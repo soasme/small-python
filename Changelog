@@ -1,0 +1,8 @@
+2026-10-25  0.1.0 (development)
+
+- Initial C11 evaluator and public spy_* embedding API.
+- Reference counting with iterative destruction and explicit cycle collection.
+- Functions, closures, control flow, containers, host-loaded modules.
+- spy command-line host and spyc standalone C source generator.
+- Local semantic checks, upstream Cython adapter, versioned language target.
+- This release does not claim full Python 3.15 or Cython compatibility.

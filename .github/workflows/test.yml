@@ -1,0 +1,50 @@
+name: C11 runtime
+on: [push, pull_request]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        compiler: [clang, gcc]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.15'
+      - run: make CC=${{ matrix.compiler }} CFLAGS='-O2 -std=c11 -Wall -Wextra -Wpedantic -Werror' test
+      - run: make docs
+      - run: make CC=${{ matrix.compiler }} sanitize
+        if: runner.os == 'Linux'
+
+  upstream-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.15'
+      - run: python3 tests/fetch_upstream.py cython
+      - run: make run-cython
+      - name: Check selected upstream boolean-expression tests
+        run: python3 tests/run_cython.py --select boolop_py.py --report tests/results/cython-boolop.json
+      - name: Record full known-failing pure-Python baseline
+        run: make cython-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cython-baseline
+          path: tests/results/*.json
+
+  standard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.15'
+      - run: python3 tests/fetch_upstream.py cpython
+      - run: python3 -m pip install pypandoc-binary==1.17 Pygments==2.19.2
+      - run: python3 tools/build_standard.py --check
+      - run: make docs

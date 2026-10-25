@@ -1,0 +1,16 @@
+{
+  "cython": {
+    "url": "https://github.com/cython/cython.git",
+    "commit": "a76568d4e9cce24843e5b9e41f67e4dd5d8a6773"
+  },
+  "cpython": {
+    "url": "https://github.com/python/cpython.git",
+    "commit": "d220409a13b77de7a6c30abe16ea90db01528edc",
+    "tag": "v3.15.0"
+  },
+  "quickjs": {
+    "url": "https://github.com/bellard/quickjs.git",
+    "commit": "7d1c13c5d8f8c6b32893786ed35cdcebd88194d2",
+    "version": "2026-06-04"
+  }
+}
