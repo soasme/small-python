@@ -1,0 +1,14 @@
+*.o
+*.a
+/spy
+/spyc
+/tests/api
+/bench/lifecycle
+__pycache__/
+/tests/upstream/
+/tests/results/
+/run-cython
+/embedded
+/hello
+/hello.c
+/.obj/
