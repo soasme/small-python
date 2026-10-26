@@ -3176,6 +3176,60 @@ for f, a in [(reversed, ()), (reversed, (1, 2)), (map, (abs,)), (enumerate, (1, 
     except TypeError as e: print(e)
 """)
 
+# printf-style formatting for str, bytes, and bytearray.
+CASES.append(r"""
+class I:
+    def __index__(self): return 5
+    def __repr__(self): return 'I()'
+class F:
+    def __float__(self): return 2.5
+class N:
+    def __int__(self): return 7
+class B:
+    def __bytes__(self): return b"BB"
+class Bad:
+    def __bytes__(self): return "x"
+class M:
+    def __getitem__(self, k): return k * 2
+    def __repr__(self): return 'M()'
+tests = [("%5.2f|%-4d|%x|%o|%e|%c|%r|%a|%%", (3.14159, 7, 255, 8, 12345.678, 65, "q", "é")), ("%(a)s-%(b)03d", {"a": 1, "b": 2}),
+         ("%+d % d %#x %#o %05.1f %.3s %*d", (5, 5, 255, 8, 2.25, "abcdef", 4, 7)),
+         ("%d", "x"), ("%x", 1.5), ("%f", "x"), ("%c", "ab"), ("%c", 0x110000), ("%c", 1.5), ("%*d", ("x", 1)), ("%(a)s", 1), ("%(a", {"a": 1}), ("%y", 1), ("%", 1), ("%s %s", (1,)), ("%s", (1, 2)), ("%(a)s", {}), ("%.*f", (2, 1.2345)), ("%s", {"a": 1}), ("%(a)s %s", {"a": 1}),
+         ("%.3d|%-6.3x|%06.2f|%-06d|%+.2e|% d|%#.3o", (5, 255, 3.14159, 7, 1234.5, 3, 8)),
+         ("%s", ()), ("%d", True), ("%i", 3.99), ("%x", True), ("%5c|%-3c|", ("x", 65)), ("%.1s %r %a", ("hello", "é", "é")), ("%#g %g %G %E", (1.0, 1e20, 1e-20, 2.0)), ("%010.3f|%-10.1f|%+010d", (-3.14159, 2.5, 42)), ("%%%s", "x"), ("%d", 10**30), ("%x", -(10**20)), ("%(x)s %(x)s", {"x": 1}),
+         ("%ld %5.1lf", (1, 2.25)), ("%s", None), ("%r", [1, "a"]), ("%.0f %.0e", (0.5, 1.5)), ("%-+5d|", 3), ("%*.*f|", (8, 2, 3.14159)), ("%-*d|", (4, 1)), ("%*d|", (-4, 1)),
+         ("%s %d", (1, "x")), ("%(a)d", {"a": "x"}), ("%s %s", 1), ("", 1), ("x", (1,)), ("", ()), ("", {}), ("%s", [1]), ("%(a)s", [1]), ("%s %*d", (1, 2.5, 3)), ("%.*d", ("q", 1)), ("%c", -1), ("%(a)c", {"a": "xy"}), ("%z", 1), ("%5", 1), ("abc %", ()), ("%(a)*d", {"a": 1}), ("%s", "x"), ("%d %s", ([], 1)), ("%c", 1.0),
+         ("%d", I()), ("%x", I()), ("%f", I()), ("%f", F()), ("%d", F()), ("%d", N()), ("%x", N()), ("%c", I()), ("%s", M()), ("%(ab)s", M()),
+         ("%s %(a)s", {"a": 1}), ("%(a)s %%", {"a": 1}), ("%-(a)5s|", {"a": 1}), ("%(a)-5s|", {"a": 1}), ("%(a)s", (1,)), ("%(a)s", "x"), ("%(a)s %(b)s", {"a": 1}), ("%s", b"x"), ("%5.1z", 1), ("%(a)", {"a": 1}), ("%(a)5", {"a": 1}), ("é%y", 1), ("%c", "é"), ("%10.4r|", "abcdef"), ("%x", 3.0), ("%.2147483648f", 1.0), ("%c", True), ("%#x %#X %#o", (0, 0, 0)), ("%e", 10**400),
+         ("%!", 1), ("%'", 1), ("%é", 1), ("%\x01", 1), ("%5.2s|%-5.2s|%05s|", ("abc", "abc", "ab")), ("%#5x|%#-6X|%#06o|% #x", (255, 255, 8, 15)), ("%+.3d|% 05d|%-+08.3f", (-5, -3, 2.5)), ("%f %F %e", (float("inf"), float("nan"), float("-inf"))), ("%s%s", ("é", "ü")), ("%-4s|%4s|", ("é", "ü")), ("%r", "x" * 3), ("%((a))s", {"(a)": 1}), ("%s", I())]
+for fmt, args in tests:
+    try: print(repr(fmt % args))
+    except Exception as e: print(type(e).__name__, e)
+btests = [(b"%d-%s", (1, b"x")), (b"%s", "x"), (b"%c%c", (65, b"b")), (b"%r %a", ("é", "é")), (b"%5.1f|%x", (2.25, 255)), (b"%s", bytearray(b"z")), (b"%b", b"q"), (b"%c", 256), (b"%c", b"ab"), (b"%c", bytearray(b"ab")), (b"%c", "a"),
+          (b"%s", B()), (b"%s", Bad()), (b"%(a)s", {b"a": b"v"}), (b"%(a)s", {"a": 1}), (b"%s", (1, 2)), (b"%s", [b"x"]), (b"%y", 1), (b"%\x01", 1), (b"%5s|%-5b|", (b"ab", b"cd")), (b"%.1s|%.2a", (b"xyz", "abc")), (b"%5c|", 65), (b"%(a)s", b"x"), (b"%d %d", 1)]
+for fmt, args in btests:
+    try: print(repr(fmt % args))
+    except Exception as e: print(type(e).__name__, e)
+print(repr(bytearray(b"%d!") % 5), type(bytearray(b"%s") % b"x").__name__)
+class S(str):
+    def __rmod__(self, other): return "rmod"
+print("%s" % S("x"), "abc" % (), "%s" % (S("y"),))
+""")
+
+# Sequence subscript diagnostics.
+CASES.append(r"""
+for v in [[1], (1,), 'a', b'a', bytearray(b'a'), range(1)]:
+    for k in [5, "x", 1.5]:
+        try: v[k]
+        except (IndexError, TypeError) as e: print(type(e).__name__, e)
+for v in [[1], bytearray(b'a')]:
+    for k in [5, "x"]:
+        try: v[k] = 1
+        except (IndexError, TypeError) as e: print(type(e).__name__, e)
+        try: del v[k]
+        except (IndexError, TypeError) as e: print(type(e).__name__, e)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),

@@ -124,6 +124,7 @@ static SPYValue *set_copy_type(SPYContext *, SPYValue *, int);
 static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static int set_subset(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
+static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
 static SPYValue *active_exception(SPYContext *c) {
@@ -4368,6 +4369,8 @@ static SPYValue *range_index(SPYContext *c, SPYValue *range, SPYValue *key) {
         SPYValue *result = step ? range_new(c, start, stop, step) : NULL;
         spy_release(start); spy_release(stop); spy_release(step); spy_release(bounds); return result;
     }
+    int64_t unused;
+    if (!is_int(key) && subscript_index(c, range, key, &unused)) return NULL;
     SPYValue *index = index_object(c, key);
     if (!index) return NULL;
     if (integer_sign(index) < 0) {
@@ -4394,6 +4397,22 @@ static int slice_index(SPYContext *c, SPYValue *value, int64_t *result) {
     if (!index) return -1;
     *result = index->as.integer_data.big ? (integer_sign(index) < 0 ? INT64_MIN : INT64_MAX) : index->as.integer_data.small;
     spy_release(index); return 0;
+}
+/* slice_index for a sequence subscript, with CPython's per-type message when
+ * the key is not an integer. */
+static int subscript_index(SPYContext *c, SPYValue *v, SPYValue *key, int64_t *result) {
+    SPYValue *method = is_int(key) || !special_dispatch(key) ? NULL : special_method(c, key, "__index__");
+    spy_release(method);
+    if (!is_int(key) && !method) {
+        if (c->error_type[0]) return -1;
+        int type = v->type == SPY_INSTANCE && v->as.map.base ? v->as.map.base->type : v->type;
+        if (type == SPY_STRING) errorf(c, "TypeError", "string indices must be integers, not '%s'", type_name(key));
+        else errorf(c, "TypeError", "%s indices must be integers or slices, not %s",
+                    type == SPY_LIST ? "list" : type == SPY_TUPLE ? "tuple" : type == SPY_BYTES ? "byte" :
+                    type == SPY_BYTEARRAY ? "bytearray" : type == SPY_RANGE ? "range" : type_name(v), type_name(key));
+        return -1;
+    }
+    return slice_index(c, key, result);
 }
 typedef struct { int64_t start, stop, step; size_t count; } Slice;
 typedef struct { int64_t start, stop, step; int has_start, has_stop; } SliceBounds;
@@ -4566,13 +4585,14 @@ static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
     }
     if (key->type == SPY_SLICE) return get_slice(c, v, key);
     int64_t index;
-    if (slice_index(c, key, &index)) return NULL;
-    size_t len;
-    if (v->type == SPY_LIST || v->type == SPY_TUPLE) len = v->as.seq.len;
-    else if (v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY) len = string_length(v);
-    else return errorf(c, "TypeError", "'%s' object is not subscriptable", type_name(v));
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE && v->type != SPY_STRING && v->type != SPY_BYTES && v->type != SPY_BYTEARRAY)
+        return errorf(c, "TypeError", "'%s' object is not subscriptable", type_name(v));
+    if (subscript_index(c, v, key, &index)) return NULL;
+    size_t len = v->type == SPY_LIST || v->type == SPY_TUPLE ? v->as.seq.len : string_length(v);
     if (index < 0 && len <= INT64_MAX) index += (int64_t)len;
-    if (index < 0 || (uint64_t)index >= len) return spy_error(c, "IndexError", "index out of range");
+    if (index < 0 || (uint64_t)index >= len)
+        return spy_error(c, "IndexError", v->type == SPY_LIST ? "list index out of range" : v->type == SPY_TUPLE ? "tuple index out of range" :
+                         v->type == SPY_STRING ? "string index out of range" : v->type == SPY_BYTEARRAY ? "bytearray index out of range" : "index out of range");
     return iter_at(c, v, (size_t)index);
 }
 static int bytearray_set(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
@@ -4590,9 +4610,9 @@ static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) 
     if (v->type != SPY_LIST) { errorf(c, "TypeError", "'%s' object does not support item assignment", type_name(v)); return -1; }
     if (key->type == SPY_SLICE) return set_slice(c, v, key, item);
     int64_t index;
-    if (slice_index(c, key, &index)) return -1;
+    if (subscript_index(c, v, key, &index)) return -1;
     if (index < 0 && v->as.seq.len <= INT64_MAX) index += (int64_t)v->as.seq.len;
-    if (index < 0 || (uint64_t)index >= v->as.seq.len) { spy_error(c, "IndexError", "index out of range"); return -1; }
+    if (index < 0 || (uint64_t)index >= v->as.seq.len) { spy_error(c, "IndexError", "list assignment index out of range"); return -1; }
     SPYValue *old = v->as.seq.items[index];
     v->as.seq.items[index] = spy_retain(item);
     spy_release(old);
@@ -5064,14 +5084,19 @@ static const Operator operators[] = {
 _Static_assert(sizeof(operators) / sizeof(*operators) == T_XOREQ - T_ADDEQ + 1, "operator table");
 static SPYValue *binary_special(SPYContext *, const Operator *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *view_binary(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
-    if ((special_dispatch(a) || special_dispatch(b)) && !(op == '%' && a->type == SPY_STRING)) {
+    /* str/bytes % never defers, except to a reflected method of a subclass on the right. */
+    int formats = op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
+        !(b->type == SPY_INSTANCE && subclass(b->as.map.parent, c->types[a->type]));
+    if ((special_dispatch(a) || special_dispatch(b)) && !formats) {
         for (size_t i = 0; i < sizeof(operators) / sizeof(*operators); i++) {
             if (operators[i].token != op) continue;
             SPYValue *result = binary_special(c, &operators[i], a, b, NULL);
             if (result || c->error_type[0]) return result;
             break;
         }
+        if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
         if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
             return binary(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
                           b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
@@ -5081,37 +5106,7 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         return spy_error(c, "TypeError", "can only concatenate str (not \"string.templatelib.Template\") to str");
     if ((op == '&' || op == '|' || op == '-' || op == '^') && (set_view(a) || set_view(b)) &&
         !(is_set(a) && is_set(b))) return view_binary(c, op, a, b);
-    if (op == '%' && a->type == SPY_STRING) {
-        Buffer out = {.ctx = c};
-        size_t argument = 0, count = b->type == SPY_TUPLE ? b->as.seq.len : 1;
-        for (size_t i = 0; i < a->as.string.len && !c->error_type[0]; i++) {
-            char ch = a->as.string.data[i];
-            if (ch != '%') { if (append(&out, &ch, 1)) break; continue; }
-            if (++i == a->as.string.len) { spy_error(c, "ValueError", "incomplete format"); break; }
-            ch = a->as.string.data[i];
-            if (ch == '%') { if (append(&out, &ch, 1)) break; continue; }
-            if (argument == count) { spy_error(c, "TypeError", "not enough arguments for format string"); break; }
-            SPYValue *value = b->type == SPY_TUPLE ? b->as.seq.items[argument] : b;
-            argument++;
-            if (ch == 's' || ch == 'r') {
-                if (format_value(&out, value, ch == 'r')) break;
-            } else if (ch == 'd' || ch == 'i') {
-                if (is_int(value)) {
-                    if (integer_format(&out, value, 10, 0, '-', 0)) break;
-                    continue;
-                }
-                int64_t integer;
-                if (value->type == SPY_FLOAT && isfinite(value->as.real) && value->as.real >= -9223372036854775808.0 && value->as.real < 9223372036854775808.0)
-                    integer = (int64_t)value->as.real;
-                else { spy_error(c, "TypeError", "integer format requires a number within the supported range"); break; }
-                char text[32]; snprintf(text, sizeof(text), "%" PRId64, integer);
-                if (puts_buffer(&out, text)) break;
-            } else { spy_error(c, "NotImplementedError", "this string format conversion is not implemented"); break; }
-        }
-        if (!c->error_type[0] && argument != count) spy_error(c, "TypeError", "not all arguments converted during string formatting");
-        SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-        free(out.data); return result;
-    }
+    if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
     if (a->type == SPY_COMPLEX || b->type == SPY_COMPLEX) return complex_binary(c, op, a, b);
     if (a->type == SPY_BOOL && b->type == SPY_BOOL && (op == '&' || op == '|' || op == '^')) {
         int x = (int)a->as.integer_data.small, y = (int)b->as.integer_data.small;
@@ -9168,7 +9163,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
                 set_slice(c, object, key, NULL);
             } else if (object->type == SPY_LIST) {
                 int64_t index;
-                if (!index_value(c, key, &index)) {
+                if (!subscript_index(c, object, key, &index)) {
                     if (index < 0) index += (int64_t)object->as.seq.len;
                     if (index < 0 || (uint64_t)index >= object->as.seq.len) spy_error(c, "IndexError", "list assignment index out of range");
                     else {
@@ -9624,6 +9619,338 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO,
        B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK };
+/* printf-style formatting for str, bytes, and bytearray, following CPython's
+ * unicode_format.c and bytesobject.c. Text widths and positions count code
+ * points; bytes count bytes. See docs/licenses/python.txt. */
+enum { PF_LJUST = 1, PF_SIGN = 2, PF_BLANK = 4, PF_ALT = 8, PF_ZERO = 16 };
+typedef struct { SPYValue *args, *owned; ptrdiff_t arglen, argidx; int bytes; } PercentArgs;
+static size_t percent_units(const char *s, size_t n, int bytes) {
+    if (bytes) return n;
+    size_t count = 0;
+    for (size_t i = 0; i < n; i += utf8_width((unsigned char)s[i])) count++;
+    return count;
+}
+static size_t percent_offset(const char *s, size_t n, size_t units, int bytes) {
+    if (bytes) return units < n ? units : n;
+    size_t i = 0;
+    while (units-- && i < n) i += utf8_width((unsigned char)s[i]);
+    return i < n ? i : n;
+}
+static SPYValue *percent_fail(SPYContext *c, const char *type, const PercentArgs *p, SPYValue *key, const char *format, ...) {
+    char message[512];
+    va_list ap;
+    va_start(ap, format); vsnprintf(message, sizeof(message), format, ap); va_end(ap);
+    if (key) {
+        SPYValue *text = spy_repr(c, key);
+        if (text) errorf(c, type, "format argument %s: %s", text->as.string.data, message);
+        spy_release(text);
+    } else if (p->argidx >= 0) errorf(c, type, "format argument %td: %s", p->argidx, message);
+    else errorf(c, type, "format argument: %s", message);
+    return NULL;
+}
+static SPYValue *percent_next(SPYContext *c, PercentArgs *p, int allowone) {
+    if (p->argidx < p->arglen && (allowone || p->arglen >= 0)) {
+        ptrdiff_t at = p->argidx++;
+        return p->arglen >= 0 ? p->args->as.seq.items[at] : p->args;
+    }
+    return errorf(c, "TypeError", "not enough arguments for format string (got %td)", p->arglen < 0 ? 1 : p->arglen);
+}
+static int percent_has(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *method = special_dispatch(v) ? special_method(c, v, name) : NULL;
+    spy_release(method);
+    return method != NULL;
+}
+/* PyNumber_Check: an int, float, or complex, or an object with a numeric hook. */
+static int percent_number(SPYContext *c, SPYValue *v) {
+    if (is_number(v) || v->type == SPY_COMPLEX) return 1;
+    return percent_has(c, v, "__index__") || percent_has(c, v, "__int__") || percent_has(c, v, "__float__") ||
+        percent_has(c, v, "__complex__");
+}
+static SPYValue *percent_spec(SPYContext *c, SPYValue *value, const char *spec) {
+    SPYValue *text = spy_string(c, spec, strlen(spec));
+    SPYValue *args[] = {value, text};
+    SPYValue *result = text ? builtin(c, 2, args, (void *)(intptr_t)B_FORMAT) : NULL;
+    spy_release(text); return result;
+}
+/* mainformatlong and _PyUnicode_FormatLong: sign, optional 0x/0X/0o prefix,
+ * and at least prec digits. */
+static SPYValue *percent_integer(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v, int ch, int flags, int prec) {
+    int hex = ch == 'o' || ch == 'x' || ch == 'X';
+    SPYValue *number = NULL;
+    if (is_int(v)) number = spy_retain(v);
+    else if (percent_number(c, v)) {
+        number = hex ? index_object(c, v) : builtin(c, 1, &v, (void *)(intptr_t)B_INT);
+        if (!number && error_is(c, "TypeError")) spy_clear_error(c);
+        else if (!number) return NULL;
+    } else if (c->error_type[0]) return NULL;
+    if (!number) return hex ? percent_fail(c, "TypeError", p, key, "%%%c requires an integer, not %s", ch, type_name(v)) :
+        percent_fail(c, "TypeError", p, key, "%%%c requires a real number, not %s", ch, type_name(v));
+    char spec[2] = {ch == 'i' || ch == 'u' ? 'd' : (char)ch, 0};
+    SPYValue *digits = percent_spec(c, number, spec);
+    spy_release(number);
+    if (!digits) return NULL;
+    const char *text = digits->as.string.data;
+    size_t len = digits->as.string.len, negative = text[0] == '-', count = len - negative;
+    Buffer out = {.ctx = c};
+    int status = (negative && puts_buffer(&out, "-")) ||
+        ((flags & PF_ALT) && hex && puts_buffer(&out, ch == 'o' ? "0o" : ch == 'x' ? "0x" : "0X"));
+    for (size_t i = count; !status && prec > 0 && i < (size_t)prec; i++) status = puts_buffer(&out, "0");
+    status = status || append(&out, text + negative, count);
+    spy_release(digits);
+    SPYValue *result = status ? NULL : spy_string(c, out.data ? out.data : "", out.len);
+    free(out.data); return result;
+}
+static SPYValue *percent_float(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v, int ch, int flags, int prec) {
+    SPYValue *number = NULL;
+    if (v->type == SPY_FLOAT) number = spy_retain(v);
+    else if (is_int(v) || (special_dispatch(v) && (percent_has(c, v, "__float__") || percent_has(c, v, "__index__")))) {
+        number = builtin(c, 1, &v, (void *)(intptr_t)B_FLOAT);
+        if (!number && !error_is(c, "TypeError")) return NULL;
+        if (!number) spy_clear_error(c);
+    }
+    if (!number) return c->error_type[0] ? NULL : percent_fail(c, "TypeError", p, key, "%%%c requires a real number, not %s", ch, type_name(v));
+    char spec[32];
+    snprintf(spec, sizeof(spec), "%s.%d%c", flags & PF_ALT ? "#" : "", prec < 0 ? 6 : prec, ch);
+    SPYValue *result = percent_spec(c, number, spec);
+    spy_release(number); return result;
+}
+static SPYValue *percent_char(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v, int bytes) {
+    if (bytes && (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY)) {
+        if (v->as.string.len != 1)
+            return percent_fail(c, "TypeError", p, key, "%%c requires an integer in range(256) or a single byte, not a %s object of length %zu",
+                                type_name(v), v->as.string.len);
+        return spy_bytes(c, v->as.string.data, 1);
+    }
+    if (!bytes && v->type == SPY_STRING) {
+        if (string_length(v) != 1)
+            return percent_fail(c, "TypeError", p, key, "%%c requires an integer or a unicode character, not a string of length %zu", string_length(v));
+        return spy_retain(v);
+    }
+    if (!is_int(v) && !percent_has(c, v, "__index__")) {
+        if (c->error_type[0]) return NULL;
+        return bytes ? percent_fail(c, "TypeError", p, key, "%%c requires an integer in range(256) or a single byte, not %s", type_name(v)) :
+            percent_fail(c, "TypeError", p, key, "%%c requires an integer or a unicode character, not %s", type_name(v));
+    }
+    SPYValue *number = index_object(c, v);
+    if (!number) return NULL;
+    int64_t code = 0;
+    int in_range = !number->as.integer_data.big && !spy_as_int(c, number, &code) && code >= 0 && code <= (bytes ? 255 : 0x10FFFF);
+    if (c->error_type[0]) { spy_release(number); return NULL; }
+    SPYValue *result = NULL;
+    if (!in_range) percent_fail(c, "OverflowError", p, key, bytes ? "%%c argument not in range(256)" : "%%c argument not in range(0x110000)");
+    else if (bytes) { char byte = (char)code; result = spy_bytes(c, &byte, 1); }
+    else result = builtin(c, 1, &number, (void *)(intptr_t)B_CHR);
+    spy_release(number); return result;
+}
+/* format_obj from bytesobject.c: bytes, bytearray, or __bytes__. */
+static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v) {
+    if (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY) return spy_bytes(c, v->as.string.data, v->as.string.len);
+    SPYValue *method = special_dispatch(v) ? special_method(c, v, "__bytes__") : NULL;
+    if (!method) return c->error_type[0] ? NULL :
+        percent_fail(c, "TypeError", p, key, "%%b requires a bytes-like object, or an object that implements __bytes__, not %s", type_name(v));
+    SPYValue *result = spy_call(c, method, 0, NULL);
+    spy_release(method);
+    if (result && result->type != SPY_BYTES) {
+        errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_name(v), type_name(result));
+        spy_release(result); return NULL;
+    }
+    return result;
+}
+/* unicode_format_arg_output: sign, alternate prefix, fill, and justification. */
+static int percent_output(Buffer *out, const char *data, size_t size, int bytes, int ch, int flags, ptrdiff_t width, int prec, int sign) {
+    char fill = sign && (flags & PF_ZERO) ? '0' : ' ', signchar = 0;
+    size_t len = percent_units(data, size, bytes);
+    if ((ch == 's' || ch == 'r' || ch == 'a' || ch == 'b') && prec >= 0 && len > (size_t)prec) {
+        size = percent_offset(data, size, (size_t)prec, bytes); len = (size_t)prec;
+    }
+    if (sign) {
+        if (size && (data[0] == '-' || data[0] == '+')) { signchar = data[0]; data++; size--; len--; }
+        else if (flags & PF_SIGN) signchar = '+';
+        else if (flags & PF_BLANK) signchar = ' ';
+        else sign = 0;
+    }
+    if (width < (ptrdiff_t)len) width = (ptrdiff_t)len;
+    if (sign) {
+        if (fill != ' ' && append(out, &signchar, 1)) return -1;
+        if (width > (ptrdiff_t)len) width--;
+    }
+    int prefix = (flags & PF_ALT) && (ch == 'x' || ch == 'X' || ch == 'o');
+    if (prefix) {
+        if (fill != ' ') {
+            if (append(out, data, 2)) return -1;
+            data += 2; size -= 2;
+        }
+        width -= 2;
+        if (width < 0) width = 0;
+        len -= 2;
+    }
+    for (; width > (ptrdiff_t)len && !(flags & PF_LJUST); width--) if (append(out, &fill, 1)) return -1;
+    if (fill == ' ') {
+        if (sign && append(out, &signchar, 1)) return -1;
+        if (prefix) {
+            if (append(out, data, 2)) return -1;
+            data += 2; size -= 2;
+        }
+    }
+    if (append(out, data, size)) return -1;
+    for (; width > (ptrdiff_t)len; width--) if (append(out, " ", 1)) return -1;
+    return 0;
+}
+static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
+    if (v->type == SPY_TUPLE || v->type == SPY_STRING || (bytes && (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY))) return 0;
+    if (v->type == SPY_DICT || v->type == SPY_LIST || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY || v->type == SPY_RANGE) return 1;
+    if (v->type == SPY_INSTANCE && (builtin_value(c, v, SPY_TUPLE) || builtin_value(c, v, SPY_STRING))) return 0;
+    return special_dispatch(v) && percent_has(c, v, "__getitem__");
+}
+static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args) {
+    int bytes = format->type != SPY_STRING;
+    const char *s = format->as.string.data;
+    size_t n = format->as.string.len;
+    SPYValue *tuple = builtin_value(c, args, SPY_TUPLE);
+    PercentArgs p = {.args = tuple ? tuple : args, .arglen = tuple ? (ptrdiff_t)tuple->as.seq.len : -1, .argidx = tuple ? 0 : -2, .bytes = bytes};
+    SPYValue *dict = percent_mapping(c, args, bytes) ? args : NULL;
+    if (c->error_type[0]) return NULL;
+    Buffer out = {.ctx = c};
+    size_t i = 0, chars = 0;
+    while (i < n && !c->error_type[0]) {
+        if (s[i] != '%') {
+            size_t start = i;
+            while (i < n && s[i] != '%') { chars++; i += bytes ? 1 : utf8_width((unsigned char)s[i]); }
+            if (i > n) i = n;
+            if (append(&out, s + start, i - start)) break;
+            continue;
+        }
+        size_t fmtstart = chars++, at = ++i, atc = chars;
+        if (at < n && s[at] == '%') { i = at + 1; chars++; if (append(&out, "%", 1)) break; continue; }
+        /* read() consumes one format character; end records a failed read. */
+        unsigned ch = 0;
+        int end = 0, flags = 0, prec = -1;
+        ptrdiff_t width = -1;
+        SPYValue *key = NULL;
+#define PERCENT_READ() (at < n ? (bytes ? (ch = (unsigned char)s[at], at++) : (ch = utf8_decode(s + at, n - at, &(size_t){0}), at += utf8_width((unsigned char)s[at]))), atc++, 1 : (end = 1, 0))
+        if (at < n) ch = bytes ? (unsigned char)s[at] : utf8_decode(s + at, n - at, &(size_t){0});
+        if (ch == '(' && at < n) {
+            if (!dict) { errorf(c, "TypeError", "format requires a mapping, not %s", type_name(args)); break; }
+            size_t keystart = ++at, depth = 1;
+            atc++;
+            while (depth && at < n) {
+                if (s[at] == ')') depth--;
+                else if (s[at] == '(') depth++;
+                if (!bytes && (unsigned char)s[at] >= 0x80) at += utf8_width((unsigned char)s[at]) - 1;
+                at++; atc++;
+            }
+            if (depth) { errorf(c, "ValueError", "stray %% or incomplete format key at position %zu", fmtstart); break; }
+            key = bytes ? spy_bytes(c, s + keystart, at - keystart - 1) : spy_string(c, s + keystart, at - keystart - 1);
+            SPYValue *value = key ? get_index(c, dict, key) : NULL;
+            if (!value) { spy_release(key); break; }
+            spy_release(p.owned); p.owned = value; p.args = value;
+            p.arglen = -3; p.argidx = -4;
+        } else if (p.arglen < -1) {
+            errorf(c, "ValueError", "format requires a parenthesised mapping key at position %zu", fmtstart); break;
+        }
+        while (PERCENT_READ()) {
+            if (ch == '-') flags |= PF_LJUST;
+            else if (ch == '+') flags |= PF_SIGN;
+            else if (ch == ' ') flags |= PF_BLANK;
+            else if (ch == '#') flags |= PF_ALT;
+            else if (ch == '0') flags |= PF_ZERO;
+            else break;
+        }
+        int failed = 0;
+        if (!end && ch == '*') {
+            if (p.arglen < -1) { errorf(c, "ValueError", "* cannot be used with a parenthesised mapping key at position %zu", fmtstart); failed = 1; }
+            SPYValue *v = failed ? NULL : percent_next(c, &p, 0);
+            int64_t value = 0;
+            if (!v) failed = 1;
+            else if (!is_int(v)) { percent_fail(c, "TypeError", &p, key, "* requires int, not %s", type_name(v)); failed = 1; }
+            else if (v->as.integer_data.big || spy_as_int(c, v, &value) || value > PTRDIFF_MAX || value < -PTRDIFF_MAX) {
+                spy_clear_error(c); percent_fail(c, "OverflowError", &p, key, "too big for width"); failed = 1;
+            }
+            if (!failed) {
+                if (value < 0) { flags |= PF_LJUST; value = -value; }
+                width = (ptrdiff_t)value;
+                PERCENT_READ();
+            }
+        } else if (!end && ch >= '0' && ch <= '9') {
+            width = ch - '0';
+            while (PERCENT_READ() && ch >= '0' && ch <= '9') {
+                if (width > (PTRDIFF_MAX - (ptrdiff_t)(ch - '0')) / 10) {
+                    errorf(c, "ValueError", "width too big at position %zu", fmtstart); failed = 1; break;
+                }
+                width = width * 10 + (ch - '0');
+            }
+        }
+        if (!failed && !end && ch == '.') {
+            prec = 0;
+            PERCENT_READ();
+            if (!end && ch == '*') {
+                if (p.arglen < -1) { errorf(c, "ValueError", "* cannot be used with a parenthesised mapping key at position %zu", fmtstart); failed = 1; }
+                SPYValue *v = failed ? NULL : percent_next(c, &p, 0);
+                int64_t value = 0;
+                if (!v) failed = 1;
+                else if (!is_int(v)) { percent_fail(c, "TypeError", &p, key, "* requires int, not %s", type_name(v)); failed = 1; }
+                else if (v->as.integer_data.big || spy_as_int(c, v, &value) || value > INT_MAX || value < INT_MIN) {
+                    spy_clear_error(c); percent_fail(c, "OverflowError", &p, key, "too big for precision"); failed = 1;
+                }
+                if (!failed) { prec = value < 0 ? 0 : (int)value; PERCENT_READ(); }
+            } else if (!end && ch >= '0' && ch <= '9') {
+                prec = (int)(ch - '0');
+                while (PERCENT_READ() && ch >= '0' && ch <= '9') {
+                    if (prec > (INT_MAX - (int)(ch - '0')) / 10) {
+                        errorf(c, "ValueError", "precision too big at position %zu", fmtstart); failed = 1; break;
+                    }
+                    prec = prec * 10 + (int)(ch - '0');
+                }
+            }
+        }
+        if (!failed && !end && (ch == 'h' || ch == 'l' || ch == 'L')) PERCENT_READ();
+#undef PERCENT_READ
+        if (!failed && end) { errorf(c, "ValueError", "stray %% at position %zu", fmtstart); failed = 1; }
+        i = at; chars = atc;
+        SPYValue *v = failed ? NULL : percent_next(c, &p, 1), *piece = NULL;
+        int sign = 0;
+        if (v) switch (ch) {
+        case 's': case 'r': case 'a': case 'b':
+            if (bytes && (ch == 's' || ch == 'b')) piece = percent_bytes(c, &p, key, v);
+            else if (ch == 'b') goto unsupported;
+            else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
+            else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
+            break;
+        case 'i': case 'd': case 'u': case 'o': case 'x': case 'X':
+            piece = percent_integer(c, &p, key, v, (int)ch, flags, prec); sign = 1; break;
+        case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
+            piece = percent_float(c, &p, key, v, (int)ch, flags, prec); sign = 1; break;
+        case 'c':
+            piece = percent_char(c, &p, key, v, bytes);
+            if (bytes) prec = -1;
+            break;
+        default:
+        unsupported:
+            if (ch < 128 && isalpha((int)ch)) errorf(c, "ValueError", "unsupported format %%%c at position %zu", (int)ch, fmtstart);
+            else if (ch == '\'') errorf(c, "ValueError", "stray %% at position %zu or unexpected format character \"'\" at position %zu", fmtstart, atc - 1);
+            else if (ch >= 32 && ch < 127) errorf(c, "ValueError", "stray %% at position %zu or unexpected format character '%c' at position %zu", fmtstart, (int)ch, atc - 1);
+            else if (bytes) errorf(c, "ValueError", "stray %% at position %zu or unexpected format character with code 0x%02x at position %zu", fmtstart, ch, atc - 1);
+            else if (unicode_printable(ch)) {
+                SPYValue *code = spy_int(c, ch), *text = code ? builtin(c, 1, &code, (void *)(intptr_t)B_CHR) : NULL;
+                if (text) errorf(c, "ValueError", "stray %% at position %zu or unexpected format character '%s' (U+%04X) at position %zu",
+                                 fmtstart, text->as.string.data, ch, atc - 1);
+                spy_release(code); spy_release(text);
+            } else errorf(c, "ValueError", "stray %% at position %zu or unexpected format character U+%04X at position %zu", fmtstart, ch, atc - 1);
+            break;
+        }
+        int status = !piece || percent_output(&out, piece->as.string.data, piece->as.string.len, bytes, (int)ch, flags, width, prec, sign);
+        spy_release(piece); spy_release(key);
+        if (status) break;
+    }
+    if (!c->error_type[0] && p.argidx < p.arglen && !dict)
+        errorf(c, "TypeError", "not all arguments converted during %s formatting (required %td, got %td)", bytes ? "bytes" : "string",
+               p.arglen < 0 ? 0 : p.argidx, p.arglen < 0 ? 1 : p.arglen);
+    spy_release(p.owned);
+    SPYValue *result = NULL;
+    if (!c->error_type[0]) result = format->type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
+        bytes ? spy_bytes(c, out.data ? out.data : "", out.len) : spy_string(c, out.data ? out.data : "", out.len);
+    free(out.data); return result;
+}
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
 static void bindings_truncate(SPYValue *bindings, size_t len) {
@@ -12536,7 +12863,7 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
     if (key->type != SPY_SLICE) {
         int64_t index;
         unsigned char byte;
-        if (slice_index(c, key, &index) || (item && byte_value(c, item, &byte))) return -1;
+        if (subscript_index(c, array, key, &index) || (item && byte_value(c, item, &byte))) return -1;
         len = array->as.string.len;
         if (index < 0) index += (int64_t)len;
         if (index < 0 || (uint64_t)index >= len) { spy_error(c, "IndexError", "bytearray index out of range"); return -1; }

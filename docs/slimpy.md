@@ -401,7 +401,8 @@ F-strings support expressions, debug fields, conversions, nested format
 specifications, raw literals, and generator suspension inside fields. String
 `format` supports positional/named fields, conversions, and basic string/numeric
 specifications; nested field specifications and attribute/index paths remain
-missing. Percent formatting supports `%s`, `%r`, `%d`, `%i`, and `%%`.
+missing. Percent formatting for `str`, `bytes`, and `bytearray` follows CPython's
+conversions, flags, `*` widths and precisions, mapping keys, and diagnostics.
 Grouping, several format options, and nonempty complex format specifications are
 not implemented. Unicode escaping, printability, and identifier properties use
 checked-in Unicode 17.0.0 data. Source identifiers undergo NFKC normalization
