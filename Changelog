@@ -182,3 +182,6 @@
   Eleven unchanged upstream methods supplement the whole-module test ledger.
 - Doctest output comparison follows CPython's trailing-newline normalization;
   raw captured output stays unchanged in reports.
+- Complete unchanged type-check and subclass-initialization unittest modules;
+  the selection now passes 177 cases in eleven modules, plus 99 subtests.
+  Test-only regex and multiset assertions are checked against CPython.

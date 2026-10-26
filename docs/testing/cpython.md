@@ -54,7 +54,7 @@ case count. Skipped modules need discovery on applicable platforms. Generated
 cases dependent on resources and build settings require further runs. Subtests
 and dynamically generated assertions are not fully enumerated by unittest
 loading. Static candidates cannot close these gaps. Whole-module execution
-currently covers the nine modules listed below; the discovery ledger still
+currently covers the eleven modules listed below; the discovery ledger still
 records the broader suite as unported.
 
 The full ledger is written to `tests/results/cpython-discover.json`. It includes
@@ -118,7 +118,7 @@ ports, skipped platforms, and dynamic-case coverage are unresolved.
 
 ## Whole-module unittest adaptation
 
-Nine complete unchanged upstream modules run in the engine. All 154 discovered
+Eleven complete unchanged upstream modules run in the engine. All 177 discovered
 cases pass with both the adapted framework and CPython's original framework:
 
 | Module | Cases |
@@ -132,6 +132,8 @@ cases pass with both the adapted framework and CPython's original framework:
 | `test_longexp` | 1 |
 | `test_unicode_identifiers` | 3 |
 | `test_exception_variations` | 30 |
+| `test_typechecks` | 6 |
+| `test_subclassinit` | 17 |
 
 The assignment-expression module also executes 99 subtests. Their results and
 parameters are recorded. The runner compares the sequence of subtest statuses
@@ -154,15 +156,19 @@ module/class/test setup, teardown, and cleanups. Failed setup leaves dependent
 cases recorded as unexecuted failures, and skips remain separate from passes.
 
 The replacement framework currently implements the assertions and fixtures
-needed by these nine modules, including subtests that continue after failure.
-Exception-message patterns support literal characters and the `?` quantifier;
-other regex syntax fails explicitly. The adapter's matching is checked against
-256 host-regex examples, including negative matches. It is not a complete
+needed by these eleven modules, including subtests that continue after failure.
+Exception-message patterns and `assertRegex` support literal characters, the `?`
+quantifier, and Unicode word boundaries (`\b`); other regex syntax fails explicitly.
+The adapter is checked against CPython with 578 regex examples, 322 `assertRegex`
+cases and 142 `assertCountEqual` cases, including negative controls, Unicode
+boundaries, duplicate unhashable values, and non-reflexive values. It is not a complete
 unittest implementation: warning assertions, full regex support, expected-failure
 handling, and continuation after cleanup failures remain gaps. Unsupported framework operations fail
 explicitly. Dynamically located or imported test classes are recorded as
 adapter-ineligible rather than silently omitted. Extending the selection
 requires resolving those obligations.
+The test driver permits one million execution steps per request, including
+framework work; the runner also retains its wall-clock timeout.
 
 `tests/results/cpython-unittest.json` records oracle results, cases, fixtures,
 actual errors/output, and hashes of the engine, driver, framework, and upstream
@@ -274,7 +280,7 @@ Their source bodies and assertions are preserved; surrounding imports and
 unrelated methods are not transplanted.
 
 These checks are supplemental selections, not whole-module passes, and are
-not added to the 154-case whole-module result. Pickling tests, CPython-only
+not added to the 177-case whole-module result. Pickling tests, CPython-only
 checks, and all other cases stay in the full test inventory. Additional oracle
 comparisons cover suspended-object lifecycle states, frozen mapping protocols,
 subclass identity, hash callbacks, and immutable execution namespaces.

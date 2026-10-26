@@ -23,7 +23,7 @@ make test
   `make upstream` followed by `make cython-report`.
 - [CPython 3.15 coverage](docs/testing/cpython.md): pinned development oracle,
   full upstream file inventory, dynamic case discovery, unchanged doctest
-  examples, and 154 passing cases from nine complete unittest modules, including
+  examples, and 177 passing cases from eleven complete unittest modules, including
   99 checked subtests. Reproduce
   with `make oracle cpython-discover cpython-report test-cpython-unittest`.
 - [Development instructions](AGENTS.md): architecture, naming, code taste, and

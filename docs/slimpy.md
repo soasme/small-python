@@ -225,9 +225,10 @@ remaining coverage gaps. `make test-cpython-doctests` is strict about the curren
 ports; `make test-cpython` additionally requires closing the full inventory.
 Both strict upstream targets currently fail.
 
-`make test-cpython-unittest` passes all 154 cases in nine unchanged modules:
+`make test-cpython-unittest` passes all 177 cases in eleven unchanged modules:
 decorators, augmented assignments, integer literals, unary operators, keyword-only
-arguments, assignment expressions, large expressions, Unicode identifiers, and exception variations.
+arguments, assignment expressions, large expressions, Unicode identifiers, exception
+variations, type checks, and subclass initialization.
 It also checks all 99 executed subtests
 against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier

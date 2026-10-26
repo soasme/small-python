@@ -17,16 +17,23 @@ def _safe_repr(value):
 
 
 def _pattern_tokens(pattern):
-    # This adapter supports literal characters and optional literal characters.
+    # Literal characters, optional literals, and Unicode word boundaries.
     # Unsupported regex grammar must fail rather than weaken the assertion.
     if not isinstance(pattern, str):
         raise NotImplementedError('compiled regular expressions are not supported by the test framework')
     tokens = []
-    for char in pattern:
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        index += 1
+        if char == '\\' and index < len(pattern) and pattern[index] == 'b':
+            tokens.append((None, False))
+            index += 1
+            continue
         if char in '\\.^$*+{}[]|()':
             raise NotImplementedError('regular expression syntax is not supported by the test framework')
         if char == '?':
-            if not tokens or tokens[-1][1]:
+            if not tokens or tokens[-1][0] is None or tokens[-1][1]:
                 raise NotImplementedError('regular expression syntax is not supported by the test framework')
             tokens[-1] = tokens[-1][0], True
         else:
@@ -35,8 +42,16 @@ def _pattern_tokens(pattern):
 
 
 def _pattern_matches(tokens, text):
+    if all(char is not None and not optional for char, optional in tokens):
+        return ''.join(char for char, optional in tokens) in text
     positions = [True] * (len(text) + 1)
     for char, optional in tokens:
+        if char is None:
+            for index in range(len(positions)):
+                left = index > 0 and (text[index - 1].isalnum() or text[index - 1] == '_')
+                right = index < len(text) and (text[index].isalnum() or text[index] == '_')
+                positions[index] = positions[index] and left != right
+            continue
         following = positions[:] if optional else [False] * len(positions)
         for index in range(len(text)):
             if positions[index] and text[index] == char:
@@ -63,7 +78,7 @@ class _AssertRaises:
         self.exception = value
         if self.tokens is not None:
             text = str(value)
-            matches = self.pattern in text if '?' not in self.pattern else _pattern_matches(self.tokens, text)
+            matches = _pattern_matches(self.tokens, text)
             if not matches:
                 raise AssertionError(f'{self.pattern!r} does not match {text!r}')
         return True
@@ -156,6 +171,46 @@ class TestCase:
     def assertNotEqual(self, first, second, msg=None):
         if first == second:
             raise AssertionError(msg or f'{first!r} == {second!r}')
+
+    def assertCountEqual(self, first, second, msg=None):
+        first, second = list(first), list(second)
+        try:
+            counts = []
+            for values in [first, second]:
+                count = {}
+                for value in values:
+                    count[value] = count.get(value, 0) + 1
+                counts.append(count)
+        except TypeError:
+            # CPython unittest.util._count_diff_all_purpose: compare and mark
+            # each occurrence when elements cannot be dictionary keys.
+            # See docs/licenses/python.txt.
+            missing = object()
+            for i, value in enumerate(first):
+                if value is missing:
+                    continue
+                left = right = 0
+                for j in range(i, len(first)):
+                    if first[j] == value:
+                        left += 1
+                        first[j] = missing
+                for j, other in enumerate(second):
+                    if other == value:
+                        right += 1
+                        second[j] = missing
+                if left != right:
+                    self.fail(msg or 'element counts were not equal')
+            if any(value is not missing for value in second):
+                self.fail(msg or 'element counts were not equal')
+        else:
+            if counts[0] != counts[1]:
+                self.fail(msg or 'element counts were not equal')
+
+    def assertRegex(self, text, expected_regex, msg=None):
+        if isinstance(expected_regex, str) and not expected_regex:
+            self.fail('expected_regex must not be empty.')
+        if not _pattern_matches(_pattern_tokens(expected_regex), text):
+            self.fail(msg or f'{expected_regex!r} does not match {text!r}')
 
     def assertTrue(self, value, msg=None):
         if not value:

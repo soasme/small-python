@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import tempfile
+import unittest
 
 from run_cython import check_example, run_group
 
@@ -34,7 +35,63 @@ def main():
         expected = re.search(pattern, text) is not None
         examples.append(doctest.Example(
             f"assert unittest._pattern_matches(unittest._pattern_tokens({pattern!r}), {text!r}) is {expected}\n", ''))
-    examples.append(doctest.Example('''
+    patterns = [r'\b', r'\bword\b', r'\b_?\b', r'α?\b', r'\b\b', r'\ba?\b']
+    texts = ['', 'word', 'words', ' word!', '_word', 'α', 'α_', 'á', '１', '²', 'a\nb']
+    for _ in range(256):
+        patterns.append(''.join(rng.choice([r'\b', 'a', 'α?', '_?', '１']) for _ in range(rng.randrange(6))))
+        texts.append(''.join(rng.choice('aα_１²! \u0301') for _ in range(rng.randrange(10))))
+    regex_cases = [(pattern, text) for pattern in patterns[:6] for text in texts[:11]]
+    regex_cases.extend(zip(patterns[6:], texts[11:]))
+    for pattern, text in regex_cases:
+        expected = re.search(pattern, text) is not None
+        examples.append(doctest.Example(
+            f"assert unittest._pattern_matches(unittest._pattern_tokens({pattern!r}), {text!r}) is {expected}\n", ''))
+        try:
+            unittest.TestCase().assertRegex(text, pattern)
+            expected = True
+        except AssertionError:
+            expected = False
+        examples.append(doctest.Example(f'''
+caught = False
+try:
+    unittest.TestCase().assertRegex({text!r}, {pattern!r})
+except AssertionError:
+    caught = True
+assert caught is {not expected}
+''', ''))
+    count_cases = [
+        ('[]', '[]'), ('[1, 1, 2]', '[2, 1, 1]'), ('[1, 1, 2]', '[2, 2, 1]'),
+        ('[True, 1.0, 1 + 0j]', '[1, 1, 1]'), ('[[], [1], []]', '[[1], [], []]'),
+        ('[[], []]', '[[]]'), ('[{}]', '[{}]'), ('[{1: 2}]', '[{1: 3}]'),
+        ('(x for x in [1, 2, 1])', 'iter([1, 1, 2])'),
+        ('[nan]', '[nan]'), ('[nan]', '[float("nan")]'),
+        ('[nan, []]', '[nan, []]'), ('[nan, []]', '[[]]'),
+        ('[[]]', '[nan, []]'),
+    ]
+    for _ in range(128):
+        left = [rng.randrange(5) for _ in range(rng.randrange(8))]
+        right = left[:] if rng.randrange(2) else [rng.randrange(5) for _ in range(rng.randrange(8))]
+        rng.shuffle(right)
+        if rng.randrange(2):
+            left, right = [[x] for x in left], [[x] for x in right]
+        count_cases.append((repr(left), repr(right)))
+    for left, right in count_cases:
+        scope = {'nan': float('nan')}
+        try:
+            unittest.TestCase().assertCountEqual(eval(left, scope), eval(right, scope))
+            expected = True
+        except AssertionError:
+            expected = False
+        examples.append(doctest.Example(f'''
+nan = float('nan')
+caught = False
+try:
+    unittest.TestCase().assertCountEqual({left}, {right})
+except AssertionError:
+    caught = True
+assert caught is {not expected}
+''', ''))
+    examples.append(doctest.Example(r'''
 for pattern, text, expected in [('needle', 'a needle here', True), ('needle', 'other text', False)]:
     caught = False
     try:
@@ -49,6 +106,13 @@ except NotImplementedError:
     pass
 else:
     raise AssertionError('unsupported regex was accepted')
+for pattern in [r'\B', r'\b?', '.*', '(word)', '[ab]', 'a??']:
+    try:
+        unittest.TestCase().assertRegex('word', pattern)
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError('unsupported regex was accepted')
 events = []
 class BrokenRepr:
     def __repr__(self): raise ValueError('repr')
@@ -94,7 +158,9 @@ assert events == [0, 1, 2, 'teardown', 'cleanup']
                     target.write_text(f'value = {index}\n')
                 replies, error = run_group(Path(sys.argv[1]).resolve(), 'import fixture\nprint(fixture.value)\n', [], 10, paths)
                 assert not error and replies[0]['ok'] and replies[0]['output'] == '0\n', (error, replies)
-    print('Framework: 14 doctest captures, 256 regex-oracle comparisons, assertions, subtests, cleanup, and 4 module-path precedence checks passed')
+    print(f'Framework: 14 doctest captures, {256 + len(regex_cases)} regex-oracle comparisons, '
+          f'{len(regex_cases)} assertRegex and {len(count_cases)} assertCountEqual oracle checks, '
+          'subtests, cleanup, and 4 module-path precedence checks passed')
 
 
 if __name__ == '__main__':

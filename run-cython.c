@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
     if (argc > 1) spy_set_module_loader(c, load_module, &paths);
     Output out = {0};
     spy_set_output(c, capture, &out);
-    spy_set_step_limit(c, 100000);
+    spy_set_step_limit(c, 1000000);
     char header[80];
     int status = 0;
     while (fgets(header, sizeof(header), stdin)) {
