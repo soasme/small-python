@@ -2217,7 +2217,9 @@ static const char *scan_field(Parser *p, const char *s, size_t depth, int flags)
     int debug = *s == '=', converted = 0, spec = 0;
     if (debug) {
         s++;
-        while (isspace((unsigned char)*s) || (*s == '\\' && s[1] == '\n')) s += *s == '\\' ? 2 : 1;
+        while (isspace((unsigned char)*s) || *s == '#' || (*s == '\\' && s[1] == '\n'))
+            if (*s == '#') while (*s && *s != '\n') s++;
+            else s += *s == '\\' ? 2 : 1;
     }
     if (*s == '!') {
         s++;
@@ -2228,6 +2230,7 @@ static const char *scan_field(Parser *p, const char *s, size_t depth, int flags)
             errorf(p->ctx, "SyntaxError", "%c-string: invalid conversion character '%c': expected 's', 'r', or 'a'", kind, *s); return NULL;
         }
         s++; converted = 1;
+        while (isspace((unsigned char)*s) || (*s == '\\' && s[1] == '\n')) s += *s == '\\' ? 2 : 1;
     }
     if (*s == ':') {
         spec = 1;
@@ -2269,6 +2272,10 @@ static const char *scan_literal(Parser *p, const char *s, size_t depth, int fiel
             }
             s = scan_field(p, s + 1, depth + 1, flags);
             if (!s) return NULL;
+        } else if (*s == '\\' && s[1] == 'N' && s[2] == '{' && (flags & L_FORMAT) && !(flags & L_RAW)) {
+            /* A named escape's braces are not a replacement field. */
+            while (s[1] && s[1] != '}' && s[1] != quote) s++;
+            if (s[1] == '}') s++;
         } else if (*s == '\\' && s[1] && (!(flags & L_FORMAT) || (s[1] != '{' && s[1] != '}'))) s++;
     }
     if (triple && !*s) p->incomplete = 1;
@@ -2934,6 +2941,99 @@ static int append_codepoint(Buffer *b, unsigned code) {
     }
     return append(b, text, len);
 }
+/* CPython's _getcode for \N{...}: case-insensitive character names and
+ * aliases, Hangul syllables, and names derived from a code point. */
+static const char *const unicode_derived_prefixes[] = {
+    "HANGUL SYLLABLE ", "CJK UNIFIED IDEOGRAPH-", "TANGUT IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-",
+    "EGYPTIAN HIEROGLYPH-", "KHITAN SMALL SCRIPT CHARACTER-", "NUSHU CHARACTER-"};
+static const char *const hangul_syllables[][3] = {
+    {"G", "A", ""}, {"GG", "AE", "G"}, {"N", "YA", "GG"}, {"D", "YAE", "GS"}, {"DD", "EO", "N"}, {"R", "E", "NJ"},
+    {"M", "YEO", "NH"}, {"B", "YE", "D"}, {"BB", "O", "L"}, {"S", "WA", "LG"}, {"SS", "WAE", "LM"}, {"", "OE", "LB"},
+    {"J", "YO", "LS"}, {"JJ", "U", "LT"}, {"C", "WEO", "LP"}, {"K", "WE", "LH"}, {"T", "WI", "M"}, {"P", "YU", "B"},
+    {"H", "EU", "BS"}, {0, "YI", "S"}, {0, "I", "SS"}, {0, 0, "NG"}, {0, 0, "J"}, {0, 0, "C"}, {0, 0, "K"},
+    {0, 0, "T"}, {0, 0, "P"}, {0, 0, "H"}};
+/* The longest jamo name at s in one column, or -1. */
+static int hangul_part(const char **s, int count, int column) {
+    int found = -1;
+    size_t best = 0;
+    for (int i = 0; i < count; i++) {
+        size_t len = strlen(hangul_syllables[i][column]);
+        if ((found < 0 || len > best) && !strncmp(*s, hangul_syllables[i][column], len)) { found = i; best = len; }
+    }
+    *s += best;
+    return found;
+}
+static int unicode_name_word(const char *word, size_t len) {
+    size_t low = 0, high = sizeof(unicode_name_word_order) / sizeof(*unicode_name_word_order);
+    while (low < high) {
+        size_t middle = (low + high) / 2;
+        const char *candidate = (const char *)unicode_name_words + unicode_name_word_offsets[unicode_name_word_order[middle]];
+        int order = strncmp(candidate, word, len);
+        if (!order && !candidate[len]) return unicode_name_word_order[middle];
+        if (order < 0) low = middle + 1;
+        else high = middle;
+    }
+    return -1;
+}
+static int unicode_lookup(const char *name, size_t len, unsigned *code) {
+    char upper[256];
+    if (!len || len >= sizeof(upper)) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if ((unsigned char)name[i] >= 128) return 0;
+        upper[i] = (char)toupper((unsigned char)name[i]);
+    }
+    upper[len] = 0;
+    size_t prefix = 0;
+    while (prefix < 7 && strncmp(upper, unicode_derived_prefixes[prefix], strlen(unicode_derived_prefixes[prefix]))) prefix++;
+    if (prefix == 0) {
+        const char *s = upper + 16;
+        int l = hangul_part(&s, 19, 0), v = hangul_part(&s, 21, 1), t = hangul_part(&s, 28, 2);
+        if (l < 0 || v < 0 || t < 0 || *s) return 0;
+        *code = 0xac00 + ((unsigned)l * 21 + (unsigned)v) * 28 + (unsigned)t;
+        return 1;
+    }
+    if (prefix < 7) {
+        const char *hex = upper + strlen(unicode_derived_prefixes[prefix]);
+        size_t digits = strlen(hex);
+        unsigned value = 0;
+        if (digits < 4 || digits > 6 || *hex == '0') return 0;
+        for (size_t i = 0; i < digits; i++) {
+            int digit = hex_digit((unsigned char)hex[i]);
+            if (digit < 0) return 0;
+            value = value * 16 + (unsigned)digit;
+        }
+        for (size_t i = 0; i < sizeof(unicode_derived_names) / sizeof(*unicode_derived_names); i++)
+            if (value >= unicode_derived_names[i][0] && value <= unicode_derived_names[i][1])
+                return unicode_derived_names[i][2] == prefix ? (*code = value, 1) : 0;
+        return 0;
+    }
+    unsigned char encoded[512];
+    size_t size = 0;
+    for (const char *word = upper; ; ) {
+        const char *stop = strchr(word, ' ');
+        size_t length = stop ? (size_t)(stop - word) : strlen(word);
+        int id = unicode_name_word(word, length);
+        if (id < 0) return 0;
+        if (id < 128) encoded[size++] = (unsigned char)id;
+        else { encoded[size++] = (unsigned char)(128 | id >> 8); encoded[size++] = (unsigned char)(id & 255); }
+        if (!stop) break;
+        word = stop + 1;
+    }
+    unsigned current = 0;
+    for (size_t at = 0; at < sizeof(unicode_names);) {
+        unsigned delta = 0;
+        for (unsigned shift = 0; ; shift += 7) {
+            unsigned char byte = unicode_names[at++];
+            delta |= (unsigned)(byte & 127) << shift;
+            if (!(byte & 128)) break;
+        }
+        current += delta;
+        size_t length = unicode_names[at++];
+        if (length == size && !memcmp(unicode_names + at, encoded, size)) { *code = current; return 1; }
+        at += length;
+    }
+    return 0;
+}
 static int literal_character(Parser *p, Buffer *out, const char **cursor, const char *end, int flags) {
     const char *s = *cursor;
     char ch = *s++;
@@ -2969,7 +3069,12 @@ static int literal_character(Parser *p, Buffer *out, const char **cursor, const 
             if (flags & L_BYTES) { char byte = (char)(code & 255); return append(out, &byte, 1); }
             return append_codepoint(out, code);
         } else if (ch == 'N' && !(flags & L_BYTES)) {
-            spy_error(p->ctx, "NotImplementedError", "named Unicode escapes are not implemented"); return -1;
+            const char *close = s < end && *s == '{' ? memchr(s, '}', (size_t)(end - s)) : NULL;
+            unsigned code;
+            if (!close || close == s + 1) { syntax(p, "(unicode error) malformed \\N character escape"); return -1; }
+            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) { syntax(p, "(unicode error) unknown Unicode character name"); return -1; }
+            *cursor = close + 1;
+            return append_codepoint(out, code);
         } else if (ch != '\\' && ch != '\'' && ch != '"') {
             /* Python retains unknown escapes; SyntaxWarning reporting is pending. */
             if (append(out, "\\", 1)) return -1;
@@ -3047,13 +3152,20 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             s = expr_end;
             int debug = *s == '=';
             if (debug) {
-                s++; while (s < end && (isspace((unsigned char)*s) || (*s == '\\' && s + 1 < end && s[1] == '\n'))) s += *s == '\\' ? 2 : 1;
-                if (append(literal, begin, (size_t)(s - begin))) return -1;
+                /* The debug text keeps the whitespace after '=' but not comments. */
+                if (append(literal, begin, (size_t)(++s - begin))) return -1;
+                while (s < end && (isspace((unsigned char)*s) || *s == '#' || (*s == '\\' && s + 1 < end && s[1] == '\n'))) {
+                    const char *start = s;
+                    if (*s == '#') { while (s < end && *s != '\n') s++; continue; }
+                    s += *s == '\\' ? 2 : 1;
+                    if (append(literal, start, (size_t)(s - start))) return -1;
+                }
             }
             if (*s == '!') {
                 s++;
                 if (*s != 's' && *s != 'r' && *s != 'a') { syntax(p, "f-string: invalid conversion character"); return -1; }
                 field->op = *s++;
+                while (s < end && (isspace((unsigned char)*s) || (*s == '\\' && s + 1 < end && s[1] == '\n'))) s += *s == '\\' ? 2 : 1;
             }
             if (flush_literal(p, tail, literal)) return -1;
             if (*s == ':') {

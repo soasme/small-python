@@ -453,8 +453,9 @@ CPython: fill code points, alignment, sign, `z`, `#`, zero padding, Unicode
 digit widths, `,`/`_` integer and fractional grouping, every presentation type,
 the short float repr, and CPython's diagnostics; `n` uses the C locale. Percent
 formatting for `str`, `bytes`, and `bytearray` follows CPython's conversions,
-flags, `*` widths and precisions, mapping keys, and diagnostics. Unicode escaping, printability, and identifier properties use
-checked-in Unicode 17.0.0 data. Source identifiers undergo NFKC normalization
+flags, `*` widths and precisions, mapping keys, and diagnostics. Unicode escaping, printability, identifier properties, and
+`\N{...}` escapes (names and aliases, case-insensitive; Hangul and derived
+ideograph names computed) use checked-in Unicode 17.0.0 data. Source identifiers undergo NFKC normalization
 before scope analysis and private-name mangling; dynamic string attribute and
 keyword names retain their original spelling. Byte sources, CLI files, and imports
 honor first/second-line encoding comments and UTF-8 BOMs. Unicode string sources
@@ -462,8 +463,7 @@ ignore encoding comments. UTF-8, ASCII, Latin-1 and ISO-8859-15 decoding is nati
 other codecs and some decoding diagnostics remain incomplete. CR and CRLF become
 LF before parsing, including inside string literals. Indentation uses eight-column
 tab stops and checks for inconsistent mixing with spaces. The lexer rejects invalid UTF-8.
-String normalization APIs, named escapes, and many other Unicode operations
-remain incomplete.
+String normalization APIs and many other Unicode operations remain incomplete.
 
 Module/class namespaces and explicit execution mappings are live; optimized
 function locals are snapshots. Class and execution locals may be arbitrary

@@ -3863,6 +3863,17 @@ t(lambda: r[T(5):T(10)]); t(lambda: slice(T()).indices(0)); t(lambda: slice(B())
 t(lambda: int(T(5))); t(lambda: 'abc' * 10**30)
 """)
 
+CASES.append(r"""
+# Named Unicode escapes: names, aliases, any case, derived and Hangul names; f-string braces.
+print(ascii("\N{EM DASH}\N{LF}\N{latin small letter a}\N{CJK UNIFIED IDEOGRAPH-4E00}\N{HANGUL SYLLABLE GAG}\N{TANGUT IDEOGRAPH-17000}"))
+x = 1
+print(ascii(f"{x}\N{DIGIT ONE}{x!r  }"), ascii(rf"\N{x}"), b"\N{A}", f"{x = # note
+  }")
+for src in [r'"\N{NOPE}"', r'"\N{A"', r'"\N"', r'"\N{}"', r'"\N{CJK UNIFIED IDEOGRAPH-FFFF}"', r'"\N{HANGUL SYLLABLE XX}"']:
+    try: print(ascii(eval(src)))
+    except SyntaxError as e: print(type(e).__name__)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),
