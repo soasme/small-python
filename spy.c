@@ -108,6 +108,7 @@ struct SPYContext {
     SPYModuleLoader loader;
     void *loader_data;
     char error_type[64], error_message[256], filename[256];
+    char error_display[320]; /* spy_error_display's result. */
     size_t line;
 };
 static SPYValue *special_method(SPYContext *, SPYValue *, const char *);
@@ -1878,7 +1879,7 @@ enum {
     N_TYPEALIAS, N_TYPEPARAM, N_GENERIC, N_TEMPLATE, N_INTERPOLATION
 };
 enum { P_POSITIONAL, P_POSONLY, P_VARARGS, P_KWONLY, P_KWARGS };
-typedef struct { int kind; const char *start; size_t len, line; } Token;
+typedef struct { int kind; const char *start; size_t len, line, level; } Token;
 typedef struct {
     SPYContext *ctx;
     Token *tokens;
@@ -1892,11 +1893,24 @@ typedef struct {
     SPYValue *unit;
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
+    char deferred_text[256];
     size_t deferred_line;
+    /* CPython's last_stmt_location: the start of the last compound statement
+     * parsed, which a SyntaxError's _metadata records. */
+    const char *last_stmt;
+    size_t last_stmt_line;
+    int incomplete; /* The lexer failed at the end of the source. */
+    /* The outermost disjunction-like expression that ended last, for
+     * CPython's invalid_expression rules. */
+    size_t expr_start, expr_end;
+    size_t far; /* The furthest token examined. */
+    size_t error_pos; /* The token a syntax() error points at. */
+    const char *unclosed; /* The innermost bracket still open at the end. */
+    size_t unclosed_line;
 } Parser;
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
     if (grow(p->ctx, (void **)&p->tokens, &p->cap, p->len + 1, sizeof(Token))) return -1;
-    p->tokens[p->len++] = (Token){kind, s, n, line};
+    p->tokens[p->len++] = (Token){kind, s, n, line, 0};
     return 0;
 }
 enum { L_RAW = 1, L_FORMAT = 2, L_BYTES = 4, L_TEMPLATE = 8, L_MULTILINE = 16 };
@@ -2028,6 +2042,7 @@ static const char *scan_literal(Parser *p, const char *s, size_t depth, int fiel
     if (depth > 128) { spy_error(p->ctx, "SyntaxError", "string nesting too deep"); return NULL; }
     size_t prefix; int flags;
     if (!literal_prefix(s, &prefix, &flags)) return NULL;
+    const char *begin = s;
     s += prefix;
     int quote = *s++, triple = s[0] == quote && s[1] == quote;
     if (triple) { s += 2; flags |= L_MULTILINE; }
@@ -2043,9 +2058,117 @@ static const char *scan_literal(Parser *p, const char *s, size_t depth, int fiel
             if (!s) return NULL;
         } else if (*s == '\\' && s[1] && (!(flags & L_FORMAT) || (s[1] != '{' && s[1] != '}'))) s++;
     }
+    if (triple && !*s) p->incomplete = 1;
     if (field_flags) errorf(p->ctx, "SyntaxError", "%c-string: expecting '}'", field_flags & L_TEMPLATE ? 't' : 'f');
-    else errorf(p->ctx, "SyntaxError", "unterminated %s%sstring literal", triple ? "triple-quoted " : "", flags & L_TEMPLATE ? "t-" : "");
+    else {
+        /* The tokenizer's line when it gave up; a final newline ends no line. */
+        size_t detected = p->ctx->line;
+        for (const char *ch = begin; ch < s; ch++) if (*ch == '\n' && ch[1]) detected++;
+        errorf(p->ctx, "SyntaxError", "unterminated %s%sstring literal (detected at line %zu)", triple ? "triple-quoted " : "",
+               flags & L_TEMPLATE ? "t-" : flags & L_FORMAT ? "f-" : "", detected);
+    }
     return NULL;
+}
+/* CPython's number tokenizer and its diagnostics. Errors point at the
+ * character before the offending one, as _PyTokenizer_syntaxerror does. */
+static const char *number_error(Parser *p, const char *at, size_t line, const char *message) {
+    p->ctx->line = line; p->error_start = p->error_end = at - 1;
+    spy_error(p->ctx, "SyntaxError", message);
+    return NULL;
+}
+/* verify_end_of_number: keywords that may follow a number only warn. */
+static int number_end(const char *s) {
+    int c = (unsigned char)*s;
+    if ((c == 'a' && !strncmp(s + 1, "nd", 2)) || (c == 'e' && !strncmp(s + 1, "lse", 3)) || (c == 'f' && !strncmp(s + 1, "or", 2)) ||
+        (c == 'i' && (s[1] == 'f' || s[1] == 'n' || s[1] == 's')) || (c == 'o' && s[1] == 'r') || (c == 'n' && !strncmp(s + 1, "ot", 2)))
+        return 1;
+    return !(c < 128 && (isalnum(c) || c == '_'));
+}
+static const char *decimal_tail(Parser *p, const char *s, size_t line) {
+    for (;;) {
+        while (isdigit((unsigned char)*s)) s++;
+        if (*s != '_') return s;
+        if (!isdigit((unsigned char)*++s)) return number_error(p, s, line, "invalid decimal literal");
+    }
+}
+static int radix_digit(int radix, int c) {
+    return radix == 'x' ? isxdigit(c) : radix == 'o' ? c >= '0' && c < '8' : c == '0' || c == '1';
+}
+static const char *scan_number(Parser *p, const char *start, size_t line, int *kind) {
+    const char *s = start;
+    char message[64];
+    *kind = T_INT;
+    if (*s == '.') { s++; goto fraction; }
+    if (*s == '0') {
+        int radix = tolower((unsigned char)*++s);
+        if (radix == 'x' || radix == 'o' || radix == 'b') {
+            const char *name = radix == 'x' ? "hexadecimal" : radix == 'o' ? "octal" : "binary";
+            s++;
+            do {
+                if (*s == '_') s++;
+                if (!radix_digit(radix, (unsigned char)*s)) {
+                    if (radix != 'x' && isdigit((unsigned char)*s)) break;
+                    snprintf(message, sizeof(message), "invalid %s literal", name);
+                    return number_error(p, s, line, message);
+                }
+                while (radix_digit(radix, (unsigned char)*s)) s++;
+            } while (*s == '_');
+            if (radix != 'x' && isdigit((unsigned char)*s)) {
+                snprintf(message, sizeof(message), "invalid digit '%c' in %s literal", *s, name);
+                return number_error(p, s + 1, line, message);
+            }
+            if (!number_end(s)) {
+                snprintf(message, sizeof(message), "invalid %s literal", name);
+                return number_error(p, s, line, message);
+            }
+            return s;
+        }
+        int nonzero = 0;
+        for (;;) {
+            if (*s == '_' && !isdigit((unsigned char)*++s)) return number_error(p, s, line, "invalid decimal literal");
+            if (*s != '0') break;
+            s++;
+        }
+        const char *zeros_end = s;
+        if (isdigit((unsigned char)*s)) {
+            nonzero = 1;
+            if (!(s = decimal_tail(p, s, line))) return NULL;
+        }
+        if (*s == '.') { s++; goto fraction; }
+        if (*s == 'e' || *s == 'E') goto exponent;
+        if (*s == 'j' || *s == 'J') goto imaginary;
+        if (nonzero) {
+            p->ctx->line = line; p->error_start = start; p->error_end = zeros_end;
+            spy_error(p->ctx, "SyntaxError", "leading zeros in decimal integer literals are not permitted; use an 0o prefix for octal integers");
+            return NULL;
+        }
+        return number_end(s) ? s : number_error(p, s, line, "invalid decimal literal");
+    }
+    if (!(s = decimal_tail(p, s, line))) return NULL;
+    if (*s == '.') {
+        s++;
+fraction:
+        *kind = T_FLOAT;
+        if (isdigit((unsigned char)*s) && !(s = decimal_tail(p, s, line))) return NULL;
+    }
+    if (*s == 'e' || *s == 'E') {
+exponent: ;
+        const char *e = s++;
+        if (*s == '+' || *s == '-') {
+            if (!isdigit((unsigned char)*++s)) return number_error(p, s, line, "invalid decimal literal");
+        } else if (!isdigit((unsigned char)*s)) {
+            /* The number ends before the 'e' of a following keyword. */
+            return number_end(e) ? e : number_error(p, e, line, "invalid decimal literal");
+        }
+        *kind = T_FLOAT;
+        if (!(s = decimal_tail(p, s, line))) return NULL;
+    }
+    if (*s == 'j' || *s == 'J') {
+imaginary:
+        *kind = T_IMAG;
+        return number_end(++s) ? s : number_error(p, s, line, "invalid imaginary literal");
+    }
+    return number_end(s) ? s : number_error(p, s, line, "invalid decimal literal");
 }
 static int lex(Parser *p, const char *s) {
     size_t line = 1, indents[128] = {0}, level = 0, brackets = 0;
@@ -2090,7 +2213,7 @@ static int lex(Parser *p, const char *s) {
                     }
                     if (indent != indents[level]) {
                         p->ctx->line = line;
-                        spy_error(p->ctx, "IndentationError", "unindent does not match an outer level");
+                        spy_error(p->ctx, "IndentationError", "unindent does not match any outer indentation level");
                         return -1;
                     }
                 }
@@ -2137,21 +2260,7 @@ static int lex(Parser *p, const char *s) {
             }
             kind = T_NAME;
         } else if (isdigit((unsigned char)*start) || (*start == '.' && isdigit((unsigned char)*s))) {
-            int dot = *start == '.';
-            if (*start == '0' && (*s == 'x' || *s == 'X' || *s == 'o' || *s == 'O' || *s == 'b' || *s == 'B')) {
-                s++;
-                while (isalnum((unsigned char)*s) || *s == '_') s++;
-            } else {
-                while (isdigit((unsigned char)*s) || *s == '_') s++;
-                if (*s == '.' && !dot) { dot = 1; s++; while (isdigit((unsigned char)*s) || *s == '_') s++; }
-                if (*s == 'e' || *s == 'E') {
-                    dot = 1; s++;
-                    if (*s == '+' || *s == '-') s++;
-                    while (isdigit((unsigned char)*s) || *s == '_') s++;
-                }
-            }
-            kind = dot ? T_FLOAT : T_INT;
-            if (*s == 'j' || *s == 'J') { kind = T_IMAG; s++; }
+            if (!(s = scan_number(p, start, line, &kind))) return -1;
         } else {
             const char *pairs[] = {"==", "!=", "<=", ">=", "**", "//", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", ":=", "->"};
             const int kinds[] = {T_EQ, T_NE, T_LE, T_GE, T_POW, T_FLOORDIV, T_LSHIFT, T_RSHIFT, T_ADDEQ, T_SUBEQ, T_MULEQ, T_DIVEQ, T_MODEQ, T_MATEQ, T_ANDEQ, T_OREQ, T_XOREQ, T_WALRUS, T_ARROW};
@@ -2177,25 +2286,28 @@ static int lex(Parser *p, const char *s) {
                     else errorf(p->ctx, "SyntaxError", "closing parenthesis '%c' does not match opening parenthesis '%c'", kind, opening);
                     return -1;
                 }
-            } else if (kind < 256 && !strchr("+-*/%~&|^<>=:;.,@", kind)) {
-                p->ctx->line = line;
-                spy_error(p->ctx, "SyntaxError", "unsupported character"); return -1;
             }
         }
         if (token_add(p, kind, start, (size_t)(s - start), line)) return -1;
+        p->tokens[p->len - 1].level = brackets;
     }
+    /* An unclosed bracket is reported once the parser reaches the end, as
+     * CPython's lexer does lazily; a second END guards one-token lookahead. */
     if (brackets) {
-        p->ctx->line = opened_line[brackets - 1]; p->error_start = opened_at[brackets - 1]; p->error_end = opened_at[brackets - 1] + 1;
-        errorf(p->ctx, "SyntaxError", "'%c' was never closed", *opened_at[brackets - 1]); return -1;
+        p->unclosed = opened_at[brackets - 1]; p->unclosed_line = opened_line[brackets - 1];
+    } else {
+        if (p->len && p->tokens[p->len - 1].kind != T_NL && token_add(p, T_NL, s, 0, line)) return -1;
+        while (level--) if (token_add(p, T_DEDENT, s, 0, line)) return -1;
     }
-    if (p->len && p->tokens[p->len - 1].kind != T_NL && token_add(p, T_NL, s, 0, line)) return -1;
-    while (level--) if (token_add(p, T_DEDENT, s, 0, line)) return -1;
-    return token_add(p, T_END, s, 0, line);
+    return token_add(p, T_END, s, 0, line) || token_add(p, T_END, s, 0, line);
 nesting:
     p->ctx->line = line;
     spy_error(p->ctx, "SyntaxError", "too many nested blocks or delimiters"); return -1;
 }
-static Token *peek(Parser *p) { return &p->tokens[p->pos]; }
+static Token *peek(Parser *p) {
+    if (p->pos > p->far) p->far = p->pos;
+    return &p->tokens[p->pos];
+}
 static int at(Parser *p, int kind) { return peek(p)->kind == kind; }
 static int keyword(Parser *p, const char *s) {
     Token *t = peek(p);
@@ -2204,6 +2316,7 @@ static int keyword(Parser *p, const char *s) {
 static int take(Parser *p, int kind) { if (!at(p, kind)) return 0; p->pos++; return 1; }
 static int take_word(Parser *p, const char *s) { if (!keyword(p, s)) return 0; p->pos++; return 1; }
 static Node *syntax(Parser *p, const char *message) {
+    p->error_pos = p->pos;
     p->ctx->line = peek(p)->line;
     p->error_start = peek(p)->start; p->error_end = peek(p)->start + peek(p)->len;
     spy_error(p->ctx, "SyntaxError", message);
@@ -2211,7 +2324,8 @@ static Node *syntax(Parser *p, const char *message) {
 }
 static void defer(Parser *p, const char *message) {
     if (p->deferred) return;
-    p->deferred = message; p->deferred_line = peek(p)->line;
+    snprintf(p->deferred_text, sizeof(p->deferred_text), "%s", message);
+    p->deferred = p->deferred_text; p->deferred_line = peek(p)->line;
     p->deferred_start = peek(p)->start; p->deferred_end = peek(p)->start + peek(p)->len;
 }
 static int expect(Parser *p, int kind, const char *message) {
@@ -2227,6 +2341,9 @@ static Node *node(Parser *p, int kind) {
     }
     return n;
 }
+static int keyword_value(Token *t) {
+    return (t->len == 4 && (!memcmp(t->start, "None", 4) || !memcmp(t->start, "True", 4))) || (t->len == 5 && !memcmp(t->start, "False", 5));
+}
 static int reserved(Token *t) {
     static const char *words[] = {"False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"};
     for (size_t i = 0; i < sizeof(words) / sizeof(*words); i++)
@@ -2234,7 +2351,7 @@ static int reserved(Token *t) {
     return 0;
 }
 static Node *identifier(Parser *p) {
-    if (!at(p, T_NAME) || reserved(peek(p))) return syntax(p, "expected identifier");
+    if (!at(p, T_NAME) || reserved(peek(p))) return syntax(p, "invalid syntax");
     Node *n = node(p, N_NAME);
     if (!n) return NULL;
     Token *t = peek(p);
@@ -2647,7 +2764,9 @@ static int flush_literal(Parser *p, Node ***tail, Buffer *out) {
     **tail = n; *tail = &n->next;
     return 0;
 }
-static Node *field_expression(Parser *p, const char *start, const char *end) {
+static void invalid_expression_error(Parser *);
+static size_t probe_expression(Parser *, size_t, int);
+static Node *field_expression(Parser *p, const char *start, const char *end, int flags) {
     Buffer text = {.ctx = p->ctx};
     if (puts_buffer(&text, "(") || append(&text, start, (size_t)(end - start)) || puts_buffer(&text, "\n)")) {
         free(text.data); return NULL;
@@ -2660,6 +2779,16 @@ static Node *field_expression(Parser *p, const char *start, const char *end) {
         result = expression(&inner, 0);
         take(&inner, T_NL);
         if (result && !at(&inner, T_END)) result = syntax(&inner, "invalid f-string expression");
+        if (!result) invalid_expression_error(&inner);
+        /* invalid_replacement_field: what follows the expression, if any. */
+        if (!result && error_is(p->ctx, "SyntaxError") && !strcmp(p->ctx->error_message, "invalid syntax")) {
+            size_t line = p->ctx->line;
+            int valid = probe_expression(&inner, 1, 0) != 0;
+            spy_clear_error(p->ctx);
+            errorf(p->ctx, "SyntaxError", valid ? "%c-string: expecting '=', or '!', or ':', or '}'" : "%c-string: expecting a valid expression after '{'",
+                   flags & L_TEMPLATE ? 't' : 'f');
+            p->ctx->line = line;
+        }
     }
     free(inner.tokens); free(text.data);
     return result;
@@ -2682,7 +2811,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             while (nonspace < expr_end && isspace((unsigned char)*nonspace)) nonspace++;
             if (nonspace == expr_end) { syntax(p, "f-string: empty expression not allowed"); return -1; }
             Node *field = node(p, !spec && (flags & L_TEMPLATE) ? N_INTERPOLATION : N_FORMAT);
-            if (!field || !(field->a = field_expression(p, begin, expr_end))) return -1;
+            if (!field || !(field->a = field_expression(p, begin, expr_end, flags))) return -1;
             if (field->kind == N_INTERPOLATION &&
                 !(field->text = copy_text(p->ctx, begin, (size_t)(expr_end - begin)))) return -1;
             s = expr_end;
@@ -2797,13 +2926,13 @@ static Node *atom(Parser *p) {
     }
     if (at(p, T_NAME)) return identifier(p);
     int open = peek(p)->kind;
-    if (open != '(' && open != '[' && open != '{') return syntax(p, "expected expression");
+    if (open != '(' && open != '[' && open != '{') return syntax(p, "invalid syntax");
     n = node(p, open == '[' ? N_LIST : open == '{' ? N_DICT : N_TUPLE);
     if (!n) return NULL;
     p->pos++;
     if (open == '(' && keyword(p, "yield")) {
         Node *value = yield_expression(p);
-        return value && expect(p, ')', "expected ')'") ? value : NULL;
+        return value && expect(p, ')', "invalid syntax") ? value : NULL;
     }
     int close = open == '[' ? ']' : open == '{' ? '}' : ')';
     Node **tail = &n->args;
@@ -2816,8 +2945,14 @@ static Node *atom(Parser *p) {
                 if (open != '{') return syntax(p, keyword(p, "for") ?
                     (open == '[' ? "cannot use dict unpacking in list comprehension" : "cannot use dict unpacking in generator expression") : "cannot use dict unpacking here");
             } else if (take(p, '*')) {
+                /* invalid_starred_expression_unpacking parses the operand as
+                 * an expression, so invalid_expression sees it. */
+                size_t operand = p->pos;
                 item = node(p, N_STAR);
                 if (!item || !(item->a = expression(p, 4))) return NULL;
+                if (p->pos > p->expr_end || (p->pos == p->expr_end && operand < p->expr_start)) {
+                    p->expr_start = operand; p->expr_end = p->pos;
+                }
             } else {
                 size_t element = p->pos;
                 item = expression(p, 0);
@@ -2834,15 +2969,22 @@ static Node *atom(Parser *p) {
                 if (item->kind == N_STAR) return syntax(p, "cannot use a starred expression in a dictionary key");
                 if (n->kind == N_SET) return syntax(p, "invalid set display");
                 Node *pair = node(p, N_ASSIGN);
-                if (!pair || !expect(p, ':', "expected ':' in dictionary")) return NULL;
+                if (!pair || !expect(p, ':', "invalid syntax")) return NULL;
                 pair->a = item;
+                if (at(p, '}') || at(p, ',')) { p->pos--; return syntax(p, "expression expected after dictionary key and ':'"); }
                 if (at(p, '*')) return syntax(p, "cannot use a starred expression in a dictionary value");
                 if (at(p, T_POW)) return syntax(p, "cannot use dict unpacking in a dictionary value");
                 pair->b = plain_expression(p, 0);
                 if (!pair->b) return NULL;
                 item = pair;
             } else if (open == '{' && item->kind != N_MAPPING) {
-                if (n->args && n->kind == N_DICT) return syntax(p, "expected ':' in dictionary");
+                if (n->args && n->kind == N_DICT) {
+                    /* invalid_kvpair points at the key's last character. */
+                    Token *last = &p->tokens[p->pos - 1];
+                    syntax(p, "':' expected after dictionary key");
+                    p->ctx->line = last->line; p->error_start = last->start + (last->len ? last->len - 1 : 0); p->error_end = NULL;
+                    return NULL;
+                }
                 n->kind = N_SET;
             } else if (open == '{' && n->kind == N_SET) {
                 return syntax(p, "cannot use dict unpacking in set display");
@@ -2855,15 +2997,15 @@ static Node *atom(Parser *p) {
             }
             if (!take(p, ',')) {
                 if (open == '(' && n->args == item) {
-                    if (item->kind == N_STAR) return syntax(p, "cannot use starred expression here");
+                    if (item->kind == N_STAR) return syntax(p, at(p, ')') ? "cannot use starred expression here" : "invalid syntax");
                     if (item->kind == N_NAMED) item->op = 1;
-                    return expect(p, close, "expected ')'") ? item : NULL;
+                    return expect(p, close, "invalid syntax") ? item : NULL;
                 }
                 break;
             }
         } while (!at(p, close));
     }
-    return expect(p, close, "expected closing delimiter") ? n : NULL;
+    return expect(p, close, "invalid syntax") ? n : NULL;
 }
 static int operator_info(Parser *p, int *width, int *prec) {
     int op = peek(p)->kind;
@@ -2894,6 +3036,21 @@ static int operator_info(Parser *p, int *width, int *prec) {
     }
     return op;
 }
+/* invalid_factor and invalid_arithmetic: 'not' as an operand of an
+ * arithmetic operator, reported when its own operand parses. */
+static Node *not_operand_error(Parser *p) {
+    size_t word = p->pos;
+    p->pos++;
+    Node *operand = expression(p, 3);
+    p->pos = word;
+    if (!operand) { spy_clear_error(p->ctx); return syntax(p, "invalid syntax"); }
+    int before = word ? p->tokens[word - 1].kind : 0, earlier = word > 1 ? p->tokens[word - 2].kind : T_NL;
+    int operand_end = earlier == T_NAME || earlier == T_INT || earlier == T_FLOAT || earlier == T_IMAG || earlier == T_STRING ||
+                      earlier == ')' || earlier == ']' || earlier == '}' || earlier == T_ELLIPSIS;
+    if (earlier == T_NAME && reserved(&p->tokens[word - 2]) && !keyword_value(&p->tokens[word - 2])) operand_end = 0;
+    if (before == '~' || ((before == '+' || before == '-') && !operand_end)) p->pos--;
+    return syntax(p, "'not' after an operator must be parenthesized");
+}
 /* invalid_starred_expression: a '*' whose operand fails to parse. */
 static void star_expression_error(Parser *p, size_t star) {
     const char *message = p->ctx->error_message;
@@ -2907,6 +3064,7 @@ static int call_arguments(Parser *p, Node *n) {
     int keywords = 0, mapping = 0;
     if (!at(p, ')')) do {
         Node *arg;
+        size_t first = p->pos;
         if (at(p, '*') || at(p, T_POW)) {
             size_t star = p->pos;
             int unpack_mapping = take(p, T_POW);
@@ -2952,7 +3110,10 @@ static int call_arguments(Parser *p, Node *n) {
                     if (a->kind == N_KEYWORD && !strcmp(a->text, arg->text)) {
                         char message[256];
                         snprintf(message, sizeof(message), "keyword argument repeated: %s", arg->text);
-                        syntax(p, message); return -1;
+                        /* The compiler reports this after the whole module parses. */
+                        size_t here = p->pos;
+                        p->pos = start; defer(p, message); p->pos = here;
+                        break;
                     }
                 if (!(arg->a = plain_expression(p, 0))) return -1;
                 keywords = 1;
@@ -2962,12 +3123,13 @@ static int call_arguments(Parser *p, Node *n) {
         if (keyword(p, "for") || keyword(p, "async")) {
             if (arg->kind == N_MAPPING) { syntax(p, "cannot use dict unpacking in generator expression"); return -1; }
             if (arg->kind == N_KEYWORD) { syntax(p, "invalid syntax. Maybe you meant '==' or ':=' instead of '='?"); return -1; }
-            if (n->args)
-                { syntax(p, "generator expression must be parenthesized"); return -1; }
+            if (n->kind == N_CLASS) { syntax(p, "invalid syntax"); return -1; }
+            if (n->args) { p->pos = first; syntax(p, "Generator expression must be parenthesized"); return -1; }
             Node *generator = node(p, N_TUPLE);
             if (!generator) return -1;
             generator->args = arg;
             if (!comprehension(p, generator)) return -1;
+            if (at(p, ',')) { p->pos = first; syntax(p, "Generator expression must be parenthesized"); return -1; }
             arg = generator;
             *tail = arg;
             break;
@@ -2975,7 +3137,7 @@ static int call_arguments(Parser *p, Node *n) {
         *tail = arg; tail = &arg->next;
         if (!take(p, ',')) break;
     } while (!at(p, ')'));
-    if (!expect(p, ')', "expected ')' after arguments")) return -1;
+    if (!expect(p, ')', "invalid syntax")) return -1;
     return 0;
 }
 static Node *expression_inner(Parser *p, int min, int named) {
@@ -2995,7 +3157,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         if (!left->b->a) return NULL;
         goto assignment_expression;
     } else if (at(p, '+') || at(p, '-') || at(p, '~') || keyword(p, "not")) {
-        if (keyword(p, "not") && min > 3) return syntax(p, "invalid 'not' expression");
+        if (keyword(p, "not") && min > 3) return not_operand_error(p);
         left = node(p, N_UNARY);
         if (!left) return NULL;
         left->op = keyword(p, "not") ? O_NOT : peek(p)->kind;
@@ -3030,7 +3192,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
                         if (!take(p, ',')) break;
                     }
                 }
-                if (!n->b || !expect(p, ']', "expected ']'")) return NULL;
+                if (!n->b || !expect(p, ']', "invalid syntax")) return NULL;
             } else {
                 if (call_arguments(p, n)) return NULL;
             }
@@ -3104,8 +3266,13 @@ assignment_expression:
 }
 static Node *expression_mode(Parser *p, int min, int named) {
     if (++p->depth > 128) { p->depth--; return syntax(p, "expression is too deeply nested"); }
+    size_t start = p->pos;
     Node *n = expression_inner(p, min, named);
     p->depth--;
+    if (n && !min && n->kind != N_COND && n->kind != N_LAMBDA && n->kind != N_NAMED &&
+        (p->pos > p->expr_end || (p->pos == p->expr_end && start < p->expr_start))) {
+        p->expr_start = start; p->expr_end = p->pos;
+    }
     return n;
 }
 static Node *expression(Parser *p, int min) { return expression_mode(p, min, 1); }
@@ -3319,13 +3486,16 @@ static Node *comprehension(Parser *p, Node *n) {
     size_t clauses = 0;
     while (keyword(p, "for") || keyword(p, "async")) {
         int asynchronous = take_word(p, "async");
-        if (!take_word(p, "for")) return syntax(p, "expected 'for'");
+        if (!take_word(p, "for")) return syntax(p, "invalid syntax");
         if (++clauses > 128) return syntax(p, "too many comprehension clauses");
         Node *loop = node(p, N_FOR);
         if (!loop || !(loop->args = expression_list(p, 4))) return NULL;
         loop->op = asynchronous;
+        /* invalid_for_if_clause precedes invalid_for_target. */
+        if (!keyword(p, "in")) return syntax(p, "'in' expected after for-loop variables");
         if (!target(p, loop->args)) return p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
-        if (!take_word(p, "in") || !(loop->a = expression(p, 1))) return syntax(p, "expected iterable");
+        p->pos++;
+        if (!(loop->a = expression(p, 1))) return NULL;
         *tail = loop; tail = &loop->b;
         while (take_word(p, "if")) {
             if (++clauses > 128) return syntax(p, "too many comprehension clauses");
@@ -3441,7 +3611,7 @@ static int line_ends_block(Parser *p) {
     size_t i = p->pos + 1;
     int depth = 0, kind = i < p->len ? p->tokens[i].kind : T_END;
     if (kind == ':' || kind == '=' || kind == '.' || kind == ',' || kind == ')' || kind == ']' || kind == '}' ||
-        kind == T_NL || kind == T_END || (kind > T_DEDENT && kind != T_POW)) return 0;
+        kind == T_NL || kind == T_END || (kind > T_DEDENT && kind != T_POW && kind != T_ELLIPSIS)) return 0;
     for (; i < p->len && p->tokens[i].kind != T_NL && p->tokens[i].kind != T_END; i++) {
         kind = p->tokens[i].kind;
         if (kind == '(' || kind == '[' || kind == '{') depth++;
@@ -3464,12 +3634,12 @@ static Node *literal_pattern(Parser *p) {
         value = node(p, N_UNARY);
         if (!value) return NULL;
         value->op = '-'; p->pos++;
-        if (!at(p, T_INT) && !at(p, T_FLOAT) && !at(p, T_IMAG)) return syntax(p, "invalid pattern");
+        if (!at(p, T_INT) && !at(p, T_FLOAT) && !at(p, T_IMAG)) return syntax(p, "invalid syntax");
         if (!(value->a = atom(p))) return NULL;
     } else if (!(value = atom(p))) return NULL;
     if (at(p, '+') || at(p, '-')) {
         Node *real = value->kind == N_UNARY ? value->a : value;
-        if (real->kind != N_INT && real->kind != N_FLOAT && real->kind != N_IMAG) return syntax(p, "invalid pattern");
+        if (real->kind != N_INT && real->kind != N_FLOAT && real->kind != N_IMAG) return syntax(p, "invalid syntax");
         if (real->kind == N_IMAG) return syntax(p, "real number required in complex literal");
         Node *sum = node(p, N_BINARY);
         if (!sum) return NULL;
@@ -3507,7 +3677,7 @@ static Node *sequence_pattern(Parser *p, int close) {
         *tail = item; tail = &item->next;
         if (!take(p, ',')) break;
     }
-    if (!expect(p, close, close == ']' ? "expected ']'" : "expected ')'") || check_sequence_stars(p, n->args)) return NULL;
+    if (!expect(p, close, "invalid syntax") || check_sequence_stars(p, n->args)) return NULL;
     return n;
 }
 static Node *closed_pattern(Parser *p) {
@@ -3517,7 +3687,7 @@ static Node *closed_pattern(Parser *p) {
         if (!first) return NULL;
         if (!at(p, ',')) {
             if (first->op == PT_STAR) return syntax(p, "cannot use starred expression here");
-            return expect(p, ')', "expected ')'") ? first : NULL;
+            return expect(p, ')', "invalid syntax") ? first : NULL;
         }
         Node *n = pattern_node(p, PT_SEQUENCE);
         if (!n) return NULL;
@@ -3528,7 +3698,7 @@ static Node *closed_pattern(Parser *p) {
             if (!item) return NULL;
             *tail = item; tail = &item->next;
         }
-        if (!expect(p, ')', "expected ')'") || check_sequence_stars(p, n->args)) return NULL;
+        if (!expect(p, ')', "invalid syntax") || check_sequence_stars(p, n->args)) return NULL;
         return n;
     }
     if (take(p, '[')) return sequence_pattern(p, ']');
@@ -3538,13 +3708,16 @@ static Node *closed_pattern(Parser *p) {
         Node **tail = &n->args;
         while (!at(p, '}')) {
             if (take(p, T_POW)) {
-                if (n->c) return syntax(p, "invalid mapping pattern");
+                size_t name = p->pos;
                 Node *rest = identifier(p);
                 if (!rest) return NULL;
                 if (!strcmp(rest->text, "_")) return syntax(p, "invalid syntax");
                 n->c = rest;
-                take(p, ',');
-                if (!at(p, '}')) return syntax(p, "double star pattern must be last");
+                if (take(p, ',') && !at(p, '}')) {
+                    if (at(p, T_POW)) return syntax(p, "invalid syntax");
+                    p->pos = name; return syntax(p, "double star pattern must be the last (right-most) subpattern in the mapping pattern");
+                }
+                if (!at(p, '}')) return syntax(p, "invalid syntax");
                 break;
             }
             Node *entry = node(p, N_KEYWORD);
@@ -3559,11 +3732,11 @@ static Node *closed_pattern(Parser *p) {
                 if (!key) return NULL;
                 entry->a = key->a;
             }
-            if (!expect(p, ':', "expected ':'") || !(entry->b = pattern(p))) return NULL;
+            if (!expect(p, ':', "invalid syntax") || !(entry->b = pattern(p))) return NULL;
             *tail = entry; tail = &entry->next;
             if (!take(p, ',')) break;
         }
-        return expect(p, '}', "expected '}'") ? n : NULL;
+        return expect(p, '}', "invalid syntax") ? n : NULL;
     }
     if (keyword(p, "None") || keyword(p, "True") || keyword(p, "False")) {
         Node *n = pattern_node(p, PT_LITERAL);
@@ -3599,6 +3772,7 @@ static Node *closed_pattern(Parser *p) {
                         }
                     const char *attr = key->original ? key->original : key->text;
                     if (!(entry->text = copy_text(p->ctx, attr, strlen(attr)))) return NULL;
+                    if (!strcmp(attr, "__debug__")) { p->pos--; defer(p, "cannot assign to __debug__"); p->pos++; }
                     p->pos++;
                     if (!(entry->b = pattern(p))) return NULL;
                     *keywords = entry; keywords = &entry->next;
@@ -3610,7 +3784,7 @@ static Node *closed_pattern(Parser *p) {
                 }
                 if (!take(p, ',')) break;
             }
-            return expect(p, ')', "expected ')'") ? n : NULL;
+            return expect(p, ')', "invalid syntax") ? n : NULL;
         }
         if (value != name) {
             Node *n = pattern_node(p, PT_VALUE);
@@ -3622,7 +3796,7 @@ static Node *closed_pattern(Parser *p) {
         return n;
     }
     if (at(p, '-') || at(p, T_INT) || at(p, T_FLOAT) || at(p, T_IMAG) || at(p, T_STRING)) return literal_pattern(p);
-    return syntax(p, "invalid pattern");
+    return syntax(p, "invalid syntax");
 }
 static Node *pattern(Parser *p) {
     Node *first = closed_pattern(p);
@@ -3640,9 +3814,19 @@ static Node *pattern(Parser *p) {
         first = n;
     }
     if (take_word(p, "as")) {
+        /* invalid_as_pattern: anything but a plain capture name. */
+        size_t target = p->pos;
+        int next = p->tokens[target + 1].kind;
+        if (!at(p, T_NAME) || reserved(peek(p)) || next == '.' || next == '(' || next == '=') {
+            Node *bad = keyword(p, "lambda") || keyword(p, "yield") ? NULL : expression(p, 0);
+            if (!bad) { spy_clear_error(p->ctx); p->pos = target; return syntax(p, "invalid syntax"); }
+            char message[96];
+            snprintf(message, sizeof(message), "cannot use %s as pattern target", expression_name(bad));
+            p->pos = target; return syntax_at(p, bad, message);
+        }
         Node *n = pattern_node(p, PT_AS), *name = n ? identifier(p) : NULL;
         if (!name) return NULL;
-        if (!strcmp(name->text, "_")) return syntax(p, "cannot use '_' as a target");
+        if (!strcmp(name->text, "_")) { p->pos--; return syntax(p, "cannot use '_' as a target"); }
         n->a = first; n->b = name;
         first = n;
     }
@@ -3710,41 +3894,46 @@ static Node *pattern_reachable(Parser *p, Node *n, int allow) {
             if (!pattern_reachable(p, entry->b, 1)) return NULL;
     return n;
 }
+/* A case clause's patterns and guard, after the 'case' keyword. */
+static Node *case_header(Parser *p) {
+    Node *item = node(p, N_EXCEPT);
+    if (!item) return NULL;
+    Node *first = star_or_pattern(p);
+    if (!first) return NULL;
+    if (at(p, ',')) {
+        Node *sequence = pattern_node(p, PT_SEQUENCE);
+        if (!sequence) return NULL;
+        sequence->args = first;
+        Node **items = &first->next;
+        while (take(p, ',') && !at(p, ':') && !keyword(p, "if")) {
+            Node *element = star_or_pattern(p);
+            if (!element) return NULL;
+            *items = element; items = &element->next;
+        }
+        if (check_sequence_stars(p, sequence->args)) return NULL;
+        first = sequence;
+    } else if (first->op == PT_STAR) return syntax(p, "cannot use starred expression here");
+    item->a = first;
+    if (take_word(p, "if") && !(item->b = expression(p, 0))) return NULL;
+    return item;
+}
 static Node *match_statement(Parser *p) {
     Node *n = node(p, N_MATCH);
     if (!n) return NULL;
     p->pos++;
     size_t line = keyword_line(p);
     if (!(n->a = expression_list(p, 0))) return NULL;
-    if (!expect(p, ':', "expected ':'") || !expect(p, T_NL, "expected newline")) return NULL;
+    if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
     if (!take(p, T_INDENT)) return missing_block(p, "'match' statement", line);
     Node **tail = &n->args;
     while (!at(p, T_DEDENT) && !at(p, T_END)) {
         if (take(p, T_NL)) continue;
-        if (!keyword(p, "case") || !line_ends_block(p)) return syntax(p, "expected 'case' block");
+        if (!keyword(p, "case")) return syntax(p, "invalid syntax");
         p->pos++;
         size_t case_line = keyword_line(p);
-        Node *item = node(p, N_EXCEPT);
-        if (!item) return NULL;
-        Node *first = star_or_pattern(p);
-        if (!first) return NULL;
-        if (at(p, ',')) {
-            Node *sequence = pattern_node(p, PT_SEQUENCE);
-            if (!sequence) return NULL;
-            sequence->args = first;
-            Node **items = &first->next;
-            while (take(p, ',') && !at(p, ':') && !keyword(p, "if")) {
-                Node *element = star_or_pattern(p);
-                if (!element) return NULL;
-                *items = element; items = &element->next;
-            }
-            if (check_sequence_stars(p, sequence->args)) return NULL;
-            first = sequence;
-        } else if (first->op == PT_STAR) return syntax(p, "cannot use starred expression here");
-        item->a = first;
-        if (take_word(p, "if") && !(item->b = expression(p, 0))) return NULL;
-        if (!(item->c = suite_after(p, "'case' statement", case_line))) return NULL;
+        Node *item = case_header(p);
+        if (!item || !(item->c = suite_after(p, "'case' statement", case_line))) return NULL;
         *tail = item; tail = &item->next;
     }
     if (!n->args) return syntax(p, "expected 'case' block");
@@ -3760,7 +3949,7 @@ static Node *match_statement(Parser *p) {
         if (status == -1) snprintf(message, sizeof(message), "too many names in pattern");
         if (status < 0) return syntax(p, message);
     }
-    return expect(p, T_DEDENT, "expected end of block") ? n : NULL;
+    return expect(p, T_DEDENT, "invalid syntax") ? n : NULL;
 }
 
 /* A lazily evaluated type-parameter bound, constraint tuple, default, or
@@ -3794,7 +3983,21 @@ static Node *type_params(Parser *p) {
         param->kind = N_TYPEPARAM; param->op = kind;
         if (take(p, ':')) {
             if (kind) return syntax(p, kind == 1 ? "cannot use bound with TypeVarTuple" : "cannot use bound with ParamSpec");
-            p->annotation_scope = "a TypeVar bound";
+            /* A parenthesized tuple is a constraint list. */
+            int constraints = 0;
+            if (at(p, '(')) {
+                size_t depth = 0;
+                for (size_t i = p->pos; i < p->len; i++) {
+                    int k = p->tokens[i].kind;
+                    if (k == '(' || k == '[' || k == '{') depth++;
+                    else if ((k == ')' || k == ']' || k == '}') && !--depth) {
+                        k = i + 1 < p->len ? p->tokens[i + 1].kind : T_END;
+                        if (k != ',' && k != ']' && k != '=') constraints = 0;
+                        break;
+                    } else if (k == ',' && depth == 1) constraints = 1;
+                }
+            }
+            p->annotation_scope = constraints ? "a TypeVar constraint" : "a TypeVar bound";
             Node *bound = expression(p, 0);
             p->annotation_scope = NULL;
             if (!bound) return NULL;
@@ -3843,7 +4046,43 @@ static Node *type_alias(Parser *p) {
     if (!value || !(n->b = lazy_function(p, source_name(n->a), value))) return NULL;
     return n;
 }
+static Node *statement_body(Parser *);
+/* invalid_match_stmt: a soft-keyword line that failed to parse as anything
+ * else may still be a misplaced match header or case clause. */
+static void soft_keyword_error(Parser *p, size_t start) {
+    SPYContext *c = p->ctx;
+    char message[sizeof(c->error_message)];
+    size_t line = c->line, pos = p->pos;
+    const char *error_start = p->error_start, *error_end = p->error_end;
+    memcpy(message, c->error_message, sizeof(message));
+    spy_clear_error(c);
+    p->pos = start + 1;
+    if (p->tokens[start].len == 5) {
+        if (expression_list(p, 0) && at(p, T_NL)) { syntax(p, "expected ':'"); return; }
+    } else if (case_header(p) && at(p, ':')) {
+        Token *colon = peek(p);
+        if (suite_after(p, "'case' statement", p->tokens[start].line)) {
+            p->pos = start; syntax(p, "case statement must be inside match statement");
+            p->error_end = colon->start + 1;
+            return;
+        }
+        /* A diagnostic raised inside the block stands, as in CPython. */
+        if (error_is(c, "SyntaxError") && strncmp(c->error_message, "invalid syntax", 14)) return;
+    }
+    spy_clear_error(c);
+    spy_error(c, "SyntaxError", message);
+    c->line = line; p->pos = pos; p->error_start = error_start; p->error_end = error_end;
+}
 static Node *statement(Parser *p) {
+    Token *first = peek(p);
+    Node *n = statement_body(p);
+    if (n && (n->kind == N_IF || n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_DEF || n->kind == N_CLASS ||
+              n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH) && first->line >= p->last_stmt_line) {
+        p->last_stmt_line = first->line; p->last_stmt = first->start;
+    }
+    return n;
+}
+static Node *statement_body(Parser *p) {
     if (at(p, '@')) {
         Node *decorators = NULL, **tail = &decorators;
         while (take(p, '@')) {
@@ -3851,7 +4090,7 @@ static Node *statement(Parser *p) {
             if (!expr || !expect(p, T_NL, "expected newline after decorator")) return NULL;
             *tail = expr; tail = &expr->next;
         }
-        if (!keyword(p, "def") && !keyword(p, "class") && !keyword(p, "async")) return syntax(p, "expected function or class after decorator");
+        if (!keyword(p, "def") && !keyword(p, "class") && !keyword(p, "async")) return syntax(p, "invalid syntax");
         Node *definition = statement(p);
         if (definition) definition->decorators = decorators;
         return definition;
@@ -3859,7 +4098,7 @@ static Node *statement(Parser *p) {
     Node *n;
     int asynchronous = take_word(p, "async");
     if (asynchronous && !keyword(p, "def") && !keyword(p, "for") && !keyword(p, "with"))
-        return syntax(p, "expected 'def', 'for', or 'with' after 'async'");
+        return syntax(p, "invalid syntax");
     if (asynchronous && !keyword(p, "def") && !p->async_function) {
         p->pos--; defer(p, keyword(p, "for") || (p->pos + 1 < p->len && p->tokens[p->pos + 1].len == 3 && !memcmp(p->tokens[p->pos + 1].start, "for", 3)) ?
                         "'async for' outside async function" : "'async with' outside async function");
@@ -3878,7 +4117,7 @@ static Node *statement(Parser *p) {
             for (size_t i = p->pos; i < p->len; i++) {
                 if (p->tokens[i].kind == '(') depth++;
                 if (p->tokens[i].kind == ')' && !--depth) {
-                    grouped = i + 1 < p->len && p->tokens[i + 1].kind == ':';
+                    grouped = i + 1 < p->len && (p->tokens[i + 1].kind == ':' || p->tokens[i + 1].kind == T_NL);
                     break;
                 }
             }
@@ -3894,8 +4133,9 @@ static Node *statement(Parser *p) {
             }
             *tail = item; tail = &item->next;
             if (!take(p, ',')) break;
+            if (!grouped && at(p, ':')) { p->pos--; return syntax(p, "the last 'with' item has a trailing comma"); }
         } while (!grouped || !at(p, ')'));
-        if (grouped && !expect(p, ')', "expected ')' after context managers")) return NULL;
+        if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
         n->b = suite_after(p, "'with' statement", n->line);
         return n->b ? n : NULL;
     }
@@ -3923,7 +4163,10 @@ static Node *statement(Parser *p) {
         if (!n || !(n->a = identifier(p))) return NULL;
         if (take(p, '[') && !(n->params = type_params(p))) return NULL;
         if (take(p, '(')) {
-            if (call_arguments(p, n)) return NULL;
+            if (n->params) p->annotation_scope = "the definition of a generic";
+            int failed = call_arguments(p, n);
+            p->annotation_scope = NULL;
+            if (failed) return NULL;
         }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
         const char *private_name = p->private_name;
@@ -3938,9 +4181,13 @@ static Node *statement(Parser *p) {
     if (take_word(p, "raise")) {
         n = node(p, N_RAISE);
         if (!n) return NULL;
+        if (keyword(p, "from")) { p->pos--; return syntax(p, "did you forget an expression between 'raise' and 'from'?"); }
         if (!at(p, T_NL) && !at(p, ';')) {
             if (!(n->a = expression(p, 0))) return NULL;
-            if (take_word(p, "from") && !(n->b = expression(p, 0))) return NULL;
+            if (take_word(p, "from") && !(n->b = expression(p, 0))) {
+                p->pos--; spy_clear_error(p->ctx);
+                return syntax(p, "did you forget an expression after 'from'?");
+            }
         }
         return n;
     }
@@ -3958,7 +4205,8 @@ static Node *statement(Parser *p) {
             star = is_star;
             Node *handler = node(p, N_EXCEPT);
             if (!handler) return NULL;
-            if (is_star && at(p, ':')) return syntax(p, "expected one or more exception types");
+            if (is_star && (at(p, ':') || at(p, T_NL))) return syntax(p, "expected one or more exception types");
+            if (at(p, T_NL)) return syntax(p, "expected ':'");
             if (!at(p, ':')) {
                 if (!(handler->a = expression(p, 0))) return NULL;
                 if (at(p, ',')) {
@@ -3973,7 +4221,20 @@ static Node *statement(Parser *p) {
                     handler->a = types;
                     if (keyword(p, "as")) return syntax(p, "multiple exception types must be parenthesized when using 'as'");
                 }
-                if (take_word(p, "as") && !(handler->c = identifier(p))) return NULL;
+                if (take_word(p, "as")) {
+                    /* invalid_except_stmt: 'as' followed by a non-name target. */
+                    size_t name = p->pos;
+                    if (!at(p, T_NAME) || reserved(peek(p)) || p->tokens[name + 1].kind != ':') {
+                        Node *bad = keyword(p, "lambda") || keyword(p, "yield") ? NULL : expression(p, 0);
+                        if (bad && at(p, ':')) {
+                            char message[96];
+                            snprintf(message, sizeof(message), "cannot use except%s statement with %s", is_star ? "*" : "", expression_name(bad));
+                            p->pos = name; return syntax_at(p, bad, message);
+                        }
+                        spy_clear_error(p->ctx); p->pos = name;
+                    }
+                    if (!(handler->c = identifier(p))) return NULL;
+                }
             } else bare = 1;
             int saved = p->star;
             if (is_star) p->star = p->loops + 1;
@@ -3984,11 +4245,11 @@ static Node *statement(Parser *p) {
         }
         if (star == 1) n->flags |= F_STAR;
         if (take_word(p, "else")) {
-            if (!n->args) return syntax(p, "expected except before else");
+            if (!n->args) { p->pos--; return syntax(p, "expected 'except' or 'finally' block"); }
             if (!(n->b = suite_after(p, "'else' statement", keyword_line(p)))) return NULL;
         }
         if (take_word(p, "finally") && !(n->c = suite_after(p, "'finally' statement", keyword_line(p)))) return NULL;
-        return n->args || n->c ? n : syntax(p, "expected except or finally");
+        return n->args || n->c ? n : syntax(p, "expected 'except' or 'finally' block");
     }
     if (take_word(p, "if")) return if_statement(p);
     if (keyword(p, "while") || keyword(p, "for")) {
@@ -4001,7 +4262,7 @@ static Node *statement(Parser *p) {
         if (is_for) {
             n->args = expression_list(p, 4);
             if (n->args && !target(p, n->args)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
-            if (!n->args || !take_word(p, "in")) return syntax(p, "expected 'in'");
+            if (!n->args || !take_word(p, "in")) return syntax(p, "invalid syntax");
         }
         size_t condition = p->pos;
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
@@ -4066,26 +4327,47 @@ static Node *statement(Parser *p) {
         return n;
     }
     if (keyword(p, "import") || keyword(p, "from")) {
-        int from = take_word(p, "from");
+        size_t start = p->pos;
+        int from = take_word(p, "from"), renamed = 0;
         if (!from) p->pos++;
         n = node(p, from ? N_FROM : N_IMPORT);
         if (!n) return NULL;
         if (from) {
             while (at(p, '.') || at(p, T_ELLIPSIS)) n->op += take(p, '.') ? 1 : (p->pos++, 3);
             if (at(p, T_NAME) && !keyword(p, "import")) n->a = import_name(p);
-            if ((!n->a && !n->op) || !take_word(p, "import")) return syntax(p, "expected import");
+            if ((!n->a && !n->op) || !take_word(p, "import")) return syntax(p, "invalid syntax");
             if (take(p, '*')) { n->args = node(p, N_STAR); return n; }
         }
+        if (at(p, T_NL)) return syntax(p, "Expected one or more names after 'import'");
         int grouped = from && take(p, '(');
         Node **tail = &n->args;
         do {
             Node *item = node(p, N_ASSIGN);
             if (!item || !(item->a = from ? identifier(p) : import_name(p))) return NULL;
-            if (take_word(p, "as") && !(item->b = identifier(p))) return NULL;
+            if (take_word(p, "as")) {
+                /* invalid_dotted_as_name and invalid_import_from_as_name */
+                size_t name = p->pos;
+                int next = p->tokens[name + 1].kind;
+                renamed = 1;
+                if (!at(p, T_NAME) || reserved(peek(p)) || (next != ',' && next != ')' && next != ';' && next != T_NL)) {
+                    Node *bad = keyword(p, "lambda") || keyword(p, "yield") ? NULL : expression(p, 0);
+                    if (bad) {
+                        char message[96];
+                        snprintf(message, sizeof(message), "cannot use %s as import target", expression_name(bad));
+                        p->pos = name; return syntax_at(p, bad, message);
+                    }
+                    spy_clear_error(p->ctx); p->pos = name;
+                }
+                if (!(item->b = identifier(p))) return NULL;
+            }
             *tail = item; tail = &item->next;
             if (!take(p, ',')) break;
+            if (from && !grouped && at(p, T_NL)) return syntax(p, "trailing comma not allowed without surrounding parentheses");
         } while (!grouped || !at(p, ')'));
-        if (grouped && !expect(p, ')', "expected ')' after import names")) return NULL;
+        if (grouped && !expect(p, ')', "invalid syntax")) return NULL;
+        if (!from && !renamed && keyword(p, "from") && p->tokens[p->pos + 1].kind == T_NAME && !reserved(&p->tokens[p->pos + 1])) {
+            p->pos = start; return syntax(p, "Did you mean to use 'from ... import ...' instead?");
+        }
         return n;
     }
     n = node(p, N_EXPR);
@@ -4139,15 +4421,26 @@ static Node *statement(Parser *p) {
 }
 static Node *line_statements(Parser *p) {
     Node *head = NULL, **tail = &head;
+    size_t start;
     do {
+        start = p->pos;
         Node *n = statement(p);
-        if (!n) return NULL;
+        if (!n) goto failed;
         *tail = n; tail = &n->next;
         if (n->kind == N_IF || n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_DEF ||
             n->kind == N_CLASS || n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH) return head;
         if (!take(p, ';')) break;
     } while (!at(p, T_NL));
-    return expect(p, T_NL, "expected end of statement") ? head : NULL;
+    if (expect(p, T_NL, "invalid syntax")) return head;
+failed:
+    if (error_is(p->ctx, "SyntaxError") && start + 1 < p->len && p->tokens[start + 1].kind != T_NL) {
+        size_t pos = p->pos;
+        p->pos = start;
+        int soft = keyword(p, "match") || keyword(p, "case");
+        p->pos = pos;
+        if (soft) soft_keyword_error(p, start);
+    }
+    return NULL;
 }
 /* CPython's invalid_*_stmt rules name the statement whose block is missing. */
 static Node *missing_block(Parser *p, const char *what, size_t line) {
@@ -4159,15 +4452,23 @@ static Node *missing_block(Parser *p, const char *what, size_t line) {
     spy_error(p->ctx, "IndentationError", message);
     return NULL;
 }
+/* CPython forces ':' after 'else', 'try', 'finally' and a function header;
+ * other headers report it only when the line ends (invalid_*_stmt). */
 static Node *suite_after(Parser *p, const char *what, size_t line) {
-    if (!expect(p, ':', "expected ':'")) return NULL;
-    if (!take(p, T_NL)) return line_statements(p);
-    while (take(p, T_NL)) {}
-    if (!take(p, T_INDENT)) return missing_block(p, what, line);
-    if (++p->depth > 128) { p->depth--; return syntax(p, "too many nested blocks"); }
-    Node *body = statements(p);
-    p->depth--;
-    if (!body || !expect(p, T_DEDENT, "expected end of block")) return NULL;
+    int forced = !strcmp(what, "'else' statement") || !strcmp(what, "'try' statement") ||
+                 !strcmp(what, "'finally' statement") || !strcmp(what, "function definition");
+    if (!expect(p, ':', forced || at(p, T_NL) ? "expected ':'" : "invalid syntax")) return NULL;
+    Node *body;
+    if (!take(p, T_NL)) body = line_statements(p);
+    else {
+        while (take(p, T_NL)) {}
+        if (!take(p, T_INDENT)) return missing_block(p, what, line);
+        if (++p->depth > 128) { p->depth--; return syntax(p, "too many nested blocks"); }
+        body = statements(p);
+        p->depth--;
+        if (!body || !expect(p, T_DEDENT, "invalid syntax")) return NULL;
+    }
+    if (body && !strcmp(what, "'else' statement") && keyword(p, "elif")) return syntax(p, "'elif' block follows an 'else' block");
     return body;
 }
 static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
@@ -4558,14 +4859,128 @@ found:;
     }
     return 0;
 }
-static SPYValue *parse(SPYContext *c, const char *source, const char *filename) {
+/* Parse and check source as compile() does. A parser or lexer SyntaxError
+ * carries CPython's _metadata (last statement line and column, source);
+ * *incomplete reports whether it happened at the end of the input, as
+ * PyCF_ALLOW_INCOMPLETE_INPUT would (without implied dedents). */
+/* Probe an expression at token 'at' without leaving an error; returns the
+ * token after it, or 0 when none parses. */
+static size_t probe_expression(Parser *p, size_t at, int min) {
+    size_t saved = p->pos, end = 0;
+    p->pos = at;
+    if (!keyword(p, "yield") && expression(p, min)) end = p->pos;
+    spy_clear_error(p->ctx);
+    p->pos = saved;
+    return end;
+}
+/* CPython's invalid_expression alternatives that replace a plain "invalid
+ * syntax": expressions between two strings, two adjacent expressions inside
+ * brackets, and a statement used as a conditional expression's body. */
+static void invalid_expression_error(Parser *p) {
+    SPYContext *c = p->ctx;
+    if (!error_is(c, "SyntaxError") || strcmp(c->error_message, "invalid syntax")) return;
+    size_t f = p->error_pos;
+    if (f >= p->len || p->tokens[f].start != p->error_start || p->tokens[f].kind == T_END) return;
+    /* _Pypegen_set_syntax_error: a generic failure on an indentation token. */
+    if (p->tokens[f].kind == T_INDENT || p->tokens[f].kind == T_DEDENT) {
+        size_t line = c->line;
+        spy_clear_error(c);
+        spy_error(c, "IndentationError", p->tokens[f].kind == T_INDENT ? "unexpected indent" : "unexpected unindent");
+        c->line = line;
+        return;
+    }
+    size_t line = c->line;
+    const char *error_start = p->error_start, *error_end = p->error_end;
+    const char *message = NULL;
+    char legacy[96];
+    size_t a = p->expr_start, end = 0;
+    spy_clear_error(c);
+    if (p->expr_end == f && p->expr_end > a) {
+        Token *first = &p->tokens[a];
+        if (first->kind == T_STRING && f == a + 1) {
+            /* STRING (!STRING expression)+ STRING */
+            size_t next = f;
+            while (p->tokens[next].kind != T_STRING && (end = probe_expression(p, next, 0))) next = end;
+            if (next > f && p->tokens[next].kind == T_STRING) { a = f; message = "invalid syntax. Is this intended to be part of the string?"; }
+        }
+        /* _PyPegen_check_legacy_stmt: "print x" and "exec x" */
+        int legacy_name = first->kind == T_NAME && ((first->len == 5 && !memcmp(first->start, "print", 5)) ||
+                                                    (first->len == 4 && !memcmp(first->start, "exec", 4)));
+        if (!message && !(legacy_name && f == a + 1) && !(first->kind == T_NAME && p->tokens[a + 1].kind == T_STRING)) {
+            static const char *soft[] = {"_", "case", "match", "type", "lazy"};
+            int skip = 0;
+            if (first->kind == T_NAME)
+                for (size_t i = 0; i < sizeof(soft) / sizeof(*soft); i++)
+                    if (strlen(soft[i]) == first->len && !memcmp(soft[i], first->start, first->len)) skip = 1;
+            if (!skip && (end = probe_expression(p, f, 0)) && p->tokens[end - 1].level)
+                message = "invalid syntax. Perhaps you forgot a comma?";
+        }
+        /* invalid_legacy_expression */
+        if (!message && legacy_name && p->tokens[a + 1].kind != '(') {
+            size_t saved = p->pos;
+            p->pos = a + 1;
+            if (expression_list(p, 0)) {
+                end = p->pos;
+                snprintf(legacy, sizeof(legacy), "Missing parentheses in call to '%.*s'. Did you mean %.*s(...)?",
+                         (int)first->len, first->start, (int)first->len, first->start);
+                message = legacy;
+            }
+            spy_clear_error(c);
+            p->pos = saved;
+        }
+    }
+    if (!message && p->tokens[f].kind == T_NAME && p->tokens[f + 1].kind == T_NAME &&
+        p->tokens[f + 1].len == 2 && !memcmp(p->tokens[f + 1].start, "if", 2)) {
+        Token *t = &p->tokens[f];
+        size_t condition;
+        if (((t->len == 4 && !memcmp(t->start, "pass", 4)) || (t->len == 5 && !memcmp(t->start, "break", 5)) ||
+             (t->len == 8 && !memcmp(t->start, "continue", 8))) && (condition = probe_expression(p, f + 2, 1)) &&
+            p->tokens[condition].kind == T_NAME && p->tokens[condition].len == 4 && !memcmp(p->tokens[condition].start, "else", 4)) {
+            size_t saved = p->pos;
+            p->pos = condition + 1;
+            if (statement(p)) {
+                p->pos = f;
+                syntax(p, "expected expression before 'if', but statement is given");
+                p->pos = saved;
+                return;
+            }
+            spy_clear_error(c);
+            p->pos = saved;
+        }
+    }
+    if (!message) {
+        spy_error(c, "SyntaxError", "invalid syntax");
+        c->line = line; p->error_start = error_start; p->error_end = error_end;
+        return;
+    }
+    Token *last = &p->tokens[end - 1], *head = &p->tokens[a];
+    spy_error(c, "SyntaxError", message);
+    c->line = head->line; p->error_start = head->start; p->error_end = last->start + last->len;
+}
+static SPYValue *parse_source(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
     unit->as.unit.filename = copy_text(c, filename, strlen(filename));
     Parser p = { .ctx = c, .unit = unit };
+    int parsing = 1, at_end = 0;
     if (unit->as.unit.filename && !lex(&p, source)) {
         unit->as.unit.body = statements(&p);
         if (!c->error_type[0] && !at(&p, T_END)) syntax(&p, "unexpected indentation");
+        if (c->error_type[0] && p.pos < p.len && (at(&p, T_END) || at(&p, T_DEDENT)) &&
+            (!p.error_start || p.error_start == peek(&p)->start)) {
+            at_end = 1;
+            for (size_t i = p.pos; i < p.len; i++) if (p.tokens[i].kind != T_DEDENT && p.tokens[i].kind != T_END) at_end = 0;
+        }
+        if (c->error_type[0]) invalid_expression_error(&p);
+        /* _PyPegen_tokenize_full_source_to_check_for_errors: the unclosed
+         * bracket wins once the parser read to the end or past its line. */
+        if (p.unclosed && (!c->error_type[0] || ((!strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError")) &&
+                                                 (p.tokens[p.far].kind == T_END || p.tokens[p.far].line > p.unclosed_line)))) {
+            spy_clear_error(c);
+            c->line = p.unclosed_line; p.error_start = p.unclosed; p.error_end = p.unclosed + 1;
+            errorf(c, "SyntaxError", "'%c' was never closed", *p.unclosed);
+        }
+        parsing = c->error_type[0] != 0;
         if (!c->error_type[0]) body_annotations(&p, NULL, unit->as.unit.body, &unit->as.unit.annotate);
         NamedScope comps[128];
         if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0, 0);
@@ -4593,11 +5008,41 @@ static SPYValue *parse(SPYContext *c, const char *source, const char *filename) 
     free(p.tokens);
     if (c->error_type[0]) {
         snprintf(c->filename, sizeof(c->filename), "%s", filename);
-        if (!strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") || !strcmp(c->error_type, "TabError"))
-            attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line);
+        int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
+            !strcmp(c->error_type, "TabError");
+        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line);
+        if (incomplete) *incomplete = syntax_error && parsing && (p.incomplete || at_end);
+        if (syntax_error && parsing && c->exception) {
+            size_t column = 0;
+            for (const char *ch = p.last_stmt; ch && ch > source && ch[-1] != '\n'; ch--) column++;
+            SPYValue *items[] = {spy_int(c, (int64_t)p.last_stmt_line), spy_int(c, (int64_t)column), spy_string(c, source, strlen(source))};
+            SPYValue *metadata = value_new(c, SPY_TUPLE);
+            for (size_t i = 0; i < 3; i++) {
+                if (metadata && items[i] && sequence_append(c, metadata, items[i])) { spy_release(metadata); metadata = NULL; }
+                spy_release(items[i]);
+            }
+            SPYValue *exception = c->exception;
+            /* A failure here loses only the suggestion metadata. */
+            if (metadata) {
+                c->exception = NULL;
+                char type[sizeof(c->error_type)], message[sizeof(c->error_message)], file[sizeof(c->filename)];
+                size_t line = c->line;
+                memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
+                memcpy(file, c->filename, sizeof(file));
+                spy_clear_error(c);
+                name_set(c, exception, "_metadata", metadata);
+                spy_clear_error(c);
+                memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
+                memcpy(c->filename, file, sizeof(file)); c->line = line; c->exception = exception;
+            }
+            spy_release(metadata);
+        }
         spy_release(unit); return NULL;
     }
     return unit;
+}
+static SPYValue *parse(SPYContext *c, const char *source, const char *filename) {
+    return parse_source(c, source, filename, NULL);
 }
 
 static size_t string_length(SPYValue *v) {
@@ -10140,6 +10585,341 @@ static void restore_error(SPYContext *c, ErrorState *state) {
     memcpy(c->error_message, state->message, sizeof(c->error_message));
     memcpy(c->filename, state->filename, sizeof(c->filename));
     c->line = state->line; c->exception = state->value; state->value = NULL;
+}
+/* Exception display, as traceback.TracebackException formats the last line:
+ * a SyntaxError with the generic message gets a keyword-typo suggestion. */
+static const char *const python_keywords[] = {
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+    "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
+    "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"};
+enum { SUGGEST_MOVE = 2, SUGGEST_CASE = 1, SUGGEST_MAX_STRING = 40 };
+/* Python/suggestions.c: Levenshtein distance over UTF-8 bytes. */
+static int suggestion_cost(char a, char b) {
+    if ((a & 31) != (b & 31)) return SUGGEST_MOVE;
+    if (a == b) return 0;
+    if ('A' <= a && a <= 'Z') a += 'a' - 'A';
+    if ('A' <= b && b <= 'Z') b += 'a' - 'A';
+    return a == b ? SUGGEST_CASE : SUGGEST_MOVE;
+}
+static size_t levenshtein(const char *a, size_t a_size, const char *b, size_t b_size, size_t max_cost) {
+    size_t buffer[SUGGEST_MAX_STRING];
+    if (a == b) return 0;
+    while (a_size && b_size && a[0] == b[0]) { a++; a_size--; b++; b_size--; }
+    while (a_size && b_size && a[a_size - 1] == b[b_size - 1]) { a_size--; b_size--; }
+    if (!a_size || !b_size) return (a_size + b_size) * SUGGEST_MOVE;
+    if (a_size > SUGGEST_MAX_STRING || b_size > SUGGEST_MAX_STRING) return max_cost + 1;
+    if (b_size < a_size) {
+        const char *t = a; a = b; b = t;
+        size_t t_size = a_size; a_size = b_size; b_size = t_size;
+    }
+    if ((b_size - a_size) * SUGGEST_MOVE > max_cost) return max_cost + 1;
+    size_t tmp = SUGGEST_MOVE;
+    for (size_t i = 0; i < a_size; i++) { buffer[i] = tmp; tmp += SUGGEST_MOVE; }
+    size_t result = 0;
+    for (size_t b_index = 0; b_index < b_size; b_index++) {
+        char code = b[b_index];
+        size_t distance = result = b_index * SUGGEST_MOVE, minimum = SIZE_MAX;
+        for (size_t index = 0; index < a_size; index++) {
+            size_t substitute = distance + suggestion_cost(code, a[index]);
+            distance = buffer[index];
+            size_t insert_delete = (result < distance ? result : distance) + SUGGEST_MOVE;
+            result = insert_delete < substitute ? insert_delete : substitute;
+            buffer[index] = result;
+            if (result < minimum) minimum = result;
+        }
+        if (minimum > max_cost) return max_cost + 1;
+    }
+    return result;
+}
+/* _Py_CalculateSuggestions over the keyword list. */
+static const char *keyword_suggestion(const char *name) {
+    size_t name_size = strlen(name), best_distance = SIZE_MAX;
+    const char *best = NULL;
+    for (size_t i = 0; i < sizeof(python_keywords) / sizeof(*python_keywords); i++) {
+        const char *item = python_keywords[i];
+        if (!strcmp(item, name)) continue;
+        size_t item_size = strlen(item), max_distance = (name_size + item_size + 3) * SUGGEST_MOVE / 6;
+        if (best_distance - 1 < max_distance) max_distance = best_distance - 1;
+        size_t distance = levenshtein(name, name_size, item, item_size, max_distance);
+        if (distance > max_distance) continue;
+        if (!best || distance < best_distance) { best = item; best_distance = distance; }
+    }
+    return best;
+}
+/* difflib.SequenceMatcher(None, a, b) over code points, without junk: the
+ * total size of get_matching_blocks(). */
+static size_t matching_size(const uint32_t *a, size_t alo, size_t ahi, const uint32_t *b, size_t blo, size_t bhi) {
+    if (alo >= ahi || blo >= bhi) return 0;
+    size_t besti = alo, bestj = blo, bestsize = 0, lengths[2][SUGGEST_MAX_STRING * 4 + 1] = {{0}};
+    if (bhi > SUGGEST_MAX_STRING * 4) return 0;
+    for (size_t i = alo; i < ahi; i++) {
+        size_t *previous = lengths[(i - alo) % 2], *current = lengths[(i - alo + 1) % 2];
+        for (size_t j = blo; j < bhi; j++) {
+            size_t k = a[i] == b[j] ? (j > blo ? previous[j - 1] : 0) + 1 : 0;
+            current[j] = k;
+            if (k > bestsize) { besti = i + 1 - k; bestj = j + 1 - k; bestsize = k; }
+        }
+    }
+    if (!bestsize) return 0;
+    return bestsize + matching_size(a, alo, besti, b, blo, bestj) +
+        matching_size(a, besti + bestsize, ahi, b, bestj + bestsize, bhi);
+}
+static size_t code_points(const char *s, uint32_t *out, size_t cap) {
+    size_t n = 0, len = strlen(s);
+    for (size_t i = 0; i < len && n < cap;) {
+        size_t width;
+        out[n++] = utf8_decode(s + i, len - i, &width);
+        i += width ? width : 1;
+    }
+    return n;
+}
+/* difflib.get_close_matches(word, keywords, n=3, cutoff=0.5). */
+static size_t close_keywords(const char *word, const char **matches) {
+    uint32_t b[SUGGEST_MAX_STRING * 4], a[16];
+    size_t lb = code_points(word, b, sizeof(b) / sizeof(*b)), count = 0;
+    if (strlen(word) > sizeof(b) / sizeof(*b)) return 0;
+    double scores[sizeof(python_keywords) / sizeof(*python_keywords)];
+    const char *found[sizeof(python_keywords) / sizeof(*python_keywords)];
+    for (size_t k = 0; k < sizeof(python_keywords) / sizeof(*python_keywords); k++) {
+        size_t la = code_points(python_keywords[k], a, sizeof(a) / sizeof(*a));
+        double total = (double)(la + lb);
+        size_t shorter = la < lb ? la : lb;
+        if ((total ? 2.0 * shorter / total : 1.0) < 0.5) continue;
+        /* quick_ratio: the multiset intersection. */
+        size_t common = 0;
+        int used[SUGGEST_MAX_STRING * 4] = {0};
+        for (size_t i = 0; i < la; i++)
+            for (size_t j = 0; j < lb; j++) if (!used[j] && b[j] == a[i]) { used[j] = 1; common++; break; }
+        if ((total ? 2.0 * common / total : 1.0) < 0.5) continue;
+        double ratio = total ? 2.0 * matching_size(a, 0, la, b, 0, lb) / total : 1.0;
+        if (ratio < 0.5) continue;
+        scores[count] = ratio; found[count++] = python_keywords[k];
+    }
+    /* heapq.nlargest(3, [(score, x)]): highest score, then the larger string. */
+    size_t n = 0;
+    for (; n < 3 && n < count; n++) {
+        size_t best = n;
+        for (size_t i = n + 1; i < count; i++)
+            if (scores[i] > scores[best] || (scores[i] == scores[best] && strcmp(found[i], found[best]) > 0)) best = i;
+        double score = scores[n]; scores[n] = scores[best]; scores[best] = score;
+        const char *keyword = found[n]; found[n] = found[best]; found[best] = keyword;
+        matches[n] = found[n];
+    }
+    return n;
+}
+/* codeop.compile_command(source, symbol="exec", flags=PyCF_ONLY_AST) raises
+ * SyntaxError: neither valid nor incomplete input. */
+static int compile_raises(SPYContext *c, const char *source) {
+    const char *text = source;
+    for (const char *line = source; *line;) {
+        const char *ch = line;
+        while (*ch == ' ' || *ch == '\t' || *ch == '\f' || *ch == '\r' || *ch == '\v') ch++;
+        if (*ch && *ch != '\n' && *ch != '#') { text = NULL; break; }
+        line = strchr(line, '\n');
+        if (!line) break;
+        line++;
+    }
+    int incomplete = 0;
+    SPYValue *unit = parse_source(c, text ? "pass" : source, "<input>", &incomplete);
+    int raises = !unit && !incomplete && (error_is(c, "SyntaxError") || error_is(c, "IndentationError") || error_is(c, "TabError"));
+    spy_release(unit); spy_clear_error(c);
+    return raises;
+}
+typedef struct { size_t line, start, end; char *name; } NameToken;
+/* The NAME tokens of tokenize.generate_tokens, with character columns, up to
+ * the first tokenizer error. f-string replacement fields are not entered. */
+static size_t name_tokens(const char *s, NameToken *out, size_t cap) {
+    size_t count = 0, line = 1, column = 0;
+    while (*s && count < cap) {
+        unsigned char ch = (unsigned char)*s;
+        if (ch == '\n') { s++; line++; column = 0; continue; }
+        if (ch == '#') { while (*s && *s != '\n') s++; continue; }
+        if (ch == '\\' && s[1] == '\n') { s += 2; line++; column = 0; continue; }
+        const char *start = s;
+        if (isalpha(ch) || ch == '_' || ch >= 0x80) {
+            size_t chars = 0;
+            while (isalnum((unsigned char)*s) || *s == '_' || (unsigned char)*s >= 0x80) {
+                if (((unsigned char)*s & 192) != 128) chars++;
+                s++;
+            }
+            int prefix = 1;
+            for (const char *p = start; p < s; p++) if (!strchr("rRbBuUfFtT", *p)) prefix = 0;
+            if (prefix && s - start <= 2 && (*s == '\'' || *s == '"')) { column += chars; goto string; }
+            out[count].line = line; out[count].start = column; out[count].end = column + chars;
+            out[count].name = malloc((size_t)(s - start) + 1);
+            if (!out[count].name) break;
+            memcpy(out[count].name, start, (size_t)(s - start)); out[count].name[s - start] = 0;
+            count++; column += chars;
+            continue;
+        }
+        if (isdigit(ch) || (ch == '.' && isdigit((unsigned char)s[1]))) {
+            if (ch == '0' && s[1] && strchr("xXoObB", s[1])) {
+                s += 2;
+                while (isxdigit((unsigned char)*s) || *s == '_') s++;
+            } else {
+                while (isdigit((unsigned char)*s) || *s == '_') s++;
+                if (*s == '.') { s++; while (isdigit((unsigned char)*s) || *s == '_') s++; }
+                if ((*s == 'e' || *s == 'E') && (isdigit((unsigned char)s[1]) ||
+                    ((s[1] == '+' || s[1] == '-') && isdigit((unsigned char)s[2])))) {
+                    s += 2; while (isdigit((unsigned char)*s) || *s == '_') s++;
+                }
+                if (*s == 'j' || *s == 'J') s++;
+            }
+            column += (size_t)(s - start);
+            continue;
+        }
+        if (ch == '\'' || ch == '"') {
+        string:;
+            char quote = *s;
+            int triple = s[1] == quote && s[2] == quote;
+            s += triple ? 3 : 1; column += triple ? 3 : 1;
+            for (;;) {
+                if (!*s || (!triple && *s == '\n')) return count;
+                if (*s == '\\' && s[1]) {
+                    if (s[1] == '\n') { line++; column = 0; } else column += 2;
+                    s += 2; continue;
+                }
+                if (*s == quote && (!triple || (s[1] == quote && s[2] == quote))) {
+                    s += triple ? 3 : 1; column += triple ? 3 : 1; break;
+                }
+                if (*s == '\n') { line++; column = 0; }
+                else if (((unsigned char)*s & 192) != 128) column++;
+                s++;
+            }
+            continue;
+        }
+        if ((ch & 192) != 128) column++;
+        s++;
+    }
+    return count;
+}
+/* traceback.TracebackException._find_keyword_typos. */
+static char *keyword_typo(SPYContext *c, SPYValue *exception) {
+    SPYValue *msg = name_local(exception, "msg"), *metadata = name_local(exception, "_metadata");
+    SPYValue *lineno = name_local(exception, "lineno");
+    if (!msg || msg->type != SPY_STRING || (strcmp(msg->as.string.data, "invalid syntax") &&
+        !strstr(msg->as.string.data, "Perhaps you forgot a comma"))) return NULL;
+    if (!metadata || metadata->type != SPY_TUPLE || metadata->as.seq.len != 3 ||
+        metadata->as.seq.items[0]->type != SPY_INT || metadata->as.seq.items[2]->type != SPY_STRING) return NULL;
+    int64_t first = metadata->as.seq.items[0]->as.integer_data.small;
+    int64_t last = lineno && lineno->type == SPY_INT ? lineno->as.integer_data.small : 0;
+    const char *source = metadata->as.seq.items[2]->as.string.data;
+    /* lines[first - 1 : last] of str.splitlines(), joined, then dedented. */
+    Buffer code = {.ctx = c};
+    int64_t number = 1, from = first > 0 ? first : 1;
+    for (const char *line = source; *line && number <= last; number++) {
+        const char *end = line + strcspn(line, "\r\n");
+        if (number >= from) {
+            if (number > from) puts_buffer(&code, "\n");
+            append(&code, line, (size_t)(end - line));
+        }
+        line = end + (*end == '\r' && end[1] == '\n' ? 2 : *end ? 1 : 0);
+    }
+    if (!code.data) return NULL;
+    /* textwrap.dedent: the common margin of the lexically first and last
+     * non-blank lines; blank lines become empty. */
+    const char *low = NULL, *high = NULL;
+    size_t low_len = 0, high_len = 0;
+    for (const char *line = code.data; line;) {
+        const char *end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line) : strlen(line), blank = len == 0;
+        if (!blank) { blank = 1; for (size_t i = 0; i < len; i++) if (!isspace((unsigned char)line[i])) blank = 0; }
+        if (!blank) {
+            size_t n = len < low_len ? len : low_len;
+            int order = low ? memcmp(line, low, n) : -1;
+            if (!low || order < 0 || (!order && len < low_len)) { low = line; low_len = len; }
+            n = len < high_len ? len : high_len;
+            order = high ? memcmp(line, high, n) : 1;
+            if (!high || order > 0 || (!order && len > high_len)) { high = line; high_len = len; }
+        }
+        line = end ? end + 1 : NULL;
+    }
+    size_t margin = 0;
+    for (size_t i = 0; low && i < low_len; i++) {
+        margin = i;
+        if (i >= high_len || low[i] != high[i] || (low[i] != ' ' && low[i] != '\t')) break;
+    }
+    Buffer text = {.ctx = c};
+    for (const char *line = code.data; line;) {
+        const char *end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line) : strlen(line), blank = 1;
+        for (size_t i = 0; i < len; i++) if (!isspace((unsigned char)line[i])) blank = 0;
+        if (line != code.data) puts_buffer(&text, "\n");
+        if (len && !blank) append(&text, line + margin, len - margin);
+        line = end ? end + 1 : NULL;
+    }
+    free(code.data);
+    if (!text.data) return NULL;
+    size_t chars = 0;
+    for (const char *ch = text.data; *ch; ch++) if (((unsigned char)*ch & 192) != 128) chars++;
+    char *result = NULL;
+    if (chars > 1024 || !compile_raises(c, text.data)) { free(text.data); return NULL; }
+    NameToken tokens[64];
+    size_t count = name_tokens(text.data, tokens, sizeof(tokens) / sizeof(*tokens));
+    int left = 10;
+    for (size_t t = 0; t < count && !result; t++) {
+        int reserved = 0;
+        for (size_t k = 0; k < sizeof(python_keywords) / sizeof(*python_keywords); k++)
+            if (!strcmp(tokens[t].name, python_keywords[k])) reserved = 1;
+        if (reserved) continue;
+        if (--left < 0) break;
+        const char *matches[4];
+        size_t n = 0;
+        const char *best = keyword_suggestion(tokens[t].name);
+        if (best) matches[n++] = best;
+        const char *close[3];
+        size_t found = close_keywords(tokens[t].name, close);
+        for (size_t i = 0; i < found && n < 3; i++) matches[n++] = close[i];
+        for (size_t m = 0; m < n && !result; m++) {
+            if (!strcmp(matches[m], tokens[t].name)) continue;
+            /* Replace the token's characters on its line, then recompile. */
+            Buffer candidate = {.ctx = c};
+            size_t line = 1, column = 0;
+            const char *ch = text.data;
+            while (*ch) {
+                if (line == tokens[t].line && column == tokens[t].start) {
+                    puts_buffer(&candidate, matches[m]);
+                    while (*ch && column < tokens[t].end) { ch++; while (((unsigned char)*ch & 192) == 128) ch++; column++; }
+                    continue;
+                }
+                size_t width = 1;
+                while (((unsigned char)ch[width] & 192) == 128) width++;
+                append(&candidate, ch, width);
+                if (*ch == '\n') { line++; column = 0; } else column++;
+                ch += width;
+            }
+            if (candidate.data && !compile_raises(c, candidate.data)) {
+                Buffer message = {.ctx = c};
+                puts_buffer(&message, "invalid syntax. Did you mean '");
+                puts_buffer(&message, matches[m]); puts_buffer(&message, "'?");
+                result = message.data;
+            }
+            free(candidate.data);
+        }
+    }
+    for (size_t t = 0; t < count; t++) free(tokens[t].name);
+    free(text.data);
+    return result;
+}
+const char *spy_error_display(SPYContext *c) {
+    snprintf(c->error_display, sizeof(c->error_display), "%s", c->error_message);
+    SPYValue *exception = c->exception;
+    if (!exception || exception->type != SPY_INSTANCE || !subclass(exception->as.map.parent, name_local(c->classes, "SyntaxError")))
+        return c->error_display;
+    char type[sizeof(c->error_type)], message[sizeof(c->error_message)], file[sizeof(c->filename)];
+    size_t line = c->line, steps = c->steps, limit = c->step_limit;
+    memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
+    memcpy(file, c->filename, sizeof(file));
+    c->exception = NULL;
+    spy_clear_error(c);
+    char *typo = keyword_typo(c, exception);
+    if (typo) snprintf(c->error_display, sizeof(c->error_display), "%s", typo);
+    free(typo);
+    spy_clear_error(c);
+    memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
+    memcpy(c->filename, file, sizeof(file));
+    c->line = line; c->exception = exception; c->steps = steps; c->step_limit = limit;
+    return c->error_display;
 }
 static int exception_add_note(SPYContext *c, SPYValue *exception, SPYValue *note) {
     if (note->type != SPY_STRING) { spy_error(c, "TypeError", "note must be a str"); return -1; }

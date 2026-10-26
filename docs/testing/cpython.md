@@ -74,7 +74,7 @@ The first language ports contain every doctest group found by CPython's
 - `Lib/test/test_extcall.py`
 - `Lib/test/test_metaclass.py`
 
-There are 1,435 examples. The latest local run passed 919 and failed 516, with
+There are 1,435 examples. The latest local run passed 1,345 and failed 90, with
 no skips or driver errors. All 1,435 passed on the pinned CPython oracle. These
 counts cover only the eight listed files' doctest examples. The denominator
 includes all 553 syntax examples and all 194 call examples, including diagnostics.

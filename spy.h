@@ -81,6 +81,9 @@ SPYValue *spy_repr(SPYContext *, SPYValue *);
 
 const char *spy_error_type(const SPYContext *);
 const char *spy_error_message(const SPYContext *);
+/* The error message as CPython's traceback module would display it, with its
+ * keyword-typo suggestion for a generic SyntaxError. Valid until the next call. */
+const char *spy_error_display(SPYContext *);
 const char *spy_error_filename(const SPYContext *);
 size_t spy_error_line(const SPYContext *);
 void spy_clear_error(SPYContext *);

@@ -83,7 +83,8 @@ int main(int argc, char **argv) {
         printf("{\"ok\":%s,\"output\":", ok ? "true" : "false");
         json_string(out.text, out.len);
         fputs(",\"type\":", stdout); json_string(spy_error_type(c), strlen(spy_error_type(c)));
-        fputs(",\"message\":", stdout); json_string(spy_error_message(c), strlen(spy_error_message(c)));
+        const char *display = spy_error_display(c);
+        fputs(",\"message\":", stdout); json_string(display, strlen(display));
         fputs(",\"filename\":", stdout); json_string(spy_error_filename(c), strlen(spy_error_filename(c)));
         printf(",\"line\":%zu}\n", spy_error_line(c)); fflush(stdout);
         spy_release(value); spy_collect(c);

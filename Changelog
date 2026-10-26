@@ -112,7 +112,7 @@
 - String-subclass keyword names retain their identities in **kwargs and use
   rich comparison when binding Python parameters. Call-unpacking diagnostics
   distinguish absent protocols from errors raised inside user methods.
-- Current CPython doctests: 919 passed, 516 failed out of 1,435. Cython static
+- Current CPython doctests: 1,345 passed, 90 failed out of 1,435. Cython static
   doctests: 343 passed, 11,107 failed; dynamic: 367 passed, 11,176 failed.
 - Bytearray mutation rechecks storage after index/value conversions; scalar
   and extended-slice deletion share assignment handling. Empty reverse slices
@@ -162,3 +162,8 @@
   callbacks run at the next statement boundary. Also module(name, doc) and
   method(function, instance) constructors, property() keyword arguments, and
   reversed() over __reversed__ and the sequence protocol.
+- Numeric tokenization, incomplete-input handling, parser error spans and
+  invalid-expression diagnostics follow the pinned Python 3.15 tests. Traceback
+  keyword suggestions use spy_error_display without changing the raw exception.
+  All 552 syntax doctests that do not require ast now pass; the remaining ast
+  example stays recorded as a failure.

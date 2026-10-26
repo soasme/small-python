@@ -486,6 +486,24 @@ int main(void) {
     assert(!strcmp(spy_error_type(c), "ModuleNotFoundError"));
     assert(calls == 4);
 
+    /* Traceback suggestions preserve the raw exception and never execute
+     * candidate source or invoke the module loader. Repeated formatting must
+     * release the temporary syntax trees and exceptions it creates. */
+    assert(spy_exec(c, "improt sample", "suggestion.py") == -1);
+    assert(!strcmp(spy_error_message(c), "invalid syntax"));
+    assert(!strcmp(spy_error_display(c), "invalid syntax. Did you mean 'import'?"));
+    spy_collect(c);
+    size_t display_baseline = spy_live_values(c);
+    for (int i = 0; i < 20; i++) {
+        assert(!strcmp(spy_error_display(c), "invalid syntax. Did you mean 'import'?"));
+        assert(!strcmp(spy_error_type(c), "SyntaxError"));
+        assert(!strcmp(spy_error_message(c), "invalid syntax"));
+        assert(!strcmp(spy_error_filename(c), "suggestion.py"));
+        assert(spy_error_line(c) == 1 && calls == 4);
+        spy_collect(c);
+        assert(spy_live_values(c) == display_baseline);
+    }
+
     spy_set_step_limit(c, 100);
     assert(spy_exec(c, "while True:\n    pass\n", "loop.py") == -1);
     assert(!strcmp(spy_error_type(c), "RuntimeError"));

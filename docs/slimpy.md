@@ -175,7 +175,7 @@ closures, reference cycles, deep graph destruction, an execution budget,
 malformed source, differential behavior against host CPython, standalone
 program generation, and interactive submissions.
 
-The current local suite includes 206 differential programs, 160 error cases, 300
+The current local suite includes 217 differential programs, 160 error cases, 300
 integer expressions, 300 floating-point representations, 300 complex expressions
 (420 with the 3.15 oracle), and 5,000 malformed
 source inputs. A separate numeric suite covers 1,329 arbitrary-integer,

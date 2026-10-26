@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
           "    spy_set_flush(c, flush_output);\n"
           "    int status = spy_exec(c, source, \"<embedded>\");\n"
           "    if (status) fprintf(stderr, \"%s:%zu: %s: %s\\n\",\n"
-          "        spy_error_filename(c), spy_error_line(c), spy_error_type(c), spy_error_message(c));\n"
+          "        spy_error_filename(c), spy_error_line(c), spy_error_type(c), spy_error_display(c));\n"
           "    spy_context_free(c);\n"
           "    return status ? 1 : 0;\n}\n", out);
     int failed = ferror(out);

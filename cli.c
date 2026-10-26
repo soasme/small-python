@@ -9,7 +9,7 @@ static int output(void *data, const char *s, size_t n) {
 static int flush_output(void *data) { return fflush(data); }
 static void report(SPYContext *c) {
     fprintf(stderr, "%s:%zu: %s: %s\n", spy_error_filename(c), spy_error_line(c),
-            spy_error_type(c), spy_error_message(c));
+            spy_error_type(c), spy_error_display(c));
 }
 static int repl(SPYContext *c) {
     char line[4096];
