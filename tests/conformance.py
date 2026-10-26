@@ -3249,6 +3249,23 @@ for v, s in [('abc', '+'), ('abc', ' '), ('abc', 'z'), ('abc', '#'), ('abc', '='
 print(f"{1234567:,} {3.14159:_.2f} {'x':*>4} {97:c}")
 """)
 
+CASES.append(r"""
+class P:
+    x = 3
+    def __format__(self, spec): return 'P' + spec
+class D(dict):
+    def __missing__(self, key): return key.upper()
+print("{0[1]} {1.real} {a[k]} {a[0]}".format([5, 6], 2 + 3j, a={'k': 'v', 0: 'z'}))
+print("{0:{1}{2}}|{0.x}|{1!r:>5}".format(P(), 'a', 'b'))
+print("{:{w}.{p}f}".format(3.14159, w=10, p=2), "{0[١]}".format('xy'), "{a}{b}".format_map(D(a=1)))
+for t in ["{0}{}", "{}{1}", "{0[}", "{0.}", "{0]}", "{", "}", "{0!x}", "{0!}", "{0:{1:{2}}}", "{5}", "{a}",
+          "{0[2]}", "{0[0]x}", "{0!r", "{0!rx}", "{0[0}", "{a{}", "{0:>{1}}"]:
+    try: t.format([1], 'a', 3)
+    except (ValueError, KeyError, IndexError, TypeError) as e: print(type(e).__name__, e)
+try: "{0}".format_map({})
+except ValueError as e: print(e)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),

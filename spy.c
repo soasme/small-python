@@ -6408,71 +6408,151 @@ static SPYValue *join_strings(SPYContext *c, SPYValue *items) {
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     free(out.data); return result;
 }
-static SPYValue *string_format(SPYContext *c, SPYValue *self, size_t argc,
-                               SPYValue *const *argv, SPYValue *keywords) {
-    Buffer out = {.ctx = c};
-    size_t automatic = 0;
-    int numbered = 0, unnumbered = 0;
-    const char *text = self->as.string.data;
-    for (size_t i = 0; i < self->as.string.len && !c->error_type[0]; i++) {
-        char ch = text[i];
-        if (ch != '{' && ch != '}') { if (append(&out, &ch, 1)) break; continue; }
-        if (i + 1 < self->as.string.len && text[i + 1] == ch) {
-            i++; if (append(&out, &ch, 1)) break; continue;
-        }
-        if (ch == '}') { spy_error(c, "ValueError", "Single '}' encountered in format string"); break; }
-        size_t start = ++i, index = 0;
-        while (i < self->as.string.len && text[i] != '}' && text[i] != '!' && text[i] != ':') i++;
-        if (i == self->as.string.len) { spy_error(c, "ValueError", "expected '}' before end of string"); break; }
-        SPYValue *value = NULL;
-        if (i == start || isdigit((unsigned char)text[start])) {
-            if (i == start) { index = automatic++; unnumbered = 1; }
-            else {
-                numbered = 1;
-                for (size_t j = start; j < i; j++) {
-                    if (!isdigit((unsigned char)text[j])) {
-                        spy_error(c, "NotImplementedError", "format field paths are not implemented"); break;
-                    }
-                    if (index > (SIZE_MAX - 9) / 10) { spy_error(c, "ValueError", "format index too large"); break; }
-                    index = index * 10 + (unsigned)(text[j] - '0');
-                }
-            }
-            if (numbered && unnumbered) spy_error(c, "ValueError", "cannot switch between automatic and manual field numbering");
-            if (c->error_type[0]) break;
-            if (index >= argc) { spy_error(c, "IndexError", "replacement index out of range"); break; }
-            value = argv[index];
-        } else {
-            SPYValue *key = spy_string(c, text + start, i - start);
-            if (!key) break;
-            ptrdiff_t found = keywords ? map_find(keywords, key) : -1;
-            if (found >= 0) value = keywords->as.map.items[found].value;
-            else errorf(c, "KeyError", "'%s'", key->as.string.data);
-            spy_release(key);
-            if (!value) break;
-        }
-        int conversion = 0;
-        if (text[i] == '!') {
-            i++;
-            if (i == self->as.string.len || (text[i] != 's' && text[i] != 'r' && text[i] != 'a')) {
-                spy_error(c, "ValueError", "Unknown conversion specifier"); break;
-            }
-            conversion = text[i++];
-        }
-        SPYValue *converted = convert_field(c, value, conversion), *spec = NULL;
-        if (i < self->as.string.len && text[i] == ':') {
-            start = ++i;
-            while (i < self->as.string.len && text[i] != '}' && text[i] != '{') i++;
-            if (i < self->as.string.len && text[i] == '{')
-                spy_error(c, "NotImplementedError", "nested format fields are not implemented");
-            else spec = spy_string(c, text + start, i - start);
-        }
-        if (i == self->as.string.len || text[i] != '}') spy_error(c, "ValueError", "expected '}' before end of string");
-        SPYValue *formatted = converted && !c->error_type[0] ? format_field(c, converted, spec) : NULL;
-        if (formatted) append(&out, formatted->as.string.data, formatted->as.string.len);
-        spy_release(converted); spy_release(spec); spy_release(formatted);
+/* str.format and str.format_map, ported from CPython's
+ * Objects/stringlib/unicode_format.h. Markup characters are ASCII, so the
+ * scanners walk UTF-8 bytes; field indexes accept Unicode decimal digits. */
+typedef struct { int state; int64_t number; } AutoNumber; /* state: 0 init, 1 automatic, 2 manual */
+typedef struct { size_t argc; SPYValue *const *argv; SPYValue *keywords; AutoNumber numbering; } FormatArgs;
+static int64_t format_field_index(SPYContext *c, const char *text, size_t start, size_t end) {
+    if (start >= end) return -1;
+    int64_t accumulator = 0;
+    for (size_t at = start, width; at < end; at += width) {
+        int digit = decimal_value(utf8_decode(text + at, end - at, &width));
+        if (digit < 0) return -1;
+        if (accumulator > (INT64_MAX - digit) / 10) { spy_error(c, "ValueError", "Too many decimal digits in format string"); return -2; }
+        accumulator = accumulator * 10 + digit;
     }
-    SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    return accumulator;
+}
+static SPYValue *format_field_object(SPYContext *c, const char *text, size_t start, size_t end, FormatArgs *args) {
+    size_t i = start;
+    while (i < end && text[i] != '[' && text[i] != '.') i++;
+    int64_t index = format_field_index(c, text, start, i);
+    if (index == -2) return NULL;
+    int empty = start >= i, numeric = empty || index != -1;
+    AutoNumber *numbering = &args->numbering;
+    if (!numbering->state && numeric) numbering->state = empty ? 1 : 2;
+    if (numeric && numbering->state == 2 && empty)
+        return spy_error(c, "ValueError", "cannot switch from manual field specification to automatic field numbering");
+    if (numeric && numbering->state != 2 && !empty)
+        return spy_error(c, "ValueError", "cannot switch from automatic field numbering to manual field specification");
+    if (empty) index = numbering->number++;
+    SPYValue *object;
+    if (index == -1) {
+        SPYValue *key = spy_string(c, text + start, i - start);
+        if (!key) return NULL;
+        object = args->keywords ? get_index(c, args->keywords, key) : missing_key(c, key);
+        spy_release(key);
+    } else if (!args->argv) return spy_error(c, "ValueError", "Format string contains positional fields");
+    else if ((uint64_t)index >= args->argc)
+        return errorf(c, "IndexError", "Replacement index %lld out of range for positional args tuple", (long long)index);
+    else object = spy_retain(args->argv[index]);
+    while (object && i < end) {
+        char ch = text[i++];
+        size_t name = i, name_end;
+        int64_t item = -1;
+        if (ch == '.') {
+            while (i < end && text[i] != '[' && text[i] != '.') i++;
+            name_end = i;
+        } else if (ch == '[') {
+            while (i < end && text[i] != ']') i++;
+            if (i >= end) { spy_release(object); return spy_error(c, "ValueError", "Missing ']' in format string"); }
+            name_end = i++;
+            if ((item = format_field_index(c, text, name, name_end)) == -2) { spy_release(object); return NULL; }
+        } else {
+            spy_release(object);
+            return spy_error(c, "ValueError", "Only '.' or '[' may follow ']' in format field specifier");
+        }
+        if (name == name_end) { spy_release(object); return spy_error(c, "ValueError", "Empty attribute in format string"); }
+        SPYValue *key = item >= 0 ? spy_int(c, item) : spy_string(c, text + name, name_end - name), *next = NULL;
+        if (key) next = ch == '.' ? attribute(c, object, key->as.string.data) : get_index(c, object, key);
+        spy_release(key); spy_release(object); object = next;
+    }
+    return object;
+}
+static int format_markup(SPYContext *c, Buffer *out, const char *text, size_t start, size_t end, FormatArgs *args, int depth);
+static SPYValue *format_build(SPYContext *c, const char *text, size_t start, size_t end, FormatArgs *args, int depth) {
+    if (depth <= 0) return spy_error(c, "ValueError", "Max string recursion exceeded");
+    Buffer out = {.ctx = c};
+    int status = format_markup(c, &out, text, start, end, args, depth);
+    return format_finish(c, &out, status);
+}
+/* parse_field and output_markup: pos is just past the opening '{'. */
+static int format_replacement(SPYContext *c, Buffer *out, const char *text, size_t *pos, size_t end, FormatArgs *args, int depth) {
+    size_t at = *pos, name = at, spec = 0, spec_end = 0;
+    int ch = 0, expanding = 0;
+    unsigned conversion = 0;
+    while (at < end) {
+        ch = (unsigned char)text[at++];
+        if (ch == '{') { spy_error(c, "ValueError", "unexpected '{' in field name"); return -1; }
+        if (ch == '[') { while (at < end && text[at] != ']') at++; continue; }
+        if (ch == '}' || ch == ':' || ch == '!') break;
+    }
+    size_t name_end = at - 1;
+    if (ch == '!' || ch == ':') {
+        int done = 0;
+        if (ch == '!') {
+            if (at >= end) { spy_error(c, "ValueError", "end of string while looking for conversion specifier"); return -1; }
+            size_t width;
+            conversion = utf8_decode(text + at, end - at, &width); at += width;
+            if (at < end) {
+                ch = (unsigned char)text[at++];
+                if (ch == '}') done = 1;
+                else if (ch != ':') { spy_error(c, "ValueError", "expected ':' after conversion specifier"); return -1; }
+            }
+        }
+        if (!done) {
+            int count = 1;
+            spec = at;
+            while (at < end) {
+                ch = (unsigned char)text[at++];
+                if (ch == '{') { expanding = 1; count++; }
+                else if (ch == '}' && !--count) { spec_end = at - 1; break; }
+            }
+            if (count) { spy_error(c, "ValueError", "unmatched '{' in format spec"); return -1; }
+        }
+    } else if (ch != '}') { spy_error(c, "ValueError", "expected '}' before end of string"); return -1; }
+    *pos = at;
+    SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL, *result = NULL;
+    if (object && conversion) {
+        SPYValue *converted = conversion == 's' || conversion == 'r' || conversion == 'a' ? convert_field(c, object, (int)conversion) :
+            conversion > 32 && conversion < 127 ? errorf(c, "ValueError", "Unknown conversion specifier %c", (int)conversion) :
+            errorf(c, "ValueError", "Unknown conversion specifier \\x%x", conversion);
+        spy_release(object); object = converted;
+    }
+    if (object) format = expanding ? format_build(c, text, spec, spec_end, args, depth - 1) : spy_string(c, text + spec, spec_end - spec);
+    if (format) result = format_spec(c, object, format);
+    int status = result ? append(out, result->as.string.data, result->as.string.len) : -1;
+    spy_release(object); spy_release(format); spy_release(result);
+    return status;
+}
+/* do_markup over MarkupIterator. */
+static int format_markup(SPYContext *c, Buffer *out, const char *text, size_t pos, size_t end, FormatArgs *args, int depth) {
+    while (pos < end) {
+        size_t start = pos;
+        int ch = 0, markup = 0;
+        while (pos < end) {
+            ch = (unsigned char)text[pos++];
+            if (ch == '{' || ch == '}') { markup = 1; break; }
+        }
+        int at_end = pos >= end;
+        size_t len = pos - start;
+        if (ch == '}' && (at_end || text[pos] != '}')) { spy_error(c, "ValueError", "Single '}' encountered in format string"); return -1; }
+        if (at_end && ch == '{') { spy_error(c, "ValueError", "Single '{' encountered in format string"); return -1; }
+        if (!at_end) {
+            if (ch == (unsigned char)text[pos]) { pos++; markup = 0; }
+            else len--;
+        }
+        if (len && append(out, text + start, len)) return -1;
+        if (markup && format_replacement(c, out, text, &pos, end, args, depth)) return -1;
+    }
+    return 0;
+}
+static SPYValue *string_format(SPYContext *c, SPYValue *self, size_t argc, SPYValue *const *argv, SPYValue *keywords, int positional) {
+    static SPYValue *const none[1];
+    FormatArgs args = {argc, positional ? (argv ? argv : none) : NULL, keywords, {0, 0}};
+    /* PEP 3101 allows two levels: "{0:{1}}" works, "{0:{1:{2}}}" does not. */
+    return format_build(c, self->as.string.data, 0, self->as.string.len, &args, 2);
 }
 /* Byte search is shared by text and bytes. UTF-8 substring matches preserve
  * code-point boundaries; convert offsets only at the Python-facing boundary. */
@@ -6758,7 +6838,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
         free(out.data); return result;
     }
-    case M_FORMAT: return string_format(c, self, argc, argv, NULL);
+    case M_FORMAT: return string_format(c, self, argc, argv, NULL, 1);
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
         if (argc) break;
         if (bound->as.bound.method == M_ISIDENTIFIER && !self->as.string.len) return spy_bool(c, 0);
@@ -8171,7 +8251,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
             result = builtin_keywords(c, argc, argv, (int)(intptr_t)fn->as.native.data, keywords,
                                       fn->as.native.name ? fn->as.native.name->as.string.data : "builtin");
         else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_FORMAT)
-            result = string_format(c, fn->as.bound.self, argc, argv, keywords);
+            result = string_format(c, fn->as.bound.self, argc, argv, keywords, 1);
         else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_SORT)
             result = sort_method(c, fn->as.bound.self, argc, argv, keywords);
         else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_UPDATE) {
@@ -12637,7 +12717,7 @@ static SPYValue *str_format_map(SPYContext *c, size_t argc, SPYValue *const *arg
     (void)data;
     SPYValue *self = method_self(c, argc, argv, SPY_STRING, "format_map"), *args[1];
     if (!self || parse_arguments(c, "format_map", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
-    return string_format(c, self, 0, NULL, args[0]);
+    return string_format(c, self, 0, NULL, args[0], 0);
 }
 
 /* Integer and float methods. */

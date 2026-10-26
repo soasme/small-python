@@ -399,8 +399,9 @@ value. CPython's complete allocator-slot restoration behavior is not implemented
 
 F-strings support expressions, debug fields, conversions, nested format
 specifications, raw literals, and generator suspension inside fields. String
-`format` supports positional/named fields and conversions; nested field
-specifications and attribute/index paths remain missing. The format-spec
+`format` and `format_map` follow CPython's parser: automatic and manual
+numbering, attribute and index field paths, conversions, nested replacement
+fields in specifications (two levels), and CPython's diagnostics. The format-spec
 mini-language for `str`, `int`, `bool`, `float`, and `complex` is ported from
 CPython: fill code points, alignment, sign, `z`, `#`, zero padding, Unicode
 digit widths, `,`/`_` integer and fractional grouping, every presentation type,

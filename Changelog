@@ -145,3 +145,6 @@
 - Format-spec mini-language ported from CPython's unicode_formatter.c and
   short float repr: grouping (including fractional), z, n, c, complex specs,
   Unicode fill and width digits, and CPython's error messages.
+- str.format and str.format_map ported from CPython's unicode_format.h:
+  field paths ({0[1]}, {0.attr}), nested specs, mapping lookups through
+  __getitem__/__missing__, and CPython's messages.
