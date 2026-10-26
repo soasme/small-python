@@ -148,3 +148,8 @@
 - str.format and str.format_map ported from CPython's unicode_format.h:
   field paths ({0[1]}, {0.attr}), nested specs, mapping lookups through
   __getitem__/__missing__, and CPython's messages.
+- CPython's SyntaxError and IndentationError messages for malformed parameter
+  lists, incompatible string prefixes, unbalanced brackets, missing indented
+  blocks, conditional expressions, and duplicate parameters; compiler-stage
+  errors (break/continue/return/yield/await/async placement) are deferred until
+  the source parses.

@@ -3266,6 +3266,22 @@ try: "{0}".format_map({})
 except ValueError as e: print(e)
 """)
 
+CASES.append(r"""
+for src in ["ub''", "turf''", "brft''", "def foo(/,a,b=,c):\n   pass", "def foo(a,/,/,b,c):\n   pass",
+            "def foo(a,*b,c,/,d,e):\n   pass", "def foo(a,*b: int=,c):\n   pass", "def foo(a,**b: int=3):\n   pass",
+            "def foo(a,*a, b, **c, *d):\n   pass", "def foo(a,b,/,c,*b,c,*d,**e):\n   pass", "def foo(a=1,/*,b,c):\n   pass",
+            "def foo(a,d: int=,c):\n   pass", "lambda a=1,/,**b,/,c: None", "lambda (x, y, z), w: None",
+            "def f((x, y, z, w)):\n   pass", "def f(*): pass", "lambda *, **k: 0", "def f(a=1, b): pass",
+            "def f(a, *, a): pass", "def f(a:): pass", "def f(/): pass", "a = [1, 42 if True, 4]", "x = 1 if 1 else pass",
+            "f(]", "f(\n]", "x = {\n1: 2", ")", "break", "continue", "async with x: pass", "yield from x", "await x",
+            "def f(): await x", "def f(): [await x for x in y]", "break\nx = (", "while x:\n def f(): break",
+            "async for x in range(10):\npass", "for x in range(10):\n    pass\nelse:\npass",
+            "try:\n    something()\nexcept* A:\npass", "with (A as a, B as b):\npass", "class Blech[T](A):\npass",
+            "match something:\n    case []:\n        ...\n    case {}:\npass", "def foo[T](x, /, y, *, z=2):\npass"]:
+    try: compile(src, "<s>", "exec")
+    except SyntaxError as e: print(type(e).__name__, e.msg, e.lineno)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),

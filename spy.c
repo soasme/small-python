@@ -1843,6 +1843,9 @@ typedef struct {
     const char *error_start, *error_end;
     int error_trim_line;
     SPYValue *unit;
+    /* CPython raises these from its compiler, after a successful parse. */
+    const char *deferred, *deferred_start, *deferred_end;
+    size_t deferred_line;
 } Parser;
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
     if (grow(p->ctx, (void **)&p->tokens, &p->cap, p->len + 1, sizeof(Token))) return -1;
@@ -1850,6 +1853,28 @@ static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) 
     return 0;
 }
 enum { L_RAW = 1, L_FORMAT = 2, L_BYTES = 4, L_TEMPLATE = 8, L_MULTILINE = 16 };
+/* maybe_raise_syntax_error_for_string_prefixes from CPython's lexer: each
+ * prefix letter may appear once; rb, rf, and rt combine in any order. */
+static int string_prefix_error(Parser *p, const char *s, int line) {
+    int b = 0, r = 0, u = 0, f = 0, t = 0;
+    const char *at = s;
+    for (;; at++) {
+        int ch = tolower((unsigned char)*at);
+        if (!b && ch == 'b') b = 1;
+        else if (!u && ch == 'u') u = 1;
+        else if (!r && ch == 'r') r = 1;
+        else if (!f && ch == 'f') f = 1;
+        else if (!t && ch == 't') t = 1;
+        else return 0;
+        if (at[1] == '"' || at[1] == '\'') break;
+    }
+    const char *pair = u && b ? "'u' and 'b'" : u && r ? "'u' and 'r'" : u && f ? "'u' and 'f'" : u && t ? "'u' and 't'" :
+                       b && f ? "'b' and 'f'" : b && t ? "'b' and 't'" : f && t ? "'f' and 't'" : NULL;
+    if (!pair) return 0;
+    p->ctx->line = line; p->error_start = s; p->error_end = at + 1;
+    errorf(p->ctx, "SyntaxError", "%s prefixes are incompatible", pair);
+    return -1;
+}
 static int literal_prefix(const char *s, size_t *prefix, int *flags) {
     *prefix = 0; *flags = 0;
     if (*s == '\'' || *s == '"') return 1;
@@ -1992,6 +2017,8 @@ static int lex(Parser *p, const char *s) {
     }
     line = 1;
     char closing[128];
+    size_t opened_line[128];
+    const char *opened_at[128];
     int bol = 1;
     while (*s) {
         if (bol && !brackets) {
@@ -2040,6 +2067,7 @@ static int lex(Parser *p, const char *s) {
         bol = 0;
         int kind = (unsigned char)*s++;
         size_t prefix; int flags;
+        if (string_prefix_error(p, start, line)) return -1;
         if (literal_prefix(start, &prefix, &flags)) {
             p->ctx->line = line;
             s = scan_literal(p, start, 0, 0);
@@ -2088,11 +2116,19 @@ static int lex(Parser *p, const char *s) {
             if (kind == '.' && s[0] == '.' && s[1] == '.') { kind = T_ELLIPSIS; s += 2; }
             if (kind == '(' || kind == '[' || kind == '{') {
                 if (brackets == 128) goto nesting;
+                opened_line[brackets] = line; opened_at[brackets] = start;
                 closing[brackets++] = kind == '(' ? ')' : kind == '[' ? ']' : '}';
             } else if (kind == ')' || kind == ']' || kind == '}') {
-                if (!brackets || closing[--brackets] != kind) {
-                    p->ctx->line = line;
-                    spy_error(p->ctx, "SyntaxError", "mismatched closing delimiter"); return -1;
+                /* CPython's lexer diagnostics for unbalanced brackets. */
+                p->ctx->line = line; p->error_start = start; p->error_end = s;
+                if (!brackets) { errorf(p->ctx, "SyntaxError", "unmatched '%c'", kind); return -1; }
+                if (closing[--brackets] != kind) {
+                    int opening = closing[brackets] == ')' ? '(' : closing[brackets] == ']' ? '[' : '{';
+                    if (opened_line[brackets] != line)
+                        errorf(p->ctx, "SyntaxError", "closing parenthesis '%c' does not match opening parenthesis '%c' on line %zu",
+                               kind, opening, opened_line[brackets]);
+                    else errorf(p->ctx, "SyntaxError", "closing parenthesis '%c' does not match opening parenthesis '%c'", kind, opening);
+                    return -1;
                 }
             } else if (kind < 256 && !strchr("+-*/%~&|^<>=:;.,@", kind)) {
                 p->ctx->line = line;
@@ -2101,7 +2137,10 @@ static int lex(Parser *p, const char *s) {
         }
         if (token_add(p, kind, start, (size_t)(s - start), line)) return -1;
     }
-    if (brackets) { spy_error(p->ctx, "SyntaxError", "unclosed delimiter"); return -1; }
+    if (brackets) {
+        p->ctx->line = opened_line[brackets - 1]; p->error_start = opened_at[brackets - 1]; p->error_end = opened_at[brackets - 1] + 1;
+        errorf(p->ctx, "SyntaxError", "'%c' was never closed", *opened_at[brackets - 1]); return -1;
+    }
     if (p->len && p->tokens[p->len - 1].kind != T_NL && token_add(p, T_NL, s, 0, line)) return -1;
     while (level--) if (token_add(p, T_DEDENT, s, 0, line)) return -1;
     return token_add(p, T_END, s, 0, line);
@@ -2122,6 +2161,11 @@ static Node *syntax(Parser *p, const char *message) {
     p->error_start = peek(p)->start; p->error_end = peek(p)->start + peek(p)->len;
     spy_error(p->ctx, "SyntaxError", message);
     return NULL;
+}
+static void defer(Parser *p, const char *message) {
+    if (p->deferred) return;
+    p->deferred = message; p->deferred_line = peek(p)->line;
+    p->deferred_start = peek(p)->start; p->deferred_end = peek(p)->start + peek(p)->len;
 }
 static int expect(Parser *p, int kind, const char *message) {
     if (take(p, kind)) return 1;
@@ -2185,7 +2229,9 @@ static Node *plain_expression(Parser *, int);
 static Node *expression_list(Parser *, int);
 static Node *comprehension(Parser *, Node *);
 static Node *statements(Parser *);
-static Node *suite(Parser *);
+static Node *suite_after(Parser *, const char *, size_t);
+static Node *missing_block(Parser *, const char *, size_t);
+static size_t keyword_line(Parser *);
 static Node *subscript(Parser *p) {
     Node *first = NULL;
     if (at(p, '*')) {
@@ -2209,7 +2255,7 @@ static Node *subscript(Parser *p) {
     }
     return n;
 }
-static int parameters(Parser *p, Node *n, int close) {
+static int parameter_list(Parser *p, Node *n, int close) {
     Node **tail = &n->args;
     int keyword_only = 0, slash = 0, defaults = 0, bare_star = 0;
     while (!at(p, close)) {
@@ -2229,7 +2275,12 @@ static int parameters(Parser *p, Node *n, int close) {
             Node *arg = identifier(p);
             if (!arg) return -1;
             for (Node *a = n->args; a; a = a->next)
-                if (!strcmp(a->text, arg->text)) { syntax(p, "duplicate argument"); return -1; }
+                if (!strcmp(a->text, arg->text)) {
+                    p->pos--;
+                    errorf(p->ctx, "SyntaxError", "duplicate parameter '%s' in function definition", source_name(arg));
+                    p->ctx->line = peek(p)->line; p->error_start = peek(p)->start; p->error_end = peek(p)->start + peek(p)->len;
+                    p->pos++; return -1;
+                }
             arg->op = kind;
             if (close == ')' && take(p, ':')) {
                 if (kind == P_VARARGS && at(p, '*')) {
@@ -2257,6 +2308,219 @@ static int parameters(Parser *p, Node *n, int close) {
     }
     if (bare_star) { syntax(p, "named arguments must follow bare star"); return -1; }
     return expect(p, close, "invalid syntax") ? 0 : -1;
+}
+/* CPython reports malformed parameter lists from the invalid_parameters,
+ * invalid_star_etc, invalid_kwds, and invalid_default grammar rules (and
+ * their lambda forms). This matcher replays those PEG rules over the tokens
+ * after the primary parse fails: 1 matched, 0 no match, -1 error raised. */
+typedef struct { Parser *p; int lambda; } ParamRules;
+static int rules_raise(Parser *p, size_t at, const char *message) {
+    p->pos = at; syntax(p, message); return -1;
+}
+/* An expression that fails on its first token simply does not match;
+ * deeper failures carry the expression rules' own diagnostics. */
+static int rules_expression(Parser *p) {
+    size_t start = p->pos;
+    if (plain_expression(p, 0)) return 1;
+    if (p->pos != start || !error_is(p->ctx, "SyntaxError") || p->error_start != p->tokens[start].start) return -1;
+    spy_clear_error(p->ctx); p->pos = start; return 0;
+}
+static int rules_close(ParamRules *r) { return at(r->p, r->lambda ? ':' : ')'); }
+static int rules_param(ParamRules *r, int star_annotation) {
+    Parser *p = r->p;
+    if (!at(p, T_NAME) || reserved(peek(p))) return 0;
+    p->pos++;
+    if (r->lambda || !at(p, ':')) return star_annotation ? 0 : 1;
+    p->pos++;
+    if (star_annotation) {
+        if (!at(p, '*')) return 0;
+        p->pos++;
+    }
+    int status = rules_expression(p);
+    if (!status) p->pos -= star_annotation ? 2 : 1;
+    return status;
+}
+static int rules_default(ParamRules *r) {
+    Parser *p = r->p;
+    if (!at(p, '=')) return 0;
+    if (p->pos + 1 < p->len && (p->tokens[p->pos + 1].kind == ')' || p->tokens[p->pos + 1].kind == ','))
+        return rules_raise(p, p->pos, "expected default value expression");
+    p->pos++;
+    int status = rules_expression(p);
+    if (!status) p->pos--;
+    return status;
+}
+/* kind 0: param_no_default, 1: param_with_default, 2: param_maybe_default,
+ * 3: param_no_default_star_annotation. */
+static int rules_item(ParamRules *r, int kind) {
+    Parser *p = r->p;
+    size_t start = p->pos;
+    int status = rules_param(r, kind == 3);
+    if (status <= 0) { if (!status) p->pos = start; return status; }
+    if (kind == 1 || kind == 2) {
+        if ((status = rules_default(r)) < 0) return -1;
+        if (!status && kind == 1) { p->pos = start; return 0; }
+    }
+    if (take(p, ',') || rules_close(r)) return 1;
+    p->pos = start; return 0;
+}
+static int rules_many(ParamRules *r, int kind, int minimum) {
+    int count = 0, status;
+    while ((status = rules_item(r, kind)) > 0) count++;
+    return status < 0 ? -1 : count >= minimum;
+}
+static int rules_slash(ParamRules *r, int with_default) {
+    Parser *p = r->p;
+    size_t start = p->pos;
+    int status = with_default ? rules_many(r, 0, 0) : 1;
+    if (status > 0) status = rules_many(r, with_default ? 1 : 0, 1);
+    if (status > 0 && take(p, '/') && (take(p, ',') || rules_close(r))) return 1;
+    if (status < 0) return -1;
+    p->pos = start; return 0;
+}
+static int rules_any_slash(ParamRules *r) {
+    int status = rules_slash(r, 0);
+    return status ? status : rules_slash(r, 1);
+}
+static int rules_kwds(ParamRules *r) {
+    Parser *p = r->p;
+    size_t start = p->pos;
+    if (!take(p, T_POW)) return 0;
+    int status = rules_param(r, 0);
+    if (status < 0) return -1;
+    if (status) {
+        if (at(p, '=')) return rules_raise(p, p->pos, "var-keyword parameter cannot have default value");
+        if (take(p, ',')) {
+            size_t after = p->pos;
+            if (at(p, '*') || at(p, T_POW) || at(p, '/')) return rules_raise(p, after, "parameters cannot follow var-keyword parameter");
+            if ((status = rules_param(r, 0)) < 0) return -1;
+            if (status) return rules_raise(p, after, "parameters cannot follow var-keyword parameter");
+        }
+    }
+    p->pos = start + 1;
+    if ((status = rules_item(r, 0)) > 0) return 1;
+    p->pos = start; return status;
+}
+static int rules_star_etc(ParamRules *r) {
+    Parser *p = r->p;
+    size_t start = p->pos;
+    int close = r->lambda ? ':' : ')', status;
+    if (take(p, '*')) {
+        if (at(p, close) || (at(p, ',') && p->pos + 1 < p->len &&
+                             (p->tokens[p->pos + 1].kind == close || p->tokens[p->pos + 1].kind == T_POW)))
+            return r->lambda ? (syntax(p, "named parameters must follow bare *"), -1) : rules_raise(p, start, "named parameters must follow bare *");
+        if ((status = rules_param(r, 0)) < 0) return -1;
+        if (status && at(p, '=')) return rules_raise(p, p->pos, "var-positional parameter cannot have default value");
+        p->pos = start + 1;
+        if ((status = rules_item(r, 0)) < 0) return -1;
+        if (status || take(p, ',')) {
+            if (rules_many(r, 2, 0) < 0) return -1;
+            size_t star = p->pos;
+            if (take(p, '*')) {
+                if ((status = rules_item(r, 0)) < 0) return -1;
+                if (status || at(p, ',')) return rules_raise(p, star, "* may appear only once");
+            }
+        }
+        p->pos = start + 1;
+        for (int kind = 0; kind < (r->lambda ? 1 : 2); kind++) {
+            p->pos = start + 1;
+            if ((status = rules_item(r, kind ? 3 : 0)) < 0) return -1;
+            if (status) {
+                if (rules_many(r, 2, 0) < 0 || rules_kwds(r) < 0) return -1;
+                return 1;
+            }
+        }
+        p->pos = start + 1;
+        if (take(p, ',')) {
+            if ((status = rules_many(r, 2, 1)) < 0) return -1;
+            if (status) return rules_kwds(r) < 0 ? -1 : 1;
+        }
+        p->pos = start; return 0;
+    }
+    return rules_kwds(r);
+}
+static int rules_parameters(ParamRules *r) {
+    Parser *p = r->p;
+    size_t start = p->pos;
+    int status;
+    /* invalid_parameters */
+    if (at(p, '/') && p->pos + 1 < p->len && p->tokens[p->pos + 1].kind == ',')
+        return rules_raise(p, p->pos, "at least one parameter must precede /");
+    if ((status = rules_any_slash(r)) < 0) return -1;
+    if (status) {
+        if (rules_many(r, 2, 0) < 0) return -1;
+        if (at(p, '/')) return rules_raise(p, p->pos, "/ may appear only once");
+    }
+    p->pos = start;
+    if (rules_slash(r, 0) < 0 || rules_many(r, 0, 0) < 0) return -1;
+    if ((status = rules_slash(r, 1)) < 0) return -1;
+    if (!status && (status = rules_many(r, 1, 1)) < 0) return -1;
+    if (status) {
+        size_t after = p->pos;
+        if ((status = rules_item(r, 0)) < 0) return -1;
+        if (status) return rules_raise(p, after, "parameter without a default follows parameter with a default");
+    }
+    p->pos = start;
+    if (rules_many(r, 0, 0) < 0) return -1;
+    size_t paren = p->pos;
+    if (take(p, '(')) {
+        int count = 0;
+        if (r->lambda) {
+            while (at(p, T_NAME) && !reserved(peek(p))) { p->pos++; count++; if (!take(p, ',')) break; }
+        } else {
+            ParamRules inner = {p, 0};
+            if ((status = rules_many(&inner, 0, 1)) < 0) return -1;
+            count = status;
+            take(p, ',');
+        }
+        if (count && at(p, ')'))
+            return rules_raise(p, paren, r->lambda ? "Lambda expression parameters cannot be parenthesized" : "Function parameters cannot be parenthesized");
+    }
+    p->pos = start;
+    if (rules_any_slash(r) < 0 || rules_many(r, 2, 0) < 0) return -1;
+    if (take(p, '*')) {
+        if ((status = rules_item(r, 0)) < 0) return -1;
+        if (status || take(p, ',')) {
+            if (rules_many(r, 2, 0) < 0) return -1;
+            if (at(p, '/')) return rules_raise(p, p->pos, "/ must be ahead of *");
+        }
+    }
+    p->pos = start;
+    if ((status = rules_many(r, 2, 1)) < 0) return -1;
+    if (status && take(p, '/') && at(p, '*')) return rules_raise(p, p->pos, "expected comma between / and *");
+    /* parameters */
+    for (int alternative = 0; alternative < 5; alternative++) {
+        p->pos = start;
+        if (alternative == 0) {
+            if ((status = rules_slash(r, 0)) > 0 && (status = rules_many(r, 0, 0)) >= 0) status = rules_many(r, 1, 0) < 0 ? -1 : 1;
+        } else if (alternative == 1) {
+            if ((status = rules_slash(r, 1)) > 0) status = rules_many(r, 1, 0) < 0 ? -1 : 1;
+        } else if (alternative == 2) {
+            if ((status = rules_many(r, 0, 1)) > 0) status = rules_many(r, 1, 0) < 0 ? -1 : 1;
+        } else if (alternative == 3) status = rules_many(r, 1, 1);
+        else return rules_star_etc(r);
+        if (status < 0) return -1;
+        if (status) return rules_star_etc(r) < 0 ? -1 : 1;
+    }
+    return 0;
+}
+static int parameters(Parser *p, Node *n, int close) {
+    size_t start = p->pos;
+    if (!parameter_list(p, n, close)) return 0;
+    if (!error_is(p->ctx, "SyntaxError")) return -1;
+    spy_clear_error(p->ctx);
+    p->pos = start;
+    ParamRules rules = {p, close == ':'};
+    int status = rules_parameters(&rules);
+    if (status < 0) return -1;
+    p->pos = start; n->args = NULL;
+    if (!parameter_list(p, n, close)) return 0;
+    /* No invalid_* rule matched: CPython reports a generic failure. */
+    if (error_is(p->ctx, "SyntaxError") && strncmp(p->ctx->error_message, "duplicate parameter", 19)) {
+        size_t line = p->ctx->line;
+        spy_clear_error(p->ctx); spy_error(p->ctx, "SyntaxError", "invalid syntax"); p->ctx->line = line;
+    }
+    return -1;
 }
 static int hex_digit(int c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -2447,7 +2711,10 @@ static Node *syntax_within(Parser *p, const char *what) {
 static Node *yield_expression(Parser *p) {
     if (p->annotation_scope) return syntax_within(p, "yield");
     p->pos++;
-    if (!p->functions) return syntax(p, keyword(p, "from") ? "'yield from' outside function" : "'yield' outside function");
+    if (!p->functions) {
+        const char *message = keyword(p, "from") ? "'yield from' outside function" : "'yield' outside function";
+        p->pos--; defer(p, message); p->pos++;
+    }
     if (p->async_function && keyword(p, "from")) return syntax(p, "'yield from' inside async function");
     Node *n = node(p, N_YIELD);
     if (!n) return NULL;
@@ -2713,10 +2980,17 @@ static Node *expression_inner(Parser *p, int min, int named) {
         Node *n = node(p, N_COND);
         if (!n) return NULL;
         n->a = left; n->b = expression(p, 1);
-        if (!n->b || !take_word(p, "else")) return syntax(p, "expected 'else' in conditional expression");
+        if (!n->b) return NULL;
+        /* invalid_expression and invalid_if_expression */
+        if (!take_word(p, "else")) return syntax(p, at(p, ':') ? "invalid syntax" : "expected 'else' after 'if' expression");
         if (at(p, '*')) return syntax(p, "cannot unpack only part of a conditional expression");
         if (at(p, T_POW)) return syntax(p, "cannot use dict unpacking on only part of a conditional expression");
+        size_t orelse = p->pos;
         n->c = plain_expression(p, 0);
+        if (!n->c && p->pos == orelse && error_is(p->ctx, "SyntaxError") && p->error_start == p->tokens[orelse].start) {
+            spy_clear_error(p->ctx);
+            return syntax(p, "expected expression after 'else', but statement is given");
+        }
         if (!n->c) return NULL;
         left = n;
     }
@@ -2810,14 +3084,16 @@ static Node *comprehension(Parser *p, Node *n) {
 static Node *if_statement(Parser *p) {
     Node *n = node(p, N_IF);
     if (!n) return NULL;
+    size_t line = keyword_line(p);
+    const char *what = p->tokens[p->pos - 1].len == 4 ? "'elif' statement" : "'if' statement";
     n->a = expression(p, 0);
-    if (!n->a || !(n->b = suite(p))) return NULL;
+    if (!n->a || !(n->b = suite_after(p, what, line))) return NULL;
     if (take_word(p, "elif")) {
         if (++p->depth > 128) { p->depth--; return syntax(p, "too many elif clauses"); }
         n->c = if_statement(p); p->depth--;
         if (!n->c) return NULL;
     }
-    else if (take_word(p, "else")) { n->c = suite(p); if (!n->c) return NULL; }
+    else if (take_word(p, "else")) { n->c = suite_after(p, "'else' statement", keyword_line(p)); if (!n->c) return NULL; }
     return n;
 }
 /* Build the hidden __annotate__(format, /) function for an owner. */
@@ -3181,15 +3457,17 @@ static Node *match_statement(Parser *p) {
     Node *n = node(p, N_MATCH);
     if (!n) return NULL;
     p->pos++;
+    size_t line = keyword_line(p);
     if (!(n->a = expression_list(p, 0))) return NULL;
     if (!expect(p, ':', "expected ':'") || !expect(p, T_NL, "expected newline")) return NULL;
     while (take(p, T_NL)) {}
-    if (!expect(p, T_INDENT, "expected an indented block")) return NULL;
+    if (!take(p, T_INDENT)) return missing_block(p, "'match' statement", line);
     Node **tail = &n->args;
     while (!at(p, T_DEDENT) && !at(p, T_END)) {
         if (take(p, T_NL)) continue;
         if (!keyword(p, "case") || !line_ends_block(p)) return syntax(p, "expected 'case' block");
         p->pos++;
+        size_t case_line = keyword_line(p);
         Node *item = node(p, N_EXCEPT);
         if (!item) return NULL;
         Node *first = star_or_pattern(p);
@@ -3209,7 +3487,7 @@ static Node *match_statement(Parser *p) {
         } else if (first->op == PT_STAR) return syntax(p, "cannot use starred expression here");
         item->a = first;
         if (take_word(p, "if") && !(item->b = expression(p, 0))) return NULL;
-        if (!(item->c = suite(p))) return NULL;
+        if (!(item->c = suite_after(p, "'case' statement", case_line))) return NULL;
         *tail = item; tail = &item->next;
     }
     if (!n->args) return syntax(p, "expected 'case' block");
@@ -3325,8 +3603,11 @@ static Node *statement(Parser *p) {
     int asynchronous = take_word(p, "async");
     if (asynchronous && !keyword(p, "def") && !keyword(p, "for") && !keyword(p, "with"))
         return syntax(p, "expected 'def', 'for', or 'with' after 'async'");
-    if (asynchronous && !keyword(p, "def") && !p->async_function)
-        return syntax(p, "asynchronous statement outside async function");
+    if (asynchronous && !keyword(p, "def") && !p->async_function) {
+        p->pos--; defer(p, keyword(p, "for") || (p->pos + 1 < p->len && p->tokens[p->pos + 1].len == 3 && !memcmp(p->tokens[p->pos + 1].start, "for", 3)) ?
+                        "'async for' outside async function" : "'async with' outside async function");
+        p->pos++;
+    }
     if (!asynchronous && keyword(p, "match") && line_ends_block(p)) return match_statement(p);
     if (!asynchronous && type_alias_start(p)) return type_alias(p);
     if (take_word(p, "with")) {
@@ -3357,7 +3638,7 @@ static Node *statement(Parser *p) {
             if (!take(p, ',')) break;
         } while (!grouped || !at(p, ')'));
         if (grouped && !expect(p, ')', "expected ')' after context managers")) return NULL;
-        n->b = suite(p);
+        n->b = suite_after(p, "'with' statement", n->line);
         return n->b ? n : NULL;
     }
     if (take_word(p, "del")) {
@@ -3389,7 +3670,7 @@ static Node *statement(Parser *p) {
         const char *private_name = p->private_name;
         p->private_name = source_name(n->a);
         p->loops = p->functions = p->async_function = p->star = 0;
-        n->b = suite(p);
+        n->b = suite_after(p, "class definition", n->line);
         if (n->b && body_annotations(p, n, n->b, &n->annotate)) return NULL;
         p->private_name = private_name;
         p->loops = loops; p->functions = functions; p->async_function = async_function; p->star = star;
@@ -3405,11 +3686,13 @@ static Node *statement(Parser *p) {
         return n;
     }
     if (take_word(p, "try")) {
+        size_t line = keyword_line(p);
         n = node(p, N_TRY);
-        if (!n || !(n->a = suite(p))) return NULL;
+        if (!n || !(n->a = suite_after(p, "'try' statement", line))) return NULL;
         Node **tail = &n->args;
         int bare = 0, star = -1;
         while (take_word(p, "except")) {
+            size_t except_line = keyword_line(p);
             if (bare) return syntax(p, "default except must be last");
             int is_star = take(p, '*');
             if (star >= 0 && star != is_star) return syntax(p, "cannot have both 'except' and 'except*' on the same 'try'");
@@ -3435,7 +3718,7 @@ static Node *statement(Parser *p) {
             } else bare = 1;
             int saved = p->star;
             if (is_star) p->star = p->loops + 1;
-            handler->b = suite(p);
+            handler->b = suite_after(p, is_star ? "'except*' statement" : "'except' statement", except_line);
             p->star = saved;
             if (!handler->b) return NULL;
             *tail = handler; tail = &handler->next;
@@ -3443,15 +3726,16 @@ static Node *statement(Parser *p) {
         if (star == 1) n->flags |= F_STAR;
         if (take_word(p, "else")) {
             if (!n->args) return syntax(p, "expected except before else");
-            if (!(n->b = suite(p))) return NULL;
+            if (!(n->b = suite_after(p, "'else' statement", keyword_line(p)))) return NULL;
         }
-        if (take_word(p, "finally") && !(n->c = suite(p))) return NULL;
+        if (take_word(p, "finally") && !(n->c = suite_after(p, "'finally' statement", keyword_line(p)))) return NULL;
         return n->args || n->c ? n : syntax(p, "expected except or finally");
     }
     if (take_word(p, "if")) return if_statement(p);
     if (keyword(p, "while") || keyword(p, "for")) {
         int is_for = take_word(p, "for");
         if (!is_for) p->pos++;
+        size_t line = keyword_line(p);
         n = node(p, is_for ? N_FOR : N_WHILE);
         if (!n) return NULL;
         n->op = asynchronous;
@@ -3462,9 +3746,9 @@ static Node *statement(Parser *p) {
         }
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
         if (!n->a) return NULL;
-        p->loops++; n->b = suite(p); p->loops--;
+        p->loops++; n->b = suite_after(p, is_for ? "'for' statement" : "'while' statement", line); p->loops--;
         if (!n->b) return NULL;
-        if (take_word(p, "else")) { n->c = suite(p); if (!n->c) return NULL; }
+        if (take_word(p, "else")) { n->c = suite_after(p, "'else' statement", keyword_line(p)); if (!n->c) return NULL; }
         return n;
     }
     if (take_word(p, "def")) {
@@ -3478,7 +3762,7 @@ static Node *statement(Parser *p) {
         if (function_annotations(p, n)) return NULL;
         int loops = p->loops, async_function = p->async_function, star = p->star;
         p->loops = 0; p->functions++; p->async_function = asynchronous; p->star = 0;
-        n->b = suite(p);
+        n->b = suite_after(p, "function definition", n->line);
         p->functions--; p->loops = loops; p->async_function = async_function; p->star = star;
         return n->b ? n : NULL;
     }
@@ -3497,7 +3781,7 @@ static Node *statement(Parser *p) {
     if (p->star && (keyword(p, "return") || ((keyword(p, "break") || keyword(p, "continue")) && p->loops == p->star - 1)))
         return syntax(p, "'break', 'continue' and 'return' cannot appear in an except* block");
     if (take_word(p, "return")) {
-        if (!p->functions) return syntax(p, "'return' outside function");
+        if (!p->functions) { p->pos--; defer(p, "'return' outside function"); p->pos++; }
         n = node(p, N_RETURN);
         if (!n) return NULL;
         if (!at(p, T_NL) && !at(p, ';')) { n->a = expression_list(p, 0); if (!n->a || n->a->kind == N_STAR) return syntax(p, "invalid return expression"); }
@@ -3505,7 +3789,7 @@ static Node *statement(Parser *p) {
         return n;
     }
     if (keyword(p, "break") || keyword(p, "continue")) {
-        if (!p->loops) return syntax(p, "loop control outside loop");
+        if (!p->loops) defer(p, keyword(p, "break") ? "'break' outside loop" : "'continue' not properly in loop");
         n = node(p, keyword(p, "break") ? N_BREAK : N_CONTINUE);
         p->pos++; return n;
     }
@@ -3597,17 +3881,28 @@ static Node *line_statements(Parser *p) {
     } while (!at(p, T_NL));
     return expect(p, T_NL, "expected end of statement") ? head : NULL;
 }
-static Node *suite(Parser *p) {
+/* CPython's invalid_*_stmt rules name the statement whose block is missing. */
+static Node *missing_block(Parser *p, const char *what, size_t line) {
+    char message[96];
+    if (what) snprintf(message, sizeof(message), "expected an indented block after %s on line %zu", what, line);
+    else snprintf(message, sizeof(message), "expected an indented block");
+    p->ctx->line = peek(p)->line;
+    p->error_start = peek(p)->start; p->error_end = peek(p)->start + peek(p)->len;
+    spy_error(p->ctx, "IndentationError", message);
+    return NULL;
+}
+static Node *suite_after(Parser *p, const char *what, size_t line) {
     if (!expect(p, ':', "expected ':'")) return NULL;
     if (!take(p, T_NL)) return line_statements(p);
     while (take(p, T_NL)) {}
-    if (!expect(p, T_INDENT, "expected an indented block")) return NULL;
+    if (!take(p, T_INDENT)) return missing_block(p, what, line);
     if (++p->depth > 128) { p->depth--; return syntax(p, "too many nested blocks"); }
     Node *body = statements(p);
     p->depth--;
     if (!body || !expect(p, T_DEDENT, "expected end of block")) return NULL;
     return body;
 }
+static size_t keyword_line(Parser *p) { return p->tokens[p->pos - 1].line; }
 static Node *statements(Parser *p) {
     Node *head = NULL, **tail = &head;
     while (!at(p, T_END) && !at(p, T_DEDENT)) {
@@ -3755,14 +4050,17 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
     return scope_node(c, scope, n);
 }
 static int scope_await(SPYContext *c, Scope *scope, Node *n) {
+    int comprehension = 0;
     while (scope->kind == S_COMPREHENSION) {
         scope->owner->asynchronous = 1;
         if (scope->owner->op == N_TUPLE) return 0;
-        scope = scope->parent;
+        scope = scope->parent; comprehension = 1;
     }
     if (scope->kind == S_FUNCTION && scope->owner->op) return 0;
     c->line = n->line;
-    spy_error(c, "SyntaxError", "asynchronous expression outside async function"); return -1;
+    spy_error(c, "SyntaxError", comprehension ? "asynchronous comprehension outside of an asynchronous function" :
+              scope->kind == S_FUNCTION ? "'await' outside async function" : "'await' outside function");
+    return -1;
 }
 /* Annotation functions run in their own scope. Unlike methods, they see the
  * names of an enclosing class body. */
@@ -4008,6 +4306,10 @@ static SPYValue *parse(SPYContext *c, const char *source, const char *filename) 
             unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
             if (unit->as.unit.scope && !scope_walk(c, unit->as.unit.scope, unit->as.unit.body) &&
                 !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate)) scope_resolve(c, unit->as.unit.scope);
+        }
+        if (!c->error_type[0] && p.deferred) {
+            c->line = p.deferred_line; p.error_start = p.deferred_start; p.error_end = p.deferred_end;
+            spy_error(c, "SyntaxError", p.deferred);
         }
         for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated) {
             if (scope_resolve(c, n->scope)) break;

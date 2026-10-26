@@ -379,8 +379,13 @@ method families. Bytearray methods include `resize` and Python 3.15's `take_byte
 storage are rechecked after conversion callbacks. Buffer exports and CPython's
 allocation introspection remain unsupported. Encoding and decoding support a limited set of codecs;
 the standard-library codec registry is unavailable. Iterator types
-are not yet distinguished completely by `type()`. Some diagnostics differ from
-CPython. These are open compatibility issues, not changes to the standard.
+are not yet distinguished completely by `type()`. Syntax errors for parameter
+lists, string prefixes, unbalanced brackets, missing indented blocks, and
+conditional expressions follow CPython's lexer and `invalid_*` grammar rules;
+errors CPython raises from its compiler (`'break' outside loop`, `'return'
+outside function`, misplaced `async for`, `async with`, and `await`) are raised
+only after the whole source parses. Some diagnostics still differ from CPython.
+These are open compatibility issues, not changes to the standard.
 Classes defining `__eq__` without `__hash__` become unhashable. Dictionary/set
 entries store hashes and use linear lookup among matching hashes. `hash()` calls
 user-defined hash methods, validates their results, and normalizes oversized
