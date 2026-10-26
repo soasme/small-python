@@ -3,8 +3,8 @@ Define names for built-in types that aren't directly accessible as a builtin.
 
 slim.py builds this module into the engine, following CPython 3.15's types
 module. Names for objects the engine does not have (cells, frames,
-tracebacks, frame-locals proxies, member and getset descriptors, capsules,
-and lazy imports) are not defined, nor is coroutine(), which needs code
+tracebacks, frame-locals proxies, member and getset descriptors, and
+capsules) are not defined, nor is coroutine(), which needs code
 object flags.
 """
 
@@ -55,7 +55,10 @@ EllipsisType = type(Ellipsis)
 NoneType = type(None)
 NotImplementedType = type(NotImplemented)
 
-del _builtins, _f, _g, _C, _c, _ag
+lazy import builtins as _lazy
+LazyImportType = type(globals()['_lazy'])
+
+del _builtins, _f, _g, _C, _c, _ag, _lazy
 
 
 class SimpleNamespace:

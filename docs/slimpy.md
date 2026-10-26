@@ -509,12 +509,20 @@ implementation loads sources through the callback. The `builtins` module exposes
 the context's builtin namespace directly and needs no loader.
 
 Module specs, namespace packages, configurable package search paths, meta-path
-finders, lazy imports, and extension loading remain missing.
+finders, and extension loading remain missing.
+
+Python 3.15 lazy imports (`lazy import`, `lazy from ... import`) bind
+`lazy_import` placeholders at module level outside `try` blocks. Reading a
+placeholder through a module global, class namespace, or module attribute
+calls `__import__` and replaces the binding; a failure is chained to an
+ImportError cause naming the lazy import. `from` imports of an already-loaded
+module bind the attribute directly. The global lazy-import filter and
+`sys.set_lazy_imports` are not provided.
 
 ### 3.3 Standard library and host services
 
-Three minimal standard-library modules are built in: `collections`, `types`,
-and `weakref`. Their Python sources live in `modules/` and are embedded into
+Four minimal standard-library modules are built in: `collections`, `sys`,
+`types`, and `weakref`. Their Python sources live in `modules/` and are embedded into
 `spy-intrinsics.h`; an import finds them before the host loader, needs no
 loader, and parses them only on first use. `collections` provides `deque`,
 `defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
@@ -522,7 +530,16 @@ loader, and parses them only on first use. `collections` provides `deque`,
 there is no `collections.abc`. `types` names the engine's builtin types and
 provides `SimpleNamespace`, `new_class`, `prepare_class`, `resolve_bases`,
 `get_original_bases`, and `DynamicClassAttribute`; cell, frame, traceback,
-descriptor-member, capsule, and lazy-import types and `coroutine()` are absent.
+descriptor-member, and capsule types and `coroutine()` are absent;
+`LazyImportType` is the lazy-import placeholder type. `sys` keeps the runtime
+state natively: `modules`, `exception()`, the recursion limit, the integer
+string-conversion limit, and `stdout`/`stderr` streams that write to the host
+output callback (`print()` and interactive display use `sys.stdout` once `sys`
+is imported). It also provides `exc_info`, `exit`, `intern`, `displayhook`,
+and constant metadata (`version_info`, `float_info`, `int_info`, `hash_info`,
+`flags`, `implementation`, whose name is `slimpy`). Frames, tracing,
+profiling, reference counts, audit hooks, and a separate error stream are not
+provided.
 `weakref` provides `ref`, `proxy`, `getweakrefcount`, `getweakrefs`,
 `WeakMethod`, `WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`, and
 `finalize` (which has no interpreter-exit hook).
@@ -672,7 +689,14 @@ Arithmetic promotes before overflowing signed C integers. Signed division and
 modulo follow floor semantics; integer-to-float and integer division use
 round-to-nearest-even. Comparisons preserve exact integer values. Exponentiation
 supports modular inverses. Decimal conversion currently uses the default
-4,300-digit limit; changing that limit through sys remains unimplemented.
+4,300-digit limit, which `sys.set_int_max_str_digits` changes per context.
+
+Recursion follows CPython's two limits. Python frames (function calls,
+generator resumption, and module execution) count against the per-context
+recursion limit, 1,000 by default, and exceeding it raises "maximum recursion
+depth exceeded". Recursive C paths in the evaluator, parser, repr, comparison,
+and hashing check the remaining machine stack against a 4 MiB budget and raise
+CPython's "Stack overflow" RecursionError instead of crashing.
 
 ### 4.4 Garbage collection
 

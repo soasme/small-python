@@ -158,13 +158,23 @@ cases recorded as unexecuted failures, and skips remain separate from passes.
 
 The replacement framework currently implements the assertions and fixtures
 needed by these twelve modules, including subtests that continue after failure.
-Exception-message patterns and `assertRegex` support literal characters, the `?`
-quantifier, and Unicode word boundaries (`\b`); other regex syntax fails explicitly.
-The adapter is checked against CPython with 578 regex examples, 322 `assertRegex`
-cases and 142 `assertCountEqual` cases, including negative controls, Unicode
-boundaries, duplicate unhashable values, and non-reflexive values. It is not a complete
-unittest implementation: warning assertions, full regex support, expected-failure
-handling, and continuation after cleanup failures remain gaps. Unsupported framework operations fail
+Exception-message patterns and `assertRegex` use a backtracking regex subset:
+literals, escapes, `.`, character classes, anchors, word boundaries, groups,
+alternation, and greedy or lazy quantifiers. Lookaround, backreferences, inline
+flags, and possessive quantifiers fail explicitly. The adapter is checked
+against CPython with 834 regex examples (512 randomly generated from the
+supported grammar), 834 `assertRegex` cases and 142 `assertCountEqual` cases,
+including negative controls, Unicode boundaries, duplicate unhashable values,
+and non-reflexive values. Skip decorators, class-level skips, and expected
+failures are supported, and skips are reported separately from passes. It is
+not a complete unittest implementation: warning and logging assertions and
+continuation after cleanup failures remain gaps.
+
+`test.support` is replaced by
+[`tests/support/test/support/__init__.py`](../../tests/support/test/support/__init__.py),
+which describes slim.py rather than CPython: `check_impl_detail()` is false,
+so `cpython_only` tests are skipped, and helpers that need missing engine
+features (warnings, subprocesses, threads) are absent and fail on use. Unsupported framework operations fail
 explicitly. Dynamically located or imported test classes are recorded as
 adapter-ineligible rather than silently omitted. Extending the selection
 requires resolving those obligations.

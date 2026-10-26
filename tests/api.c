@@ -86,7 +86,7 @@ static void namespace_cycles(void) {
         spy_collect(c);
         assert(spy_live_values(c) == baseline);
     }
-    execute(c, "proxy = {}.keys().mapping\nfor i in range(1000): proxy = type(proxy)(proxy)\n");
+    execute(c, "proxy = {}.keys().mapping\nfor i in range(100000): proxy = type(proxy)(proxy)\n");
     assert(!spy_eval(c, "repr(proxy)", "proxy.py"));
     assert(!strcmp(spy_error_type(c), "RecursionError"));
     spy_clear_error(c);

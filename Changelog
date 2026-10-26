@@ -195,3 +195,11 @@
   arguments. Unterminated strings and unclosed brackets report CPython's
   offsets. Compiler errors inside f-string fields are no longer lost, and an
   await expression reports the line of its keyword.
+- Built-in sys module: modules, exception/exc_info, recursion and integer
+  string-conversion limits, host stdout/stderr used by print, and constant
+  metadata struct sequences. Python frames count against the recursion limit;
+  C recursion is bounded by a stack budget with CPython's messages.
+- Python 3.15 lazy imports (PEP 810) with placeholder reification, resolution
+  cause chaining, and the parser's placement errors; types.LazyImportType.
+- A test.support adapter and a backtracking regex subset, skip decorators,
+  and expected failures in the test-only unittest replacement.

@@ -242,7 +242,7 @@ def unittest_ports(driver, modules):
                     finish_class(current)
                 actions.append(({"phase": "setUpClass", "class": name},
                                 f"_spy_class_ready = False\n{name}._class_cleanups = []\n"
-                                f"{name}.setUpClass()\n_spy_class_ready = True\n"))
+                                f"_spy_unittest._class_setup({name})\n_spy_class_ready = True\n"))
                 current = cls
             actions.append(({"phase": "test", "id": case.id(), "class": name},
                             f"if _spy_class_ready:\n    _spy_unittest._run_case({name}, {case._testMethodName!r})\n"))

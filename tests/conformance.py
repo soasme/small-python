@@ -3407,6 +3407,58 @@ print(property(fget=len, doc='d').__doc__)
 """]
 
 CASES.append(r"""
+# sys recursion and integer-string limits, and PEP 810 lazy imports of built-in modules.
+import sys
+print(sys.getrecursionlimit(), sys.get_int_max_str_digits(), sys.version_info[:2], sys.maxsize == 2**63 - 1)
+def down(n): return down(n + 1)
+try: down(0)
+except RecursionError as e: print(type(e).__name__, e)
+old = sys.getrecursionlimit()
+sys.setrecursionlimit(50)
+def depth(n=1):
+    try: return depth(n + 1)
+    except RecursionError: return n
+print(depth() <= 50)
+sys.setrecursionlimit(old)
+for bad in [0, -1, 2**40, "x"]:
+    try: sys.setrecursionlimit(bad)
+    except Exception as e: print(type(e).__name__, e)
+for value in ["1" * 4301, "1" * 4300]:
+    try: print(len(str(int(value))))
+    except ValueError as e: print(e)
+sys.set_int_max_str_digits(0)
+print(len(str(10 ** 5000)))
+sys.set_int_max_str_digits(5000)
+try: str(10 ** 5000)
+except ValueError as e: print(e)
+for bad in [10, -1]:
+    try: sys.set_int_max_str_digits(bad)
+    except ValueError as e: print(e)
+sys.set_int_max_str_digits(4300)
+print(sys.float_info.max == 1.7976931348623157e+308, sys.float_info.dig, sys.int_info.default_max_str_digits)
+print(float.__getformat__("double"), sys.intern("ab") is sys.intern("ab"))
+try: type(sys.version_info)()
+except TypeError as e: print(e)
+print(sys.modules["sys"] is sys, sys.exc_info())
+try: raise KeyError(1)
+except KeyError: print(sys.exc_info()[0], sys.exception())
+lazy import collections
+lazy from weakref import ref as lazy_ref
+print(type(globals()["collections"]).__name__, type(globals()["lazy_ref"]).__name__)
+print(collections.deque([1, 2]), type(globals()["collections"]).__name__)
+print(lazy_ref.__name__, globals()["lazy_ref"] is lazy_ref)
+lazy import missing_module_for_lazy
+try: missing_module_for_lazy
+except ModuleNotFoundError as e: print(type(e).__name__, e, type(e.__cause__).__name__, e.__cause__)
+for source in ["def f():\n    lazy import x", "class C:\n    lazy import x", "try:\n    lazy import x\nexcept: pass",
+               "lazy from x import *", "lazy from __future__ import annotations", "from x lazy import y"]:
+    try: compile(source, "<s>", "exec")
+    except SyntaxError as e: print(e.msg, e.lineno)
+lazy = 3
+print(lazy)
+""")
+
+CASES.append(r"""
 # CPython's error spans for range-based parser diagnostics and tokenizer errors.
 for source in ["[1, 2 3]", "x = 1 +", "print 'x'", "import a.b from c.d", "case 1: pass", "match x\n  case 1: pass",
                "x = 08", "0x", "0o8", "1_000_", "1.5j_", "with a,: pass", "raise from x", "3 + not 3", "- not 3", "{1: 2, 3}",

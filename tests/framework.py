@@ -29,23 +29,32 @@ def main():
         assert check_example(example, reply) == (outcome.failed == 0), (example, reply)
     rng = random.Random(315)
     examples = []
-    for _ in range(256):
-        pattern = ''.join(rng.choice('ab') + rng.choice(('', '?')) for _ in range(rng.randrange(8)))
-        text = ''.join(rng.choice('abc') for _ in range(rng.randrange(12)))
-        expected = re.search(pattern, text) is not None
-        examples.append(doctest.Example(
-            f"assert unittest._pattern_matches(unittest._pattern_tokens({pattern!r}), {text!r}) is {expected}\n", ''))
+    # Random patterns over the supported grammar, compared with re.search.
+    def atom(depth):
+        choices = ['a', 'b', 'α', '.', r'\d', r'\w', r'\s', r'\W', '[ab]', '[^a]', '[a-c]', r'[\d_]', r'\.', '-']
+        if depth < 2:
+            choices += ['(' + regex(depth + 1) + ')', '(?:' + regex(depth + 1) + ')']
+        return rng.choice(choices) + rng.choice(['', '', '?', '*', '+', '{2}', '{1,2}', '{,1}', '*?', '+?', '??'])
+    def regex(depth=0):
+        branches = []
+        for _ in range(rng.choice([1, 1, 1, 2])):
+            items = [rng.choice([r'\b', r'\B', '^', '$', r'\A', r'\Z']) if not rng.randrange(6) else atom(depth)
+                     for _ in range(rng.randrange(4))]
+            branches.append(''.join(items))
+        return '|'.join(branches)
     patterns = [r'\b', r'\bword\b', r'\b_?\b', r'α?\b', r'\b\b', r'\ba?\b']
-    texts = ['', 'word', 'words', ' word!', '_word', 'α', 'α_', 'á', '１', '²', 'a\nb']
+    texts = ['', 'word', 'words', ' word!', '_word', 'α', 'α_', 'á', '１', '²', 'a\nb']
     for _ in range(256):
         patterns.append(''.join(rng.choice([r'\b', 'a', 'α?', '_?', '１']) for _ in range(rng.randrange(6))))
         texts.append(''.join(rng.choice('aα_１²! \u0301') for _ in range(rng.randrange(10))))
+    for _ in range(512):
+        patterns.append(regex())
+        texts.append(''.join(rng.choice('abcα1 _.-\n') for _ in range(rng.randrange(10))))
     regex_cases = [(pattern, text) for pattern in patterns[:6] for text in texts[:11]]
     regex_cases.extend(zip(patterns[6:], texts[11:]))
     for pattern, text in regex_cases:
         expected = re.search(pattern, text) is not None
-        examples.append(doctest.Example(
-            f"assert unittest._pattern_matches(unittest._pattern_tokens({pattern!r}), {text!r}) is {expected}\n", ''))
+        examples.append(doctest.Example(f"assert unittest._search({pattern!r}, {text!r}) is {expected}\n", ''))
         try:
             unittest.TestCase().assertRegex(text, pattern)
             expected = True
@@ -101,12 +110,12 @@ for pattern, text, expected in [('needle', 'a needle here', True), ('needle', 'o
         caught = True
     assert caught is not expected
 try:
-    unittest.TestCase().assertRaisesRegex(ValueError, '.*')
+    unittest.TestCase().assertRaisesRegex(ValueError, '(?=x)')
 except NotImplementedError:
     pass
 else:
     raise AssertionError('unsupported regex was accepted')
-for pattern in [r'\B', r'\b?', '.*', '(word)', '[ab]', 'a??']:
+for pattern in [r'\b?', '(?=w)', '(?!w)', '(?<=w)', r'(w)\1', '(?i)w', 'w*+', '[[:alpha:]]', r'\p', '*w', '(w']:
     try:
         unittest.TestCase().assertRegex('word', pattern)
     except NotImplementedError:
@@ -137,9 +146,9 @@ assert events == [0, 1, 2, 'teardown', 'cleanup']
     replies, error = run_group(Path(sys.argv[1]).resolve(), 'import unittest\n', examples, 30, root / 'tests/support')
     if error or len(replies) != len(examples) + 1:
         raise AssertionError(error or 'missing framework results')
-    for reply in replies:
+    for example, reply in zip([None] + examples, replies):
         if not reply['ok']:
-            raise AssertionError(reply)
+            raise AssertionError((example and example.source, reply))
     output = replies[-1]['output']
     records = ast.literal_eval(output.removeprefix('@spy-subtests@').strip())
     assert [record[2] for record in records] == ['passed', 'failed', 'passed', 'passed'], records
@@ -158,7 +167,7 @@ assert events == [0, 1, 2, 'teardown', 'cleanup']
                     target.write_text(f'value = {index}\n')
                 replies, error = run_group(Path(sys.argv[1]).resolve(), 'import fixture\nprint(fixture.value)\n', [], 10, paths)
                 assert not error and replies[0]['ok'] and replies[0]['output'] == '0\n', (error, replies)
-    print(f'Framework: 14 doctest captures, {256 + len(regex_cases)} regex-oracle comparisons, '
+    print(f'Framework: 14 doctest captures, {len(regex_cases)} regex-oracle comparisons, '
           f'{len(regex_cases)} assertRegex and {len(count_cases)} assertCountEqual oracle checks, '
           'subtests, cleanup, and 4 module-path precedence checks passed')
 

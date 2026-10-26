@@ -15,7 +15,7 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-enum { V_UNIT = SPY_CODE, V_ENV = SPY_FROZENDICT + 1, V_UNBOUND };
+enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAZY_IMPORT + 1, V_UNBOUND };
 typedef struct Node Node;
 typedef struct Program Program;
 typedef struct Machine Machine;
@@ -25,11 +25,12 @@ typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]
 enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16 };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 typedef struct { const char *name; unsigned flags; size_t line; } Symbol;
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap; int kind; };
+struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap; int kind, tries; };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
-enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64 };
+enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
+       F_LAZY = 128 };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -67,6 +68,9 @@ struct SPYValue {
         struct { SPYValue *get, *set, *del, *doc, *name; } property;
         struct { SPYValue *start, *stop, *step, *length; } range;
         struct { SPYValue *start, *stop, *step; } slice;
+        /* A root has an absolute module name and a None or tuple fromlist;
+         * a projection has its source placeholder and an attribute name. */
+        struct { SPYValue *from, *attr, *builtins; int resolving; } lazy;
         struct { SPYValue *strings, *interpolations; } template;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
@@ -83,11 +87,12 @@ struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
+    SPYValue *sys; /* The sys module once imported; print then uses sys.stdout. */
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
-    SPYValue *types[SPY_FROZENDICT + 1];
+    SPYValue *types[SPY_LAZY_IMPORT + 1];
     /* Weak references: targets and reference objects are borrowed. A reference
      * keeps its callback as its own __callback__ attribute, so the collector
      * sees that edge. weak_calls owns each reference whose target died, until
@@ -102,6 +107,10 @@ struct SPYContext {
     SPYValue *caller_env; /* Borrowed: where the running Python function was called. */
     SPYValue *inherited_exception; /* Borrowed from a suspended caller. */
     size_t live, steps, step_limit, depth;
+    /* Python frames are limited by sys.setrecursionlimit; the engine's own C
+     * recursion by the machine stack it has used since the outermost entry. */
+    size_t py_depth, recursion_limit, int_max_str_digits, stack_size;
+    uintptr_t stack_top;
     SPYWrite write;
     SPYFlush flush;
     void *write_data;
@@ -158,6 +167,25 @@ static SPYValue *errorf(SPYContext *c, const char *type, const char *fmt, ...) {
         va_end(ap);
     }
     return NULL;
+}
+/* As CPython's _Py_CheckRecursiveCall, bound native recursion by the stack
+ * actually used rather than a count; the first entry records the top. */
+static int deeper(SPYContext *c, const char *where) {
+    char probe;
+    uintptr_t here = (uintptr_t)&probe;
+    if (!c->depth++) { c->stack_top = here; return 0; }
+    size_t used = here < c->stack_top ? c->stack_top - here : here - c->stack_top;
+    if (used <= c->stack_size) return 0;
+    c->depth--;
+    errorf(c, "RecursionError", "Stack overflow (used %zu kB)%s", used / 1024, where);
+    return -1;
+}
+/* A Python frame, counted against sys.getrecursionlimit() as CPython's
+ * _Py_CheckRecursiveCallPy. */
+static int enter_frame(SPYContext *c) {
+    if (c->py_depth >= c->recursion_limit) { errorf(c, "RecursionError", "maximum recursion depth exceeded"); return -1; }
+    c->py_depth++;
+    return 0;
 }
 SPYValue *spy_error(SPYContext *c, const char *type, const char *message) {
     return errorf(c, type, "%s", message);
@@ -285,6 +313,10 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         break;
     case SPY_SLICE:
         visit(v->as.slice.start, data); visit(v->as.slice.stop, data); visit(v->as.slice.step, data); break;
+    case SPY_LAZY_IMPORT:
+        visit(v->as.lazy.from, data); visit(v->as.lazy.attr, data);
+        if (v->as.lazy.builtins) visit(v->as.lazy.builtins, data);
+        break;
     case SPY_RANGE:
         visit(v->as.range.start, data); visit(v->as.range.stop, data); visit(v->as.range.step, data);
         if (v->as.range.length) visit(v->as.range.length, data);
@@ -1048,7 +1080,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     return -1;
 }
 static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
-    if (++c->depth > 256) { c->depth--; spy_error(c, "RecursionError", "hash nesting limit exceeded"); return -1; }
+    if (deeper(c, "")) return -1;
     int status = hash_object(c, value, result);
     c->depth--; return status;
 }
@@ -1200,7 +1232,7 @@ static int native_kind(SPYValue *v) {
 }
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
@@ -1209,7 +1241,7 @@ static const char *type_name(SPYValue *value) {
     int kind = native_kind(value);
     if (kind) return kind == NATIVE_METHOD_DESCRIPTOR ? "method_descriptor" : kind == NATIVE_WRAPPER_DESCRIPTOR ? "wrapper_descriptor" :
         kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
-    return value->type <= SPY_FROZENDICT ? names[value->type] : "object";
+    return value->type <= SPY_LAZY_IMPORT ? names[value->type] : "object";
 }
 static Symbol *scope_symbol(Scope *scope, const char *name) {
     if (scope) for (size_t i = 0; i < scope->len; i++)
@@ -1255,6 +1287,7 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
     }
     return spy_retain(name_local(env, name));
 }
+static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
     int annotation = 1;
     for (SPYValue *e = env; e; e = e->as.map.parent) {
@@ -1284,6 +1317,10 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
                 if (e != env) return errorf(c, "NameError", "cannot access free variable '%s' where it is not associated with a value in enclosing scope", name);
                 return errorf(c, "UnboundLocalError", "local variable '%s' has no value", name);
             }
+            /* Global and class namespaces resolve lazy imports; function locals do not. */
+            if (v->type == SPY_LAZY_IMPORT && (e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE ||
+                                               e->as.map.scope->kind == S_CLASS))
+                return lazy_reify(c, e, name, v);
             return v;
         }
     }
@@ -1344,9 +1381,11 @@ static int integer_format(Buffer *out, SPYValue *value, unsigned base, int upper
             work[i - 1] = (uint32_t)(numerator / base); remainder = numerator % base;
         }
         text[count++] = digits[remainder];
-        if ((base & (base - 1)) && count > 4300) {
+        size_t limit = out->ctx->int_max_str_digits;
+        if ((base & (base - 1)) && limit && count > limit) {
             free(work); free(text);
-            spy_error(out->ctx, "ValueError", "Exceeds the limit (4300 digits) for integer string conversion");
+            errorf(out->ctx, "ValueError", "Exceeds the limit (%zu digits) for integer string conversion; "
+                   "use sys.set_int_max_str_digits() to increase the limit", limit);
             return -1;
         }
         while (len && !work[len - 1]) len--;
@@ -1388,9 +1427,8 @@ static SPYValue *integer_parse(SPYContext *c, const char *text, size_t len, unsi
             ch >= 'a' && ch <= 'z' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'Z' ? ch - 'A' + 10 : 36;
         if (digit >= base) goto invalid;
         previous_digit = 1; digits++; nonzero |= digit != 0;
-        if ((base & (base - 1)) && digits > 4300) {
-            free(result); return spy_error(c, error, "Exceeds the limit (4300 digits) for integer string conversion");
-        }
+        /* An over-long value is still validated; only its arithmetic is skipped. */
+        if ((base & (base - 1)) && c->int_max_str_digits && digits > c->int_max_str_digits) continue;
         uint64_t carry = digit;
         for (size_t i = 0; i < result->len; i++) {
             uint64_t product = (uint64_t)result->digits[i] * base + carry;
@@ -1399,6 +1437,12 @@ static SPYValue *integer_parse(SPYContext *c, const char *text, size_t len, unsi
         if (carry) result->digits[result->len++] = (uint32_t)carry;
     }
     if (!digits || !previous_digit || (automatic && !prefix && leading_zero && nonzero)) goto invalid;
+    if ((base & (base - 1)) && c->int_max_str_digits && digits > c->int_max_str_digits) {
+        free(result);
+        return errorf(c, error, "Exceeds the limit (%zu digits) for integer string conversion: value has %zu digits; "
+                      "use sys.set_int_max_str_digits() to increase the limit%s", c->int_max_str_digits, digits,
+                      strcmp(error, "SyntaxError") ? "" : " - Consider hexadecimal for huge integer literals to avoid decimal conversion limits.");
+    }
     result->sign = sign;
     return integer_finish(c, result);
 invalid:
@@ -1649,12 +1693,15 @@ static SPYValue *template_concat(SPYContext *c, SPYValue *a, SPYValue *b) {
     return result;
 }
 static SPYValue *view_list(SPYContext *, SPYValue *);
+static int lazy_name(Buffer *, SPYValue *);
 static int format_value(Buffer *b, SPYValue *v, int repr) {
     char num[96];
     switch (v->type) {
     case SPY_NONE: return puts_buffer(b, "None");
     case SPY_NOT_IMPLEMENTED: return puts_buffer(b, "NotImplemented");
     case SPY_ELLIPSIS: return puts_buffer(b, "Ellipsis");
+    case SPY_LAZY_IMPORT:
+        return puts_buffer(b, "<lazy_import '") || lazy_name(b, v) || puts_buffer(b, "'>");
     case SPY_MAPPINGPROXY: {
         if (b->depth == 128) { spy_error(b->ctx, "RecursionError", "representation is too deep"); return -1; }
         b->path[b->depth++] = v;
@@ -1844,7 +1891,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             free(inner.data); return status ? -1 : 0;
         }
         if (base) return format_value(b, base, repr);
-        if (++b->ctx->depth > 256) { b->ctx->depth--; spy_error(b->ctx, "RecursionError", "representation nesting limit exceeded"); return -1; }
+        if (deeper(b->ctx, repr ? " while getting the repr of an object" : " while getting the str of an object")) return -1;
         SPYValue *method = special_method(b->ctx, v, repr ? "__repr__" : "__str__");
         if (!method && !repr) method = special_method(b->ctx, v, "__repr__");
         if (method) {
@@ -4406,16 +4453,27 @@ static Node *statement_body(Parser *p) {
         }
         return n;
     }
+    /* PEP 810: the soft keyword lazy before an import statement. */
+    Token *after = &p->tokens[p->pos + 1];
+    size_t lazy = keyword(p, "lazy") && after->kind == T_NAME &&
+        ((after->len == 6 && !memcmp(after->start, "import", 6)) || (after->len == 4 && !memcmp(after->start, "from", 4))) ? ++p->pos : 0;
     if (keyword(p, "import") || keyword(p, "from")) {
         size_t start = p->pos;
         int from = take_word(p, "from"), renamed = 0;
         if (!from) p->pos++;
         n = node(p, from ? N_FROM : N_IMPORT);
         if (!n) return NULL;
+        if (lazy) n->flags |= F_LAZY;
         if (from) {
             while (at(p, '.') || at(p, T_ELLIPSIS)) n->op += take(p, '.') ? 1 : (p->pos++, 3);
             if (at(p, T_NAME) && !keyword(p, "import")) n->a = import_name(p);
+            if (n->a && keyword(p, "lazy") && p->tokens[p->pos + 1].len == 6 && !memcmp(p->tokens[p->pos + 1].start, "import", 6))
+                return syntax(p, "use 'lazy from ... ' instead of 'from ... lazy import'");
             if ((!n->a && !n->op) || !take_word(p, "import")) return syntax(p, "invalid syntax");
+            if (lazy && !n->op && !strcmp(source_name(n->a), "__future__")) {
+                p->pos = lazy - 1;
+                return syntax(p, "lazy from __future__ import is not allowed");
+            }
             if (take(p, '*')) { n->args = node(p, N_STAR); return n; }
         }
         if (at(p, T_NL)) return syntax(p, "Expected one or more names after 'import'");
@@ -4808,6 +4866,14 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         return 0;
     case N_ATTR: return scope_node(c, scope, n->a);
     case N_IMPORT: case N_FROM:
+        if (n->flags & F_LAZY) {
+            const char *what = n->kind == N_IMPORT ? "import" : "from ... import";
+            const char *where = scope->tries ? "try/except blocks" : scope->kind == S_FUNCTION ? "functions" :
+                scope->kind == S_CLASS ? "classes" : NULL;
+            c->line = n->line;
+            if (where) { errorf(c, "SyntaxError", "lazy %s not allowed inside %s", what, where); return -1; }
+            if (n->args->kind == N_STAR) { spy_error(c, "SyntaxError", "lazy from ... import * is not allowed"); return -1; }
+        }
         if (n->args->kind == N_STAR) {
             if (scope->kind != S_MODULE) { spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
             return 0;
@@ -4876,9 +4942,13 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         return scope_walk(c, scope, n->b);
     case N_EXCEPT:
         return scope_node(c, scope, n->a) || scope_target(c, scope, n->c, 1) || scope_walk(c, scope, n->b) ? -1 : 0;
-    case N_TRY:
-        return scope_walk(c, scope, n->a) || scope_walk(c, scope, n->args) ||
+    case N_TRY: {
+        scope->tries++;
+        int status = scope_walk(c, scope, n->a) || scope_walk(c, scope, n->args) ||
             scope_walk(c, scope, n->b) || scope_walk(c, scope, n->c) ? -1 : 0;
+        scope->tries--;
+        return status;
+    }
     case N_MATCH:
         if (scope_node(c, scope, n->a)) return -1;
         for (Node *item = n->args; item; item = item->next)
@@ -5295,7 +5365,7 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         return result;
     }
     if (v->as.iterator.done) return NULL;
-    if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "iterator nesting limit exceeded"); }
+    if (deeper(c, "")) return NULL;
     SPYValue *source = v->as.iterator.source, *result = NULL;
     switch (v->as.iterator.kind) {
     case I_CALLABLE: {
@@ -6424,7 +6494,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     int order;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE || a->type == SPY_SLICE) && a->type == b->type) {
-        if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "comparison nesting limit exceeded"); }
+        if (deeper(c, " in comparison")) return NULL;
         for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
             SPYValue *x = spy_retain(comparison_item(a, i)), *y = spy_retain(comparison_item(b, i));
             if (x == y || equal(x, y, 0)) { spy_release(x); spy_release(y); continue; }
@@ -6584,7 +6654,7 @@ static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self
     return spy_retain(value);
 }
 static SPYValue *descriptor_get(SPYContext *c, SPYValue *value, SPYValue *self, SPYValue *owner) {
-    if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "descriptor nesting limit exceeded"); }
+    if (deeper(c, "")) return NULL;
     SPYValue *result = descriptor_value(c, value, self, owner);
     c->depth--;
     return result;
@@ -6973,6 +7043,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             return value;
         }
         SPYValue *item = name_local(v, name);
+        if (item && item->type == SPY_LAZY_IMPORT) return lazy_reify(c, v, name, spy_retain(item));
         return item ? spy_retain(item) : errorf(c, "AttributeError", "module has no attribute '%s'", name);
     }
     int method = -1;
@@ -7075,6 +7146,12 @@ static SPYValue *attribute(SPYContext *c, SPYValue *v, const char *name) {
         result = key ? spy_call(c, method, 1, &key) : NULL;
         spy_release(method); spy_release(key);
     } else result = attribute_value(c, v, name);
+    if (!result && v->type == SPY_LAZY_IMPORT && error_is(c, "AttributeError")) {
+        Buffer lazy = {.ctx = c};
+        spy_clear_error(c);
+        if (!lazy_name(&lazy, v)) errorf(c, "AttributeError", "cannot access attribute '%s' on unresolved lazy import '%s'", name, lazy.data);
+        free(lazy.data);
+    }
     if (result || v->type != SPY_INSTANCE || !error_is(c, "AttributeError")) return result;
     SPYValue *fallback = class_lookup(v->as.map.parent, "__getattr__");
     if (!fallback) return NULL;
@@ -9193,7 +9270,7 @@ container_fail:
     return result;
 }
 static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
-    if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "evaluation nesting limit exceeded"); }
+    if (deeper(c, "")) return NULL;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
     SPYValue *v = eval_inner(c, f, n);
@@ -9417,7 +9494,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     for (size_t i = 0; i < argc; i++) if (!same_context(c, argv[i])) return NULL;
     if (keywords) for (size_t i = 0; i < keywords->as.map.len; i++)
         if (!builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)) return spy_error(c, "TypeError", "keywords must be strings");
-    if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "call nesting limit exceeded"); }
+    if (deeper(c, " while calling a Python object")) return NULL;
     SPYValue *result = NULL;
     if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
         result = fn->as.native.kwcall(c, argc, argv, keywords, fn->as.native.data);
@@ -9477,11 +9554,11 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
             if (!bind_arguments(c, fn, env, argc, argv, keywords) && !declare_locals(c, env)) {
                 Frame frame = { env, fn->as.function.unit , 0};
                 if (def->code) result = new_generator(c, &frame, fn);
-                else {
+                else if (!enter_frame(c)) {
                     SPYValue *caller = c->caller_env;
                     c->caller_env = c->eval_env;
                     Result r = execute(c, &frame, def->b);
-                    c->caller_env = caller;
+                    c->caller_env = caller; c->py_depth--;
                     if (r.flow == FLOW_RETURN) result = r.value;
                     else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
                 }
@@ -9578,10 +9655,12 @@ SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *ar
 }
 static int weakref_natives(SPYContext *, SPYValue *);
 static int collections_natives(SPYContext *, SPYValue *);
+static int sys_natives(SPYContext *, SPYValue *);
 /* Built-in modules: Python sources embedded by tools/build_intrinsics.py,
  * found before the host loader and parsed only when first imported. */
 static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); } builtin_modules[] = {
     {"collections", module_collections, sizeof(module_collections) / sizeof(*module_collections), collections_natives},
+    {"sys", module_sys, sizeof(module_sys) / sizeof(*module_sys), sys_natives},
     {"types", module_types, sizeof(module_types) / sizeof(*module_types), NULL},
     {"weakref", module_weakref, sizeof(module_weakref) / sizeof(*module_weakref), weakref_natives},
 };
@@ -9729,6 +9808,90 @@ static int weakref_natives(SPYContext *c, SPYValue *module) {
         define_native(c, module, "_weak_callback", weak_get, c) || define_native(c, module, "_weak_hash", weak_hash, NULL) ||
         define_native(c, module, "_weak_refs", weak_refs, NULL);
 }
+/* The sys module's runtime state. Constant metadata is Python in modules/sys.py. */
+enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH };
+static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits"};
+    int id = (int)(intptr_t)data;
+    if (id == SYS_SETRECURSIONLIMIT) {
+        if (argc != 1) return errorf(c, "TypeError", "sys.setrecursionlimit() takes exactly one argument (%zu given)", argc);
+        SPYValue *index = index_object(c, argv[0]);
+        if (!index) return NULL;
+        int64_t limit;
+        int fits = !index->as.integer_data.big && !spy_as_int(c, index, &limit) && limit >= INT_MIN && limit <= INT_MAX;
+        spy_release(index);
+        if (!fits) { spy_clear_error(c); return spy_error(c, "OverflowError", "Python int too large to convert to C int"); }
+        if (limit < 1) return spy_error(c, "ValueError", "recursion limit must be greater or equal than 1");
+        if ((size_t)limit <= c->py_depth)
+            return errorf(c, "RecursionError", "cannot set the recursion limit to %d at the recursion depth %zu: the limit is too low",
+                          (int)limit, c->py_depth);
+        c->recursion_limit = (size_t)limit;
+        return spy_none(c);
+    }
+    if (id == SYS_WRITE || id == SYS_FLUSH) {
+        /* Host output for sys.stdout and sys.stderr; text is already a str. */
+        if (id == SYS_FLUSH) return c->flush && c->flush(c->write_data) ? spy_error(c, "OSError", "output flush failed") : spy_none(c);
+        if (argc != 1 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "write() argument must be str");
+        if (!c->write) return spy_error(c, "OSError", "no output callback installed");
+        if (c->write(c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
+        return spy_none(c);
+    }
+    if (argc) return errorf(c, "TypeError", "sys.%s() takes no arguments (%zu given)", names[id], argc);
+    if (id == SYS_EXCEPTION) { SPYValue *e = active_exception(c); return spy_retain(e ? e : c->none); }
+    return spy_int(c, (int64_t)(id == SYS_GETRECURSIONLIMIT ? c->recursion_limit : c->int_max_str_digits));
+}
+static SPYValue *sys_set_int_max_str_digits(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *value = argc ? argv[0] : NULL;
+    for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
+        SPYValue *key = keywords->as.map.items[i].key;
+        if (strcmp(key->as.string.data, "maxdigits"))
+            return errorf(c, "TypeError", "set_int_max_str_digits() got an unexpected keyword argument '%s'", key->as.string.data);
+        if (value) return spy_error(c, "TypeError", "argument for set_int_max_str_digits() given by name ('maxdigits') and position (1)");
+        value = keywords->as.map.items[i].value;
+    }
+    if (argc > 1) return errorf(c, "TypeError", "set_int_max_str_digits() takes at most 1 argument (%zu given)", argc);
+    if (!value) return spy_error(c, "TypeError", "set_int_max_str_digits() missing required argument 'maxdigits' (pos 1)");
+    SPYValue *index = index_object(c, value);
+    if (!index) return NULL;
+    int64_t digits;
+    int fits = !index->as.integer_data.big && !spy_as_int(c, index, &digits) && digits >= INT_MIN && digits <= INT_MAX;
+    spy_release(index);
+    if (!fits) { spy_clear_error(c); return spy_error(c, "OverflowError", "Python int too large to convert to C int"); }
+    if (digits && digits < 640) return spy_error(c, "ValueError", "maxdigits must be >= 640 or 0 for unlimited");
+    c->int_max_str_digits = (size_t)digits;
+    return spy_none(c);
+}
+static int sys_natives(SPYContext *c, SPYValue *module) {
+    static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits", "_write", "_flush"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
+        if (define_native(c, module, names[i], sys_native, (void *)(intptr_t)i)) return -1;
+    if (define_native(c, module, "set_int_max_str_digits", NULL, NULL)) return -1;
+    spy_release(c->sys); c->sys = spy_retain(module);
+    name_local(module, "set_int_max_str_digits")->as.native.kwcall = sys_set_int_max_str_digits;
+    uint16_t probe = 1;
+    const char *platform =
+#if defined(__APPLE__)
+        "darwin";
+#elif defined(__linux__)
+        "linux";
+#elif defined(_WIN32)
+        "win32";
+#elif defined(__FreeBSD__)
+        "freebsd";
+#else
+        "unknown";
+#endif
+    SPYValue *values[] = {spy_int(c, PTRDIFF_MAX), spy_string(c, *(unsigned char *)&probe ? "little" : "big", *(unsigned char *)&probe ? 6 : 3),
+                          spy_string(c, platform, strlen(platform))};
+    static const char *const fields[] = {"maxsize", "byteorder", "platform"};
+    int status = name_set(c, module, "modules", c->modules);
+    for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
+        status = status || !values[i] || name_set(c, module, fields[i], values[i]);
+        spy_release(values[i]);
+    }
+    return status;
+}
 static SPYValue *import_module(SPYContext *, const char *);
 static SPYValue *load_source_module(SPYContext *c, const char *name) {
     SPYValue *cached = name_local(c->modules, name);
@@ -9772,7 +9935,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         free(init.data);
         package = source != NULL;
         if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
-        if (!source) { spy_release(parent); return errorf(c, "ModuleNotFoundError", "no module named '%s'", name); }
+        if (!source) { spy_release(parent); return errorf(c, "ModuleNotFoundError", "No module named '%s'", name); }
         for (const char *ch = name; *ch && !c->error_type[0]; ch++) {
             char part = *ch == '.' ? '/' : *ch;
             append(&filename, &part, 1);
@@ -9864,7 +10027,7 @@ static SPYValue *call_intrinsic(SPYContext *c, const char *name, size_t argc, SP
     return fn ? spy_call(c, fn, argc, argv) : NULL;
 }
 static SPYValue *import_module(SPYContext *c, const char *name) {
-    if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "module nesting limit exceeded"); }
+    if (deeper(c, "")) return NULL;
     SPYValue *module = load_source_module(c, name);
     c->depth--; return module;
 }
@@ -9879,7 +10042,7 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
         if (!puts_buffer(&full, module_name->as.string.data) && !puts_buffer(&full, ".") && !puts_buffer(&full, name))
             value = import_module(c, full.data);
         char missing[sizeof(c->error_message)];
-        snprintf(missing, sizeof(missing), "no module named '%s'", full.data ? full.data : "");
+        snprintf(missing, sizeof(missing), "No module named '%s'", full.data ? full.data : "");
         int absent = error_is(c, "ModuleNotFoundError") && !strcmp(c->error_message, missing);
         free(full.data);
         if (value || !absent) return value;
@@ -9887,32 +10050,191 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
     }
     return required ? errorf(c, "ImportError", "cannot import name '%s'", name) : spy_none(c);
 }
-static SPYValue *relative_module(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
-    if (!level) return *suffix ? import_module(c, suffix) : spy_error(c, "ValueError", "Empty module name");
-    if (level < 0) return spy_error(c, "ValueError", "level must be >= 0");
-    if (!globals || globals->type != SPY_DICT) return spy_error(c, "TypeError", "globals must be a dict");
+/* The absolute module name of an import, as importlib._bootstrap._resolve_name. */
+static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
+    if (!level) {
+        if (!*suffix) { spy_error(c, "ValueError", "Empty module name"); return NULL; }
+        return copy_text(c, suffix, strlen(suffix));
+    }
+    if (level < 0) { spy_error(c, "ValueError", "level must be >= 0"); return NULL; }
+    if (!globals || globals->type != SPY_DICT) { spy_error(c, "TypeError", "globals must be a dict"); return NULL; }
     SPYValue *package = name_local(globals, "__package__");
     int fallback = !package || package->type == SPY_NONE;
     if (fallback) {
         package = name_local(globals, "__name__");
-        if (!package || package->type != SPY_STRING) return spy_error(c, "ImportError", "attempted relative import with no known parent package");
-    } else if (package->type != SPY_STRING) return spy_error(c, "TypeError", "__package__ must be a string");
+        if (!package || package->type != SPY_STRING) {
+            spy_error(c, "ImportError", "attempted relative import with no known parent package"); return NULL;
+        }
+    } else if (package->type != SPY_STRING) { spy_error(c, "TypeError", "__package__ must be a string"); return NULL; }
     size_t len = package->as.string.len;
     if (fallback && !name_local(globals, "__path__")) {
         const char *dot = strrchr(package->as.string.data, '.');
         len = dot ? (size_t)(dot - package->as.string.data) : 0;
     }
-    if (!len) return spy_error(c, "ImportError", "attempted relative import with no known parent package");
+    if (!len) { spy_error(c, "ImportError", "attempted relative import with no known parent package"); return NULL; }
     for (int64_t i = 1; i < level; i++) {
         while (len && package->as.string.data[len - 1] != '.') len--;
-        if (!len) return spy_error(c, "ImportError", "attempted relative import beyond top-level package");
+        if (!len) { spy_error(c, "ImportError", "attempted relative import beyond top-level package"); return NULL; }
         len--;
     }
     Buffer name = {.ctx = c};
     append(&name, package->as.string.data, len);
     if (*suffix) { puts_buffer(&name, "."); puts_buffer(&name, suffix); }
-    SPYValue *module = c->error_type[0] ? NULL : import_module(c, name.data);
-    free(name.data); return module;
+    if (c->error_type[0]) { free(name.data); return NULL; }
+    return name.data;
+}
+static SPYValue *relative_module(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
+    char *name = absolute_name(c, suffix, globals, level);
+    SPYValue *module = name ? import_module(c, name) : NULL;
+    free(name); return module;
+}
+/* PEP 810 lazy imports, after CPython's lazyimportobject.c. A placeholder is
+ * bound in module globals and resolved when a global or module attribute
+ * lookup reads it; plain dictionary access returns the placeholder. A root
+ * resolves through __import__; a projection replays from-import lookups. */
+static SPYValue *lazy_new(SPYContext *c, SPYValue *from, SPYValue *attr, SPYValue *builtins) {
+    SPYValue *lazy = value_new(c, SPY_LAZY_IMPORT);
+    if (!lazy) return NULL;
+    lazy->as.lazy.from = spy_retain(from); lazy->as.lazy.attr = spy_retain(attr);
+    lazy->as.lazy.builtins = spy_retain(builtins);
+    return lazy;
+}
+static int lazy_projection(SPYValue *lazy) { return lazy->as.lazy.from->type == SPY_LAZY_IMPORT; }
+static int lazy_from_import(SPYValue *root) {
+    SPYValue *attr = root->as.lazy.attr;
+    return attr->type == SPY_STRING || (attr->type == SPY_TUPLE && attr->as.seq.len);
+}
+/* lazy_import_path: the dotted name of the object resolution returns. */
+static int lazy_path(Buffer *out, SPYValue *lazy) {
+    if (lazy_projection(lazy))
+        return lazy_path(out, lazy->as.lazy.from) || puts_buffer(out, ".") || puts_buffer(out, lazy->as.lazy.attr->as.string.data);
+    const char *name = lazy->as.lazy.from->as.string.data, *dot = strchr(name, '.');
+    return append(out, name, dot && !lazy_from_import(lazy) ? (size_t)(dot - name) : strlen(name));
+}
+static int lazy_name(Buffer *out, SPYValue *lazy) {
+    if (lazy_projection(lazy)) return lazy_path(out, lazy);
+    return puts_buffer(out, lazy->as.lazy.from->as.string.data) || (lazy_from_import(lazy) && puts_buffer(out, "..."));
+}
+static SPYValue *lazy_replay(SPYContext *c, SPYValue *module, SPYValue *lazy) {
+    if (!lazy_projection(lazy)) return spy_retain(module);
+    SPYValue *from = lazy_replay(c, module, lazy->as.lazy.from);
+    SPYValue *value = from ? import_from(c, from, lazy->as.lazy.attr->as.string.data, 1) : NULL;
+    spy_release(from);
+    return value;
+}
+static ErrorState take_error(SPYContext *);
+static void restore_error(SPYContext *, ErrorState *);
+/* An unchained resolution error gets an ImportError naming the import as its cause. */
+static void lazy_cause(SPYContext *c, SPYValue *lazy) {
+    ErrorState error = take_error(c);
+    SPYValue *exception = error.value, *cause = NULL;
+    Buffer name = {.ctx = c}, message = {.ctx = c};
+    if (exception && exception->type == SPY_INSTANCE && !lazy_name(&name, lazy) &&
+        !puts_buffer(&message, "lazy import of '") && !puts_buffer(&message, name.data) &&
+        !puts_buffer(&message, "' raised an exception during resolution")) {
+        SPYValue *previous = name_local(exception, "__cause__"), *context = name_local(exception, "__context__");
+        SPYValue *suppress = name_local(exception, "__suppress_context__");
+        if ((!previous || previous->type == SPY_NONE) && (!context || context->type == SPY_NONE) &&
+            (!suppress || !spy_truth(suppress))) {
+            SPYValue *text = spy_string(c, message.data, message.len);
+            cause = text ? new_exception(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
+            spy_release(text);
+            if (cause) { name_set(c, exception, "__cause__", cause); name_set(c, exception, "__suppress_context__", c->booleans[1]); }
+        }
+    }
+    spy_release(cause); free(name.data); free(message.data);
+    spy_clear_error(c);
+    restore_error(c, &error);
+}
+static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
+    SPYValue *root = lazy, *first = NULL;
+    while (lazy_projection(root)) { first = root; root = root->as.lazy.from; }
+    if (lazy->as.lazy.resolving) {
+        Buffer name = {.ctx = c};
+        if (!lazy_name(&name, lazy))
+            errorf(c, "ImportError", "cannot import name '%s' (most likely due to a circular import)", name.data);
+        free(name.data); return NULL;
+    }
+    SPYValue *function = spy_retain(name_local(root->as.lazy.builtins, "__import__"));
+    if (!function) return spy_error(c, "ImportError", "__import__ not found");
+    /* `from a import b, c` imports only the name being resolved. */
+    SPYValue *fromlist = first && root->as.lazy.attr->type == SPY_TUPLE && root->as.lazy.attr->as.seq.len ?
+        value_new(c, SPY_TUPLE) : spy_retain(root->as.lazy.attr);
+    if (fromlist && fromlist != root->as.lazy.attr && sequence_append(c, fromlist, first->as.lazy.attr)) {
+        spy_release(fromlist); fromlist = NULL;
+    }
+    SPYValue *level = spy_int(c, 0), *module = NULL, *value = NULL;
+    lazy->as.lazy.resolving = 1;
+    if (fromlist && level) {
+        SPYValue *args[] = {root->as.lazy.from, c->none, c->none, fromlist, level};
+        module = spy_call(c, function, 5, args);
+    }
+    if (module && module->type == SPY_LAZY_IMPORT) { SPYValue *inner = lazy_resolve(c, module); spy_release(module); module = inner; }
+    if (module) value = lazy_replay(c, module, lazy);
+    lazy->as.lazy.resolving = 0;
+    spy_release(module); spy_release(fromlist); spy_release(level); spy_release(function);
+    if (value && value->type == SPY_LAZY_IMPORT) { SPYValue *inner = lazy_resolve(c, value); spy_release(value); value = inner; }
+    if (!value && c->error_type[0]) lazy_cause(c, lazy);
+    return value;
+}
+/* Resolve a placeholder read from env's binding of name and replace the
+ * binding, unless it has meanwhile been rebound. Takes ownership. */
+static SPYValue *name_lookup(SPYContext *, SPYValue *, const char *);
+static SPYValue *lazy_reify(SPYContext *c, SPYValue *env, const char *name, SPYValue *placeholder) {
+    SPYValue *value = lazy_resolve(c, placeholder);
+    SPYValue *current = value ? name_lookup(c, env, name) : NULL;
+    if (current == placeholder && name_set(c, env, name, value)) { spy_release(value); value = NULL; }
+    spy_release(current); spy_release(placeholder);
+    if (c->error_type[0]) { spy_release(value); return NULL; }
+    return value;
+}
+/* Bind each name of a lazy import statement, as _PyImport_LazyImportModuleLevelObject
+ * and _PyEval_LazyImportFrom: a loaded module's concrete attribute binds directly. */
+static int lazy_statement(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *globals = module_env(c, f->env);
+    SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
+    if (n->kind == N_IMPORT) {
+        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
+            const char *name = source_name(item->a);
+            SPYValue *text = spy_string(c, name, strlen(name));
+            SPYValue *value = text ? lazy_new(c, text, c->none, builtins) : NULL;
+            spy_release(text);
+            /* import a.b.c as d replays the attribute lookups b and c. */
+            for (const char *part = strchr(name, '.'); value && item->b && part; part = strchr(part + 1, '.')) {
+                const char *end = strchr(part + 1, '.');
+                SPYValue *attr = spy_string(c, part + 1, end ? (size_t)(end - part - 1) : strlen(part + 1));
+                SPYValue *next = attr ? lazy_new(c, value, attr, NULL) : NULL;
+                spy_release(attr); spy_release(value); value = next;
+            }
+            Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
+            if (value) name_set(c, f->env, binding->text, value);
+            spy_release(value);
+        }
+        return c->error_type[0] ? -1 : 0;
+    }
+    char *name = absolute_name(c, n->a ? source_name(n->a) : "", namespace_map(globals), n->op);
+    SPYValue *text = name ? spy_string(c, name, strlen(name)) : NULL, *fromlist = text ? value_new(c, SPY_TUPLE) : NULL;
+    for (Node *item = n->args; fromlist && item && !c->error_type[0]; item = item->next) {
+        SPYValue *attr = spy_string(c, source_name(item->a), strlen(source_name(item->a)));
+        if (!attr || sequence_append(c, fromlist, attr)) spy_error(c, "MemoryError", "allocation failed");
+        spy_release(attr);
+    }
+    SPYValue *root = fromlist && !c->error_type[0] ? lazy_new(c, text, fromlist, builtins) : NULL;
+    SPYValue *loaded = root ? name_local(c->modules, name) : NULL;
+    for (Node *item = n->args; root && item && !c->error_type[0]; item = item->next) {
+        const char *attr_name = source_name(item->a);
+        SPYValue *current = loaded && loaded->type == SPY_MODULE ? name_local(loaded, attr_name) : NULL, *value;
+        if (current && current->type != SPY_LAZY_IMPORT) value = spy_retain(current);
+        else {
+            SPYValue *attr = spy_string(c, attr_name, strlen(attr_name));
+            value = attr ? lazy_new(c, root, attr, NULL) : NULL;
+            spy_release(attr);
+        }
+        if (value) name_set(c, f->env, item->b ? item->b->text : item->a->text, value);
+        spy_release(value);
+    }
+    free(name); spy_release(text); spy_release(fromlist); spy_release(root);
+    return c->error_type[0] ? -1 : 0;
 }
 static int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     if (module->type != SPY_MODULE && module->type != SPY_INSTANCE && module->type != SPY_CLASS)
@@ -10286,7 +10608,7 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
         }
         /* Exceptions and each builtin value type have their own layout. */
         int kind = builtin_layout(c, base);
-        if (kind < 0 && subclass(base, exception)) kind = SPY_FROZENDICT + 1;
+        if (kind < 0 && subclass(base, exception)) kind = SPY_LAZY_IMPORT + 1;
         if (kind < 0 && subclass(base, c->types[SPY_CLASS])) kind = SPY_FROZENDICT + 2;
         if (kind >= 0 && layout >= 0 && kind != layout) return spy_error(c, "TypeError", "multiple bases have instance lay-out conflict");
         if (kind >= 0) layout = kind;
@@ -10342,7 +10664,7 @@ static int mapping_type(SPYContext *c, SPYValue *value) {
 }
 static int class_layout(SPYContext *c, SPYValue *cls) {
     int layout = builtin_layout(c, cls);
-    if (layout < 0 && subclass(cls, name_local(c->classes, "BaseException"))) return SPY_FROZENDICT + 1;
+    if (layout < 0 && subclass(cls, name_local(c->classes, "BaseException"))) return SPY_LAZY_IMPORT + 1;
     if (layout < 0 && subclass(cls, c->types[SPY_CLASS])) return SPY_FROZENDICT + 2;
     return layout;
 }
@@ -11308,7 +11630,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
 }
 static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     if (!item) return execute(c, f, body);
-    if (++c->depth > 256) { c->depth--; spy_error(c, "RecursionError", "too many context managers"); return (Result){FLOW_ERROR, NULL}; }
+    if (deeper(c, "")) return (Result){FLOW_ERROR, NULL};
     SPYValue *manager = eval(c, f, item->a);
     SPYValue *exit = manager ? special_method(c, manager, "__exit__") : NULL;
     SPYValue *enter = exit ? call_special(c, manager, "__enter__", 0, NULL) : NULL;
@@ -11373,7 +11695,7 @@ typedef int (*GroupTest)(SPYContext *, SPYValue *, void *);
 /* Split a group by a test into matching and remaining parts, either may be NULL. */
 static int group_split(SPYContext *c, SPYValue *exception, GroupTest test, void *data, int want_rest, SPYValue **match, SPYValue **rest) {
     *match = *rest = NULL;
-    if (++c->depth > 256) { c->depth--; spy_error(c, "RecursionError", "exception group nesting limit exceeded"); return -1; }
+    if (deeper(c, "")) return -1;
     int matched = test(c, exception, data), status = -1;
     SPYValue *matches = NULL, *remaining = NULL;
     if (matched < 0) goto done;
@@ -11650,12 +11972,19 @@ static Result execute_try(SPYContext *c, Frame *f, Node *n) {
     }
     return r;
 }
+static int print_text(SPYContext *, SPYValue *, SPYValue *);
 static int display_value(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_NONE) return 0;
     if (name_set(c, c->builtins, "_", c->none)) return -1;
     SPYValue *text = spy_repr(c, value);
     if (!text) return -1;
-    if (!c->write) spy_error(c, "OSError", "no output callback installed");
+    SPYValue *file = c->sys ? spy_retain(name_local(c->sys, "stdout")) : NULL, *newline = NULL;
+    if (c->sys) {
+        if (!file) spy_error(c, "RuntimeError", "lost sys.stdout");
+        else if (file->type != SPY_NONE && !print_text(c, file, text) && (newline = spy_string(c, "\n", 1)))
+            print_text(c, file, newline);
+        spy_release(file); spy_release(newline);
+    } else if (!c->write) spy_error(c, "OSError", "no output callback installed");
     else if (c->write(c->write_data, text->as.string.data, text->as.string.len) ||
              c->write(c->write_data, "\n", 1)) spy_error(c, "OSError", "output failed");
     spy_release(text);
@@ -11738,8 +12067,11 @@ static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char
     return status;
 }
 static Result execute_module(SPYContext *c, Frame *f) {
-    if (start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__")) return (Result){FLOW_ERROR, NULL};
-    return execute(c, f, f->unit->as.unit.body);
+    if (enter_frame(c)) return (Result){FLOW_ERROR, NULL};
+    Result r = start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
+        (Result){FLOW_ERROR, NULL} : execute(c, f, f->unit->as.unit.body);
+    c->py_depth--;
+    return r;
 }
 enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_LIST, B_TUPLE, B_DICT, B_ABS, B_SUM, B_MIN, B_MAX, B_ALL, B_ANY,
@@ -12276,7 +12608,7 @@ static int match_sequence(SPYContext *c, Frame *f, Node *n, SPYValue *subject, S
     return 1;
 }
 static int match_pattern(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
-    if (++c->depth > 256) { c->depth--; spy_error(c, "RecursionError", "pattern nesting limit exceeded"); return -1; }
+    if (deeper(c, "")) return -1;
     int result = -1;
     switch (n->op) {
     case PT_WILDCARD: result = 1; break;
@@ -12433,6 +12765,7 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             break;
         }
         case N_IMPORT: case N_FROM: {
+            if (n->flags & F_LAZY) { lazy_statement(c, f, n); break; }
             SPYValue *fromlist = n->kind == N_FROM ? value_new(c, SPY_TUPLE) : NULL;
             if (n->kind == N_FROM && !fromlist) break;
             if (fromlist) for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
@@ -12973,7 +13306,8 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
                       g->type == SPY_COROUTINE ? "coroutine" : g->type == SPY_ASYNC_GENERATOR ? "async generator" : "generator");
     if (!g->as.generator.started && thrown) { generator_close(g); return raise_value(c, thrown); }
     g->as.generator.started = 1;
-    if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "generator nesting limit exceeded"); }
+    if (deeper(c, "")) return NULL;
+    if (enter_frame(c)) { c->depth--; return NULL; }
     g->as.generator.running = 1;
     Machine *m = g->as.generator.machine;
     SPYValue *outer = c->handled;
@@ -12983,7 +13317,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     Result result = run_machine(c, g, sent, thrown, argc, argv);
     spy_release(m->handled); m->handled = c->handled; c->handled = outer;
     c->inherited_exception = inherited;
-    g->as.generator.running = 0; c->depth--;
+    g->as.generator.running = 0; c->depth--; c->py_depth--;
     if (result.flow == FLOW_YIELD) return result.value;
     g->as.generator.returned = result.flow == FLOW_RETURN;
     if (result.flow == FLOW_RETURN) {
@@ -14765,6 +15099,26 @@ static int same_word(const char *s, size_t len, const char *word) {
     for (size_t i = 0; i < len; i++) if (tolower((unsigned char)s[i]) != word[i]) return 0;
     return 1;
 }
+static SPYValue *lazy_resolve(SPYContext *, SPYValue *);
+static SPYValue *lazy_import_resolve(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    if (parse_arguments(c, "resolve", argc - 1, argv + 1, keywords, NULL, 0, 0, 0, NULL)) return NULL;
+    if (argv[0]->type != SPY_LAZY_IMPORT) return spy_error(c, "TypeError", "descriptor 'resolve' requires a 'lazy_import' object");
+    return lazy_resolve(c, argv[0]);
+}
+/* float.__getformat__: doubles are IEEE 754 binary64 in host byte order. */
+static SPYValue *float_getformat(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *args[1];
+    if (parse_arguments(c, "__getformat__", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
+    if (args[0]->type != SPY_STRING)
+        return errorf(c, "TypeError", "__getformat__() argument must be str, not %s", type_name(args[0]));
+    if (strcmp(args[0]->as.string.data, "double") && strcmp(args[0]->as.string.data, "float"))
+        return spy_error(c, "ValueError", "__getformat__() argument 1 must be 'double' or 'float'");
+    uint16_t probe = 1;
+    const char *format = *(unsigned char *)&probe ? "IEEE, little-endian" : "IEEE, big-endian";
+    return spy_string(c, format, strlen(format));
+}
 static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     SPYValue *args[1];
@@ -16014,6 +16368,10 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
     int flushing = flush && spy_truth(flush);
     if (c->error_type[0]) return NULL;
     if (file && file->type == SPY_NONE) file = NULL;
+    /* Without sys, output goes to the host; afterwards through sys.stdout. */
+    if (!file && c->sys && !(file = name_local(c->sys, "stdout"))) return spy_error(c, "RuntimeError", "lost sys.stdout");
+    if (file && file->type == SPY_NONE) return spy_none(c);
+    spy_retain(file);
     sep = sep && sep->type == SPY_STRING ? spy_retain(sep) : spy_string(c, " ", 1);
     end = end && end->type == SPY_STRING ? spy_retain(end) : spy_string(c, "\n", 1);
     for (size_t i = 0; i < argc && !c->error_type[0]; i++) {
@@ -16029,7 +16387,7 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
             spy_release(method); spy_release(result);
         } else if (c->flush && c->flush(c->write_data)) spy_error(c, "OSError", "output flush failed");
     }
-    spy_release(sep); spy_release(end); return c->error_type[0] ? NULL : spy_none(c);
+    spy_release(file); spy_release(sep); spy_release(end); return c->error_type[0] ? NULL : spy_none(c);
 }
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, const char *name) {
     if (id == B_TYPE && argc == 3) {
@@ -16362,7 +16720,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
 static int builtin_type_id(SPYContext *c, SPYValue *cls) {
     if (cls == name_local(c->classes, "object")) return 63;
     for (int i = 0; i < IT_COUNT; i++) if (c->iterator_types[i] == cls && i != IT_TEMPLATE) return SPY_ITERATOR;
-    for (int t = 0; t <= SPY_FROZENDICT; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
+    for (int t = 0; t <= SPY_LAZY_IMPORT; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
     return -1;
 }
 static int slot_index(const char *name) {
@@ -16724,6 +17082,8 @@ static int register_type_methods(SPYContext *c) {
         register_method(c, SPY_FLOAT, "is_integer", float_method, 1, METHOD_INSTANCE) ||
         register_method(c, SPY_FLOAT, "hex", float_method, 2, METHOD_INSTANCE) ||
         register_method(c, SPY_FLOAT, "fromhex", float_fromhex, 0, METHOD_CLASS) ||
+        register_method(c, SPY_FLOAT, "__getformat__", float_getformat, 0, METHOD_CLASS) ||
+        register_method(c, SPY_LAZY_IMPORT, "resolve", lazy_import_resolve, 0, METHOD_INSTANCE) ||
         register_method(c, SPY_DICT, "fromkeys", dict_fromkeys, 0, METHOD_CLASS) ||
         register_method(c, SPY_FROZENDICT, "fromkeys", dict_fromkeys, 0, METHOD_CLASS) ||
         register_method(c, SPY_FROZENDICT, "copy", frozendict_method, 0, METHOD_INSTANCE) ||
@@ -16752,6 +17112,7 @@ SPYContext *spy_context_new(void) {
     c->booleans[1] = value_new(c, SPY_BOOL);
     if (!c->none || !c->not_implemented || !c->ellipsis || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
+    c->recursion_limit = 1000; c->int_max_str_digits = 4300; c->stack_size = 4 << 20;
     c->builtins = value_new(c, SPY_DICT);
     c->classes = value_new(c, SPY_DICT);
     c->globals = value_new(c, SPY_DICT);
@@ -16839,9 +17200,10 @@ SPYContext *spy_context_new(void) {
         {"coroutine", -1}, {"coroutine_wrapper", -1}, {"async_generator", -1},
         {"async_generator_asend", -1}, {"async_generator_athrow", -1}, {"anext_awaitable", -1}, {"super", B_SUPER},
         {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
-        {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT}
+        {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT},
+        {"lazy_import", -1}
     };
-    _Static_assert(sizeof(types) / sizeof(*types) == SPY_FROZENDICT + 1, "builtin type table must cover every public value tag");
+    _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAZY_IMPORT + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
         SPYValue *cls = new_class(c, types[i].name, name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
@@ -16962,7 +17324,7 @@ SPYContext *spy_context_new(void) {
     c->types[SPY_BOUND_METHOD] = spy_retain(c->types[SPY_NATIVE]);
     spy_release(module);
     if (name_natives(c, c->builtins, NULL)) goto fail;
-    for (int t = 0; t <= SPY_FROZENDICT; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
+    for (int t = 0; t <= SPY_LAZY_IMPORT; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
     for (size_t i = 0; i < c->classes->as.map.len; i++)
         if (name_natives(c, c->classes->as.map.items[i].value, c->classes->as.map.items[i].value)) goto fail;
     SPYValue *name = spy_string(c, "__main__", 8);
