@@ -3407,6 +3407,124 @@ print(property(fget=len, doc='d').__doc__)
 """]
 
 CASES.append(r"""
+# property, classmethod and staticmethod subclasses.
+x = property.__new__(property)
+print(type(x), x.fget)
+class P(property):
+    "P doc"
+class Q(property): pass
+def g(self):
+    "get doc"
+    return 42
+class C:
+    a = P(g)
+    b = Q(g, doc="explicit")
+    @P
+    def c(self): return 5
+    @c.setter
+    def c(self, v): print("set", v)
+    cm = classmethod(lambda cls: cls.__name__)
+print(C().a, C.a.__doc__, C.b.__doc__, type(C.c).__name__, C().c, vars(C.a))
+C().c = 9
+try: del C().c
+except AttributeError as e: print(e)
+class CM(classmethod):
+    pass
+class SM(staticmethod):
+    pass
+class D:
+    @CM
+    def f(cls, x): return (cls.__name__, x)
+    @SM
+    def h(x): return x * 2
+print(D.f(1), D().f(2), D.h(3), D().h(4), repr(D.__dict__['f'])[:20], D.__dict__['h'].__func__.__name__)
+print(vars(D.__dict__['f']).keys(), D.__dict__['h'](5), isinstance(D.__dict__['f'], classmethod))
+""")
+
+CASES.append(r"""
+# property accessor errors name the property and owner.
+class C:
+    x = property(lambda s: 1)
+    y = property()
+    z = property(None, lambda s, v: None)
+for f in [lambda: setattr(C(), "x", 1), lambda: delattr(C(), "x"), lambda: C().y, lambda: delattr(C(), "z"),
+          lambda: property.__get__(C.x, None, None), lambda: C.x.__set__(C(), 1), lambda: classmethod(), lambda: staticmethod(1, 2)]:
+    try: print(f())
+    except Exception as e: print(type(e).__name__, e)
+print(repr(classmethod(len)), repr(staticmethod(len)))
+""")
+
+CASES.append(r"""
+# sys._getframe frames and their write-through FrameLocalsProxy (PEP 667).
+import sys
+f0 = sys._getframe()
+print(type(f0).__name__, f0.f_globals is globals(), f0.f_locals is globals(), f0.f_back, f0.f_lineno)
+print(f0.f_code.co_name if hasattr(f0.f_code, "co_name") else None)
+def outer():
+    a = 1
+    def inner(x):
+        b = a + x
+        fr = sys._getframe()
+        loc = fr.f_locals
+        print(type(loc).__name__, sorted(loc.keys()), loc["x"], "a" in loc, len(loc), loc.get("zz", 7))
+        loc["b"] = 10
+        print(b)
+        loc["new"] = 5
+        print(sorted(loc), loc["new"], loc.pop("new"), "new" in loc)
+        try: del loc["b"]
+        except ValueError as e: print(e)
+        try: loc["nope"]
+        except KeyError as e: print(repr(e))
+        try: loc.pop("b")
+        except ValueError as e: print(e)
+        print(loc == dict(loc), loc == loc, loc != {}, dict(loc) == loc.copy())
+        print(fr.f_back.f_code.co_name, fr.f_back.f_back.f_back is None, sys._getframe(1) is fr.f_back)
+        print(fr.f_lineno, fr.f_back.f_lineno)
+        print(repr(loc)[:30])
+        return fr
+    return inner(2)
+fr = outer()
+print(fr.f_back.f_code.co_name, fr.f_lineno, sorted(fr.f_locals))
+try: sys._getframe(99)
+except ValueError as e: print(e)
+class K:
+    v = sys._getframe().f_locals
+    print(v is locals(), sys._getframe().f_code.co_name)
+def gen():
+    yield sys._getframe().f_code.co_name
+    yield sys._getframe().f_back.f_code.co_name
+print(list(gen()))
+x = (lambda: sys._getframe().f_locals)()
+print(type(x).__name__, x | {"q": 1}, {"q": 1} | x)
+def deep(n):
+    return sys._getframe().f_back.f_locals["n"] if n == 0 else deep(n - 1)
+print(deep(3))
+""")
+
+CASES.append(r"""
+# sys._getframemodulename and the types module frame names.
+import sys, types
+def f(d=0): return sys._getframemodulename(d)
+print(f(), f(1), f(50), sys._getframemodulename())
+f.__module__ = "zz"
+print(f(), types.FrameType.__name__, types.FrameLocalsProxyType.__name__)
+try: sys._getframemodulename("x")
+except TypeError as e: print(e)
+""")
+
+CASES.append(r"""
+# type.__subclasses__ lists live direct subclasses in creation order.
+class A: pass
+class B(A): pass
+class C(A): pass
+class D(B, C): pass
+print(A.__subclasses__(), B.__subclasses__(), D.__subclasses__())
+del C
+print([k.__name__ for k in A.__subclasses__()])
+print(int.__subclasses__() == [bool] or int.__subclasses__())
+""")
+
+CASES.append(r"""
 # sys recursion and integer-string limits, and PEP 810 lazy imports of built-in modules.
 import sys
 print(sys.getrecursionlimit(), sys.get_int_max_str_digits(), sys.version_info[:2], sys.maxsize == 2**63 - 1)

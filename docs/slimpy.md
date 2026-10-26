@@ -522,7 +522,7 @@ module bind the attribute directly. The global lazy-import filter and
 ### 3.3 Standard library and host services
 
 Four minimal standard-library modules are built in: `collections`, `sys`,
-`types`, and `weakref`. Their Python sources live in `modules/` and are embedded into
+`types`, and `weakref`, with `_weakref` as the primitive half of `weakref`. Their Python sources live in `modules/` and are embedded into
 `spy-intrinsics.h`; an import finds them before the host loader, needs no
 loader, and parses them only on first use. `collections` provides `deque`,
 `defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
@@ -530,16 +530,23 @@ loader, and parses them only on first use. `collections` provides `deque`,
 there is no `collections.abc`. `types` names the engine's builtin types and
 provides `SimpleNamespace`, `new_class`, `prepare_class`, `resolve_bases`,
 `get_original_bases`, and `DynamicClassAttribute`; cell, frame, traceback,
-descriptor-member, and capsule types and `coroutine()` are absent;
+descriptor-member, and capsule types and `coroutine()` are absent; it names
+`FrameType` and `FrameLocalsProxyType`;
 `LazyImportType` is the lazy-import placeholder type. `sys` keeps the runtime
 state natively: `modules`, `exception()`, the recursion limit, the integer
 string-conversion limit, and `stdout`/`stderr` streams that write to the host
 output callback (`print()` and interactive display use `sys.stdout` once `sys`
 is imported). It also provides `exc_info`, `exit`, `intern`, `displayhook`,
 and constant metadata (`version_info`, `float_info`, `int_info`, `hash_info`,
-`flags`, `implementation`, whose name is `slimpy`). Frames, tracing,
-profiling, reference counts, audit hooks, and a separate error stream are not
-provided.
+`flags`, `implementation`, whose name is `slimpy`). `_getframe()` returns
+frame objects for running calls (functions, generators, class bodies, and
+modules) with `f_globals`, `f_locals`, `f_back`, `f_code`, `f_lineno`,
+`f_builtins`, and `f_generator`; a function frame's `f_locals` is a
+write-through `FrameLocalsProxy` as in PEP 667. Line numbers are those of the
+executing statement. `_getframemodulename()` is provided. Tracing, profiling,
+`f_lasti`, `frame.clear()`, reference counts, audit hooks, and a separate
+error stream are not provided. `_weakref` re-exports the `weakref` primitives
+for the standard library's pure-Python modules.
 `weakref` provides `ref`, `proxy`, `getweakrefcount`, `getweakrefs`,
 `WeakMethod`, `WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`, and
 `finalize` (which has no interpreter-exit hook).

@@ -203,3 +203,8 @@
   cause chaining, and the parser's placement errors; types.LazyImportType.
 - A test.support adapter and a backtracking regex subset, skip decorators,
   and expected failures in the test-only unittest replacement.
+- property, classmethod and staticmethod are subclassable and expose their
+  descriptor methods; property errors name the property and owner type.
+- sys._getframe frames with write-through FrameLocalsProxy f_locals,
+  sys._getframemodulename, types.FrameType, type.__subclasses__, and a
+  built-in _weakref module.

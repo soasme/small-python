@@ -5,8 +5,9 @@ interpreter and to functions that interact strongly with the interpreter.
 slim.py builds this module into the engine, following CPython 3.15's sys
 module. Runtime state (modules, the handled exception, recursion and integer
 conversion limits, host output) is native; the remaining names are constant
-metadata describing this engine. Frames, tracing, profiling, reference counts,
-audit hooks, and interpreter switching are not provided.
+metadata describing this engine. _getframe() returns the running frames.
+Tracing, profiling, reference counts, audit hooks, and interpreter switching
+are not provided.
 """
 
 
@@ -98,6 +99,18 @@ dont_write_bytecode = True
 executable = ""
 prefix = exec_prefix = base_prefix = base_exec_prefix = ""
 copyright = "Copyright (c) 2001 Python Software Foundation.\nAll Rights Reserved."
+
+
+def _getframemodulename(depth=0):
+    """Return the name of the module for a calling frame.
+
+    The default depth returns the module containing the call to this API.
+    A more typical use in a library will pass a depth of 1 to get the user's
+    module rather than the library module.
+
+    If no frame, module, or name can be found, returns None.
+    """
+    return _frame_module(depth)
 
 
 def exc_info():
