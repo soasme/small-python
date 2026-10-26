@@ -9535,7 +9535,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_COMPILE, B_EVAL, B_EXEC, B_SLICE, B_STATICMETHOD, B_CLASSMETHOD, B_PROPERTY, B_DIR, B_LOCALS, B_FORMAT, B_ASCII, B_MAP, B_GLOBALS, B_COMPLEX,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO,
-       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY };
+       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK };
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
 static void bindings_truncate(SPYValue *bindings, size_t len) {
@@ -13255,6 +13255,11 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (c->error_type[0]) { spy_release(cls); return NULL; }
         return cls;
     }
+    if (id == B_SUBCLASSHOOK) {
+        if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "object.__subclasshook__() takes no keyword arguments");
+        if (argc != 2) return errorf(c, "TypeError", "object.__subclasshook__() takes exactly one argument (%zu given)", argc ? argc - 1 : 0);
+        return spy_retain(c->not_implemented);
+    }
     if (id == B_INIT_SUBCLASS) {
         if (argc != 1 || argv[0]->type != SPY_CLASS || (keywords && keywords->as.map.len))
             return spy_error(c, "TypeError", "__init_subclass__() takes no arguments");
@@ -14045,6 +14050,7 @@ SPYContext *spy_context_new(void) {
         {"object", "__new__", B_OBJECT_NEW, 0}, {"object", "__init__", B_OBJECT_INIT, 1},
         {"object", "__hash__", B_OBJECT_HASH, 1},
         {"object", "__init_subclass__", B_INIT_SUBCLASS, 2},
+        {"object", "__subclasshook__", B_SUBCLASSHOOK, 2},
         {"object", "__getattribute__", B_OBJECT_GETATTRIBUTE, 1},
         {"object", "__setattr__", B_OBJECT_SETATTR, 1},
         {"object", "__delattr__", B_OBJECT_DELATTR, 1},

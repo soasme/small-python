@@ -3115,6 +3115,20 @@ try: type(list.append)()
 except TypeError as e: print(e)
 """)
 
+# object.__subclasshook__ defaults to NotImplemented.
+CASES.append(r"""
+print(object.__subclasshook__(int), int.__subclasshook__(1), type(object.__subclasshook__).__name__)
+class A:
+    @classmethod
+    def __subclasshook__(cls, C): return True
+print(A.__subclasshook__(int), issubclass(int, A))
+for args in [(), (1, 2)]:
+    try: object.__subclasshook__(*args)
+    except TypeError as e: print(e)
+try: object.__subclasshook__(x=1)
+except TypeError as e: print(e)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),
