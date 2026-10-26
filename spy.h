@@ -45,6 +45,17 @@ void spy_set_output(SPYContext *, SPYWrite, void *);
  * Without it the output callback is treated as unbuffered. */
 void spy_set_flush(SPYContext *, SPYFlush);
 void spy_set_module_loader(SPYContext *, SPYModuleLoader, void *);
+/* Register a module, as QuickJS's JS_NewCModule. It is found before the
+ * loader; its first import creates the module object, with __name__,
+ * __package__, and __builtins__ set, and calls init to fill it. Init returns 0,
+ * or -1 with an error set, which fails the import. A package's init sets
+ * __path__; its submodules register under dotted names. Registering a name
+ * again replaces its init. The module _spy always exists and exposes engine
+ * primitives to such modules; spy-std.c registers the standard ones. */
+typedef int (*SPYModuleInit)(SPYContext *, SPYValue *);
+int spy_new_module(SPYContext *, const char *, SPYModuleInit);
+/* Execute source with a module's namespace as its globals. */
+int spy_exec_module(SPYContext *, SPYValue *, const char *source, const char *filename);
 /* Zero means unlimited. Budget resets for each top-level evaluation. */
 void spy_set_step_limit(SPYContext *, size_t);
 size_t spy_collect(SPYContext *);

@@ -1,4 +1,5 @@
 #include "../spy.h"
+#include "../spy-std.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -176,8 +177,17 @@ int main(void) {
         }
         spy_context_free(templates);
     }
+    {
+        /* The core has no standard modules until a host registers them. */
+        SPYContext *bare = spy_context_new();
+        assert(bare && spy_exec(bare, "import sys", "bare.py") && !strcmp(spy_error_type(bare), "ModuleNotFoundError"));
+        assert(!spy_exec(bare, "import _spy, builtins", "bare_core.py"));
+        assert(!spy_std_init_module(bare, "sys") && !spy_exec(bare, "import sys\nassert sys.modules['sys'] is sys", "bare_sys.py"));
+        assert(spy_exec(bare, "import gc", "bare_gc.py") && spy_std_init_module(bare, "nope"));
+        spy_context_free(bare);
+    }
     SPYContext *c = spy_context_new();
-    assert(c);
+    assert(c && !spy_std_init(c));
     Output o = {0};
     spy_set_output(c, output, &o);
     execute(c, "print('hello', 6 * 7)");

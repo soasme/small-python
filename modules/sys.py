@@ -2,13 +2,17 @@
 This module provides access to some objects used or maintained by the
 interpreter and to functions that interact strongly with the interpreter.
 
-Small Python builds this module into the engine, following CPython 3.15's sys
+Small Python's standard layer (spy-std.c) provides this module, following CPython 3.15's sys
 module. Runtime state (modules, the handled exception, recursion and integer
 conversion limits, host output) is native; the remaining names are constant
 metadata describing this engine. _getframe() returns the running frames.
 Tracing, profiling, reference counts, audit hooks, and interpreter switching
 are not provided.
 """
+
+from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,
+                  set_int_max_str_digits, modules, maxsize, byteorder, platform, _write, _flush,
+                  _getframe, _frame_module)
 
 
 def _structseq(name, fields, doc, instantiable=False):

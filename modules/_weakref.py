@@ -1,6 +1,6 @@
 """Weak-reference support module.
 
-Small Python builds this module into the engine as the primitive half of weakref,
+Small Python's standard layer (spy-std.c) provides this module as the primitive half of weakref,
 following CPython's _weakref. Its names are the weakref module's own objects.
 """
 

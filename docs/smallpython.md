@@ -575,9 +575,18 @@ module bind the attribute directly. The global lazy-import filter and
 
 ### 3.3 Standard library and host services
 
-Minimal standard-library modules are built in: `_thread`, `_typing`,
-`collections`, `gc`, `itertools`, `sys`, `types`, and `weakref`, with
-`_weakref` as the primitive half of `weakref`. `_typing` exposes the engine's
+The core engine (`spy.c`, `libspy.a`) provides the language and its builtins
+but no standard modules. A standard layer, `spy-std.c` (`libspy-std.a`,
+declared in `spy-std.h`), plays the role of QuickJS's `quickjs-libc`: its
+`spy_std_init` registers `_thread`, `_typing`, `collections`, `gc`,
+`itertools`, `sys`, `types`, and `weakref`, with `_weakref` as the primitive
+half of `weakref`, and `spy_std_init_module` registers one of them. The `spy`
+command, `spyc` programs, and the test drivers link it. The layer uses only the
+public API: the modules are Python sources that import their engine primitives
+(the weak table, frames, collection, recursion and integer-string limits, the
+handled exception, and host output) from `_spy`, a private module every
+context has. `print` and interactive display write to `sys.stdout` once a
+`sys` module has been imported. `_typing` exposes the engine's
 type-parameter, alias, generic, and union objects so the standard library's
 `typing` imports. `gc.collect()` runs the cycle collector during execution.
 `gc` reports referents and referrers and CPython's tracking rules. Its
@@ -586,7 +595,7 @@ nothing. `_thread` describes the engine's single thread. Its locks
 keep CPython's states, arguments, and errors. A blocking acquire that only
 another thread could satisfy raises `RuntimeError` instead of hanging, and
 starting a thread raises `RuntimeError`. Their Python sources live in `modules/` and are embedded into
-`spy-intrinsics.h`; an import finds them before the host loader, needs no
+`spy-std-modules.h`; an import finds them before the host loader, needs no
 loader, and parses them only on first use. `collections` provides `deque`,
 `defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
 `UserList`, and `UserString` (the last six are CPython's own Python code).
@@ -706,6 +715,14 @@ Do not recursively call `spy_eval` from a callback on the same context.
 
 `spy_set_output` installs text output; `spy_set_module_loader` installs module
 source loading. Neither service is installed by the core automatically.
+
+`spy_new_module(ctx, name, init)` registers a module the way QuickJS's
+`JS_NewCModule` does. An import finds it before the loader. The first import
+creates the module object with `__name__`, `__package__`, and `__builtins__`
+set and calls `init(ctx, module)`, which fills it (with `spy_set_attr`,
+`spy_native` values, or Python source through `spy_exec_module`) and returns 0,
+or -1 with an error set to fail the import. An init that sets `__path__` makes
+a package, whose submodules register under dotted names.
 `spy_set_flush` optionally supplies a flush callback using the output callback's
 data pointer. Otherwise output is treated as unbuffered. Replacing the output
 callback clears the flush callback. `print(file=...)` uses the Python object's

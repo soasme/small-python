@@ -21,9 +21,9 @@ CFLAGS += -Werror
 endif
 
 .PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates
-all: spy spyc libspy.a
+all: spy spyc libspy.a libspy-std.a
 
-spy: $(OBJDIR)/cli.o $(OBJDIR)/spy.o
+spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 spyc: $(OBJDIR)/spyc.o
@@ -32,20 +32,26 @@ spyc: $(OBJDIR)/spyc.o
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^
 
+# The standard layer (sys, gc, weakref, ...), separate from the core like quickjs-libc.
+libspy-std.a: $(OBJDIR)/spy-std.o
+	$(AR) rcs $@ $^
+
 $(OBJDIR)/%.o: %.c spy.h
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o: host.h
 $(OBJDIR)/spy.o: spy-unicode.h spy-intrinsics.h
+$(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o: spy-std.h
+$(OBJDIR)/spy-std.o: spy-std-modules.h
 
-tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy.o
+tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 bench/lifecycle: $(OBJDIR)/bench/lifecycle.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-run-cython: $(OBJDIR)/run-cython.o $(OBJDIR)/spy.o
+run-cython: $(OBJDIR)/run-cython.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 upstream:
@@ -88,8 +94,8 @@ cpython-discover:
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -m755 spy spyc "$(DESTDIR)$(PREFIX)/bin"
-	install -m644 spy.h "$(DESTDIR)$(PREFIX)/include"
-	install -m644 libspy.a "$(DESTDIR)$(PREFIX)/lib"
+	install -m644 spy.h spy-std.h "$(DESTDIR)$(PREFIX)/include"
+	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
 	install -m644 docs/smallpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
 	install -m644 docs/testing/cython.md docs/testing/cpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"

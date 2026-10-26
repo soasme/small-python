@@ -1,4 +1,5 @@
 #include "spy.h"
+#include "spy-std.h"
 #include "host.h"
 
 #include <string.h>
@@ -68,6 +69,7 @@ int main(int argc, char **argv) {
     if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
     spy_set_output(c, output, stdout);
     spy_set_flush(c, flush_output);
+    if (spy_std_init(c)) { report(c); spy_context_free(c); return 1; }
     char *directory = NULL;
     const char *filename = argc == 2 ? argv[1] : "<string>";
     if (argc == 2 && argv[1][0] != '-') {

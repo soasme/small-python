@@ -1,6 +1,7 @@
 /* Persistent, length-framed evaluation driver for the upstream doctest adapter.
  * Only the adapter uses JSON; the engine itself has no JSON dependency. */
 #include "spy.h"
+#include "spy-std.h"
 #include "host.h"
 
 #include <ctype.h>
@@ -55,7 +56,7 @@ int main(int argc, char **argv) {
     if (!(argc % 2)) return 2;
     for (int i = 1; i < argc; i += 2) if (strcmp(argv[i], "--module-path")) return 2;
     SPYContext *c = spy_context_new();
-    if (!c) return 1;
+    if (!c || spy_std_init(c)) return 1;
     ModulePaths paths = {argc, argv};
     if (argc > 1) spy_set_module_loader(c, load_module, &paths);
     Output out = {0};

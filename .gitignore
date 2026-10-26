@@ -12,3 +12,4 @@ __pycache__/
 /hello
 /hello.c
 /.obj/
+libspy-std.a

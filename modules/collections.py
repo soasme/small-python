@@ -12,13 +12,15 @@ list, set, and tuple.
 * UserList     wrapper around list objects for easier list subclassing
 * UserString   wrapper around string objects for easier string subclassing
 
-Small Python builds this module into the engine. namedtuple, Counter, ChainMap,
+Small Python's standard layer (spy-std.c) provides this module. namedtuple, Counter, ChainMap,
 UserDict, UserList, and UserString are CPython 3.15's pure-Python code;
 deque, defaultdict, and OrderedDict follow its C implementations. Private
 mixins supply the methods these classes inherit from collections.abc, whose
 submodule is the standard library's _collections_abc and is imported on first
 use of collections.abc.
 '''
+
+from _spy import _caller_module
 
 __all__ = [
     'ChainMap',

@@ -1,12 +1,14 @@
 """This module provides access to the garbage collector for reference cycles.
 
-Small Python builds this module into the engine, following CPython 3.15's gc
+Small Python's standard layer (spy-std.c) provides this module, following CPython 3.15's gc
 module. Reference counting frees most values at once; collect() runs the
 engine's cycle collector, which has a single generation. Automatic
 collection happens between host runs, so enable(), disable() and the
 thresholds are recorded but do not schedule collections. Objects are never
 uncollectable, so garbage stays empty.
 """
+
+from _spy import _collect, get_referents, get_referrers, _tracked, _objects
 
 DEBUG_STATS = 1
 DEBUG_COLLECTABLE = 2

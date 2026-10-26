@@ -1,7 +1,7 @@
 """
 Define names for built-in types that aren't directly accessible as a builtin.
 
-Small Python builds this module into the engine, following CPython 3.15's types
+Small Python's standard layer (spy-std.c) provides this module, following CPython 3.15's types
 module. Names for objects the engine does not have (tracebacks,
 member and getset descriptors, and capsules) are not defined, nor is
 coroutine(), which needs code object flags.

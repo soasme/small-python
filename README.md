@@ -3,6 +3,9 @@
 A small, embeddable Python-language engine in C11, inspired by QuickJS.
 Commands and public APIs use the **spy** prefix: `spy`, `spyc`, `spy_*`,
 `SPYContext`, and `libspy.a`. No CPython or third-party runtime dependency.
+As in QuickJS, the core (`spy.c`) is the language alone; the standard layer
+(`spy-std.c`) registers `sys`, `gc`, `weakref`, and the other built-in modules
+for the `spy` command and any host that links it.
 
 **Status:** experimental subset. The target is the full Python 3.15 core
 language; the current engine does not yet conform to it.

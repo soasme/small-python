@@ -245,3 +245,7 @@
 - C API: spy_native, spy_call_keywords, spy_tuple, spy_dict, spy_get_item,
   spy_set_item, spy_get_attr, spy_set_attr, spy_iter, spy_next, spy_str,
   spy_error_value, and spy_raise.
+- The core no longer contains standard modules. spy_new_module and
+  spy_exec_module register modules QuickJS-style; the standard layer
+  spy-std.c (libspy-std.a, spy_std_init) provides sys, gc, weakref, types,
+  itertools, collections, _thread, and _typing on the core's _spy primitives.

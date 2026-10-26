@@ -1,12 +1,14 @@
 """Weak reference support for Python.
 
-This module is an implementation of PEP 205. Small Python builds it into the
-engine; it follows CPython 3.15's weakref, _weakref and _weakrefset modules.
-The engine keeps the weak table and exposes private primitives to this
-module: _weak_bind(target, reference, callback), _weak_get(reference),
+This module is an implementation of PEP 205. Small Python's standard layer
+(spy-std.c) provides it, following CPython 3.15's weakref, _weakref and
+_weakrefset modules. The engine keeps the weak table and exposes it through
+_spy: _weak_bind(target, reference, callback), _weak_get(reference),
 _weak_callback(reference), _weak_hash(reference), and _weak_refs(target).
 A callback runs at the next statement boundary after its referent dies.
 """
+
+from _spy import _weak_bind, _weak_get, _weak_callback, _weak_hash, _weak_refs
 
 __all__ = ["ref", "proxy", "getweakrefcount", "getweakrefs",
            "WeakKeyDictionary", "ReferenceType", "ProxyType",

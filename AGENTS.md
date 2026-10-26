@@ -27,12 +27,19 @@ run the equivalent command directly.
   protocols, and import semantics are part of the language and cannot be
   excluded merely because CPython documents them near its standard library.
   Host I/O and optional C library wrappers belong at an explicit host boundary.
-  The exceptions are the minimal built-in modules `_thread` (the engine's
-  single thread), `_typing` (the intrinsic typing objects), `gc`, `collections` (a package
-  whose `abc` aliases the host's `_collections_abc`, as in CPython), `itertools`, `sys`,
-  `types`, and `weakref` (with its primitive half `_weakref`): Python sources in `modules/`, embedded by
-  `tools/build_intrinsics.py`, found before the host loader, and parsed only
-  on first import. Their private primitives (weak table, caller module) are C.
+  Modules are registered QuickJS-style: `spy_new_module(ctx, name, init)`
+  (like `JS_NewCModule`), with `init` filling the module on first import.
+  `spy.c`/`spy.h` hold no standard module; the standard layer `spy-std.c`
+  (like `quickjs-libc.c`) registers the minimal modules `_thread` (the
+  engine's single thread), `_typing` (the intrinsic typing objects), `gc`,
+  `collections` (a package whose `abc` aliases the host's `_collections_abc`,
+  as in CPython), `itertools`, `sys`, `types`, and `weakref` (with its
+  primitive half `_weakref`) through the public API. Their Python sources are
+  in `modules/`, embedded in `spy-std-modules.h` by
+  `tools/build_intrinsics.py`. Engine primitives they need (weak table, frames,
+  collection, limits, host output) live in the core's private `_spy` module;
+  add a primitive there only when a module cannot be written without it. The
+  `spy` command and test drivers link the standard layer; `libspy.a` does not.
 - Work on the language core, not the library. Do not add further standard
   library modules (`math`, `_struct`, `_sre`, `os`, `array`, ...), even when a
   CPython test imports one; skip tests that are blocked only by a missing

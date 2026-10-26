@@ -102,7 +102,9 @@ struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
-    SPYValue *sys; /* The sys module once imported; print then uses sys.stdout. */
+    /* Modules a host registered with spy_new_module, created on first import. */
+    struct HostModule { char *name; SPYModuleInit init; } *host_modules;
+    size_t host_modules_len;
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
@@ -10280,26 +10282,6 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
 SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) {
     return call_keywords(c, fn, argc, argv, NULL);
 }
-static int weakref_natives(SPYContext *, SPYValue *);
-static int collections_natives(SPYContext *, SPYValue *);
-static int sys_natives(SPYContext *, SPYValue *);
-static int gc_natives(SPYContext *, SPYValue *);
-/* Built-in modules: Python sources embedded by tools/build_intrinsics.py,
- * found before the host loader and parsed only when first imported. A
- * package's submodules are named with their dotted path. */
-#define BUILTIN_MODULE(name, source, init, package) {name, source, sizeof(source) / sizeof(*source), init, package}
-static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); int package; } builtin_modules[] = {
-    BUILTIN_MODULE("_thread", module__thread, NULL, 0),
-    BUILTIN_MODULE("_typing", module__typing, NULL, 0),
-    BUILTIN_MODULE("_weakref", module__weakref, NULL, 0),
-    BUILTIN_MODULE("collections", module_collections, collections_natives, 1),
-    BUILTIN_MODULE("collections.abc", module_collections_abc, NULL, 0),
-    BUILTIN_MODULE("gc", module_gc, gc_natives, 0),
-    BUILTIN_MODULE("itertools", module_itertools, NULL, 0),
-    BUILTIN_MODULE("sys", module_sys, sys_natives, 0),
-    BUILTIN_MODULE("types", module_types, NULL, 0),
-    BUILTIN_MODULE("weakref", module_weakref, weakref_natives, 0),
-};
 /* Weak references. The weakref module builds its reference, proxy, and
  * container types on these private primitives; a reference object is any
  * value registered here with a borrowed target. */
@@ -10445,11 +10427,9 @@ static SPYValue *caller_module(SPYContext *c, size_t argc, SPYValue *const *argv
     SPYValue *name = name_local(module_env(c, env), "__name__");
     return spy_retain(name ? name : c->none);
 }
-static int collections_natives(SPYContext *c, SPYValue *module) {
-    return define_native(c, module, "_caller_module", caller_module, NULL);
-}
 static int weakref_natives(SPYContext *c, SPYValue *module) {
-    return define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
+    return define_native(c, module, "_caller_module", caller_module, NULL) ||
+        define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
         define_native(c, module, "_weak_callback", weak_get, c) || define_native(c, module, "_weak_hash", weak_hash, NULL) ||
         define_native(c, module, "_weak_refs", weak_refs, NULL);
 }
@@ -10619,7 +10599,6 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
         if (define_native(c, module, names[i], sys_native, (void *)(intptr_t)i)) return -1;
     if (define_native(c, module, "set_int_max_str_digits", NULL, NULL)) return -1;
-    spy_release(c->sys); c->sys = spy_retain(module);
     name_local(module, "set_int_max_str_digits")->as.native.kwcall = sys_set_int_max_str_digits;
     uint16_t probe = 1;
     const char *platform =
@@ -10655,10 +10634,22 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (name_set(c, c->modules, name, module)) { spy_release(module); return NULL; }
         return module;
     }
+    if (!strcmp(name, "_spy")) {
+        /* Engine primitives for a standard layer: the weak table, frames,
+         * collection, limits, the handled exception, and host output. */
+        SPYValue *module = value_new(c, SPY_MODULE), *module_name = spy_string(c, name, strlen(name));
+        if (module) module->as.map.namespace = value_new(c, SPY_DICT);
+        int status = !module || !module_name || !module->as.map.namespace || name_set(c, module, "__name__", module_name) ||
+            sys_natives(c, module) || gc_natives(c, module) || weakref_natives(c, module) || name_set(c, c->modules, name, module);
+        spy_release(module_name);
+        if (status) { spy_release(module); return NULL; }
+        return module;
+    }
     size_t builtin = 0;
-    while (builtin < sizeof(builtin_modules) / sizeof(*builtin_modules) && strcmp(builtin_modules[builtin].name, name)) builtin++;
-    int embedded = builtin < sizeof(builtin_modules) / sizeof(*builtin_modules);
+    while (builtin < c->host_modules_len && strcmp(c->host_modules[builtin].name, name)) builtin++;
+    int embedded = builtin < c->host_modules_len;
     if (!embedded && !c->loader) return errorf(c, "ModuleNotFoundError", "no loader installed for '%s'", name);
+    SPYModuleInit init = embedded ? c->host_modules[builtin].init : NULL;
     const char *dot = strrchr(name, '.');
     SPYValue *parent = NULL;
     if (dot) {
@@ -10674,15 +10665,9 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         }
     }
     char *source = NULL;
-    int package = embedded && builtin_modules[builtin].package;
+    int package = 0;
     Buffer filename = {.ctx = c};
-    if (embedded) {
-        Buffer text = {.ctx = c};
-        for (size_t i = 0; i < builtin_modules[builtin].lines; i++)
-            if (puts_buffer(&text, builtin_modules[builtin].source[i])) { free(text.data); return NULL; }
-        source = text.data;
-        puts_buffer(&filename, "<frozen "); puts_buffer(&filename, name); puts_buffer(&filename, ">");
-    } else {
+    if (!init) {
         Buffer init = {.ctx = c};
         if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c->loader_data, init.data);
         free(init.data);
@@ -10701,10 +10686,10 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         }
         puts_buffer(&filename, package ? "/__init__.py" : ".py");
     }
-    SPYValue *unit = c->error_type[0] ? NULL : parse(c, source, filename.data);
+    SPYValue *unit = c->error_type[0] || init ? NULL : parse(c, source, filename.data);
     free(filename.data);
     free(source);
-    if (!unit) { spy_release(parent); return NULL; }
+    if (!unit && !init) { spy_release(parent); return NULL; }
     SPYValue *module = value_new(c, SPY_MODULE);
     SPYValue *module_name = spy_string(c, name, strlen(name));
     if (!module || !module_name) { spy_release(module); spy_release(module_name); spy_release(unit); spy_release(parent); return NULL; }
@@ -10726,9 +10711,18 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); return NULL;
     }
     spy_release(module_name);
-    Frame frame = {module, unit, 0};
-    Result result = embedded && builtin_modules[builtin].init && builtin_modules[builtin].init(c, module) ?
-        (Result){FLOW_ERROR, NULL} : execute_module(c, &frame);
+    Result result = {FLOW_NORMAL, NULL};
+    if (init) {
+        /* A host module's init function fills the new module, as QuickJS's
+         * JS_NewCModule initializers do. */
+        if (init(c, module) && !c->error_type[0]) errorf(c, "SystemError", "initialization of %s failed without raising an exception", name);
+        /* An init that made a package also makes it its own __package__. */
+        if (!c->error_type[0] && name_local(module, "__path__")) name_set(c, module, "__package__", name_local(module, "__name__"));
+        if (c->error_type[0]) result.flow = FLOW_ERROR;
+    } else {
+        Frame frame = {module, unit, 0};
+        result = execute_module(c, &frame);
+    }
     spy_release(result.value); spy_release(unit);
     if (result.flow == FLOW_ERROR) {
         /* A failed import must not leave a half-initialized cached module. */
@@ -12895,13 +12889,18 @@ static Result execute_try(SPYContext *c, Frame *f, Node *n) {
     return r;
 }
 static int print_text(SPYContext *, SPYValue *, SPYValue *);
+/* The imported sys module, whose stdout then receives print and display output. */
+static SPYValue *sys_module(SPYContext *c) {
+    SPYValue *sys = name_local(c->modules, "sys");
+    return sys && sys->type == SPY_MODULE ? sys : NULL;
+}
 static int display_value(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_NONE) return 0;
     if (name_set(c, c->builtins, "_", c->none)) return -1;
     SPYValue *text = spy_repr(c, value);
     if (!text) return -1;
-    SPYValue *file = c->sys ? spy_retain(name_local(c->sys, "stdout")) : NULL, *newline = NULL;
-    if (c->sys) {
+    SPYValue *sys = sys_module(c), *file = sys ? spy_retain(name_local(sys, "stdout")) : NULL, *newline = NULL;
+    if (sys) {
         if (!file) spy_error(c, "RuntimeError", "lost sys.stdout");
         else if (file->type != SPY_NONE && !print_text(c, file, text) && (newline = spy_string(c, "\n", 1)))
             print_text(c, file, newline);
@@ -18401,7 +18400,8 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
     if (c->error_type[0]) return NULL;
     if (file && file->type == SPY_NONE) file = NULL;
     /* Without sys, output goes to the host; afterwards through sys.stdout. */
-    if (!file && c->sys && !(file = name_local(c->sys, "stdout"))) return spy_error(c, "RuntimeError", "lost sys.stdout");
+    SPYValue *sys = file ? NULL : sys_module(c);
+    if (!file && sys && !(file = name_local(sys, "stdout"))) return spy_error(c, "RuntimeError", "lost sys.stdout");
     if (file && file->type == SPY_NONE) return spy_none(c);
     spy_retain(file);
     sep = sep && sep->type == SPY_STRING ? spy_retain(sep) : spy_string(c, " ", 1);
@@ -19720,6 +19720,8 @@ void spy_context_free(SPYContext *c) {
     c->weak_len = 0;
     while (c->values) free_value(c->values);
     free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->frames);
+    for (size_t i = 0; i < c->host_modules_len; i++) free(c->host_modules[i].name);
+    free(c->host_modules);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     free(c);
 }
@@ -19796,4 +19798,26 @@ SPYValue *spy_error_value(SPYContext *c) {
 SPYValue *spy_raise(SPYContext *c, SPYValue *exception) {
     return same_context(c, exception) ? raise_value(c, exception) : NULL;
 }
-
+int spy_new_module(SPYContext *c, const char *name, SPYModuleInit init) {
+    size_t i = 0;
+    while (i < c->host_modules_len && strcmp(c->host_modules[i].name, name)) i++;
+    if (i == c->host_modules_len) {
+        struct HostModule *grown = realloc(c->host_modules, (i + 1) * sizeof(*grown));
+        if (!grown) { spy_error(c, "MemoryError", "allocation failed"); return -1; }
+        c->host_modules = grown;
+        if (!(c->host_modules[i].name = copy_text(c, name, strlen(name)))) return -1;
+        c->host_modules_len++;
+    }
+    c->host_modules[i].init = init;
+    return 0;
+}
+int spy_exec_module(SPYContext *c, SPYValue *module, const char *source, const char *filename) {
+    if (!same_context(c, module)) return -1;
+    if (module->type != SPY_MODULE) { spy_error(c, "TypeError", "spy_exec_module() requires a module"); return -1; }
+    SPYValue *unit = parse(c, source, filename ? filename : "<string>");
+    if (!unit) return -1;
+    Frame frame = {module, unit, 0};
+    Result result = execute_module(c, &frame);
+    spy_release(result.value); spy_release(unit);
+    return result.flow == FLOW_ERROR ? -1 : 0;
+}

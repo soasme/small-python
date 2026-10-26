@@ -1,6 +1,6 @@
 """Functional tools for creating and using iterators.
 
-Small Python builds this module into the engine, following CPython 3.15's
+Small Python's standard layer (spy-std.c) provides this module, following CPython 3.15's
 itertools C module: the same iterator types, argument checks, and error
 messages, written in Python. Pickling support, which CPython 3.14 removed,
 is not provided.

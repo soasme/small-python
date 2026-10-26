@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     source.write_text("print('standalone', sum(range(10)))\n", encoding="utf-8")
     subprocess.run([str(ROOT / "spyc"), "-o", str(generated), str(source)], check=True)
     subprocess.run(
-        [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-O2", "-I", str(ROOT), str(generated), str(ROOT / "spy.c"), "-lm", "-o", str(binary)],
+        [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-O2", "-I", str(ROOT), str(generated), str(ROOT / "spy-std.c"), str(ROOT / "spy.c"), "-lm", "-o", str(binary)],
         check=True,
     )
     source.unlink()
