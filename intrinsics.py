@@ -235,7 +235,7 @@ def _subs_parameters(alias, args, params, item):
 
 
 def _unionable(obj):
-    return (obj is None or isinstance(obj, (type, GenericAlias, Union, TypeAliasType)))
+    return (obj is None or isinstance(obj, (type, GenericAlias, Union, TypeAliasType, sentinel)))
 
 
 def _union_from_tuple(args):
@@ -1167,3 +1167,133 @@ def _generic_base(type_params):
         else:
             params.append(param)
     return Generic[tuple(params)]
+
+
+# object.__reduce__, __reduce_ex__ and __getstate__, after Objects/typeobject.c.
+# copyreg is imported when first needed, as CPython does.
+
+def _plain_layout(cls):
+    # Python classes whose instances hold no builtin value beyond object's.
+    for base in cls.__mro__:
+        if base is object:
+            return True
+        if base.__module__ == 'builtins':
+            return False
+    return True
+
+
+def _slotnames(cls):
+    # _PyType_GetSlotNames: the cached __slotnames__, else copyreg._slotnames,
+    # whose result (cached on the class when possible) is computed here.
+    names = cls.__dict__.get('__slotnames__')
+    if names is not None:
+        if not isinstance(names, list):
+            raise TypeError(f'{cls.__name__}.__slotnames__ should be a list or None, not {type(names).__name__}')
+        return names
+    names = []
+    if hasattr(cls, '__slots__'):
+        for c in cls.__mro__:
+            if '__slots__' in c.__dict__:
+                slots = c.__dict__['__slots__']
+                if isinstance(slots, str):
+                    slots = (slots,)
+                for name in slots:
+                    if name in ('__dict__', '__weakref__'):
+                        continue
+                    elif name.startswith('__') and not name.endswith('__'):
+                        stripped = c.__name__.lstrip('_')
+                        names.append('_%s%s' % (stripped, name) if stripped else name)
+                    else:
+                        names.append(name)
+    try:
+        cls.__slotnames__ = names
+    except:
+        pass
+    return names
+
+
+def _object_getstate_default(obj, required):
+    cls = type(obj)
+    if required and not _plain_layout(cls):
+        raise TypeError(f"cannot pickle {cls.__name__!r} object")
+    try:
+        state = object.__getattribute__(obj, '__dict__')
+    except AttributeError:
+        state = None
+    state = dict(state) if state else None
+    slotnames = _slotnames(cls)
+    if slotnames:
+        slots = {}
+        for name in slotnames:
+            try:
+                slots[name] = getattr(obj, name)
+            except AttributeError:
+                pass
+        if slots:
+            state = (state, slots)
+    return state
+
+
+def _object_getstate(obj, required):
+    getstate = getattr(obj, '__getstate__')
+    if getattr(type(obj), '__getstate__', None) is object.__getstate__:
+        return _object_getstate_default(obj, required)
+    return getstate()
+
+
+def _object_newargs(obj):
+    cls = type(obj)
+    getnewargs_ex = getattr(cls, '__getnewargs_ex__', None)
+    if getnewargs_ex is not None:
+        result = getnewargs_ex(obj)
+        if not isinstance(result, tuple):
+            raise TypeError(f"__getnewargs_ex__ should return a tuple, not '{type(result).__name__}'")
+        if len(result) != 2:
+            raise ValueError(f"__getnewargs_ex__ should return a tuple of length 2, not {len(result)}")
+        args, kwargs = result
+        if not isinstance(args, tuple):
+            raise TypeError("first item of the tuple returned by __getnewargs_ex__ must be "
+                            f"a tuple, not '{type(args).__name__}'")
+        if not isinstance(kwargs, dict):
+            raise TypeError("second item of the tuple returned by __getnewargs_ex__ must be "
+                            f"a dict, not '{type(kwargs).__name__}'")
+        return args, kwargs
+    getnewargs = getattr(cls, '__getnewargs__', None)
+    if getnewargs is not None:
+        args = getnewargs(obj)
+        if not isinstance(args, tuple):
+            raise TypeError(f"__getnewargs__ should return a tuple, not '{type(args).__name__}'")
+        return args, None
+    return None, None
+
+
+def _object_reduce_newobj(obj):
+    import copyreg
+    cls = type(obj)
+    if getattr(cls, '__new__', None) is None:
+        raise TypeError(f"cannot pickle {cls.__name__!r} object")
+    args, kwargs = _object_newargs(obj)
+    hasargs = args is not None
+    if not kwargs:
+        newobj = copyreg.__newobj__
+        newargs = (cls,) + (args or ())
+    else:
+        newobj = copyreg.__newobj_ex__
+        newargs = (cls, args, kwargs)
+    state = _object_getstate(obj, not (hasargs or isinstance(obj, (list, dict))))
+    listitems = iter(obj) if isinstance(obj, list) else None
+    dictitems = iter(obj.items()) if isinstance(obj, dict) else None
+    return newobj, newargs, state, listitems, dictitems
+
+
+def _object_common_reduce(obj, protocol):
+    if protocol >= 2:
+        return _object_reduce_newobj(obj)
+    import copyreg
+    return copyreg._reduce_ex(obj, protocol)
+
+
+def _object_reduce_ex(obj, protocol):
+    if getattr(type(obj), '__reduce__', None) is not object.__reduce__:
+        return obj.__reduce__()
+    return _object_common_reduce(obj, protocol)

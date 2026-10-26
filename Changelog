@@ -217,3 +217,6 @@
   name, filled by failed lookups; CPython's unbound-local and from-import
   messages.
 - Built-in itertools module following CPython's C implementation.
+- sentinel builtin (PEP 661), built-in _thread for the single engine thread,
+  object.__reduce__/__reduce_ex__/__getstate__, builtin __self__, and
+  CPython's read-only attribute and ordering messages.

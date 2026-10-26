@@ -27,7 +27,8 @@ run the equivalent command directly.
   protocols, and import semantics are part of the language and cannot be
   excluded merely because CPython documents them near its standard library.
   Host I/O and optional C library wrappers belong at an explicit host boundary.
-  The exceptions are the minimal built-in modules `collections` (a package
+  The exceptions are the minimal built-in modules `_thread` (the engine's
+  single thread), `collections` (a package
   whose `abc` aliases the host's `_collections_abc`, as in CPython), `itertools`, `sys`,
   `types`, and `weakref` (with its primitive half `_weakref`) (later `gc`, `math`, and `abc`): Python sources in `modules/`, embedded by
   `tools/build_intrinsics.py`, found before the host loader, and parsed only

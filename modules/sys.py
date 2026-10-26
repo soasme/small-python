@@ -86,7 +86,7 @@ class _Implementation:
 
 
 implementation = _Implementation(name="slimpy", cache_tag=None, version=version_info, hexversion=hexversion)
-builtin_module_names = ("_weakref", "builtins", "collections", "itertools", "sys", "types", "weakref")
+builtin_module_names = ("_thread", "_weakref", "builtins", "collections", "itertools", "sys", "types", "weakref")
 argv = []
 orig_argv = []
 path = []

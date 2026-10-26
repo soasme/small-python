@@ -15,9 +15,10 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-enum { V_UNIT = SPY_CODE, V_ENV = SPY_MEMORYVIEW + 1, V_UNBOUND };
+#define SPY_LAST_TYPE SPY_SENTINEL /* The last public value tag. */
+enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* Instance layouts beyond the builtin value types. */
-enum { LAYOUT_EXCEPTION = SPY_MEMORYVIEW + 1, LAYOUT_TYPE };
+enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE };
 typedef struct Node Node;
 typedef struct Program Program;
 typedef struct Machine Machine;
@@ -80,6 +81,7 @@ struct SPYValue {
         struct { SPYValue *obj, *source; ptrdiff_t *layout, offset; size_t itemsize; int64_t hash;
                  int ndim, readonly, released, hashed; char format[4]; } memory;
         struct { SPYValue *strings, *interpolations; } template;
+        struct { SPYValue *name, *module; } sentinel;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
@@ -100,7 +102,7 @@ struct SPYContext {
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
-    SPYValue *types[SPY_MEMORYVIEW + 1];
+    SPYValue *types[SPY_LAST_TYPE + 1];
     /* Weak references: targets and reference objects are borrowed. A reference
      * keeps its callback as its own __callback__ attribute, so the collector
      * sees that edge. weak_calls owns each reference whose target died, until
@@ -338,6 +340,10 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_MEMORYVIEW:
         if (v->as.memory.obj) visit(v->as.memory.obj, data);
         if (v->as.memory.source) visit(v->as.memory.source, data);
+        break;
+    case SPY_SENTINEL:
+        visit(v->as.sentinel.name, data);
+        visit(v->as.sentinel.module, data);
         break;
     case SPY_FRAME:
         if (v->as.frame.env) visit(v->as.frame.env, data);
@@ -1302,7 +1308,7 @@ static int native_kind(SPYValue *v) {
 }
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
@@ -1311,7 +1317,7 @@ static const char *type_name(SPYValue *value) {
     int kind = native_kind(value);
     if (kind) return kind == NATIVE_METHOD_DESCRIPTOR ? "method_descriptor" : kind == NATIVE_WRAPPER_DESCRIPTOR ? "wrapper_descriptor" :
         kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
-    return value->type <= SPY_MEMORYVIEW ? names[value->type] : "object";
+    return value->type <= SPY_LAST_TYPE ? names[value->type] : "object";
 }
 static Symbol *scope_symbol(Scope *scope, const char *name) {
     if (scope) for (size_t i = 0; i < scope->len; i++)
@@ -2031,6 +2037,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     case SPY_MEMORYVIEW:
         snprintf(num, sizeof(num), "<%smemory at %p>", v->as.memory.released ? "released " : "", (void *)v);
         return puts_buffer(b, num);
+    case SPY_SENTINEL: return format_value(b, v->as.sentinel.name, 0);
     case SPY_FRAME_LOCALS: {
         for (size_t i = 0; i < b->depth; i++)
             if (b->path[i] == v) return puts_buffer(b, "{...}");
@@ -6506,7 +6513,8 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             return comparison(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
                               b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
         if (kind == R_EQ || kind == R_NE) return spy_bool(c, kind == R_EQ ? a == b : a != b);
-        return spy_error(c, "TypeError", "objects do not support ordering");
+        return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
+                      op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
     }
     if ((op == T_EQ || op == T_NE || op == '<' || op == T_LE || op == '>' || op == T_GE) &&
         (set_view(a) || set_view(b)) && (set_view(a) || is_set(a)) && (set_view(b) || is_set(b))) {
@@ -6692,7 +6700,8 @@ static SPYValue *builtin_base(SPYContext *c, SPYValue *v, const char *name, cons
 /* Instances and classes whose metaclass is not type look up special methods
  * on their type. */
 static int special_dispatch(SPYValue *v) {
-    return v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
+    return v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_SENTINEL ||
+        v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
 }
 static int subclass(SPYValue *cls, SPYValue *base) {
     if (cls && cls->type == SPY_CLASS && cls->as.map.mro) {
@@ -6861,7 +6870,7 @@ static SPYValue *descriptor_get(SPYContext *c, SPYValue *value, SPYValue *self, 
     return result;
 }
 static SPYValue *special_method(SPYContext *c, SPYValue *v, const char *name) {
-    if (v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW) {
+    if (v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_SENTINEL) {
         SPYValue *cls = c->types[v->type], *method = class_lookup(cls, name);
         return method ? descriptor_get(c, method, v, cls) : NULL;
     }
@@ -6990,12 +6999,15 @@ static SPYValue *builtin_descriptor_lookup(SPYContext *, SPYValue *, const char 
 static SPYValue *builtin_descriptor(SPYContext *, SPYValue *, const char *);
 static SPYValue *frame_attribute(SPYContext *, SPYValue *, const char *);
 static SPYValue *memory_attribute(SPYContext *, SPYValue *, const char *);
+static SPYValue *load_source_module(SPYContext *, const char *);
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (!strcmp(name, "__class__") && v->type != SPY_INSTANCE) return spy_retain(value_class(c, v));
     if (v->type == SPY_FRAME || v->type == SPY_MEMORYVIEW) {
         SPYValue *field = v->type == SPY_FRAME ? frame_attribute(c, v, name) : memory_attribute(c, v, name);
         if (field || c->error_type[0]) return field;
     }
+    if (v->type == SPY_SENTINEL && (!strcmp(name, "__name__") || !strcmp(name, "__module__")))
+        return spy_retain(name[2] == 'n' ? v->as.sentinel.name : v->as.sentinel.module);
     if (v->type == SPY_TEMPLATE) {
         if (!strcmp(name, "strings")) return spy_retain(v->as.template.strings);
         if (!strcmp(name, "interpolations")) return spy_retain(v->as.template.interpolations);
@@ -7147,6 +7159,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (v->type == SPY_NATIVE && owner && !strcmp(name, "__objclass__")) return spy_retain(owner);
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__self__")) return spy_retain(v->as.bound.self);
+        /* A builtin function is bound to its class (a static method such as
+         * object.__new__) or to the builtins module; descriptors are unbound. */
+        if (v->type == SPY_NATIVE && !strcmp(name, "__self__") && native_kind(v) == NATIVE_FUNCTION)
+            return owner ? spy_retain(owner) : load_source_module(c, "builtins");
     }
     if (v->type == SPY_FUNCTION) {
         if (!strcmp(name, "__globals__")) return spy_retain(namespace_map(module_env(c, v->as.function.env)));
@@ -8494,6 +8510,22 @@ static int descriptor_set(SPYContext *c, SPYValue *descriptor, SPYValue *object,
     spy_release(method); spy_release(result);
     return c->error_type[0] ? -1 : 0;
 }
+/* CPython's errors for setting or deleting an attribute of a builtin object
+ * without a __dict__: methods are read-only, data descriptors not writable. */
+static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name) {
+    char filename[sizeof(c->filename)];
+    size_t line = c->line;
+    memcpy(filename, c->filename, sizeof(filename));
+    SPYValue *existing = attribute_value(c, object, name);
+    if (!existing) {
+        spy_clear_error(c);
+        memcpy(c->filename, filename, sizeof(filename)); c->line = line;
+        errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+    } else if (existing->type == SPY_BOUND_METHOD || existing->type == SPY_NATIVE || existing->type == SPY_METHOD)
+        errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
+    else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object));
+    spy_release(existing); return -1;
+}
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_PROPERTY && (!strcmp(name, "__name__") || !strcmp(name, "__doc__"))) {
         SPYValue **field = !strcmp(name, "__name__") ? &object->as.property.name : &object->as.property.doc;
@@ -8577,9 +8609,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         SPYValue **field = !strcmp(name, "__name__") ? &object->as.generator.name : &object->as.generator.qualname;
         spy_retain(value); spy_release(*field); *field = value; return 0;
     }
-    if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) {
-        spy_error(c, "AttributeError", "object attributes are read-only"); return -1;
-    }
+    if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name);
     if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "changing an object's class is not implemented"); return -1; }
     if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__")) && value->type != SPY_STRING) {
         spy_error(c, "TypeError", "class name and module attributes must be strings"); return -1;
@@ -9047,6 +9077,8 @@ static Result execute_module(SPYContext *, Frame *);
 static int start_annotations(SPYContext *, Frame *, Node *, const char *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, const char *);
+static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *frame_module_name(SPYContext *, size_t);
 static const char *const *exception_keywords(SPYContext *, SPYValue *);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static int store_target(SPYContext *, Frame *, Node *, SPYValue *);
@@ -9866,6 +9898,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     SPYValue *result = NULL;
     if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
+    if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
         result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
     else if (fn == c->types[SPY_MODULE]) result = module_construct(c, argc, argv, keywords);
@@ -9909,6 +9942,7 @@ static int sys_natives(SPYContext *, SPYValue *);
  * package's submodules are named with their dotted path. */
 #define BUILTIN_MODULE(name, source, init, package) {name, source, sizeof(source) / sizeof(*source), init, package}
 static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); int package; } builtin_modules[] = {
+    BUILTIN_MODULE("_thread", module__thread, NULL, 0),
     BUILTIN_MODULE("_weakref", module__weakref, NULL, 0),
     BUILTIN_MODULE("collections", module_collections, collections_natives, 1),
     BUILTIN_MODULE("collections.abc", module_collections_abc, NULL, 0),
@@ -10099,11 +10133,7 @@ static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, v
         spy_release(index);
         if (!fits) { spy_clear_error(c); return spy_error(c, "OverflowError", "Python int too large to convert to C ssize_t"); }
         if (depth < 0) depth = 0;
-        if ((uint64_t)depth + 1 >= c->py_depth) return spy_none(c);
-        struct ActiveFrame *frame = &c->frames[c->py_depth - 2 - (size_t)depth];
-        if (frame->owner->type == SPY_FUNCTION) return attribute(c, frame->owner, "__module__");
-        SPYValue *name = name_local(namespace_map(module_env(c, frame->env)), "__name__");
-        return spy_retain(name ? name : c->none);
+        return frame_module_name(c, (size_t)depth + 1);
     }
     if (id == SYS_GETFRAME) {
         if (argc > 1) return errorf(c, "TypeError", "_getframe expected at most 1 argument, got %zu", argc);
@@ -10141,6 +10171,15 @@ static SPYValue *sys_set_int_max_str_digits(SPYContext *c, size_t argc, SPYValue
     if (digits && digits < 640) return spy_error(c, "ValueError", "maxdigits must be >= 640 or 0 for unlimited");
     c->int_max_str_digits = (size_t)digits;
     return spy_none(c);
+}
+/* The module of the Python frame depth levels out from the innermost; a
+ * function frame names its function's __module__. */
+static SPYValue *frame_module_name(SPYContext *c, size_t depth) {
+    if (depth >= c->py_depth) return spy_none(c);
+    struct ActiveFrame *frame = &c->frames[c->py_depth - 1 - depth];
+    if (frame->owner->type == SPY_FUNCTION) return attribute(c, frame->owner, "__module__");
+    SPYValue *name = name_local(namespace_map(module_env(c, frame->env)), "__name__");
+    return spy_retain(name ? name : c->none);
 }
 static int sys_natives(SPYContext *c, SPYValue *module) {
     static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits", "_write", "_flush", "_getframe", "_frame_module"};
@@ -11872,9 +11911,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
              !strcmp(name, "__suppress_context__"))) {
             spy_error(c, "TypeError", "cannot delete exception chaining attributes"); return -1;
         }
-        if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) {
-            spy_error(c, "AttributeError", "object attributes are read-only"); return -1;
-        }
+        if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name);
         if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__"))) {
             spy_error(c, "TypeError", "cannot delete class name or module attributes"); return -1;
         }
@@ -12416,7 +12453,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_COMPILE, B_EVAL, B_EXEC, B_SLICE, B_STATICMETHOD, B_CLASSMETHOD, B_PROPERTY, B_DIR, B_LOCALS, B_FORMAT, B_ASCII, B_MAP, B_GLOBALS, B_COMPLEX,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
-       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT };
+       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT };
 /* printf-style formatting for str, bytes, and bytearray, following CPython's
  * unicode_format.c and bytesobject.c. Text widths and positions count code
  * points; bytes count bytes. See docs/licenses/python.txt. */
@@ -16482,6 +16519,33 @@ static const char *const memory_methods[] = {
 };
 enum { MV_GETITEM, MV_SETITEM, MV_DELITEM, MV_LEN, MV_ITER, MV_EQ, MV_NE, MV_HASH, MV_REPR, MV_ENTER, MV_EXIT,
        MV_BUFFER, MV_RELEASE_BUFFER, MV_RELEASE, MV_TOBYTES, MV_TOLIST, MV_HEX, MV_TOREADONLY, MV_CAST, MV_COUNT, MV_INDEX, MV_NEW };
+/* PEP 661 sentinels: unique named objects whose module is the creating frame's. */
+static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (argc != 1) return errorf(c, "TypeError", "sentinel() takes exactly 1 positional argument (%zu given)", argc);
+    if (keywords && keywords->as.map.len)
+        return errorf(c, "TypeError", "sentinel() got an unexpected keyword argument '%s'", keywords->as.map.items[0].key->as.string.data);
+    if (!builtin_value(c, argv[0], SPY_STRING)) return errorf(c, "TypeError", "sentinel() argument 1 must be str, not %s", type_name(argv[0]));
+    SPYValue *module = frame_module_name(c, 0);
+    if (!module) return NULL;
+    SPYValue *v = value_new(c, SPY_SENTINEL);
+    if (!v) { spy_release(module); return NULL; }
+    v->as.sentinel.name = spy_retain(argv[0]); v->as.sentinel.module = module;
+    return v;
+}
+enum { SENTINEL_COPY, SENTINEL_DEEPCOPY, SENTINEL_REDUCE, SENTINEL_OR, SENTINEL_ROR };
+static const char *const sentinel_methods[] = {"__copy__", "__deepcopy__", "__reduce__", "__or__", "__ror__"};
+static SPYValue *sentinel_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    int op = (int)(intptr_t)data;
+    if (!argc || argv[0]->type != SPY_SENTINEL)
+        return errorf(c, "TypeError", "descriptor '%s' for 'sentinel' objects doesn't apply to a '%s' object", sentinel_methods[op], argc ? type_name(argv[0]) : "nothing");
+    SPYValue *arg = NULL;
+    if (parse_arguments(c, sentinel_methods[op], argc - 1, argv + 1, keywords, NULL, op == SENTINEL_COPY || op == SENTINEL_REDUCE ? 0 : 1,
+                        op == SENTINEL_COPY || op == SENTINEL_REDUCE ? 0 : 1, 0, &arg)) return NULL;
+    if (op == SENTINEL_REDUCE) return spy_retain(argv[0]->as.sentinel.name);
+    if (op == SENTINEL_COPY || op == SENTINEL_DEEPCOPY) return spy_retain(argv[0]);
+    SPYValue *args[] = {op == SENTINEL_OR ? argv[0] : arg, op == SENTINEL_OR ? arg : argv[0]};
+    return call_intrinsic(c, "_union", 2, args);
+}
 // bytes.__buffer__, bytearray.__buffer__ and bytearray.__release_buffer__ (data is the type, negated for release).
 static SPYValue *buffer_export(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data, release = type < 0;
@@ -16883,6 +16947,31 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *list = default_mro(c, argv[0], argv[0]->as.map.bases);
         if (list) list->type = SPY_LIST;
         return list;
+    }
+    if (id == B_OBJECT_REDUCE || id == B_OBJECT_REDUCE_EX || id == B_OBJECT_GETSTATE) {
+        /* The protocol itself is Python code in the intrinsics module. */
+        size_t expected = id == B_OBJECT_REDUCE_EX ? 2 : 1;
+        const char *method = id == B_OBJECT_REDUCE ? "__reduce__" : id == B_OBJECT_REDUCE_EX ? "__reduce_ex__" : "__getstate__";
+        if (argc != expected) {
+            if (!argc) return errorf(c, "TypeError", "descriptor '%s' of 'object' object needs an argument", method);
+            if (expected == 1) return errorf(c, "TypeError", "object.%s() takes no arguments (%zu given)", method, argc - 1);
+            return errorf(c, "TypeError", "object.__reduce_ex__() takes exactly one argument (%zu given)", argc - 1);
+        }
+        if (id == B_OBJECT_REDUCE_EX) {
+            int64_t protocol;
+            if (!is_int(argv[1])) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
+            if (spy_as_int(c, argv[1], &protocol)) return NULL;
+            return call_intrinsic(c, "_object_reduce_ex", 2, argv);
+        }
+        SPYValue *args[] = {argv[0], id == B_OBJECT_REDUCE ? NULL : c->booleans[0]};
+        if (id == B_OBJECT_REDUCE) {
+            SPYValue *protocol = spy_int(c, 0);
+            if (!protocol) return NULL;
+            args[1] = protocol;
+            SPYValue *result = call_intrinsic(c, "_object_common_reduce", 2, args);
+            spy_release(protocol); return result;
+        }
+        return call_intrinsic(c, "_object_getstate_default", 2, args);
     }
     if (id == B_OBJECT_GETATTRIBUTE || id == B_OBJECT_SETATTR || id == B_OBJECT_DELATTR) {
         if (argc != (id == B_OBJECT_SETATTR ? 3u : 2u) || argv[1]->type != SPY_STRING)
@@ -18057,7 +18146,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
 static int builtin_type_id(SPYContext *c, SPYValue *cls) {
     if (cls == name_local(c->classes, "object")) return 63;
     for (int i = 0; i < IT_COUNT; i++) if (c->iterator_types[i] == cls && i != IT_TEMPLATE) return SPY_ITERATOR;
-    for (int t = 0; t <= SPY_MEMORYVIEW; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
+    for (int t = 0; t <= SPY_LAST_TYPE; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
     return -1;
 }
 static int slot_index(const char *name) {
@@ -18299,6 +18388,14 @@ static int register_constructors(SPYContext *c) {
     for (size_t i = 0; i < sizeof(memory_methods) / sizeof(*memory_methods); i++)
         if (register_method(c, SPY_MEMORYVIEW, memory_methods[i], memory_method, (intptr_t)i, i == MV_NEW ? METHOD_STATIC : METHOD_INSTANCE)) return -1;
     if (name_set(c, c->builtins, "memoryview", c->types[SPY_MEMORYVIEW])) return -1;
+    for (size_t i = 0; i < sizeof(sentinel_methods) / sizeof(*sentinel_methods); i++)
+        if (register_method(c, SPY_SENTINEL, sentinel_methods[i], sentinel_method, (intptr_t)i, METHOD_INSTANCE)) return -1;
+    if (name_set(c, c->builtins, "sentinel", c->types[SPY_SENTINEL])) return -1;
+    static const char sentinel_doc[] = "Create a unique sentinel object with the given name.";
+    SPYValue *doc = spy_string(c, sentinel_doc, sizeof(sentinel_doc) - 1);
+    int failed = !doc || name_set(c, c->types[SPY_SENTINEL], "__doc__", doc);
+    spy_release(doc);
+    if (failed) return -1;
     if (register_method(c, SPY_BYTES, "__buffer__", buffer_export, (intptr_t)SPY_BYTES, METHOD_INSTANCE) ||
         register_method(c, SPY_BYTEARRAY, "__buffer__", buffer_export, (intptr_t)SPY_BYTEARRAY, METHOD_INSTANCE) ||
         register_method(c, SPY_BYTEARRAY, "__release_buffer__", buffer_export, -(intptr_t)SPY_BYTEARRAY, METHOD_INSTANCE)) return -1;
@@ -18559,9 +18656,9 @@ SPYContext *spy_context_new(void) {
         {"async_generator_asend", -1}, {"async_generator_athrow", -1}, {"anext_awaitable", -1}, {"super", B_SUPER},
         {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
         {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT},
-        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}
+        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}
     };
-    _Static_assert(sizeof(types) / sizeof(*types) == SPY_MEMORYVIEW + 1, "builtin type table must cover every public value tag");
+    _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAST_TYPE + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
         SPYValue *cls = new_class(c, types[i].name, name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
@@ -18652,6 +18749,8 @@ SPYContext *spy_context_new(void) {
         {"object", "__getattribute__", B_OBJECT_GETATTRIBUTE, 1},
         {"object", "__setattr__", B_OBJECT_SETATTR, 1},
         {"object", "__delattr__", B_OBJECT_DELATTR, 1},
+        {"object", "__reduce__", B_OBJECT_REDUCE, 1}, {"object", "__reduce_ex__", B_OBJECT_REDUCE_EX, 1},
+        {"object", "__getstate__", B_OBJECT_GETSTATE, 1},
         {"type", "mro", B_TYPE_MRO, 1}, {"type", "__subclasses__", B_TYPE_SUBCLASSES, 1},
         {"BaseException", "add_note", B_ADD_NOTE, 1},
         {"SyntaxError", "__init__", B_SYNTAX_INIT, 1},
@@ -18682,7 +18781,7 @@ SPYContext *spy_context_new(void) {
     c->types[SPY_BOUND_METHOD] = spy_retain(c->types[SPY_NATIVE]);
     spy_release(module);
     if (name_natives(c, c->builtins, NULL)) goto fail;
-    for (int t = 0; t <= SPY_MEMORYVIEW; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
+    for (int t = 0; t <= SPY_LAST_TYPE; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
     for (size_t i = 0; i < c->classes->as.map.len; i++)
         if (name_natives(c, c->classes->as.map.items[i].value, c->classes->as.map.items[i].value)) goto fail;
     SPYValue *name = spy_string(c, "__main__", 8);

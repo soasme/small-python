@@ -1313,6 +1313,59 @@ for f in [lambda: it.count('a'), lambda: repr(it.count()), lambda: repr(it.count
     t(f)
 class Sub(it.chain): pass
 print(list(Sub("ab", "c")), type(it.chain()).__module__, it.repeat.__name__)
+""",    r"""
+print(sentinel, type(sentinel), sentinel.__doc__ is not None)
+s = sentinel('MISSING')
+print(repr(s), str(s), type(s), s.__name__, s.__module__, bool(s), hash(s) == hash(s), s == s, s is s, f"{s}")
+print(s.__copy__() is s, s.__deepcopy__({}) is s)
+def p(f):
+    try: print(repr(f()))
+    except Exception as e: print(type(e).__name__+':', e)
+p(lambda: sentinel()); p(lambda: sentinel(1)); p(lambda: sentinel('a', 'b')); p(lambda: sentinel(name='x'))
+p(lambda: s.__reduce__())
+p(lambda: type('X', (sentinel,), {}))
+p(lambda: s.x)
+def setx(): s.x = 1
+p(setx)
+p(lambda: s | int); p(lambda: int | s); p(lambda: sentinel('A', module='m').__module__)
+p(lambda: s.__name__ == 'MISSING')
+p(lambda: sentinel('A') == sentinel('A'))
+p(lambda: (s | None).__args__)
+def f(): return sentinel('In').__module__
+p(f)
+p(lambda: s < s)
+""",
+    r"""
+import _thread as t
+def p(f):
+    try: print(repr(f()))
+    except Exception as e: print(type(e).__name__+':', e)
+l = t.allocate_lock()
+print(type(l), t.LockType, type(l).__name__, type(l).__module__, t.error, t.TIMEOUT_MAX)
+print(repr(l)[:24], l.acquire(), repr(l)[:22], l.locked(), l.acquire(False), l.acquire(timeout=0))
+p(lambda: l.acquire(False, 1)); p(lambda: l.acquire(timeout=-2)); p(lambda: l.acquire(timeout='x'))
+l.release(); p(lambda: l.release())
+with l: print(l.locked())
+r = t.RLock()
+print(repr(r)[:45], r.acquire(), r.acquire(), r._recursion_count(), r._is_owned(), repr(r)[:30])
+r.release(); r.release(); p(lambda: r.release())
+p(lambda: t.RLock(1)); p(lambda: repr(t.LockType())[:24]); p(lambda: t.get_ident() > 0); p(lambda: t._count()); p(lambda: t.stack_size())
+print(t.lock is t.LockType)
+for code in ["(1).x = 2", "(1).real = 2", "[].append = 1", "del (1).x", "del (1).real", "len.x = 1"]:
+    try: exec(code)
+    except AttributeError as e: print(e)
+print(object.__new__.__self__, [].append.__self__, int.from_bytes.__self__, len.__self__.__name__)
+try: object.__init__.__self__
+except AttributeError as e: print(e)
+class A: pass
+a = A(); a.x = 1
+print(a.__getstate__(), A().__getstate__(), object().__getstate__())
+for bad in [lambda: object.__reduce_ex__(A()), lambda: object.__reduce__(A(), 1), lambda: A().__reduce_ex__('x')]:
+    try: bad()
+    except TypeError as e: print(e)
+class R:
+    def __reduce__(self): return "custom"
+print(R().__reduce_ex__(2))
 """,
 ]
 CASES += [

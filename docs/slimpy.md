@@ -375,6 +375,14 @@ round trips remain untested because the pickle module is not implemented.
 Exception support still lacks
 traceback objects, complete chaining, and all builtin-specific
 constructors. Context-manager exit currently receives `None` for the traceback.
+The 3.15 `sentinel` builtin creates unique named objects (PEP 661) that
+record their creating module, copy as themselves, reduce to their name, and
+form unions with `|`. `object.__reduce__`, `__reduce_ex__`, and `__getstate__`
+follow `typeobject.c`: `__getnewargs_ex__`/`__getnewargs__`, `__dict__` and
+slot state, list and dict items, and `copyreg` (imported from the host when
+needed) for protocols below 2. Builtin functions expose `__self__`. Setting an
+attribute of a builtin object without `__dict__` raises CPython's three
+`AttributeError` forms, and unsupported orderings name the operator and types.
 `ImportError` accepts `name`, `path`, and `name_from` keywords and keeps a lone
 argument as `msg`. `AttributeError` accepts `name` and `obj`, and `NameError`
 accepts `name`. Failed attribute lookups and name lookups fill these attributes,
@@ -538,8 +546,12 @@ module bind the attribute directly. The global lazy-import filter and
 
 ### 3.3 Standard library and host services
 
-Five minimal standard-library modules are built in: `collections`, `itertools`,
-`sys`, `types`, and `weakref`, with `_weakref` as the primitive half of `weakref`. Their Python sources live in `modules/` and are embedded into
+Six minimal standard-library modules are built in: `_thread`, `collections`,
+`itertools`, `sys`, `types`, and `weakref`, with `_weakref` as the primitive
+half of `weakref`. `_thread` describes the engine's single thread. Its locks
+keep CPython's states, arguments, and errors. A blocking acquire that only
+another thread could satisfy raises `RuntimeError` instead of hanging, and
+starting a thread raises `RuntimeError`. Their Python sources live in `modules/` and are embedded into
 `spy-intrinsics.h`; an import finds them before the host loader, needs no
 loader, and parses them only on first use. `collections` provides `deque`,
 `defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
