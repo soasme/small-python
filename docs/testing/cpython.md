@@ -118,7 +118,7 @@ ports, skipped platforms, and dynamic-case coverage are unresolved.
 
 ## Whole-module unittest adaptation
 
-Thirteen complete unchanged upstream modules run in the engine. All 192 discovered
+Fourteen complete unchanged upstream modules run in the engine. All 215 discovered
 cases pass with both the adapted framework and CPython's original framework:
 
 | Module | Cases |
@@ -136,6 +136,7 @@ cases pass with both the adapted framework and CPython's original framework:
 | `test_subclassinit` | 17 |
 | `test_utf8source` | 3 |
 | `test_binop` | 12 |
+| `test_isinstance` | 23 |
 
 The assignment-expression module also executes 99 subtests. Their results and
 parameters are recorded. The runner compares the sequence of subtest statuses
@@ -292,7 +293,7 @@ Their source bodies and assertions are preserved; surrounding imports and
 unrelated methods are not transplanted.
 
 These checks are supplemental selections, not whole-module passes, and are
-not added to the 192-case whole-module result. Pickling tests, CPython-only
+not added to the 215-case whole-module result. Pickling tests, CPython-only
 checks, and all other cases stay in the full test inventory. Additional oracle
 comparisons cover suspended-object lifecycle states, frozen mapping protocols,
 subclass identity, hash callbacks, and immutable execution namespaces.
@@ -300,7 +301,7 @@ subclass identity, hash callbacks, and immutable execution namespaces.
 ## Source bytes and indentation
 
 The complete unchanged `test_utf8source` module contributes three cases to the
-192-case result. `tests/source_encoding.py` additionally runs six unchanged
+215-case result. `tests/source_encoding.py` additionally runs six unchanged
 methods from `test_source_encoding.MiscSourceEncodingTest` and
 `test_compile.TestSpecifics`, after checking them with the original unittest
 framework on the pinned oracle. This selected-method adaptation replaces only

@@ -222,3 +222,4 @@
   CPython's read-only attribute and ordering messages.
 - Built-in gc and _typing modules; __get__ on functions, methods and method
   descriptors; builtin slots take MRO precedence over later Python bases.
+- isinstance/issubclass follow CPython's abstract __bases__ protocol.

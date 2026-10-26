@@ -225,10 +225,11 @@ remaining coverage gaps. `make test-cpython-doctests` is strict about the curren
 ports; `make test-cpython` additionally requires closing the full inventory.
 Both strict upstream targets currently fail.
 
-`make test-cpython-unittest` passes all 192 cases in thirteen unchanged modules:
+`make test-cpython-unittest` passes all 215 cases in fourteen unchanged modules:
 decorators, augmented assignments, integer literals, unary operators, keyword-only
 arguments, assignment expressions, large expressions, Unicode identifiers, exception
-variations, type checks, subclass initialization, UTF-8 source, and binary operators.
+variations, type checks, subclass initialization, UTF-8 source, binary operators,
+and isinstance/issubclass.
 It also checks all 99 executed subtests
 against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
@@ -387,6 +388,10 @@ lookup does, so enum mixins such as `IntFlag` and `StrEnum` resolve their
 methods correctly. Setting an
 attribute of a builtin object without `__dict__` raises CPython's three
 `AttributeError` forms, and unsupported orderings name the operator and types.
+`isinstance` and `issubclass` follow `Objects/abstract.c`: exact types check
+the MRO, tuples are searched, other targets use `__instancecheck__` or
+`__subclasscheck__`, and objects with a tuple `__bases__` act as classes,
+with recursion limits on cyclic bases.
 `ImportError` accepts `name`, `path`, and `name_from` keywords and keeps a lone
 argument as `msg`. `AttributeError` accepts `name` and `obj`, and `NameError`
 accepts `name`. Failed attribute lookups and name lookups fill these attributes,

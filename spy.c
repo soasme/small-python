@@ -14001,23 +14001,86 @@ static SPYValue *type_round(SPYContext *c, size_t argc, SPYValue *const *argv, v
     if (!self) return spy_error(c, "TypeError", "__round__ descriptor requires an instance of its type and optional ndigits");
     return round_value(c, self, argc == 2 ? argv[1] : NULL);
 }
-/* isinstance()/issubclass(): tuples are searched recursively and any
- * non-type target consults __instancecheck__/__subclasscheck__ on its type. */
+/* isinstance()/issubclass(), as Objects/abstract.c: exact types check the
+ * MRO, tuples are searched, other targets use __instancecheck__ or
+ * __subclasscheck__ on their type, and objects with a tuple __bases__ act as
+ * classes for the abstract protocol. */
+static SPYValue *abstract_bases(SPYContext *c, SPYValue *cls) {
+    SPYValue *bases = attribute(c, cls, "__bases__");
+    if (!bases && error_is(c, "AttributeError")) spy_clear_error(c);
+    if (bases && bases->type != SPY_TUPLE) { spy_release(bases); return NULL; }
+    return bases;
+}
+static int abstract_issubclass(SPYContext *c, SPYValue *derived, SPYValue *cls) {
+    SPYValue *bases = NULL;
+    spy_retain(derived);
+    for (;;) {
+        if (derived == cls) { spy_release(derived); spy_release(bases); return 1; }
+        spy_release(bases);
+        bases = abstract_bases(c, derived);
+        spy_release(derived);
+        if (!bases) return c->error_type[0] ? -1 : 0;
+        if (bases->as.seq.len != 1) break;
+        /* Single inheritance is followed without recursion. */
+        derived = spy_retain(bases->as.seq.items[0]);
+    }
+    int result = 0;
+    for (size_t i = 0; i < bases->as.seq.len && !result; i++) {
+        if (deeper(c, " in __issubclass__")) { result = -1; break; }
+        result = abstract_issubclass(c, bases->as.seq.items[i], cls);
+        c->depth--;
+    }
+    spy_release(bases); return result;
+}
+static int check_class(SPYContext *c, SPYValue *cls, const char *error) {
+    SPYValue *bases = abstract_bases(c, cls);
+    if (!bases) { if (!c->error_type[0]) spy_error(c, "TypeError", error); return 0; }
+    spy_release(bases); return 1;
+}
+static int object_isinstance(SPYContext *c, SPYValue *inst, SPYValue *cls) {
+    SPYValue *type = value_class(c, inst);
+    int result;
+    if (cls->type == SPY_CLASS) {
+        result = subclass(type, cls);
+        if (result) return 1;
+    } else if (!check_class(c, cls, "isinstance() arg 2 must be a type, a tuple of types, or a union")) return -1;
+    SPYValue *icls = attribute(c, inst, "__class__");
+    if (!icls) {
+        if (!error_is(c, "AttributeError")) return -1;
+        spy_clear_error(c); return 0;
+    }
+    if (cls->type == SPY_CLASS) result = icls != type && icls->type == SPY_CLASS ? subclass(icls, cls) : 0;
+    else result = abstract_issubclass(c, icls, cls);
+    spy_release(icls); return result;
+}
+static int recursive_issubclass(SPYContext *c, SPYValue *derived, SPYValue *cls) {
+    if (cls->type == SPY_CLASS && derived->type == SPY_CLASS) return subclass(derived, cls);
+    if (!check_class(c, derived, "issubclass() arg 1 must be a class")) return -1;
+    if (!check_class(c, cls, "issubclass() arg 2 must be a class, a tuple of classes, or a union")) return -1;
+    return abstract_issubclass(c, derived, cls);
+}
 static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub, size_t depth) {
-    if (depth > 128) { spy_error(c, "RecursionError", "maximum recursion depth exceeded in __instancecheck__"); return -1; }
-    SPYValue *cls = sub ? a : value_class(c, a);
-    if (!sub && cls == target) return 1;
-    if (target->type == SPY_CLASS && !target->as.map.meta) return subclass(cls, target);
+    (void)depth;
+    if (!sub && value_class(c, a) == target) return 1;
+    int exact = target->type == SPY_CLASS && !target->as.map.meta;
+    if (exact) {
+        if (sub) return a == target ? 1 : recursive_issubclass(c, a, target);
+        return object_isinstance(c, a, target);
+    }
     if (target->type == SPY_TUPLE) {
-        for (size_t i = 0; i < target->as.seq.len; i++) {
-            int result = instance_check(c, a, target->as.seq.items[i], sub, depth + 1);
-            if (result) return result;
+        int result = 0;
+        for (size_t i = 0; i < target->as.seq.len && !result; i++) {
+            if (deeper(c, sub ? " in __subclasscheck__" : " in __instancecheck__")) return -1;
+            result = instance_check(c, a, target->as.seq.items[i], sub, 0);
+            c->depth--;
         }
-        return 0;
+        return result;
     }
     SPYValue *hook = special_dispatch(target) ? special_method(c, target, sub ? "__subclasscheck__" : "__instancecheck__") : NULL;
     if (hook) {
+        if (deeper(c, sub ? " in __subclasscheck__" : " in __instancecheck__")) { spy_release(hook); return -1; }
         SPYValue *value = spy_call(c, hook, 1, &a);
+        c->depth--;
         spy_release(hook);
         if (!value) return -1;
         int truth = spy_truth(value);
@@ -14025,10 +14088,7 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
         return c->error_type[0] ? -1 : truth;
     }
     if (c->error_type[0]) return -1;
-    if (target->type == SPY_CLASS) return subclass(cls, target);
-    spy_error(c, "TypeError", sub ? "issubclass() arg 2 must be a class, a tuple of classes, or a union" :
-              "isinstance() arg 2 must be a type, a tuple of types, or a union");
-    return -1;
+    return sub ? recursive_issubclass(c, a, target) : object_isinstance(c, a, target);
 }
 typedef struct { SPYValue *value, *key; } SortItem;
 static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) {
@@ -17279,7 +17339,6 @@ execution_fail:
     }
     if (id == B_ISINSTANCE || id == B_ISSUBCLASS) {
         if (argc != 2) goto arity;
-        if (id == B_ISSUBCLASS && a->type != SPY_CLASS) return spy_error(c, "TypeError", "issubclass() arg 1 must be a class");
         int result = instance_check(c, a, argv[1], id == B_ISSUBCLASS, 0);
         return result < 0 ? NULL : spy_bool(c, result);
     }
