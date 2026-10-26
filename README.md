@@ -13,7 +13,7 @@ uv build
 ## Publishing
 
 The workflow in `.github/workflows/publish.yml` builds and publishes to PyPI when
-a version tag matching `pyproject.toml` is pushed (for example, `v0.1.0`).
+a version tag matching `pyproject.toml` is pushed (for example, `v0.0.1`).
 
 Before the first release, configure a [PyPI Trusted Publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
 with these values:
@@ -30,8 +30,8 @@ No PyPI API token is needed.
 To publish the initial version after the repository is pushed:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.0.1
+git push origin v0.0.1
 ```
 
 For later releases, preview a version bump:
