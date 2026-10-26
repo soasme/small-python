@@ -3407,6 +3407,26 @@ print(property(fget=len, doc='d').__doc__)
 """]
 
 CASES.append(r"""
+# CPython's error spans for range-based parser diagnostics and tokenizer errors.
+for source in ["[1, 2 3]", "x = 1 +", "print 'x'", "import a.b from c.d", "case 1: pass", "match x\n  case 1: pass",
+               "x = 08", "0x", "0o8", "1_000_", "1.5j_", "with a,: pass", "raise from x", "3 + not 3", "- not 3", "{1: 2, 3}",
+               "{1:}", "f(x for x in y, 1)", "f(a, x for x in y if z)", "'a' b 'c'", "x = pass if 1 else 1", "[a b",
+               "[a b c", "from t import x,", "import a as b.c", "try:\n  pass\nexcept E as a.b:\n  pass", "x = 'abc",
+               "x = f'abc", "match x:\n  case 1 as a():\n    pass", "fur x in y:\n  pass", "class C(x for x in y): pass",
+               "for x im y:\n  pass"]:
+    try:
+        compile(source, "<s>", "exec")
+    except SyntaxError as e:
+        print(type(e).__name__, e.msg, e.lineno, e.offset, e.end_lineno, e.end_offset)
+namespace = {}
+exec(compile('def g():\n    return f"{(yield 1)}"\n', "<s>", "exec"), namespace)
+print(next(namespace["g"]()))
+for source in ['x = f"{yield}"', 'x = f"{await y}"', 'x = (await\n  y)']:
+    try: compile(source, "<s>", "exec")
+    except SyntaxError as e: print(e.msg, e.lineno)
+""")
+
+CASES.append(r"""
 extra = ['x = a < b = 1','x = f() = y = 1','x = 1 = 2','[1] + 2 = 3','(a) + 1 = 2','[x for x in y] = 1','x() = yield','x = f() = 1 if 2 else 3','-1 = 2','not a = 1','a, f() = 1','*a = 1','*a += 1','del *a','del (a, f())','if x == 1 = 2: pass','x = (yield) = 1','f() = 1 = 2','a.b, c() = 1','x = lambda: 1 = 2','await x = 1','(x = 1)','[a, b() = 1]','x = f() == 1 = 2','x = 1','a, b = 1, 2','x = y = z = 0','a[0], b.c = 1, 2','*a, b = c','[a, *b] = c','(a) = 1','x += 1','del a, b[0], c.d','for (a, b) in c: pass','with a as (b, c): pass','[x for (a, b) in y]','assert x == 1, "m"','assert (x := 1)','assert x := 1','assert 1, x := 2','f(a) = 1 = 2','a, *b() = 1','(a, b()) = 1','x = [y = 1]']
 for src in ['None = 1', 'True = 1', '(True := 1)', 'f() = 1', 'yield = 1', 'del f()', 'a + 1 = 2', '1 = 1', '"abc" = 1', 'b"" = 1', '... = 1', '(a, "b", c) = (1, 2, 3)', '(a, True, c) = (1, 2, 3)', '(a, *True, c) = (1, 2, 3)', '[a, b, c + 1] = [1, 2, 3]', '[a, b[1], c + 1] = [1, 2, 3]', '[a, b.c.d, c + 1] = [1, 2, 3]', 'a if 1 else b = 1', 'True = True = 3', 'x = y = True = z = 3', 'x = y = yield = 1', 'a, b += 1, 2', '(a, b) += 1, 2', '[a, b] += 1, 2', 'for a() in b: pass', 'for (a, b()) in b: pass', 'for [a, b()] in b: pass', 'for (*a, b, c+1) in b: pass', 'for (x, *(y, z.d())) in b: pass', 'for a, b() in c: pass', 'for a, b, (c + 1, d()): pass', 'with a as b(): pass', 'with a as (b, c()): pass', 'with a as [b, c()]: pass', 'with a as (*b, c, d+1): pass', 'with a as (x, *(y, z.d())): pass', 'with a as b, c as d(): pass', '[x for x() in a]', '[x for a, b, (c + 1, d()) in y]', '[x for x+1 in y]', '[x for x+1, x() in y]', 'f(True=1)', 'f(False=1)', 'f(None=1)', 'f(*args=[0])', 'f(a, b, *args=[0])', "f(**kwargs={'a': 1})", "f(a, b, *args, **kwargs={'a': 1})", 'None += 1', 'f() += 1', 'if 1:\n  x() = 1\nelif 1:\n  pass', 'if 1:\n  pass\nelif 1:\n  x() = 1', 'if 1:\n  x() = 1\nelif 1:\n  pass\nelse:\n  pass', 'if 1:\n  pass\nelif 1:\n  x() = 1\nelse:\n  pass', 'if 1:\n  pass\nelif 1:\n  pass\nelse:\n  x() = 1', 'if x = 3:\n   pass', 'while x = 3:\n   pass', 'if x.a = 3:\n   pass', 'while x.a = 3:\n   pass', '{1, 2, 3} = 42', '{1: 2, 3: 4} = 42', "f'{x}' = 42", "f'{x}-{y}' = 42", "t'{x}' = 42", "t'{x}-{y}' = 42", '(x, y, z=3, d, e)', '[x, y, z=3, d, e]', '[z=3]', '{x, y, z=3, d, e}', '{z=3}', 'import a as b; None = 1', 'import a, b as c; d = 1; None = 1', 'from a import b as c; None = 1', 'from a import b, c as d; e = 1; None = 1', 'assert a := 1', 'assert 1, a := 1', 'assert 1 = 2 = 3', 'assert 1 = 2', 'assert (1 = 2)', "assert 'a' = a", 'assert x[0] = 1', 'assert (yield a) = 2', 'assert a = 2', 'assert (a = 2)', 'assert a = b', 'assert 1, 1 = b', 'assert 1, (1 = b)', 'assert 1, a = 1', 'assert 1, (a = 1)', 'assert 1 = a, a = 1'] + extra:
     try: compile(src, '<s>', 'exec'); print(repr(src), 'OK')

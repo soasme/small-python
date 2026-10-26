@@ -190,3 +190,8 @@
   Tab indentation uses Python column and consistency rules. The whole-module
   selection now passes 180 cases in twelve modules; six unchanged encoding
   methods and 789 oracle comparisons supplement it.
+- Parser diagnostics carry CPython's column ranges for raise/from, import,
+  except and pattern targets, misplaced 'not', and unparenthesized generator
+  arguments. Unterminated strings and unclosed brackets report CPython's
+  offsets. Compiler errors inside f-string fields are no longer lost, and an
+  await expression reports the line of its keyword.
