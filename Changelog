@@ -134,3 +134,8 @@
 - Live dict_keys, dict_values, and dict_items views: set operations and
   comparisons, membership, reversal, isdisjoint, mapping proxies, and
   size-change detection. reversed() accepts dictionaries.
+- Iterators have CPython's classes (list_iterator, dict_keyiterator,
+  callable_iterator, ...) with __next__/__iter__ slot wrappers; map, zip,
+  enumerate, filter, and reversed are builtin classes. iter(callable,
+  sentinel), zip(strict=True), and enumerate keywords follow CPython.
+- object.__subclasshook__; slot wrappers report CPython's "requires" error.

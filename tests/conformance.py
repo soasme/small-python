@@ -3129,6 +3129,53 @@ try: object.__subclasshook__(x=1)
 except TypeError as e: print(e)
 """)
 
+# Iterator classes, builtin iterator types, iter(callable, sentinel), zip strict.
+CASES.append(r"""
+for x in [iter([]), iter(()), iter(""), iter("é"), iter({}), iter(set()), iter(frozenset()), iter(range(1)), iter(range(2**70)), iter(b""), iter(bytearray()),
+          map(abs, []), zip(), enumerate([]), reversed([]), reversed((1,)), reversed("ab"), filter(None, []), iter({}.items()), iter({}.values()), iter({}.keys()),
+          reversed({}), reversed({}.values()), reversed({}.items()), iter(lambda: 1, 2), reversed(range(3)), iter(t"a{1}")]:
+    print(type(x).__name__, type(x) is type(x), type(x).__module__)
+print(type(map) is type, isinstance(map(abs, []), map), isinstance(zip(), zip), isinstance(enumerate([]), enumerate), isinstance(reversed([]), reversed), isinstance(filter(None, []), filter))
+print(map, zip, list(map(abs, [-1, 2])), list(zip("ab", [1, 2], strict=True)), list(enumerate("ab", start=1)), list(filter(None, [0, 1])), list(reversed("ab")))
+it = iter([1, 2, 3])
+print(it.__next__(), next(it), it.__iter__() is it, type(it).__next__(it))
+try: it.__next__()
+except StopIteration: print("stop")
+m = map(str, [1]); print(m.__next__(), iter(m) is m, map.__next__)
+try: type(iter([])).__next__(iter(()))
+except TypeError as e: print(e)
+try: type(iter([]))()
+except TypeError as e: print(e)
+try: map()
+except TypeError as e: print(e)
+try: iter(1, 2)
+except TypeError as e: print(e)
+n = [0]
+def counter():
+    n[0] += 1
+    return n[0]
+print(list(iter(counter, 4)))
+def raiser():
+    raise StopIteration
+print(list(iter(raiser, 0)))
+ci = iter(counter, 8); print(next(ci), next(ci), list(ci), list(ci))
+lines = iter(["a", "b", "", "c"]).__next__
+print(list(iter(lines, "")))
+for kw in [dict(start=2), dict(iterable='ab'), dict(iterable='ab', start=3), dict(start=3, iterable='ab'), dict(x=1)]:
+    try: print(list(enumerate(**kw)))
+    except TypeError as e: print(e)
+for call in [lambda: enumerate('a', 1, start=2), lambda: enumerate('a', start='x'), lambda: enumerate(), lambda: zip(x=1)]:
+    try: print(list(call()))
+    except TypeError as e: print(e)
+for a in [([1], [1, 2]), ([1, 2], [1]), ([1], [1], [1, 2]), ([1, 2], [1, 2], [1]), ([], []), ((), "", [])]:
+    try: print(list(zip(*a, strict=True)))
+    except ValueError as e: print(e)
+print(list(zip([1], [1, 2], strict=False)), list(enumerate("ab", 5)))
+for f, a in [(reversed, ()), (reversed, (1, 2)), (map, (abs,)), (enumerate, (1, 2, 3)), (filter, ()), (filter, (1, 2, 3)), (iter, ()), (iter, (1, 2, 3))]:
+    try: f(*a)
+    except TypeError as e: print(e)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),

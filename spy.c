@@ -84,6 +84,7 @@ struct SPYContext {
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
+    SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
     SPYValue *types[SPY_TEMPLATE_ITERATOR + 1];
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
@@ -1045,6 +1046,55 @@ static SPYValue *name_local(SPYValue *env, const char *name) {
 /* CPython's types for builtin methods: most unbound dunders of builtin types
  * are slot wrappers, a few are method descriptors, and binding a slot wrapper
  * gives a method-wrapper. Other natives are builtin_function_or_method. */
+enum { I_SEQUENCE, I_ZIP, I_ENUMERATE, I_REVERSED, I_GETITEM, I_MAP, I_RANGE, I_FILTER, I_TEMPLATE, I_CALLABLE };
+/* Iterator values share one layout; their class follows CPython's iterator
+ * types. map, zip, enumerate, filter, and reversed are builtin classes. */
+enum { IT_ITERATOR, IT_LIST, IT_TUPLE, IT_STR_ASCII, IT_STR, IT_BYTES, IT_BYTEARRAY, IT_DICT_KEY, IT_DICT_VALUE, IT_DICT_ITEM,
+       IT_SET, IT_RANGE, IT_LONGRANGE, IT_CALLABLE, IT_LIST_REVERSE, IT_DICT_REVERSE_KEY, IT_DICT_REVERSE_VALUE,
+       IT_DICT_REVERSE_ITEM, IT_TEMPLATE, IT_MAP, IT_ZIP, IT_ENUMERATE, IT_FILTER, IT_REVERSED, IT_COUNT };
+static const char *const iterator_names[] = {"iterator", "list_iterator", "tuple_iterator", "str_ascii_iterator", "str_iterator",
+    "bytes_iterator", "bytearray_iterator", "dict_keyiterator", "dict_valueiterator", "dict_itemiterator", "set_iterator",
+    "range_iterator", "longrange_iterator", "callable_iterator", "list_reverseiterator", "dict_reversekeyiterator",
+    "dict_reversevalueiterator", "dict_reverseitemiterator", "TemplateIter", "map", "zip", "enumerate", "filter", "reversed"};
+_Static_assert(sizeof(iterator_names) / sizeof(*iterator_names) == IT_COUNT, "iterator class table");
+static int iterator_class_id(SPYValue *v) {
+    SPYValue *source = v->as.iterator.source;
+    switch (v->as.iterator.kind) {
+    case I_ZIP: return IT_ZIP;
+    case I_MAP: return IT_MAP;
+    case I_ENUMERATE: return IT_ENUMERATE;
+    case I_FILTER: return IT_FILTER;
+    case I_CALLABLE: return IT_CALLABLE;
+    case I_TEMPLATE: return IT_TEMPLATE;
+    case I_RANGE:
+        return source->as.range.start->as.integer_data.big || source->as.range.stop->as.integer_data.big ||
+            source->as.range.step->as.integer_data.big || source->as.range.length->as.integer_data.big ? IT_LONGRANGE : IT_RANGE;
+    case I_REVERSED:
+        switch (source->type) {
+        case SPY_LIST: return IT_LIST_REVERSE;
+        case SPY_DICT: case SPY_DICT_KEYS: return IT_DICT_REVERSE_KEY;
+        case SPY_DICT_VALUES: return IT_DICT_REVERSE_VALUE;
+        case SPY_DICT_ITEMS: return IT_DICT_REVERSE_ITEM;
+        default: return IT_REVERSED;
+        }
+    case I_SEQUENCE:
+        switch (source->type) {
+        case SPY_LIST: return IT_LIST;
+        case SPY_TUPLE: return IT_TUPLE;
+        case SPY_STRING:
+            for (size_t i = 0; i < source->as.string.len; i++) if ((unsigned char)source->as.string.data[i] >= 0x80) return IT_STR;
+            return IT_STR_ASCII;
+        case SPY_BYTES: return IT_BYTES;
+        case SPY_BYTEARRAY: return IT_BYTEARRAY;
+        case SPY_DICT: case SPY_DICT_KEYS: return IT_DICT_KEY;
+        case SPY_DICT_VALUES: return IT_DICT_VALUE;
+        case SPY_DICT_ITEMS: return IT_DICT_ITEM;
+        case SPY_SET: case SPY_FROZENSET: return IT_SET;
+        default: return IT_ITERATOR;
+        }
+    default: return IT_ITERATOR;
+    }
+}
 enum { NATIVE_FUNCTION, NATIVE_METHOD_DESCRIPTOR, NATIVE_WRAPPER_DESCRIPTOR, NATIVE_METHOD_WRAPPER, NATIVE_BOUND };
 static int native_kind(SPYValue *v) {
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
@@ -1073,6 +1123,7 @@ static const char *type_name(SPYValue *value) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
     }
+    if (value->type == SPY_ITERATOR) return iterator_names[iterator_class_id(value)];
     int kind = native_kind(value);
     if (kind) return kind == NATIVE_METHOD_DESCRIPTOR ? "method_descriptor" : kind == NATIVE_WRAPPER_DESCRIPTOR ? "wrapper_descriptor" :
         kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
@@ -4038,7 +4089,6 @@ static SPYValue *awaitable_method(SPYContext *, SPYValue *, int, size_t, SPYValu
 static int awaitable_iterator(SPYValue *v) {
     return v->type == SPY_ASYNC_GENERATOR_ASEND || v->type == SPY_ASYNC_GENERATOR_ATHROW || v->type == SPY_ANEXT_AWAITABLE;
 }
-enum { I_SEQUENCE, I_ZIP, I_ENUMERATE, I_REVERSED, I_GETITEM, I_MAP, I_RANGE, I_FILTER, I_TEMPLATE };
 static int iterable_type(SPYValue *v) {
     if (special_dispatch(v)) {
         SPYValue *cls = value_class(v->ctx, v), *method = class_lookup(cls, "__iter__");
@@ -4130,6 +4180,27 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     if (++c->depth > 256) { c->depth--; return spy_error(c, "RecursionError", "iterator nesting limit exceeded"); }
     SPYValue *source = v->as.iterator.source, *result = NULL;
     switch (v->as.iterator.kind) {
+    case I_CALLABLE: {
+        /* calliter_iternext: stop on StopIteration or a value equal to the sentinel. */
+        result = spy_call(c, source, 0, NULL);
+        if (!result) {
+            if (error_is(c, "StopIteration")) spy_clear_error(c);
+            v->as.iterator.done = !c->error_type[0];
+            break;
+        }
+        SPYValue *sentinel = spy_retain(v->as.iterator.counter);
+        int stop = sentinel == result || equal(sentinel, result, 0);
+        spy_release(sentinel);
+        if (c->error_type[0] || stop) {
+            spy_release(result); result = NULL;
+            if (stop && !c->error_type[0]) {
+                v->as.iterator.done = 1;
+                spy_release(v->as.iterator.source); v->as.iterator.source = spy_none(c);
+                spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
+            }
+        }
+        break;
+    }
     case I_TEMPLATE: {
         SPYValue *strings = source->as.template.strings, *fields = source->as.template.interpolations;
         while (v->as.iterator.index / 2 < strings->as.seq.len) {
@@ -4170,7 +4241,21 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         for (size_t i = v->as.iterator.kind == I_MAP ? 1 : 0; i < source->as.seq.len; i++) {
             SPYValue *item = iterator_next(c, source->as.seq.items[i]);
             if (!item || sequence_append(c, result, item)) {
-                spy_release(item); spy_release(result); result = NULL; break;
+                spy_release(item); spy_release(result); result = NULL;
+                /* zip(strict=True), as zip_next checks: a short argument after
+                 * the first, or a longer one once the first is exhausted. */
+                if (!item && !c->error_type[0] && v->as.iterator.kind == I_ZIP && v->as.iterator.size) {
+                    const char *plural = i == 1 ? " " : "s 1-";
+                    if (i) { errorf(c, "ValueError", "zip() argument %zu is shorter than argument%s%zu", i + 1, plural, i); break; }
+                    for (size_t j = 1; j < source->as.seq.len && !c->error_type[0]; j++) {
+                        SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
+                        if (extra) {
+                            spy_release(extra);
+                            errorf(c, "ValueError", "zip() argument %zu is longer than argument%s%zu", j + 1, j == 1 ? " " : "s 1-", j);
+                        }
+                    }
+                }
+                break;
             }
             spy_release(item);
         }
@@ -5816,9 +5901,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "mapping")) return call_intrinsic(c, "_mappingproxy", 1, &v->as.bound.self);
     }
     if (method < 0) {
-        SPYValue *definition = instance_lookup(c->types[v->type], name);
-        if (!definition && !c->error_type[0]) definition = builtin_descriptor_lookup(c, c->types[v->type], name);
-        if (definition) return descriptor_get(c, definition, v, c->types[v->type]);
+        SPYValue *cls = v->type == SPY_ITERATOR ? value_class(c, v) : c->types[v->type];
+        SPYValue *definition = instance_lookup(cls, name);
+        if (!definition && !c->error_type[0]) definition = builtin_descriptor_lookup(c, cls, name);
+        if (definition) return descriptor_get(c, definition, v, cls);
         if (c->error_type[0]) return NULL;
         return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
     }
@@ -8412,7 +8498,9 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
                 accepted |= base == c->types[subclassable_types[t]];
             accepted |= base == c->types[SPY_CLASS];
             if (!accepted && (base == c->types[SPY_PROPERTY] || base == c->types[SPY_STATICMETHOD] ||
-                              base == c->types[SPY_CLASSMETHOD] || base == c->types[SPY_SUPER] || base == c->types[SPY_MODULE]))
+                              base == c->types[SPY_CLASSMETHOD] || base == c->types[SPY_SUPER] || base == c->types[SPY_MODULE] ||
+                              base == c->iterator_types[IT_MAP] || base == c->iterator_types[IT_ZIP] || base == c->iterator_types[IT_ENUMERATE] ||
+                              base == c->iterator_types[IT_FILTER] || base == c->iterator_types[IT_REVERSED]))
                 return errorf(c, "NotImplementedError", "subclassing '%s' is not implemented", name_local(base, "__name__")->as.string.data);
             if (!accepted) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", name_local(base, "__name__")->as.string.data);
         }
@@ -10600,6 +10688,7 @@ static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_
 static SPYValue *value_class(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_CLASS && value->as.map.meta) return value->as.map.meta;
     if (value->type == SPY_INSTANCE) return value->as.map.parent;
+    if (value->type == SPY_ITERATOR) return c->iterator_types[iterator_class_id(value)];
     int kind = native_kind(value);
     return kind == NATIVE_BOUND ? c->types[SPY_NATIVE] : kind ? c->native_types[kind - 1] : c->types[value->type];
 }
@@ -12796,7 +12885,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         return spy_int(c, (int64_t)address);
     }
     if (id == B_FILTER) {
-        if (argc != 2) goto arity;
+        if (argc != 2) return errorf(c, "TypeError", "filter expected 2 arguments, got %zu", argc);
         SPYValue *iterator = get_iterator(c, argv[1]);
         SPYValue *source = iterator ? value_new(c, SPY_TUPLE) : NULL;
         if (source && (sequence_append(c, source, a) || sequence_append(c, source, iterator))) { spy_release(source); source = NULL; }
@@ -12860,8 +12949,15 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         return spy_string(c, s, len);
     }
     if (id == B_ITER) {
-        if (argc != 1) goto arity;
-        return get_iterator(c, a);
+        if (argc < 1 || argc > 2) return errorf(c, "TypeError", argc ? "iter expected at most 2 arguments, got %zu" : "iter expected at least 1 argument, got %zu", argc);
+        if (argc == 1) return get_iterator(c, a);
+        if (!callable_value(c, a)) return c->error_type[0] ? NULL : spy_error(c, "TypeError", "iter(v, w): v must be callable");
+        SPYValue *v = value_new(c, SPY_ITERATOR);
+        if (!v) return NULL;
+        v->as.iterator.kind = I_CALLABLE;
+        v->as.iterator.source = spy_retain(a);
+        v->as.iterator.counter = spy_retain(argv[1]);
+        return v;
     }
     if (id == B_NEXT) {
         if (argc < 1 || argc > 2) goto arity;
@@ -12891,7 +12987,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         return wrapper;
     }
     if (id == B_ZIP || id == B_ENUMERATE || id == B_REVERSED || id == B_MAP) {
-        if ((id == B_ENUMERATE && (argc < 1 || argc > 2)) || (id == B_REVERSED && argc != 1)) goto arity;
+        if (id == B_ENUMERATE && !argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
+        if (id == B_ENUMERATE && argc > 2) return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", argc);
+        if (id == B_REVERSED && argc != 1) return errorf(c, "TypeError", "reversed expected 1 argument, got %zu", argc);
         if (id == B_REVERSED && a->type == SPY_RANGE) {
             SPYValue *step = spy_int(c, -1);
             SPYValue *slice = step ? slice_new(c, c->none, c->none, step) : NULL;
@@ -12899,7 +12997,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             SPYValue *iterator = range ? get_iterator(c, range) : NULL;
             spy_release(step); spy_release(slice); spy_release(range); return iterator;
         }
-        if (id == B_MAP && argc < 2) goto arity;
+        if (id == B_MAP && argc < 2) return spy_error(c, "TypeError", "map() must have at least two arguments.");
         SPYValue *source;
         if (id == B_ZIP || id == B_MAP) {
             source = spy_list(c);
@@ -13339,6 +13437,40 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         spy_release(args[0]);
         return result;
     }
+    if (id == B_ZIP && keywords && keywords->as.map.len) {
+        int strict = 0;
+        for (size_t i = 0; i < keywords->as.map.len; i++) {
+            const char *key = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
+            if (strcmp(key, "strict")) return errorf(c, "TypeError", "zip() got an unexpected keyword argument '%s'", key);
+            strict = spy_truth(keywords->as.map.items[i].value);
+            if (c->error_type[0]) return NULL;
+        }
+        SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)B_ZIP);
+        if (result && strict) result->as.iterator.size = 1;
+        return result;
+    }
+    if (id == B_ENUMERATE && keywords && keywords->as.map.len) {
+        /* enumerate_vectorcall's keyword handling. */
+        size_t count = keywords->as.map.len, total = argc + count;
+        const char *first = builtin_value(c, keywords->as.map.items[0].key, SPY_STRING)->as.string.data;
+        const char *second = count > 1 ? builtin_value(c, keywords->as.map.items[1].key, SPY_STRING)->as.string.data : NULL;
+        SPYValue *args[2] = {argc ? argv[0] : NULL, NULL};
+        if (total == 2 && count == 1) {
+            if (strcmp(first, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
+            args[1] = keywords->as.map.items[0].value;
+        } else if (total == 2) {
+            int swapped = !strcmp(first, "start");
+            if (swapped ? strcmp(second, "iterable") : strcmp(first, "iterable"))
+                return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", swapped ? second : first);
+            if (!swapped && strcmp(second, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", second);
+            args[0] = keywords->as.map.items[swapped].value; args[1] = keywords->as.map.items[!swapped].value;
+        } else if (total == 1) {
+            if (strcmp(first, "iterable")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
+            args[0] = keywords->as.map.items[0].value;
+        } else if (!argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
+        else return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", total);
+        return builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
+    }
     if (id == B_SORTED) {
         if (argc != 1) return spy_error(c, "TypeError", "sorted expected 1 argument");
         SPYValue *list = value_new(c, SPY_LIST);
@@ -13465,7 +13597,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
  * sees only Python-level overrides. */
 enum { SLOT_BINARY, SLOT_RBINARY, SLOT_INPLACE, SLOT_COMPARE, SLOT_UNARY, SLOT_BUILTIN, SLOT_OTHER };
 enum { SLOT_REPR, SLOT_STR, SLOT_FORMAT, SLOT_ITER, SLOT_CONTAINS, SLOT_GETITEM, SLOT_SETITEM, SLOT_DELITEM,
-       SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_SELF };
+       SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_SELF, SLOT_NEXT };
 #define T(x) (UINT64_C(1) << (x))
 #define T_OBJECT (UINT64_C(1) << 63)
 #define T_NUMBERS (T(SPY_INT) | T(SPY_FLOAT) | T(SPY_COMPLEX))
@@ -13500,7 +13632,8 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__complex__", SLOT_OTHER, SLOT_COMPLEX, T(SPY_COMPLEX)}, {"__trunc__", SLOT_OTHER, SLOT_TRUNC, T(SPY_INT) | T(SPY_FLOAT)},
     {"__floor__", SLOT_OTHER, SLOT_FLOOR, T(SPY_INT) | T(SPY_FLOAT)}, {"__ceil__", SLOT_OTHER, SLOT_CEIL, T(SPY_INT) | T(SPY_FLOAT)},
     {"__len__", SLOT_BUILTIN, B_LEN, T_SEQUENCES | T(SPY_DICT) | T_SETS | T(SPY_RANGE) | T_VIEWS},
-    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T(SPY_DICT) | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR)},
+    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T(SPY_DICT) | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR)},
+    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR)},
     {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T(SPY_DICT) | T_SETS | T(SPY_RANGE) | T_VIEWS},
     {"__getitem__", SLOT_OTHER, SLOT_GETITEM, T_SEQUENCES | T(SPY_DICT) | T(SPY_RANGE)},
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
@@ -13513,6 +13646,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
 #undef T
 static int builtin_type_id(SPYContext *c, SPYValue *cls) {
     if (cls == name_local(c->classes, "object")) return 63;
+    for (int i = 0; i < IT_COUNT; i++) if (c->iterator_types[i] == cls && i != IT_TEMPLATE) return SPY_ITERATOR;
     for (int t = 0; t <= SPY_TEMPLATE_ITERATOR; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
     return -1;
 }
@@ -13567,6 +13701,9 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         return errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, owner_name);
     }
     SPYValue *self = argv[0], *value = type == 63 ? self : builtin_value(c, self, type);
+    if (value && type == SPY_ITERATOR && value_class(c, value) != owner) value = NULL;
+    if (!value && native_kind(fn) == NATIVE_WRAPPER_DESCRIPTOR)
+        return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner_name, type_name(self));
     if (!value) return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner_name, type_name(self));
     argc--; argv++;
     if (index < 0) {
@@ -13645,6 +13782,10 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
             return builtin(c, 2, args, (void *)(intptr_t)B_FORMAT);
         }
     case SLOT_ITER: return get_iterator(c, value);
+    case SLOT_NEXT: {
+        SPYValue *result = iterator_next(c, value);
+        return result || c->error_type[0] ? result : spy_error(c, "StopIteration", "");
+    }
     case SLOT_CONTAINS: return comparison(c, O_IN, argv[0], value);
     case SLOT_GETITEM: return get_index(c, value, argv[0]);
     case SLOT_SETITEM: return set_index(c, value, argv[0], argv[1]) ? NULL : spy_none(c);
@@ -13678,7 +13819,7 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
     int index = slot_index(name);
     if (index >= 0 && !(slots[index].types & (UINT64_C(1) << type))) return NULL;
     char key[128];
-    snprintf(key, sizeof(key), "%d:%s", type, name);
+    snprintf(key, sizeof(key), "%p:%s", (void *)cls, name);
     if (!c->slots && !(c->slots = value_new(c, SPY_DICT))) return NULL;
     SPYValue *cached = name_local(c->slots, key);
     if (cached) return cached->type == SPY_NONE ? NULL : cached;
@@ -14045,6 +14186,19 @@ SPYContext *spy_context_new(void) {
         int status = name_set(c, c->builtins, extra_builtins[i].name, v);
         spy_release(v);
         if (status) { spy_release(module); goto fail; }
+    }
+    static const int iterator_natives[] = {B_MAP, B_ZIP, B_ENUMERATE, B_FILTER, B_REVERSED};
+    c->iterator_types[IT_ITERATOR] = spy_retain(c->types[SPY_ITERATOR]);
+    c->iterator_types[IT_TEMPLATE] = spy_retain(c->types[SPY_TEMPLATE_ITERATOR]);
+    for (int i = 1; i < IT_COUNT; i++) {
+        if (i == IT_TEMPLATE) continue;
+        SPYValue *cls = new_class(c, iterator_names[i], name_local(c->classes, "object"), module);
+        if (!cls) { spy_release(module); goto fail; }
+        c->iterator_types[i] = cls;
+        if (i >= IT_MAP) {
+            cls->as.map.native = iterator_natives[i - IT_MAP] + 1;
+            if (name_set(c, c->builtins, iterator_names[i], cls)) { spy_release(module); goto fail; }
+        } else cls->as.map.flags = 2;
     }
     static const struct { const char *type, *name; int id, method; } constructors[] = {
         {"object", "__new__", B_OBJECT_NEW, 0}, {"object", "__init__", B_OBJECT_INIT, 1},
