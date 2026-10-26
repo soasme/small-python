@@ -183,6 +183,24 @@ class RuntimeTest(unittest.TestCase):
         a.close(); b.close()
         gc.collect()
 
+    def test_mount(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory, Runtime() as rt:
+            with self.assertRaises(Error) as cm:
+                rt.exec("open('x.txt', 'w')")
+            self.assertEqual(cm.exception.type, "PermissionError")
+            rt.mount(directory, "/work")
+            rt.exec("with open('/work/x.txt', 'w') as f: f.write('hi')")
+            with open(f"{directory}/x.txt") as f:
+                self.assertEqual(f.read(), "hi")
+            self.assertEqual(rt.eval("open('x.txt').read()"), "hi")
+            rt.mount(directory, "/ro", read_only=True)
+            self.assertEqual(rt.eval("open('/ro/x.txt').read()"), "hi")
+            with self.assertRaises(Error):
+                rt.exec("open('/ro/y.txt', 'w')")
+            with self.assertRaises(Error):
+                rt.mount(f"{directory}/missing")
+
     def test_version(self):
         self.assertEqual(smallpython.__version__, smallpython.SPY_VERSION)
 

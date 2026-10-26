@@ -154,6 +154,7 @@ test: all tests/api run-cython check-intrinsics
 	$(PYTHON) tests/frozendict.py ./spy
 	$(PYTHON) tests/rounding.py ./spy
 	$(PYTHON) tests/strings.py ./spy
+	$(PYTHON) tests/files.py ./spy
 	$(PYTHON) tests/framework.py ./run-cython
 	$(PYTHON) tests/executable.py
 

@@ -698,12 +698,31 @@ int main(void) {
         assert(!spy_exec(c, "del keyword_sum", "native_del.py") && released == 1);
     }
 
+    {
+        /* open() reaches only mounts: nothing without one, read-only data
+         * at its guest path, and relative paths from the first mount. */
+        SPYContext *files = spy_context_new();
+        assert(files);
+        assert(!spy_exec(files, "try:\n    open('tests/api.c')\nexcept PermissionError as e:\n    assert e.errno == 13\n", "no_mount.py"));
+        assert(spy_mount(files, "tests/missing", NULL, 0) == -1 && !strcmp(spy_error_type(files), "OSError"));
+        spy_clear_error(files);
+        assert(spy_mount(files, "tests", "data", 0) == -1 && !strcmp(spy_error_type(files), "ValueError"));
+        spy_clear_error(files);
+        assert(!spy_mount(files, "tests", "/data/./", SPY_MOUNT_READ_ONLY));
+        assert(!spy_exec(files,
+            "with open('/data/api.c') as f:\n    assert f.readline().startswith('#include')\n"
+            "assert open('api.c', 'rb').read(8) == b'#include'\n"
+            "try:\n    open('/data/new.txt', 'w')\nexcept OSError as e:\n    assert type(e) is OSError and e.strerror, e\n"
+            "try:\n    open('/data/../Makefile')\nexcept PermissionError:\n    pass\n", "mounted.py"));
+        spy_context_free(files);
+    }
+
     SPYContext *other = spy_context_new();
     assert(other);
     SPYValue *foreign = spy_int(other, 3);
     assert(spy_set_global(c, "foreign", foreign) == -1);
     spy_release(foreign); spy_context_free(other);
     spy_context_free(c);
-    puts("C API: ownership, closures, cycles, imports, limits, and recovery passed");
+    puts("C API: ownership, closures, cycles, imports, limits, mounts, and recovery passed");
     return 0;
 }

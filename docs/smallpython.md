@@ -136,11 +136,12 @@ libraries. Static linking depends on the target platform.
 #### 2.3.1 `spy` interpreter
 
 ```text
-usage: spy [-c source | -i | --version | file.py | -]
+usage: spy [--mount dir]... [-c source | -i | --version | file.py | -]
 ```
 
 | Option | Effect |
 | --- | --- |
+| `--mount dir` | Let `open` reach `dir` at its own resolved path; repeatable, and replaces the default mount of the current directory |
 | `-c source` | Execute the supplied text |
 | `-i` | Start the interactive shell |
 | `--version` | Print the engine version |
@@ -374,9 +375,22 @@ completed result. Exact frozen copies can reuse the original value; subclass
 copies produce plain frozen mappings. `eval` and `exec` accept frozen globals
 with an existing `__builtins__` entry and reject writes and deletions. Pickle
 round trips remain untested because the pickle module is not implemented.
-The builtins module provides every CPython 3.15 builtin except `open` and
-`input`, which need host files and streams, and `help`, `copyright`,
-`credits`, and `license`, which come from the `site` module. `exit` and `quit`
+The builtins module provides every CPython 3.15 builtin except `input`,
+which needs a host stream, and `help`, `copyright`, `credits`, and
+`license`, which come from the `site` module. `open` reaches only host
+directories mounted with `spy_mount` (see [Host services and
+limits](#346-host-services-and-limits)); without a mount every path raises
+`PermissionError`. It returns `_io`-named `FileIO`, `BufferedReader`,
+`BufferedWriter`, `BufferedRandom`, and `TextIOWrapper` objects with CPython's
+modes, argument validation, reprs, `with`/iteration, `readline`/`readlines`,
+`seek`/`tell`/`truncate`, universal and explicit newline handling, and
+`UnsupportedOperation` (an `OSError` and `ValueError`). Buffered objects pass
+straight through to the descriptor. Text files decode `utf-8` (the 3.15
+default), `latin-1`, or `ascii`, the codecs `str.encode` supports; integer
+descriptors and `opener` are refused. `OSError(errno, strerror, filename,
+winerror, filename2)` follows CPython: the errno selects the subclass, the
+attributes are set, a filename shortens `args`, and `str` gives
+`[Errno N] message: 'name'`. `exit` and `quit`
 raise `SystemExit` with their code, and `SystemExit.code` follows CPython.
 `__build_class__` creates a class as a class statement does, calling an
 ordinary function for the body; `__lazy_import__` returns a lazy import object
@@ -724,6 +738,18 @@ Do not recursively call `spy_eval` from a callback on the same context.
 `spy_set_output` installs text output; `spy_set_module_loader` installs module
 source loading. Neither service is installed by the core automatically.
 
+`spy_mount(ctx, directory, path, flags)` lets `open` reach a host directory
+at an absolute guest path, or at the directory's own resolved path when
+`path` is `NULL`; `SPY_MOUNT_READ_ONLY` refuses writes with `EROFS`. Nothing
+else is reachable: a guest path is normalized lexically, must fall inside a
+mount (the longest matching one), and is then resolved on the host with
+`realpath`, so `..` and symbolic links cannot leave the mount, and files are
+opened with `O_NOFOLLOW`. Relative paths start at the first mount. The context
+owns every descriptor `open` creates and closes the rest when it is freed;
+other descriptors, such as the process's standard streams, are unreachable.
+The `spy` command mounts its working directory at its own path. File access
+needs a POSIX host; elsewhere `spy_mount` and `open` raise `OSError`.
+
 `spy_new_module(ctx, name, init)` registers a module the way QuickJS's
 `JS_NewCModule` does. An import finds it before the loader. The first import
 creates the module object with `__name__`, `__package__`, and `__builtins__`
@@ -779,7 +805,8 @@ context. `std` registers the standard layer; `output` receives printed text
 Its methods are `eval(source, filename)` (the last expression's value),
 `exec`, `call(function_or_global_name, *args, **kwargs)`, `define(name, f)`
 and the `function` decorator, `register_module(name, members, source)` (built
-on `spy_new_module`), `collect`, and `close`; `rt[name]` reads, assigns, and
+on `spy_new_module`), `mount(directory, path=None, *, read_only=False)` (no
+directory is mounted by default), `collect`, and `close`; `rt[name]` reads, assigns, and
 deletes globals. A runtime is a context manager.
 
 Values cross the boundary by copy when they are `None`, `bool`, `int`

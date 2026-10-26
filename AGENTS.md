@@ -27,6 +27,9 @@ run the equivalent command directly.
   protocols, and import semantics are part of the language and cannot be
   excluded merely because CPython documents them near its standard library.
   Host I/O and optional C library wrappers belong at an explicit host boundary.
+  The `open` builtin is the one file service in the core, and it reaches only
+  directories the host mounted with `spy_mount`; keep every new path check
+  inside `mount_resolve` and never expose descriptors the context did not open.
   Modules are registered QuickJS-style: `spy_new_module(ctx, name, init)`
   (like `JS_NewCModule`), with `init` filling the module on first import.
   `spy.c`/`spy.h` hold no standard module; the standard layer `spy-std.c`

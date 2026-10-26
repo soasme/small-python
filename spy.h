@@ -60,6 +60,12 @@ int spy_new_module(SPYContext *, const char *, SPYModuleInit);
 /* Execute source with a module's namespace as its globals. */
 int spy_exec_module(SPYContext *, SPYValue *, const char *source, const char *filename);
 /* Zero means unlimited. Budget resets for each top-level evaluation. */
+/* open() reaches only host directories mounted with spy_mount, at an absolute
+ * path (NULL: the directory's own resolved path); paths are resolved inside
+ * the mount, so symbolic links cannot leave it. The first mount is the
+ * working directory for relative paths. Without a mount nothing is readable. */
+enum { SPY_MOUNT_READ_ONLY = 1 };
+int spy_mount(SPYContext *, const char *directory, const char *path, int flags);
 void spy_set_step_limit(SPYContext *, size_t);
 size_t spy_collect(SPYContext *);
 size_t spy_live_values(const SPYContext *);

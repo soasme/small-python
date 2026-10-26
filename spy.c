@@ -1,3 +1,10 @@
+/* POSIX file access backs open() on mounted host directories. */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 #include "spy.h"
 
 #include <ctype.h>
@@ -10,6 +17,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__unix__) || defined(__APPLE__)
+#define SPY_FILES 1
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#else
+#define SPY_FILES 0
+#endif
 #include "spy-unicode.h"
 #include "spy-intrinsics.h"
 
@@ -107,6 +122,12 @@ struct SPYContext {
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     /* Modules a host registered with spy_new_module, created on first import. */
     struct HostModule { char *name; SPYModuleInit init; } *host_modules;
+    /* Mounted host directories (resolved host path, normalized guest path)
+     * and the descriptors open() created, which the context closes. */
+    struct Mount { char *host, *path; int flags; } *mounts;
+    size_t mounts_len;
+    int *files;
+    size_t files_len, files_cap;
     size_t host_modules_len;
     void *opaque;
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
@@ -255,12 +276,23 @@ static SPYValue *value_new(SPYContext *, int);
 static size_t frame_line(SPYContext *, SPYValue *);
 enum { FRAME_KEYS, FRAME_VALUES, FRAME_ITEMS, FRAME_DICT };
 static SPYValue *frame_contents(SPYContext *, SPYValue *, int);
+/* The source unit a running frame executes. */
+static SPYValue *frame_unit(struct ActiveFrame *frame) {
+    SPYValue *owner = frame->owner;
+    return owner->type == SPY_FUNCTION ? owner->as.function.unit : owner->type == V_UNIT ? owner : owner->as.generator.unit;
+}
+/* Intrinsic Python code implements builtins, which CPython writes in C: its
+ * frames get no traceback entries and never become an error's location. */
+static int intrinsic_frame(struct ActiveFrame *frame) {
+    SPYValue *unit = frame_unit(frame);
+    return unit && unit->as.unit.filename && !strcmp(unit->as.unit.filename, "<intrinsics>");
+}
 /* PyTraceBack_Here: an error passing through the innermost frame prepends
  * that frame's entry to the pending traceback, once per frame. */
 static void traceback_here(SPYContext *c) {
     if (!c->py_depth || !c->error_type[0]) return;
     struct ActiveFrame *top = &c->frames[c->py_depth - 1];
-    if (c->traceback_frame == top->serial) return;
+    if (c->traceback_frame == top->serial || intrinsic_frame(top)) return;
     char type[sizeof(c->error_type)];
     memcpy(type, c->error_type, sizeof(type));
     c->error_type[0] = 0;
@@ -277,6 +309,12 @@ static void traceback_here(SPYContext *c) {
 static void leave_frame(SPYContext *c) {
     traceback_here(c);
     struct ActiveFrame *top = &c->frames[--c->py_depth];
+    if (c->error_type[0] && c->py_depth && intrinsic_frame(top) && !intrinsic_frame(&c->frames[c->py_depth - 1])) {
+        struct ActiveFrame *caller = &c->frames[c->py_depth - 1];
+        SPYValue *unit = frame_unit(caller);
+        c->line = caller->line;
+        if (unit && unit->as.unit.filename) snprintf(c->filename, sizeof(c->filename), "%s", unit->as.unit.filename);
+    }
     SPYValue *frame = top->object;
     if (!frame) return;
     frame->as.frame.index = 0;
@@ -1847,6 +1885,12 @@ static SPYValue *template_concat(SPYContext *c, SPYValue *a, SPYValue *b) {
 }
 static SPYValue *view_list(SPYContext *, SPYValue *);
 static int lazy_name(Buffer *, SPYValue *);
+/* Whether OSError_str uses its errno form: a filename, or both errno and strerror. */
+static int oserror_text(SPYValue *v) {
+    SPYValue *code = name_local(v, "errno"), *text = name_local(v, "strerror"), *file = name_local(v, "filename");
+    if (!code || !text) return 0;
+    return (file && file->type != SPY_NONE) || (code->type != SPY_NONE && text->type != SPY_NONE);
+}
 static int format_value(Buffer *b, SPYValue *v, int repr) {
     char num[96];
     switch (v->type) {
@@ -2077,6 +2121,15 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
                     if (has_line && !status) status = (has_file && puts_buffer(b, ", ")) ||
                         puts_buffer(b, "line ") || format_value(b, line, 0);
                     if (!status) status = puts_buffer(b, ")");
+                }
+            } else if (subclass(v->as.map.parent, name_local(b->ctx->classes, "OSError")) && oserror_text(v)) {
+                /* OSError_str: [Errno N] strerror, then the filenames. */
+                SPYValue *file = name_local(v, "filename"), *file2 = name_local(v, "filename2");
+                status = puts_buffer(b, "[Errno ") || format_value(b, name_local(v, "errno"), 0) || puts_buffer(b, "] ") ||
+                    format_value(b, name_local(v, "strerror"), 0);
+                if (!status && file && file->type != SPY_NONE) {
+                    status = puts_buffer(b, ": ") || format_value(b, file, 1);
+                    if (!status && file2 && file2->type != SPY_NONE) status = puts_buffer(b, " -> ") || format_value(b, file2, 1);
                 }
             } else if (subclass(v->as.map.parent, name_local(b->ctx->classes, "ImportError")) && name_local(v, "msg") &&
                        name_local(v, "msg")->type == SPY_STRING) {
@@ -9980,7 +10033,89 @@ static const char *const *exception_keywords(SPYContext *c, SPYValue *cls) {
     if (subclass(cls, name_local(c->classes, "NameError"))) return name_fields;
     return NULL;
 }
+/* Objects/exceptions.c errnomap: OSError(errno, ...) creates the subclass for errno. */
+static const char *oserror_subclass(int64_t code) {
+    switch (code) {
+#ifdef EAGAIN
+    case EAGAIN: return "BlockingIOError";
+#endif
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+    case EWOULDBLOCK: return "BlockingIOError";
+#endif
+#ifdef EALREADY
+    case EALREADY: return "BlockingIOError";
+#endif
+#ifdef EINPROGRESS
+    case EINPROGRESS: return "BlockingIOError";
+#endif
+#ifdef ECHILD
+    case ECHILD: return "ChildProcessError";
+#endif
+#ifdef EPIPE
+    case EPIPE: return "BrokenPipeError";
+#endif
+#ifdef ESHUTDOWN
+    case ESHUTDOWN: return "BrokenPipeError";
+#endif
+#ifdef ECONNABORTED
+    case ECONNABORTED: return "ConnectionAbortedError";
+#endif
+#ifdef ECONNREFUSED
+    case ECONNREFUSED: return "ConnectionRefusedError";
+#endif
+#ifdef ECONNRESET
+    case ECONNRESET: return "ConnectionResetError";
+#endif
+#ifdef EEXIST
+    case EEXIST: return "FileExistsError";
+#endif
+#ifdef ENOENT
+    case ENOENT: return "FileNotFoundError";
+#endif
+#ifdef EISDIR
+    case EISDIR: return "IsADirectoryError";
+#endif
+#ifdef ENOTDIR
+    case ENOTDIR: return "NotADirectoryError";
+#endif
+#ifdef EINTR
+    case EINTR: return "InterruptedError";
+#endif
+#ifdef EACCES
+    case EACCES: return "PermissionError";
+#endif
+#ifdef EPERM
+    case EPERM: return "PermissionError";
+#endif
+#ifdef ESRCH
+    case ESRCH: return "ProcessLookupError";
+#endif
+#ifdef ETIMEDOUT
+    case ETIMEDOUT: return "TimeoutError";
+#endif
+    default: return NULL;
+    }
+}
+/* oserror_init: two to five arguments are errno, strerror, filename,
+ * winerror, and filename2; a filename shortens args to the first two. A
+ * BlockingIOError's third integer argument is characters_written instead. */
+static int oserror_fields(SPYContext *c, SPYValue *v, size_t argc, SPYValue *const *argv) {
+    static const char *const fields[] = {"errno", "strerror", "filename", "filename2"};
+    for (size_t i = 0; i < 4; i++) if (name_set(c, v, fields[i], c->none)) return -1;
+    if (argc < 2 || argc > 5) return 0;
+    if (name_set(c, v, "errno", argv[0]) || name_set(c, v, "strerror", argv[1])) return -1;
+    if (argc < 3 || argv[2]->type == SPY_NONE) return 0;
+    if (argc == 3 && argv[2]->type == SPY_INT && subclass(v->as.map.parent, name_local(c->classes, "BlockingIOError")))
+        return name_set(c, v, "characters_written", argv[2]);
+    if (name_set(c, v, "filename", argv[2]) || (argc == 5 && name_set(c, v, "filename2", argv[4]))) return -1;
+    return exception_args(c, v, 2, argv);
+}
 static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv) {
+    if (cls == name_local(c->classes, "OSError") && argc >= 2 && argc <= 5 && argv[0]->type == SPY_INT) {
+        int64_t code;
+        const char *mapped = spy_as_int(c, argv[0], &code) ? (spy_clear_error(c), NULL) : oserror_subclass(code);
+        if (mapped) cls = name_local(c->classes, mapped);
+    }
     SPYValue *v = new_instance(c, cls);
     if (!v) return NULL;
     int status = exception_args(c, v, argc, argv);
@@ -10003,6 +10138,7 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
     const char *const *fields = exception_keywords(c, cls);
     for (size_t i = 0; fields && fields[i] && !status; i++) status = name_set(c, v, fields[i], c->none);
     if (!status && subclass(cls, name_local(c->classes, "ImportError"))) status = name_set(c, v, "msg", c->none);
+    if (!status && subclass(cls, name_local(c->classes, "OSError"))) status = oserror_fields(c, v, argc, argv);
     if (status) { spy_release(v); return NULL; }
     return v;
 }
@@ -10466,6 +10602,8 @@ static void weak_callbacks(SPYContext *c) {
     }
     c->weak_running = 0;
 }
+static int file_natives(SPYContext *, SPYValue *);
+static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int define_native(SPYContext *c, SPYValue *module, const char *name, SPYNative call, void *data) {
     SPYValue *v = value_new(c, SPY_NATIVE);
     if (!v) return -1;
@@ -10696,7 +10834,8 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         SPYValue *module = value_new(c, SPY_MODULE), *module_name = spy_string(c, name, strlen(name));
         if (module) module->as.map.namespace = value_new(c, SPY_DICT);
         int status = !module || !module_name || !module->as.map.namespace || name_set(c, module, "__name__", module_name) ||
-            sys_natives(c, module) || gc_natives(c, module) || weakref_natives(c, module) || name_set(c, c->modules, name, module);
+            sys_natives(c, module) || gc_natives(c, module) || weakref_natives(c, module) || file_natives(c, module) ||
+            name_set(c, c->modules, name, module);
         spy_release(module_name);
         if (status) { spy_release(module); return NULL; }
         return module;
@@ -18232,6 +18371,8 @@ execution_fail:
         for (size_t i = 0; fields && fields[i]; i++) if (name_set(c, a, fields[i], c->none)) return NULL;
         if (fields && subclass(a->as.map.parent, name_local(c->classes, "ImportError")) &&
             name_set(c, a, "msg", argc == 2 ? argv[1] : c->none)) return NULL;
+        if (id == B_EXCEPTION_INIT && subclass(a->as.map.parent, name_local(c->classes, "OSError")) &&
+            oserror_fields(c, a, argc - 1, argv + 1)) return NULL;
         if (id == B_SYNTAX_INIT && argc > 1) {
             if (name_set(c, a, "msg", argv[1])) return NULL;
             if (argc == 3) {
@@ -19743,7 +19884,7 @@ SPYContext *spy_context_new(void) {
     } host_builtins[] = {
         {"__build_class__", build_class_builtin, NULL}, {"__lazy_import__", lazy_import_builtin, NULL},
         {"breakpoint", breakpoint_builtin, NULL},
-        {"exit", exit_builtin, NULL}, {"quit", exit_builtin, NULL}
+        {"exit", exit_builtin, NULL}, {"quit", exit_builtin, NULL}, {"open", open_builtin, NULL}
     };
     for (size_t i = 0; i < sizeof(host_builtins) / sizeof(*host_builtins); i++) {
         SPYValue *v = value_new(c, SPY_NATIVE);
@@ -19828,6 +19969,12 @@ void spy_context_free(SPYContext *c) {
     free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->frames);
     for (size_t i = 0; i < c->host_modules_len; i++) free(c->host_modules[i].name);
     free(c->host_modules);
+    for (size_t i = 0; i < c->mounts_len; i++) { free(c->mounts[i].host); free(c->mounts[i].path); }
+    free(c->mounts);
+#if SPY_FILES
+    for (size_t i = 0; i < c->files_len; i++) close(c->files[i]);
+#endif
+    free(c->files);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     free(c);
 }
@@ -19903,6 +20050,213 @@ SPYValue *spy_error_value(SPYContext *c) {
 }
 SPYValue *spy_raise(SPYContext *c, SPYValue *exception) {
     return same_context(c, exception) ? raise_value(c, exception) : NULL;
+}
+/* Host files. open() is the intrinsic io layer over these _spy primitives,
+ * which reach only mounted directories and descriptors this context opened. */
+static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *fn = intrinsic(c, "open");
+    return fn ? spy_call_keywords(c, fn, argc, argv, keywords) : NULL;
+}
+/* Raise the OSError subclass for errno code, as PyErr_SetFromErrnoWithFilenameObject. */
+static SPYValue *file_error(SPYContext *c, int code, SPYValue *filename) {
+    const char *text = strerror(code);
+    SPYValue *args[] = {spy_int(c, code), spy_string(c, text, strlen(text)), filename};
+    SPYValue *error = args[0] && args[1] ? new_exception(c, name_local(c->classes, "OSError"), filename ? 3 : 2, args) : NULL;
+    if (error) raise_value(c, error);
+    spy_release(error); spy_release(args[0]); spy_release(args[1]);
+    return NULL;
+}
+/* Lexically normalize an absolute path in place: no empty, '.', or '..' components. */
+static void normalize_path(char *path) {
+    char *out = path, *in = path;
+    while (*in) {
+        while (*in == '/') in++;
+        const char *start = in;
+        while (*in && *in != '/') in++;
+        size_t len = (size_t)(in - start);
+        if (!len || (len == 1 && start[0] == '.')) continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            while (out > path && *--out != '/') {}
+            continue;
+        }
+        *out++ = '/';
+        memmove(out, start, len);
+        out += len;
+    }
+    if (out == path) *out++ = '/';
+    *out = 0;
+}
+/* Whether path is root or lies under it, component-wise. */
+static int path_within(const char *path, const char *root) {
+    size_t len = strlen(root);
+    if (len == 1) return 1;
+    return !strncmp(path, root, len) && (path[len] == 0 || path[len] == '/');
+}
+#if SPY_FILES
+/* The host path of a guest path inside the mount that holds it, with the
+ * final component unresolved only when it does not exist yet; NULL with errno. */
+static char *mount_resolve(SPYContext *c, const char *path, int writing) {
+    if (!c->mounts_len) { errno = EACCES; return NULL; }
+    size_t size = strlen(path) + strlen(c->mounts[0].path) + 2;
+    char *guest = malloc(size);
+    if (!guest) { errno = ENOMEM; return NULL; }
+    if (path[0] == '/') memcpy(guest, path, strlen(path) + 1);
+    else snprintf(guest, size, "%s/%s", c->mounts[0].path, path);
+    normalize_path(guest);
+    struct Mount *mount = NULL;
+    for (size_t i = 0; i < c->mounts_len; i++)
+        if (path_within(guest, c->mounts[i].path) && (!mount || strlen(c->mounts[i].path) > strlen(mount->path))) mount = &c->mounts[i];
+    if (!mount) { free(guest); errno = EACCES; return NULL; }
+    if (writing && (mount->flags & SPY_MOUNT_READ_ONLY)) { free(guest); errno = EROFS; return NULL; }
+    const char *rest = guest + (strlen(mount->path) == 1 ? 0 : strlen(mount->path));
+    size = strlen(mount->host) + strlen(rest) + 1;
+    char *host = malloc(size);
+    if (!host) { free(guest); errno = ENOMEM; return NULL; }
+    snprintf(host, size, "%s%s", strcmp(mount->host, "/") || !*rest ? mount->host : "", rest);
+    free(guest);
+    char *real = realpath(host, NULL);
+    if (!real && errno == ENOENT) {
+        char *slash = strrchr(host, '/');
+        *slash = 0;
+        char *parent = realpath(*host ? host : "/", NULL);
+        if (parent) {
+            size = strlen(parent) + strlen(slash + 1) + 2;
+            if ((real = malloc(size))) snprintf(real, size, "%s/%s", strcmp(parent, "/") ? parent : "", slash + 1);
+            else errno = ENOMEM;
+            free(parent);
+        }
+    }
+    free(host);
+    if (real && !path_within(real, mount->host)) { free(real); errno = EACCES; return NULL; }
+    return real;
+}
+static ptrdiff_t file_index(SPYContext *c, SPYValue *v, int *fd) {
+    int64_t n;
+    if (index_value(c, v, &n)) return -1;
+    for (size_t i = 0; i < c->files_len; i++)
+        if (c->files[i] == n) { *fd = (int)n; return (ptrdiff_t)i; }
+    file_error(c, EBADF, NULL);
+    return -1;
+}
+#endif
+enum { FILE_OPEN, FILE_READ, FILE_WRITE, FILE_SEEK, FILE_TRUNCATE, FILE_CLOSE };
+static SPYValue *file_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    static const char *const names[] = {"_file_open", "_file_read", "_file_write", "_file_seek", "_file_truncate", "_file_close"};
+    static const size_t counts[] = {2, 2, 2, 3, 2, 1};
+    int id = (int)(intptr_t)data;
+    if (argc != counts[id]) return errorf(c, "TypeError", "%s() takes %zu arguments (%zu given)", names[id], counts[id], argc);
+#if SPY_FILES
+    if (id == FILE_OPEN) {
+        SPYValue *path = builtin_value(c, argv[0], SPY_STRING), *mode = builtin_value(c, argv[1], SPY_STRING);
+        if (!path) path = builtin_value(c, argv[0], SPY_BYTES);
+        if (!path || !mode) return spy_error(c, "TypeError", "_file_open() needs a path and a mode string");
+        if (strlen(path->as.string.data) != path->as.string.len) return spy_error(c, "ValueError", "embedded null byte");
+        const char *m = mode->as.string.data;
+        int plus = strchr(m, '+') != NULL, flags = plus ? O_RDWR : m[0] == 'r' ? O_RDONLY : O_WRONLY;
+        if (m[0] == 'w') flags |= O_CREAT | O_TRUNC;
+        else if (m[0] == 'a') flags |= O_CREAT | O_APPEND;
+        else if (m[0] == 'x') flags |= O_CREAT | O_EXCL;
+        else if (m[0] != 'r') return errorf(c, "ValueError", "invalid mode: '%s'", m);
+        if (c->files_len == c->files_cap) {
+            size_t cap = c->files_cap ? c->files_cap * 2 : 8;
+            int *files = realloc(c->files, cap * sizeof(*files));
+            if (!files) return spy_error(c, "MemoryError", "out of memory");
+            c->files = files; c->files_cap = cap;
+        }
+        char *real = mount_resolve(c, path->as.string.data, plus || m[0] != 'r');
+        if (!real) return file_error(c, errno, argv[0]);
+        int fd = open(real, flags | O_CLOEXEC | O_NOFOLLOW, 0666), code = errno;
+        free(real);
+        if (fd < 0) return file_error(c, code, argv[0]);
+        struct stat st;
+        if (fstat(fd, &st) || S_ISDIR(st.st_mode)) {
+            code = S_ISDIR(st.st_mode) ? EISDIR : errno;
+            close(fd);
+            return file_error(c, code, argv[0]);
+        }
+        c->files[c->files_len++] = fd;
+        return spy_int(c, fd);
+    }
+    int fd;
+    ptrdiff_t at = file_index(c, argv[0], &fd);
+    if (at < 0) return NULL;
+    if (id == FILE_CLOSE) {
+        c->files[at] = c->files[--c->files_len];
+        return close(fd) ? file_error(c, errno, NULL) : spy_none(c);
+    }
+    if (id == FILE_WRITE) {
+        SPYValue *bytes = builtin_value(c, argv[1], SPY_BYTES);
+        if (!bytes) bytes = builtin_value(c, argv[1], SPY_BYTEARRAY);
+        if (!bytes) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(argv[1]));
+        size_t done = 0;
+        while (done < bytes->as.string.len) {
+            ssize_t n = write(fd, bytes->as.string.data + done, bytes->as.string.len - done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) return file_error(c, errno, NULL);
+            done += (size_t)n;
+        }
+        return spy_int(c, (int64_t)done);
+    }
+    int64_t n, whence = 0;
+    if (index_value(c, argv[1], &n) || (id == FILE_SEEK && index_value(c, argv[2], &whence))) return NULL;
+    if (id == FILE_SEEK) {
+        if (whence < 0 || whence > 2) return errorf(c, "ValueError", "invalid whence (%" PRId64 ", should be 0, 1 or 2)", whence);
+        off_t pos = lseek(fd, (off_t)n, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+        return pos < 0 ? file_error(c, errno, NULL) : spy_int(c, (int64_t)pos);
+    }
+    if (id == FILE_TRUNCATE) return ftruncate(fd, (off_t)n) ? file_error(c, errno, NULL) : spy_int(c, n);
+    /* FILE_READ: n bytes in one read, or everything to the end when negative. */
+    size_t cap = n >= 0 ? (size_t)n : 8192, len = 0;
+    char *buffer = malloc(cap ? cap : 1);
+    if (!buffer) return spy_error(c, "MemoryError", "out of memory");
+    for (;;) {
+        if (len == cap) {
+            char *grown = realloc(buffer, cap * 2);
+            if (!grown) { free(buffer); return spy_error(c, "MemoryError", "out of memory"); }
+            buffer = grown; cap *= 2;
+        }
+        ssize_t got = read(fd, buffer + len, cap - len);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) { int code = errno; free(buffer); return file_error(c, code, NULL); }
+        len += (size_t)got;
+        if (n >= 0 || !got) break;
+    }
+    SPYValue *result = spy_bytes(c, buffer, len);
+    free(buffer);
+    return result;
+#else
+    (void)argv;
+    return spy_error(c, "OSError", "this build has no file system support");
+#endif
+}
+static int file_natives(SPYContext *c, SPYValue *module) {
+    static const char *const names[] = {"_file_open", "_file_read", "_file_write", "_file_seek", "_file_truncate", "_file_close"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
+        if (define_native(c, module, names[i], file_native, (void *)(intptr_t)i)) return -1;
+    return 0;
+}
+int spy_mount(SPYContext *c, const char *directory, const char *path, int flags) {
+#if SPY_FILES
+    struct stat st;
+    char *host = realpath(directory, NULL);
+    if (!host || stat(host, &st) || !S_ISDIR(st.st_mode)) {
+        errorf(c, "OSError", "cannot mount '%s': %s", directory, strerror(host ? ENOTDIR : errno));
+        free(host); return -1;
+    }
+    if (path && path[0] != '/') { free(host); spy_error(c, "ValueError", "a mount path must be absolute"); return -1; }
+    char *guest = copy_text(c, path ? path : host, strlen(path ? path : host));
+    struct Mount *grown = guest ? realloc(c->mounts, (c->mounts_len + 1) * sizeof(*grown)) : NULL;
+    if (!grown) { free(host); free(guest); if (!c->error_type[0]) spy_error(c, "MemoryError", "out of memory"); return -1; }
+    normalize_path(guest);
+    c->mounts = grown;
+    c->mounts[c->mounts_len++] = (struct Mount){host, guest, flags};
+    return 0;
+#else
+    (void)directory; (void)path; (void)flags;
+    spy_error(c, "OSError", "this build has no file system support");
+    return -1;
+#endif
 }
 int spy_new_module(SPYContext *c, const char *name, SPYModuleInit init) {
     size_t i = 0;

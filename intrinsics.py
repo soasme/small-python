@@ -1297,3 +1297,538 @@ def _object_reduce_ex(obj, protocol):
     if getattr(type(obj), '__reduce__', None) is not object.__reduce__:
         return obj.__reduce__()
     return _object_common_reduce(obj, protocol)
+
+
+# File objects for the open() builtin, following CPython's _io classes over
+# the engine's mount-checked descriptor primitives. Buffered objects pass
+# straight through to the raw file; text files decode utf-8, latin-1, or
+# ascii incrementally and translate newlines.
+
+class UnsupportedOperation(OSError, ValueError):
+    __module__ = 'io'
+
+
+def _check_open(f):
+    if f.closed:
+        raise ValueError("I/O operation on closed file.")
+
+
+def _readline_bytes(f, size):
+    line = bytearray()
+    while size < 0 or len(line) < size:
+        b = f.read(1)
+        if not b:
+            break
+        line += b
+        if b == b'\n':
+            break
+    return bytes(line)
+
+
+class _IOBase:
+    __module__ = '_io'
+
+    def __enter__(self):
+        _check_open(self)
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __iter__(self):
+        _check_open(self)
+        return self
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def readlines(self, hint=-1):
+        lines, total = [], 0
+        for line in self:
+            lines.append(line)
+            total += len(line)
+            if 0 < hint <= total:
+                break
+        return lines
+
+    def writelines(self, lines):
+        _check_open(self)
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        _check_open(self)
+
+    def isatty(self):
+        _check_open(self)
+        return False
+
+    def _unsupported(self, name):
+        raise UnsupportedOperation(name)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class FileIO(_IOBase):
+    __module__ = '_io'
+
+    def __init__(self, file, mode='r', closefd=True, opener=None):
+        from _spy import _file_open
+        if opener is not None:
+            raise NotImplementedError("open() does not support opener")
+        self._fd = -1
+        if isinstance(file, float):
+            raise TypeError("integer argument expected, got float")
+        if not isinstance(mode, str):
+            raise TypeError(f"FileIO() argument 'mode' must be str, not {type(mode).__name__}")
+        kinds = [k for k in 'rwax' if k in mode]
+        if len(kinds) != 1 or any(ch not in 'rwaxb+' for ch in mode) or any(mode.count(ch) > 1 for ch in mode):
+            raise ValueError("Must have exactly one of create/read/write/append mode and at most one plus")
+        kind, plus = kinds[0], '+' in mode
+        if isinstance(file, int):
+            raise OSError(9, "Bad file descriptor")
+        self._fd = _file_open(file, kind + ('+' if plus else ''))
+        if kind == 'a':
+            from _spy import _file_seek
+            _file_seek(self._fd, 0, 2)
+        self.name = file
+        self.closefd = closefd
+        self._readable = kind == 'r' or plus
+        self._writable = kind != 'r' or plus
+        self.mode = {'r': 'rb', 'w': 'wb', 'a': 'ab', 'x': 'xb'}[kind] if not plus else \
+            {'r': 'rb+', 'w': 'rb+', 'a': 'ab+', 'x': 'xb+'}[kind]
+
+    @property
+    def closed(self):
+        return self._fd < 0
+
+    def __repr__(self):
+        if self.closed:
+            return '<_io.FileIO [closed]>'
+        return f'<_io.FileIO name={self.name!r} mode={self.mode!r} closefd={self.closefd!r}>'
+
+    def fileno(self):
+        _check_open(self)
+        return self._fd
+
+    def readable(self):
+        _check_open(self)
+        return self._readable
+
+    def writable(self):
+        _check_open(self)
+        return self._writable
+
+    def seekable(self):
+        _check_open(self)
+        return True
+
+    def read(self, size=-1):
+        from _spy import _file_read
+        _check_open(self)
+        if not self._readable:
+            raise UnsupportedOperation('File not open for reading')
+        return _file_read(self._fd, -1 if size is None else size)
+
+    def readall(self):
+        return self.read()
+
+    def readinto(self, buffer):
+        data = self.read(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+    def readline(self, size=-1):
+        _check_open(self)
+        return _readline_bytes(self, -1 if size is None else size)
+
+    def write(self, data):
+        from _spy import _file_write
+        _check_open(self)
+        if not self._writable:
+            raise UnsupportedOperation('File not open for writing')
+        return _file_write(self._fd, bytes(data) if isinstance(data, memoryview) else data)
+
+    def seek(self, pos, whence=0):
+        from _spy import _file_seek
+        _check_open(self)
+        return _file_seek(self._fd, pos, whence)
+
+    def tell(self):
+        return self.seek(0, 1)
+
+    def truncate(self, size=None):
+        from _spy import _file_truncate
+        _check_open(self)
+        if not self._writable:
+            raise UnsupportedOperation('File not open for writing')
+        return _file_truncate(self._fd, self.tell() if size is None else size)
+
+    def close(self):
+        from _spy import _file_close
+        if self._fd >= 0:
+            fd, self._fd = self._fd, -1
+            if self.closefd:
+                _file_close(fd)
+
+
+class _Buffered(_IOBase):
+    __module__ = '_io'
+
+    def __init__(self, raw, buffer_size=8192):
+        self.raw = raw
+
+    name = property(lambda self: self.raw.name)
+    mode = property(lambda self: self.raw.mode)
+    closed = property(lambda self: self.raw.closed)
+
+    def __repr__(self):
+        return f'<_io.{type(self).__name__} name={self.name!r}>'
+
+    def fileno(self):
+        return self.raw.fileno()
+
+    def readable(self):
+        return self.raw.readable()
+
+    def writable(self):
+        return self.raw.writable()
+
+    def seekable(self):
+        return self.raw.seekable()
+
+    def read(self, size=-1):
+        _check_open(self)
+        if size is None or size < 0:
+            return self.raw.read()
+        chunks = []
+        while size > 0:
+            chunk = self.raw.read(size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size -= len(chunk)
+        return b''.join(chunks)
+
+    def read1(self, size=-1):
+        return self.read(size)
+
+    def peek(self, size=0):
+        pos = self.tell()
+        data = self.read(max(size, 1))
+        self.seek(pos)
+        return data
+
+    def readinto(self, buffer):
+        data = self.read(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+    def readline(self, size=-1):
+        _check_open(self)
+        return _readline_bytes(self, -1 if size is None else size)
+
+    def write(self, data):
+        _check_open(self)
+        return self.raw.write(data)
+
+    def seek(self, pos, whence=0):
+        return self.raw.seek(pos, whence)
+
+    def tell(self):
+        return self.raw.tell()
+
+    def truncate(self, size=None):
+        return self.raw.truncate(size)
+
+    def detach(self):
+        raw, self.raw = self.raw, None
+        return raw
+
+    def close(self):
+        if self.raw is not None and not self.raw.closed:
+            self.raw.close()
+
+
+class BufferedReader(_Buffered):
+    pass
+
+
+class BufferedWriter(_Buffered):
+    pass
+
+
+class BufferedRandom(_Buffered):
+    pass
+
+
+def _encoding_name(encoding):
+    key = encoding.lower().replace('_', '-')
+    if key in ('utf-8', 'utf8', 'u8', 'utf'):
+        return 'utf-8'
+    if key in ('latin-1', 'latin1', 'iso-8859-1', 'iso8859-1', 'l1', 'latin'):
+        return 'latin-1'
+    if key in ('ascii', 'us-ascii', '646'):
+        return 'ascii'
+    raise LookupError(f"unknown encoding: {encoding}")
+
+
+def _utf8_cut(data):
+    # The longest prefix of data that does not end inside a UTF-8 sequence.
+    end = len(data)
+    for back in range(1, min(4, end) + 1):
+        byte = data[end - back]
+        if byte & 0xC0 != 0x80:
+            need = 1 if byte < 0x80 else 2 if byte >> 5 == 6 else 3 if byte >> 4 == 14 else 4 if byte >> 3 == 30 else 1
+            return end if need <= back else end - back
+    return end
+
+
+class TextIOWrapper(_IOBase):
+    __module__ = '_io'
+
+    def __init__(self, buffer, encoding=None, errors=None, newline=None, line_buffering=False, write_through=False):
+        if newline not in (None, '', '\n', '\r', '\r\n'):
+            raise ValueError(f"illegal newline value: {newline}")
+        if encoding is None:
+            encoding = 'utf-8'
+        if not isinstance(encoding, str):
+            raise TypeError(f"TextIOWrapper() argument 'encoding' must be str or None, not {type(encoding).__name__}")
+        self._codec = _encoding_name(encoding)
+        self.buffer = buffer
+        self.encoding = encoding
+        self.errors = 'strict' if errors is None else errors
+        self._newline = newline
+        self.line_buffering = line_buffering
+        self.write_through = write_through
+        self._raw = ''        # decoded, untranslated text not yet returned
+        self._bytes = b''     # undecoded tail of the last chunk
+        self._eof = False
+        self._seen = 0        # newline kinds seen: 1 '\r', 2 '\n', 4 '\r\n'
+
+    name = property(lambda self: self.buffer.name)
+    closed = property(lambda self: self.buffer.closed)
+
+    @property
+    def newlines(self):
+        kinds = [n for bit, n in ((1, '\r'), (2, '\n'), (4, '\r\n')) if self._seen & bit]
+        return None if not kinds else kinds[0] if len(kinds) == 1 else tuple(kinds)
+
+    def __repr__(self):
+        text = '<_io.TextIOWrapper'
+        try:
+            text += f' name={self.name!r}'
+        except AttributeError:
+            pass
+        mode = getattr(self, 'mode', None)
+        if mode is not None:
+            text += f' mode={mode!r}'
+        return text + f' encoding={self.encoding!r}>'
+
+    def fileno(self):
+        return self.buffer.fileno()
+
+    def readable(self):
+        return self.buffer.readable()
+
+    def writable(self):
+        return self.buffer.writable()
+
+    def seekable(self):
+        return self.buffer.seekable()
+
+    def detach(self):
+        buffer, self.buffer = self.buffer, None
+        return buffer
+
+    def _fill(self):
+        # Decode one more chunk into _raw; False at end of file.
+        if self._eof:
+            return False
+        chunk = self.buffer.read(8192)
+        if not chunk:
+            self._eof = True
+            if self._bytes:
+                self._raw += self._bytes.decode(self._codec, self.errors)
+                self._bytes = b''
+            return False
+        data = self._bytes + chunk
+        cut = _utf8_cut(data) if self._codec == 'utf-8' else len(data)
+        self._raw += data[:cut].decode(self._codec, self.errors)
+        self._bytes = data[cut:]
+        return True
+
+    def _note(self, text):
+        crlf = text.count('\r\n')
+        if crlf:
+            self._seen |= 4
+        if text.count('\r') > crlf:
+            self._seen |= 1
+        if text.count('\n') > crlf:
+            self._seen |= 2
+
+    def _take(self, count):
+        # Remove count raw characters from _raw and return them translated.
+        text, self._raw = self._raw[:count], self._raw[count:]
+        if self._newline is None:
+            self._note(text)
+            text = text.replace('\r\n', '\n').replace('\r', '\n')
+        return text
+
+    def read(self, size=-1):
+        _check_open(self)
+        if not self.readable():
+            raise UnsupportedOperation('not readable')
+        if size is None or size < 0:
+            while self._fill():
+                pass
+            return self._take(len(self._raw))
+        # A trailing '\r' may begin '\r\n', so universal mode looks one further.
+        while len(self._raw) < size + 1 and self._fill():
+            pass
+        count, produced = 0, 0
+        while produced < size and count < len(self._raw):
+            if self._newline is None and self._raw[count] == '\r' and self._raw[count + 1:count + 2] == '\n':
+                count += 1
+            count += 1
+            produced += 1
+        return self._take(count)
+
+    def _line_end(self):
+        # The raw length of the first complete line in _raw, or -1.
+        raw, newline = self._raw, self._newline
+        if newline is None or newline == '':
+            for i, ch in enumerate(raw):
+                if ch == '\n':
+                    return i + 1
+                if ch == '\r':
+                    if i + 1 < len(raw):
+                        return i + 2 if raw[i + 1] == '\n' else i + 1
+                    return i + 1 if self._eof else -1
+            return -1
+        at = raw.find(newline)
+        return -1 if at < 0 else at + len(newline)
+
+    def readline(self, size=-1):
+        _check_open(self)
+        if not self.readable():
+            raise UnsupportedOperation('not readable')
+        if size is None:
+            size = -1
+        while True:
+            end = self._line_end()
+            if end >= 0 or not self._fill():
+                break
+        if end < 0:
+            end = len(self._raw)
+        if size >= 0 and end > size:
+            end = size
+        return self._take(end)
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def write(self, text):
+        _check_open(self)
+        if not isinstance(text, str):
+            raise TypeError(f"write() argument must be str, not {type(text).__name__}")
+        if not self.writable():
+            raise UnsupportedOperation('not writable')
+        # As CPython, read-ahead is dropped and writing continues where it left the file.
+        self._raw, self._bytes, self._eof = '', b'', False
+        length = len(text)
+        if self._newline not in (None, '', '\n'):
+            text = text.replace('\n', self._newline)
+        self.buffer.write(text.encode(self._codec, self.errors))
+        if self.line_buffering and ('\n' in text or '\r' in text):
+            self.flush()
+        return length
+
+    def flush(self):
+        self.buffer.flush()
+
+    def tell(self):
+        _check_open(self)
+        return self.buffer.tell() - len(self._bytes) - len(self._raw.encode(self._codec, self.errors))
+
+    def seek(self, cookie, whence=0):
+        _check_open(self)
+        if whence == 1:
+            if cookie != 0:
+                raise UnsupportedOperation("can't do nonzero cur-relative seeks")
+            return self.tell()
+        if whence == 2:
+            if cookie != 0:
+                raise UnsupportedOperation("can't do nonzero end-relative seeks")
+            position = self.buffer.seek(0, 2)
+        elif whence == 0:
+            if cookie < 0:
+                raise ValueError(f"negative seek position {cookie}")
+            position = self.buffer.seek(cookie)
+        else:
+            raise ValueError(f"invalid whence ({whence}, should be 0, 1 or 2)")
+        self._raw, self._bytes, self._eof = '', b'', False
+        return position
+
+    def truncate(self, size=None):
+        self.flush()
+        return self.buffer.truncate(self.tell() if size is None else size)
+
+    def close(self):
+        if self.buffer is not None and not self.closed:
+            self.buffer.close()
+
+
+def open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+    if hasattr(file, '__fspath__') and not isinstance(file, (str, bytes)):
+        file = file.__fspath__()
+    if not isinstance(file, (str, bytes, int)) or isinstance(file, bool):
+        raise TypeError(f"expected str, bytes or os.PathLike object, not {type(file).__name__}")
+    if not isinstance(mode, str):
+        raise TypeError(f"open() argument 'mode' must be str, not {type(mode).__name__}")
+    if any(ch not in 'rwaxbt+' for ch in mode) or len(set(mode)) != len(mode):
+        raise ValueError(f"invalid mode: {mode!r}")
+    binary, text = 'b' in mode, 't' in mode
+    if sum(ch in mode for ch in 'rwax') != 1:
+        raise ValueError("must have exactly one of create/read/write/append mode")
+    if binary and text:
+        raise ValueError("can't have text and binary mode at once")
+    if binary and encoding is not None:
+        raise ValueError("binary mode doesn't take an encoding argument")
+    if binary and errors is not None:
+        raise ValueError("binary mode doesn't take an errors argument")
+    if binary and newline is not None:
+        raise ValueError("binary mode doesn't take a newline argument")
+    if binary and buffering == 1:
+        buffering = -1
+    if not binary and buffering == 0:
+        raise ValueError("can't have unbuffered text I/O")
+    raw = FileIO(file, ''.join(ch for ch in mode if ch in 'rwax+'), closefd, opener=opener)
+    try:
+        if buffering == 0:
+            return raw
+        if '+' in mode:
+            buffer = BufferedRandom(raw)
+        elif 'r' in mode:
+            buffer = BufferedReader(raw)
+        else:
+            buffer = BufferedWriter(raw)
+        if binary:
+            return buffer
+        wrapper = TextIOWrapper(buffer, encoding, errors, newline, line_buffering=buffering == 1)
+        wrapper.mode = mode
+        return wrapper
+    except BaseException:
+        raw.close()
+        raise
+

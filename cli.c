@@ -58,10 +58,20 @@ static int repl(SPYContext *c) {
     return 0;
 }
 static int usage(void) {
-    fputs("usage: spy [-c source | -i | --version | file.py | -]\n", stderr);
+    fputs("usage: spy [--mount dir]... [-c source | -i | --version | file.py | -]\n", stderr);
     return 2;
 }
 int main(int argc, char **argv) {
+    /* open() reaches only mounted directories: the current one at its own
+     * path unless --mount names others, each mounted at its own path. */
+    const char *mounts[64];
+    int mount_count = 0, at = 1;
+    while (at < argc && !strcmp(argv[at], "--mount")) {
+        if (at + 1 >= argc || mount_count == 64) return usage();
+        mounts[mount_count++] = argv[at + 1];
+        at += 2;
+    }
+    argv[at - 1] = argv[0]; argv += at - 1; argc -= at - 1;
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts("spy " SPY_VERSION); return 0; }
     if (argc > 3 || (argc == 3 && strcmp(argv[1], "-c"))) return usage();
     if (argc == 2 && !strcmp(argv[1], "-c")) return usage();
@@ -70,6 +80,12 @@ int main(int argc, char **argv) {
     spy_set_output(c, output, stdout);
     spy_set_flush(c, flush_output);
     if (spy_std_init(c)) { report(c); spy_context_free(c); return 1; }
+    if (!mount_count) mounts[mount_count++] = ".";
+    for (int i = 0; i < mount_count; i++)
+        if (spy_mount(c, mounts[i], NULL, 0)) {
+            fprintf(stderr, "spy: %s\n", spy_error_message(c));
+            spy_context_free(c); return 1;
+        }
     char *directory = NULL;
     const char *filename = argc == 2 ? argv[1] : "<string>";
     if (argc == 2 && argv[1][0] != '-') {

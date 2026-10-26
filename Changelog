@@ -258,3 +258,11 @@
 - Traceback objects: __traceback__ chains built as an error leaves each frame,
   tb_next/tb_frame/tb_lineno/tb_lasti, types.TracebackType, with_traceback,
   and tracebacks passed to __exit__ and accepted by generator throw().
+- open() in the core with _io-style file objects, reaching only host
+  directories mounted with spy_mount (read-only mounts, realpath and
+  O_NOFOLLOW containment, context-owned descriptors). spy mounts its working
+  directory by default and takes --mount; the binding has Runtime.mount.
+- OSError(errno, strerror, filename, ...) selects the errno subclass and sets
+  errno, strerror, filename, filename2, and characters_written.
+- Errors raised inside intrinsic code report the caller's location and add no
+  traceback entries.

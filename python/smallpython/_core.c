@@ -546,6 +546,20 @@ static PyObject *Runtime_register_module(Runtime *self, PyObject *args, PyObject
     if (spy_new_module(self->ctx, text, init_module)) return raise_spy_error(self);
     Py_RETURN_NONE;
 }
+static PyObject *Runtime_mount(Runtime *self, PyObject *args, PyObject *kwargs) {
+    static char *keywords[] = {"directory", "path", "read_only", NULL};
+    PyObject *directory, *encoded = NULL;
+    const char *path = NULL;
+    int read_only = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|z$p", keywords, &directory, &path, &read_only) ||
+        !PyUnicode_FSConverter(directory, &encoded))
+        return NULL;
+    int status = closed(self) ? -2 : spy_mount(self->ctx, PyBytes_AS_STRING(encoded), path, read_only ? SPY_MOUNT_READ_ONLY : 0);
+    Py_DECREF(encoded);
+    if (status == -2) return NULL;
+    if (status) return raise_spy_error(self);
+    Py_RETURN_NONE;
+}
 static PyObject *Runtime_collect(Runtime *self, PyObject *unused) {
     (void)unused;
     return closed(self) ? NULL : PyLong_FromSize_t(spy_collect(self->ctx));
@@ -564,6 +578,8 @@ static PyMethodDef Runtime_methods[] = {
     {"define", (PyCFunction)Runtime_define, METH_VARARGS, "define(name, function)\n\nBind a Python callable as a host function global."},
     {"register_module", (PyCFunction)(void (*)(void))Runtime_register_module, METH_VARARGS | METH_KEYWORDS,
      "register_module(name, members=None, source=None)\n\nRegister an importable module from members and Python source."},
+    {"mount", (PyCFunction)(void (*)(void))Runtime_mount, METH_VARARGS | METH_KEYWORDS,
+     "mount(directory, path=None, *, read_only=False)\n\nLet open() reach a host directory at an absolute path (default: its own)."},
     {"collect", (PyCFunction)Runtime_collect, METH_NOARGS, "Run the cycle collector; return the number of values freed."},
     {"close", (PyCFunction)Runtime_close, METH_NOARGS, "Free the engine context; wrapped Objects become unusable."},
     {0}
