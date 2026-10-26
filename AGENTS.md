@@ -78,6 +78,9 @@ run the equivalent command directly.
   definition and their suspended instances share that identity. Closed
   generators retain their code while releasing execution environments; trace
   the source-unit/code cache cycle explicitly.
+- Suspended instances snapshot the creating function's exposed name and
+  qualified name. Retain both through closure and close; later renaming either
+  object is independent. Trace string-subclass names through cycle collection.
 - Class calls invoke `__new__` before initialization. Initialize only a returned
   instance of the requested class, using the returned instance's actual type.
   Wrap plain `__new__` functions as static methods when building the class.

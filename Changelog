@@ -172,3 +172,7 @@
   receive copies of exact dictionaries as required by Python 3.15. Explicit
   dict.__getitem__ preserves subclass __missing__, including slice keys.
 - Upstream reports fingerprint modules/*.py as well as the generated header.
+- Generator, coroutine and async-generator names retain the creating function's
+  current metadata. Qualified names drive repr and survive closure; string
+  subclasses and cycles are retained correctly. Python 3.15 gi_state and cr_state
+  now share the existing async-generator state handling.

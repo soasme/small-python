@@ -143,6 +143,7 @@ test: all tests/api run-cython check-intrinsics
 	$(PYTHON) tests/classcreation.py ./spy
 	$(PYTHON) tests/hashing.py ./spy
 	$(PYTHON) tests/mappingproxy.py ./spy
+	$(PYTHON) tests/generator_metadata.py ./spy
 	$(PYTHON) tests/rounding.py ./spy
 	$(PYTHON) tests/strings.py ./spy
 	$(PYTHON) tests/framework.py ./run-cython

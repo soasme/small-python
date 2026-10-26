@@ -72,7 +72,7 @@ struct SPYValue {
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
         struct {
-            SPYValue *env, *unit, *name, *code;
+            SPYValue *env, *unit, *name, *qualname, *code;
             Node *node;
             Machine *machine;
             int running, done, started, returned, async_running, async_closed;
@@ -297,6 +297,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR:
         if (v->as.generator.code) visit(v->as.generator.code, data);
         if (v->as.generator.name) visit(v->as.generator.name, data);
+        if (v->as.generator.qualname) visit(v->as.generator.qualname, data);
         if (v->as.generator.machine) machine_edges(v->as.generator.machine, visit, data);
         if (v->as.generator.env) visit(v->as.generator.env, data);
         if (v->as.generator.unit) visit(v->as.generator.unit, data);
@@ -1850,7 +1851,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR:
         snprintf(num, sizeof(num), " at %p>", (void *)v);
         return puts_buffer(b, v->type == SPY_COROUTINE ? "<coroutine object " : v->type == SPY_ASYNC_GENERATOR ? "<async_generator object " : "<generator object ") ||
-            puts_buffer(b, v->as.generator.name ? v->as.generator.name->as.string.data : "<genexpr>") || puts_buffer(b, num);
+            puts_buffer(b, v->as.generator.qualname ? builtin_value(b->ctx, v->as.generator.qualname, SPY_STRING)->as.string.data : "<genexpr>") || puts_buffer(b, num);
     case SPY_CODE:
         snprintf(num, sizeof(num), "<code object <module> at %p>", (void *)v);
         return puts_buffer(b, num);
@@ -6734,9 +6735,17 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_running")) return spy_bool(c, v->as.generator.async_running);
     if (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_suspended"))
         return spy_bool(c, v->as.generator.started && !v->as.generator.running && !v->as.generator.done);
-    if (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_state")) {
-        const char *state = v->as.generator.done ? "AGEN_CLOSED" : v->as.generator.running ? "AGEN_RUNNING" :
-                            v->as.generator.started ? "AGEN_SUSPENDED" : "AGEN_CREATED";
+    if ((v->type == SPY_GENERATOR && !strcmp(name, "gi_state")) ||
+        (v->type == SPY_COROUTINE && !strcmp(name, "cr_state")) ||
+        (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_state"))) {
+        static const char *const states[][4] = {
+            {"GEN_CREATED", "GEN_RUNNING", "GEN_SUSPENDED", "GEN_CLOSED"},
+            {"CORO_CREATED", "CORO_RUNNING", "CORO_SUSPENDED", "CORO_CLOSED"},
+            {"AGEN_CREATED", "AGEN_RUNNING", "AGEN_SUSPENDED", "AGEN_CLOSED"}
+        };
+        int kind = v->type == SPY_GENERATOR ? 0 : v->type == SPY_COROUTINE ? 1 : 2;
+        int state_index = v->as.generator.done ? 3 : v->as.generator.running ? 1 : v->as.generator.started ? 2 : 0;
+        const char *state = states[kind][state_index];
         return spy_string(c, state, strlen(state));
     }
     if (v->type == SPY_COROUTINE && !strcmp(name, "cr_suspended"))
@@ -6744,8 +6753,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if ((v->type == SPY_COROUTINE && !strcmp(name, "cr_await")) ||
         (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_await")) ||
         (v->type == SPY_GENERATOR && !strcmp(name, "gi_yieldfrom"))) return suspended_delegate(c, v);
-    if ((v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) && !strcmp(name, "__name__"))
-        return v->as.generator.name ? spy_retain(v->as.generator.name) : spy_string(c, "<genexpr>", 9);
+    if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
+        if (!strcmp(name, "__name__")) return spy_retain(v->as.generator.name);
+        if (!strcmp(name, "__qualname__")) return spy_retain(v->as.generator.qualname);
+    }
     if ((v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) &&
         (!strcmp(name, "__func__") || !strcmp(name, "__wrapped__"))) return spy_retain(v->as.wrapper.function);
     if ((v->type == SPY_NATIVE && v->as.native.name) || (v->type == SPY_BOUND_METHOD && v->as.bound.name)) {
@@ -8156,9 +8167,11 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             }
         }
     }
-    if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) && !strcmp(name, "__name__")) {
-        if (value->type != SPY_STRING) { spy_error(c, "TypeError", "__name__ must be set to a string object"); return -1; }
-        spy_retain(value); spy_release(object->as.generator.name); object->as.generator.name = value; return 0;
+    if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
+        (!strcmp(name, "__name__") || !strcmp(name, "__qualname__"))) {
+        if (!builtin_value(c, value, SPY_STRING)) { errorf(c, "TypeError", "%s must be set to a string object", name); return -1; }
+        SPYValue **field = !strcmp(name, "__name__") ? &object->as.generator.name : &object->as.generator.qualname;
+        spy_retain(value); spy_release(*field); *field = value; return 0;
     }
     if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) {
         spy_error(c, "AttributeError", "object attributes are read-only"); return -1;
@@ -8633,7 +8646,7 @@ static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, 
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static int store_target(SPYContext *, Frame *, Node *, SPYValue *);
 static SPYValue *eval_comprehension(SPYContext *, Frame *, Node *);
-static SPYValue *new_generator(SPYContext *, Frame *, Node *);
+static SPYValue *new_generator(SPYContext *, Frame *, SPYValue *);
 static SPYValue *display_new(SPYContext *c, Node *node, int type) {
     size_t size = 0;
     if (type == SPY_TUPLE)
@@ -9356,7 +9369,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
             env->as.map.unit = spy_retain(fn->as.function.unit);
             if (!bind_arguments(c, fn, env, argc, argv, keywords) && !declare_locals(c, env)) {
                 Frame frame = { env, fn->as.function.unit , 0};
-                if (def->code) result = new_generator(c, &frame, def);
+                if (def->code) result = new_generator(c, &frame, fn);
                 else {
                     SPYValue *caller = c->caller_env;
                     c->caller_env = c->eval_env;
@@ -9922,6 +9935,8 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
         result->as.generator.unit = spy_retain(f->unit);
         result->as.generator.node = n;
         result->as.generator.code = definition_code(c, f->unit, n);
+        result->as.generator.name = spy_string(c, "<genexpr>", 9);
+        result->as.generator.qualname = qualified_name(c, n->scope);
         result->as.generator.machine = allocate(c, sizeof(Machine));
         Machine *m = result->as.generator.machine;
         if (m) {
@@ -11056,6 +11071,10 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
     return env->type == V_ENV && env->as.map.scope ? declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
+    if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
+        (!strcmp(name, "__name__") || !strcmp(name, "__qualname__"))) {
+        errorf(c, "TypeError", "%s must be set to a string object", name); return -1;
+    }
     if (object->type == SPY_CLASS && !strcmp(name, "__dict__")) {
         spy_error(c, "AttributeError", "readonly attribute"); return -1;
     }
@@ -12345,16 +12364,18 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
 static Result execute(SPYContext *c, Frame *f, Node *body) {
     return execute_statements(c, f, body, 0);
 }
-static SPYValue *new_generator(SPYContext *c, Frame *f, Node *n) {
+static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
+    Node *n = function->as.function.def;
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
     v->as.generator.machine = allocate(c, sizeof(Machine));
     if (!v->as.generator.machine) { spy_release(v); return NULL; }
     v->as.generator.machine->code = n->code;
     v->as.generator.node = n;
-    v->as.generator.name = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
+    v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
+    v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
     v->as.generator.code = definition_code(c, f->unit, n);
-    if (!v->as.generator.name || !v->as.generator.code) { spy_release(v); return NULL; }
+    if (!v->as.generator.name || !v->as.generator.qualname || !v->as.generator.code) { spy_release(v); return NULL; }
     v->as.generator.env = spy_retain(f->env);
     v->as.generator.unit = spy_retain(f->unit);
     return v;

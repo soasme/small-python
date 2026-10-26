@@ -107,7 +107,12 @@ int main(void) {
             "        yield t'{values}{(yield 1)}'\n"
             "    generator = suspended()\n"
             "    next(generator)\n"
-            "    values.append(generator)\n");
+            "    values.append(generator)\n"
+            "    class Name(str): pass\n"
+            "    label = Name('cycle')\n"
+            "    label.owner = generator\n"
+            "    generator.__name__ = label\n"
+            "    generator.__qualname__ = label\n");
         execute(templates, "make()\n");
         spy_collect(templates);
         size_t baseline = spy_live_values(templates);
