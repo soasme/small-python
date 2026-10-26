@@ -1,5 +1,5 @@
 [project]
-name = "smallpy"
+name = "small-python"
 version = "0.1.0"
 description = "A placeholder Python package."
 readme = "README.md"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/soasme/smallpy"
+Repository = "https://github.com/soasme/small-python"
 
 [build-system]
 requires = ["hatchling>=1.26"]

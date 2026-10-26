@@ -1,4 +1,4 @@
-# smallpy
+# small-python
 
 A placeholder Python package. No functionality yet.
 
@@ -6,7 +6,7 @@ Requires Python 3.12 or newer. Manage the project with [uv](https://docs.astral.
 
 ```sh
 uv sync --locked
-uv run python -c "import smallpy"
+uv run python -c "import small_python"
 uv build
 ```
 
@@ -18,9 +18,9 @@ a version tag matching `pyproject.toml` is pushed (for example, `v0.1.0`).
 Before the first release, configure a [PyPI Trusted Publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
 with these values:
 
-- Project: `smallpy`
+- Project: `small-python`
 - Owner: `soasme`
-- Repository: `smallpy`
+- Repository: `small-python`
 - Workflow: `publish.yml`
 - Environment: `pypi`
 

@@ -31,8 +31,8 @@ def main() -> None:
 
     root = Path(run("git", "rev-parse", "--show-toplevel", cwd=Path.cwd()))
     origin = run("git", "remote", "get-url", "origin", cwd=root)
-    with tempfile.TemporaryDirectory(prefix="smallpy-bumpversion-") as directory:
-        clone = Path(directory) / "smallpy"
+    with tempfile.TemporaryDirectory(prefix="small-python-bumpversion-") as directory:
+        clone = Path(directory) / "small-python"
         run_checked(
             "git", "clone", "--quiet", "--branch", "main", origin, str(clone), cwd=root
         )
