@@ -153,3 +153,6 @@
   blocks, conditional expressions, and duplicate parameters; compiler-stage
   errors (break/continue/return/yield/await/async placement) are deferred until
   the source parses.
+- CPython's assignment-target diagnostics: "cannot assign to/delete X",
+  "... here. Maybe you meant '==' instead of '='?", augmented-assignment,
+  assert, call keyword and starred-argument messages.

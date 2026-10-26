@@ -2227,6 +2227,9 @@ static Node *import_name(Parser *p) {
 static Node *expression(Parser *, int);
 static Node *plain_expression(Parser *, int);
 static Node *expression_list(Parser *, int);
+static void star_expression_error(Parser *, size_t);
+static int named_equals_error(Parser *, size_t);
+static const char *expression_name(Node *);
 static Node *comprehension(Parser *, Node *);
 static Node *statements(Parser *);
 static Node *suite_after(Parser *, const char *, size_t);
@@ -2237,8 +2240,9 @@ static Node *subscript(Parser *p) {
     if (at(p, '*')) {
         /* PEP 646: a starred subscript element unpacks into the index tuple. */
         Node *star = node(p, N_STAR);
-        p->pos++;
-        if (!star || !(star->a = expression(p, 4))) return NULL;
+        size_t at = p->pos++;
+        if (!star) return NULL;
+        if (!(star->a = expression(p, 4))) { star_expression_error(p, at); return NULL; }
         return star;
     }
     if (!at(p, ':')) first = expression(p, 0);
@@ -2721,7 +2725,7 @@ static Node *yield_expression(Parser *p) {
     if (take_word(p, "from")) {
         n->op = 1;
         if (!(n->a = expression(p, 0))) return NULL;
-    } else if (!at(p, T_NL) && !at(p, ';') && !at(p, ')') && !at(p, T_END)) {
+    } else if (!at(p, T_NL) && !at(p, ';') && !at(p, ')') && !at(p, T_END) && !at(p, '=')) {
         if (!(n->a = expression_list(p, 0))) return NULL;
         if (n->a->kind == N_STAR) return syntax(p, "can't use starred expression here");
     }
@@ -2767,7 +2771,11 @@ static Node *atom(Parser *p) {
             } else if (take(p, '*')) {
                 item = node(p, N_STAR);
                 if (!item || !(item->a = expression(p, 4))) return NULL;
-            } else item = expression(p, 0);
+            } else {
+                size_t element = p->pos;
+                item = expression(p, 0);
+                if (item && at(p, '=') && named_equals_error(p, element)) return NULL;
+            }
             if (!item) return NULL;
             if ((item->kind == N_STAR || item->kind == N_MAPPING) && keyword(p, "if"))
                 return syntax(p, item->kind == N_STAR ?
@@ -2839,22 +2847,58 @@ static int operator_info(Parser *p, int *width, int *prec) {
     }
     return op;
 }
+/* invalid_starred_expression: a '*' whose operand fails to parse. */
+static void star_expression_error(Parser *p, size_t star) {
+    const char *message = p->ctx->error_message;
+    if (!error_is(p->ctx, "SyntaxError") || (strcmp(message, "expected expression") && strcmp(message, "expected ')'") &&
+                                             strcmp(message, "invalid syntax"))) return;
+    spy_clear_error(p->ctx);
+    p->pos = star; syntax(p, "Invalid star expression");
+}
 static int call_arguments(Parser *p, Node *n) {
     Node **tail = &n->args;
     int keywords = 0, mapping = 0;
     if (!at(p, ')')) do {
         Node *arg;
         if (at(p, '*') || at(p, T_POW)) {
+            size_t star = p->pos;
             int unpack_mapping = take(p, T_POW);
             if (!unpack_mapping) p->pos++;
-            if (!unpack_mapping && mapping) { syntax(p, "iterable unpacking follows keyword unpacking"); return -1; }
             arg = node(p, unpack_mapping ? N_MAPPING : N_STAR);
-            if (!arg || !(arg->a = plain_expression(p, 0))) return -1;
+            if (!arg) return -1;
+            if (!(arg->a = plain_expression(p, 0))) {
+                if (!unpack_mapping) star_expression_error(p, star);
+                return -1;
+            }
+            /* invalid_starred_expression_unpacking and invalid_kwarg */
+            if (at(p, '=')) {
+                size_t equals = p->pos++;
+                Node *value = plain_expression(p, 0);
+                if (!value) return -1;
+                p->pos = equals;
+                syntax(p, unpack_mapping ? "cannot assign to keyword argument unpacking" : "cannot assign to iterable argument unpacking");
+                return -1;
+            }
+            if (!unpack_mapping && mapping) {
+                p->pos = star;
+                syntax(p, "iterable argument unpacking follows keyword argument unpacking"); return -1;
+            }
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
+            size_t start = p->pos;
             arg = expression(p, 0);
-            if (arg && take(p, '=')) {
-                if (arg->kind != N_NAME) { syntax(p, "keyword cannot be an expression"); return -1; }
+            if (arg && at(p, '=')) {
+                Token *name = &p->tokens[start];
+                if (arg->kind == N_BOOL || arg->kind == N_NONE) {
+                    char message[64];
+                    snprintf(message, sizeof(message), "cannot assign to %s", expression_name(arg));
+                    p->pos = start; syntax(p, message); return -1;
+                }
+                if (name->kind != T_NAME || reserved(name) || start + 1 >= p->len || p->tokens[start + 1].kind != '=') {
+                    p->pos = start; syntax(p, "expression cannot contain assignment, perhaps you meant \"==\"?"); return -1;
+                }
+                p->pos++;
+                if (at(p, ',') || at(p, ')')) { p->pos = start; syntax(p, "expected argument value expression"); return -1; }
                 if (arg->original) { free(arg->text); arg->text = arg->original; arg->original = NULL; }
                 arg->kind = N_KEYWORD;
                 for (Node *a = n->args; a; a = a->next)
@@ -2997,8 +3041,11 @@ static Node *expression_inner(Parser *p, int min, int named) {
 assignment_expression:
     if (min == 0 && named && at(p, T_WALRUS) && p->annotation_scope) return syntax_within(p, "named");
     if (min == 0 && named && take(p, T_WALRUS)) {
-        if (left->kind != N_NAME) return syntax(p, left->kind == N_TUPLE ? "cannot use assignment expressions with tuple" :
-            left->kind == N_LAMBDA ? "cannot use assignment expressions with lambda" : "cannot use assignment expressions with this target");
+        if (left->kind != N_NAME) {
+            char message[96];
+            snprintf(message, sizeof(message), "cannot use assignment expressions with %s", expression_name(left));
+            return syntax(p, message);
+        }
         Node *n = node(p, N_NAMED);
         if (!n) return NULL;
         n->a = left; n->b = plain_expression(p, 0);
@@ -3057,6 +3104,167 @@ static int target(Parser *p, Node *n) {
     }
     return 1;
 }
+/* Assignment diagnostics replay CPython's second-pass rules: invalid_named_expression,
+ * invalid_assignment, and RAISE_SYNTAX_ERROR_INVALID_TARGET. */
+enum { TARGETS_STAR, TARGETS_DEL, TARGETS_FOR };
+static const char *expression_name(Node *n) {
+    switch (n->kind) {
+    case N_ATTR: return "attribute";
+    case N_INDEX: return "subscript";
+    case N_STAR: return "starred";
+    case N_NAME: return "name";
+    case N_LIST: return "list";
+    case N_TUPLE: return "tuple";
+    case N_LAMBDA: return "lambda";
+    case N_CALL: return "function call";
+    case N_BINARY: case N_UNARY: return "expression";
+    case N_COMPREHENSION:
+        return n->op == N_TUPLE ? "generator expression" : n->op == N_LIST ? "list comprehension" :
+               n->op == N_SET ? "set comprehension" : "dict comprehension";
+    case N_YIELD: return "yield expression";
+    case N_AWAIT: return "await expression";
+    case N_DICT: return "dict literal";
+    case N_SET: return "set display";
+    case N_JOINED: case N_FORMAT: return "f-string expression";
+    case N_TEMPLATE: case N_INTERPOLATION: return "t-string expression";
+    case N_NONE: return "None";
+    case N_BOOL: return n->op ? "True" : "False";
+    case N_ELLIPSIS: return "ellipsis";
+    case N_COMPARE: return "comparison";
+    case N_COND: return "conditional expression";
+    case N_NAMED: return "named expression";
+    default: return "literal";
+    }
+}
+static Node *invalid_target(Node *n, int type) {
+    switch (n->kind) {
+    case N_LIST: case N_TUPLE:
+        for (Node *item = n->args; item; item = item->next) {
+            Node *bad = invalid_target(item, type);
+            if (bad) return bad;
+        }
+        return NULL;
+    case N_STAR: return type == TARGETS_DEL ? n : invalid_target(n->a, type);
+    case N_COMPARE:
+        if (type == TARGETS_FOR) return n->args->op == O_IN ? invalid_target(n->a, type) : NULL;
+        return n;
+    case N_NAME: case N_INDEX: case N_ATTR: return NULL;
+    default: return n;
+    }
+}
+static Node *syntax_at(Parser *p, Node *n, const char *message) {
+    syntax(p, message); p->ctx->line = n->line; return NULL;
+}
+static Node *target_error(Parser *p, Node *n, int type) {
+    Node *bad = invalid_target(n, type);
+    if (!bad) return syntax(p, "invalid syntax");
+    char message[96];
+    snprintf(message, sizeof(message), type == TARGETS_DEL ? "cannot delete %s" : "cannot assign to %s", expression_name(bad));
+    return syntax_at(p, bad, message);
+}
+/* Parse a bitwise_or at token 'at' without side effects on the position;
+ * failures do not match. Returns the node and the following token. */
+static Node *probe_bitwise_or(Parser *p, size_t at, size_t *end) {
+    size_t saved = p->pos;
+    p->pos = at;
+    Node *n = keyword(p, "not") || keyword(p, "lambda") || keyword(p, "yield") ? NULL : expression(p, 4);
+    if (!n) spy_clear_error(p->ctx);
+    *end = p->pos; p->pos = saved;
+    return n;
+}
+static int probe_excluded(Parser *p, size_t at) {
+    if (p->tokens[at].kind != '(' && p->tokens[at].kind != '[') {
+        size_t saved = p->pos; p->pos = at;
+        int excluded = keyword(p, "True") || keyword(p, "None") || keyword(p, "False");
+        p->pos = saved; return excluded;
+    }
+    size_t saved = p->pos;
+    p->pos = at;
+    Node *n = atom(p);
+    if (!n) spy_clear_error(p->ctx);
+    p->pos = saved;
+    return n && (n->kind == N_LIST || n->kind == N_TUPLE || (n->kind == N_COMPREHENSION && n->op == N_TUPLE));
+}
+/* invalid_named_expression at token 'at'; returns 1 after raising. */
+static int named_equals_error(Parser *p, size_t at) {
+    size_t end, after;
+    Token *t = &p->tokens[at];
+    if (t->kind == T_NAME && !reserved(t) && at + 1 < p->len && p->tokens[at + 1].kind == '=' &&
+        probe_bitwise_or(p, at + 2, &after) && p->tokens[after].kind != '=' && p->tokens[after].kind != T_WALRUS) {
+        p->pos = at; syntax(p, "invalid syntax. Maybe you meant '==' or ':=' instead of '='?"); return 1;
+    }
+    if (probe_excluded(p, at)) return 0;
+    Node *a = probe_bitwise_or(p, at, &end);
+    if (!a || p->tokens[end].kind != '=') return 0;
+    if (!probe_bitwise_or(p, end + 1, &after) || p->tokens[after].kind == '=' || p->tokens[after].kind == T_WALRUS) return 0;
+    char message[112];
+    snprintf(message, sizeof(message), "cannot assign to %s here. Maybe you meant '==' instead of '='?", expression_name(a));
+    p->pos = at; syntax_at(p, a, message); return 1;
+}
+static int star_target(Node *n) {
+    if (n->kind == N_NAME || n->kind == N_INDEX || n->kind == N_ATTR) return 1;
+    if (n->kind == N_STAR) return star_target(n->a);
+    if (n->kind != N_TUPLE && n->kind != N_LIST) return 0;
+    for (Node *item = n->args; item; item = item->next) if (!star_target(item)) return 0;
+    return 1;
+}
+static Node *condition_equals_error(Parser *p, size_t start) {
+    if (!named_equals_error(p, start)) syntax(p, "invalid syntax");
+    return NULL;
+}
+/* A statement E1 = E2 = ... failed because some target is invalid. */
+/* invalid_assert_stmt: 'assert' [expression ','] a=expression ('=' | ':=') expression */
+static int assert_equals_error(Parser *p, Node *a) {
+    int walrus = at(p, T_WALRUS);
+    if (!walrus && !at(p, '=')) return 0;
+    size_t saved = p->pos++;
+    Node *b = plain_expression(p, 0);
+    if (!b) { spy_clear_error(p->ctx); p->pos = saved; return 0; }
+    p->pos = saved;
+    char message[112];
+    if (walrus) snprintf(message, sizeof(message), "cannot use named expression without parentheses here");
+    else snprintf(message, sizeof(message), "cannot assign to %s here. Maybe you meant '==' instead of '='?", expression_name(a));
+    syntax_at(p, a, message); return 1;
+}
+static Node *assignment_error(Parser *p, size_t start) {
+    p->pos = start;
+    Node *first = NULL, *bad = NULL;
+    size_t last_item = start;
+    int bare_yield = 0;
+    for (;;) {
+        size_t here = p->pos;
+        int bare = keyword(p, "yield");
+        Node *n = bare ? yield_expression(p) : expression_list(p, 0);
+        if (!n) return NULL;
+        if (bare && !bad && at(p, '=')) { bad = n; bare_yield = 1; }
+        if (!first) {
+            first = n;
+            /* star_named_expression ',' star_named_expressions: only the element before '=' can match. */
+            last_item = here;
+            if (n->kind == N_TUPLE && n->args && p->tokens[here].kind != '(') {
+                size_t scan = here;
+                for (Node *item = n->args; item->next; item = item->next) {
+                    int depth = 0;
+                    while (scan < p->pos && !(depth == 0 && p->tokens[scan].kind == ',')) {
+                        int kind = p->tokens[scan].kind;
+                        if (kind == '(' || kind == '[' || kind == '{') depth++;
+                        else if (kind == ')' || kind == ']' || kind == '}') depth--;
+                        scan++;
+                    }
+                    scan++;
+                }
+                last_item = scan;
+            }
+        }
+        if (!at(p, '=')) break;
+        if (!bad && !star_target(n)) bad = n;
+        p->pos++;
+    }
+    if (p->tokens[last_item].kind != '*' && named_equals_error(p, last_item)) return NULL;
+    if (!bad) return syntax(p, "invalid syntax");
+    if (bare_yield) return syntax_at(p, bad, "assignment to yield expression not possible");
+    return target_error(p, bad, TARGETS_STAR);
+}
 static Node *comprehension(Parser *p, Node *n) {
     if (n->args->next) return syntax(p, "did you forget parentheses around the comprehension target?");
     n->op = n->kind; n->kind = N_COMPREHENSION;
@@ -3069,7 +3277,7 @@ static Node *comprehension(Parser *p, Node *n) {
         Node *loop = node(p, N_FOR);
         if (!loop || !(loop->args = expression_list(p, 4))) return NULL;
         loop->op = asynchronous;
-        if (!target(p, loop->args)) return syntax(p, "invalid comprehension target");
+        if (!target(p, loop->args)) return p->ctx->error_type[0] ? NULL : target_error(p, loop->args, TARGETS_FOR);
         if (!take_word(p, "in") || !(loop->a = expression(p, 1))) return syntax(p, "expected iterable");
         *tail = loop; tail = &loop->b;
         while (take_word(p, "if")) {
@@ -3086,7 +3294,9 @@ static Node *if_statement(Parser *p) {
     if (!n) return NULL;
     size_t line = keyword_line(p);
     const char *what = p->tokens[p->pos - 1].len == 4 ? "'elif' statement" : "'if' statement";
+    size_t condition = p->pos;
     n->a = expression(p, 0);
+    if (n->a && at(p, '=')) return condition_equals_error(p, condition);
     if (!n->a || !(n->b = suite_after(p, what, line))) return NULL;
     if (take_word(p, "elif")) {
         if (++p->depth > 128) { p->depth--; return syntax(p, "too many elif clauses"); }
@@ -3632,7 +3842,8 @@ static Node *statement(Parser *p) {
             if (!item || !(item->a = expression(p, 0))) return NULL;
             if (take_word(p, "as")) {
                 item->b = expression(p, 4);
-                if (!item->b || !target(p, item->b)) return syntax(p, "invalid with target");
+                if (!item->b) return NULL;
+                if (!target(p, item->b)) return p->ctx->error_type[0] ? NULL : target_error(p, item->b, TARGETS_STAR);
             }
             *tail = item; tail = &item->next;
             if (!take(p, ',')) break;
@@ -3644,7 +3855,8 @@ static Node *statement(Parser *p) {
     if (take_word(p, "del")) {
         n = node(p, N_DELETE);
         if (!n || !(n->a = expression_list(p, 0))) return NULL;
-        if (!target(p, n->a)) return syntax(p, "invalid deletion target");
+        if (invalid_target(n->a, TARGETS_DEL)) return target_error(p, n->a, TARGETS_DEL);
+        if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : target_error(p, n->a, TARGETS_DEL);
         /* Starred targets are only meaningful when consuming an iterable. */
         Node *stack[256]; size_t count = 0;
         stack[count++] = n->a;
@@ -3741,11 +3953,13 @@ static Node *statement(Parser *p) {
         n->op = asynchronous;
         if (is_for) {
             n->args = expression_list(p, 4);
-            if (n->args && !target(p, n->args)) return syntax(p, "invalid loop target");
+            if (n->args && !target(p, n->args)) return p->ctx->error_type[0] ? NULL : target_error(p, n->args, TARGETS_FOR);
             if (!n->args || !take_word(p, "in")) return syntax(p, "expected 'in'");
         }
+        size_t condition = p->pos;
         n->a = is_for ? expression_list(p, 0) : expression(p, 0);
         if (!n->a) return NULL;
+        if (!is_for && at(p, '=')) return condition_equals_error(p, condition);
         p->loops++; n->b = suite_after(p, is_for ? "'for' statement" : "'while' statement", line); p->loops--;
         if (!n->b) return NULL;
         if (take_word(p, "else")) { n->c = suite_after(p, "'else' statement", keyword_line(p)); if (!n->c) return NULL; }
@@ -3796,8 +4010,12 @@ static Node *statement(Parser *p) {
     if (take_word(p, "pass")) return node(p, N_PASS);
     if (take_word(p, "assert")) {
         n = node(p, N_ASSERT);
-        if (!n || !(n->a = expression(p, 0))) return NULL;
-        if (take(p, ',')) { n->b = expression(p, 0); if (!n->b) return NULL; }
+        if (!n || !(n->a = plain_expression(p, 0))) return NULL;
+        if (assert_equals_error(p, n->a)) return NULL;
+        if (take(p, ',')) {
+            n->b = plain_expression(p, 0);
+            if (!n->b || assert_equals_error(p, n->b)) return NULL;
+        }
         return n;
     }
     if (keyword(p, "import") || keyword(p, "from")) {
@@ -3827,9 +4045,11 @@ static Node *statement(Parser *p) {
     if (!n) return NULL;
     if (keyword(p, "yield")) {
         n->a = yield_expression(p);
+        if (n->a && at(p, '=')) return syntax_at(p, n->a, "assignment to yield expression not possible");
         return n->a ? n : NULL;
     }
     int parenthesized = at(p, '(');
+    size_t start = p->pos;
     if (!(n->a = expression_list(p, 0))) return NULL;
     int op = peek(p)->kind;
     if (op == ':') {
@@ -3848,17 +4068,18 @@ static Node *statement(Parser *p) {
         return n;
     }
     if (op == '=' || (op >= T_ADDEQ && op <= T_XOREQ)) {
-        if (op != '=' && n->a->kind == N_COMPREHENSION && n->a->op == N_TUPLE)
-            return syntax(p, "'generator expression' is an illegal expression for augmented assignment");
-        if (!target(p, n->a)) return syntax(p, "invalid assignment target");
-        if (op != '=' && n->a->kind != N_NAME && n->a->kind != N_INDEX && n->a->kind != N_ATTR)
-            return syntax(p, "invalid augmented assignment target");
+        if (op != '=' && n->a->kind != N_NAME && n->a->kind != N_INDEX && n->a->kind != N_ATTR) {
+            char message[96];
+            snprintf(message, sizeof(message), "'%s' is an illegal expression for augmented assignment", expression_name(n->a));
+            return syntax_at(p, n->a, message);
+        }
+        if (!target(p, n->a)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
         p->pos++; n->kind = N_ASSIGN; n->op = op;
         n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
         if (!n->b) return NULL;
         Node **tail = &n->args;
         while (op == '=' && take(p, '=')) {
-            if (!target(p, n->b)) return syntax(p, "invalid assignment target");
+            if (!target(p, n->b)) return p->ctx->error_type[0] ? NULL : assignment_error(p, start);
             *tail = n->b; tail = &n->b->next;
             n->b = keyword(p, "yield") ? yield_expression(p) : expression_list(p, 0);
             if (!n->b) return NULL;

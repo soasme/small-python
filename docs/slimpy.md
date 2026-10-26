@@ -380,8 +380,9 @@ storage are rechecked after conversion callbacks. Buffer exports and CPython's
 allocation introspection remain unsupported. Encoding and decoding support a limited set of codecs;
 the standard-library codec registry is unavailable. Iterator types
 are not yet distinguished completely by `type()`. Syntax errors for parameter
-lists, string prefixes, unbalanced brackets, missing indented blocks, and
-conditional expressions follow CPython's lexer and `invalid_*` grammar rules;
+lists, assignment, deletion, loop, `with`, and keyword-argument targets, `assert`
+and condition `=` typos, starred arguments, string prefixes, unbalanced brackets,
+missing indented blocks, and conditional expressions follow CPython's lexer and `invalid_*` grammar rules;
 errors CPython raises from its compiler (`'break' outside loop`, `'return'
 outside function`, misplaced `async for`, `async with`, and `await`) are raised
 only after the whole source parses. Some diagnostics still differ from CPython.
