@@ -220,3 +220,5 @@
 - sentinel builtin (PEP 661), built-in _thread for the single engine thread,
   object.__reduce__/__reduce_ex__/__getstate__, builtin __self__, and
   CPython's read-only attribute and ordering messages.
+- Built-in gc and _typing modules; __get__ on functions, methods and method
+  descriptors; builtin slots take MRO precedence over later Python bases.

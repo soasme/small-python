@@ -1366,6 +1366,69 @@ for bad in [lambda: object.__reduce_ex__(A()), lambda: object.__reduce__(A(), 1)
 class R:
     def __reduce__(self): return "custom"
 print(R().__reduce_ex__(2))
+""",    r"""
+def f(self): return self
+class A:
+    def m(self): pass
+for o in [f, A().m, len, str.join, object.__init__, (1).__add__]:
+    print(type(o).__name__, hasattr(o, "__get__"), hasattr(o, "__set__"))
+a = A()
+print(f.__get__(a).__self__ is a, f.__get__(None, A) is f, f.__get__(a, A).__func__ is f)
+try: f.__get__()
+except Exception as e: print(type(e).__name__, e)
+try: f.__get__(None, None)
+except Exception as e: print(type(e).__name__, e)
+try: f.__get__(None)
+except Exception as e: print(type(e).__name__, e)
+print(str.join.__get__("x")(["a", "b"]), object.__init__.__get__(a)())
+print(str.join.__get__(None, str) is str.join)
+try: str.join.__get__(1)
+except Exception as e: print(type(e).__name__, e)
+m = a.m
+print(m.__get__(1) is m)
+print(type(f).__get__(f, a).__self__ is a)
+class B:
+    def __repr__(self): return "B-repr"
+    def bit_length(self): return "B"
+class X(int, B): pass
+print(repr(X(3)), X.__repr__, X(3).bit_length(), X.bit_length, X.__repr__ in (int.__repr__, object.__repr__))
+""",
+    r"""
+import gc, _typing
+print(gc.get_threshold(), gc.isenabled(), gc.get_debug(), gc.garbage, gc.callbacks, gc.get_freeze_count())
+for f in [lambda: gc.collect(3), lambda: gc.collect(-1), lambda: gc.collect("x"), lambda: gc.is_tracked(1), lambda: gc.is_tracked([]), lambda: gc.is_tracked({}), lambda: gc.is_tracked((1,)), lambda: gc.is_tracked(([],)), lambda: gc.get_referents([1, "a"]), lambda: gc.is_finalized(object()), lambda: gc.set_threshold(1,2,3,4), lambda: gc.get_debug()]:
+    try: print(repr(f()))
+    except Exception as e: print(type(e).__name__, e)
+print(sorted(n for n in dir(gc) if not n.startswith("_")))
+# cycles freed mid-run
+import weakref
+class Node: pass
+def make():
+    a = Node(); b = Node(); a.b = b; b.a = a
+    return weakref.ref(a)
+r = make()
+print(r() is not None, gc.collect() >= 2, r() is None)
+def gen():
+    x = [1]
+    x.append(x)
+    yield gc.collect() >= 0
+    yield x[0]
+g = gen(); print(next(g), next(g))
+def deep(n):
+    l = [n]; l.append(l)
+    if n: return deep(n - 1) + [gc.collect() >= 0]
+    return [l[0]]
+print(deep(5))
+def outer():
+    v = {'k': []}
+    v['k'].append(v)
+    def inner(): return v['k'][0] is v, gc.collect() >= 0
+    return inner()
+print(outer())
+x = [Node() for _ in range(3)]
+for n in x: n.peer = x
+print(len(gc.get_referrers(x[0])) >= 1, x[0] in gc.get_referents(x))
+print(_typing.TypeVar, _typing.Generic, _typing.Union, _typing.NoDefault, _typing.TypeAliasType, _typing.ParamSpecArgs, _typing._idfunc(5))
 """,
 ]
 CASES += [

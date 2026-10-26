@@ -380,7 +380,11 @@ record their creating module, copy as themselves, reduce to their name, and
 form unions with `|`. `object.__reduce__`, `__reduce_ex__`, and `__getstate__`
 follow `typeobject.c`: `__getnewargs_ex__`/`__getnewargs__`, `__dict__` and
 slot state, list and dict items, and `copyreg` (imported from the host when
-needed) for protocols below 2. Builtin functions expose `__self__`. Setting an
+needed) for protocols below 2. Builtin functions expose `__self__`. Functions, bound methods, and builtin
+method descriptors expose `__get__`. A builtin base that precedes the defining
+class in the MRO supplies its own slot on attribute access, as CPython's type
+lookup does, so enum mixins such as `IntFlag` and `StrEnum` resolve their
+methods correctly. Setting an
 attribute of a builtin object without `__dict__` raises CPython's three
 `AttributeError` forms, and unsupported orderings name the operator and types.
 `ImportError` accepts `name`, `path`, and `name_from` keywords and keeps a lone
@@ -546,9 +550,14 @@ module bind the attribute directly. The global lazy-import filter and
 
 ### 3.3 Standard library and host services
 
-Six minimal standard-library modules are built in: `_thread`, `collections`,
-`itertools`, `sys`, `types`, and `weakref`, with `_weakref` as the primitive
-half of `weakref`. `_thread` describes the engine's single thread. Its locks
+Minimal standard-library modules are built in: `_thread`, `_typing`,
+`collections`, `gc`, `itertools`, `sys`, `types`, and `weakref`, with
+`_weakref` as the primitive half of `weakref`. `_typing` exposes the engine's
+type-parameter, alias, generic, and union objects so the standard library's
+`typing` imports. `gc.collect()` runs the cycle collector during execution.
+`gc` reports referents and referrers and CPython's tracking rules. Its
+enable, disable, threshold, and debug settings are recorded but schedule
+nothing. `_thread` describes the engine's single thread. Its locks
 keep CPython's states, arguments, and errors. A blocking acquire that only
 another thread could satisfy raises `RuntimeError` instead of hanging, and
 starting a thread raises `RuntimeError`. Their Python sources live in `modules/` and are embedded into

@@ -28,9 +28,9 @@ run the equivalent command directly.
   excluded merely because CPython documents them near its standard library.
   Host I/O and optional C library wrappers belong at an explicit host boundary.
   The exceptions are the minimal built-in modules `_thread` (the engine's
-  single thread), `collections` (a package
+  single thread), `_typing` (the intrinsic typing objects), `gc`, `collections` (a package
   whose `abc` aliases the host's `_collections_abc`, as in CPython), `itertools`, `sys`,
-  `types`, and `weakref` (with its primitive half `_weakref`) (later `gc`, `math`, and `abc`): Python sources in `modules/`, embedded by
+  `types`, and `weakref` (with its primitive half `_weakref`) (later `math` and `abc`): Python sources in `modules/`, embedded by
   `tools/build_intrinsics.py`, found before the host loader, and parsed only
   on first import. Their private primitives (weak table, caller module) are C.
 - Cache at most one released tuple allocation for each length zero through

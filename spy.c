@@ -7000,6 +7000,7 @@ static SPYValue *builtin_descriptor(SPYContext *, SPYValue *, const char *);
 static SPYValue *frame_attribute(SPYContext *, SPYValue *, const char *);
 static SPYValue *memory_attribute(SPYContext *, SPYValue *, const char *);
 static SPYValue *load_source_module(SPYContext *, const char *);
+static SPYValue *builtin_slot_before(SPYContext *, SPYValue *, const char *);
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (!strcmp(name, "__class__") && v->type != SPY_INSTANCE) return spy_retain(value_class(c, v));
     if (v->type == SPY_FRAME || v->type == SPY_MEMORYVIEW) {
@@ -7195,6 +7196,14 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_METHOD) {
         if (!strcmp(name, "__self__")) return spy_retain(v->as.method.self);
         if (!strcmp(name, "__func__")) return spy_retain(v->as.method.function);
+        /* The method type's own attributes come before the function's; bound
+         * builtins (builtin methods and method-wrappers) are not descriptors. */
+        if (!strcmp(name, "__get__")) {
+            if (v->as.method.function->type != SPY_FUNCTION)
+                return errorf(c, "AttributeError", "'%s' object has no attribute '__get__'", type_name(v));
+            SPYValue *own = class_lookup(c->types[SPY_METHOD], name);
+            if (own) return descriptor_get(c, own, v, c->types[SPY_METHOD]);
+        }
         return attribute(c, v->as.method.function, name);
     }
     if (v->type == SPY_PROPERTY) {
@@ -7244,6 +7253,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         value = name_local(v, name);
         if (value) return v->type == SPY_CLASS ? descriptor_get(c, value, NULL, v) : spy_retain(value);
         value = v->type == SPY_CLASS ? class_lookup(v, name) : instance_lookup(v->as.map.parent, name);
+        /* A builtin base before the defining class in the MRO provides its own slot. */
+        SPYValue *slot = value ? builtin_slot_before(c, v->type == SPY_CLASS ? v : v->as.map.parent, name) : NULL;
+        if (c->error_type[0]) return NULL;
+        if (slot) value = slot;
         if (value) return descriptor_get(c, value, v->type == SPY_INSTANCE ? v : NULL,
                                          v->type == SPY_INSTANCE ? v->as.map.parent : v);
         if (!strcmp(name, "__class__") && v->type == SPY_INSTANCE) return spy_retain(v->as.map.parent);
@@ -7359,7 +7372,9 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "mapping")) return mappingproxy_new(c, v->as.bound.self);
     }
     if (method < 0) {
-        SPYValue *cls = v->type == SPY_ITERATOR ? value_class(c, v) : c->types[v->type];
+        int kind = v->type == SPY_NATIVE ? native_kind(v) : NATIVE_FUNCTION;
+        SPYValue *cls = v->type == SPY_ITERATOR || kind == NATIVE_METHOD_DESCRIPTOR || kind == NATIVE_WRAPPER_DESCRIPTOR ?
+            value_class(c, v) : c->types[v->type];
         SPYValue *definition = instance_lookup(cls, name);
         if (!definition && !c->error_type[0]) definition = builtin_descriptor_lookup(c, cls, name);
         if (definition) return descriptor_get(c, definition, v, cls);
@@ -9937,15 +9952,18 @@ SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *ar
 static int weakref_natives(SPYContext *, SPYValue *);
 static int collections_natives(SPYContext *, SPYValue *);
 static int sys_natives(SPYContext *, SPYValue *);
+static int gc_natives(SPYContext *, SPYValue *);
 /* Built-in modules: Python sources embedded by tools/build_intrinsics.py,
  * found before the host loader and parsed only when first imported. A
  * package's submodules are named with their dotted path. */
 #define BUILTIN_MODULE(name, source, init, package) {name, source, sizeof(source) / sizeof(*source), init, package}
 static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); int package; } builtin_modules[] = {
     BUILTIN_MODULE("_thread", module__thread, NULL, 0),
+    BUILTIN_MODULE("_typing", module__typing, NULL, 0),
     BUILTIN_MODULE("_weakref", module__weakref, NULL, 0),
     BUILTIN_MODULE("collections", module_collections, collections_natives, 1),
     BUILTIN_MODULE("collections.abc", module_collections_abc, NULL, 0),
+    BUILTIN_MODULE("gc", module_gc, gc_natives, 0),
     BUILTIN_MODULE("itertools", module_itertools, NULL, 0),
     BUILTIN_MODULE("sys", module_sys, sys_natives, 0),
     BUILTIN_MODULE("types", module_types, NULL, 0),
@@ -10094,6 +10112,72 @@ static int weakref_natives(SPYContext *c, SPYValue *module) {
     return define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
         define_native(c, module, "_weak_callback", weak_get, c) || define_native(c, module, "_weak_hash", weak_hash, NULL) ||
         define_native(c, module, "_weak_refs", weak_refs, NULL);
+}
+/* The gc module's view of the collector. Engine-internal values (environments
+ * and other private tags) are never exposed. */
+enum { GC_COLLECT, GC_REFERENTS, GC_REFERRERS, GC_TRACKED, GC_OBJECTS };
+static int gc_public(SPYValue *v) { return v->type <= SPY_LAST_TYPE; }
+/* CPython tracks containers; tuples and frozensets only while an item is tracked. */
+static int gc_tracked(SPYContext *c, SPYValue *v) {
+    switch (v->type) {
+    case SPY_NONE: case SPY_BOOL: case SPY_INT: case SPY_FLOAT: case SPY_COMPLEX: case SPY_STRING: case SPY_BYTES:
+    case SPY_BYTEARRAY: case SPY_NOT_IMPLEMENTED: case SPY_ELLIPSIS: case SPY_RANGE: return 0;
+    case SPY_TUPLE:
+        for (size_t i = 0; i < v->as.seq.len; i++) if (gc_tracked(c, v->as.seq.items[i])) return 1;
+        return 0;
+    case SPY_FROZENSET:
+        for (size_t i = 0; i < v->as.map.len; i++) if (gc_tracked(c, v->as.map.items[i].key)) return 1;
+        return 0;
+    case SPY_INSTANCE: return v->as.map.parent != name_local(c->classes, "object");
+    default: return 1;
+    }
+}
+typedef struct { SPYContext *c; SPYValue *out, *target; int found, failed; } GCWalk;
+static void gc_referent(SPYValue *v, void *data) {
+    GCWalk *walk = data;
+    if (walk->target) { if (v == walk->target) walk->found = 1; return; }
+    if (!walk->failed && gc_public(v) && sequence_append(walk->c, walk->out, v)) walk->failed = 1;
+}
+static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    int id = (int)(intptr_t)data;
+    if (id == GC_COLLECT) return spy_int(c, (int64_t)spy_collect(c));
+    if (id == GC_TRACKED) {
+        if (argc != 1) return errorf(c, "TypeError", "is_tracked() takes exactly one argument (%zu given)", argc);
+        return spy_bool(c, gc_tracked(c, argv[0]));
+    }
+    GCWalk walk = {c, value_new(c, SPY_LIST), NULL, 0, 0};
+    if (!walk.out) return NULL;
+    if (id == GC_REFERENTS) {
+        for (size_t i = 0; i < argc && !walk.failed; i++) {
+            size_t start = walk.out->as.seq.len;
+            edges(argv[i], gc_referent, &walk);
+            /* Lists and tuples traverse their items from the end. */
+            if (argv[i]->type == SPY_LIST || argv[i]->type == SPY_TUPLE)
+                for (size_t lo = start, hi = walk.out->as.seq.len; hi > lo + 1; lo++, hi--) {
+                    SPYValue *item = walk.out->as.seq.items[lo];
+                    walk.out->as.seq.items[lo] = walk.out->as.seq.items[hi - 1]; walk.out->as.seq.items[hi - 1] = item;
+                }
+        }
+    } else {
+        for (SPYValue *v = c->values; v && !walk.failed; v = v->next) {
+            if (!gc_public(v) || v == walk.out || !gc_tracked(c, v)) continue;
+            if (id == GC_OBJECTS) { walk.failed = sequence_append(c, walk.out, v) != 0; continue; }
+            for (size_t i = 0; i < argc && !walk.failed; i++) {
+                GCWalk probe = {c, NULL, argv[i], 0, 0};
+                edges(v, gc_referent, &probe);
+                if (probe.found) { walk.failed = sequence_append(c, walk.out, v) != 0; break; }
+            }
+        }
+    }
+    if (walk.failed) { spy_release(walk.out); return NULL; }
+    return walk.out;
+}
+static int gc_natives(SPYContext *c, SPYValue *module) {
+    return define_native(c, module, "_collect", gc_native, (void *)(intptr_t)GC_COLLECT) ||
+        define_native(c, module, "get_referents", gc_native, (void *)(intptr_t)GC_REFERENTS) ||
+        define_native(c, module, "get_referrers", gc_native, (void *)(intptr_t)GC_REFERRERS) ||
+        define_native(c, module, "_tracked", gc_native, (void *)(intptr_t)GC_TRACKED) ||
+        define_native(c, module, "_objects", gc_native, (void *)(intptr_t)GC_OBJECTS);
 }
 /* The sys module's runtime state. Constant metadata is Python in modules/sys.py. */
 enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH, SYS_GETFRAME, SYS_FRAME_MODULE };
@@ -18352,6 +18436,20 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
     cached = name_local(c->slots, key);
     return cached->type == SPY_NONE ? NULL : cached;
 }
+/* The slot of a builtin class (not object) that precedes, in the MRO, the
+ * first class whose namespace defines name; NULL if none does. */
+static SPYValue *builtin_slot_before(SPYContext *c, SPYValue *cls, const char *name) {
+    SPYValue *mro = cls ? cls->as.map.mro : NULL;
+    SPYValue *object = name_local(c->classes, "object");
+    for (size_t i = 0; mro && i < mro->as.seq.len && !c->error_type[0]; i++) {
+        SPYValue *klass = mro->as.seq.items[i];
+        if (name_local(klass, name)) return NULL;
+        if ((!klass->as.map.native && klass->as.map.flags != 2) || klass == object) continue;
+        SPYValue *descriptor = builtin_descriptor(c, klass, name);
+        if (descriptor) return descriptor;
+    }
+    return NULL;
+}
 /* The first builtin class in the MRO that provides the descriptor. */
 static SPYValue *builtin_descriptor_lookup(SPYContext *c, SPYValue *cls, const char *name) {
     SPYValue *mro = cls ? cls->as.map.mro : NULL;
@@ -18372,6 +18470,22 @@ static SPYValue *class_getitem(SPYContext *c, size_t argc, SPYValue *const *argv
     if (argc != 2) return errorf(c, "TypeError", "__class_getitem__() takes exactly one argument (%zu given)", argc ? argc - 1 : 0);
     return call_intrinsic(c, "_class_getitem", 2, argv);
 }
+/* __get__ of functions, bound methods, and builtin method descriptors. */
+enum { GET_FUNCTION, GET_METHOD, GET_NATIVE };
+static SPYValue *callable_get(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    int kind = (int)(intptr_t)data;
+    if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "__get__() takes no keyword arguments");
+    if (argc < 2) return errorf(c, "TypeError", "__get__ expected at least 1 argument, got %zu", argc ? argc - 1 : 0);
+    if (argc > 3) return errorf(c, "TypeError", "__get__ expected at most 2 arguments, got %zu", argc - 1);
+    SPYValue *self = argv[0], *instance = argv[1], *owner = argc > 2 ? argv[2] : c->none;
+    if (kind == GET_METHOD) return spy_retain(self);
+    if (instance->type == SPY_NONE && owner->type == SPY_NONE) return spy_error(c, "TypeError", "__get__(None, None) is invalid");
+    if (instance->type == SPY_NONE) return spy_retain(self);
+    if (kind == GET_NATIVE && self->as.native.owner && !subclass(value_class(c, instance), self->as.native.owner))
+        return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", self->as.native.name->as.string.data,
+                      name_local(self->as.native.owner, "__name__")->as.string.data, type_name(instance));
+    return descriptor_get(c, self, instance, owner->type == SPY_NONE ? value_class(c, instance) : owner);
+}
 static int register_descriptor_methods(SPYContext *c) {
     static const int types[] = {SPY_PROPERTY, SPY_CLASSMETHOD, SPY_STATICMETHOD};
     for (size_t t = 0; t < 3; t++)
@@ -18385,6 +18499,16 @@ static int register_descriptor_methods(SPYContext *c) {
 }
 static int register_constructors(SPYContext *c) {
     if (register_descriptor_methods(c)) return -1;
+    if (register_method(c, SPY_FUNCTION, "__get__", callable_get, GET_FUNCTION, METHOD_INSTANCE) ||
+        register_method(c, SPY_METHOD, "__get__", callable_get, GET_METHOD, METHOD_INSTANCE)) return -1;
+    for (int i = 0; i < 2; i++) {
+        SPYValue *get = value_new(c, SPY_NATIVE);
+        if (!get) return -1;
+        get->as.native.kwcall = callable_get; get->as.native.data = (void *)(intptr_t)GET_NATIVE; get->as.native.method = 1;
+        int status = name_set(c, c->native_types[i], "__get__", get);
+        spy_release(get);
+        if (status) return -1;
+    }
     for (size_t i = 0; i < sizeof(memory_methods) / sizeof(*memory_methods); i++)
         if (register_method(c, SPY_MEMORYVIEW, memory_methods[i], memory_method, (intptr_t)i, i == MV_NEW ? METHOD_STATIC : METHOD_INSTANCE)) return -1;
     if (name_set(c, c->builtins, "memoryview", c->types[SPY_MEMORYVIEW])) return -1;
