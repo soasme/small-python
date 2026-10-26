@@ -23,7 +23,7 @@ import unittest
 from unittest.util import safe_repr
 import warnings
 
-from run_cython import check_example, run_group
+from run_cython import check_example, run_group, engine_fingerprints
 
 ROOT = Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / "tests/upstream/cpython"
@@ -323,7 +323,7 @@ def main():
         if not args.driver.is_file():
             raise SystemExit("build run-cython before running doctest ports")
         report["driver_sha256"] = digest(args.driver)
-        report["engine_sha256"] = {name: digest(ROOT / name) for name in ("spy.c", "spy.h", "spy-unicode.h", "spy-intrinsics.h", "intrinsics.py", "host.h", "run-cython.c")}
+        report["engine_sha256"] = engine_fingerprints()
         report["adaptation"] = "Extract all doctest groups in PORTS with upstream DocTestFinder; replace only the doctest framework, preserve every example and expected result; module unittest fixtures remain unported."
         report["groups"], report["cases"] = ports(args.driver.resolve())
         for entry in report["files"]:
@@ -337,7 +337,7 @@ def main():
         if not args.driver.is_file():
             raise SystemExit("build run-cython before running unittest ports")
         report["driver_sha256"] = digest(args.driver)
-        report["engine_sha256"] = {name: digest(ROOT / name) for name in ("spy.c", "spy.h", "spy-unicode.h", "spy-intrinsics.h", "intrinsics.py", "host.h", "run-cython.c")}
+        report["engine_sha256"] = engine_fingerprints()
         report["framework_sha256"] = digest(ROOT / "tests/support/unittest.py")
         report["adaptation"] = "Initialize complete unchanged upstream modules; search tests/support for the unittest adaptation, then the unchanged pinned Lib tree for dependencies and fixtures; retain every discovered case ID and run module/class/test fixtures. Unsupported framework operations fail explicitly."
         report["groups"], report["cases"], report["fixtures"] = unittest_ports(

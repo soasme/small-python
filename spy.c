@@ -15,7 +15,7 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-enum { V_UNIT = SPY_CODE, V_ENV = SPY_TEMPLATE_ITERATOR + 1, V_UNBOUND };
+enum { V_UNIT = SPY_CODE, V_ENV = SPY_MAPPINGPROXY + 1, V_UNBOUND };
 typedef struct Node Node;
 typedef struct Program Program;
 typedef struct Machine Machine;
@@ -87,7 +87,7 @@ struct SPYContext {
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
-    SPYValue *types[SPY_TEMPLATE_ITERATOR + 1];
+    SPYValue *types[SPY_MAPPINGPROXY + 1];
     /* Weak references: targets and reference objects are borrowed. A reference
      * keeps its callback as its own __callback__ attribute, so the collector
      * sees that edge. weak_calls owns each reference whose target died, until
@@ -127,6 +127,7 @@ static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static int special_dispatch(SPYValue *);
+static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
 enum { R_LT, R_LE, R_EQ, R_NE, R_GT, R_GE };
 static SPYValue *rich_compare(SPYContext *, int, SPYValue *, SPYValue *);
@@ -249,7 +250,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         if (v->as.function.attributes) visit(v->as.function.attributes, data);
         if (v->as.function.metadata) visit(v->as.function.metadata, data);
         break;
-    case SPY_BOUND_METHOD: case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS:
+    case SPY_MAPPINGPROXY: case SPY_BOUND_METHOD: case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS:
         visit(v->as.bound.self, data);
         if (v->as.bound.name) visit(v->as.bound.name, data);
         break;
@@ -751,7 +752,7 @@ int spy_truth(SPYValue *v) {
     case SPY_DICT: case SPY_SET: case SPY_FROZENSET: return v->as.map.len != 0;
     case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: return v->as.bound.self->as.map.len != 0;
     case SPY_RANGE: return integer_sign(v->as.range.length) != 0;
-    case SPY_INSTANCE: {
+    case SPY_MAPPINGPROXY: case SPY_INSTANCE: {
         SPYContext *c = v->ctx;
         SPYValue *base = builtin_base(c, v, "__bool__", "__len__");
         if (base) return spy_truth(base);
@@ -951,6 +952,7 @@ static int hash_items(SPYContext *c, size_t len, SPYValue *const *items, int tup
 }
 static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     switch (value->type) {
+    case SPY_MAPPINGPROXY: return hash_value(c, value->as.bound.self, result);
     case SPY_BOOL: case SPY_INT: *result = hash_integer(value); return 0;
     case SPY_FLOAT: *result = hash_double(value, value->as.real); return 0;
     case SPY_COMPLEX:
@@ -1168,7 +1170,7 @@ static int native_kind(SPYValue *v) {
 }
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
@@ -1177,7 +1179,7 @@ static const char *type_name(SPYValue *value) {
     int kind = native_kind(value);
     if (kind) return kind == NATIVE_METHOD_DESCRIPTOR ? "method_descriptor" : kind == NATIVE_WRAPPER_DESCRIPTOR ? "wrapper_descriptor" :
         kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
-    return value->type <= SPY_TEMPLATE_ITERATOR ? names[value->type] : "object";
+    return value->type <= SPY_MAPPINGPROXY ? names[value->type] : "object";
 }
 static Symbol *scope_symbol(Scope *scope, const char *name) {
     if (scope) for (size_t i = 0; i < scope->len; i++)
@@ -1531,6 +1533,13 @@ static int format_complex_part(Buffer *out, double value) {
     if (len >= 2 && text[len - 2] == '.' && text[len - 1] == '0') len -= 2;
     return append(out, text, len);
 }
+static SPYValue *mappingproxy_new(SPYContext *c, SPYValue *mapping) {
+    if (!mapping_type(c, mapping) || builtin_value(c, mapping, SPY_LIST) || builtin_value(c, mapping, SPY_TUPLE))
+        return errorf(c, "TypeError", "mappingproxy() argument must be a mapping, not %s", type_name(mapping));
+    SPYValue *proxy = value_new(c, SPY_MAPPINGPROXY);
+    if (proxy) proxy->as.bound.self = spy_retain(mapping);
+    return proxy;
+}
 static SPYValue *interpolation_new(SPYContext *c, SPYValue *value, SPYValue *expression,
                                    SPYValue *conversion, SPYValue *format_spec) {
     SPYValue *result = value_new(c, SPY_INTERPOLATION);
@@ -1611,6 +1620,13 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     case SPY_NONE: return puts_buffer(b, "None");
     case SPY_NOT_IMPLEMENTED: return puts_buffer(b, "NotImplemented");
     case SPY_ELLIPSIS: return puts_buffer(b, "Ellipsis");
+    case SPY_MAPPINGPROXY: {
+        if (b->depth == 128) { spy_error(b->ctx, "RecursionError", "representation is too deep"); return -1; }
+        b->path[b->depth++] = v;
+        int status = (repr && puts_buffer(b, "mappingproxy(")) || format_value(b, v->as.bound.self, repr) ||
+            (repr && puts_buffer(b, ")"));
+        b->depth--; return status ? -1 : 0;
+    }
     case SPY_TEMPLATE:
         return puts_buffer(b, "Template(strings=") || format_value(b, v->as.template.strings, 1) ||
             puts_buffer(b, ", interpolations=") || format_value(b, v->as.template.interpolations, 1) || puts_buffer(b, ")");
@@ -5565,6 +5581,19 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
     }
     spy_release(result); spy_release(items); return c->error_type[0] ? -1 : 0;
 }
+static SPYValue *dict_subscript(SPYContext *c, SPYValue *dict, SPYValue *self, SPYValue *key) {
+    ptrdiff_t i = map_find(dict, key);
+    if (i >= 0) return spy_retain(dict->as.map.items[i].value);
+    if (c->error_type[0]) return NULL;
+    if (self->type == SPY_INSTANCE) {
+        SPYValue *missing = special_method(c, self, "__missing__");
+        if (missing) {
+            SPYValue *result = spy_call(c, missing, 1, &key);
+            spy_release(missing); return result;
+        }
+    }
+    return c->error_type[0] ? NULL : missing_key(c, key);
+}
 static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
     if (v->type == SPY_RANGE) return range_index(c, v, key);
     if (v->type == SPY_CLASS && v->as.map.meta) {
@@ -5589,27 +5618,16 @@ static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
     SPYValue *base = builtin_base(c, v, "__getitem__", NULL);
     if (base) {
         /* dict subclasses consult __missing__ for absent keys. */
-        if (base->type == SPY_DICT && key->type != SPY_SLICE) {
-            ptrdiff_t i = map_find(base, key);
-            if (i >= 0) return spy_retain(base->as.map.items[i].value);
-            if (c->error_type[0]) return NULL;
-            SPYValue *missing = special_method(c, v, "__missing__");
-            if (missing) { SPYValue *result = spy_call(c, missing, 1, &key); spy_release(missing); return result; }
-            return c->error_type[0] ? NULL : missing_key(c, key);
-        }
+        if (base->type == SPY_DICT) return dict_subscript(c, base, v, key);
         return get_index(c, base, key);
     }
-    if (v->type == SPY_INSTANCE) {
+    if (v->type == SPY_INSTANCE || v->type == SPY_MAPPINGPROXY) {
         SPYValue *method = special_method(c, v, "__getitem__");
         if (!method) return errorf(c, "TypeError", "'%s' object is not subscriptable", type_name(v));
         SPYValue *result = spy_call(c, method, 1, &key);
         spy_release(method); return result;
     }
-    if (v->type == SPY_DICT) {
-        ptrdiff_t i = map_find(v, key);
-        if (i < 0) return missing_key(c, key);
-        return spy_retain(v->as.map.items[i].value);
-    }
+    if (v->type == SPY_DICT) return dict_subscript(c, v, v, key);
     if (key->type == SPY_SLICE) return get_slice(c, v, key);
     int64_t index;
     if (v->type != SPY_LIST && v->type != SPY_TUPLE && v->type != SPY_STRING && v->type != SPY_BYTES && v->type != SPY_BYTEARRAY)
@@ -6405,7 +6423,7 @@ static SPYValue *builtin_base(SPYContext *c, SPYValue *v, const char *name, cons
 /* Instances and classes whose metaclass is not type look up special methods
  * on their type. */
 static int special_dispatch(SPYValue *v) {
-    return v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
+    return v->type == SPY_MAPPINGPROXY || v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
 }
 static int subclass(SPYValue *cls, SPYValue *base) {
     if (cls && cls->type == SPY_CLASS && cls->as.map.mro) {
@@ -6479,6 +6497,10 @@ static SPYValue *descriptor_get(SPYContext *c, SPYValue *value, SPYValue *self, 
     return result;
 }
 static SPYValue *special_method(SPYContext *c, SPYValue *v, const char *name) {
+    if (v->type == SPY_MAPPINGPROXY) {
+        SPYValue *cls = c->types[SPY_MAPPINGPROXY], *method = class_lookup(cls, name);
+        return method ? descriptor_get(c, method, v, cls) : NULL;
+    }
     if (v->type == SPY_ASYNC_GENERATOR || v->type == SPY_PROPERTY || awaitable_iterator(v)) {
         SPYValue *method = attribute(c, v, name);
         if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
@@ -6812,7 +6834,12 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         SPYValue *meta = v->type == SPY_CLASS ? v->as.map.meta : NULL;
         SPYValue *meta_value = meta ? class_lookup(meta, name) : NULL;
         if (data_descriptor(meta_value)) return descriptor_get(c, meta_value, v, meta);
-        if (!value && !strcmp(name, "__dict__")) return instance_dict(c, v);
+        if (!value && !strcmp(name, "__dict__")) {
+            SPYValue *dict = instance_dict(c, v);
+            if (!dict || v->type == SPY_INSTANCE) return dict;
+            SPYValue *proxy = mappingproxy_new(c, dict);
+            spy_release(dict); return proxy;
+        }
         value = name_local(v, name);
         if (value) return v->type == SPY_CLASS ? descriptor_get(c, value, NULL, v) : spy_retain(value);
         value = v->type == SPY_CLASS ? class_lookup(v, name) : instance_lookup(v->as.map.parent, name);
@@ -6920,7 +6947,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     }
     if (is_view(v)) {
         if (set_view(v) && !strcmp(name, "isdisjoint")) method = M_ISDISJOINT;
-        if (!strcmp(name, "mapping")) return call_intrinsic(c, "_mappingproxy", 1, &v->as.bound.self);
+        if (!strcmp(name, "mapping")) return mappingproxy_new(c, v->as.bound.self);
     }
     if (method < 0) {
         SPYValue *cls = v->type == SPY_ITERATOR ? value_class(c, v) : c->types[v->type];
@@ -8058,7 +8085,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         spy_retain(value); spy_release(*field); *field = value; return 0;
     }
     if (object->type == SPY_CLASS) {
-        if (!strcmp(name, "__mro__") || !strcmp(name, "__base__")) {
+        if (!strcmp(name, "__mro__") || !strcmp(name, "__base__") || !strcmp(name, "__dict__")) {
             spy_error(c, "AttributeError", "readonly attribute"); return -1;
         }
         if (!strcmp(name, "__bases__")) {
@@ -8716,7 +8743,7 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     /* Like PyDict_Merge, dict subclasses keeping dict iteration copy directly. */
     SPYValue *base = builtin_base(c, a, "__iter__", NULL);
     if (base && base->type == SPY_DICT) a = base;
-    if (a->type == SPY_DICT || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "keys"))) extend_display(c, dict, a);
+    if (a->type == SPY_DICT || a->type == SPY_MAPPINGPROXY || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "keys"))) extend_display(c, dict, a);
     else {
         SPYValue *iterator = get_iterator(c, a);
         while (iterator && !c->error_type[0]) {
@@ -9359,6 +9386,7 @@ static void not_callable(SPYContext *c, SPYValue *fn) {
     else errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
 }
 static SPYValue *template_construct(SPYContext *, int, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *mappingproxy_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 /* module(name, doc=None), as CPython's module___init___impl. */
 static SPYValue *module_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (argc > 2) return errorf(c, "TypeError", "module() takes at most 2 arguments (%zu given)", argc);
@@ -9392,6 +9420,7 @@ static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *a
 /* type.__call__: allocate with __new__, then initialize with __init__. */
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *result = NULL;
+    if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
         result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
     else if (fn == c->types[SPY_MODULE]) result = module_construct(c, argc, argv, keywords);
@@ -10135,8 +10164,8 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
         }
         /* Exceptions and each builtin value type have their own layout. */
         int kind = builtin_layout(c, base);
-        if (kind < 0 && subclass(base, exception)) kind = SPY_TEMPLATE_ITERATOR + 1;
-        if (kind < 0 && subclass(base, c->types[SPY_CLASS])) kind = SPY_TEMPLATE_ITERATOR + 2;
+        if (kind < 0 && subclass(base, exception)) kind = SPY_MAPPINGPROXY + 1;
+        if (kind < 0 && subclass(base, c->types[SPY_CLASS])) kind = SPY_MAPPINGPROXY + 2;
         if (kind >= 0 && layout >= 0 && kind != layout) return spy_error(c, "TypeError", "multiple bases have instance lay-out conflict");
         if (kind >= 0) layout = kind;
     }
@@ -10191,8 +10220,8 @@ static int mapping_type(SPYContext *c, SPYValue *value) {
 }
 static int class_layout(SPYContext *c, SPYValue *cls) {
     int layout = builtin_layout(c, cls);
-    if (layout < 0 && subclass(cls, name_local(c->classes, "BaseException"))) return SPY_TEMPLATE_ITERATOR + 1;
-    if (layout < 0 && subclass(cls, c->types[SPY_CLASS])) return SPY_TEMPLATE_ITERATOR + 2;
+    if (layout < 0 && subclass(cls, name_local(c->classes, "BaseException"))) return SPY_MAPPINGPROXY + 1;
+    if (layout < 0 && subclass(cls, c->types[SPY_CLASS])) return SPY_MAPPINGPROXY + 2;
     return layout;
 }
 static int initialize_mro(SPYContext *c, SPYValue *cls) {
@@ -11027,6 +11056,9 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
     return env->type == V_ENV && env->as.map.scope ? declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
+    if (object->type == SPY_CLASS && !strcmp(name, "__dict__")) {
+        spy_error(c, "AttributeError", "readonly attribute"); return -1;
+    }
     if (object->type == SPY_PROPERTY && !strcmp(name, "__name__")) {
         spy_release(object->as.property.name); object->as.property.name = NULL; return 0;
     }
@@ -13364,6 +13396,68 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
         }
     return 0;
 }
+static SPYValue *mappingproxy_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    static const char *const names[] = {"mapping"};
+    SPYValue *args[1];
+    if (parse_arguments(c, "mappingproxy", argc, argv, keywords, names, 1, 1, 0, args)) return NULL;
+    return mappingproxy_new(c, args[0]);
+}
+enum { MP_NEW, MP_GETITEM, MP_CONTAINS, MP_ITER, MP_LEN, MP_REVERSED, MP_HASH,
+       MP_EQ, MP_NE, MP_OR, MP_ROR, MP_IOR, MP_REPR, MP_STR, MP_GET, MP_KEYS, MP_VALUES, MP_ITEMS, MP_COPY };
+static const char *const mappingproxy_methods[] = {
+    "__new__", "__getitem__", "__contains__", "__iter__", "__len__", "__reversed__", "__hash__",
+    "__eq__", "__ne__", "__or__", "__ror__", "__ior__", "__repr__", "__str__", "get", "keys", "values", "items", "copy"
+};
+static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    int op = (int)(intptr_t)data;
+    const char *name = mappingproxy_methods[op];
+    if (op == MP_NEW) {
+        if (!argc || argv[0] != c->types[SPY_MAPPINGPROXY]) return spy_error(c, "TypeError", "mappingproxy.__new__ requires its defining type");
+        return mappingproxy_construct(c, argc - 1, argv + 1, keywords);
+    }
+    if (!argc || argv[0]->type != SPY_MAPPINGPROXY)
+        return errorf(c, "TypeError", "descriptor '%s' requires a 'mappingproxy' object", name);
+    SPYValue *proxy = argv[0], *mapping = proxy->as.bound.self, *args[2] = {NULL, NULL};
+    size_t required = op == MP_GETITEM || op == MP_CONTAINS || (op >= MP_EQ && op <= MP_IOR) || op == MP_GET;
+    if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, op == MP_GET ? 2 : required, required, 0, args)) return NULL;
+    switch (op) {
+    case MP_GETITEM: return get_index(c, mapping, args[0]);
+    case MP_CONTAINS: return comparison(c, O_IN, args[0], mapping);
+    case MP_ITER: return get_iterator(c, mapping);
+    case MP_LEN: return builtin(c, 1, &mapping, (void *)(intptr_t)B_LEN);
+    case MP_REVERSED: return builtin(c, 1, &mapping, (void *)(intptr_t)B_REVERSED);
+    case MP_HASH: return builtin(c, 1, &mapping, (void *)(intptr_t)B_HASH);
+    case MP_EQ: case MP_NE: {
+        /* Match descrobject.c: arbitrary reflected comparisons must not get
+         * the mutable exact dict behind a class namespace (gh-152405). */
+        SPYValue *other = args[0], *copy = NULL;
+        if (mapping->type == SPY_DICT && other->type != SPY_DICT && other->type != SPY_MAPPINGPROXY) {
+            copy = value_new(c, SPY_DICT);
+            if (!copy) return NULL;
+            for (size_t i = 0; i < mapping->as.map.len; i++) {
+                Entry *entry = &mapping->as.map.items[i];
+                if (map_append(c, copy, entry->key, entry->value, entry->hash)) { spy_release(copy); return NULL; }
+            }
+        }
+        SPYValue *result = comparison(c, op == MP_EQ ? T_EQ : T_NE, copy ? copy : mapping, other);
+        spy_release(copy); return result;
+    }
+    case MP_OR: case MP_ROR: {
+        SPYValue *other = args[0]->type == SPY_MAPPINGPROXY ? args[0]->as.bound.self : args[0];
+        return binary(c, '|', op == MP_OR ? mapping : other, op == MP_OR ? other : mapping);
+    }
+    case MP_IOR: return spy_error(c, "TypeError", "'|=' is not supported by mappingproxy; use '|' instead");
+    case MP_REPR: return spy_repr(c, proxy);
+    case MP_STR: return stringify(c, mapping, 0);
+    default: {
+        SPYValue *method = attribute(c, mapping, name);
+        if (!method) return NULL;
+        if (op == MP_GET && !args[1]) args[1] = c->none;
+        SPYValue *result = spy_call(c, method, op == MP_GET ? 2 : 0, args);
+        spy_release(method); return result;
+    }
+    }
+}
 static SPYValue *template_construct(SPYContext *c, int type, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (type == SPY_TEMPLATE) {
         if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "Template.__new__ only accepts *args arguments");
@@ -15306,7 +15400,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
                 if (status) { spy_release(source); return NULL; }
             }
         } else if (id == B_ENUMERATE) source = get_iterator(c, a);
-        else if (a->type == SPY_INSTANCE) {
+        else if (special_dispatch(a)) {
             /* reversed_new: __reversed__, else the sequence protocol. */
             SPYValue *cls = value_class(c, a), *method = class_lookup(cls, "__reversed__");
             if (method && method->type != SPY_NONE) return call_special(c, a, "__reversed__", 0, NULL);
@@ -15978,7 +16072,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
 static int builtin_type_id(SPYContext *c, SPYValue *cls) {
     if (cls == name_local(c->classes, "object")) return 63;
     for (int i = 0; i < IT_COUNT; i++) if (c->iterator_types[i] == cls && i != IT_TEMPLATE) return SPY_ITERATOR;
-    for (int t = 0; t <= SPY_TEMPLATE_ITERATOR; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
+    for (int t = 0; t <= SPY_MAPPINGPROXY; t++) if (c->types[t] == cls && t != SPY_BOUND_METHOD) return t;
     return -1;
 }
 static int slot_index(const char *name) {
@@ -16118,7 +16212,8 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         return result || c->error_type[0] ? result : spy_error(c, "StopIteration", "");
     }
     case SLOT_CONTAINS: return comparison(c, O_IN, argv[0], value);
-    case SLOT_GETITEM: return get_index(c, value, argv[0]);
+    case SLOT_GETITEM:
+        return type == SPY_DICT ? dict_subscript(c, value, self, argv[0]) : get_index(c, value, argv[0]);
     case SLOT_SETITEM: return set_index(c, value, argv[0], argv[1]) ? NULL : spy_none(c);
     case SLOT_DELITEM: return delete_index(c, value, argv[0]) ? NULL : spy_none(c);
     case SLOT_BOOL: return spy_bool(c, spy_truth(value));
@@ -16202,6 +16297,9 @@ static SPYValue *class_getitem(SPYContext *c, size_t argc, SPYValue *const *argv
     return call_intrinsic(c, "_class_getitem", 2, argv);
 }
 static int register_constructors(SPYContext *c) {
+    for (size_t i = 0; i < sizeof(mappingproxy_methods) / sizeof(*mappingproxy_methods); i++)
+        if (register_method(c, SPY_MAPPINGPROXY, mappingproxy_methods[i], mappingproxy_method, (intptr_t)i,
+                            i == MP_NEW ? METHOD_STATIC : METHOD_INSTANCE)) return -1;
     SPYValue *module = spy_string(c, "string.templatelib", 18), *matches = value_new(c, SPY_TUPLE);
     if (module) {
         name_set(c, c->types[SPY_TEMPLATE], "__module__", module);
@@ -16220,7 +16318,7 @@ static int register_constructors(SPYContext *c) {
         register_method(c, SPY_TEMPLATE, "__new__", template_method, SPY_TEMPLATE, METHOD_STATIC) ||
         register_method(c, SPY_INTERPOLATION, "__new__", template_method, SPY_INTERPOLATION, METHOD_STATIC) ||
         register_method(c, SPY_TEMPLATE_ITERATOR, "__next__", template_method, SPY_TEMPLATE_ITERATOR, METHOD_INSTANCE)) return -1;
-    static const int generic_types[] = {SPY_LIST, SPY_DICT, SPY_TUPLE, SPY_SET, SPY_FROZENSET, SPY_CLASSMETHOD, SPY_STATICMETHOD};
+    static const int generic_types[] = {SPY_LIST, SPY_DICT, SPY_TUPLE, SPY_SET, SPY_FROZENSET, SPY_CLASSMETHOD, SPY_STATICMETHOD, SPY_MAPPINGPROXY};
     for (size_t i = 0; i < sizeof(generic_types) / sizeof(*generic_types); i++)
         if (register_method(c, generic_types[i], "__class_getitem__", class_getitem, 0, METHOD_CLASS)) return -1;
     {
@@ -16446,9 +16544,9 @@ SPYContext *spy_context_new(void) {
         {"coroutine", -1}, {"coroutine_wrapper", -1}, {"async_generator", -1},
         {"async_generator_asend", -1}, {"async_generator_athrow", -1}, {"anext_awaitable", -1}, {"super", B_SUPER},
         {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
-        {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}
+        {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}
     };
-    _Static_assert(sizeof(types) / sizeof(*types) == SPY_TEMPLATE_ITERATOR + 1, "builtin type table must cover every public value tag");
+    _Static_assert(sizeof(types) / sizeof(*types) == SPY_MAPPINGPROXY + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
         SPYValue *cls = new_class(c, types[i].name, name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
@@ -16569,7 +16667,7 @@ SPYContext *spy_context_new(void) {
     c->types[SPY_BOUND_METHOD] = spy_retain(c->types[SPY_NATIVE]);
     spy_release(module);
     if (name_natives(c, c->builtins, NULL)) goto fail;
-    for (int t = 0; t <= SPY_TEMPLATE_ITERATOR; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
+    for (int t = 0; t <= SPY_MAPPINGPROXY; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
     for (size_t i = 0; i < c->classes->as.map.len; i++)
         if (name_natives(c, c->classes->as.map.items[i].value, c->classes->as.map.items[i].value)) goto fail;
     SPYValue *name = spy_string(c, "__main__", 8);

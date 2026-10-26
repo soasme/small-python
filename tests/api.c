@@ -70,7 +70,10 @@ static void namespace_cycles(void) {
         "    class Meta(type):\n"
         "        def mro(cls): return [cls, object]\n"
         "    class D(metaclass=Meta): pass\n"
-        "    D.cycle = D\n");
+        "    D.cycle = D\n"
+        "    D.proxy = D.__dict__\n"
+        "    values = {}\n"
+        "    values['proxy'] = values.keys().mapping\n");
     execute(c, "make()\n"); /* Initialize lazy builtin descriptors before measuring. */
     spy_collect(c);
     size_t baseline = spy_live_values(c);
@@ -79,6 +82,14 @@ static void namespace_cycles(void) {
         spy_collect(c);
         assert(spy_live_values(c) == baseline);
     }
+    execute(c, "proxy = {}.keys().mapping\nfor i in range(1000): proxy = type(proxy)(proxy)\n");
+    assert(!spy_eval(c, "repr(proxy)", "proxy.py"));
+    assert(!strcmp(spy_error_type(c), "RecursionError"));
+    spy_clear_error(c);
+    assert(!spy_eval(c, "proxy[0]", "proxy.py"));
+    assert(!strcmp(spy_error_type(c), "RecursionError"));
+    spy_clear_error(c);
+    execute(c, "del proxy\n");
     spy_context_free(c);
 }
 int main(void) {

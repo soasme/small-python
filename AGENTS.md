@@ -121,6 +121,10 @@ run the equivalent command directly.
   key's hash once, compare only matching hashes, and reuse stored hashes for
   copies, dictionary merges, and equality. Recheck positions after comparison
   callbacks. Preserve equal numeric values' hash equality across types.
+- Mapping proxies are native C values retaining a live mapping. Class __dict__
+  and dictionary-view mapping attributes share this read-only wrapper. Follow
+  Python 3.15's exact-dictionary copying rule for reflected equality callbacks;
+  callbacks must not receive a mutable builtin class namespace through equality.
 - The inherited implementation currently embeds intrinsics.py through
   spy-intrinsics.h and executes it on this engine for generic/type objects.
   This requires no external Python runtime, but language semantics implemented

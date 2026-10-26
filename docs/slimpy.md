@@ -361,7 +361,11 @@ and `__delete__`. Builtin types expose method descriptors and slot wrappers
 names; they are created on first lookup and do not change implicit
 special-method dispatch. Dictionary `keys`, `values`, and `items` return live
 views; keys and items views are set-like, and `mapping` returns a read-only
-`mappingproxy`. Exception support still lacks
+native C `mappingproxy`. Class `__dict__` also returns a live, read-only proxy.
+Proxies forward mapping methods, support generic aliases, and copy an exact
+dictionary before comparison with an arbitrary reflected-equality callback,
+following Python 3.15. Their implementation no longer uses embedded Python.
+Exception support still lacks
 traceback objects, complete chaining, and all builtin-specific
 constructors. Context-manager exit currently receives `None` for the traceback.
 Exception notes and `add_note` are supported; a failed `__set_name__` callback

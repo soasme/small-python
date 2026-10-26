@@ -24,6 +24,13 @@ import warnings
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def engine_fingerprints():
+    sources = [ROOT / name for name in (
+        'spy.c', 'spy.h', 'spy-unicode.h', 'spy-intrinsics.h', 'intrinsics.py', 'host.h', 'run-cython.c')]
+    sources.extend(sorted((ROOT / 'modules').glob('*.py')))
+    return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
+
+
 def verify_checkout(path, commit):
     if not (path / "runtests.py").is_file():
         raise SystemExit("missing Cython checkout; run: make upstream")
@@ -223,8 +230,7 @@ def main():
         "schema": 1, "suite": "Cython upstream pure-Python doctests", "commit": pin["commit"],
         "selector": args.select, "dynamic_discovery": args.dynamic, "host_python": sys.version.split()[0],
         "host_platform": platform.platform(),
-        "engine_sources": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-                           for name in ("spy.c", "spy.h", "spy-unicode.h", "spy-intrinsics.h", "intrinsics.py", "host.h", "run-cython.c")},
+        "engine_sources": engine_fingerprints(),
         "driver_sha256": hashlib.sha256(args.driver.read_bytes()).hexdigest(),
         "scope": "Unchanged .py modules and upstream doctest expectations; no compiled Cython, C API/ABI, .pyx, .srctree, or unittest claim.",
         "adapter_limits": ["Runtime docstrings require --dynamic and successful oracle module initialization.",
