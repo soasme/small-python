@@ -64,7 +64,8 @@ struct SPYValue {
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner; size_t statements; int expression; } unit;
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; } function;
         struct { SPYNative call; void *data; int method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
-                 SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */ } native;
+                 SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
+                 void (*release)(void *); /* Host cleanup for data, run when the value is freed. */ } native;
         struct { SPYValue *self; int method; SPYValue *name; } bound;
         struct { SPYValue *self, *function; } method;
         struct { SPYValue *type, *self, *owner; } super;
@@ -170,6 +171,9 @@ static SPYValue *rich_compare(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *cell_contents(SPYValue *);
 static int cell_set(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *cell_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *function_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Node *, int);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
 static SPYValue *builtin_value(SPYContext *, SPYValue *, int);
@@ -471,6 +475,7 @@ static void free_value(SPYValue *v) {
     case SPY_INT: free(v->as.integer_data.big); break;
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: free(v->as.string.data); break;
     case SPY_MEMORYVIEW: free(v->as.memory.layout); break;
+    case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(v->as.generator.machine); break;
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET: free(v->as.map.items); break;
@@ -2102,7 +2107,10 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             (puts_buffer(b, ", ") || format_value(b, v->as.range.step, 1))) return -1;
         return puts_buffer(b, ")");
     }
-    default: return puts_buffer(b, "<built-in function>");
+    default:
+        /* object.__repr__ for builtin types without their own repr. */
+        snprintf(num, sizeof(num), " object at %p>", (void *)v);
+        return puts_buffer(b, "<") || puts_buffer(b, type_name(v)) || puts_buffer(b, num);
     }
 }
 static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
@@ -9929,6 +9937,12 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
     }
     if (!status && subclass(cls, name_local(c->classes, "StopIteration")))
         status = name_set(c, v, "value", argc ? argv[0] : c->none);
+    if (!status && subclass(cls, name_local(c->classes, "SystemExit"))) {
+        /* SystemExit_init: no argument, one argument, or the args tuple. */
+        SPYValue *code = argc == 1 ? spy_retain(argv[0]) : argc ? spy_tuple(c, argc, argv) : spy_none(c);
+        status = code ? name_set(c, v, "code", code) : -1;
+        spy_release(code);
+    }
     const char *const *fields = exception_keywords(c, cls);
     for (size_t i = 0; fields && fields[i] && !status; i++) status = name_set(c, v, fields[i], c->none);
     if (!status && subclass(cls, name_local(c->classes, "ImportError"))) status = name_set(c, v, "msg", c->none);
@@ -10230,6 +10244,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_CELL]) return cell_construct(c, argc, argv, keywords);
+    if (fn == c->types[SPY_FUNCTION]) return function_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
         result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
     else if (fn == c->types[SPY_MODULE]) result = module_construct(c, argc, argv, keywords);
@@ -11551,15 +11566,14 @@ static SPYValue *static_attributes(SPYContext *c, SPYValue *unit, Scope *scope) 
     result->type = SPY_TUPLE;
     return result;
 }
-static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic_base, SPYValue *type_params) {
-    SPYValue *bases = spy_list(c), *arguments = value_new(c, SPY_DICT), *keywords = value_new(c, SPY_DICT), *cls = NULL;
-    SPYValue *tuple = NULL, *name = NULL, *namespace = NULL, *env = NULL, *original = NULL;
-    if (!bases || !arguments || !keywords) goto done;
-    SPYValue *builder = spy_string(c, "__build_class__", 15);
-    int argument_error = builder ? eval_arguments(c, f, n->args, builder, bases, arguments) : -1;
-    spy_release(builder);
-    if (argument_error) goto done;
-    if (generic_base && sequence_append(c, bases, generic_base)) goto done;
+/* Create a class from evaluated bases (a list) and keyword arguments. The
+ * body is either a class statement n run in frame f, or a call of function,
+ * as builtins.__build_class__ makes it. */
+static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function, SPYValue *name,
+                            SPYValue *bases, SPYValue *arguments, SPYValue *type_params) {
+    SPYValue *keywords = value_new(c, SPY_DICT), *cls = NULL;
+    SPYValue *tuple = NULL, *namespace = NULL, *env = NULL, *original = NULL;
+    if (!keywords) goto done;
     if (!(original = value_new(c, SPY_TUPLE)) || extend_display(c, original, bases)) goto done;
     int resolved = update_bases(c, bases, original);
     if (resolved < 0) goto done;
@@ -11574,8 +11588,7 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     }
     if (meta->type == SPY_CLASS && !(meta = derived_metaclass(c, meta, bases))) goto done;
     tuple = value_new(c, SPY_TUPLE);
-    name = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
-    if (!tuple || !name || extend_display(c, tuple, bases)) goto done;
+    if (!tuple || extend_display(c, tuple, bases)) goto done;
     if (meta == c->types[SPY_CLASS]) namespace = value_new(c, SPY_DICT);
     else {
         SPYValue *prepare = attribute(c, meta, "__prepare__");
@@ -11596,7 +11609,7 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     env = value_new(c, V_ENV);
     if (!env) goto done;
     env->as.map.flags = 1; /* Class namespaces are not method closure scopes. */
-    SPYValue *outer = f->env;
+    SPYValue *outer = function ? function->as.function.env : f->env;
     while (outer->type == V_ENV && (outer->as.map.flags == 1 || outer->as.map.flags == 2)) outer = outer->as.map.parent;
     env->as.map.parent = spy_retain(outer);
     env->as.map.namespace = spy_retain(namespace);
@@ -11607,6 +11620,15 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     SPYValue *unbound = value_new(c, V_UNBOUND);
     if (unbound) name_set(c, env->as.map.class_cell, "__class__", unbound);
     spy_release(unbound);
+    if (c->error_type[0]) goto done;
+    Result r;
+    if (function) {
+        /* An ordinary function keeps its names in its own frame, so as in
+         * CPython the namespace only holds what __prepare__ put there. */
+        spy_release(spy_call(c, function, 0, NULL));
+        if (c->error_type[0]) goto done;
+        goto create;
+    }
     SPYValue *module = name_get(c, env, "__name__"), *qualname = module ? qualified_name(c, n->scope) : NULL;
     SPYValue *firstline = spy_int(c, (int64_t)(n->decorators ? n->decorators->line : n->line));
     if (qualname && firstline && !name_set(c, env, "__module__", module) && !name_set(c, env, "__qualname__", qualname))
@@ -11625,7 +11647,7 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     declare_locals(c, env);
     Frame frame = {env, f->unit, 0};
     if (enter_frame(c, env, f->unit)) goto done;
-    Result r = start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
+    r = start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
     leave_frame(c);
     spy_release(r.value);
     if (r.flow != FLOW_NORMAL || c->error_type[0]) goto done;
@@ -11633,6 +11655,7 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     if (attributes) name_set(c, env, "__static_attributes__", attributes);
     spy_release(attributes);
     if (c->error_type[0]) goto done;
+create:
     if (resolved && name_set(c, env, "__orig_bases__", original)) goto done;
     if (meta == c->types[SPY_CLASS]) cls = create_class(c, meta, name, tuple, namespace, keywords);
     else {
@@ -11641,10 +11664,116 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     }
     if (cls && cls->type == SPY_CLASS) name_set(c, env->as.map.class_cell, "__class__", cls);
 done:
-    spy_release(env); spy_release(namespace); spy_release(name); spy_release(tuple); spy_release(original);
-    spy_release(bases); spy_release(arguments); spy_release(keywords);
+    spy_release(env); spy_release(namespace); spy_release(tuple); spy_release(original); spy_release(keywords);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
+}
+static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic_base, SPYValue *type_params) {
+    SPYValue *bases = spy_list(c), *arguments = value_new(c, SPY_DICT), *name = NULL, *cls = NULL;
+    if (!bases || !arguments) goto done;
+    SPYValue *builder = spy_string(c, "__build_class__", 15);
+    int argument_error = builder ? eval_arguments(c, f, n->args, builder, bases, arguments) : -1;
+    spy_release(builder);
+    if (argument_error || (generic_base && sequence_append(c, bases, generic_base))) goto done;
+    name = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
+    if (name) cls = make_class(c, f, n, NULL, name, bases, arguments, type_params);
+done:
+    spy_release(name); spy_release(bases); spy_release(arguments);
+    return cls;
+}
+/* builtins.__build_class__(func, name, /, *bases, metaclass=..., **kwds). */
+static SPYValue *build_class_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    if (argc < 2) return spy_error(c, "TypeError", "__build_class__: not enough arguments");
+    if (argv[0]->type != SPY_FUNCTION) return spy_error(c, "TypeError", "__build_class__: func must be a function");
+    if (!builtin_value(c, argv[1], SPY_STRING)) return spy_error(c, "TypeError", "__build_class__: name is not a string");
+    SPYValue *bases = spy_list(c), *arguments = value_new(c, SPY_DICT), *cls = NULL;
+    for (size_t i = 2; bases && i < argc && !c->error_type[0]; i++) sequence_append(c, bases, argv[i]);
+    if (bases && arguments && !c->error_type[0] && (!keywords || !extend_display(c, arguments, keywords)))
+        cls = make_class(c, NULL, NULL, argv[0], argv[1], bases, arguments, NULL);
+    spy_release(bases); spy_release(arguments);
+    return cls;
+}
+/* builtins.__lazy_import__(name, globals=None, locals=None, fromlist=(), level=0),
+ * as _PyImport_LazyImportModuleLevelObject without lazy-import filters. */
+static SPYValue *lazy_import_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    static const char *const names[] = {"name", "globals", "locals", "fromlist", "level"};
+    SPYValue *args[5] = {0};
+    if (argc > 5) return errorf(c, "TypeError", "__lazy_import__() takes at most 5 arguments (%zu given)", argc);
+    for (size_t i = 0; i < argc; i++) args[i] = argv[i];
+    for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
+        SPYValue *key = keywords->as.map.items[i].key;
+        size_t slot = 0;
+        while (slot < 5 && strcmp(key->as.string.data, names[slot])) slot++;
+        if (slot == 5) return errorf(c, "TypeError", "__lazy_import__() got an unexpected keyword argument '%s'", key->as.string.data);
+        if (args[slot]) return errorf(c, "TypeError", "argument for __lazy_import__() given by name ('%s') and position (%zu)", names[slot], slot + 1);
+        args[slot] = keywords->as.map.items[i].value;
+    }
+    if (!args[0]) return spy_error(c, "TypeError", "__lazy_import__() missing required argument 'name' (pos 1)");
+    int64_t level = 0;
+    if (args[4]) {
+        SPYValue *index = index_object(c, args[4]);
+        int fits = index && !index->as.integer_data.big && !spy_as_int(c, index, &level) && level >= INT_MIN && level <= INT_MAX;
+        spy_release(index);
+        if (!fits) { if (!c->error_type[0]) spy_error(c, "OverflowError", "Python int too large to convert to C int"); return NULL; }
+    }
+    SPYValue *caller = c->eval_env ? c->eval_env : c->globals, *globals = args[1] && args[1]->type != SPY_NONE ? args[1] : NULL;
+    if (globals && !is_dict(globals)) return errorf(c, "TypeError", "expect dict for globals, got %s", type_name(globals));
+    if (!globals) globals = namespace_map(module_env(c, caller));
+    SPYValue *builtins = name_local(globals, "__builtins__");
+    if (!builtins) return spy_error(c, "ValueError", "unable to get builtins for lazy import");
+    if (builtins->type == SPY_MODULE) builtins = namespace_map(builtins);
+    if (args[0]->type != SPY_STRING) return errorf(c, "TypeError", "module name must be a string, got %s", type_name(args[0]));
+    if (level < 0) return spy_error(c, "ValueError", "level must be >= 0");
+    char *name = level ? absolute_name(c, args[0]->as.string.data, globals, level) : NULL;
+    if (level && !name) return NULL;
+    if (module_env(c, caller) != caller) { free(name); return spy_error(c, "SyntaxError", "'lazy import' is only allowed at module level"); }
+    SPYValue *fromlist = args[3] && args[3]->type != SPY_NONE ? args[3] : c->none, *packed = NULL;
+    if (fromlist->type == SPY_STRING) {
+        if ((packed = value_new(c, SPY_TUPLE)) && sequence_append(c, packed, fromlist)) { spy_release(packed); packed = NULL; }
+        if (!packed) { free(name); return NULL; }
+        fromlist = packed;
+    }
+    for (size_t i = 0; fromlist->type == SPY_TUPLE && i < fromlist->as.seq.len && !c->error_type[0]; i++)
+        if (fromlist->as.seq.items[i]->type != SPY_STRING)
+            errorf(c, "TypeError", "Item in ``from list'' must be str, not %s", type_name(fromlist->as.seq.items[i]));
+    SPYValue *text = c->error_type[0] ? NULL : name ? spy_string(c, name, strlen(name)) : spy_retain(args[0]);
+    SPYValue *lazy = text ? lazy_new(c, text, fromlist, builtins) : NULL;
+    free(name); spy_release(text); spy_release(packed);
+    return lazy;
+}
+/* builtins.breakpoint(*args, **kws) calls sys.breakpointhook. */
+static SPYValue *breakpoint_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *sys = import_module(c, "sys");
+    SPYValue *hook = sys ? attribute(c, sys, "breakpointhook") : NULL;
+    spy_release(sys);
+    if (!hook) {
+        if (c->error_type[0] && !error_is(c, "AttributeError")) return NULL;
+        spy_clear_error(c);
+        return spy_error(c, "RuntimeError", "lost sys.breakpointhook");
+    }
+    SPYValue *result = call_keywords(c, hook, argc, argv, keywords);
+    spy_release(hook);
+    return result;
+}
+/* exit(code=None) and quit(code=None), the site module's Quitter calls. */
+static SPYValue *exit_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *code = argc ? argv[0] : NULL;
+    if (argc > 1) return errorf(c, "TypeError", "Quitter.__call__() takes from 1 to 2 positional arguments but %zu were given", argc + 1);
+    for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
+        SPYValue *key = keywords->as.map.items[i].key;
+        if (strcmp(key->as.string.data, "code"))
+            return errorf(c, "TypeError", "Quitter.__call__() got an unexpected keyword argument '%s'", key->as.string.data);
+        if (code) return spy_error(c, "TypeError", "Quitter.__call__() got multiple values for argument 'code'");
+        code = keywords->as.map.items[i].value;
+    }
+    SPYValue *exception = spy_call(c, name_local(c->classes, "SystemExit"), code ? 1 : 0, &code);
+    if (exception) raise_value(c, exception);
+    spy_release(exception);
+    return NULL;
 }
 /* PEP 695: bind type parameters in a fresh annotation-scope environment
  * between the current frame and the definition. In a class body it keeps
@@ -12873,7 +13002,53 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_COMPILE, B_EVAL, B_EXEC, B_SLICE, B_STATICMETHOD, B_CLASSMETHOD, B_PROPERTY, B_DIR, B_LOCALS, B_FORMAT, B_ASCII, B_MAP, B_GLOBALS, B_COMPLEX,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
-       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT };
+       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT,
+       B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */ };
+/* CPython's argument-count errors for builtins, by their argument parser:
+ * METH_O functions, _PyArg_CheckPositional, and Argument Clinic signatures
+ * with keywords (required names) or a positional-only first argument. */
+static SPYValue *arity_error(SPYContext *c, int id, size_t argc) {
+    static const struct { int id; const char *name; char style; size_t min, max; const char *first, *second; } table[] = {
+        {B_ABS, "abs", 'O', 1, 1, 0, 0}, {B_AITER, "aiter", 'O', 1, 1, 0, 0}, {B_ALL, "all", 'O', 1, 1, 0, 0},
+        {B_ANY, "any", 'O', 1, 1, 0, 0}, {B_ASCII, "ascii", 'O', 1, 1, 0, 0}, {B_BIN, "bin", 'O', 1, 1, 0, 0},
+        {B_CALLABLE, "callable", 'O', 1, 1, 0, 0}, {B_CHR, "chr", 'O', 1, 1, 0, 0}, {B_HASH, "hash", 'O', 1, 1, 0, 0},
+        {B_HEX, "hex", 'O', 1, 1, 0, 0}, {B_ID, "id", 'O', 1, 1, 0, 0}, {B_LEN, "len", 'O', 1, 1, 0, 0},
+        {B_OCT, "oct", 'O', 1, 1, 0, 0}, {B_ORD, "ord", 'O', 1, 1, 0, 0}, {B_REPR, "repr", 'O', 1, 1, 0, 0},
+        {B_ANEXT, "anext", 'E', 1, 2, 0, 0}, {B_BOOL, "bool", 'E', 0, 1, 0, 0}, {B_DELATTR, "delattr", 'E', 2, 2, 0, 0},
+        {B_DICT, "dict", 'E', 0, 1, 0, 0}, {B_DIVMOD, "divmod", 'E', 2, 2, 0, 0}, {B_FLOAT, "float", 'E', 0, 1, 0, 0},
+        {B_FORMAT, "format", 'E', 1, 2, 0, 0}, {B_FROZENSET, "frozenset", 'E', 0, 1, 0, 0},
+        {B_GETATTR, "getattr", 'E', 2, 3, 0, 0}, {B_HASATTR, "hasattr", 'E', 2, 2, 0, 0}, {B_INT, "int", 'E', 0, 2, 0, 0},
+        {B_ISINSTANCE, "isinstance", 'E', 2, 2, 0, 0}, {B_ISSUBCLASS, "issubclass", 'E', 2, 2, 0, 0},
+        {B_LIST, "list", 'E', 0, 1, 0, 0}, {B_NEXT, "next", 'E', 1, 2, 0, 0}, {B_SET, "set", 'E', 0, 1, 0, 0},
+        {B_SETATTR, "setattr", 'E', 3, 3, 0, 0}, {B_SLICE, "slice", 'E', 1, 3, 0, 0}, {B_SORTED, "sorted", 'E', 1, 1, 0, 0},
+        {B_STR, "str", 'E', 0, 3, 0, 0}, {B_TUPLE, "tuple", 'E', 0, 1, 0, 0},
+        {B_IMPORT, "__import__", 'K', 1, 5, "name", 0}, {B_POW, "pow", 'K', 2, 3, "base", "exp"},
+        {B_BYTEARRAY, "bytearray", 'K', 0, 3, 0, 0}, {B_BYTES, "bytes", 'K', 0, 3, 0, 0}, {B_COMPLEX, "complex", 'K', 0, 2, 0, 0},
+        {B_EVAL, "eval", 'P', 1, 3, 0, 0}, {B_EXEC, "exec", 'P', 1, 4, 0, 0}, {B_SUM, "sum", 'P', 1, 2, 0, 0},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(*table); i++) {
+        if (table[i].id != id) continue;
+        const char *name = table[i].name;
+        size_t min = table[i].min, max = table[i].max;
+        if (argc >= min && argc <= max) break;
+        switch (table[i].style) {
+        case 'O': return errorf(c, "TypeError", "%s() takes exactly one argument (%zu given)", name, argc);
+        case 'E': {
+            size_t n = argc < min ? min : max;
+            return errorf(c, "TypeError", "%s expected %s%zu argument%s, got %zu", name,
+                          min == max ? "" : argc < min ? "at least " : "at most ", n, n == 1 ? "" : "s", argc);
+        }
+        case 'K':
+            if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
+            return errorf(c, "TypeError", "%s() missing required argument '%s' (pos %zu)", name,
+                          argc == 0 ? table[i].first : table[i].second, argc + 1);
+        default:
+            if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
+            return errorf(c, "TypeError", "%s() takes at least %zu positional argument%s (%zu given)", name, min, min == 1 ? "" : "s", argc);
+        }
+    }
+    return spy_error(c, "TypeError", "wrong number of builtin arguments");
+}
 /* printf-style formatting for str, bytes, and bytearray, following CPython's
  * unicode_format.c and bytesobject.c. Text widths and positions count code
  * points; bytes count bytes. See docs/licenses/python.txt. */
@@ -14914,16 +15089,24 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
         errorf(c, "TypeError", "%s() takes at most %zu argument%s (%zu given)", function, count, count == 1 ? "" : "s", argc);
         return -1;
     }
+    size_t given = argc + (keywords ? keywords->as.map.len : 0);
+    if (keyword_start == count && given > argc) {
+        errorf(c, "TypeError", "%s() takes no keyword arguments", function);
+        return -1;
+    }
+    /* _PyArg_UnpackKeywords order: the total count, then required
+     * parameters, then unknown keywords. */
+    if (given > count) {
+        errorf(c, "TypeError", "%s() takes at most %zu argument%s (%zu given)", function, count, count == 1 ? "" : "s", given);
+        return -1;
+    }
     for (size_t i = 0; i < count; i++) out[i] = i < argc ? argv[i] : NULL;
+    const char *unknown = NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *key = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
         size_t at = keyword_start;
         while (at < count && strcmp(names[at], key)) at++;
-        if (at == count) {
-            if (keyword_start == count) errorf(c, "TypeError", "%s() takes no keyword arguments", function);
-            else errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", function, key);
-            return -1;
-        }
+        if (at == count) { if (!unknown) unknown = key; continue; }
         if (out[at]) {
             errorf(c, "TypeError", "argument for %s() given by name ('%s') and position (%zu)", function, key, at + 1);
             return -1;
@@ -14936,6 +15119,10 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
             else errorf(c, "TypeError", "%s() takes at least %zu argument%s (%zu given)", function, required, required == 1 ? "" : "s", argc);
             return -1;
         }
+    if (unknown) {
+        errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", function, unknown);
+        return -1;
+    }
     return 0;
 }
 static SPYValue *mappingproxy_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -17001,6 +17188,7 @@ enum { MV_GETITEM, MV_SETITEM, MV_DELITEM, MV_LEN, MV_ITER, MV_EQ, MV_NE, MV_HAS
        MV_BUFFER, MV_RELEASE_BUFFER, MV_RELEASE, MV_TOBYTES, MV_TOLIST, MV_HEX, MV_TOREADONLY, MV_CAST, MV_COUNT, MV_INDEX, MV_NEW };
 /* PEP 661 sentinels: unique named objects whose module is the creating frame's. */
 static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (argc > 2) return errorf(c, "TypeError", "sentinel() takes at most 2 arguments (%zu given)", argc);
     if (argc != 1) return errorf(c, "TypeError", "sentinel() takes exactly 1 positional argument (%zu given)", argc);
     if (keywords && keywords->as.map.len)
         return errorf(c, "TypeError", "sentinel() got an unexpected keyword argument '%s'", keywords->as.map.items[0].key->as.string.data);
@@ -17631,7 +17819,10 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         spy_release(quotient); spy_release(remainder); return result;
     }
-    if (id == B_COMPILE || id == B_EVAL || id == B_EXEC) {
+    if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, "compile");
+    if (id == B_COMPILE || id == B_EVAL || id == B_EXEC || id == B_EXEC_CLOSURE) {
+        SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
+        if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
         if (id == B_COMPILE ? argc != 3 : argc < 1 || argc > 3) goto arity;
         const char *filename = "<string>";
         int expression = id == B_EVAL;
@@ -17648,16 +17839,30 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *env = id != B_COMPILE ? execution_env(c, argc, argv) : NULL;
         if (id != B_COMPILE && !env) return NULL;
         SPYValue *unit = NULL;
+        if (closure && a->type != SPY_CODE) {
+            spy_error(c, "TypeError", "closure can only be used when source is a code object"); goto execution_fail;
+        }
         if (a->type == SPY_CODE && id != B_COMPILE) {
             if (a->as.unit.definition) {
-                SPYValue *free = closure_names(c, a->as.unit.definition, 0);
-                if (free && free->as.seq.len) {
-                    if (expression) spy_error(c, "TypeError", "code object passed to eval() may not contain free variables");
-                    else errorf(c, "TypeError", "code object requires a closure of exactly length %zu", free->as.seq.len);
-                } else if (free) spy_error(c, "NotImplementedError", "execution of function code objects is not implemented");
-                spy_release(free);
-                goto execution_fail;
+                /* A function's code runs as a call with no arguments. */
+                SPYValue *free = closure_names(c, a->as.unit.definition, 0), *result = NULL;
+                size_t needed = free ? free->as.seq.len : 0, given = closure && closure->type == SPY_TUPLE ? closure->as.seq.len : 0;
+                if (!free) {}
+                else if (needed && expression) spy_error(c, "TypeError", "code object passed to eval() may not contain free variables");
+                else if (closure && closure->type != SPY_TUPLE) spy_error(c, "TypeError", "closure must be a tuple of cells");
+                else if (closure && !needed) spy_error(c, "TypeError", "cannot use a closure with this code object");
+                else if (needed != given) errorf(c, "TypeError", "code object requires a closure of exactly length %zu", needed);
+                else {
+                    SPYValue *fn = function_from_code(c, a, env->as.map.parent->as.map.namespace, closure);
+                    result = fn ? spy_call(c, fn, 0, NULL) : NULL;
+                    spy_release(fn);
+                }
+                spy_release(free); spy_release(env);
+                if (!result) return NULL;
+                if (id == B_EVAL) return result;
+                spy_release(result); return spy_none(c);
             }
+            if (closure) { spy_error(c, "TypeError", "cannot use a closure with this code object"); goto execution_fail; }
             unit = spy_retain(a);
         }
         else {
@@ -18167,7 +18372,7 @@ execution_fail:
     }
     return spy_error(c, "RuntimeError", "unknown builtin");
 arity:
-    return spy_error(c, "TypeError", "wrong number of builtin arguments");
+    return arity_error(c, id, argc);
 }
 static int print_text(SPYContext *c, SPYValue *file, SPYValue *text) {
     if (!text) return -1;
@@ -18216,6 +18421,118 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
     }
     spy_release(file); spy_release(sep); spy_release(end); return c->error_type[0] ? NULL : spy_none(c);
 }
+/* compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1, *,
+ * module=None, _feature_version=-1), validated as builtin_compile_impl. Future
+ * flags and optimization levels do not change the code spy produces. */
+enum { CF_ONLY_AST = 0x400, CF_FUTURE_MASK = 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000 | 0x1000000,
+       CF_ALLOWED = CF_FUTURE_MASK | 0x10 | CF_ONLY_AST | 0x2000 | 0x1000 | 0x200 | 0x4000 | 0x8000 };
+static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    static const char *const names[] = {"source", "filename", "mode", "flags", "dont_inherit", "optimize", "module", "_feature_version"};
+    SPYValue *args[8];
+    if (argc > 6) return errorf(c, "TypeError", "compile() takes at most 6 positional arguments (%zu given)", argc);
+    if (parse_arguments(c, "compile", argc, argv, keywords, names, 8, 3, 0, args)) return NULL;
+    int64_t flags = 0, optimize = -1;
+    SPYValue *numbers[] = {args[3], args[5], args[7]};
+    int64_t *slots[] = {&flags, &optimize, NULL};
+    for (size_t i = 0; i < 3; i++) {
+        if (!numbers[i]) continue;
+        SPYValue *index = index_object(c, numbers[i]);
+        int64_t value = 0;
+        int fits = index && !index->as.integer_data.big && !spy_as_int(c, index, &value) && value >= INT_MIN && value <= INT_MAX;
+        spy_release(index);
+        if (!fits) { if (!c->error_type[0]) spy_error(c, "OverflowError", "Python int too large to convert to C int"); return NULL; }
+        if (slots[i]) *slots[i] = value;
+    }
+    if (args[4] && spy_truth(args[4]) < 0) return NULL;
+    if (flags & ~(int64_t)CF_ALLOWED) return spy_error(c, "ValueError", "compile(): unrecognised flags");
+    if (optimize < -1 || optimize > 2) return spy_error(c, "ValueError", "compile(): invalid optimize value");
+    if (args[6] && args[6]->type != SPY_NONE && !builtin_value(c, args[6], SPY_STRING))
+        return errorf(c, "TypeError", "compile() argument 'module' must be str or None, not %s", type_name(args[6]));
+    if (flags & CF_ONLY_AST) return spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
+    return builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
+}
+/* The function a definition's code object makes in a globals dict, as
+ * PyFunction_New. spy closures share their defining environment rather than
+ * holding cells, so free variables need cells bound in one defining
+ * environment, which the function then extends. */
+static SPYValue *function_from_code(SPYContext *c, SPYValue *code, SPYValue *globals, SPYValue *closure) {
+    Node *def = code->as.unit.definition;
+    if (!def) return spy_error(c, "NotImplementedError", "a function of module code is not implemented");
+    SPYValue *env = NULL;
+    for (size_t i = 0; closure && closure->type == SPY_TUPLE && i < closure->as.seq.len; i++) {
+        SPYValue *cell = closure->as.seq.items[i];
+        if (!cell->as.cell.env) return spy_error(c, "NotImplementedError", "a closure of cells not bound to a defining scope is not implemented");
+        /* Keep the innermost environment: every other cell's must enclose it. */
+        if (!env) { env = cell->as.cell.env; continue; }
+        SPYValue *scan = cell->as.cell.env;
+        while (scan && scan != env) scan = scan->type == V_ENV ? scan->as.map.parent : NULL;
+        if (scan) env = cell->as.cell.env;
+    }
+    for (size_t i = 0; env && i < closure->as.seq.len; i++) {
+        SPYValue *scan = env;
+        while (scan && scan != closure->as.seq.items[i]->as.cell.env) scan = scan->type == V_ENV ? scan->as.map.parent : NULL;
+        if (!scan) return spy_error(c, "NotImplementedError", "a closure of cells from unrelated scopes is not implemented");
+    }
+    if (env && namespace_map(module_env(c, env)) != globals)
+        return spy_error(c, "NotImplementedError", "a closure with different globals is not implemented");
+    if (env) spy_retain(env);
+    else {
+        SPYValue *builtins = name_local(globals, "__builtins__");
+        if (builtins && builtins->type == SPY_MODULE) builtins = namespace_map(builtins);
+        if (!builtins || !is_dict(builtins)) builtins = c->builtins;
+        env = value_new(c, V_ENV);
+        if (!env) return NULL;
+        env->as.map.flags = 3;
+        env->as.map.namespace = spy_retain(globals);
+        env->as.map.parent = spy_retain(builtins);
+    }
+    Frame frame = {env, code->as.unit.owner, 0};
+    SPYValue *fn = function_new(c, &frame, def);
+    spy_release(env);
+    if (!fn) return NULL;
+    SPYValue *module = name_local(globals, "__name__");
+    if (name_set(c, fn->as.function.metadata, "__module__", module ? module : c->none) ||
+        (closure && closure->type == SPY_TUPLE && closure->as.seq.len && name_set(c, fn->as.function.metadata, "__closure__", closure))) {
+        spy_release(fn); return NULL;
+    }
+    return fn;
+}
+/* function(code, globals, name=None, argdefs=None, closure=None, kwdefaults=None). */
+static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    static const char *const names[] = {"code", "globals", "name", "argdefs", "closure", "kwdefaults"};
+    SPYValue *args[6];
+    if (parse_arguments(c, "function", argc, argv, keywords, names, 6, 2, 0, args)) return NULL;
+    for (size_t i = 2; i < 6; i++) if (!args[i]) args[i] = c->none;
+    if (args[0]->type != SPY_CODE) return errorf(c, "TypeError", "function() argument 'code' must be code, not %s", type_name(args[0]));
+    if (!is_dict(args[1])) return errorf(c, "TypeError", "function() argument 'globals' must be dict, not %s", type_name(args[1]));
+    if (args[2]->type != SPY_NONE && args[2]->type != SPY_STRING) return spy_error(c, "TypeError", "arg 3 (name) must be None or string");
+    if (args[3]->type != SPY_NONE && args[3]->type != SPY_TUPLE) return spy_error(c, "TypeError", "arg 4 (defaults) must be None or tuple");
+    Node *def = args[0]->as.unit.definition;
+    SPYValue *free = def ? closure_names(c, def, 0) : value_new(c, SPY_TUPLE);
+    if (!free) return NULL;
+    size_t needed = free->as.seq.len;
+    spy_release(free);
+    if (args[4]->type != SPY_TUPLE) {
+        if (needed && args[4]->type == SPY_NONE) return spy_error(c, "TypeError", "arg 5 (closure) must be tuple");
+        if (args[4]->type != SPY_NONE) return spy_error(c, "TypeError", "arg 5 (closure) must be None or tuple");
+    }
+    if (args[5]->type != SPY_NONE && !is_dict(args[5])) return spy_error(c, "TypeError", "arg 6 (kwdefaults) must be None or dict");
+    size_t given = args[4]->type == SPY_TUPLE ? args[4]->as.seq.len : 0;
+    if (needed != given) {
+        const char *name = !def ? "<module>" : def->kind == N_LAMBDA ? "<lambda>" : source_name(def->a);
+        return errorf(c, "ValueError", "%s requires closure of length %zu, not %zu", name, needed, given);
+    }
+    for (size_t i = 0; i < given; i++)
+        if (args[4]->as.seq.items[i]->type != SPY_CELL)
+            return errorf(c, "TypeError", "arg 5 (closure) expected cell, found %s", type_name(args[4]->as.seq.items[i]));
+    SPYValue *fn = function_from_code(c, args[0], args[1], args[4]->type == SPY_TUPLE ? args[4] : NULL);
+    if (fn && ((args[2]->type != SPY_NONE && name_set(c, fn->as.function.metadata, "__name__", args[2])) ||
+               (args[3]->type != SPY_NONE && name_set(c, fn->as.function.metadata, "__defaults__", args[3])) ||
+               (args[5]->type != SPY_NONE && name_set(c, fn->as.function.metadata, "__kwdefaults__", args[5])))) {
+        spy_release(fn); return NULL;
+    }
+    return fn;
+}
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, const char *name) {
     if (id == B_TYPE && argc == 3) {
         SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords);
@@ -18241,22 +18558,14 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_none(c);
     }
     if (id == B_ROUND) {
-        if (argc > 2) return spy_error(c, "TypeError", "round() takes at most 2 arguments");
-        SPYValue *args[2] = {argc ? argv[0] : NULL, argc > 1 ? argv[1] : NULL};
-        if (keywords) for (size_t i = 0; i < keywords->as.map.len; i++) {
-            Entry *entry = &keywords->as.map.items[i];
-            const char *key = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
-            size_t len = entry->key->as.string.len;
-            int at = len == 6 && !memcmp(key, "number", len) ? 0 : len == 7 && !memcmp(key, "ndigits", len) ? 1 : -1;
-            if (at < 0) return spy_error(c, "TypeError", "invalid keyword argument for round()");
-            if (args[at]) return spy_error(c, "TypeError", "duplicate argument for round()");
-            args[at] = entry->value;
-        }
-        if (!args[0]) return spy_error(c, "TypeError", "round() missing required argument 'number'");
+        static const char *const names[] = {"number", "ndigits"};
+        SPYValue *args[2];
+        if (parse_arguments(c, "round", argc, argv, keywords, names, 2, 1, 0, args)) return NULL;
         return round_value(c, args[0], args[1]);
     }
     if (id == B_HASH || id == B_OBJECT_HASH) {
-        if (argc != 1 || (keywords && keywords->as.map.len)) return spy_error(c, "TypeError", "hash requires one positional argument");
+        if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "hash() takes no keyword arguments");
+        if (argc != 1) return errorf(c, "TypeError", "hash() takes exactly one argument (%zu given)", argc);
         int64_t hash;
         if (id == B_OBJECT_HASH) hash = hash_pointer(argv[0]);
         else if (hash_value(c, argv[0], &hash)) return NULL;
@@ -18289,6 +18598,27 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
     }
     if (id == B_PRINT) return print_values(c, argc, argv, keywords);
     if (id == B_MIN || id == B_MAX) return min_max(c, id == B_MAX, argc, argv, keywords);
+    if (id == B_COMPILE) return compile_builtin(c, argc, argv, keywords);
+    if ((id == B_EVAL || id == B_EXEC) && keywords && keywords->as.map.len) {
+        static const char *const names[] = {"source", "globals", "locals", "closure"};
+        SPYValue *args[4];
+        const char *function = id == B_EVAL ? "eval" : "exec";
+        if (argc > 3) return errorf(c, "TypeError", "%s expected at most 3 arguments, got %zu", function, argc);
+        if (parse_arguments(c, function, argc, argv, keywords, names, id == B_EVAL ? 3 : 4, 1, 1, args)) return NULL;
+        for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
+        return builtin(c, id == B_EXEC && args[3] != c->none ? 4 : 3, args, (void *)(intptr_t)(id == B_EXEC ? B_EXEC_CLOSURE : id));
+    }
+    if (id == B_COMPLEX && keywords && keywords->as.map.len) {
+        static const char *const names[] = {"real", "imag"};
+        SPYValue *args[2];
+        if (parse_arguments(c, "complex", argc, argv, keywords, names, 2, 0, 0, args)) return NULL;
+        if (!args[0] && !args[1]) return builtin(c, 0, args, (void *)(intptr_t)id);
+        SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
+        if (!args[0]) { if (!zero) return NULL; args[0] = zero; }
+        SPYValue *result = builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)id);
+        spy_release(zero);
+        return result;
+    }
     if ((id == B_SUM || id == B_STR || id == B_BYTES || id == B_BYTEARRAY) && keywords && keywords->as.map.len) {
         static const char *const sum_names[] = {"iterable", "start"}, *const str_names[] = {"object", "encoding", "errors"},
                                  *const bytes_names[] = {"source", "encoding", "errors"};
@@ -18349,7 +18679,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         return builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
     }
     if (id == B_SORTED) {
-        if (argc != 1) return spy_error(c, "TypeError", "sorted expected 1 argument");
+        if (argc != 1) return errorf(c, "TypeError", "sorted expected 1 argument, got %zu", argc);
         SPYValue *list = value_new(c, SPY_LIST);
         if (!list) return NULL;
         if (extend_display(c, list, argv[0])) { spy_release(list); return NULL; }
@@ -18376,29 +18706,21 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         return builtin(c, args[4] ? 5 : 4, args, (void *)(intptr_t)id);
     }
     if (id == B_POW && keywords && keywords->as.map.len) {
-        if (argc > 3) return spy_error(c, "TypeError", "pow() takes at most 3 arguments");
-        SPYValue *args[3] = {NULL, NULL, NULL};
-        const char *names[] = {"base", "exp", "mod"};
-        for (size_t i = 0; i < argc; i++) args[i] = argv[i];
-        for (size_t i = 0; i < keywords->as.map.len; i++) {
-            Entry *entry = &keywords->as.map.items[i];
-            size_t at;
-            for (at = 0; at < 3; at++) if (!strcmp(builtin_value(c, entry->key, SPY_STRING)->as.string.data, names[at])) break;
-            if (at == 3) return spy_error(c, "TypeError", "invalid keyword argument for pow()");
-            if (args[at]) return spy_error(c, "TypeError", "duplicate argument for pow()");
-            args[at] = entry->value;
-        }
-        if (!args[0] || !args[1]) return spy_error(c, "TypeError", "pow() requires base and exp");
-        return builtin(c, args[2] ? 3 : 2, args, (void *)(intptr_t)id);
+        static const char *const names[] = {"base", "exp", "mod"};
+        SPYValue *args[3];
+        if (parse_arguments(c, "pow", argc, argv, keywords, names, 3, 2, 0, args)) return NULL;
+        return builtin(c, args[2] && args[2]->type != SPY_NONE ? 3 : 2, args, (void *)(intptr_t)id);
     }
     if (id == B_PROPERTY && keywords && keywords->as.map.len) {
         SPYValue *args[4];
         return property_arguments(c, argc, argv, keywords, args) ? NULL : builtin(c, 4, args, (void *)(intptr_t)id);
     }
     if (id == B_INT && keywords && keywords->as.map.len) {
-        SPYValue *base = name_local(keywords, "base");
-        if (argc != 1 || !base || keywords->as.map.len != 1) return spy_error(c, "TypeError", "invalid arguments for int()");
-        SPYValue *args[] = {argv[0], base};
+        static const char *const names[] = {"x", "base"};
+        SPYValue *args[2];
+        if (argc > 2) return errorf(c, "TypeError", "int() takes at most 2 arguments (%zu given)", argc);
+        if (parse_arguments(c, "int", argc, argv, keywords, names, 2, 0, 1, args)) return NULL;
+        if (!args[0]) return spy_error(c, "TypeError", "int() missing string argument");
         return builtin(c, 2, args, (void *)(intptr_t)id);
     }
     if (id == B_FROZENDICT) {
@@ -19175,11 +19497,27 @@ SPYContext *spy_context_new(void) {
         {"Warning", "Exception"}, {"UserWarning", "Warning"}, {"DeprecationWarning", "Warning"},
         {"PendingDeprecationWarning", "Warning"}, {"SyntaxWarning", "Warning"}, {"RuntimeWarning", "Warning"},
         {"FutureWarning", "Warning"}, {"ImportWarning", "Warning"}, {"UnicodeWarning", "Warning"},
-        {"BytesWarning", "Warning"}, {"ResourceWarning", "Warning"}, {"EncodingWarning", "Warning"}
+        {"BytesWarning", "Warning"}, {"ResourceWarning", "Warning"}, {"EncodingWarning", "Warning"},
+        {"ImportCycleError", "ImportError"}, {"_IncompleteInputError", "SyntaxError"}
     };
     SPYValue *module = spy_string(c, "builtins", 8);
     if (!module) goto fail;
     if (name_set(c, c->builtins, "__name__", module)) { spy_release(module); goto fail; }
+    {
+        static const char doc[] = "Built-in functions, types, exceptions, and other objects.\n\n"
+            "This module provides direct access to all 'built-in'\nidentifiers of Python; for example, builtins.len is\n"
+            "the full name for the built-in function len().\n\nThis module is not normally accessed explicitly by most\n"
+            "applications, but can be useful in modules that provide\nobjects with the same name as a built-in value, but in\n"
+            "which the built-in of that name is also needed.";
+        SPYValue *text = spy_string(c, doc, sizeof(doc) - 1), *package = spy_string(c, "", 0);
+        int status = !text || !package || name_set(c, c->builtins, "__doc__", text) ||
+            name_set(c, c->builtins, "__package__", package) || name_set(c, c->builtins, "__loader__", c->none) ||
+            name_set(c, c->builtins, "__spec__", c->none) || name_set(c, c->builtins, "None", c->none) ||
+            name_set(c, c->builtins, "False", c->booleans[0]) || name_set(c, c->builtins, "True", c->booleans[1]) ||
+            name_set(c, c->builtins, "__debug__", c->booleans[1]);
+        spy_release(text); spy_release(package);
+        if (status) { spy_release(module); goto fail; }
+    }
     for (size_t i = 0; i < sizeof(classes) / sizeof(*classes); i++) {
         SPYValue *base = classes[i].base ? name_local(c->classes, classes[i].base) : NULL;
         SPYValue *cls = new_class(c, classes[i].name, base, module);
@@ -19292,6 +19630,24 @@ SPYContext *spy_context_new(void) {
         spy_release(v);
         if (status) { spy_release(module); goto fail; }
     }
+    static const struct {
+        const char *name;
+        SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+        SPYNative call;
+    } host_builtins[] = {
+        {"__build_class__", build_class_builtin, NULL}, {"__lazy_import__", lazy_import_builtin, NULL},
+        {"breakpoint", breakpoint_builtin, NULL},
+        {"exit", exit_builtin, NULL}, {"quit", exit_builtin, NULL}
+    };
+    for (size_t i = 0; i < sizeof(host_builtins) / sizeof(*host_builtins); i++) {
+        SPYValue *v = value_new(c, SPY_NATIVE);
+        if (!v) { spy_release(module); goto fail; }
+        v->as.native.kwcall = host_builtins[i].kwcall; v->as.native.call = host_builtins[i].call;
+        v->as.native.name = spy_string(c, host_builtins[i].name, strlen(host_builtins[i].name));
+        int status = name_set(c, c->builtins, host_builtins[i].name, v);
+        spy_release(v);
+        if (status) { spy_release(module); goto fail; }
+    }
     static const int iterator_natives[] = {B_MAP, B_ZIP, B_ENUMERATE, B_FILTER, B_REVERSED};
     c->iterator_types[IT_ITERATOR] = spy_retain(c->types[SPY_ITERATOR]);
     c->iterator_types[IT_TEMPLATE] = spy_retain(c->types[SPY_TEMPLATE_ITERATOR]);
@@ -19395,3 +19751,49 @@ int spy_exec(SPYContext *c, const char *source, const char *filename) {
     spy_release(v);
     return 0;
 }
+/* Embedding API over the evaluator's own operations. */
+SPYValue *spy_native(SPYContext *c, const char *name, SPYNativeKeywords call, void *data, void (*release)(void *)) {
+    SPYValue *v = value_new(c, SPY_NATIVE);
+    if (!v) { if (release) release(data); return NULL; }
+    v->as.native.kwcall = call; v->as.native.data = data; v->as.native.release = release;
+    v->as.native.name = spy_string(c, name, strlen(name));
+    if (!v->as.native.name) { spy_release(v); return NULL; }
+    return v;
+}
+SPYValue *spy_call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (keywords && (!same_context(c, keywords) || !is_dict(keywords))) return spy_error(c, "TypeError", "keywords must be a dict");
+    return call_keywords(c, fn, argc, argv, keywords && keywords->as.map.len ? keywords : NULL);
+}
+SPYValue *spy_tuple(SPYContext *c, size_t n, SPYValue *const *items) {
+    SPYValue *tuple = value_new(c, SPY_TUPLE);
+    for (size_t i = 0; tuple && i < n; i++)
+        if (!same_context(c, items[i]) || sequence_append(c, tuple, items[i])) { spy_release(tuple); return NULL; }
+    return tuple;
+}
+SPYValue *spy_dict(SPYContext *c) { return value_new(c, SPY_DICT); }
+SPYValue *spy_get_item(SPYContext *c, SPYValue *v, SPYValue *key) {
+    return same_context(c, v) && same_context(c, key) ? get_index(c, v, key) : NULL;
+}
+int spy_set_item(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) {
+    return same_context(c, v) && same_context(c, key) && same_context(c, item) ? set_index(c, v, key, item) : -1;
+}
+SPYValue *spy_get_attr(SPYContext *c, SPYValue *v, const char *name) {
+    return same_context(c, v) ? attribute(c, v, name) : NULL;
+}
+int spy_set_attr(SPYContext *c, SPYValue *v, const char *name, SPYValue *item) {
+    return same_context(c, v) && same_context(c, item) ? set_attribute(c, v, name, item) : -1;
+}
+SPYValue *spy_iter(SPYContext *c, SPYValue *v) { return same_context(c, v) ? get_iterator(c, v) : NULL; }
+SPYValue *spy_next(SPYContext *c, SPYValue *iterator) { return same_context(c, iterator) ? iterator_next(c, iterator) : NULL; }
+SPYValue *spy_str(SPYContext *c, SPYValue *v) { return same_context(c, v) ? stringify(c, v, 0) : NULL; }
+SPYValue *spy_error_value(SPYContext *c) {
+    if (!c->error_type[0]) return NULL;
+    ErrorState state = take_error(c);
+    SPYValue *value = spy_retain(state.value);
+    restore_error(c, &state);
+    return value;
+}
+SPYValue *spy_raise(SPYContext *c, SPYValue *exception) {
+    return same_context(c, exception) ? raise_value(c, exception) : NULL;
+}
+

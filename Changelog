@@ -235,3 +235,13 @@
   statement boundary; resurrection is honored and exceptions are discarded.
 - Membership tests on non-containers report "argument of type 'X' is not a
   container or iterable".
+- builtins: __build_class__, __lazy_import__, breakpoint, exit, quit,
+  ImportCycleError, _IncompleteInputError, and the module's True/False/None,
+  __debug__, __doc__, __package__, __loader__, and __spec__. SystemExit.code;
+  spy exits with it. CPython argument-count and keyword messages for builtins;
+  keywords for compile, eval, exec, and complex; builtin iterator reprs.
+- types.FunctionType(code, globals, ...); exec/eval of function code objects,
+  with exec's closure keyword.
+- C API: spy_native, spy_call_keywords, spy_tuple, spy_dict, spy_get_item,
+  spy_set_item, spy_get_attr, spy_set_attr, spy_iter, spy_next, spy_str,
+  spy_error_value, and spy_raise.

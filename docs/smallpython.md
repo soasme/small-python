@@ -373,6 +373,22 @@ completed result. Exact frozen copies can reuse the original value; subclass
 copies produce plain frozen mappings. `eval` and `exec` accept frozen globals
 with an existing `__builtins__` entry and reject writes and deletions. Pickle
 round trips remain untested because the pickle module is not implemented.
+The builtins module provides every CPython 3.15 builtin except `open` and
+`input`, which need host files and streams, and `help`, `copyright`,
+`credits`, and `license`, which come from the `site` module. `exit` and `quit`
+raise `SystemExit` with their code, and `SystemExit.code` follows CPython.
+`__build_class__` creates a class as a class statement does, calling an
+ordinary function for the body; `__lazy_import__` returns a lazy import object
+as the `lazy import` statement does; `breakpoint` calls `sys.breakpointhook`,
+raising "lost sys.breakpointhook" when it is absent. Builtin argument counts and
+keywords are checked with CPython's messages. `types.FunctionType` creates a
+function from a code object, and `exec` and `eval` run a function's code
+object as a call with no arguments. A closure for either must consist of cells
+bound in the function's defining scopes with the same globals, because spy
+functions share their defining environment rather than holding cells.
+`compile` accepts `flags`, `dont_inherit`, `optimize`, `module`, and
+`_feature_version` with CPython's validation; flags do not change the
+resulting code, and `PyCF_ONLY_AST` raises `NotImplementedError`.
 Exception support still lacks
 traceback objects, complete chaining, and all builtin-specific
 constructors. Context-manager exit currently receives `None` for the traceback.
@@ -668,9 +684,9 @@ validation, checked arithmetic, registration, evaluation, and cleanup.
 API failures use `NULL` or `-1`, with details available through
 `spy_error_type`, `spy_error_message`, `spy_error_filename`, and
 `spy_error_line`. These strings belong to the context. `spy_clear_error` resets
-them. The runtime also retains Python exception instances when available,
-but the public C interface exposes only these records; traceback objects remain
-unimplemented.
+them. `spy_error_value` returns the pending exception object, creating it from
+the record if needed, and leaves the error set. `spy_raise` raises an exception
+instance or class, so a native callback can fail with any exception.
 
 #### 3.4.5 Evaluation
 

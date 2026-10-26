@@ -26,6 +26,8 @@ typedef enum {
 
 /* Arguments are borrowed. Return an owned value, or NULL with an error set. */
 typedef SPYValue *(*SPYNative)(SPYContext *, size_t, SPYValue *const *, void *);
+/* As SPYNative, with keyword arguments as a borrowed dict, or NULL when none. */
+typedef SPYValue *(*SPYNativeKeywords)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 typedef int (*SPYWrite)(void *, const char *, size_t);
 typedef int (*SPYFlush)(void *);
 /* Return malloc-allocated, NUL-terminated source bytes, or NULL if absent.
@@ -61,6 +63,11 @@ SPYValue *spy_get_global(SPYContext *, const char *);
 int spy_set_global(SPYContext *, const char *, SPYValue *);
 int spy_define(SPYContext *, const char *, SPYNative, void *);
 SPYValue *spy_call(SPYContext *, SPYValue *, size_t, SPYValue *const *);
+/* keywords is a dict of str keys, or NULL. */
+SPYValue *spy_call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+/* A builtin function value. release, if given, runs on data when the value is
+ * freed, including during spy_context_free, and when creation fails. */
+SPYValue *spy_native(SPYContext *, const char *, SPYNativeKeywords, void *, void (*release)(void *));
 
 SPYValue *spy_retain(SPYValue *);
 void spy_release(SPYValue *);
@@ -73,6 +80,16 @@ SPYValue *spy_string(SPYContext *, const char *, size_t);
 SPYValue *spy_bytes(SPYContext *, const void *, size_t);
 SPYValue *spy_list(SPYContext *);
 int spy_list_append(SPYContext *, SPYValue *, SPYValue *);
+SPYValue *spy_tuple(SPYContext *, size_t, SPYValue *const *);
+SPYValue *spy_dict(SPYContext *);
+/* Python subscription, attribute access, and iteration. spy_next returns NULL
+ * with no error set when the iterator is exhausted. */
+SPYValue *spy_get_item(SPYContext *, SPYValue *, SPYValue *);
+int spy_set_item(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+SPYValue *spy_get_attr(SPYContext *, SPYValue *, const char *);
+int spy_set_attr(SPYContext *, SPYValue *, const char *, SPYValue *);
+SPYValue *spy_iter(SPYContext *, SPYValue *);
+SPYValue *spy_next(SPYContext *, SPYValue *);
 /* Large Python integers raise OverflowError rather than narrowing silently. */
 int spy_as_int(SPYContext *, SPYValue *, int64_t *);
 int spy_as_float(SPYContext *, SPYValue *, double *);
@@ -81,6 +98,7 @@ const unsigned char *spy_as_bytes(SPYContext *, SPYValue *, size_t *);
 int spy_truth(SPYValue *);
 /* String conversion returns an owned SPY_STRING. */
 SPYValue *spy_repr(SPYContext *, SPYValue *);
+SPYValue *spy_str(SPYContext *, SPYValue *);
 
 const char *spy_error_type(const SPYContext *);
 const char *spy_error_message(const SPYContext *);
@@ -91,6 +109,11 @@ const char *spy_error_filename(const SPYContext *);
 size_t spy_error_line(const SPYContext *);
 void spy_clear_error(SPYContext *);
 SPYValue *spy_error(SPYContext *, const char *type, const char *message);
+/* The pending exception object (owned), or NULL when no error is set. The
+ * error stays set. */
+SPYValue *spy_error_value(SPYContext *);
+/* Raise an exception instance or class; always returns NULL. */
+SPYValue *spy_raise(SPYContext *, SPYValue *);
 
 #ifdef __cplusplus
 }

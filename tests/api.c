@@ -96,6 +96,36 @@ static void namespace_cycles(void) {
     execute(c, "del proxy\n");
     spy_context_free(c);
 }
+static int released;
+static void release_counter(void *data) { released += *(int *)data; }
+/* Sums positional arguments and adds the "scale" keyword's value. */
+static SPYValue *keyword_sum(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    int64_t total = 0, n;
+    for (size_t i = 0; i < argc; i++) {
+        if (spy_as_int(c, argv[i], &n)) return NULL;
+        total += n;
+    }
+    if (keywords) {
+        SPYValue *key = spy_string(c, "scale", 5), *scale = key ? spy_get_item(c, keywords, key) : NULL;
+        spy_release(key);
+        if (!scale) return NULL;
+        int failed = spy_as_int(c, scale, &n);
+        spy_release(scale);
+        if (failed) return NULL;
+        total += n;
+    }
+    return spy_int(c, total);
+}
+static SPYValue *raise_value_error(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)argc; (void)argv; (void)keywords; (void)data;
+    SPYValue *cls = spy_get_global(c, "ValueError"), *message = spy_string(c, "host failure", 12);
+    SPYValue *error = cls && message ? spy_call(c, cls, 1, &message) : NULL;
+    spy_release(cls); spy_release(message);
+    if (error) spy_raise(c, error);
+    spy_release(error);
+    return NULL;
+}
 int main(void) {
     namespace_cycles();
     {
@@ -608,6 +638,51 @@ int main(void) {
         spy_collect(c);
     }
     assert(spy_live_values(c) <= before + 8);
+
+
+    {
+        /* Natives with keywords and host data, containers, attributes, iteration,
+         * and exception objects. */
+        released = 0;
+        static int weight = 1;
+        SPYValue *native = spy_native(c, "keyword_sum", keyword_sum, &weight, release_counter);
+        assert(native && !spy_set_global(c, "keyword_sum", native));
+        assert(integer(c, spy_eval(c, "keyword_sum(1, 2, scale=10)", "native.py")) == 13);
+        SPYValue *one = spy_int(c, 1), *two = spy_int(c, 2), *pair[] = {one, two};
+        SPYValue *tuple = spy_tuple(c, 2, pair), *keywords = spy_dict(c), *scale = spy_string(c, "scale", 5);
+        assert(tuple && keywords && scale && !spy_set_item(c, keywords, scale, two));
+        SPYValue *sum = spy_call_keywords(c, native, 2, pair, keywords);
+        assert(integer(c, sum) == 5);
+        assert(integer(c, spy_get_item(c, tuple, one)) == 2);
+        assert(integer(c, spy_get_item(c, keywords, scale)) == 2);
+        SPYValue *iterator = spy_iter(c, tuple), *item;
+        int64_t seen = 0;
+        while ((item = spy_next(c, iterator))) seen += integer(c, item);
+        assert(seen == 3 && !spy_error_type(c)[0]);
+        spy_release(iterator);
+        SPYValue *size = spy_get_attr(c, tuple, "count"), *counted = size ? spy_call(c, size, 1, &one) : NULL;
+        assert(integer(c, counted) == 1);
+        spy_release(size);
+        assert(!spy_get_attr(c, tuple, "missing") && !strcmp(spy_error_type(c), "AttributeError"));
+        spy_clear_error(c);
+        assert(!spy_exec(c, "class Box: pass\nbox = Box()", "box.py"));
+        SPYValue *box = spy_get_global(c, "box");
+        assert(box && !spy_set_attr(c, box, "value", two));
+        assert(integer(c, spy_eval(c, "box.value", "box_value.py")) == 2);
+        SPYValue *text = spy_str(c, tuple);
+        assert(text && !strcmp(spy_as_string(c, text, NULL), "(1, 2)"));
+        spy_release(text); spy_release(box); spy_release(tuple); spy_release(keywords); spy_release(scale);
+        spy_release(one); spy_release(two);
+        SPYValue *failing = spy_native(c, "failing", raise_value_error, NULL, NULL);
+        assert(failing && !spy_call(c, failing, 0, NULL) && !strcmp(spy_error_type(c), "ValueError"));
+        SPYValue *error = spy_error_value(c), *args = error ? spy_get_attr(c, error, "args") : NULL;
+        assert(args && !strcmp(spy_error_type(c), "ValueError"));
+        spy_release(args); spy_release(error); spy_release(failing); spy_clear_error(c);
+        assert(!spy_error_value(c));
+        assert(!spy_exec(c, "try:\n    keyword_sum('x')\nexcept TypeError:\n    caught = 1", "native_error.py"));
+        spy_release(native);
+        assert(!spy_exec(c, "del keyword_sum", "native_del.py") && released == 1);
+    }
 
     SPYContext *other = spy_context_new();
     assert(other);

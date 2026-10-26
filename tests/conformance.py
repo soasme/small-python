@@ -3957,6 +3957,95 @@ for t in ['1 in Plain()', '1 not in Plain()', '1 in 5', '1 in None', '1 in BadIt
     except TypeError as e: print(e)
 """)
 
+CASES.append(r"""
+# builtins: __build_class__, __lazy_import__, breakpoint, module attributes, ImportCycleError, SystemExit.code.
+import builtins
+x = __lazy_import__('itertools')
+print(type(x).__name__, x.__name__)
+y = __lazy_import__('types', fromlist=('CellType',))
+print(type(y).__name__, y.__name__)
+try: __lazy_import__(5)
+except Exception as e: print(type(e).__name__, e)
+def body():
+    a = 1
+    def m(self): return self.a
+C = __build_class__(body, 'C')
+print(C, C.__module__, C.__qualname__, sorted(k for k in C.__dict__ if not k.startswith('__')))
+class M(type):
+    def __new__(m, n, b, ns, **kw): print('M', n, b, sorted(ns), kw); return super().__new__(m, n, b, ns)
+D = __build_class__(lambda: None, 'D', C, metaclass=M, flag=1)
+print(D.__mro__)
+for args in [(), (body,), (1, 'X'), (body, 1)]:
+    try: __build_class__(*args)
+    except TypeError as e: print(e)
+print(getattr(builtins,'True'), getattr(builtins,'None'), builtins.__debug__, builtins.__package__, builtins.__doc__[:30])
+print(ImportCycleError.__mro__[1], _IncompleteInputError.__mro__[1], issubclass(ImportCycleError, ImportError))
+import sys
+if hasattr(sys, 'breakpointhook'): del sys.breakpointhook
+try: breakpoint()
+except RuntimeError as e: print(e)
+sys.breakpointhook = lambda *a, **k: print('hook', a, k)
+breakpoint(1, x=2)
+print(SystemExit().code, SystemExit(1, 2).code, SystemExit('x').code)
+""")
+
+CASES.append(r"""
+# function(code, globals, ...), exec/eval of function code with closures, and compile/eval/exec/complex keywords.
+import types
+def f(a, b=2): return (a, b, g)
+g = 5
+h = types.FunctionType(f.__code__, {'g': 7}, 'h', (9,))
+print(h(1), h(1, 3), h.__name__, h.__module__, h.__defaults__)
+def mk():
+    x = 1
+    def inner(): return x
+    def bump():
+        nonlocal x
+        x += 1
+    return inner, bump
+i, bump = mk()
+j = types.FunctionType(i.__code__, globals(), None, None, i.__closure__)
+bump(); print(j(), j.__closure__ is i.__closure__ or j.__closure__ == i.__closure__)
+for args in [(1, {}), (f.__code__, 1), (f.__code__, {}, 1), (f.__code__, {}, None, [1]), (i.__code__, {}), (i.__code__, globals(), None, None, (1,)), (i.__code__, globals(), None, None, ()), (f.__code__, {}, None, None, None, 1)]:
+    try: types.FunctionType(*args)
+    except Exception as e: print(type(e).__name__, e)
+def body(): print('ran body', g)
+exec(body.__code__)
+exec(body.__code__, {'g': 'G', 'print': print})
+print(eval((lambda: 41 + 1).__code__))
+exec(i.__code__, closure=i.__closure__)
+for call in [lambda: exec(i.__code__), lambda: exec(i.__code__, closure=()), lambda: exec(body.__code__, closure=i.__closure__), lambda: exec('1', closure=()), lambda: eval(i.__code__)]:
+    try: call(); print('ok')
+    except Exception as e: print(type(e).__name__, e)
+print(eval('x + 1', globals={'x': 1}), eval('y', None, locals={'y': 2}))
+exec('z = 3', globals=(d := {})); print(d['z'])
+print(compile('1', 'f', 'eval', flags=0, dont_inherit=True, optimize=-1).co_filename, compile('1', 'f', 'exec', 0, True, 2) is not None)
+for kw in [dict(flags=1 << 30), dict(optimize=5), dict(flags='x'), dict(module=1)]:
+    try: compile('1', 'f', 'eval', **kw)
+    except Exception as e: print(type(e).__name__, e)
+try: compile('1','f','eval',0,0,0,0)
+except TypeError as e: print(e)
+print(complex(real=1, imag=2), complex(imag=3), complex(real=4), complex())
+try: complex(foo=1)
+except TypeError as e: print(e)
+try: int(x='5')
+except TypeError as e: print(e)
+""")
+
+CASES.append(r"""
+# Builtin keyword parsing order and argument-count messages; default reprs of builtin iterators.
+for t in ["pow(2, 3, mod=None)", "pow(2, foo=1)", "pow(2)", "pow(base=2, exp=3, mod=5)", "pow(2, 3, base=1)", "round(1.5, foo=1)", "round()", "round(number=2.5)", "round(1.25, ndigits=None)", "int(base=16)", "int('10', 16, base=2)", "int('z', base=36)", "int(1, 2, 3)", "round(1, 2, 3)", "pow(1,2,3,4)"]:
+    try: print(repr(eval(t)))
+    except Exception as e: print(t, type(e).__name__, e)
+import builtins
+for n in ['abs', 'len', 'divmod', 'getattr', 'next', 'pow', 'sum', 'eval', 'exec', 'bytes', 'complex', '__import__', 'sorted', 'hash', 'int', 'slice']:
+    for args in [(), (1,) * 7]:
+        try: getattr(builtins, n)(*args)
+        except TypeError as e: print(n, e)
+for x in [enumerate([1]), map(abs, [1]), zip([1]), filter(None, [1]), reversed([1]), iter([1]), iter(range(2)), iter({}.items())]:
+    print(repr(x).split(' at ')[0])
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),
