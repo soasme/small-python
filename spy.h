@@ -40,6 +40,9 @@ SPYContext *spy_context_new(void);
 /* Release all external values before freeing their context. No shared contexts
  * or values across threads; independent contexts have no global mutable state. */
 void spy_context_free(SPYContext *);
+/* A host pointer stored with the context, as QuickJS's JS_SetContextOpaque. */
+void spy_set_opaque(SPYContext *, void *);
+void *spy_get_opaque(const SPYContext *);
 void spy_set_output(SPYContext *, SPYWrite, void *);
 /* Optional flush for the current output callback; shares its data pointer.
  * Without it the output callback is treated as unbuffered. */

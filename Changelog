@@ -249,3 +249,8 @@
   spy_exec_module register modules QuickJS-style; the standard layer
   spy-std.c (libspy-std.a, spy_std_init) provides sys, gc, weakref, types,
   itertools, collections, _thread, and _typing on the core's _spy primitives.
+- spy_set_opaque/spy_get_opaque attach a host pointer to a context.
+- smallpython Python package (python/smallpython, setup.py): a CPython
+  extension embedding the engine. Runtime eval/exec/call, globals as items,
+  Python callables as host functions with keywords, registered modules,
+  Object wrappers, value conversion, and exception mapping both ways.

@@ -13,3 +13,6 @@ __pycache__/
 /hello.c
 /.obj/
 libspy-std.a
+/build/
+*.egg-info/
+*.so

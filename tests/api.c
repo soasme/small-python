@@ -51,6 +51,10 @@ static void execute(SPYContext *c, const char *source) {
 static void namespace_cycles(void) {
     SPYContext *c = spy_context_new();
     assert(c);
+    int host = 0;
+    assert(!spy_get_opaque(c));
+    spy_set_opaque(c, &host);
+    assert(spy_get_opaque(c) == &host);
     execute(c,
         "def make():\n"
         "    class Namespace:\n"

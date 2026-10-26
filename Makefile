@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -156,6 +156,12 @@ test: all tests/api run-cython check-intrinsics
 	$(PYTHON) tests/strings.py ./spy
 	$(PYTHON) tests/framework.py ./run-cython
 	$(PYTHON) tests/executable.py
+
+# The CPython binding (python/smallpython) builds with setuptools into .obj/binding.
+test-binding:
+	python3 setup.py -q build_ext --build-lib $(OBJDIR)/binding --build-temp $(OBJDIR)/binding-temp
+	cp python/smallpython/__init__.py $(OBJDIR)/binding/smallpython/
+	PYTHONPATH=$(OBJDIR)/binding python3 tests/binding.py
 
 bench: bench/lifecycle spy
 	./bench/lifecycle

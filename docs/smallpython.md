@@ -19,6 +19,7 @@ Version 0.1.0 — development edition
   - [3.2 Modules](#32-modules)
   - [3.3 Standard library and host services](#33-standard-library-and-host-services)
   - [3.4 C API](#34-c-api)
+  - [3.5 Python binding](#35-python-binding)
 - [4 Internals](#4-internals)
   - [4.1 Source representation](#41-source-representation)
   - [4.2 Executable generation](#42-executable-generation)
@@ -655,6 +656,9 @@ separately.
 failure. `spy_context_free()` destroys it and all remaining values. Contexts
 have no process-global mutable runtime state. Use independent contexts on
 different threads; do not concurrently enter one context.
+`spy_set_opaque` and `spy_get_opaque` attach one host pointer to a context,
+like `JS_SetContextOpaque`, so callbacks such as a module init can find the
+host object that owns the context.
 
 The current API does not separate a shared allocator/runtime from execution
 contexts as QuickJS does. One `SPYContext` owns its heap, globals, module cache,
@@ -739,6 +743,57 @@ programs.
 values collected. Externally retained values are roots. The host schedules
 collection at suitable safe points. `spy_live_values` reports the current value
 count. Context teardown frees remaining cycles regardless of collection timing.
+
+### 3.5 Python binding
+
+The `smallpython` package (`python/smallpython`) embeds the engine in CPython
+3.13 or later as the extension module `smallpython._core`, compiled from
+`spy.c`, `spy-std.c`, and the binding. It lets Python programs run Small
+Python code and inject Python functions as host functions.
+
+```sh
+pip install .            # or: python3 setup.py build_ext --inplace
+make test-binding
+```
+
+```python
+import smallpython
+
+with smallpython.Runtime(step_limit=1_000_000) as rt:
+    @rt.function
+    def fetch(key, *, default=None):
+        return {"answer": 42}.get(key, default)
+
+    rt.register_module("host", {"fetch": fetch}, source="def twice(n): return n * 2")
+    rt.exec("from host import twice")
+    print(rt.eval("twice(fetch('answer'))"))  # 84
+```
+
+`Runtime(*, std=True, step_limit=0, output=None, loader=None)` owns one
+context. `std` registers the standard layer; `output` receives printed text
+(default `sys.stdout.write`); `loader` maps a module name to source or `None`.
+Its methods are `eval(source, filename)` (the last expression's value),
+`exec`, `call(function_or_global_name, *args, **kwargs)`, `define(name, f)`
+and the `function` decorator, `register_module(name, members, source)` (built
+on `spy_new_module`), `collect`, and `close`; `rt[name]` reads, assigns, and
+deletes globals. A runtime is a context manager.
+
+Values cross the boundary by copy when they are `None`, `bool`, `int`
+(any size), `float`, `complex`, `str`, `bytes`, `bytearray`, `list`, `tuple`,
+`dict`, `set`, or `frozenset`. Python callables become native functions that
+keep a reference to the callable and receive keyword arguments; other engine
+values come back as `smallpython.Object`, which forwards calls, attributes,
+items, iteration, `repr`, `str`, and truth to the engine and stops working once
+its runtime closes. Other Python objects are rejected with `TypeError`.
+
+An engine exception reaches Python as `smallpython.Error` with `type`,
+`message`, `exception` (the engine object), `filename`, and `lineno`. A Python
+exception raised by a host function becomes the engine builtin exception with
+the nearest class name in its MRO (else `RuntimeError`) and the same `args`;
+an `Error` passing back through a host function re-raises its original
+exception. Host functions cannot call `eval`, `exec`, or `close` on their own
+runtime; they may call engine functions they receive. One runtime must not be
+used from two threads at once.
 
 ## 4 Internals
 

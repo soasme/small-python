@@ -105,6 +105,7 @@ struct SPYContext {
     /* Modules a host registered with spy_new_module, created on first import. */
     struct HostModule { char *name; SPYModuleInit init; } *host_modules;
     size_t host_modules_len;
+    void *opaque;
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
@@ -19821,3 +19822,5 @@ int spy_exec_module(SPYContext *c, SPYValue *module, const char *source, const c
     spy_release(result.value); spy_release(unit);
     return result.flow == FLOW_ERROR ? -1 : 0;
 }
+void spy_set_opaque(SPYContext *c, void *opaque) { c->opaque = opaque; }
+void *spy_get_opaque(const SPYContext *c) { return c->opaque; }

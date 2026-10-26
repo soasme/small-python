@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smallpython"
+dynamic = ["version"]
+description = "Python binding for Small Python, an embeddable Python engine"
+readme = "README.md"
+requires-python = ">=3.13"
