@@ -74,7 +74,7 @@ The first language ports contain every doctest group found by CPython's
 - `Lib/test/test_extcall.py`
 - `Lib/test/test_metaclass.py`
 
-There are 1,435 examples. The latest local run passed 1,345 and failed 90, with
+There are 1,435 examples. The latest local run passed 1,347 and failed 88, with
 no skips or driver errors. All 1,435 passed on the pinned CPython oracle. These
 counts cover only the eight listed files' doctest examples. The denominator
 includes all 553 syntax examples and all 194 call examples, including diagnostics.
@@ -97,6 +97,9 @@ upstream doctest option flags and exception comparison rules. A skipped example
 is recorded as skipped, never passed. Driver failures and timeouts are separate
 from language mismatches. Later examples still run after a failed example, as
 in doctest; a setup failure may therefore produce several downstream failures.
+As in CPython's `doctest._SpoofOut`, the comparator appends a newline to nonempty
+output lacking one. Reports retain the raw output; the engine does not change
+what `print(..., end='')` writes.
 
 The latest report is `tests/results/cpython-doctests.json`. It records source
 locations, inputs, expectations, actual outputs, per-file totals, oracle results,

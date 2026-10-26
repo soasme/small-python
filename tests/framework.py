@@ -2,17 +2,30 @@
 
 import ast
 import doctest
+import io
 from pathlib import Path
 import random
 import re
 import sys
 import tempfile
 
-from run_cython import run_group
+from run_cython import check_example, run_group
 
 
 def main():
     root = Path(__file__).resolve().parent.parent
+    # Compare the adapter with the actual upstream runner, including negative
+    # controls. Doctest normalizes captured output, not the program's writes.
+    output_examples = []
+    for text in ['', 'x', 'x\n', 'x\n\n', '\n', 'x\r', 'αβ']:
+        for want in [text, 'different\n']:
+            output_examples.append(doctest.Example(f'print({text!r}, end="")\n', want))
+    replies, error = run_group(Path(sys.argv[1]).resolve(), '', output_examples, 30)
+    assert not error and replies[0]['ok'], (error, replies)
+    for example, reply in zip(output_examples, replies[1:]):
+        test = doctest.DocTest([example], {}, 'capture', '<capture>', 0, '')
+        outcome = doctest.DocTestRunner().run(test, out=io.StringIO().write)
+        assert check_example(example, reply) == (outcome.failed == 0), (example, reply)
     rng = random.Random(315)
     examples = []
     for _ in range(256):
@@ -81,7 +94,7 @@ assert events == [0, 1, 2, 'teardown', 'cleanup']
                     target.write_text(f'value = {index}\n')
                 replies, error = run_group(Path(sys.argv[1]).resolve(), 'import fixture\nprint(fixture.value)\n', [], 10, paths)
                 assert not error and replies[0]['ok'] and replies[0]['output'] == '0\n', (error, replies)
-    print('Framework: 256 regex-oracle comparisons, assertions, subtests, cleanup, and 4 module-path precedence checks passed')
+    print('Framework: 14 doctest captures, 256 regex-oracle comparisons, assertions, subtests, cleanup, and 4 module-path precedence checks passed')
 
 
 if __name__ == '__main__':

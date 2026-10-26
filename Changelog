@@ -112,7 +112,7 @@
 - String-subclass keyword names retain their identities in **kwargs and use
   rich comparison when binding Python parameters. Call-unpacking diagnostics
   distinguish absent protocols from errors raised inside user methods.
-- Current CPython doctests: 1,345 passed, 90 failed out of 1,435. Cython static
+- Current CPython doctests: 1,347 passed, 88 failed out of 1,435. Cython static
   doctests: 343 passed, 11,107 failed; dynamic: 367 passed, 11,176 failed.
 - Bytearray mutation rechecks storage after index/value conversions; scalar
   and extended-slice deletion share assignment handling. Empty reverse slices
@@ -180,3 +180,5 @@
   matching, cached item-pair hashing, copying and fromkeys. Frozen eval/exec
   globals and builtins remain read-only; type() accepts frozen namespaces.
   Eleven unchanged upstream methods supplement the whole-module test ledger.
+- Doctest output comparison follows CPython's trailing-newline normalization;
+  raw captured output stays unchanged in reports.

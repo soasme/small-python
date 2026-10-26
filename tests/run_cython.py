@@ -150,7 +150,12 @@ def check_example(example, reply):
         if flags & doctest.IGNORE_EXCEPTION_DETAIL:
             actual, expected = actual.split(":", 1)[0].strip(), expected.split(":", 1)[0].strip()
         return not reply["ok"] and checker.check_output(expected, actual, flags)
-    return reply["ok"] and checker.check_output(example.want, reply["output"], flags)
+    # Match doctest._SpoofOut.getvalue(): expected output cannot express a
+    # missing trailing newline. Keep the raw capture unchanged in reports.
+    output = reply["output"]
+    if output and not output.endswith("\n"):
+        output += "\n"
+    return reply["ok"] and checker.check_output(example.want, output, flags)
 
 
 def main():
