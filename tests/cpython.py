@@ -20,13 +20,15 @@ import subprocess
 import sys
 import tokenize
 import unittest
+from unittest.util import safe_repr
 import warnings
 
 from run_cython import check_example, run_group
 
 ROOT = Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / "tests/upstream/cpython"
-PORTS = ("test.test_unpack", "test.test_unpack_ex", "test.test_listcomps", "test.test_genexps")
+PORTS = ("test.test_unpack", "test.test_unpack_ex", "test.test_listcomps", "test.test_genexps",
+         "test.test_generators", "test.test_syntax", "test.test_extcall", "test.test_metaclass")
 
 
 def digest(path):
@@ -148,7 +150,7 @@ def ports(driver):
             oracle = doctest.DocTestRunner()
             diagnostics = io.StringIO()
             oracle_result = oracle.run(test, out=diagnostics.write, clear_globs=False)
-            line = strings.get(test.docstring, test.lineno + 1)
+            line = strings.get(test.docstring, (test.lineno or 0) + 1)
             groups.append({"name": test.name, "file": str(Path(test.filename).relative_to(UPSTREAM)),
                            "line": line, "oracle_attempted": oracle_result.attempted,
                            "oracle_failed": oracle_result.failed, "oracle_output": diagnostics.getvalue()})
@@ -162,19 +164,142 @@ def ports(driver):
                     record["status"] = "skipped"
                 elif error:
                     record.update(status="driver-error", detail=error)
+                elif not replies[0]["ok"]:
+                    record.update(actual=replies[0], status="failed", executed=False, detail="group initialization failed")
                 else:
                     reply = next(active)
-                    record.update(actual=reply, status="passed" if replies[0]["ok"] and check_example(example, reply) else "failed")
+                    record.update(actual=reply, executed=True, status="passed" if check_example(example, reply) else "failed")
                 records.append(record)
     return groups, records
 
 
+def unittest_ports(driver, modules):
+    records, controls, fixtures = [], [], []
+    for module_name in modules:
+        module = importlib.import_module(module_name)
+        loader = unittest.TestLoader()
+        suite = loader.loadTestsFromModule(module)
+        cases = []
+
+        def flatten(tests):
+            for test in tests:
+                if isinstance(test, unittest.TestSuite):
+                    flatten(test)
+                else:
+                    cases.append(test)
+
+        flatten(suite)
+        if not cases:
+            raise RuntimeError(f"no unittest cases discovered in {module_name}")
+        if loader.errors:
+            raise RuntimeError("oracle discovery failed: " + "\n".join(loader.errors))
+        oracle_subtests = []
+
+        class Result(unittest.TextTestResult):
+            def addSubTest(self, test, subtest, error):
+                oracle_subtests.append({"id": test.id(), "parameters": safe_repr(dict(subtest.params)),
+                                        "status": "passed" if error is None else "failed"})
+                super().addSubTest(test, subtest, error)
+
+            def addSkip(self, test, reason):
+                if hasattr(test, "test_case"):
+                    oracle_subtests.append({"id": test.test_case.id(), "parameters": safe_repr(dict(test.params)),
+                                            "status": "skipped", "reason": reason})
+                super().addSkip(test, reason)
+
+        diagnostics = io.StringIO()
+        with contextlib.redirect_stdout(diagnostics), contextlib.redirect_stderr(diagnostics):
+            control = unittest.TextTestRunner(stream=diagnostics, resultclass=Result).run(suite)
+        controls.append({"module": module_name, "attempted": control.testsRun,
+                         "failed": len(control.failures) + len(control.errors) + len(control.unexpectedSuccesses),
+                         "expected_failures": len(control.expectedFailures),
+                         "skipped": len(control.skipped), "subtests": oracle_subtests, "output": diagnostics.getvalue()})
+        path = Path(module.__file__)
+        relative = str(path.relative_to(UPSTREAM))
+        with tokenize.open(path) as stream:
+            source = f"__name__ = {module_name!r}\n" + stream.read()
+        source += "\nimport unittest as _spy_unittest\n"
+        if hasattr(module, "setUpModule"):
+            source += "setUpModule()\n"
+        actions = []
+        current = None
+
+        def finish_class(cls):
+            name = cls.__qualname__
+            actions.append(({"phase": "tearDownClass", "class": name},
+                            f"try:\n    if _spy_class_ready:\n        {name}.tearDownClass()\n"
+                            f"finally:\n    {name}.doClassCleanups()\n"))
+
+        for case in cases:
+            cls = type(case)
+            name = cls.__qualname__
+            if cls.__module__ != module_name or "<locals>" in name:
+                records.append({"id": case.id(), "file": relative, "status": "adapter-ineligible",
+                                "detail": "dynamically located/imported test classes require another adapter"})
+                continue
+            if current is not cls:
+                if current is not None:
+                    finish_class(current)
+                actions.append(({"phase": "setUpClass", "class": name},
+                                f"_spy_class_ready = False\n{name}._class_cleanups = []\n"
+                                f"{name}.setUpClass()\n_spy_class_ready = True\n"))
+                current = cls
+            actions.append(({"phase": "test", "id": case.id(), "class": name},
+                            f"if _spy_class_ready:\n    _spy_unittest._run_case({name}, {case._testMethodName!r})\n"))
+        if current is not None:
+            finish_class(current)
+        if hasattr(module, "tearDownModule"):
+            actions.append(({"phase": "tearDownModule"}, "tearDownModule()\n"))
+        replies, error = run_group(driver, source, [doctest.Example(code, "") for metadata, code in actions],
+                                   30, [ROOT / "tests/support", UPSTREAM / "Lib"])
+        responses = iter(replies[1:] if replies else [])
+        ready, setup = False, None
+        for metadata, code in actions:
+            record = dict(metadata, file=relative, source=code)
+            if error:
+                record.update(status="driver-error", detail=error, executed=False)
+            elif not replies[0]["ok"]:
+                record.update(status="failed", detail="unchanged module or module setup failed",
+                              actual=replies[0], executed=False)
+            else:
+                reply = next(responses)
+                skipped = not reply["ok"] and reply["type"] == "unittest.SkipTest"
+                record.update(actual=reply, executed=True,
+                              status="passed" if reply["ok"] else "skipped" if skipped else "failed")
+                if metadata["phase"] == "test":
+                    subtests = []
+                    try:
+                        for line in reply["output"].splitlines():
+                            if line.startswith("@spy-subtests@"):
+                                for message, params, status, kind, detail in ast.literal_eval(line[len("@spy-subtests@"):]):
+                                    subtests.append({"message": message, "parameters": params, "status": status,
+                                                     "exception": kind, "detail": detail})
+                    except (ValueError, SyntaxError, TypeError) as exc:
+                        record.update(status="driver-error", detail=f"invalid subtest results: {exc}")
+                    if subtests:
+                        record["subtests"] = subtests
+                    expected = [subtest["status"] for subtest in oracle_subtests if subtest["id"] == metadata["id"]]
+                    record["oracle_subtest_count"] = len(expected)
+                    if record["status"] == "passed" and [subtest["status"] for subtest in subtests] != expected:
+                        record.update(status="failed", detail="subtest results do not match oracle execution")
+                if metadata["phase"] == "setUpClass":
+                    ready, setup = reply["ok"], record
+                elif metadata["phase"] == "test" and not ready:
+                    record.update(status="skipped" if setup["status"] == "skipped" else "failed",
+                                  detail="class setup failed", actual=setup["actual"], executed=False)
+            (records if metadata["phase"] == "test" else fixtures).append(record)
+    return controls, records, fixtures
+
+
 def main():
+    # Keep project test names (notably numbers.py) out of oracle imports.
+    sys.path[:] = [entry for entry in sys.path if Path(entry).resolve() != ROOT / 'tests']
     if len(sys.argv) == 3 and sys.argv[1] == "worker":
         worker(sys.argv[2])
         return
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("inventory", "discover", "doctests"))
+    parser.add_argument("mode", choices=("inventory", "discover", "doctests", "unittest"))
+    parser.add_argument("--module", action="append", help="complete unittest module to adapt (default: the documented passing whole-module ports)")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--driver", type=Path, default=ROOT / "run-cython")
@@ -184,7 +309,7 @@ def main():
               "complete": False, "files": inventory(),
               "limits": ["Static candidates omit generated cases; they are not a complete case count.",
                          "Discovery is platform-dependent; skipped/error modules remain unresolved.",
-                         "No unittest module or subtest is yet ported by this adapter."]}
+                         "Unittest coverage is limited to explicitly adapted modules; unported subtests remain obligations."]}
     failed = True
     if args.mode == "discover":
         from test.libregrtest.findtests import findtests
@@ -198,11 +323,36 @@ def main():
         if not args.driver.is_file():
             raise SystemExit("build run-cython before running doctest ports")
         report["driver_sha256"] = digest(args.driver)
-        report["engine_sha256"] = {name: digest(ROOT / name) for name in ("spy.c", "spy.h", "run-cython.c")}
+        report["engine_sha256"] = {name: digest(ROOT / name) for name in ("spy.c", "spy.h", "spy-unicode.h", "spy-intrinsics.h", "intrinsics.py", "host.h", "run-cython.c")}
         report["adaptation"] = "Extract all doctest groups in PORTS with upstream DocTestFinder; replace only the doctest framework, preserve every example and expected result; module unittest fixtures remain unported."
         report["groups"], report["cases"] = ports(args.driver.resolve())
+        for entry in report["files"]:
+            cases = [case for case in report["cases"] if case["file"] == entry["file"]]
+            if cases:
+                entry["status"] = "partial-doctest-port"
+                entry["doctest_summary"] = dict(Counter(case["status"] for case in cases))
         report["summary"] = dict(Counter(c["status"] for c in report["cases"]))
         failed = not report["cases"] or any(c["status"] != "passed" for c in report["cases"]) or any(g["oracle_failed"] for g in report["groups"])
+    elif args.mode == "unittest":
+        if not args.driver.is_file():
+            raise SystemExit("build run-cython before running unittest ports")
+        report["driver_sha256"] = digest(args.driver)
+        report["engine_sha256"] = {name: digest(ROOT / name) for name in ("spy.c", "spy.h", "spy-unicode.h", "spy-intrinsics.h", "intrinsics.py", "host.h", "run-cython.c")}
+        report["framework_sha256"] = digest(ROOT / "tests/support/unittest.py")
+        report["adaptation"] = "Initialize complete unchanged upstream modules; search tests/support for the unittest adaptation, then the unchanged pinned Lib tree for dependencies and fixtures; retain every discovered case ID and run module/class/test fixtures. Unsupported framework operations fail explicitly."
+        report["groups"], report["cases"], report["fixtures"] = unittest_ports(
+            args.driver.resolve(), args.module or ["test.test_decorators", "test.test_augassign", "test.test_int_literal",
+                                                  "test.test_unary", "test.test_keywordonlyarg", "test.test_named_expressions",
+                                                  "test.test_longexp", "test.test_unicode_identifiers", "test.test_exception_variations"])
+        for entry in report["files"]:
+            cases = [case for case in report["cases"] if case["file"] == entry["file"]]
+            if cases:
+                entry["status"] = "partial-unittest-port"
+                entry["unittest_summary"] = dict(Counter(case["status"] for case in cases))
+        report["summary"] = dict(Counter(c["status"] for c in report["cases"]))
+        failed = (not report["cases"] or any(c["status"] != "passed" for c in report["cases"])
+                  or any(f["status"] != "passed" for f in report["fixtures"])
+                  or any(g["failed"] or g["skipped"] for g in report["groups"]))
     path = args.report or ROOT / f"tests/results/cpython-{args.mode}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2) + "\n")

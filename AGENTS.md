@@ -17,13 +17,125 @@ run the equivalent command directly.
 - Runtime dependencies are limited to the C runtime and math library. Do not
   embed, invoke, or link CPython as the implementation. Development tools may
   use Python; this must not become a runtime dependency.
+- Prefer the pinned Python 3.15 interpreter for semantic comparisons when it
+  is available. Do not copy older host-version diagnostics or representations
+  into the target runtime merely to satisfy a local differential test.
+- After any user conversion callback, re-read mutable container size and data
+  before bounds checks or memory access. Shared builtin argument parsing must
+  handle unnamed positional-only parameters without dereferencing name tables.
 - Keep standard-library modules out of the core. Language builtins, object
   protocols, and import semantics are part of the language and cannot be
   excluded merely because CPython documents them near its standard library.
   Host I/O and optional C library wrappers belong at an explicit host boundary.
+- Cache at most one released tuple allocation for each length zero through
+  eight inside its owning context. Cached storage owns no element references,
+  is excluded from the live-value graph, and is freed during context shutdown.
 - Use reference counting for prompt reclamation and a cycle collector for
   cyclic graphs. Keep C API ownership explicit. Contexts must be independent;
   avoid process-global mutable runtime state.
+- Suspend generator functions with heap-owned operand and cleanup stacks.
+  Keep every retained stack value visible to the cycle collector. Instructions
+  borrow original AST nodes from a retained source unit; never retain temporary
+  copies of definition nodes. Preserve evaluation order and cleanup across
+  `yield`, delegation, exceptions, returns, and loop exits.
+- Reuse those suspension and cleanup stacks for coroutines and asynchronous
+  generators. Distinguish yielding a value from suspending an await; track an
+  async-generator operation across suspension to reject concurrent resumes.
+  Keep await wrappers and their arguments visible to cycle collection.
+- Keep comprehension loops on that same execution machinery. Acquire the first
+  iterator eagerly in the outer scope; preserve lazy generator-expression bodies
+  and distinguish ordinary comprehension exceptions from generator termination.
+- Keep import syntax and relative-name resolution in the core, filesystem search
+  in the host loader, and import-hook lookup in the frame's builtin namespace.
+  Cache modules before executing them and remove failed initializations.
+- Keep small integers inline and arbitrary magnitudes in owned limbs. Check
+  host-width conversions explicitly; never use stack-shaped values where a
+  numeric operation may retain its operand.
+- Share exact quotient rounding between numeric division and decimal rounding.
+  Preserve ties to even and signed zero without depending on the host's current
+  floating-point rounding mode or an inexact decimal multiplication.
+- Build symbol tables before execution. Lexical environments must retain the
+  source units owning their symbol tables. Keep class namespace lookup separate
+  from method closures, and mangle private names in the parser's class context.
+- Evaluate decorators before defaults/bases, then apply them in reverse order.
+  Keep descriptor lookup and method binding shared by normal attributes and
+  special-method calls; trace all wrapper and property fields during collection.
+- Expose actual dictionaries for module globals. Class and explicit execution
+  locals retain their original mappings and dispatch through mapping methods.
+  Missing lookups fall back only on KeyError; DELETE_NAME converts deletion
+  errors into NameError. Dictionary-subclass globals dispatch reads through
+  __getitem__, while global writes/deletes use dictionary storage. Optimized
+  function locals are snapshots. Keep intrinsic exception
+  classes rooted separately from the user-mutable builtin namespace.
+- Function binding must read the exposed positional-default tuple and keyword-
+  default dictionary. Keep code metadata attached to its owning parsed unit so
+  it remains valid after the function is released.
+- Cache code objects per parsed definition. Functions created from the same
+  definition and their suspended instances share that identity. Closed
+  generators retain their code while releasing execution environments; trace
+  the source-unit/code cache cycle explicitly.
+- Class calls invoke `__new__` before initialization. Initialize only a returned
+  instance of the requested class, using the returned instance's actual type.
+  Wrap plain `__new__` functions as static methods when building the class.
+- Honor metaclass __prepare__ on any callable, preserve namespace callback
+  order, and pass the original mapping to the metaclass. Native type.__new__
+  copies dictionary-subclass storage without invoking its mapping overrides.
+  Collect class static attributes during scope analysis; their names retain
+  unmangled spelling. Keep borrowed AST links distinct from owned scope fields.
+- Invoke custom metaclass mro methods before class finalization. Explicit
+  type.mro computes C3 from the bases independently of the installed MRO.
+  Reject empty orders, non-class entries, and incompatible builtin layouts.
+- Compute default C3 method resolution during class construction and share it among
+  attribute lookup, subclass checks, special methods, and `super`. Trace bases,
+  MROs, bound super objects, and class cells through cycle collection.
+- Class headers share call-argument grammar and evaluation order. Finalize classes
+  through one path: wrap implicit methods, notify an owned namespace snapshot
+  with `__set_name__`, then invoke the inherited `__init_subclass__`. Preserve
+  the original callback exception and add its Python 3.15 diagnostic note.
+- Keep the lexical `__class__` cell separate from the class namespace. Methods
+  retain it through their closure; a class attribute with the same spelling
+  must not replace the cell used by zero-argument `super()`.
+- Attribute deletion and `delattr` share descriptor and metadata rules. Deleting
+  function defaults resets their metadata and immediately changes call binding.
+- Instance attribute reads, writes and deletions dispatch through type-level
+  interception hooks. The explicit `object` methods reach default operations
+  without redispatch. Implicit special-method lookup bypasses interception.
+- Validate keywords in call order before reporting excess positional arguments
+  or filling defaults. Preserve exception and assertion objects through ordinary
+  and suspended execution; do not replace assertion arguments with formatted text.
+- Sort keys are evaluated once in input order. Preserve stable ordering in both
+  directions and retain keys across comparison callbacks and failure cleanup.
+  Detach a list's contents while sorting so callbacks see an empty list; keep
+  the detached contents traced and detect mutations before restoring them.
+- Share operator dispatch between ordinary and suspended execution. Preserve
+  reflected subclass priority, NotImplemented fallback, target evaluation order,
+  and the identity of mutable containers during augmented assignment.
+- Rich comparisons may return arbitrary objects or mutate their operands.
+  Retain compared elements across callbacks, recheck collection positions after
+  callbacks, and preserve identity shortcuts used by container lookup.
+- Dictionary/set entries retain the hash computed on insertion. Call a lookup
+  key's hash once, compare only matching hashes, and reuse stored hashes for
+  copies, dictionary merges, and equality. Recheck positions after comparison
+  callbacks. Preserve equal numeric values' hash equality across types.
+- The inherited implementation currently embeds intrinsics.py through
+  spy-intrinsics.h and executes it on this engine for generic/type objects.
+  This requires no external Python runtime, but language semantics implemented
+  in Python remain a gap against the requested C11-only implementation. Do not
+  describe them as C implementations. Preserve their behavior and tests when
+  moving them into C. Fingerprint both source and generated header in reports.
+- Generate Unicode properties from the pinned oracle into checked-in C data.
+  Ordinary builds must not require Python or the generator. Retain the Unicode
+  license and verify the table against all code points.
+- Normalize source identifiers with Unicode NFKC before scope analysis and
+  private-name mangling. Preserve spelling in dynamic string names. Validate
+  source UTF-8 independently of the host locale; include generated tables in
+  upstream report hashes.
+- Keep buffered output and flushing at the host callback boundary. Optional
+  Python file objects use their `write` and `flush` methods.
+- Template strings use native C Template and Interpolation values. Retain raw
+  interpolation values and source spelling; conversions remain metadata. Evaluate
+  format specifications with the shared formatted-string machinery. Trace every
+  retained value through GC, including template iterators and suspended fields.
 - Preserve the targets of full syntax/modules/async support, standalone
   executables, a Python-written interactive shell with contextual coloring,
   and very low startup time. Current omissions are implementation gaps, not
@@ -60,8 +172,31 @@ run the equivalent command directly.
 - Report passed, failed, skipped, and adapter-ineligible cases separately.
   Label pure-Python doctests separately from Cython compiler and C-extension
   tests. Cython compatibility requires a separate CPython C API/ABI effort.
+- The user requires every CPython 3.15 test case to be accounted for and ported;
+  small, documented framework adaptations are allowed. Preserve the full file
+  inventory and dynamic discovery results. Static test definitions are only
+  candidates: generated tests, subtests, platform skips, fixtures, and extension
+  dependencies remain obligations until actually resolved. Do not use a passing
+  selection as evidence that the full suite passed.
+- Build pinned CPython out of tree as a development oracle when the installed
+  interpreter differs. Keep it under ignored `tests/upstream/`; never make it
+  an engine dependency. Preserve unchanged doctest examples and expectations,
+  validate the port against the oracle, and identify replaced framework code.
+- Remove this repository's tests directory from oracle module search paths after
+  importing the runner helpers. Local names such as numbers.py must not shadow
+  the pinned standard library in either the parent runner or discovery workers.
 - A missing suite, prerequisite, or failed runner must fail explicitly, not
   report success with zero tests. Never count skips as passes.
+- Whole-module unittest ports execute the original module and every discovered
+  case with fixtures. Keep the replacement framework under tests/support;
+  unsupported framework behavior must fail visibly, never bypass assertions.
+- Record subtest outcomes and compare their execution with the oracle. A passing
+  parent case must not hide missing or failed subtests. Validate any test-framework
+  matching subset against the host implementation and reject unsupported syntax.
+- Let the test driver load unchanged upstream dependencies and fixtures after
+  the explicit framework-adaptation directory. Keep search-path precedence
+  consistent for plain modules and packages; never replace a missing fixture
+  with a fabricated outcome.
 - Use strict C11 warnings, meaningful semantic checks, ownership tests, and
   sanitizers. Record environment failures accurately. Do not claim a test ran
   when only a workflow or test target was added.

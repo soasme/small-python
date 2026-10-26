@@ -1,8 +1,136 @@
-2026-10-25  0.1.0 (development)
+2026-10-26  0.1.0 (development)
 
 - Initial C11 evaluator and public spy_* embedding API.
 - Reference counting with iterative destruction and explicit cycle collection.
 - Functions, closures, control flow, containers, host-loaded modules.
 - spy command-line host and spyc standalone C source generator.
 - Local semantic checks, upstream Cython adapter, versioned language target.
+- Pinned CPython 3.15 development oracle, complete test-file ledger, isolated
+  unittest discovery, and upstream unpacking/comprehension doctest ports.
+- Nested/starred unpacking, chained assignment, comprehension scopes, lazy
+  generator expressions, and Python 3.15 starred comprehension elements.
+- Defaults, positional-only/keyword-only parameters, variadic arguments,
+  keyword calls, lambdas, and assignment expressions.
+- Basic classes, bound methods, exception handling, context managers, deletion,
+  builtin type objects, stateful iterators, and sets.
+- Code objects, module-scope eval/exec, string joining, and partial formatting.
+- Generator functions with owned suspension stacks, send/throw/close, yield
+  delegation, return values, and exception/context-manager cleanup.
+- List/tuple/string slices, slice assignment/deletion, and index conversion.
+- print keyword arguments, Python file objects, and a host flush callback.
+- Upstream CPython generator doctests and suspended-stack ownership checks.
+- Static scope validation, global/nonlocal bindings, private-name mangling,
+  decorators, static/class methods, properties, and user-defined descriptors.
+- Named string-format fields, function-scope locals, and partial dir support.
+- Interactive expression display, runtime Cython doctest discovery, and all
+  CPython syntax doctests in the adapted selection.
+- Function metadata, live globals/module dictionaries, local snapshots, and
+  explicit eval/exec namespaces with custom builtins.
+- F-strings, debug fields, conversions, nested format specifications, and
+  suspension while evaluating formatted strings.
+- Complex literals, construction, conversion hooks, arithmetic, and signed-zero
+  handling for mixed real/complex operations.
+- NotImplemented and Ellipsis, all augmented-assignment operators, reflected
+  arithmetic dispatch, and in-place list extension/repetition.
+- Complete unchanged CPython decorator and augmented-assignment unittest modules
+  through a test-only framework adapter; the integer-literal module extends
+  the passing selection, together with unary operators, to 35 cases.
+- Unicode 17.0.0 printable properties and escaping, checked across every code
+  point; string splitlines and isprintable.
+- Arbitrary-precision integers with exact comparison, signed bit operations,
+  floor division, float rounding, modular powers/inverses, bit counts, large
+  enumerate counters, and checked fixed-width C API access.
+- Immutable bytes literals, construction, sequence operations, and binary C API.
+- Native coroutines, await delegation, asynchronous iteration/context managers,
+  asynchronous generators, asend/athrow/aclose, and aiter/anext builtins.
+- Exception context preservation across suspended cleanup and cycle checks for
+  coroutine wrappers, async-generator operations, and pending async exits.
+- Shared comprehension execution with async clauses, awaited elements/filters,
+  and lazy async generator expressions; 120 async operation-state checks.
+- Package/relative imports, multiple imports, import hooks, the builtins namespace
+  module, and parenthesized synchronous/asynchronous context managers.
+- Arbitrary-precision ranges, range indexing/slicing/reversal and equality,
+  count/index methods, and arbitrary-precision slice normalization.
+- Rich comparison methods, reflected subclass priority, non-boolean results,
+  containment hooks, implicit unhashability, and mutation-safe comparison paths.
+- Writable function defaults, retained code metadata, stable sorting keys and
+  reverse ordering, and single-statement compilation with expression display.
+- Assignment-expression grammar and comprehension diagnostics; complete unchanged
+  keyword-only and assignment-expression modules extend the passing selection to
+  120 cases and 99 subtests. The adapter checks subtest outcomes against CPython.
+- Slice equality/ordering share the tuple/list comparison implementation.
+- List extension, insertion, removal, clearing, copying, reversal, counting,
+  indexing, and in-place sorting with callback mutation detection. The unchanged
+  large-expression module extends the passing upstream selection to 121 cases.
+- Explicit exception causes, context suppression, cause validation, and suspension
+  in raise expressions; assertions preserve message objects and evaluation order.
+- All 194 upstream call doctests, keyword validation order, full missing-argument
+  diagnostics, and 560 supplementary argument-binding checks.
 - This release does not claim full Python 3.15 or Cython compatibility.
+- Class allocator dispatch, implicit static wrapping of __new__, initialization
+  of returned subclasses, and 288 supplementary construction checks.
+- Shared attribute deletion and delattr, including function-default removal.
+- User-defined hashing, cached dictionary entry hashes and tuple hashes,
+  numeric hash consistency, and 913 supplementary hash comparisons.
+- Dictionary copy, clear, pop, popitem and setdefault, with stored-hash reuse
+  during copying, equality and updates. Missing-key exceptions retain the key.
+- Unicode 17 identifier syntax, NFKC normalization and strict source UTF-8;
+  exhaustive identifier properties and 297,124 source-normalization checks.
+- Unicode filenames in the command-line host's module loader. Upstream report
+  fingerprints now include generated Unicode data and host-loader source.
+- SyntaxError metadata and location formatting; all three unchanged Unicode
+  identifier cases now pass. The strict unittest selection has 124 cases.
+- Test-only module search reaches pinned upstream dependencies and fixtures,
+  with package/module precedence checked across search directories.
+- Exact decimal rounding for integers and floats, ties to even, signed zero,
+  __round__ dispatch, and 5,238 supplementary numeric rounding checks.
+- C3 multiple inheritance, explicit and zero-argument super, lexical class
+  cells, class construction hooks and exception notes. Class headers reuse
+  call argument parsing; three-argument type shares class finalization.
+- 240 supplementary inheritance hierarchies plus callback, descriptor mutation,
+  class cell, super binding, and cyclic ownership checks.
+- Class subscription hooks, type.mro, property naming, and instance attribute
+  interception with explicit object-method delegation.
+- Shared str/bytes prefix, suffix, forward/reverse search, index and count
+  methods, with Unicode positions and tuple-prefix short circuiting; 286
+  upstream-derived literal examples and 5,600 differential search cases.
+- Shared definition code objects and generator/coroutine/async-generator code
+  attributes retained after closure, with source-unit cache cycle tracing.
+- Metaclass namespace mappings and callable __prepare__, custom mro methods,
+  class first-line/static-attribute metadata, and shared exec/eval mapping locals.
+- All 73 unchanged upstream metaclass doctest examples pass. The unchanged
+  exception-variation module adds 30 passing cases, bringing the strict whole-
+  module selection to 154 cases in nine modules, plus 99 subtests.
+- Native C template strings preserve interpolation values, source spelling,
+  conversions, and evaluated format specifications. Constructors, concatenation,
+  iteration, matching and suspended fields share normal runtime ownership.
+  Checks cover 336 literals and all 21 upstream malformed-template table entries.
+- Oracle runners exclude the local tests directory from dependency lookup so
+  numbers.py cannot shadow CPython's standard-library module.
+- Upstream report fingerprints include embedded intrinsic source and generated
+  data. The manual distinguishes that Python implementation from the C11 goal.
+- String-subclass keyword names retain their identities in **kwargs and use
+  rich comparison when binding Python parameters. Call-unpacking diagnostics
+  distinguish absent protocols from errors raised inside user methods.
+- Current CPython doctests: 919 passed, 516 failed out of 1,435. Cython static
+  doctests: 343 passed, 11,107 failed; dynamic: 367 passed, 11,176 failed.
+- Bytearray mutation rechecks storage after index/value conversions; scalar
+  and extended-slice deletion share assignment handling. Empty reverse slices
+  and empty extended-slice replacement no longer reach invalid memory.
+- Bytearray resize and Python 3.15 take_bytes, with conversion-mutation checks
+  derived from the upstream bytearray regressions.
+- Shared builtin argument parsing safely rejects missing positional arguments
+  and unexpected keywords when no keyword-name table exists.
+- Semantic tests prefer the pinned 3.15 oracle. Pattern diagnostics, type-alias
+  display inside aliases/unions, and object descriptor repr follow that version.
+- Bounded per-context small-tuple storage reuse makes the upstream generator
+  tuple-reuse example independent of host malloc behavior. Cached allocations
+  retain no elements and are released with the context.
+- Upstream driver reports actual error filenames and lines, including imported
+  dependencies. The object/bytearray module attempt accounts for 635 failures.
+- Builtin method descriptors and slot wrappers (list.append, int.__add__,
+  object.__repr__, ...) with CPython names, reprs, and argument diagnostics;
+  in-place slot wrappers update their operand.
+- Live dict_keys, dict_values, and dict_items views: set operations and
+  comparisons, membership, reversal, isdisjoint, mapping proxies, and
+  size-change detection. reversed() accepts dictionaries.

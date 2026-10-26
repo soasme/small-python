@@ -6,22 +6,10 @@
 static int output(void *data, const char *s, size_t n) {
     return fwrite(s, 1, n, data) == n ? 0 : -1;
 }
+static int flush_output(void *data) { return fflush(data); }
 static void report(SPYContext *c) {
     fprintf(stderr, "%s:%zu: %s: %s\n", spy_error_filename(c), spy_error_line(c),
             spy_error_type(c), spy_error_message(c));
-}
-static char *load_module(void *data, const char *name) {
-    const char *directory = data;
-    size_t size = strlen(directory) + strlen(name) + 5;
-    char *path = malloc(size);
-    if (!path) return NULL;
-    snprintf(path, size, "%s/%s.py", directory, name);
-    FILE *file = fopen(path, "rb");
-    free(path);
-    if (!file) return NULL;
-    char *source = host_read(file);
-    fclose(file);
-    return source;
 }
 static int repl(SPYContext *c) {
     char line[4096];
@@ -40,16 +28,8 @@ static int repl(SPYContext *c) {
         while (end && (line[end - 1] == '\n' || line[end - 1] == '\r' || line[end - 1] == ' ')) end--;
         if (end && line[end - 1] == ':') compound = 1;
         if (compound && end) continue;
-        SPYValue *v = spy_eval(c, source, "<stdin>");
+        SPYValue *v = spy_eval_interactive(c, source, "<stdin>");
         if (!v) report(c);
-        else if (spy_type(v) != SPY_NONE) {
-            SPYValue *text = spy_repr(c, v);
-            if (text) {
-                size_t size;
-                const char *s = spy_as_string(c, text, &size);
-                fwrite(s, 1, size, stdout); putchar('\n'); spy_release(text);
-            } else report(c);
-        }
         spy_release(v); spy_collect(c);
         len = 0; compound = 0;
     }
@@ -67,6 +47,7 @@ int main(int argc, char **argv) {
     SPYContext *c = spy_context_new();
     if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
     spy_set_output(c, output, stdout);
+    spy_set_flush(c, flush_output);
     char *directory = NULL;
     const char *filename = argc == 2 ? argv[1] : "<string>";
     if (argc == 2 && argv[1][0] != '-') {
@@ -78,7 +59,7 @@ int main(int argc, char **argv) {
             memcpy(directory, filename, n); directory[n] = 0;
         }
     }
-    spy_set_module_loader(c, load_module, directory ? (*directory ? directory : "/") : ".");
+    spy_set_module_loader(c, host_load_module, directory ? (*directory ? directory : "/") : ".");
     int status;
     if (argc == 2 && !strcmp(argv[1], "-i")) status = repl(c);
     else if (argc == 3) {

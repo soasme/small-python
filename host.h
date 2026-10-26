@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+#include <ctype.h>
 
 /* C11 stream reader: also works for pipes, where seeking is unavailable. */
 static char *host_read(FILE *file) {
@@ -27,6 +29,28 @@ static char *host_read(FILE *file) {
     /* Python source may not contain NUL bytes. */
     for (size_t i = 0; i < len; i++) if (!source[i]) { free(source); return NULL; }
     return source;
+}
+
+/* The core probes package.__init__ before package. Search policy stays here. */
+static inline char *host_load_module(void *data, const char *name) {
+    const char *directory = data;
+    size_t prefix = strlen(directory), len = strlen(name);
+    if (!len || prefix > SIZE_MAX - len - 5) return NULL;
+    char *path = malloc(prefix + len + 5);
+    if (!path) return NULL;
+    memcpy(path, directory, prefix); path[prefix++] = '/';
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)name[i];
+        if (ch == '.' && i && i + 1 < len && name[i - 1] != '.') path[prefix + i] = '/';
+        else if (isalnum(ch) || ch == '_' || ch >= 128) path[prefix + i] = (char)ch;
+        else { free(path); return NULL; }
+    }
+    memcpy(path + prefix + len, ".py", 4);
+    FILE *file = fopen(path, "rb");
+    free(path);
+    if (!file) return NULL;
+    char *source = host_read(file);
+    fclose(file); return source;
 }
 
 #endif

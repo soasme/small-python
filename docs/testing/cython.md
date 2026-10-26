@@ -1,6 +1,6 @@
 # Cython upstream baseline
 
-Date: 2026-10-25. Engine: 0.1.0 development. This report measures the current
+Engine: 0.1.0 development. This report measures the current
 partial engine; it is not a full Cython-suite compatibility claim.
 
 ## Sources inspected
@@ -47,18 +47,24 @@ in a group share state, including state preceding an expected exception.
 The transport decodes source using its declared encoding and supplies UTF-8
 text to the embedding API. It changes no function bodies, imports, decorators,
 expected outputs, assertions, or example inputs. Engine output and error
-type/message are returned as structured JSON. A failed module initialization
-fails its examples; the adapter does not bypass unsupported module code.
+type/message and actual error filename/line are returned as structured JSON. A failed module initialization
+fails its examples without executing them in an uninitialized namespace. Such
+records carry `executed: false`; they are failures, not skips or passes. The
+adapter does not bypass unsupported module code. Any unexpected driver stderr,
+including sanitizer diagnostics, is a driver error.
 
 Limitations are explicit:
 
-- Dynamic `__test__` generation, unittest suites, `.pyx`, `.srctree`, compiled
-  extension behavior, optimizer checks, and the C API/ABI are not adapted.
-- The driver displays the final top-level expression of an example. An example
-  containing multiple interactive expressions needs a fuller display adapter.
+- Runtime docstrings and `__test__` groups require `--dynamic` and successful
+  oracle initialization. Static groups remain present if runtime discovery fails
+  or produces a different group. Discovery errors fail the strict adapter.
+- Unittest suites, `.pyx`, `.srctree`, compiled extension behavior, optimizer
+  checks, and the C API/ABI are not adapted.
+- The driver displays every non-`None` interactive expression, including inside
+  loops and conditionals; function and class bodies use ordinary execution.
 - Exception matching follows doctest type/message checks; traceback frames are
   not compared.
-- The discovery host was Python 3.14.3. A future-syntax discovery failure is
+- Both current discovery runs use the pinned Python 3.15.0 oracle. A future-syntax discovery failure is
   adapter-ineligible, not a runtime pass or an engine syntax failure.
 - Execution budgets and process timeouts prevent an unsupported test from
   hanging the reporting run. Such failures are recorded, never passed.
@@ -68,24 +74,35 @@ Limitations are explicit:
 | Category | Count |
 | --- | ---: |
 | Selected `.py` files | 102 |
-| Files with attempted static doctests | 88 |
-| Adapter-ineligible files | 14 |
-| Discovered examples | 11,439 |
-| Passed examples | 7 |
-| Failed examples | 11,432 |
+| Files with attempted static doctests | 89 |
+| Adapter-ineligible files | 13 |
+| Discovered examples | 11,450 |
+| Passed examples | 343 |
+| Failed examples | 11,107 |
 | Upstream-directed skips | 0 |
 | Driver errors/timeouts | 0 |
 
-Six passing examples are from `tests/run/boolop_py.py`; one is from
-`tests/run/file_encoding_T740.py`. The failing-example error categories were
-11,419 `SyntaxError`, 10 `NameError`, 2 `OverflowError`, and 1
-`ModuleNotFoundError`. Most errors happened while initializing the unchanged
-module, so these counts are **not** 11,432 independently diagnosed engine bugs.
+The additional dynamic-discovery run covers 11,543 examples in 90 files:
+367 pass and 11,176 fail. Twelve files remain adapter-ineligible. Oracle module
+initialization succeeds for 97 files and fails for four; one file cannot be
+parsed by the oracle. Those failures are recorded independently of engine
+outcomes. Reports are in `tests/results/cython-dynamic.json`.
+
+Cython's unchanged `methodmangling_T5.py` passes all 48 static examples and all
+24 additional examples in its formatted class docstring. Its dynamic selection
+therefore passes 72 examples. This is a narrow language result, not a claim
+about the compiled Cython variant or complete object-model compatibility.
+
+The initial baseline was 7 passing and 11,432 failing examples. New passing
+cases include argument binding, closures, class scopes, exception propagation,
+context managers, generator functions, and slicing. Most remaining failures happen while initializing the
+unchanged module; they are not independently diagnosed engine bugs. Passing
+counts refer to examples, not complete test modules or Cython compiler tests.
 
 Full records live in the generated `tests/results/cython.json`. The report is
 not checked in because it embeds upstream test excerpts and is reproducible
 from the pinned checkout. The generated file retains provenance for every
-record. The 14 adapter-ineligible files are also named there.
+record. The 13 adapter-ineligible files are also named there.
 
 ## Reproduce
 
@@ -93,6 +110,7 @@ record. The 14 adapter-ineligible files are also named there.
 make upstream
 make run-cython
 make cython-report
+make cython-dynamic-report
 ```
 
 `make test-cython` runs the same selection and exits nonzero for failures or
@@ -127,7 +145,7 @@ Python 3.15 result nor a result for `spy`.
 The first priority is semantic implementation, not adjusting test expectations:
 full function signatures, unpacking, class definitions and protocols,
 exceptions, Unicode, arbitrary integers, comprehensions, and generators.
-The adapter then needs unittest, dynamic doctest, and interactive-display
-coverage. Extension loading and the CPython C API/ABI require their own profile
+The adapter still needs unittest coverage and resolution of failed dynamic
+discovery prerequisites. Extension loading and the CPython C API/ABI require their own profile
 and upstream runner integration. No current report supports a claim of
 near-complete Cython or Python compatibility.

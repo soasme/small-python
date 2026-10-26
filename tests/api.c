@@ -5,12 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { char text[4096]; size_t len; } Output;
+typedef struct { char text[4096]; size_t len; int flushes, fail_flush; } Output;
 static int output(void *data, const char *s, size_t n) {
     Output *o = data;
     if (n >= sizeof(o->text) - o->len) return -1;
     memcpy(o->text + o->len, s, n); o->len += n; o->text[o->len] = 0;
     return 0;
+}
+static int flush_output(void *data) {
+    Output *o = data;
+    o->flushes++;
+    return o->fail_flush;
 }
 static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)data;
@@ -41,18 +46,131 @@ static void execute(SPYContext *c, const char *source) {
         abort();
     }
 }
-int main(void) {
+/* Mappings can close cycles through class bodies, closures, and exec locals. */
+static void namespace_cycles(void) {
     SPYContext *c = spy_context_new();
     assert(c);
-    Output o = {{0}, 0};
+    execute(c,
+        "def make():\n"
+        "    class Namespace:\n"
+        "        def __init__(self): self.data = {}\n"
+        "        def __getitem__(self, key): return self.data[key]\n"
+        "        def __setitem__(self, key, value): self.data[key] = value\n"
+        "        def keys(self): return self.data.keys()\n"
+        "    ns = Namespace()\n"
+        "    def meta(name, bases, mapping): return type(name, bases, dict(mapping))\n"
+        "    def prepare(name, bases): return ns\n"
+        "    meta.__prepare__ = prepare\n"
+        "    class C(metaclass=meta):\n"
+        "        saved = locals()\n"
+        "        def read(self): return __class__\n"
+        "    assert C().read() is C\n"
+        "    ns.data['C'] = C\n"
+        "    exec('saved = locals()', {}, ns)\n"
+        "    class Meta(type):\n"
+        "        def mro(cls): return [cls, object]\n"
+        "    class D(metaclass=Meta): pass\n"
+        "    D.cycle = D\n");
+    execute(c, "make()\n"); /* Initialize lazy builtin descriptors before measuring. */
+    spy_collect(c);
+    size_t baseline = spy_live_values(c);
+    for (int i = 0; i < 50; i++) {
+        execute(c, "make()\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+    }
+    spy_context_free(c);
+}
+int main(void) {
+    namespace_cycles();
+    {
+        SPYContext *templates = spy_context_new();
+        assert(templates);
+        execute(templates,
+            "def make():\n"
+            "    values = []\n"
+            "    template = t'{values!r}'\n"
+            "    values.append(template)\n"
+            "    values.append(iter(template))\n"
+            "    def suspended():\n"
+            "        yield t'{values}{(yield 1)}'\n"
+            "    generator = suspended()\n"
+            "    next(generator)\n"
+            "    values.append(generator)\n");
+        execute(templates, "make()\n");
+        spy_collect(templates);
+        size_t baseline = spy_live_values(templates);
+        for (int i = 0; i < 50; i++) {
+            execute(templates, "make()\n");
+            spy_collect(templates);
+            assert(spy_live_values(templates) == baseline);
+        }
+        spy_context_free(templates);
+    }
+    SPYContext *c = spy_context_new();
+    assert(c);
+    Output o = {0};
     spy_set_output(c, output, &o);
     execute(c, "print('hello', 6 * 7)");
     assert(!strcmp(o.text, "hello 42\n"));
+    spy_set_flush(c, flush_output);
+    execute(c, "print(end='', flush=True)");
+    assert(o.flushes == 1);
+    o.fail_flush = 1;
+    assert(spy_exec(c, "print(flush=True)", "flush.py") == -1);
+    assert(!strcmp(spy_error_type(c), "OSError"));
+    o.fail_flush = 0;
+    spy_clear_error(c);
     assert(!spy_define(c, "twice", twice, NULL));
     assert(integer(c, spy_eval(c, "twice(21)", "api.py")) == 42);
     execute(c, "x = 19");
     assert(integer(c, spy_get_global(c, "x")) == 19);
     assert(integer(c, spy_eval(c, "x + 23", "api.py")) == 42);
+
+    /* Arbitrary integers stay owned Python values; the fixed-width C accessor
+     * rejects overflow instead of truncating. Large limbs must be reclaimed. */
+    size_t integer_baseline = spy_live_values(c);
+    SPYValue *large = spy_eval(c, "2**256 + 17", "integer.py");
+    assert(large && spy_type(large) == SPY_INT);
+    int64_t narrowed = 42;
+    assert(spy_as_int(c, large, &narrowed) == -1 && narrowed == 42);
+    assert(!strcmp(spy_error_type(c), "OverflowError"));
+    spy_clear_error(c);
+    SPYValue *large_repr = spy_repr(c, large);
+    size_t repr_len;
+    assert(!strcmp(spy_as_string(c, large_repr, &repr_len),
+        "115792089237316195423570985008687907853269984665640564039457584007913129639953"));
+    spy_release(large_repr); spy_release(large);
+    assert(spy_live_values(c) == integer_baseline);
+    assert(integer(c, spy_eval(c, "(2**256 + 17) % 2**256", "integer.py")) == 17);
+    const unsigned char binary_data[] = {0, 127, 128, 255};
+    SPYValue *binary_value = spy_bytes(c, binary_data, sizeof(binary_data));
+    size_t binary_len;
+    const unsigned char *binary_pointer = spy_as_bytes(c, binary_value, &binary_len);
+    assert(binary_pointer && binary_len == sizeof(binary_data));
+    assert(!memcmp(binary_pointer, binary_data, binary_len));
+    assert(!spy_as_string(c, binary_value, NULL));
+    assert(!strcmp(spy_error_type(c), "TypeError"));
+    spy_clear_error(c);
+    assert(!spy_set_global(c, "binary_value", binary_value));
+    spy_release(binary_value);
+    execute(c, "assert binary_value == b'\\x00\\x7f\\x80\\xff'\ndel binary_value\n");
+
+    /* Interactive display belongs to statements in this input, not to the
+     * function/class code objects it defines. Earlier output survives errors. */
+    o.len = 0;
+    SPYValue *interactive = spy_eval_interactive(c,
+        "1; 2\nfor x in (3, 4):\n    x\ndef f():\n    99\n    return 5\n"
+        "class C:\n    88\nf()\nNone\n", "interactive.py");
+    assert(interactive); spy_release(interactive);
+    assert(!strcmp(o.text, "1\n2\n3\n4\n5\n"));
+    assert(integer(c, spy_eval(c, "_", "last.py")) == 5);
+    o.len = 0;
+    assert(!spy_eval_interactive(c, "6; 1 / 0", "interactive.py"));
+    assert(!strcmp(o.text, "6\n"));
+    assert(!strcmp(spy_error_type(c), "ZeroDivisionError"));
+    spy_clear_error(c);
+    execute(c, "f = None\nC = None\n");
 
     /* Functions and closures outlive their original evaluation's syntax tree. */
     execute(c, "def outer(x):\n    def inner(y):\n        return x + y\n    return inner\nf = outer(40)\n");
@@ -107,6 +225,125 @@ int main(void) {
     spy_collect(c);
     baseline = spy_live_values(c);
     for (int i = 0; i < 50; i++) {
+        execute(c, "def make():\n    def inner(): yield 1\n    return inner\n"
+                   "a = make()\ng = a()\nitems = a.__code__\nassert items is g.gi_code\n"
+                   "g.close()\na = None\nmake = None\nassert g.gi_code is items\n"
+                   "g = None\nitems = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make():\n"
+                   "    class A:\n        def method(self): return __class__\n"
+                   "    class B(A): pass\n    class C(A): pass\n    class D(B, C): pass\n"
+                   "    a = D()\n    a.cycle = super(B, a)\n    return a\n"
+                   "a = make()\nassert a.cycle.method() is a.__class__.__mro__[3]\na = None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make():\n"
+                   "    class D:\n        def __set_name__(self, owner, name):\n"
+                   "            self.owner = owner\n            raise ValueError('set name')\n"
+                   "    class C:\n        attr = D()\n"
+                   "try: make()\nexcept ValueError as a: assert a.__notes__\nmake = None\na = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make():\n"
+                   "    class C:\n        def __getattribute__(self, name):\n"
+                   "            object.__setattr__(self, 'cycle', self)\n            raise ValueError(name)\n"
+                   "    a = C()\n    try: a.value\n    except ValueError: pass\n"
+                   "make()\nmake = None\n"
+                   "a = property(lambda self: 1)\na.__name__ = a\na = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __hash__(self):\n        self.cycle = self\n        raise ValueError('hash')\n"
+                   "a = C()\nitems = {}\ntry: items.setdefault(a, a)\nexcept ValueError: pass\n"
+                   "a = None\nitems = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "items = {}\nitems['cycle'] = items\ng = items.copy()\n"
+                   "assert g.pop('cycle') is items\nitems.clear()\ng = None\nitems = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __new__(cls):\n        a = object.__new__(cls)\n        a.cycle = a\n        return a\n"
+                   "    def __init__(self): raise ValueError('initialization')\n"
+                   "try: C()\nexcept ValueError: pass\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make(x=1, *, y=2): return x, y\n"
+                   "make.__defaults__ = (make,)\nmake.__kwdefaults__ = {'y': make}\n"
+                   "del make.__defaults__\ndelattr(make, '__kwdefaults__')\n"
+                   "assert make.__defaults__ is None\nassert make.__kwdefaults__ is None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "g = ValueError('cycle')\ng.__cause__ = g\nassert g.__suppress_context__\ng = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "items = [3, 1, 2]\n"
+                   "def make(x):\n    items.append(items)\n    return x\n"
+                   "try: items.sort(key=make)\nexcept ValueError: pass\n"
+                   "assert items == [1, 2, 3]\nmake = None\nitems = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __eq__(self, other):\n        items.clear()\n        return True\n"
+                   "items = [C()]\nitems.remove(None)\nassert items == []\nitems = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make(x=1, *, y=2): return x, y\n"
+                   "make.__defaults__ = (make,)\nmake.__kwdefaults__ = {'y': make}\n"
+                   "assert make() == (make, make)\n"
+                   "g = make.__code__\nassert g.co_argcount == 1\n"
+                   "make = None\ng = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make(x): return x\ng = make.__code__\nmake = None\n");
+        SPYValue *code = spy_get_global(c, "g");
+        execute(c, "g = None\n");
+        spy_collect(c);
+        assert(!spy_set_global(c, "g", code));
+        spy_release(code);
+        execute(c, "assert g.co_name == 'make'\nassert g.co_argcount == 1\ng = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make(x):\n    if x == 2: raise ValueError('key')\n    return [x]\n"
+                   "try: sorted([3, 2, 1], key=make)\nexcept ValueError: pass\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __hash__(self): return 0\n"
+                   "    def __eq__(self, other):\n        del items[self]\n        return True\n"
+                   "items = {C(): 1}\ng = C()\nassert g not in items\n"
+                   "items = None\ng = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "g = range(10**100, 10**100 + 10, 3)\nitems = iter(g)\n"
+                   "assert next(items) == 10**100\nassert g[-1] == 10**100 + 9\n"
+                   "g = g[::-1]\nassert next(items) == 10**100 + 3\n"
+                   "g = None\nitems = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "async def make():\n    return [await C() for x in range(2)]\n"
+                   "g = make()\nassert g.send(None) == 1\nassert g.send(g) is g\n"
+                   "g = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "g = (await C() for x in range(2))\nitems = g.__anext__()\n"
+                   "assert next(items) == 1\nassert items.send(g) is g\n"
+                   "g = None\nitems = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "async def make():\n    yield await C()\n"
+                   "g = make()\nitems = anext(g, [])\nassert items.send(None) == 1\n"
+                   "assert items.send(items) is items\n"
+                   "g = None\nitems = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "async def make():\n    try: yield 0\n    finally: await C()\n"
+                   "g = make()\ntry: next(g.__anext__())\nexcept StopIteration: pass\n"
+                   "items = g.aclose()\nassert items.send(None) == 1\nassert items.send(g) is g\n"
+                   "g = None\nitems = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
         execute(c, "class C:\n    def f(self): return self\na = C()\na.method = a.f\na.link = a\n"
                    "items = []\ndef make(value=items): return value\nitems.append(make)\n"
                    "g = (x for x in items)\nitems.append(g)\n"
@@ -127,13 +364,127 @@ int main(void) {
     spy_collect(c);
     assert(spy_live_values(c) == baseline);
 
+    /* Descriptor wrappers and their callable fields are collector edges. */
+    for (int i = 0; i < 50; i++) {
+        execute(c, "def make(): pass\nmake.cycle = make\ng = staticmethod(make)\ng.cycle = g\n"
+                   "g = None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "g = {}\nexec('def f(): return 42', g)\ng = None\n"
+                   "class C:\n    saved = locals()\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C: pass\nC.static = staticmethod(C)\nC.cls = classmethod(C)\n"
+                   "C.prop = property(C(), C(), C(), C())\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make():\n    value = []\n    def inner():\n        nonlocal value\n"
+                   "        value.append(inner)\n        return value\n    return inner\n"
+                   "g = make()\ng()\ng = None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+    }
+    execute(c, "def make():\n    value = 40\n    def inner():\n        nonlocal value\n"
+               "        value += 1\n        return value\n    return inner\ng = make()\n");
+    SPYValue *closure = spy_get_global(c, "g");
+    execute(c, "g = None\nmake = None\n");
+    spy_collect(c);
+    assert(integer(c, spy_call(c, closure, 0, NULL)) == 41);
+    spy_collect(c);
+    assert(integer(c, spy_call(c, closure, 0, NULL)) == 42);
+    spy_release(closure); spy_collect(c);
+    assert(spy_live_values(c) == baseline);
+
     int calls = 0;
+    /* A suspended function owns operands, iterators, pending exceptions and
+     * cleanup callbacks, even when no Python name still reaches its source. */
+    for (int i = 0; i < 50; i++) {
+        execute(c, "def make():\n    value = yield 1\n    yield [value, (yield 2)]\n"
+                   "g = make()\nassert next(g) == 1\nassert g.send(g) == 2\n"
+                   "g = None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make():\n    value = yield 1\n    try:\n        raise ValueError(value)\n"
+                   "    finally:\n        value = None\n        yield 2\n"
+                   "g = make()\nnext(g)\ng.send(g)\ng = None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __enter__(self): return self\n    def __exit__(self, t, v, tb): pass\n"
+                   "def make():\n    with C() as value:\n        value.gen = yield 1\n        value = None\n        yield 2\n"
+                   "g = make()\nnext(g)\ng.send(g)\ng = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "def make():\n    yield f'{(yield 1):{(yield 2)}}'\n"
+                   "g = make()\nnext(g)\ng.send(g)\ng = None\nmake = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "items = []\ng = slice(items)\nitems.append(g)\nitems = None\ng = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "async def make():\n    return await C()\n"
+                   "g = make()\nassert g.send(None) == 1\nassert g.send(g) is g\n"
+                   "g = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "async def make():\n    return await C()\n"
+                   "g = make()\nitems = g.__await__()\nassert next(items) == 1\nassert items.send(items) is items\n"
+                   "g = None\nitems = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "    def __aiter__(self): return self\n    async def __anext__(self): return await self\n"
+                   "async def make():\n    async for item in C(): pass\n"
+                   "g = make()\nassert g.send(None) == 1\nassert g.send(g) is g\n"
+                   "g = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "    async def __aenter__(self): return self\n"
+                   "    async def __aexit__(self, t, v, tb): return await self\n"
+                   "async def make():\n    async with C(): return 42\n"
+                   "g = make()\nassert g.send(None) == 1\nassert g.send(g) is g\n"
+                   "g = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+        execute(c, "class C:\n    def __await__(self):\n        value = yield 1\n        yield value\n"
+                   "    async def __aenter__(self): return self\n"
+                   "    async def __aexit__(self, t, v, tb): return await self\n"
+                   "async def make():\n    async with C(): raise ValueError('pending')\n"
+                   "g = make()\nassert g.send(None) == 1\nassert g.send(g) is g\n"
+                   "g = None\nmake = None\nC = None\n");
+        spy_collect(c);
+        assert(spy_live_values(c) == baseline);
+    }
+    execute(c, "def make():\n    try:\n        yield 40\n    finally:\n        yield 41\n"
+               "g = make()\nassert next(g) == 40\n");
+    generator = spy_get_global(c, "g");
+    execute(c, "g = None\nmake = None\n");
+    spy_collect(c);
+    assert(!spy_set_global(c, "g", generator));
+    spy_release(generator);
+    assert(integer(c, spy_eval(c, "next(g)", "resume.py")) == 41);
+    execute(c, "assert next(g, 42) == 42\ng = None\n");
+    spy_collect(c);
+    assert(spy_live_values(c) == baseline);
+
+    execute(c, "g = {}\nexec('def f(): return 42', g)\nmake = g['f']\ng = None\n");
+    closure = spy_get_global(c, "make");
+    execute(c, "make = None\n");
+    spy_collect(c);
+    assert(integer(c, spy_call(c, closure, 0, NULL)) == 42);
+    spy_release(closure); spy_collect(c);
+    assert(spy_live_values(c) == baseline);
+
     spy_set_module_loader(c, loader, &calls);
-    execute(c, "import sample\nfrom sample import add as plus\nassert sample.answer == 42\nassert plus(1) == 43\n");
-    assert(calls == 1);
+    execute(c, "import sample\nfrom sample import add as plus\nassert sample.answer == 42\nassert plus(1) == 43\n"
+               "sample.__dict__['answer'] = 44\nassert sample.answer == 44\n"
+               "assert sample.add.__globals__ is sample.__dict__\n");
+    assert(calls == 2);
     assert(spy_exec(c, "import missing", "api.py") == -1);
     assert(!strcmp(spy_error_type(c), "ModuleNotFoundError"));
-    assert(calls == 2);
+    assert(calls == 4);
 
     spy_set_step_limit(c, 100);
     assert(spy_exec(c, "while True:\n    pass\n", "loop.py") == -1);
@@ -150,6 +501,12 @@ int main(void) {
     assert(spy_exec(c, "x = 2\nif:\n", "bad.py") == -1);
     spy_clear_error(c);
     assert(integer(c, spy_get_global(c, "x")) == 1);
+    const char *invalid_utf8[] = {"\x80\x80", "\xbf\xbf", "\xc0\x80", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xe2\x82"};
+    for (size_t i = 0; i < sizeof(invalid_utf8) / sizeof(*invalid_utf8); i++) {
+        assert(spy_exec(c, invalid_utf8[i], "encoding.py") == -1);
+        assert(!strcmp(spy_error_type(c), "SyntaxError"));
+        spy_clear_error(c);
+    }
     assert(spy_exec(c, "x = 2\n1__0", "bad_literal.py") == -1);
     spy_clear_error(c);
     assert(integer(c, spy_get_global(c, "x")) == 1);
@@ -163,7 +520,7 @@ int main(void) {
     spy_release(tuple); spy_release(item);
 
     /* Bounded malformed-source stress: exercise parse cleanup and recovery. */
-    static const char alphabet[] = "abc0123_ +-*/<>=!()[]{}:;,.\n'\"#\\";
+    static const char alphabet[] = "abcfur0123_ @+-*/<>=!()[]{}:;,.\n'\"#\\";
     uint32_t seed = 315;
     spy_set_step_limit(c, 500);
     for (size_t i = 0; i < 5000; i++) {
