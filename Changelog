@@ -233,3 +233,5 @@
   global declarations in nested scopes make the module-level name global.
 - __del__ finalizers run once, after release or collection, at the next
   statement boundary; resurrection is honored and exceptions are discarded.
+- Membership tests on non-containers report "argument of type 'X' is not a
+  container or iterable".

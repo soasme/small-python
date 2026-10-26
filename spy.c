@@ -6781,7 +6781,12 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
                     if (!memcmp(b->as.string.data + i, a->as.string.data, a->as.string.len)) { result = 1; break; }
         } else {
             SPYValue *iterator = get_iterator(c, b);
-            if (!iterator) return NULL;
+            if (!iterator) {
+                /* PySequence_Contains: any TypeError from iter() is replaced. */
+                if (!error_is(c, "TypeError")) return NULL;
+                spy_clear_error(c);
+                return errorf(c, "TypeError", "argument of type '%s' is not a container or iterable", type_name(b));
+            }
             for (;;) {
                 SPYValue *item = iterator_next(c, iterator);
                 if (!item) break;

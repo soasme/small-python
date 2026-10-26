@@ -3945,6 +3945,18 @@ z = A()
 del z
 """)
 
+CASES.append(r"""
+# Membership on objects that are neither containers nor iterable.
+class Plain: pass
+class BadIter:
+    def __iter__(self): raise TypeError('mine')
+class NotIt:
+    def __iter__(self): return 5
+for t in ['1 in Plain()', '1 not in Plain()', '1 in 5', '1 in None', '1 in BadIter()', '1 in NotIt()']:
+    try: eval(t)
+    except TypeError as e: print(e)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),
