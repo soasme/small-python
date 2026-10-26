@@ -86,15 +86,15 @@ cpython-discover:
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py discover --report-only
 
 install: all
-	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/slimpy/standards" "$(DESTDIR)$(PREFIX)/share/doc/slimpy/testing"
+	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -m755 spy spyc "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a "$(DESTDIR)$(PREFIX)/lib"
-	install -m644 docs/slimpy.md "$(DESTDIR)$(PREFIX)/share/doc/slimpy"
-	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/slimpy/standards"
-	install -m644 docs/testing/cython.md docs/testing/cpython.md "$(DESTDIR)$(PREFIX)/share/doc/slimpy/testing"
-	install -d "$(DESTDIR)$(PREFIX)/share/doc/slimpy/licenses"
-	install -m644 docs/licenses/unicode.txt docs/licenses/python.txt "$(DESTDIR)$(PREFIX)/share/doc/slimpy/licenses"
+	install -m644 docs/smallpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
+	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
+	install -m644 docs/testing/cython.md docs/testing/cpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
+	install -d "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
+	install -m644 docs/licenses/unicode.txt docs/licenses/python.txt "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
 
 docs:
 	$(PYTHON) tools/check_docs.py

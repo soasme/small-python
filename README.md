@@ -1,4 +1,4 @@
-# slim.py
+# Small Python
 
 A small, embeddable Python-language engine in C11, inspired by QuickJS.
 Commands and public APIs use the **spy** prefix: `spy`, `spyc`, `spy_*`,
@@ -14,7 +14,7 @@ make
 make test
 ```
 
-- [Engine manual](docs/slimpy.md): usage, embedding, implementation, benchmarks.
+- [Engine manual](docs/smallpython.md): usage, embedding, implementation, benchmarks.
 - [SLP-315 language standard](docs/standards/3_15.md): a single-file, versioned
   consolidation of the pinned Python 3.15.0 reference and core builtins, with
   Core, Host, and Extension profiles. Project draft, not an official PSF standard.

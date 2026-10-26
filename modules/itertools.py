@@ -1,6 +1,6 @@
 """Functional tools for creating and using iterators.
 
-slim.py builds this module into the engine, following CPython 3.15's
+Small Python builds this module into the engine, following CPython 3.15's
 itertools C module: the same iterator types, argument checks, and error
 messages, written in Python. Pickling support, which CPython 3.14 removed,
 is not provided.

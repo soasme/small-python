@@ -174,7 +174,7 @@ continuation after cleanup failures remain gaps.
 
 `test.support` is replaced by
 [`tests/support/test/support/__init__.py`](../../tests/support/test/support/__init__.py),
-which describes slim.py rather than CPython: `check_impl_detail()` is false,
+which describes Small Python rather than CPython: `check_impl_detail()` is false,
 so `cpython_only` tests are skipped, and helpers that need missing engine
 features (warnings, subprocesses, threads) are absent and fail on use. Unsupported framework operations fail
 explicitly. Dynamically located or imported test classes are recorded as
@@ -276,7 +276,7 @@ released small-tuple storage. Cached allocations retain no element references.
 Remaining failures include module fixtures, library imports, runtime
 introspection, finalization, and diagnostics. Generator unittest cases, including
 `test_yield_from.py`, remain unported; inspecting those cases is not a passing
-result. The [manual](../slimpy.md) records the broader
+result. The [manual](../smallpython.md) records the broader
 language gaps. The [versioned standard](../standards/3_15.md) remains the full
 target; its requirements have not been reduced to the implemented subset.
 

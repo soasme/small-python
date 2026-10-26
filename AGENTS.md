@@ -1,4 +1,4 @@
-# slim.py development instructions
+# Small Python development instructions
 
 Read `/Users/soasme/.codex/RTK.md` when it exists. Prefix shell commands with
 `rtk`; use `rtk proxy` when raw output is required. On machines without RTK,
@@ -9,7 +9,7 @@ run the equivalent command directly.
 - Build a small, embeddable Python engine in **C11 only**. The language target
   is Python **3.15**. The earlier 3.14 mention is superseded by that target.
 - Use **`spy`** as the public prefix: `spy`, `spyc`, `spy_*`, `SPYContext`,
-  `SPYValue`, and `libspy.a`. The project name is slim.py.
+  `SPYValue`, and `libspy.a`. The project name is Small Python.
 - Follow QuickJS's organization: a few understandable C files, a small public
   embedding header, a separate command-line host and executable generator,
   an ordinary Makefile, examples, versioned documentation, and upstream test
@@ -177,7 +177,7 @@ run the equivalent command directly.
 
 ## Language standard and documentation
 
-- `docs/slimpy.md` is the engine manual, with the same broad organization as
+- `docs/smallpython.md` is the engine manual, with the same broad organization as
   QuickJS's manual: introduction, usage, specifications, internals, references.
 - `docs/standards/3_15.md` is the single-file, versioned language target. Give
   clauses stable identifiers. Pin source revisions and state document status.

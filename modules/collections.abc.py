@@ -1,6 +1,6 @@
 """Abstract base classes for containers, as CPython's collections.abc.
 
-slim.py builds this submodule into the engine. As in CPython 3.15, it is the
+Small Python builds this submodule into the engine. As in CPython 3.15, it is the
 standard library's _collections_abc module, which the host loader provides.
 """
 

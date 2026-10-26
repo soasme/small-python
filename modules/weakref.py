@@ -1,6 +1,6 @@
 """Weak reference support for Python.
 
-This module is an implementation of PEP 205. slim.py builds it into the
+This module is an implementation of PEP 205. Small Python builds it into the
 engine; it follows CPython 3.15's weakref, _weakref and _weakrefset modules.
 The engine keeps the weak table and exposes private primitives to this
 module: _weak_bind(target, reference, callback), _weak_get(reference),
@@ -277,7 +277,7 @@ def _is_mapping(other):
     return hasattr(type(other), 'keys') and hasattr(type(other), '__getitem__')
 
 
-# slim.py closures retain their whole defining environment, so the callbacks
+# Small Python closures retain their whole defining environment, so the callbacks
 # below come from small factories that capture only what CPython's do.
 def _weakset_remover(selfref):
     def _remove(item):
@@ -818,7 +818,7 @@ class finalize:
     and returns the result. After this the finalizer is dead, and
     calling it just returns None.
 
-    slim.py has no interpreter-exit hook, so the atexit flag is kept
+    Small Python has no interpreter-exit hook, so the atexit flag is kept
     but finalizers do not run at exit.
     """
 

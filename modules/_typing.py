@@ -1,6 +1,6 @@
 """Primitives and accelerators for the typing module.
 
-slim.py builds this module into the engine, following CPython 3.15's _typing
+Small Python builds this module into the engine, following CPython 3.15's _typing
 module. Its types are the engine's own objects for PEP 695 type parameters,
 type aliases, generics, and unions, taken from the language constructs that
 create them.

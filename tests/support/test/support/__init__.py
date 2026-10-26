@@ -3,7 +3,7 @@
 Upstream test modules import it unchanged in place of Lib/test/support, whose
 own initialization needs inspect, logging, os, re, sysconfig, and time. The
 definitions follow the pinned Lib/test/support/__init__.py (see
-docs/licenses/python.txt); platform queries describe slim.py, which is not
+docs/licenses/python.txt); platform queries describe Small Python, which is not
 CPython, so CPython-only tests are skipped exactly as on other
 implementations. Missing helpers fail at import, never silently.
 """
@@ -110,7 +110,7 @@ def refcount_test(test):
 
 
 def no_tracing(func):
-    # slim.py has no trace functions.
+    # Small Python has no trace functions.
     return func
 
 

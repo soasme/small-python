@@ -1,6 +1,6 @@
 """This module provides access to the garbage collector for reference cycles.
 
-slim.py builds this module into the engine, following CPython 3.15's gc
+Small Python builds this module into the engine, following CPython 3.15's gc
 module. Reference counting frees most values at once; collect() runs the
 engine's cycle collector, which has a single generation. Automatic
 collection happens between host runs, so enable(), disable() and the

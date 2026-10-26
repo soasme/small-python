@@ -1,7 +1,7 @@
 """This module provides primitive operations to write multi-threaded programs.
 The 'threading' module provides a more convenient interface.
 
-slim.py builds this module into the engine, following CPython 3.15's _thread
+Small Python builds this module into the engine, following CPython 3.15's _thread
 module. The engine runs one thread, so get_ident() is constant and starting a
 thread raises RuntimeError. Locks keep CPython's states, arguments, and errors;
 a blocking acquire that no other thread could ever satisfy raises RuntimeError

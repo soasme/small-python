@@ -1,4 +1,4 @@
-# slim.py Python Engine
+# Small Python Engine
 
 Version 0.1.0 — development edition
 
@@ -30,7 +30,7 @@ Version 0.1.0 — development edition
 
 ## 1 Introduction
 
-slim.py is a small, embeddable Python-language engine written in C11. The command
+Small Python is a small, embeddable Python-language engine written in C11. The command
 is `spy`, the standalone-program generator is `spyc`, and the embedding API uses
 the `spy_*` prefix. The core consists of `spy.c` and `spy.h` and depends only on
 the C runtime and math library. It does not link or invoke CPython.
@@ -102,11 +102,11 @@ An optional installation uses the conventional `PREFIX` and `DESTDIR` variables:
 
 ```sh
 make install PREFIX=/usr/local
-make install PREFIX=/usr/local DESTDIR=/tmp/slimpy-package
+make install PREFIX=/usr/local DESTDIR=/tmp/smallpython-package
 ```
 
 Installation places commands in `bin`, the header in `include`, the archive in
-`lib`, and this manual in `share/doc/slimpy`. Installing is not required to use
+`lib`, and this manual in `share/doc/smallpython`. Installing is not required to use
 the engine from its build directory.
 
 ### 2.2 Quick start
@@ -589,7 +589,7 @@ string-conversion limit, and `stdout`/`stderr` streams that write to the host
 output callback (`print()` and interactive display use `sys.stdout` once `sys`
 is imported). It also provides `exc_info`, `exit`, `intern`, `displayhook`,
 and constant metadata (`version_info`, `float_info`, `int_info`, `hash_info`,
-`flags`, `implementation`, whose name is `slimpy`). `_getframe()` returns
+`flags`, `implementation`, whose name is `smallpython`). `_getframe()` returns
 frame objects for running calls (functions, generators, class bodies, and
 modules) with `f_globals`, `f_locals`, `f_back`, `f_code`, `f_lineno`,
 `f_builtins`, and `f_generator`; a function frame's `f_locals` is a
@@ -820,7 +820,7 @@ Annotation scopes, complete traceback propagation, and introspection remain work
 | `examples/` | Python and C embedding examples |
 | `tests/` | Local checks, upstream pins, fetcher, adapter |
 | `bench/` | Lifecycle benchmark |
-| `docs/slimpy.md` | Engine manual |
+| `docs/smallpython.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
 | `tools/build_standard.py` | Reproducible consolidation of pinned Python reference sources |

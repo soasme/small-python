@@ -12,7 +12,7 @@ list, set, and tuple.
 * UserList     wrapper around list objects for easier list subclassing
 * UserString   wrapper around string objects for easier string subclassing
 
-slim.py builds this module into the engine. namedtuple, Counter, ChainMap,
+Small Python builds this module into the engine. namedtuple, Counter, ChainMap,
 UserDict, UserList, and UserString are CPython 3.15's pure-Python code;
 deque, defaultdict, and OrderedDict follow its C implementations. Private
 mixins supply the methods these classes inherit from collections.abc, whose

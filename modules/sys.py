@@ -2,7 +2,7 @@
 This module provides access to some objects used or maintained by the
 interpreter and to functions that interact strongly with the interpreter.
 
-slim.py builds this module into the engine, following CPython 3.15's sys
+Small Python builds this module into the engine, following CPython 3.15's sys
 module. Runtime state (modules, the handled exception, recursion and integer
 conversion limits, host output) is native; the remaining names are constant
 metadata describing this engine. _getframe() returns the running frames.
@@ -48,7 +48,7 @@ version_info = _make(_structseq("version_info", ("major", "minor", "micro", "rel
                                 "sys.version_info\n\nVersion information as a named tuple."),
                      (3, 15, 0, "final", 0))
 hexversion = 0x030F00F0
-version = "3.15.0 (slim.py)"
+version = "3.15.0 (Small Python)"
 api_version = 1013
 float_repr_style = "short"
 maxunicode = 0x10FFFF
@@ -85,7 +85,7 @@ class _Implementation:
         return "namespace(" + ", ".join(f"{key}={value!r}" for key, value in self.__dict__.items()) + ")"
 
 
-implementation = _Implementation(name="slimpy", cache_tag=None, version=version_info, hexversion=hexversion)
+implementation = _Implementation(name="smallpython", cache_tag=None, version=version_info, hexversion=hexversion)
 builtin_module_names = ("_thread", "_typing", "_weakref", "builtins", "collections", "gc", "itertools", "sys", "types", "weakref")
 argv = []
 orig_argv = []

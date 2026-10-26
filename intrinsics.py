@@ -1,6 +1,6 @@
 """Intrinsic objects for generics, unions, and type parameters.
 
-slim.py compiles this module into the engine (see tools/build_intrinsics.py)
+Small Python compiles this module into the engine (see tools/build_intrinsics.py)
 and runs it lazily, the first time a language construct needs one of its
 objects: subscripting a builtin class, `|` between types, PEP 695 type
 parameters, and the `type` statement. It is not importable. CPython exposes
