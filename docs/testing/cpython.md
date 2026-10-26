@@ -257,3 +257,21 @@ introspection, finalization, and diagnostics. Generator unittest cases, includin
 result. The [manual](../slimpy.md) records the broader
 language gaps. The [versioned standard](../standards/3_15.md) remains the full
 target; its requirements have not been reduced to the implemented subset.
+
+## Supplemental method checks
+
+`tests/generator_metadata.py` runs the unchanged body of
+`test_generators.GeneratorTest.test_name` under its original class name, with
+the local unittest adapter, and validates it against the pinned interpreter.
+`tests/frozendict.py` similarly runs eight methods from
+`test_dict.FrozenDictTests`, the frozen eval/exec methods from
+`test_builtin.BuiltinTest`, and `test_builtin.TestType.test_type_frozendict`.
+These methods do not use module fixtures or the original classes' mixins.
+Their source bodies and assertions are preserved; surrounding imports and
+unrelated methods are not transplanted.
+
+These checks are supplemental selections, not whole-module passes, and are
+not added to the 154-case whole-module result. Pickling tests, CPython-only
+checks, and all other cases stay in the full test inventory. Additional oracle
+comparisons cover suspended-object lifecycle states, frozen mapping protocols,
+subclass identity, hash callbacks, and immutable execution namespaces.

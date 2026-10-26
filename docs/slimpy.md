@@ -318,7 +318,7 @@ edition, engine release, and upstream test revisions are separate identifiers.
 
 | Area | Implemented subset |
 | --- | --- |
-| Values | `None`, `NotImplemented`, `Ellipsis`, booleans, arbitrary-precision integers, doubles, complex numbers, bytes, UTF-8 strings, lists, tuples, dictionaries, sets/frozensets, bytearrays, ranges, functions, modules, basic classes/instances |
+| Values | `None`, `NotImplemented`, `Ellipsis`, booleans, arbitrary-precision integers, doubles, complex numbers, bytes, UTF-8 strings, lists, tuples, dictionaries/frozendicts, sets/frozensets, bytearrays, ranges, functions, modules, basic classes/instances |
 | Expressions | Arithmetic, bit operations, comparisons/chains, boolean operators, conditionals, calls, indexing/slicing, lambdas, assignment expressions |
 | Template strings | `t`/`rt`/`tr` literals, native Template and Interpolation values, raw values and expression spelling, conversion metadata, evaluated format specifications, concatenation and iteration |
 | Control flow | `if`/`elif`/`else`, `while`, `for`, loop `else`, `break`, `continue`, `return`, `assert`, `pass`, basic `with` |
@@ -331,7 +331,7 @@ edition, engine release, and upstream test revisions are separate identifiers.
 | Exceptions | Basic exception classes/instances, `raise`, explicit causes and context suppression, bare re-raise, `try`/`except`/`else`/`finally`, exception groups and `except*`, subclass matching |
 | Annotations and patterns | Lazy annotations, type parameters, type aliases, structural matching; these implementations remain partial |
 | Imports | Multiple/dotted imports, aliases, parenthesized import lists, package/relative imports, star imports, `__import__` hooks |
-| Builtins | Partial `print`, `len`, `range`, `str`, `repr`, `ascii`, `format`, `int`, `float`, `complex`, `bytes`, `bytearray`, `bool`, `list`, `tuple`, `dict`, `set`, `frozenset`, `sorted`, `abs`, `pow`, `divmod`, `round`, `hash`, `bin`, `oct`, `hex`, `sum`, `min`, `max`, `all`, `any`, `iter`, `next`, `map`, `filter`, `zip`, `enumerate`, `reversed`, `ord`, `chr`, `type`, `super`, `isinstance`, `issubclass`, `getattr`, `setattr`, `delattr`, `hasattr`, `callable`, `id`, `slice`, `staticmethod`, `classmethod`, `property`, `dir`, `locals`, `globals` |
+| Builtins | Partial `print`, `len`, `range`, `str`, `repr`, `ascii`, `format`, `int`, `float`, `complex`, `bytes`, `bytearray`, `bool`, `list`, `tuple`, `dict`, `frozendict`, `set`, `frozenset`, `sorted`, `abs`, `pow`, `divmod`, `round`, `hash`, `bin`, `oct`, `hex`, `sum`, `min`, `max`, `all`, `any`, `iter`, `next`, `map`, `filter`, `zip`, `enumerate`, `reversed`, `ord`, `chr`, `type`, `super`, `isinstance`, `issubclass`, `getattr`, `setattr`, `delattr`, `hasattr`, `callable`, `id`, `slice`, `staticmethod`, `classmethod`, `property`, `dir`, `locals`, `globals` |
 | Methods | List `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `copy`, `reverse`, `sort`; list/tuple `count`/`index`; dictionary `get`, `keys`, `values`, `items`, `update`, `copy`, `clear`, `pop`, `popitem`, `setdefault`; str/bytes `startswith`, `endswith`, `find`, `rfind`, `index`, `rindex`, `count`; string `join`, `splitlines`, `isprintable`, `isidentifier`, and positional/named-field `format`; slice `indices`; numeric `conjugate`; integer `bit_length`/`bit_count` |
 | Dynamic source | Code objects, three-argument `compile` in `exec`/`eval`/`single` modes, `eval`/`exec` with dictionary globals, mapping locals, and custom builtin dictionaries |
 
@@ -352,7 +352,7 @@ Plain `__init_subclass__` and `__class_getitem__` functions become class methods
 Three-argument `type()` shares this construction path. Metaclasses support
 `__prepare__`, `__new__`, `__init__`, custom `mro()`, and base resolution through
 `__mro_entries__`. Class namespace writes and reads honor mapping overrides;
-native `type.__new__` accepts dictionary subclasses. Class metadata includes
+native `type.__new__` accepts dictionaries, frozendicts, and their subclasses. Class metadata includes
 `__firstlineno__` and `__static_attributes__`. Changing bases, slots, complete
 class-cell propagation, and some builtin subclasses remain unsupported. Descriptor
 lookup honors data-descriptor precedence and supports `__get__`, `__set__`,
@@ -365,6 +365,12 @@ native C `mappingproxy`. Class `__dict__` also returns a live, read-only proxy.
 Proxies forward mapping methods, support generic aliases, and copy an exact
 dictionary before comparison with an arbitrary reflected-equality callback,
 following Python 3.15. Their implementation no longer uses embedded Python.
+Native `frozendict` shares dictionary lookup, views, unpacking, and pattern
+matching. Its hash combines stored key hashes with value hashes and caches the
+completed result. Exact frozen copies can reuse the original value; subclass
+copies produce plain frozen mappings. `eval` and `exec` accept frozen globals
+with an existing `__builtins__` entry and reject writes and deletions. Pickle
+round trips remain untested because the pickle module is not implemented.
 Exception support still lacks
 traceback objects, complete chaining, and all builtin-specific
 constructors. Context-manager exit currently receives `None` for the traceback.

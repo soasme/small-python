@@ -73,7 +73,11 @@ static void namespace_cycles(void) {
         "    D.cycle = D\n"
         "    D.proxy = D.__dict__\n"
         "    values = {}\n"
-        "    values['proxy'] = values.keys().mapping\n");
+        "    values['proxy'] = values.keys().mapping\n"
+        "    frozen = frozendict(values=values)\n"
+        "    values['frozen'] = frozen\n"
+        "    values['view'] = frozen.items()\n"
+        "    values['iterator'] = iter(frozen)\n");
     execute(c, "make()\n"); /* Initialize lazy builtin descriptors before measuring. */
     spy_collect(c);
     size_t baseline = spy_live_values(c);

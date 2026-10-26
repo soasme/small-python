@@ -176,3 +176,7 @@
   current metadata. Qualified names drive repr and survive closure; string
   subclasses and cycles are retained correctly. Python 3.15 gi_state and cr_state
   now share the existing async-generator state handling.
+- Native Python 3.15 frozendict: construction and subclasses, views, merging,
+  matching, cached item-pair hashing, copying and fromkeys. Frozen eval/exec
+  globals and builtins remain read-only; type() accepts frozen namespaces.
+  Eleven unchanged upstream methods supplement the whole-module test ledger.
