@@ -399,12 +399,14 @@ value. CPython's complete allocator-slot restoration behavior is not implemented
 
 F-strings support expressions, debug fields, conversions, nested format
 specifications, raw literals, and generator suspension inside fields. String
-`format` supports positional/named fields, conversions, and basic string/numeric
-specifications; nested field specifications and attribute/index paths remain
-missing. Percent formatting for `str`, `bytes`, and `bytearray` follows CPython's
-conversions, flags, `*` widths and precisions, mapping keys, and diagnostics.
-Grouping, several format options, and nonempty complex format specifications are
-not implemented. Unicode escaping, printability, and identifier properties use
+`format` supports positional/named fields and conversions; nested field
+specifications and attribute/index paths remain missing. The format-spec
+mini-language for `str`, `int`, `bool`, `float`, and `complex` is ported from
+CPython: fill code points, alignment, sign, `z`, `#`, zero padding, Unicode
+digit widths, `,`/`_` integer and fractional grouping, every presentation type,
+the short float repr, and CPython's diagnostics; `n` uses the C locale. Percent
+formatting for `str`, `bytes`, and `bytearray` follows CPython's conversions,
+flags, `*` widths and precisions, mapping keys, and diagnostics. Unicode escaping, printability, and identifier properties use
 checked-in Unicode 17.0.0 data. Source identifiers undergo NFKC normalization
 before scope analysis and private-name mangling; dynamic string attribute and
 keyword names retain their original spelling. The lexer rejects invalid UTF-8.

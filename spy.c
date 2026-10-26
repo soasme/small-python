@@ -125,6 +125,7 @@ static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static int set_subset(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
 static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
+static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
 static SPYValue *active_exception(SPYContext *c) {
@@ -5941,9 +5942,429 @@ static SPYValue *ascii_repr(SPYContext *c, SPYValue *value) {
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     free(out.data); return result;
 }
+/* Format-spec mini-language, ported from CPython's Objects/unicode_formatter.c
+ * and the short float repr in Python/pystrtod.c. */
+enum { GROUP_NONE = 0, GROUP_COMMA = ',', GROUP_UNDERSCORE = '_', GROUP_UNDER_FOUR = 1, GROUP_LOCALE = 2 };
+typedef struct {
+    unsigned fill, align, sign, type;
+    int alternate, no_neg_0, thousands, frac_thousands;
+    int64_t width, precision;
+} FormatSpec;
+static SPYValue *format_presentation(SPYContext *c, unsigned type, SPYValue *named) {
+    if (type > 32 && type < 128) return errorf(c, "ValueError", "Unknown format code '%c' for object of type '%s'", (int)type, type_name(named));
+    return errorf(c, "ValueError", "Unknown format code '\\x%x' for object of type '%s'", type, type_name(named));
+}
+static int format_separator_type(SPYContext *c, int specifier, unsigned type) {
+    if (type > 32 && type < 128) errorf(c, "ValueError", "Cannot specify '%c' with '%c'.", specifier, (int)type);
+    else errorf(c, "ValueError", "Cannot specify '%c' with '\\x%x'.", specifier, type);
+    return -1;
+}
+static int format_integer_field(SPYContext *c, const unsigned *spec, size_t *pos, size_t end, int64_t *result) {
+    int64_t accumulator = 0; int count = 0;
+    for (; *pos < end; ++*pos, count++) {
+        int digit = decimal_value(spec[*pos]);
+        if (digit < 0) break;
+        if (accumulator > (INT64_MAX - digit) / 10) { spy_error(c, "ValueError", "Too many decimal digits in format string"); return -1; }
+        accumulator = accumulator * 10 + digit;
+    }
+    *result = accumulator; return count;
+}
+static int format_parse(SPYContext *c, SPYValue *named, SPYValue *text, FormatSpec *f, unsigned default_type, unsigned default_align) {
+    size_t n = 0, cap = text->as.string.len, end;
+    unsigned *spec = allocate(c, (cap ? cap : 1) * sizeof(unsigned));
+    if (!spec) return -1;
+    for (size_t at = 0, width; at < text->as.string.len; at += width)
+        spec[n++] = utf8_decode(text->as.string.data + at, text->as.string.len - at, &width);
+    end = n;
+    size_t pos = 0; int status = -1, fill_specified = 0, align_specified = 0, consumed;
+    *f = (FormatSpec){.fill = ' ', .align = default_align, .type = default_type, .width = -1, .precision = -1};
+#define ALIGNMENT(ch) ((ch) == '<' || (ch) == '>' || (ch) == '=' || (ch) == '^')
+    if (end - pos >= 2 && ALIGNMENT(spec[pos + 1])) {
+        f->align = spec[pos + 1]; f->fill = spec[pos]; fill_specified = align_specified = 1; pos += 2;
+    } else if (end - pos >= 1 && ALIGNMENT(spec[pos])) { f->align = spec[pos++]; align_specified = 1; }
+#undef ALIGNMENT
+    if (pos < end && (spec[pos] == ' ' || spec[pos] == '+' || spec[pos] == '-')) f->sign = spec[pos++];
+    if (pos < end && spec[pos] == 'z') { f->no_neg_0 = 1; pos++; }
+    if (pos < end && spec[pos] == '#') { f->alternate = 1; pos++; }
+    if (!fill_specified && pos < end && spec[pos] == '0') {
+        f->fill = '0';
+        if (!align_specified && default_align == '>') f->align = '=';
+        pos++;
+    }
+    if ((consumed = format_integer_field(c, spec, &pos, end, &f->width)) < 0) goto done;
+    if (!consumed) f->width = -1;
+    if (pos < end && spec[pos] == ',') { f->thousands = GROUP_COMMA; pos++; }
+    if (pos < end && spec[pos] == '_') {
+        if (f->thousands) goto both;
+        f->thousands = GROUP_UNDERSCORE; pos++;
+    }
+    if (pos < end && spec[pos] == ',' && f->thousands == GROUP_UNDERSCORE) goto both;
+    if (pos < end && spec[pos] == '.') {
+        pos++;
+        if ((consumed = format_integer_field(c, spec, &pos, end, &f->precision)) < 0) goto done;
+        if (pos < end && spec[pos] == ',') {
+            if (!consumed) f->precision = -1;
+            f->frac_thousands = GROUP_COMMA; pos++; consumed++;
+        }
+        if (pos < end && spec[pos] == '_') {
+            if (f->frac_thousands) goto both;
+            if (!consumed) f->precision = -1;
+            f->frac_thousands = GROUP_UNDERSCORE; pos++; consumed++;
+        }
+        if (pos < end && spec[pos] == ',' && f->frac_thousands == GROUP_UNDERSCORE) goto both;
+        if (!consumed) { spy_error(c, "ValueError", "Format specifier missing precision"); goto done; }
+    }
+    if (end - pos > 1) {
+        errorf(c, "ValueError", "Invalid format specifier '%s' for object of type '%s'", text->as.string.data, type_name(named));
+        goto done;
+    }
+    if (end - pos == 1) f->type = spec[pos++];
+    if (f->thousands) {
+        switch (f->type) {
+        case 'd': case 'e': case 'f': case 'g': case 'E': case 'G': case '%': case 'F': case 0: break;
+        case 'b': case 'o': case 'x': case 'X':
+            if (f->thousands == GROUP_UNDERSCORE) { f->thousands = GROUP_UNDER_FOUR; break; }
+            /* fall through */
+        default: format_separator_type(c, f->thousands, f->type); goto done;
+        }
+    }
+    if (f->type == 'n' && f->frac_thousands) { format_separator_type(c, f->frac_thousands, f->type); goto done; }
+    status = 0; goto done;
+both:
+    spy_error(c, "ValueError", "Cannot specify both ',' and '_'.");
+done:
+    free(spec); return status;
+}
+static int format_fill(Buffer *out, unsigned fill, int64_t count) {
+    for (int64_t i = 0; i < count; i++) if (append_codepoint(out, fill)) return -1;
+    return 0;
+}
+/* _PyUnicode_InsertThousandsGrouping: group is 0 for none, else repeated
+ * every 'group' digits. Backward grouping zero-pads to min_width. */
+static int format_group(Buffer *out, const char *digits, int64_t n, int64_t min_width, int group, const char *sep, int forward) {
+    Buffer chunk = {.ctx = out->ctx};
+    int64_t remaining = n, sep_len = (int64_t)strlen(sep), pos = forward ? 0 : n, len;
+    int use_sep = 0, broken = 0, status = 0;
+    if (min_width < 0) min_width = 0;
+#define GROUP_EMIT() do { \
+        int64_t zeros = len - remaining > 0 ? len - remaining : 0, chars = remaining < len ? remaining : len; \
+        if (chars < 0) chars = 0; \
+        if (forward) { \
+            if (use_sep) status |= puts_buffer(&chunk, sep); \
+            status |= append(&chunk, digits + pos, (size_t)chars); pos += chars; \
+            for (int64_t z = 0; z < zeros && !status; z++) status = append(&chunk, "0", 1); \
+        } else { \
+            if (use_sep) for (int64_t s = sep_len; s > 0 && !status; s--) status = append(&chunk, sep + s - 1, 1); \
+            for (int64_t d = 0; d < chars && !status; d++) status = append(&chunk, digits + --pos, 1); \
+            for (int64_t z = 0; z < zeros && !status; z++) status = append(&chunk, "0", 1); \
+        } \
+        use_sep = 1; remaining -= chars; \
+    } while (0)
+    while (group > 0 && !status) {
+        int64_t widest = remaining > min_width ? remaining : min_width;
+        len = group < (widest > 1 ? widest : 1) ? group : (widest > 1 ? widest : 1);
+        GROUP_EMIT();
+        min_width -= len;
+        if (remaining <= 0 && min_width <= 0) { broken = 1; break; }
+        min_width -= sep_len;
+    }
+    if (!broken && !status) {
+        len = remaining > min_width ? remaining : min_width;
+        if (len < 1) len = 1;
+        GROUP_EMIT();
+    }
+#undef GROUP_EMIT
+    if (!status && !forward)
+        for (size_t i = 0; i < chunk.len / 2; i++) {
+            char ch = chunk.data[i]; chunk.data[i] = chunk.data[chunk.len - 1 - i]; chunk.data[chunk.len - 1 - i] = ch;
+        }
+    if (!status && chunk.len) status = append(out, chunk.data, chunk.len);
+    free(chunk.data); return status;
+}
+/* calc_number_widths and fill_number. body holds [digits][.frac][remainder]
+ * without a sign; n_digits_override >= 0 gives the digit count directly
+ * (integers, and 0 for 'c' whose character is all remainder). */
+static int format_number(Buffer *out, const FormatSpec *f, unsigned fill, int sign_char,
+                         const char *prefix, const char *body, size_t body_len, int64_t n_digits_override) {
+    int frac_type = f->frac_thousands, type = f->type == 'n' ? GROUP_LOCALE : f->thousands;
+    const char *sep = type == GROUP_COMMA ? "," : type == GROUP_UNDERSCORE || type == GROUP_UNDER_FOUR ? "_" : "";
+    const char *frac_sep = frac_type == GROUP_COMMA ? "," : frac_type == GROUP_UNDERSCORE ? "_" : "";
+    int group = type == GROUP_COMMA || type == GROUP_UNDERSCORE ? 3 : type == GROUP_UNDER_FOUR ? 4 : 0;
+    if (frac_type && !group && type != GROUP_LOCALE) group = 3;
+    size_t at = 0;
+    while (at < body_len && isdigit((unsigned char)body[at])) at++;
+    int64_t n_digits = n_digits_override >= 0 ? n_digits_override : (int64_t)at;
+    int has_decimal = n_digits_override < 0 && at < body_len && body[at] == '.';
+    size_t frac = at + (size_t)has_decimal, frac_end = frac;
+    while (n_digits_override < 0 && frac_end < body_len && isdigit((unsigned char)body[frac_end])) frac_end++;
+    if (n_digits_override >= 0) frac = frac_end = 0;
+    int64_t n_frac = (int64_t)(frac_end - frac), n_prefix = (int64_t)strlen(prefix);
+    const char *remainder = body + (n_digits_override >= 0 ? (size_t)n_digits_override : frac_end);
+    size_t remainder_len = body_len - (size_t)(remainder - body);
+    int64_t n_remainder = 0;
+    for (size_t i = 0; i < remainder_len; i += utf8_width((unsigned char)remainder[i])) n_remainder++;
+    int sign = f->sign == '+' ? (sign_char == '-' ? '-' : '+') : f->sign == ' ' ? (sign_char == '-' ? '-' : ' ') :
+               sign_char == '-' ? '-' : 0;
+    Buffer frac_text = {.ctx = out->ctx}, digit_text = {.ctx = out->ctx};
+    int status = n_frac ? format_group(&frac_text, body + frac, n_frac, n_frac, group, frac_sep, 1) : 0;
+    int64_t n_non = (sign != 0) + n_prefix + has_decimal + n_frac + n_remainder;
+    int64_t min_width = f->fill == '0' && f->align == '=' ? f->width - n_non + n_frac - (int64_t)frac_text.len : 0;
+    if (!status && n_digits) status = format_group(&digit_text, body, n_digits, min_width, group, sep, 0);
+    if (!status && f->type == 'X') for (size_t i = 0; i < digit_text.len; i++) digit_text.data[i] = (char)toupper((unsigned char)digit_text.data[i]);
+    int64_t padding = f->width - (n_non + (int64_t)digit_text.len + (int64_t)frac_text.len - n_frac), left = 0, inner = 0, right = 0;
+    if (padding > 0) {
+        if (f->align == '<') right = padding;
+        else if (f->align == '^') { left = padding / 2; right = padding - left; }
+        else if (f->align == '=') inner = padding;
+        else left = padding;
+    }
+    if (!status) status = format_fill(out, fill, left);
+    if (!status && sign) { char ch = (char)sign; status = append(out, &ch, 1); }
+    if (!status && n_prefix) {
+        char upper[3] = {0};
+        for (int64_t i = 0; i < n_prefix && i < 2; i++) upper[i] = f->type == 'X' ? (char)toupper((unsigned char)prefix[i]) : prefix[i];
+        status = append(out, upper, (size_t)n_prefix);
+    }
+    if (!status) status = format_fill(out, fill, inner);
+    if (!status && digit_text.len) status = append(out, digit_text.data, digit_text.len);
+    if (!status && has_decimal) status = append(out, ".", 1);
+    if (!status && frac_text.len) status = append(out, frac_text.data, frac_text.len);
+    if (!status && remainder_len) status = append(out, remainder, remainder_len);
+    if (!status) status = format_fill(out, fill, right);
+    free(frac_text.data); free(digit_text.data); return status;
+}
+/* Digits of d as _Py_dg_dtoa would return them: mode 0 shortest, mode 2
+ * 'precision' significant digits, mode 3 'precision' digits after the point.
+ * Trailing zeros are stripped; zero is "0" with decpt 1. */
+static char *float_digits(SPYContext *c, double d, int mode, int precision, int *decpt, size_t *len) {
+    double magnitude = fabs(d);
+    if (magnitude == 0) { char *zero = allocate(c, 2); if (zero) { zero[0] = '0'; zero[1] = 0; *decpt = 1; *len = 1; } return zero; }
+    int digits = mode == 2 ? precision - 1 : 0;
+    if (mode == 0)
+        for (; digits < 17; digits++) {
+            char probe[40]; snprintf(probe, sizeof(probe), "%.*e", digits, magnitude);
+            if (strtod(probe, NULL) == magnitude) break;
+        }
+    const char *format = mode == 3 ? "%.*f" : "%.*e";
+    int count = snprintf(NULL, 0, format, mode == 3 ? precision : digits, magnitude);
+    char *text = count < 0 ? NULL : allocate(c, (size_t)count + 1);
+    if (!text) return NULL;
+    snprintf(text, (size_t)count + 1, format, mode == 3 ? precision : digits, magnitude);
+    size_t n = 0, at = 0; int point = 0;
+    if (mode == 3) {
+        while (text[at] && text[at] != '.') text[n++] = text[at++];
+        point = (int)n;
+        if (text[at] == '.') at++;
+        while (text[at]) text[n++] = text[at++];
+        size_t lead = 0;
+        while (lead < n && text[lead] == '0') lead++;
+        memmove(text, text + lead, n - lead); n -= lead; point -= (int)lead;
+        while (n && text[n - 1] == '0') n--;
+        if (!n) point = -precision;
+    } else {
+        char *exponent = strchr(text, 'e');
+        for (char *p = text; p < exponent; p++) if (*p != '.') text[n++] = *p;
+        point = atoi(exponent + 1) + 1;
+        while (n > 1 && text[n - 1] == '0') n--;
+    }
+    text[n] = 0; *decpt = point; *len = n; return text;
+}
+enum { DTSF_SIGN = 1, DTSF_ADD_DOT_0 = 2, DTSF_ALT = 4, DTSF_NO_NEG_0 = 8 };
+/* PyOS_double_to_string for codes e E f F g G r. */
+static int double_to_string(Buffer *out, double d, int code, int precision, int flags) {
+    SPYContext *c = out->ctx;
+    int upper = code == 'E' || code == 'F' || code == 'G', mode = 0;
+    if (precision > INT_MAX - 1024) { spy_error(c, "ValueError", "precision too big"); return -1; }
+    code = tolower(code);
+    if (code == 'e') { mode = 2; precision++; }
+    else if (code == 'f') mode = 3;
+    else if (code == 'g') { mode = 2; if (!precision) precision = 1; }
+    int sign = signbit(d) != 0, status = 0;
+    if (!isfinite(d)) {
+        if (isnan(d)) sign = 0;
+        if (sign) status = append(out, "-", 1);
+        else if (flags & DTSF_SIGN) status = append(out, "+", 1);
+        return status ? status : puts_buffer(out, isnan(d) ? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf"));
+    }
+    int decpt; size_t digits_len;
+    char *digits = float_digits(c, d, mode, precision, &decpt, &digits_len);
+    if (!digits) return -1;
+    if ((flags & DTSF_NO_NEG_0) && sign && (!digits_len || (digits_len == 1 && digits[0] == '0'))) sign = 0;
+    int64_t vend = (int64_t)digits_len, vstart, len = (int64_t)digits_len, point = decpt;
+    int use_exp = 0, exponent = 0, add_dot_0 = (flags & DTSF_ADD_DOT_0) != 0, alt = (flags & DTSF_ALT) != 0;
+    switch (code) {
+    case 'e': use_exp = 1; vend = precision; break;
+    case 'f': vend = point + precision; break;
+    case 'g':
+        if (point <= -4 || point > (add_dot_0 ? precision - 1 : precision)) use_exp = 1;
+        if (alt) vend = precision;
+        break;
+    default: if (point <= -4 || point > 16) use_exp = 1; break;
+    }
+    if (use_exp) { exponent = (int)point - 1; point = 1; }
+    vstart = point <= 0 ? point - 1 : 0;
+    if (!use_exp && add_dot_0) vend = vend > point ? vend : point + 1;
+    else vend = vend > point ? vend : point;
+    if (sign) status = append(out, "-", 1);
+    else if (flags & DTSF_SIGN) status = append(out, "+", 1);
+    size_t start = out->len;
+#define ZEROS(n) for (int64_t z = 0; z < (n) && !status; z++) status = append(out, "0", 1)
+    if (point <= 0) { ZEROS(point - vstart); if (!status) status = append(out, ".", 1); ZEROS(-point); }
+    else ZEROS(-vstart);
+    if (!status) {
+        if (0 < point && point <= len) {
+            status = append(out, digits, (size_t)point);
+            if (!status) status = append(out, ".", 1);
+            if (!status) status = append(out, digits + point, (size_t)(len - point));
+        } else status = append(out, digits, (size_t)len);
+    }
+    if (len < point) { ZEROS(point - len); if (!status) status = append(out, ".", 1); ZEROS(vend - point); }
+    else ZEROS(vend - len);
+#undef ZEROS
+    free(digits);
+    if (!status && out->len > start && out->data[out->len - 1] == '.' && !alt) out->len--;
+    if (!status && use_exp) {
+        char text[16]; snprintf(text, sizeof(text), "%c%+.02d", upper ? 'E' : 'e', exponent);
+        status = puts_buffer(out, text);
+    }
+    return status;
+}
+static SPYValue *format_finish(SPYContext *c, Buffer *out, int status) {
+    SPYValue *result = status || c->error_type[0] ? NULL : spy_string(c, out->data ? out->data : "", out->len);
+    free(out->data); return result;
+}
+static SPYValue *format_string_value(SPYContext *c, SPYValue *value, const FormatSpec *f) {
+    if (f->sign) return spy_error(c, "ValueError", f->sign == ' ' ? "Space not allowed in string format specifier" : "Sign not allowed in string format specifier");
+    if (f->no_neg_0) return spy_error(c, "ValueError", "Negative zero coercion (z) not allowed in string format specifier");
+    if (f->alternate) return spy_error(c, "ValueError", "Alternate form (#) not allowed in string format specifier");
+    if (f->align == '=') return spy_error(c, "ValueError", "'=' alignment not allowed in string format specifier");
+    int64_t len = (int64_t)string_length(value);
+    size_t bytes = value->as.string.len;
+    if (f->precision >= 0 && len >= f->precision) {
+        len = f->precision; bytes = 0;
+        for (int64_t i = 0; i < len; i++) bytes += utf8_width((unsigned char)value->as.string.data[bytes]);
+    }
+    int64_t total = f->width > len ? f->width : len, left = f->align == '>' ? total - len : f->align == '^' ? (total - len) / 2 : 0;
+    Buffer out = {.ctx = c};
+    int status = format_fill(&out, f->fill, left);
+    if (!status && bytes) status = append(&out, value->as.string.data, bytes);
+    if (!status) status = format_fill(&out, f->fill, total - len - left);
+    return format_finish(c, &out, status);
+}
+static SPYValue *format_float_value(SPYContext *c, double value, const FormatSpec *f) {
+    int type = (int)f->type, flags = 0, precision, default_precision = 6, add_pct = 0;
+    if (f->precision > INT_MAX) return spy_error(c, "ValueError", "precision too big");
+    precision = (int)f->precision;
+    if (f->alternate) flags |= DTSF_ALT;
+    if (f->no_neg_0) flags |= DTSF_NO_NEG_0;
+    if (!type) { flags |= DTSF_ADD_DOT_0; type = 'r'; default_precision = 0; }
+    if (type == 'n') type = 'g';
+    if (type == '%') { type = 'f'; value *= 100; add_pct = 1; }
+    if (precision < 0) precision = default_precision;
+    else if (type == 'r') type = 'g';
+    Buffer text = {.ctx = c}, out = {.ctx = c};
+    int status = double_to_string(&text, value, type, precision, flags);
+    if (!status && add_pct) status = append(&text, "%", 1);
+    if (!status) {
+        int negative = text.len && text.data[0] == '-';
+        status = format_number(&out, f, f->fill, negative ? '-' : 0, "", text.data + negative, text.len - (size_t)negative, -1);
+    }
+    free(text.data); return format_finish(c, &out, status);
+}
+static SPYValue *format_complex_value(SPYContext *c, double re, double im, const FormatSpec *f) {
+    if (f->precision > INT_MAX) return spy_error(c, "ValueError", "precision too big");
+    if (f->fill == '0') return spy_error(c, "ValueError", "Zero padding is not allowed in complex format specifier");
+    if (f->align == '=') return spy_error(c, "ValueError", "'=' alignment flag is not allowed in complex format specifier");
+    int type = (int)f->type, flags = 0, precision = (int)f->precision, default_precision = 6, add_parens = 0, skip_re = 0;
+    if (f->alternate) flags |= DTSF_ALT;
+    if (f->no_neg_0) flags |= DTSF_NO_NEG_0;
+    if (!type) {
+        type = 'r'; default_precision = 0;
+        if (re == 0.0 && copysign(1.0, re) == 1.0) skip_re = 1; else add_parens = 1;
+    }
+    if (type == 'n') type = 'g';
+    if (precision < 0) precision = default_precision;
+    else if (type == 'r') type = 'g';
+    Buffer re_text = {.ctx = c}, im_text = {.ctx = c}, re_out = {.ctx = c}, im_out = {.ctx = c}, out = {.ctx = c};
+    int status = double_to_string(&re_text, re, type, precision, flags);
+    if (!status) status = double_to_string(&im_text, im, type, precision, flags);
+    FormatSpec inner = *f; inner.fill = 0; inner.align = '<'; inner.width = -1;
+    if (!status && !skip_re) {
+        int negative = re_text.data[0] == '-';
+        status = format_number(&re_out, &inner, 0, negative ? '-' : 0, "", re_text.data + negative, re_text.len - (size_t)negative, -1);
+    }
+    if (!skip_re) inner.sign = '+';
+    if (!status) {
+        int negative = im_text.data[0] == '-';
+        status = format_number(&im_out, &inner, 0, negative ? '-' : 0, "", im_text.data + negative, im_text.len - (size_t)negative, -1);
+    }
+    int64_t len = (int64_t)(re_out.len + im_out.len) + 1 + add_parens * 2;
+    int64_t total = f->width > len ? f->width : len, left = f->align == '>' ? total - len : f->align == '^' ? (total - len) / 2 : 0;
+    if (!status) status = format_fill(&out, f->fill, left);
+    if (!status && add_parens) status = append(&out, "(", 1);
+    if (!status && re_out.len) status = append(&out, re_out.data, re_out.len);
+    if (!status && im_out.len) status = append(&out, im_out.data, im_out.len);
+    if (!status) status = append(&out, add_parens ? "j)" : "j", (size_t)(1 + add_parens));
+    if (!status) status = format_fill(&out, f->fill, total - len - left);
+    free(re_text.data); free(im_text.data); free(re_out.data); free(im_out.data);
+    return format_finish(c, &out, status);
+}
+static SPYValue *format_integer_value(SPYContext *c, SPYValue *value, const FormatSpec *f) {
+    if (f->precision != -1) return spy_error(c, "ValueError", "Precision not allowed in integer format specifier");
+    if (f->no_neg_0) return spy_error(c, "ValueError", "Negative zero coercion (z) not allowed in integer format specifier");
+    Buffer text = {.ctx = c}, out = {.ctx = c};
+    int status;
+    if (f->type == 'c') {
+        if (f->sign) return spy_error(c, "ValueError", "Sign not allowed with integer format specifier 'c'");
+        if (f->alternate) return spy_error(c, "ValueError", "Alternate form (#) not allowed with integer format specifier 'c'");
+        if (value->as.integer_data.big) return spy_error(c, "OverflowError", "Python int too large to convert to C long");
+        int64_t code = value->as.integer_data.small;
+        if (code < 0 || code > 0x10ffff) return spy_error(c, "OverflowError", "%c arg not in range(0x110000)");
+        status = append_codepoint(&text, (unsigned)code);
+        if (!status) status = format_number(&out, f, f->fill, 0, "", text.data, text.len, 0);
+    } else {
+        unsigned base = f->type == 'b' ? 2 : f->type == 'o' ? 8 : f->type == 'x' || f->type == 'X' ? 16 : 10;
+        const char *prefix = f->alternate && base != 10 ? (base == 2 ? "0b" : base == 8 ? "0o" : "0x") : "";
+        status = integer_format(&text, value, base, 0, '-', 0);
+        if (!status) {
+            int negative = text.data[0] == '-';
+            status = format_number(&out, f, f->fill, negative ? '-' : 0, prefix, text.data + negative, text.len - (size_t)negative,
+                                   (int64_t)text.len - negative);
+        }
+    }
+    free(text.data); return format_finish(c, &out, status);
+}
+static SPYValue *format_builtin(SPYContext *c, SPYValue *value, SPYValue *named, SPYValue *spec) {
+    FormatSpec f;
+    if (value->type == SPY_STRING) {
+        if (format_parse(c, named, spec, &f, 's', '<')) return NULL;
+        return f.type == 's' ? format_string_value(c, value, &f) : format_presentation(c, f.type, named);
+    }
+    if (is_int(value)) {
+        if (format_parse(c, named, spec, &f, 'd', '>')) return NULL;
+        if (f.type < 128 && f.type && strchr("bcdoxXn", (int)f.type)) return format_integer_value(c, value, &f);
+        if (f.type < 128 && f.type && strchr("eEfFgG%", (int)f.type)) {
+            double number;
+            return spy_as_float(c, value, &number) ? NULL : format_float_value(c, number, &f);
+        }
+        return format_presentation(c, f.type, named);
+    }
+    if (value->type == SPY_FLOAT) {
+        if (format_parse(c, named, spec, &f, 0, '>')) return NULL;
+        if (!f.type || (f.type < 128 && strchr("eEfFgGn%", (int)f.type))) return format_float_value(c, value->as.real, &f);
+        return format_presentation(c, f.type, named);
+    }
+    if (value->type == SPY_COMPLEX) {
+        if (format_parse(c, named, spec, &f, 0, '>')) return NULL;
+        if (!f.type || (f.type < 128 && strchr("eEfFgGn", (int)f.type)))
+            return format_complex_value(c, creal(value->as.number), cimag(value->as.number), &f);
+        return format_presentation(c, f.type, named);
+    }
+    return errorf(c, "TypeError", "unsupported format string passed to %s.__format__", type_name(named));
+}
 static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
     SPYValue *base = builtin_base(c, value, "__format__", NULL);
-    if (base && (spec->type != SPY_STRING || spec->as.string.len)) return format_spec(c, base, spec);
+    if (base && (spec->type != SPY_STRING || spec->as.string.len)) return format_builtin(c, base, value, spec);
     if (base) return stringify(c, value, 0);
     if (value->type == SPY_INSTANCE) {
         SPYValue *method = special_method(c, value, "__format__");
@@ -5958,105 +6379,7 @@ static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
         if (c->error_type[0]) return NULL;
     }
     if (!spec->as.string.len) return stringify(c, value, 0);
-    const char *s = spec->as.string.data, *end = s + spec->as.string.len, *fill = " ";
-    size_t fill_len = 1, width = 0, precision = 0;
-    int align = 0, sign = '-', alternate = 0, precise = 0, zero = 0, explicit_fill = 0;
-    size_t first = utf8_width((unsigned char)*s);
-    if ((size_t)(end - s) > first && strchr("<>=^", s[first])) {
-        fill = s; fill_len = first; explicit_fill = 1; align = s[first]; s += first + 1;
-    } else if (*s && strchr("<>=^", *s)) align = *s++;
-    if (s < end && *s && strchr("+- ", *s)) sign = *s++;
-    if (s < end && *s == 'z') return spy_error(c, "NotImplementedError", "negative-zero formatting is not implemented");
-    if (s < end && *s == '#') { alternate = 1; s++; }
-    if (s < end && *s == '0') { zero = 1; s++; }
-    while (s < end && isdigit((unsigned char)*s)) {
-        if (width > (SIZE_MAX - 9) / 10) return spy_error(c, "ValueError", "format width too large");
-        width = width * 10 + (unsigned)(*s++ - '0');
-    }
-    if (s < end && (*s == ',' || *s == '_')) return spy_error(c, "NotImplementedError", "grouped number formatting is not implemented");
-    if (s < end && *s == '.') {
-        precise = 1; s++;
-        if (s == end || !isdigit((unsigned char)*s)) return spy_error(c, "ValueError", "Format specifier missing precision");
-        while (s < end && isdigit((unsigned char)*s)) {
-            if (precision > ((size_t)INT_MAX - 9) / 10) return spy_error(c, "ValueError", "format precision too large");
-            precision = precision * 10 + (unsigned)(*s++ - '0');
-        }
-    }
-    if (s < end && !*s) return spy_error(c, "ValueError", "invalid format specifier");
-    int type = s < end ? *s++ : 0;
-    if (s != end) return spy_error(c, "ValueError", "invalid format specifier");
-    SPYValue *text = NULL;
-    size_t prefix = 0;
-    int numeric = is_number(value);
-    if (value->type == SPY_STRING) {
-        if ((type && type != 's') || sign != '-' || alternate || align == '=')
-            return spy_error(c, "ValueError", "invalid string format specifier");
-        size_t bytes = value->as.string.len;
-        if (precise) {
-            bytes = 0;
-            for (size_t i = 0; i < precision && bytes < value->as.string.len; i++)
-                bytes += utf8_width((unsigned char)value->as.string.data[bytes]);
-        }
-        text = spy_string(c, value->as.string.data, bytes);
-    } else if (numeric && value->type != SPY_FLOAT && (!type || strchr("dboxX", type))) {
-        if (precise) return spy_error(c, "ValueError", "Precision not allowed in integer format specifier");
-        unsigned base = type == 'b' ? 2 : type == 'o' ? 8 : type == 'x' || type == 'X' ? 16 : 10;
-        Buffer out = {.ctx = c};
-        if (!integer_format(&out, value, base, type == 'X', sign, alternate)) text = spy_string(c, out.data, out.len);
-        prefix = (integer_sign(value) < 0 || sign != '-') + (alternate && base != 10 ? 2 : 0);
-        free(out.data);
-    } else if (numeric && (!type || strchr("eEfFgG%", type))) {
-        double number;
-        if (spy_as_float(c, value, &number)) return NULL;
-        if (!type && !precise && !alternate) {
-            text = stringify(c, value, 0);
-            if (text && sign != '-' && number >= 0 && !signbit(number)) {
-                Buffer signed_text = {.ctx = c}; char ch = (char)sign;
-                append(&signed_text, &ch, 1); append(&signed_text, text->as.string.data, text->as.string.len);
-                spy_release(text);
-                text = c->error_type[0] ? NULL : spy_string(c, signed_text.data, signed_text.len);
-                free(signed_text.data);
-            }
-        } else {
-            char format[8]; size_t len = 0;
-            format[len++] = '%';
-            if (sign != '-') format[len++] = (char)sign;
-            if (alternate) format[len++] = '#';
-            format[len++] = '.'; format[len++] = '*';
-            format[len++] = (char)(type == '%' ? 'f' : type ? type : 'g'); format[len] = 0;
-            if (type == '%') number *= 100;
-            int count = snprintf(NULL, 0, format, precise ? (int)precision : 6, number);
-            if (count < 0) return spy_error(c, "ValueError", "floating-point formatting failed");
-            char *data = allocate(c, (size_t)count + 4);
-            if (!data) return NULL;
-            snprintf(data, (size_t)count + 1, format, precise ? (int)precision : 6, number);
-            size_t size = (size_t)count;
-            if (!type && !strchr(data, '.') && !strchr(data, 'e') && isfinite(number)) {
-                data[size++] = '.'; data[size++] = '0';
-            }
-            if (type == '%') data[size++] = '%';
-            text = spy_string(c, data, size); free(data);
-        }
-        if (text && text->as.string.len && strchr("+- ", text->as.string.data[0])) prefix = 1;
-    } else return spy_error(c, "TypeError", "unsupported format string for object");
-    if (!text) return NULL;
-    if (!align) align = numeric ? (zero ? '=' : '>') : '<';
-    if (zero && !explicit_fill) fill = "0";
-    size_t length = string_length(text), padding = width > length ? width - length : 0;
-    if (!padding) return text;
-    if (padding > (SIZE_MAX - text->as.string.len) / fill_len) {
-        spy_release(text); return spy_error(c, "MemoryError", "formatted string too large");
-    }
-    Buffer out = {.ctx = c};
-    size_t left = align == '>' || align == '=' ? padding : align == '^' ? padding / 2 : 0;
-    if (align == '=') append(&out, text->as.string.data, prefix);
-    for (size_t i = 0; i < left && !c->error_type[0]; i++) append(&out, fill, fill_len);
-    size_t offset = align == '=' ? prefix : 0;
-    append(&out, text->as.string.data + offset, text->as.string.len - offset);
-    for (size_t i = left; i < padding && !c->error_type[0]; i++) append(&out, fill, fill_len);
-    spy_release(text);
-    SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data, out.len);
-    free(out.data); return result;
+    return format_builtin(c, value, value, spec);
 }
 static SPYValue *convert_field(SPYContext *c, SPYValue *value, int conversion) {
     return conversion == 'a' ? ascii_repr(c, value) :

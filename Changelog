@@ -142,3 +142,6 @@
 - Complete printf-style % formatting for str, bytes, and bytearray, ported
   from CPython's formatter with its 3.15 diagnostics. Sequence subscripts
   report CPython's per-type TypeError and IndexError messages.
+- Format-spec mini-language ported from CPython's unicode_formatter.c and
+  short float repr: grouping (including fractional), z, n, c, complex specs,
+  Unicode fill and width digits, and CPython's error messages.
