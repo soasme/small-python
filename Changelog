@@ -208,3 +208,6 @@
 - sys._getframe frames with write-through FrameLocalsProxy f_locals,
   sys._getframemodulename, types.FrameType, type.__subclasses__, and a
   built-in _weakref module.
+- memoryview over bytes, bytearray and __buffer__ objects, with native
+  formats, casts, slicing and bytearray export locking; bytes consumers
+  accept buffers.

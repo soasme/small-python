@@ -225,10 +225,10 @@ remaining coverage gaps. `make test-cpython-doctests` is strict about the curren
 ports; `make test-cpython` additionally requires closing the full inventory.
 Both strict upstream targets currently fail.
 
-`make test-cpython-unittest` passes all 180 cases in twelve unchanged modules:
+`make test-cpython-unittest` passes all 192 cases in thirteen unchanged modules:
 decorators, augmented assignments, integer literals, unary operators, keyword-only
 arguments, assignment expressions, large expressions, Unicode identifiers, exception
-variations, type checks, subclass initialization, and UTF-8 source.
+variations, type checks, subclass initialization, UTF-8 source, and binary operators.
 It also checks all 99 executed subtests
 against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
@@ -319,7 +319,7 @@ edition, engine release, and upstream test revisions are separate identifiers.
 
 | Area | Implemented subset |
 | --- | --- |
-| Values | `None`, `NotImplemented`, `Ellipsis`, booleans, arbitrary-precision integers, doubles, complex numbers, bytes, UTF-8 strings, lists, tuples, dictionaries/frozendicts, sets/frozensets, bytearrays, ranges, functions, modules, basic classes/instances |
+| Values | `None`, `NotImplemented`, `Ellipsis`, booleans, arbitrary-precision integers, doubles, complex numbers, bytes, UTF-8 strings, lists, tuples, dictionaries/frozendicts, sets/frozensets, bytearrays, memoryviews, ranges, functions, modules, basic classes/instances |
 | Expressions | Arithmetic, bit operations, comparisons/chains, boolean operators, conditionals, calls, indexing/slicing, lambdas, assignment expressions |
 | Template strings | `t`/`rt`/`tr` literals, native Template and Interpolation values, raw values and expression spelling, conversion metadata, evaluated format specifications, concatenation and iteration |
 | Control flow | `if`/`elif`/`else`, `while`, `for`, loop `else`, `break`, `continue`, `return`, `assert`, `pass`, basic `with` |
@@ -387,8 +387,16 @@ Parenthesized manager lists work for synchronous and asynchronous managers. Buil
 signatures are partial; most builtins reject keyword arguments. Bytes support
 literals, sequence operations, integer/iterable construction, and string/bytes
 method families. Bytearray methods include `resize` and Python 3.15's `take_bytes`; bounds and
-storage are rechecked after conversion callbacks. Buffer exports and CPython's
-allocation introspection remain unsupported. Encoding and decoding support a limited set of codecs;
+storage are rechecked after conversion callbacks. `memoryview` wraps bytes,
+bytearrays, other views, and objects with `__buffer__`. It supports native
+struct formats (including `e`, `?`, and `P`) and `cast` between 1-D and N-D
+shapes. Indexing, slicing, item assignment, comparison, hashing, `tolist`,
+`tobytes`, `hex`, `toreadonly`, `release`, and the context-manager protocol
+are provided. Bytes consumers accept views. A bytearray with live exports
+refuses to resize, and raises CPython's `BufferError`. `bytes` and `bytearray`
+expose `__buffer__`. Struct-module formats beyond native single items,
+multi-dimensional sub-views, and CPython's allocation introspection remain
+unsupported. Encoding and decoding support a limited set of codecs;
 the standard-library codec registry is unavailable. Iterator types
 are not yet distinguished completely by `type()`. Syntax errors for parameter
 lists, assignment, deletion, loop, `with`, and keyword-argument targets, `assert`

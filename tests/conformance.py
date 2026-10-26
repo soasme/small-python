@@ -1194,6 +1194,37 @@ except StopIteration: pass
 lam = lambda a: a
 print(lam(3))
 """,
+    r"""
+m = memoryview(b"abcdef")
+print(len(m), m[1], bytes(m[1:3]), m.tolist()[:3], m.readonly, m.format, m.itemsize, m.shape, m.strides, m[-1])
+print(m == b"abcdef", m.hex(), bytes(m[::2]), hash(memoryview(b"ab")) == hash(b"ab"), repr(m)[:12])
+ba = bytearray(b"hello")
+v = memoryview(ba)
+v[0] = 72; v[1:3] = b"EL"
+print(ba, b"x" + v, b"-".join([v, b"z"]), str(v, "ascii"), b"HEllo".startswith((b"q", v[:2])))
+for mutate in (lambda: ba.append(1), lambda: ba.pop(), lambda: ba.extend(b"ab"), lambda: ba.clear()):
+    try: mutate()
+    except BufferError as e: print("BufferError", e)
+ba[0] = 104; print(v[0])
+v.release(); ba.append(33); print(ba)
+try: v[0]
+except ValueError as e: print(e)
+c = memoryview(b"\x01\x00\x02\x00\x03\x00\x04\x00").cast("H")
+print(c.tolist(), c.format, c.nbytes, len(c), c.cast("B").tolist(), c.cast("B", (2, 4)).tolist())
+with memoryview(bytearray(b"q")) as q: print(q[0], q.toreadonly().readonly, q.obj)
+try: memoryview(b"ab")[0] = 1
+except TypeError as e: print(e)
+try: memoryview(bytearray(b"ab"))[0] = 300
+except ValueError as e: print(e)
+try: memoryview("text")
+except TypeError as e: print(e)
+r = bytearray(b"rw").__buffer__(0); print(type(r).__name__, r.readonly)
+try: b"ro".__buffer__(1)
+except BufferError as e: print(e)
+class B:
+    def __buffer__(self, flags): return memoryview(b"custom")
+print(bytes(memoryview(B())))
+""",
 ]
 CASES += [
     "print(', '.join(str(i) for i in range(4))); print('a%d:%s:%r:%%' % (3, 'x', 'y'))",
