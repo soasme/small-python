@@ -30,9 +30,14 @@ run the equivalent command directly.
   The exceptions are the minimal built-in modules `_thread` (the engine's
   single thread), `_typing` (the intrinsic typing objects), `gc`, `collections` (a package
   whose `abc` aliases the host's `_collections_abc`, as in CPython), `itertools`, `sys`,
-  `types`, and `weakref` (with its primitive half `_weakref`) (later `math` and `abc`): Python sources in `modules/`, embedded by
+  `types`, and `weakref` (with its primitive half `_weakref`): Python sources in `modules/`, embedded by
   `tools/build_intrinsics.py`, found before the host loader, and parsed only
   on first import. Their private primitives (weak table, caller module) are C.
+- Work on the language core, not the library. Do not add further standard
+  library modules (`math`, `_struct`, `_sre`, `os`, `array`, ...), even when a
+  CPython test imports one; skip tests that are blocked only by a missing
+  module and raise pass rates by fixing core semantics instead. Add a module
+  only when the user explicitly asks for it.
 - Cache at most one released tuple allocation for each length zero through
   eight inside its owning context. Cached storage owns no element references,
   is excluded from the live-value graph, and is freed during context shutdown.

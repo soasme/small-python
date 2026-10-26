@@ -657,7 +657,8 @@ static double integer_double(SPYValue *value) {
     return view.sign * ldexp((double)top, (int)shift);
 }
 static SPYValue *integer_from_double(SPYContext *c, double number) {
-    if (!isfinite(number)) return spy_error(c, isnan(number) ? "ValueError" : "OverflowError", "cannot convert non-finite float to integer");
+    if (isnan(number)) return spy_error(c, "ValueError", "cannot convert float NaN to integer");
+    if (isinf(number)) return spy_error(c, "OverflowError", "cannot convert float infinity to integer");
     if (number >= -9223372036854775808.0 && number < 9223372036854775808.0) return spy_int(c, (int64_t)number);
     int exponent;
     double fraction = frexp(fabs(number), &exponent);
@@ -5622,13 +5623,20 @@ static SPYValue *slice_new(SPYContext *c, SPYValue *start, SPYValue *stop, SPYVa
     return v;
 }
 static SPYValue *index_object(SPYContext *c, SPYValue *value) {
-    if (is_int(value)) return value->type == SPY_BOOL ? spy_int(c, value->as.integer_data.small) : spy_retain(value);
+    /* PyNumber_Index: ints and their subclasses are used directly. */
+    SPYValue *integer = builtin_value(c, value, SPY_INT);
+    if (integer) return integer->type == SPY_BOOL ? spy_int(c, integer->as.integer_data.small) : spy_retain(integer);
     SPYValue *method = special_method(c, value, "__index__");
     if (!method) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(value));
     SPYValue *index = spy_call(c, method, 0, NULL);
     spy_release(method);
-    if (index && !is_int(index)) {
-        spy_release(index); return spy_error(c, "TypeError", "__index__ returned non-int");
+    if (index && !(integer = builtin_value(c, index, SPY_INT))) {
+        errorf(c, "TypeError", "%s.__index__() must return an int, not %s", type_name(value), type_name(index));
+        spy_release(index); return NULL;
+    }
+    if (index && integer != index) {
+        SPYValue *exact = integer->type == SPY_BOOL ? spy_int(c, integer->as.integer_data.small) : spy_retain(integer);
+        spy_release(index); index = exact;
     }
     return index;
 }
@@ -6233,9 +6241,24 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
             v = a->type == SPY_BYTEARRAY ? bytearray_new(c, out.data, out.len) : spy_bytes(c, out.data, out.len);
         free(out.data); spy_release(copy); return v;
     }
-    if (op == '*' && is_int(a)) { SPYValue *tmp = a; a = b; b = tmp; }
     int sequence = a->type == SPY_LIST || a->type == SPY_TUPLE;
     int text = a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY;
+    if (op == '*' && !sequence && !text) {
+        SPYValue *tmp = a; a = b; b = tmp;
+        sequence = a->type == SPY_LIST || a->type == SPY_TUPLE;
+        text = a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY;
+    }
+    if (op == '*' && (sequence || text) && !is_int(b)) {
+        /* sq_repeat takes any object with __index__. */
+        SPYValue *method = special_dispatch(b) ? special_method(c, b, "__index__") : NULL;
+        if (!method) {
+            if (c->error_type[0]) return NULL;
+            return errorf(c, "TypeError", "can't multiply sequence by non-int of type '%s'", type_name(b));
+        }
+        spy_release(method);
+        SPYValue *count = index_object(c, b), *result = count ? sequence_binary(c, op, a, count) : NULL;
+        spy_release(count); return result;
+    }
     if (op == '+' && a->type == b->type && (sequence || text)) {
         if (text) {
             Buffer out = { .ctx = c };
@@ -6254,7 +6277,7 @@ seq_fail:
         spy_release(v); return NULL;
     }
     if (op == '*' && is_int(b) && (sequence || text)) {
-        if (b->as.integer_data.big) return spy_error(c, "OverflowError", "cannot fit integer into an index-sized value");
+        if (b->as.integer_data.big) return errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(b));
         uint64_t count = b->as.integer_data.small < 0 ? 0 : (uint64_t)b->as.integer_data.small;
         size_t len = sequence ? a->as.seq.len : a->as.string.len;
         if (!len) count = 0;
@@ -17697,7 +17720,7 @@ execution_fail:
     if (id == B_INT || id == B_FLOAT) {
         if (argc > (id == B_INT ? 2u : 1u)) goto arity;
         if (!argc) return id == B_INT ? spy_int(c, 0) : spy_float(c, 0);
-        SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", "__index__");
+        SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", NULL);
         if (base && (base->type == SPY_STRING || base->type == SPY_BYTES || is_number(base))) a = base;
         if (id == B_INT && (a->type == SPY_STRING || a->type == SPY_BYTES || argc == 2)) {
             if (a->type != SPY_STRING && a->type != SPY_BYTES) return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
@@ -18362,6 +18385,16 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (argc < 1 || argc > 2) return errorf(c, "TypeError", "expected 1 or 2 arguments, got %zu", argc);
     } else if (argc != expected) return errorf(c, "TypeError", "expected %zu argument%s, got %zu", expected, expected == 1 ? "" : "s", argc);
     SPYValue *other = argc ? operand_value(c, argv[0]) : NULL;
+    if ((op == '*' || op == T_MULEQ) && (kind == SLOT_BINARY || kind == SLOT_RBINARY || kind == SLOT_INPLACE) &&
+        (type == SPY_LIST || type == SPY_TUPLE || type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY)) {
+        /* sq_repeat and sq_inplace_repeat wrappers: the count is any index. */
+        SPYValue *count = index_object(c, argv[0]), *result;
+        if (!count) return NULL;
+        result = kind == SLOT_INPLACE ? inplace(c, op, value, count) : binary(c, '*', value, count);
+        spy_release(count);
+        if (result && result == value && value != self) { spy_release(result); result = spy_retain(self); }
+        return result;
+    }
     switch (kind) {
     case SLOT_BINARY: case SLOT_RBINARY:
         if (!slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);

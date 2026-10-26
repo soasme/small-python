@@ -3842,6 +3842,27 @@ for src in ['A[*(1:2)]', 'A[*]', 'f(**x, *)', 'f(x = 5, *:)', 'f(**x, *y)', 'f(a
     except SyntaxError as e: print(repr(src), e.msg)
 """)
 
+CASES.append(r"""
+# Sequence repetition and slicing take any __index__; int subclasses index directly.
+class N:
+    def __init__(self, i): self.i = i
+    def __index__(self): return self.i
+class T(int):
+    def __index__(self): return int(self)
+class B:
+    def __index__(self): return 'x'
+def t(f):
+    try: print(repr(f()))
+    except Exception as e: print(type(e).__name__, e)
+for seq in ([1, 2], (1, 2), 'ab', b'ab', bytearray(b'ab')):
+    t(lambda: seq * N(2)); t(lambda: N(2) * seq); t(lambda: seq.__mul__(N(2))); t(lambda: seq.__rmul__(N(2)))
+    t(lambda: seq * 2.0); t(lambda: seq.__mul__(2.0))
+l = [1]; l *= N(3); print(l, l.__imul__(N(1)) is l)
+r = list(range(10))
+t(lambda: r[T(5):T(10)]); t(lambda: slice(T()).indices(0)); t(lambda: slice(B()).indices(0)); t(lambda: r[B()])
+t(lambda: int(T(5))); t(lambda: 'abc' * 10**30)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),

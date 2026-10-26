@@ -223,3 +223,6 @@
 - Built-in gc and _typing modules; __get__ on functions, methods and method
   descriptors; builtin slots take MRO precedence over later Python bases.
 - isinstance/issubclass follow CPython's abstract __bases__ protocol.
+- Sequence repetition (operators and the __mul__/__rmul__/__imul__ wrappers)
+  accepts any __index__ object; int subclasses index directly, as
+  PyNumber_Index; CPython's int-conversion and bad-__index__ messages.
