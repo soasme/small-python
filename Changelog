@@ -216,3 +216,4 @@
 - ImportError name/path/name_from/msg, AttributeError name/obj and NameError
   name, filled by failed lookups; CPython's unbound-local and from-import
   messages.
+- Built-in itertools module following CPython's C implementation.

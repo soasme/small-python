@@ -538,12 +538,14 @@ module bind the attribute directly. The global lazy-import filter and
 
 ### 3.3 Standard library and host services
 
-Four minimal standard-library modules are built in: `collections`, `sys`,
-`types`, and `weakref`, with `_weakref` as the primitive half of `weakref`. Their Python sources live in `modules/` and are embedded into
+Five minimal standard-library modules are built in: `collections`, `itertools`,
+`sys`, `types`, and `weakref`, with `_weakref` as the primitive half of `weakref`. Their Python sources live in `modules/` and are embedded into
 `spy-intrinsics.h`; an import finds them before the host loader, needs no
 loader, and parses them only on first use. `collections` provides `deque`,
 `defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
 `UserList`, and `UserString` (the last six are CPython's own Python code).
+`itertools` provides all of CPython 3.15's iterator types, with its argument
+checks and messages; the tee buffer and `_grouper` follow the C module.
 `collections` is a package. As in CPython 3.15, `collections.abc` is the
 standard library's `_collections_abc`, which the host loader supplies on first
 use. `types` names the engine's builtin types and

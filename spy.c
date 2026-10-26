@@ -9912,6 +9912,7 @@ static const struct { const char *name; const char *const *source; size_t lines;
     BUILTIN_MODULE("_weakref", module__weakref, NULL, 0),
     BUILTIN_MODULE("collections", module_collections, collections_natives, 1),
     BUILTIN_MODULE("collections.abc", module_collections_abc, NULL, 0),
+    BUILTIN_MODULE("itertools", module_itertools, NULL, 0),
     BUILTIN_MODULE("sys", module_sys, sys_natives, 0),
     BUILTIN_MODULE("types", module_types, NULL, 0),
     BUILTIN_MODULE("weakref", module_weakref, weakref_natives, 0),

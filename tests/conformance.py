@@ -1285,6 +1285,34 @@ print(m.ab, getattr(m, "cd"), hasattr(m, "q"))
 m.__getattr__ = 5
 try: m.y
 except TypeError as e: print(e)
+""",    r"""
+def chain_ga(): return 1
+import itertools as it
+def t(f):
+    try: print(repr(f()))
+    except Exception as e: print(type(e).__name__+':', e)
+L = list
+for f in [lambda: it.count('a'), lambda: repr(it.count()), lambda: repr(it.count(1,1.0)), lambda: repr(it.count(1.5)), lambda: repr(it.count(2,3)),
+          lambda: L(it.islice(it.count(3, 2), 4)), lambda: repr(it.repeat(1)), lambda: repr(it.repeat(1, -2)), lambda: it.repeat(1,3).__length_hint__(), lambda: it.repeat(1).__length_hint__(),
+          lambda: it.repeat(1,'a'), lambda: it.batched('abc', 0), lambda: L(it.batched('abc', 2, strict=True)), lambda: L(it.batched('abcde', 2)), lambda: it.chain(x=1), lambda: it.cycle(1),
+          lambda: L(it.islice(it.cycle('ab'), 5)), lambda: it.islice('a', -1), lambda: it.islice('a', 'x'), lambda: it.islice('a', 1, 'x'), lambda: it.islice('a', 0, 1, 0), lambda: it.islice('a'), lambda: it.islice('a',1,2,3,4),
+          lambda: L(it.islice('abcdefg', 1, None, 2)), lambda: L(it.islice('abcdefg', 2, 5)), lambda: L(it.islice('abc', None)),
+          lambda: it.tee('a', -1), lambda: it.combinations('a', -1), lambda: it.permutations('a', -1), lambda: it.permutations('a', 'x'), lambda: it.product('a', repeat=-1),
+          lambda: type(it.tee('a')[0]), lambda: [L(x) for x in it.tee('abc', 3)],
+          lambda: it.groupby(1), lambda: type(next(it.groupby('a'))[1]), lambda: [(k, L(g)) for k, g in it.groupby('aabbbca')], lambda: [k for k, g in it.groupby([1,1,2,3,3], key=lambda x: x % 2)],
+          lambda: it.starmap(1, 2), lambda: L(it.starmap(pow, [(2,3),(3,2)])), lambda: L(it.starmap(pow, [1])), lambda: L(it.compress('abcd', [1,0,1,0])),
+          lambda: L(it.chain.from_iterable(['ab', 'cd'])), lambda: L(it.chain(1)), lambda: L(it.pairwise('abcd')), lambda: it.filterfalse(1), lambda: L(it.filterfalse(None,[0,1])),
+          lambda: it.count.__module__, lambda: it.count.__name__, lambda: it.chain.__mro__, lambda: it.batched('a', 1.5),
+          lambda: it.repeat(), lambda: it.repeat(1, times=2), lambda: it.combinations('abc'), lambda: L(it.combinations('abcd', 2)), lambda: L(it.combinations_with_replacement('ab', 2)), lambda: L(it.permutations('abc', 5)),
+          lambda: L(it.permutations('abc')), lambda: L(it.permutations(range(3), 2)), lambda: L(it.product('ab', range(2))), lambda: L(it.product('ab', repeat=2)), lambda: L(it.product()),
+          lambda: it.tee('a', 0), lambda: L(it.zip_longest('ab','c', fillvalue='-')), lambda: it.dropwhile(1), lambda: it.takewhile(1,2,3), lambda: it.islice(1, 2),
+          lambda: L(it.dropwhile(lambda x: x < 3, [1,4,1])), lambda: L(it.takewhile(lambda x: x < 3, [1,2,4,1])),
+          lambda: L(it.accumulate([1,2,3])), lambda: L(it.accumulate('abc')), lambda: L(it.accumulate([], initial=5)), lambda: L(it.accumulate([1,2,3], max, initial=2)), lambda: it.cycle(), lambda: it.pairwise(),
+          lambda: L(it.combinations_with_replacement('', 0)), lambda: L(it.combinations_with_replacement('', 1)), lambda: L(it.combinations('', 0)), lambda: chain_ga(), lambda: it.chain[int],
+          ]:
+    t(f)
+class Sub(it.chain): pass
+print(list(Sub("ab", "c")), type(it.chain()).__module__, it.repeat.__name__)
 """,
 ]
 CASES += [
