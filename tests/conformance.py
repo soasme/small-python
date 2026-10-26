@@ -2507,6 +2507,10 @@ x = 5
 match x:
     case 1: pass
     case y: print("captured", y)
+match w := x,:
+    case (5,): print("walrus subject", w)
+match *[x], w := 3:
+    case (5, 3): print("starred subject", w)
 def gen(items):
     for item in items:
         match item:

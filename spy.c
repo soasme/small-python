@@ -3677,13 +3677,14 @@ static Node *expression_mode(Parser *p, int min, int named) {
 }
 static Node *expression(Parser *p, int min) { return expression_mode(p, min, 1); }
 static Node *plain_expression(Parser *p, int min) { return expression_mode(p, min, 0); }
-/* Commas belong to the enclosing grammar, not the precedence parser. */
-static Node *expression_list(Parser *p, int min) {
+/* Commas belong to the enclosing grammar, not the precedence parser. Named
+ * items (star_named_expressions) allow an unparenthesized walrus. */
+static Node *expression_items(Parser *p, int min, int named) {
     Node *first;
     if (take(p, '*')) {
         first = node(p, N_STAR);
         if (!first || !(first->a = expression(p, 4))) return NULL;
-    } else first = plain_expression(p, min);
+    } else first = expression_mode(p, min, named);
     if (!first || !take(p, ',')) return first;
     Node *tuple = node(p, N_TUPLE);
     if (!tuple) return NULL;
@@ -3695,13 +3696,14 @@ static Node *expression_list(Parser *p, int min) {
         if (take(p, '*')) {
             item = node(p, N_STAR);
             if (!item || !(item->a = expression(p, 4))) return NULL;
-        } else item = plain_expression(p, min);
+        } else item = expression_mode(p, min, named);
         if (!item) return NULL;
         *tail = item; tail = &item->next;
         if (!take(p, ',')) break;
     }
     return tuple;
 }
+static Node *expression_list(Parser *p, int min) { return expression_items(p, min, 0); }
 static int target(Parser *p, Node *n) {
     if (n->kind == N_NAME || n->kind == N_INDEX || n->kind == N_ATTR) return 1;
     if (n->kind == N_STAR) { syntax(p, "starred assignment target must be in a list or tuple"); return 0; }
@@ -4322,7 +4324,7 @@ static Node *match_statement(Parser *p) {
     if (!n) return NULL;
     p->pos++;
     size_t line = keyword_line(p);
-    if (!(n->a = expression_list(p, 0))) return NULL;
+    if (!(n->a = expression_items(p, 0, 1))) return NULL;
     if (!expect(p, ':', at(p, T_NL) ? "expected ':'" : "invalid syntax") || !expect(p, T_NL, "invalid syntax")) return NULL;
     while (take(p, T_NL)) {}
     if (!take(p, T_INDENT)) return missing_block(p, "'match' statement", line);

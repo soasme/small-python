@@ -254,3 +254,4 @@
   extension embedding the engine. Runtime eval/exec/call, globals as items,
   Python callables as host functions with keywords, registered modules,
   Object wrappers, value conversion, and exception mapping both ways.
+- match subjects accept unparenthesized walrus items (match w := x, :).
