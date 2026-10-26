@@ -773,8 +773,17 @@ iterators, slice components, and suspended generator operands, environments,
 delegates, and cleanup records, participate.
 Dead objects remain allocated while their edges are inspected. Context teardown
 can free storage directly because it invalidates every value at once.
-Python finalizers and automatic generator closing are not implemented; callers
-must explicitly close generators whose cleanup must run.
+An instance whose class defines `__del__` is not freed when its last reference
+is released or when the collector finds it unreachable. Instead it is queued,
+kept alive by the queue, and marked as finalized. Its `__del__` runs at the next
+statement boundary or when the top-level program finishes, before any weak
+reference callbacks. Exceptions raised by `__del__` are discarded, because there
+is no error stream. Afterwards the instance is freed unless the finalizer
+resurrected it, and `__del__` never runs twice for the same object.
+`gc.collect()` collects again after running finalizers, so cyclic garbage with
+`__del__` is freed in the same call. Context teardown never runs finalizers.
+Automatic generator closing is not implemented; callers must explicitly close
+generators whose cleanup must run.
 
 ### 4.5 Calls and scopes
 

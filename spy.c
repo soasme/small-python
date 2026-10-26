@@ -53,6 +53,7 @@ struct SPYValue {
     size_t refs, trial;
     int type;
     unsigned char marked, weak; /* weak: a weak-table entry names this value. */
+    unsigned char finalized; /* __del__ has been queued for this instance. */
     union {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
@@ -114,6 +115,11 @@ struct SPYContext {
     size_t weak_len, weak_cap;
     SPYValue **weak_calls;
     size_t weak_calls_len, weak_calls_cap;
+    /* Instances whose last reference died while their class defines __del__.
+     * The queue owns each one until its finalizer runs at the next statement
+     * boundary, after which an unresurrected instance is freed. */
+    SPYValue **finalize_calls;
+    size_t finalize_calls_len, finalize_calls_cap;
     int weak_running;
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
@@ -488,11 +494,20 @@ static void release_edge(SPYValue *v, void *data) {
     if (--v->refs == 0) { v->pending = *pending; *pending = v; }
 }
 static void memory_unexport(SPYValue *);
+/* Keep a dying instance alive for its __del__, once per object. */
+static int finalize_later(SPYValue *v) {
+    if (v->type != SPY_INSTANCE || v->finalized || !class_lookup(v->as.map.parent, "__del__")) return 0;
+    SPYContext *c = v->ctx;
+    if (weak_push(&c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
+    v->finalized = 1;
+    return 1;
+}
 void spy_release(SPYValue *v) {
     SPYValue *pending = NULL;
     if (v) release_edge(v, &pending);
     while (pending) {
         v = pending; pending = v->pending;
+        if (finalize_later(v)) { v->refs = 1; continue; }
         if (v->type == SPY_MEMORYVIEW) memory_unexport(v);
         edges(v, release_edge, &pending);
         free_value(v);
@@ -517,6 +532,12 @@ size_t spy_collect(SPYContext *c) {
     for (SPYValue *v = c->values; v; v = v->next) if (v->trial) mark_edge(v, &work);
     for (size_t i = 0; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     free(work.items);
+    /* Unreachable instances with __del__ are finalized first; the garbage is
+     * freed by a later collection unless a finalizer resurrected it. */
+    int finalizing = 0;
+    for (SPYValue *v = c->values; v; v = v->next)
+        if (!v->marked && finalize_later(v)) { v->refs++; finalizing = 1; }
+    if (finalizing) return 0;
     /* Inspect edges while every dead object still exists, then free storage. */
     for (SPYValue *v = c->values; v; v = v->next) {
         if (!v->marked && v->weak) weak_dead(c, v, 1);
@@ -9416,7 +9437,7 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
 static void weak_callbacks(SPYContext *);
 static int tick(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
-    if (c->weak_calls_len) weak_callbacks(c);
+    if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
     if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
     snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
@@ -10362,12 +10383,21 @@ static SPYValue *weak_refs(SPYContext *c, size_t argc, SPYValue *const *argv, vo
             if (c->weak[i].target == argv[0] && spy_list_append(c, list, c->weak[i].ref)) { spy_release(list); list = NULL; }
     return list;
 }
-/* Run callbacks of references whose targets died, at a statement boundary.
- * CPython reports their exceptions as unraisable; spy has no error stream, so
- * they are discarded without disturbing the interrupted code. */
+/* Run __del__ of dead instances, then callbacks of references whose targets
+ * died, at a statement boundary. CPython reports their exceptions as
+ * unraisable; spy has no error stream, so they are discarded without
+ * disturbing the interrupted code. */
 static void weak_callbacks(SPYContext *c) {
     if (c->weak_running) return;
     c->weak_running = 1;
+    while (c->finalize_calls_len) {
+        SPYValue *self = c->finalize_calls[0];
+        memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+        SPYValue *method = special_method(c, self, "__del__");
+        if (method) spy_release(spy_call(c, method, 0, NULL));
+        if (c->error_type[0]) spy_clear_error(c);
+        spy_release(method); spy_release(self);
+    }
     while (c->weak_calls_len) {
         SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
         memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
@@ -10430,7 +10460,16 @@ static void gc_referent(SPYValue *v, void *data) {
 }
 static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
-    if (id == GC_COLLECT) return spy_int(c, (int64_t)spy_collect(c));
+    if (id == GC_COLLECT) {
+        /* A pass that finds garbage with __del__ only finalizes it; collect
+         * again to free what the finalizers left unreachable. */
+        size_t count = spy_collect(c);
+        while (c->finalize_calls_len && !c->weak_running) {
+            weak_callbacks(c);
+            count += spy_collect(c);
+        }
+        return spy_int(c, (int64_t)count);
+    }
     if (id == GC_TRACKED) {
         if (argc != 1) return errorf(c, "TypeError", "is_tracked() takes exactly one argument (%zu given)", argc);
         return spy_bool(c, gc_tracked(c, argv[0]));
@@ -19319,7 +19358,7 @@ void spy_context_free(SPYContext *c) {
      * shutdown cannot recurse through an arbitrarily deep object graph. */
     c->weak_len = 0;
     while (c->values) free_value(c->values);
-    free(c->weak); free(c->weak_calls); free(c->frames);
+    free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->frames);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     free(c);
 }
@@ -19334,6 +19373,8 @@ static SPYValue *eval_source(SPYContext *c, const char *source, const char *file
     Frame frame = {c->globals, unit, interactive};
     Result result = execute_module(c, &frame);
     spy_release(unit);
+    /* Deaths in the last statement have no later statement boundary. */
+    if (result.flow != FLOW_ERROR && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
     if (result.flow == FLOW_ERROR) { spy_release(result.value); return NULL; }
     return result.value ? result.value : spy_none(c);
 }

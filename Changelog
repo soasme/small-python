@@ -231,3 +231,5 @@
   whitespace and comments.
 - Closure cells: __closure__, co_freevars/co_cellvars, types.CellType;
   global declarations in nested scopes make the module-level name global.
+- __del__ finalizers run once, after release or collection, at the next
+  statement boundary; resurrection is honored and exceptions are discarded.

@@ -3911,6 +3911,40 @@ exec("def f():\n y = 1\n def g():\n  global y\n  return y\n def h(): return y + 
 print(loc['r'], glob['y'], 'y' in loc)
 """)
 
+CASES.append(r"""
+# __del__ finalizers: release, exceptions discarded, resurrection, cycles, int subclasses, and order.
+import gc
+class A:
+    def __del__(self): print('del', type(self).__name__)
+a = A(); del a
+print('after')
+class B:
+    def __del__(self): 1/0
+b = B(); del b
+print('after B')
+keep = []
+class R:
+    def __del__(self): print('resurrect'); keep.append(self)
+r = R(); del r
+print(len(keep)); keep.clear(); print('cleared')
+class C:
+    def __del__(self): print('cycle del')
+x = C(); x.self = x; del x
+print(gc.collect() >= 1)
+class S(int):
+    def __del__(self): print('int sub del', int(self))
+s = S(5); s = None
+def f():
+    try: raise KeyError('k')
+    except KeyError:
+        t = A(); del t
+        print(repr(__import__('sys').exception()))
+f()
+l = [A(), A()]; l.clear(); print('end')
+z = A()
+del z
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),
