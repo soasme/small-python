@@ -344,7 +344,7 @@ def main():
             args.driver.resolve(), args.module or ["test.test_decorators", "test.test_augassign", "test.test_int_literal",
                                                   "test.test_unary", "test.test_keywordonlyarg", "test.test_named_expressions",
                                                   "test.test_longexp", "test.test_unicode_identifiers", "test.test_exception_variations",
-                                                  "test.test_typechecks", "test.test_subclassinit"])
+                                                  "test.test_typechecks", "test.test_subclassinit", "test.test_utf8source"])
         for entry in report["files"]:
             cases = [case for case in report["cases"] if case["file"] == entry["file"]]
             if cases:

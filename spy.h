@@ -27,7 +27,8 @@ typedef enum {
 typedef SPYValue *(*SPYNative)(SPYContext *, size_t, SPYValue *const *, void *);
 typedef int (*SPYWrite)(void *, const char *, size_t);
 typedef int (*SPYFlush)(void *);
-/* Return malloc-allocated source, or NULL if absent. The runtime frees source.
+/* Return malloc-allocated, NUL-terminated source bytes, or NULL if absent.
+ * The runtime decodes encoding declarations and frees source.
  * For a module "pkg.mod", it probes "pkg.mod.__init__" (package) first,
  * then "pkg.mod". The host controls search paths and source storage. */
 typedef char *(*SPYModuleLoader)(void *, const char *);
@@ -46,7 +47,8 @@ void spy_set_step_limit(SPYContext *, size_t);
 size_t spy_collect(SPYContext *);
 size_t spy_live_values(const SPYContext *);
 
-/* eval returns the final expression (or None); exec returns 0 or -1.
+/* Source is NUL-terminated encoded bytes (UTF-8 unless declared otherwise).
+ * eval returns the final expression (or None); exec returns 0 or -1.
  * All returned SPYValue pointers are owned; NULL indicates an error.
  * A new evaluation clears the previous error, but preserves globals. */
 SPYValue *spy_eval(SPYContext *, const char *source, const char *filename);

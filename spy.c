@@ -2227,7 +2227,7 @@ imaginary:
     return number_end(s) ? s : number_error(p, s, line, "invalid decimal literal");
 }
 static int lex(Parser *p, const char *s) {
-    size_t line = 1, indents[128] = {0}, level = 0, brackets = 0;
+    size_t line = 1, indents[128] = {0}, altindents[128] = {0}, level = 0, brackets = 0;
     const char *end = s + strlen(s);
     for (const char *ch = s; ch < end;) {
         size_t width;
@@ -2248,19 +2248,20 @@ static int lex(Parser *p, const char *s) {
     int bol = 1;
     while (*s) {
         if (bol && !brackets) {
-            size_t indent = 0;
-            while (*s == ' ' || *s == '\t') {
-                if (*s++ == '\t') {
-                    p->ctx->line = line;
-                    spy_error(p->ctx, "TabError", "tabs in indentation are not supported; use spaces");
-                    return -1;
-                }
-                indent++;
+            /* CPython checks both eight-column and one-column tab stops. */
+            size_t indent = 0, alternate = 0;
+            while (*s == ' ' || *s == '\t' || *s == '\f') {
+                if (*s == '\t') { indent = (indent / 8 + 1) * 8; alternate++; }
+                else if (*s == '\f') indent = alternate = 0;
+                else { indent++; alternate++; }
+                s++;
             }
             if (*s && *s != '#' && *s != '\n' && *s != '\r') {
                 if (indent > indents[level]) {
                     if (level == 127) goto nesting;
+                    if (alternate <= altindents[level]) goto tab_error;
                     indents[++level] = indent;
+                    altindents[level] = alternate;
                     if (token_add(p, T_INDENT, s, 0, line)) return -1;
                 } else {
                     while (indent < indents[level]) {
@@ -2272,12 +2273,13 @@ static int lex(Parser *p, const char *s) {
                         spy_error(p->ctx, "IndentationError", "unindent does not match any outer indentation level");
                         return -1;
                     }
+                    if (alternate != altindents[level]) goto tab_error;
                 }
             }
             bol = 0;
         }
         if (!*s) break;
-        if (*s == ' ' || *s == '\t' || *s == '\r') { s++; continue; }
+        if (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\f') { s++; continue; }
         if (*s == '#') { while (*s && *s != '\n') s++; continue; }
         if (*s == '\\' && (s[1] == '\n' || (s[1] == '\r' && s[2] == '\n'))) {
             s += s[1] == '\r' ? 3 : 2;
@@ -2359,6 +2361,10 @@ static int lex(Parser *p, const char *s) {
 nesting:
     p->ctx->line = line;
     spy_error(p->ctx, "SyntaxError", "too many nested blocks or delimiters"); return -1;
+tab_error:
+    p->ctx->line = line;
+    spy_error(p->ctx, "TabError", "inconsistent use of tabs and spaces in indentation");
+    return -1;
 }
 static Token *peek(Parser *p) {
     if (p->pos > p->far) p->far = p->pos;
@@ -5013,7 +5019,7 @@ static void invalid_expression_error(Parser *p) {
     spy_error(c, "SyntaxError", message);
     c->line = head->line; p->error_start = head->start; p->error_end = last->start + last->len;
 }
-static SPYValue *parse_source(SPYContext *c, const char *source, const char *filename, int *incomplete) {
+static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
     unit->as.unit.filename = copy_text(c, filename, strlen(filename));
@@ -5097,8 +5103,26 @@ static SPYValue *parse_source(SPYContext *c, const char *source, const char *fil
     }
     return unit;
 }
+static SPYValue *parse_source(SPYContext *c, const char *source, const char *filename, int *incomplete) {
+    if (!strchr(source, '\r')) return parse_normalized(c, source, filename, incomplete);
+    char *normalized = copy_text(c, source, strlen(source));
+    if (!normalized) return NULL;
+    char *out = normalized;
+    for (const char *p = source; *p; p++) {
+        if (*p == '\r') { *out++ = '\n'; if (p[1] == '\n') p++; }
+        else *out++ = *p;
+    }
+    *out = 0;
+    SPYValue *unit = parse_normalized(c, normalized, filename, incomplete);
+    free(normalized);
+    return unit;
+}
+static SPYValue *decode_source(SPYContext *, const char *, size_t, const char *);
 static SPYValue *parse(SPYContext *c, const char *source, const char *filename) {
-    return parse_source(c, source, filename, NULL);
+    SPYValue *text = decode_source(c, source, strlen(source), filename);
+    SPYValue *unit = text ? parse_source(c, text->as.string.data, filename, NULL) : NULL;
+    spy_release(text);
+    return unit;
 }
 
 static size_t string_length(SPYValue *v) {
@@ -14163,9 +14187,9 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
     free(out.data);
     return result;
 }
-/* Codecs: UTF-8, ASCII and Latin-1 with the common error handlers. */
+/* Codecs: UTF-8, ASCII, Latin-1 and Latin-9 with common error handlers. */
 static SPYValue *text_encode(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
-enum { CODEC_UTF8, CODEC_ASCII, CODEC_LATIN1 };
+enum { CODEC_UTF8, CODEC_ASCII, CODEC_LATIN1, CODEC_LATIN9 };
 static int codec_lookup(SPYContext *c, SPYValue *encoding, int *codec) {
     *codec = CODEC_UTF8;
     if (!encoding) return 0;
@@ -14181,10 +14205,26 @@ static int codec_lookup(SPYContext *c, SPYValue *encoding, int *codec) {
     if (!strcmp(name, "ascii") || !strcmp(name, "us-ascii") || !strcmp(name, "646")) { *codec = CODEC_ASCII; return 0; }
     if (!strcmp(name, "latin-1") || !strcmp(name, "latin1") || !strcmp(name, "iso-8859-1") || !strcmp(name, "iso8859-1") ||
         !strcmp(name, "l1") || !strcmp(name, "8859") || !strcmp(name, "cp819") || !strcmp(name, "latin")) { *codec = CODEC_LATIN1; return 0; }
+    if (!strcmp(name, "iso-8859-15") || !strcmp(name, "iso8859-15") || !strcmp(name, "latin9") || !strcmp(name, "l9")) {
+        *codec = CODEC_LATIN9; return 0;
+    }
     errorf(c, "LookupError", "unknown encoding: %s", encoding->as.string.data);
     return -1;
 }
-static const char *const codec_names[] = {"utf-8", "ascii", "latin-1"};
+static const char *const codec_names[] = {"utf-8", "ascii", "latin-1", "charmap"};
+/* The eight replacements in CPython Lib/encodings/iso8859_15.py. */
+static const unsigned latin9_bytes[] = {0xa4, 0xa6, 0xa8, 0xb4, 0xb8, 0xbc, 0xbd, 0xbe};
+static const unsigned latin9_codes[] = {0x20ac, 0x160, 0x161, 0x17d, 0x17e, 0x152, 0x153, 0x178};
+static unsigned latin9_decode(unsigned byte) {
+    for (size_t i = 0; i < sizeof(latin9_bytes) / sizeof(*latin9_bytes); i++)
+        if (byte == latin9_bytes[i]) return latin9_codes[i];
+    return byte;
+}
+static unsigned latin9_encode(unsigned code) {
+    for (size_t i = 0; i < sizeof(latin9_codes) / sizeof(*latin9_codes); i++)
+        if (code == latin9_codes[i]) return latin9_bytes[i];
+    return code < 256 && latin9_decode(code) == code ? code : 256;
+}
 enum { ERRORS_STRICT, ERRORS_IGNORE, ERRORS_REPLACE, ERRORS_BACKSLASH, ERRORS_XMLCHARREF, ERRORS_SURROGATEESCAPE, ERRORS_SURROGATEPASS };
 static int errors_lookup(SPYContext *c, SPYValue *errors, int *handler) {
     static const char *const names[] = {"strict", "ignore", "replace", "backslashreplace", "xmlcharrefreplace", "surrogateescape", "surrogatepass"};
@@ -14204,10 +14244,11 @@ static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, 
         size_t width;
         unsigned code = utf8_decode(self->as.string.data + i, self->as.string.len - i, &width);
         int surrogate = code >= 0xd800 && code <= 0xdfff;
-        unsigned limit = codec == CODEC_ASCII ? 128 : codec == CODEC_LATIN1 ? 256 : 0x110000;
-        if (!surrogate && code < limit) {
+        unsigned limit = codec == CODEC_ASCII ? 128 : codec == CODEC_LATIN1 || codec == CODEC_LATIN9 ? 256 : 0x110000;
+        unsigned encoded = codec == CODEC_LATIN9 ? latin9_encode(code) : code;
+        if (!surrogate && encoded < limit) {
             if (codec == CODEC_UTF8) append(&out, self->as.string.data + i, width);
-            else { char byte = (char)code; append(&out, &byte, 1); }
+            else { char byte = (char)encoded; append(&out, &byte, 1); }
         } else if (handler == ERRORS_SURROGATEESCAPE && code >= 0xdc80 && code <= 0xdcff) {
             char byte = (char)(code - 0xdc00); append(&out, &byte, 1);
         } else if (handler == ERRORS_SURROGATEPASS && codec == CODEC_UTF8 && surrogate) {
@@ -14217,13 +14258,14 @@ static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, 
             append(&out, "?", 1);
         } else if (handler == ERRORS_BACKSLASH) {
             unicode_escape(&out, code);
-        } else if (handler == ERRORS_XMLCHARREF && !surrogate) {
+        } else if (handler == ERRORS_XMLCHARREF) {
             char text[16]; int len = snprintf(text, sizeof(text), "&#%u;", code); append(&out, text, (size_t)len);
         } else {
             errorf(c, "UnicodeEncodeError", "'%s' codec can't encode character '\\%s%0*x' in position %zu: %s",
                    codec_names[codec], code <= 0xff ? "x" : code <= 0xffff ? "u" : "U", code <= 0xff ? 2 : code <= 0xffff ? 4 : 8,
-                   code, position, surrogate && codec == CODEC_UTF8 ? "surrogates not allowed" : "ordinal not in range(" );
-            if (!(surrogate && codec == CODEC_UTF8)) {
+                   code, position, surrogate && codec == CODEC_UTF8 ? "surrogates not allowed" :
+                   codec == CODEC_LATIN9 ? "character maps to <undefined>" : "ordinal not in range(" );
+            if (codec != CODEC_LATIN9 && !(surrogate && codec == CODEC_UTF8)) {
                 size_t used = strlen(c->error_message);
                 snprintf(c->error_message + used, sizeof(c->error_message) - used, "%u)", limit);
             }
@@ -14263,7 +14305,9 @@ static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYVa
     for (size_t i = 0; i < len && !c->error_type[0];) {
         const char *reason = "ordinal not in range(128)";
         size_t width = 1, bad = 1;
-        if (codec == CODEC_LATIN1) { append_codepoint(&out, text[i]); i++; continue; }
+        if (codec == CODEC_LATIN1 || codec == CODEC_LATIN9) {
+            append_codepoint(&out, codec == CODEC_LATIN9 ? latin9_decode(text[i]) : text[i]); i++; continue;
+        }
         if (codec == CODEC_ASCII ? text[i] < 128 : (width = utf8_valid(text + i, len - i, &reason, &bad)) != 0) {
             append(&out, data + i, width); i += width; continue;
         }
@@ -14287,6 +14331,86 @@ static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYVa
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     free(out.data);
     return result;
+}
+/* PEP 263, adapted from CPython Parser/tokenizer/helpers.c (PSF license).
+ * Only comment-only lines before the first statement can declare a codec. */
+static SPYValue *source_encoding(SPYContext *c, const char *source, size_t len) {
+    const char *end = source + len;
+    for (int line = 0; line < 2 && source < end; line++) {
+        const char *stop = source;
+        while (stop < end && *stop != '\n' && *stop != '\r') stop++;
+        const char *p = source;
+        while (p < stop && (*p == ' ' || *p == '\t' || *p == '\f')) p++;
+        if (p < stop && *p != '#') break;
+        for (; stop - p > 6; p++) {
+            if (memcmp(p, "coding", 6) || (p[6] != ':' && p[6] != '=')) continue;
+            const char *name = p + 7, *last;
+            while (name < stop && (*name == ' ' || *name == '\t')) name++;
+            for (last = name; last < stop; last++) {
+                unsigned char ch = (unsigned char)*last;
+                if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                      (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.')) break;
+            }
+            if (last == name) continue;
+            char normal[13];
+            size_t n = (size_t)(last - name);
+            if (n > 12) n = 12;
+            for (size_t i = 0; i < n; i++) normal[i] = name[i] == '_' ? '-' : (char)tolower((unsigned char)name[i]);
+            normal[n] = 0;
+            if (!strcmp(normal, "utf-8") || !strncmp(normal, "utf-8-", 6)) return spy_string(c, "utf-8", 5);
+            if (!strcmp(normal, "latin-1") || !strncmp(normal, "latin-1-", 8) ||
+                !strcmp(normal, "iso-8859-1") || !strncmp(normal, "iso-8859-1-", 11) ||
+                !strcmp(normal, "iso-latin-1") || !strncmp(normal, "iso-latin-1-", 12))
+                return spy_string(c, "iso-8859-1", 10);
+            return spy_string(c, name, (size_t)(last - name));
+        }
+        source = stop;
+        if (source < end && *source == '\r') source++;
+        if (source < end && *source == '\n') source++;
+    }
+    return NULL;
+}
+static void source_decode_error(SPYContext *c, const char *filename) {
+    char message[sizeof(c->error_message)];
+    memcpy(message, c->error_message, sizeof(message));
+    spy_clear_error(c);
+    SPYValue *details = value_new(c, SPY_TUPLE), *msg = spy_string(c, message, strlen(message));
+    SPYValue *fields[] = {spy_string(c, filename, strlen(filename)), spy_int(c, 0), spy_int(c, -1), spy_none(c)};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
+        if (!c->error_type[0] && details && fields[i]) sequence_append(c, details, fields[i]);
+        spy_release(fields[i]);
+    }
+    SPYValue *args[] = {msg, details};
+    SPYValue *error = c->error_type[0] ? NULL : spy_call(c, name_local(c->classes, "SyntaxError"), 2, args);
+    spy_release(msg); spy_release(details);
+    if (error) {
+        chain_exception(c, error);
+        c->exception = error;
+        snprintf(c->error_type, sizeof(c->error_type), "SyntaxError");
+        memcpy(c->error_message, message, sizeof(message));
+        c->line = 0;
+    }
+}
+static SPYValue *decode_source(SPYContext *c, const char *source, size_t len, const char *filename) {
+    if (memchr(source, 0, len)) return spy_error(c, "SyntaxError", "source code string cannot contain null bytes");
+    int bom = len >= 3 && !memcmp(source, "\xef\xbb\xbf", 3);
+    if (bom) { source += 3; len -= 3; }
+    SPYValue *encoding = source_encoding(c, source, len), *text = NULL;
+    if (c->error_type[0]) return NULL;
+    if (bom && encoding && strcmp(encoding->as.string.data, "utf-8")) {
+        errorf(c, "SyntaxError", "encoding problem: %s with BOM", encoding->as.string.data);
+        c->line = 1;
+        attach_syntax_error(c, filename, source, source, source, 1);
+    } else {
+        int codec;
+        if (!codec_lookup(c, encoding, &codec)) {
+            text = codec == CODEC_UTF8 ? spy_string(c, source, len) : bytes_decode(c, source, len, encoding, NULL);
+        }
+        if (!text && (error_is(c, "LookupError") || error_is(c, "UnicodeDecodeError"))) source_decode_error(c, filename);
+    }
+    if (!text) snprintf(c->filename, sizeof(c->filename), "%s", filename);
+    spy_release(encoding);
+    return text;
 }
 static SPYValue *str_encode(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
@@ -15333,9 +15457,20 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             unit = spy_retain(a);
         }
         else {
-            if (a->type != SPY_STRING) { spy_error(c, "TypeError", "source must be a string or code object"); goto execution_fail; }
-            if (strlen(a->as.string.data) != a->as.string.len) { spy_error(c, "SyntaxError", "source code string cannot contain null bytes"); goto execution_fail; }
-            unit = parse(c, a->as.string.data, filename);
+            SPYValue *text = builtin_value(c, a, SPY_STRING);
+            if (text) {
+                if (memchr(text->as.string.data, 0, text->as.string.len)) {
+                    spy_error(c, "SyntaxError", "source code string cannot contain null bytes"); goto execution_fail;
+                }
+                text = spy_retain(text);
+            } else {
+                SPYValue *bytes = builtin_value(c, a, SPY_BYTES);
+                if (!bytes) bytes = builtin_value(c, a, SPY_BYTEARRAY);
+                if (!bytes) { spy_error(c, "TypeError", "source must be a string or code object"); goto execution_fail; }
+                text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
+            }
+            if (text) unit = parse_source(c, text->as.string.data, filename, NULL);
+            spy_release(text);
             if (!unit) goto execution_fail;
             Node *body = unit->as.unit.body;
             if (expression == 1 && (!body || body->kind != N_EXPR || body->next)) {

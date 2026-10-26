@@ -185,3 +185,8 @@
 - Complete unchanged type-check and subclass-initialization unittest modules;
   the selection now passes 177 cases in eleven modules, plus 99 subtests.
   Test-only regex and multiset assertions are checked against CPython.
+- Native byte-source decoding for compile/eval/exec, CLI and module loading,
+  with encoding comments, BOMs, CR/CRLF normalization and ISO-8859-15.
+  Tab indentation uses Python column and consistency rules. The whole-module
+  selection now passes 180 cases in twelve modules; six unchanged encoding
+  methods and 789 oracle comparisons supplement it.

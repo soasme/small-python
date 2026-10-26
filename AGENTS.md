@@ -145,6 +145,11 @@ run the equivalent command directly.
   private-name mangling. Preserve spelling in dynamic string names. Validate
   source UTF-8 independently of the host locale; include generated tables in
   upstream report hashes.
+- Decode source bytes and host-loaded files in the core. Honor PEP 263 comments
+  and UTF-8 BOMs before parsing; Unicode string inputs ignore encoding comments.
+  Normalize CR/CRLF before tokenization, including inside string literals.
+  Indentation uses eight-column tab stops and a second one-column count to
+  reject inconsistent mixing; blank and comment-only lines do not change it.
 - Keep buffered output and flushing at the host callback boundary. Optional
   Python file objects use their `write` and `flush` methods.
 - Template strings use native C Template and Interpolation values. Retain raw

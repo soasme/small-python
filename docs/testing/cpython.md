@@ -54,7 +54,7 @@ case count. Skipped modules need discovery on applicable platforms. Generated
 cases dependent on resources and build settings require further runs. Subtests
 and dynamically generated assertions are not fully enumerated by unittest
 loading. Static candidates cannot close these gaps. Whole-module execution
-currently covers the eleven modules listed below; the discovery ledger still
+currently covers the twelve modules listed below; the discovery ledger still
 records the broader suite as unported.
 
 The full ledger is written to `tests/results/cpython-discover.json`. It includes
@@ -118,7 +118,7 @@ ports, skipped platforms, and dynamic-case coverage are unresolved.
 
 ## Whole-module unittest adaptation
 
-Eleven complete unchanged upstream modules run in the engine. All 177 discovered
+Twelve complete unchanged upstream modules run in the engine. All 180 discovered
 cases pass with both the adapted framework and CPython's original framework:
 
 | Module | Cases |
@@ -134,6 +134,7 @@ cases pass with both the adapted framework and CPython's original framework:
 | `test_exception_variations` | 30 |
 | `test_typechecks` | 6 |
 | `test_subclassinit` | 17 |
+| `test_utf8source` | 3 |
 
 The assignment-expression module also executes 99 subtests. Their results and
 parameters are recorded. The runner compares the sequence of subtest statuses
@@ -156,7 +157,7 @@ module/class/test setup, teardown, and cleanups. Failed setup leaves dependent
 cases recorded as unexecuted failures, and skips remain separate from passes.
 
 The replacement framework currently implements the assertions and fixtures
-needed by these eleven modules, including subtests that continue after failure.
+needed by these twelve modules, including subtests that continue after failure.
 Exception-message patterns and `assertRegex` support literal characters, the `?`
 quantifier, and Unicode word boundaries (`\b`); other regex syntax fails explicitly.
 The adapter is checked against CPython with 578 regex examples, 322 `assertRegex`
@@ -280,7 +281,23 @@ Their source bodies and assertions are preserved; surrounding imports and
 unrelated methods are not transplanted.
 
 These checks are supplemental selections, not whole-module passes, and are
-not added to the 177-case whole-module result. Pickling tests, CPython-only
+not added to the 180-case whole-module result. Pickling tests, CPython-only
 checks, and all other cases stay in the full test inventory. Additional oracle
 comparisons cover suspended-object lifecycle states, frozen mapping protocols,
 subclass identity, hash callbacks, and immutable execution namespaces.
+
+## Source bytes and indentation
+
+The complete unchanged `test_utf8source` module contributes three cases to the
+180-case result. `tests/source_encoding.py` additionally runs six unchanged
+methods from `test_source_encoding.MiscSourceEncodingTest` and
+`test_compile.TestSpecifics`, after checking them with the original unittest
+framework on the pinned oracle. This selected-method adaptation replaces only
+unittest and retains each method body; the complete modules and their fixtures
+remain unported. It also compares 789 programs with the oracle, including
+encoding comments, bytearray sources, newline normalization, tab indentation,
+all 256 Latin-9 byte mappings, errors, CLI files and imported fixtures.
+
+Source decoding supports UTF-8, ASCII, Latin-1 and ISO-8859-15. Other codecs and
+the codec registry remain gaps; malformed UTF-8 and BOM diagnostics are not yet
+fully identical to CPython.

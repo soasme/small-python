@@ -225,10 +225,10 @@ remaining coverage gaps. `make test-cpython-doctests` is strict about the curren
 ports; `make test-cpython` additionally requires closing the full inventory.
 Both strict upstream targets currently fail.
 
-`make test-cpython-unittest` passes all 177 cases in eleven unchanged modules:
+`make test-cpython-unittest` passes all 180 cases in twelve unchanged modules:
 decorators, augmented assignments, integer literals, unary operators, keyword-only
 arguments, assignment expressions, large expressions, Unicode identifiers, exception
-variations, type checks, and subclass initialization.
+variations, type checks, subclass initialization, and UTF-8 source.
 It also checks all 99 executed subtests
 against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
@@ -427,7 +427,12 @@ formatting for `str`, `bytes`, and `bytearray` follows CPython's conversions,
 flags, `*` widths and precisions, mapping keys, and diagnostics. Unicode escaping, printability, and identifier properties use
 checked-in Unicode 17.0.0 data. Source identifiers undergo NFKC normalization
 before scope analysis and private-name mangling; dynamic string attribute and
-keyword names retain their original spelling. The lexer rejects invalid UTF-8.
+keyword names retain their original spelling. Byte sources, CLI files, and imports
+honor first/second-line encoding comments and UTF-8 BOMs. Unicode string sources
+ignore encoding comments. UTF-8, ASCII, Latin-1 and ISO-8859-15 decoding is native;
+other codecs and some decoding diagnostics remain incomplete. CR and CRLF become
+LF before parsing, including inside string literals. Indentation uses eight-column
+tab stops and checks for inconsistent mixing with spaces. The lexer rejects invalid UTF-8.
 String normalization APIs, named escapes, and many other Unicode operations
 remain incomplete.
 

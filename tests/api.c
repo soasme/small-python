@@ -99,6 +99,25 @@ static void namespace_cycles(void) {
 int main(void) {
     namespace_cycles();
     {
+        SPYContext *source = spy_context_new();
+        assert(source);
+        execute(source, "# coding: latin-1\rtext = '\xc7'\r");
+        execute(source, "assert text == '\u00c7'\n");
+        execute(source, "\xef\xbb\xbf# coding: utf-8\r\nassert text == '\u00c7'\r\n");
+        for (int i = 0; i < 20; i++) {
+            assert(spy_exec(source, "# coding: missing\n", "source.py") == -1);
+            assert(!strcmp(spy_error_type(source), "SyntaxError"));
+            assert(!strcmp(spy_error_filename(source), "source.py"));
+            spy_clear_error(source);
+            assert(spy_exec(source, "\xef\xbb\xbf# coding: latin-1\n", "source.py") == -1);
+            assert(strstr(spy_error_message(source), "BOM"));
+            spy_clear_error(source);
+        }
+        execute(source, "del text\n");
+        spy_collect(source);
+        spy_context_free(source);
+    }
+    {
         SPYContext *templates = spy_context_new();
         assert(templates);
         execute(templates,
