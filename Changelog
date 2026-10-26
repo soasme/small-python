@@ -229,3 +229,5 @@
 - Named Unicode escapes (\N{...}) from generated Unicode 17.0.0 name and
   alias tables; f-string conversions and debug '=' fields allow trailing
   whitespace and comments.
+- Closure cells: __closure__, co_freevars/co_cellvars, types.CellType;
+  global declarations in nested scopes make the module-level name global.

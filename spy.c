@@ -15,7 +15,7 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-#define SPY_LAST_TYPE SPY_SENTINEL /* The last public value tag. */
+#define SPY_LAST_TYPE SPY_CELL /* The last public value tag. */
 enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* Instance layouts beyond the builtin value types. */
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE };
@@ -82,6 +82,9 @@ struct SPYValue {
                  int ndim, readonly, released, hashed; char format[4]; } memory;
         struct { SPYValue *strings, *interpolations; } template;
         struct { SPYValue *name, *module; } sentinel;
+        /* A closure cell: the variable name in its defining environment, or
+         * its own value when env is NULL (types.CellType). */
+        struct { SPYValue *env, *name, *value; } cell;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
@@ -158,6 +161,11 @@ static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
 enum { R_LT, R_LE, R_EQ, R_NE, R_GT, R_GE };
 static SPYValue *rich_compare(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *cell_contents(SPYValue *);
+static int cell_set(SPYContext *, SPYValue *, SPYValue *);
+static SPYValue *cell_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *closure_names(SPYContext *, Node *, int);
+static SPYValue *function_closure(SPYContext *, SPYValue *);
 static SPYValue *builtin_value(SPYContext *, SPYValue *, int);
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
@@ -340,6 +348,11 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_MEMORYVIEW:
         if (v->as.memory.obj) visit(v->as.memory.obj, data);
         if (v->as.memory.source) visit(v->as.memory.source, data);
+        break;
+    case SPY_CELL:
+        if (v->as.cell.env) visit(v->as.cell.env, data);
+        if (v->as.cell.name) visit(v->as.cell.name, data);
+        if (v->as.cell.value) visit(v->as.cell.value, data);
         break;
     case SPY_SENTINEL:
         visit(v->as.sentinel.name, data);
@@ -1148,7 +1161,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         if (value->type == SPY_FROZENDICT) { value->as.map.hash = *result; value->as.map.flags = 1; }
         return 0;
     }
-    case SPY_LIST: case SPY_DICT: case SPY_SET: case SPY_BYTEARRAY: case SPY_DICT_KEYS: case SPY_DICT_ITEMS: break;
+    case SPY_LIST: case SPY_DICT: case SPY_SET: case SPY_BYTEARRAY: case SPY_DICT_KEYS: case SPY_DICT_ITEMS: case SPY_CELL: break;
     default: *result = hash_pointer(value); return 0;
     }
     const char *module = builtin_module_of(c, value);
@@ -1309,7 +1322,7 @@ static int native_kind(SPYValue *v) {
 }
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
@@ -2039,6 +2052,12 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         snprintf(num, sizeof(num), "<%smemory at %p>", v->as.memory.released ? "released " : "", (void *)v);
         return puts_buffer(b, num);
     case SPY_SENTINEL: return format_value(b, v->as.sentinel.name, 0);
+    case SPY_CELL: {
+        SPYValue *value = cell_contents(v);
+        if (value) snprintf(num, sizeof(num), "<cell at %p: %.80s object at %p>", (void *)v, type_name(value), (void *)value);
+        else snprintf(num, sizeof(num), "<cell at %p: empty>", (void *)v);
+        return puts_buffer(b, num);
+    }
     case SPY_FRAME_LOCALS: {
         for (size_t i = 0; i < b->depth; i++)
             if (b->path[i] == v) return puts_buffer(b, "{...}");
@@ -4947,6 +4966,19 @@ static int scope_record(SPYContext *c, Scope *scope, Node *n, unsigned flags) {
         symbol->line = n->line;
     }
     symbol->flags |= flags;
+    if ((flags & S_GLOBAL) && scope->parent) {
+        /* As CPython's symtable_add_def_helper, a global declaration in any
+         * nested scope also makes the name explicitly global in the module block. */
+        Scope *top = scope;
+        while (top->parent) top = top->parent;
+        Symbol *global = top->kind == S_MODULE ? scope_symbol(top, n->text) : NULL;
+        if (top->kind == S_MODULE && !global) {
+            if (grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
+            global = &top->symbols[top->len++];
+            *global = (Symbol){n->text, 0, n->line};
+        }
+        if (global) global->flags |= S_GLOBAL;
+    }
     return 0;
 }
 static int scope_walk(SPYContext *, Scope *, Node *);
@@ -6836,7 +6868,7 @@ static SPYValue *builtin_base(SPYContext *c, SPYValue *v, const char *name, cons
  * on their type. */
 static int special_dispatch(SPYValue *v) {
     return v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_SENTINEL ||
-        v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
+        v->type == SPY_CELL || v->type == SPY_INSTANCE || (v->type == SPY_CLASS && v->as.map.meta);
 }
 static int subclass(SPYValue *cls, SPYValue *base) {
     if (cls && cls->type == SPY_CLASS && cls->as.map.mro) {
@@ -7005,7 +7037,8 @@ static SPYValue *descriptor_get(SPYContext *c, SPYValue *value, SPYValue *self, 
     return result;
 }
 static SPYValue *special_method(SPYContext *c, SPYValue *v, const char *name) {
-    if (v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_SENTINEL) {
+    if (v->type == SPY_MAPPINGPROXY || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || v->type == SPY_SENTINEL ||
+        v->type == SPY_CELL) {
         SPYValue *cls = c->types[v->type], *method = class_lookup(cls, name);
         return method ? descriptor_get(c, method, v, cls) : NULL;
     }
@@ -7142,6 +7175,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         SPYValue *field = v->type == SPY_FRAME ? frame_attribute(c, v, name) : memory_attribute(c, v, name);
         if (field || c->error_type[0]) return field;
     }
+    if (v->type == SPY_CELL && !strcmp(name, "cell_contents")) {
+        SPYValue *value = cell_contents(v);
+        return value ? spy_retain(value) : spy_error(c, "ValueError", "Cell is empty");
+    }
     if (v->type == SPY_SENTINEL && (!strcmp(name, "__name__") || !strcmp(name, "__module__")))
         return spy_retain(name[2] == 'n' ? v->as.sentinel.name : v->as.sentinel.module);
     if (v->type == SPY_TEMPLATE) {
@@ -7203,6 +7240,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             return spy_string(c, text, strlen(text));
         }
         if (!strcmp(name, "co_qualname")) return qualified_name(c, def->scope);
+        if (!strcmp(name, "co_freevars") || !strcmp(name, "co_cellvars"))
+            return def && def->kind != N_CLASS ? closure_names(c, def, name[3] == 'c') : value_new(c, SPY_TUPLE);
         if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->line : 1);
         if (!strcmp(name, "co_varnames") || !strcmp(name, "co_nlocals")) {
             /* Parameters first, then other local bindings in first-use order.
@@ -7303,6 +7342,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_FUNCTION) {
         if (!strcmp(name, "__globals__")) return spy_retain(namespace_map(module_env(c, v->as.function.env)));
         if (!strcmp(name, "__code__")) return definition_code(c, v->as.function.unit, v->as.function.def);
+        if (!strcmp(name, "__closure__")) return function_closure(c, v);
         if (!strcmp(name, "__dict__")) {
             if (!v->as.function.attributes) v->as.function.attributes = value_new(c, SPY_DICT);
             return spy_retain(v->as.function.attributes);
@@ -8677,6 +8717,8 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name)
     spy_release(existing); return -1;
 }
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
+    if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
+    if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_PROPERTY && (!strcmp(name, "__name__") || !strcmp(name, "__doc__"))) {
         SPYValue **field = !strcmp(name, "__name__") ? &object->as.property.name : &object->as.property.doc;
         spy_retain(value); spy_release(*field); *field = value; return 0;
@@ -9448,6 +9490,118 @@ static SPYValue *qualified_name(SPYContext *c, Scope *scope) {
     SPYValue *result = append_qualname(&out, scope) ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     free(out.data); return result;
 }
+/* Closures. As CPython's symtable, a name is free in a scope when it resolves
+ * to a binding in an enclosing function (or, for __class__, a class); a
+ * function also passes on the free names of scopes nested within it. */
+static Scope *free_binding(Scope *scope, const char *name) {
+    Symbol *symbol = scope_symbol(scope, name);
+    if (symbol && ((symbol->flags & S_GLOBAL) || ((symbol->flags & (S_LOCAL | S_PARAM)) && !(symbol->flags & S_NONLOCAL)))) return NULL;
+    for (Scope *parent = scope->parent; parent && parent->kind != S_MODULE; parent = parent->parent) {
+        if (parent->kind == S_CLASS) {
+            if (!strcmp(name, "__class__")) return parent;
+            continue;
+        }
+        Symbol *binding = scope_symbol(parent, name);
+        if (!binding) continue;
+        if (binding->flags & S_GLOBAL) return NULL;
+        if (!(binding->flags & S_NONLOCAL) && (binding->flags & (S_LOCAL | S_PARAM))) return parent;
+    }
+    return NULL;
+}
+static int scope_within(Scope *inner, Scope *outer) {
+    for (Scope *scope = inner->parent; scope; scope = scope->parent) if (scope == outer) return 1;
+    return 0;
+}
+typedef struct { SPYContext *c; Scope *self; SPYValue *names; int cells; } ClosureNames;
+static int closure_name(ClosureNames *w, Scope *scope, const char *name) {
+    Scope *binding = free_binding(scope, name);
+    if (!binding || (w->cells ? binding != w->self || scope == w->self : binding == w->self || !(scope == w->self || scope_within(w->self, binding))))
+        return 0;
+    for (size_t i = 0; i < w->names->as.seq.len; i++) if (!strcmp(w->names->as.seq.items[i]->as.string.data, name)) return 0;
+    SPYValue *text = spy_string(w->c, name, strlen(name));
+    int status = !text || sequence_append(w->c, w->names, text);
+    spy_release(text); return status ? -1 : 0;
+}
+static int closure_scope(ClosureNames *w, Scope *scope) {
+    for (size_t i = 0; i < scope->len; i++) {
+        Symbol *symbol = &scope->symbols[i];
+        if (closure_name(w, scope, symbol->name)) return -1;
+        /* super() in a function implicitly uses __class__. */
+        if (scope->kind == S_FUNCTION && !strcmp(symbol->name, "super") && closure_name(w, scope, "__class__")) return -1;
+    }
+    return 0;
+}
+static int closure_walk(ClosureNames *w, Node *n, int depth) {
+    for (; n && depth < 1000; n = n->next) {
+        if (n->scope && n->scope != w->self && scope_within(n->scope, w->self) && closure_scope(w, n->scope)) return -1;
+        if (closure_walk(w, n->a, depth + 1) || closure_walk(w, n->b, depth + 1) || closure_walk(w, n->c, depth + 1) ||
+            closure_walk(w, n->args, depth + 1) || closure_walk(w, n->decorators, depth + 1) || closure_walk(w, n->params, depth + 1))
+            return -1;
+    }
+    return 0;
+}
+/* co_freevars (cells 0) or co_cellvars (cells 1) of a definition, sorted. */
+static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
+    ClosureNames w = {c, def ? def->scope : NULL, value_new(c, SPY_TUPLE), cells};
+    if (!w.names || !w.self) return w.names;
+    if (closure_scope(&w, w.self) || closure_walk(&w, def->a, 0) || closure_walk(&w, def->b, 0) || closure_walk(&w, def->c, 0) ||
+        closure_walk(&w, def->args, 0) || closure_walk(&w, def->params, 0)) { spy_release(w.names); return NULL; }
+    SPYValue **items = w.names->as.seq.items;
+    for (size_t i = 1; i < w.names->as.seq.len; i++)
+        for (size_t j = i; j > 0 && strcmp(items[j - 1]->as.string.data, items[j]->as.string.data) > 0; j--) {
+            SPYValue *item = items[j]; items[j] = items[j - 1]; items[j - 1] = item;
+        }
+    return w.names;
+}
+static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYValue *value) {
+    SPYValue *cell = value_new(c, SPY_CELL);
+    if (!cell) return NULL;
+    if (env) {
+        cell->as.cell.name = spy_string(c, name, strlen(name));
+        if (!cell->as.cell.name) { spy_release(cell); return NULL; }
+        cell->as.cell.env = spy_retain(env);
+    } else cell->as.cell.value = value ? spy_retain(value) : NULL;
+    return cell;
+}
+/* A cell's contents, borrowed, or NULL when it is empty. */
+static SPYValue *cell_contents(SPYValue *cell) {
+    if (!cell->as.cell.env) return cell->as.cell.value;
+    SPYValue *value = name_local(cell->as.cell.env, cell->as.cell.name->as.string.data);
+    return value && value->type != V_UNBOUND ? value : NULL;
+}
+static int cell_set(SPYContext *c, SPYValue *cell, SPYValue *value) {
+    if (!cell->as.cell.env) {
+        spy_retain(value); spy_release(cell->as.cell.value); cell->as.cell.value = value; return 0;
+    }
+    SPYValue *unbound = value ? NULL : value_new(c, V_UNBOUND);
+    if (!value && !unbound) return -1;
+    int status = name_set(c, cell->as.cell.env, cell->as.cell.name->as.string.data, value ? value : unbound);
+    spy_release(unbound); return status;
+}
+/* __closure__: one cell per free variable, made once per function. */
+static SPYValue *function_closure(SPYContext *c, SPYValue *fn) {
+    SPYValue *cached = name_local(fn->as.function.metadata, "__closure__");
+    if (cached) return spy_retain(cached);
+    Node *def = fn->as.function.def;
+    SPYValue *names = closure_names(c, def, 0), *closure = NULL;
+    if (!names) return NULL;
+    closure = names->as.seq.len ? value_new(c, SPY_TUPLE) : spy_none(c);
+    for (size_t i = 0; closure && closure->type == SPY_TUPLE && i < names->as.seq.len; i++) {
+        const char *name = names->as.seq.items[i]->as.string.data;
+        Scope *binding = free_binding(def->scope, name);
+        SPYValue *env = fn->as.function.env;
+        for (; env && env != c->builtins; env = env->as.map.parent) {
+            if (env->type != V_ENV) continue;
+            if (binding && binding->kind == S_CLASS ? env->as.map.flags == 4 && name_local(env, name) : env->as.map.scope == binding) break;
+        }
+        SPYValue *cell = cell_new(c, env && env != c->builtins ? env : NULL, name, NULL);
+        if (!cell || sequence_append(c, closure, cell)) { spy_release(closure); closure = NULL; }
+        spy_release(cell);
+    }
+    spy_release(names);
+    if (closure && name_set(c, fn->as.function.metadata, "__closure__", closure)) { spy_release(closure); return NULL; }
+    return closure;
+}
 static SPYValue *function_new(SPYContext *c, Frame *f, Node *n) {
     SPYValue *fn = value_new(c, SPY_FUNCTION);
     if (!fn) return NULL;
@@ -10049,6 +10203,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
+    if (fn == c->types[SPY_CELL]) return cell_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
         result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
     else if (fn == c->types[SPY_MODULE]) result = module_construct(c, argc, argv, keywords);
@@ -12095,6 +12250,8 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
     return env->type == V_ENV && env->as.map.scope ? declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
+    if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
+    if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
         (!strcmp(name, "__name__") || !strcmp(name, "__qualname__"))) {
         errorf(c, "TypeError", "%s must be set to a string object", name); return -1;
@@ -16811,6 +16968,30 @@ static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const 
     v->as.sentinel.name = spy_retain(argv[0]); v->as.sentinel.module = module;
     return v;
 }
+/* types.CellType([contents]) */
+static SPYValue *cell_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "cell() takes no keyword arguments");
+    if (argc > 1) return errorf(c, "TypeError", "cell expected at most 1 argument, got %zu", argc);
+    return cell_new(c, NULL, NULL, argc ? argv[0] : NULL);
+}
+/* Cells compare by contents; an empty cell sorts first. */
+static const char *const cell_methods[] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};
+static SPYValue *cell_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    int op = (int)(intptr_t)data;
+    if (!argc || argv[0]->type != SPY_CELL)
+        return errorf(c, "TypeError", "descriptor '%s' requires a 'cell' object but received a '%s'", cell_methods[op], argc ? type_name(argv[0]) : "nothing");
+    if (keywords && keywords->as.map.len) return errorf(c, "TypeError", "expected 1 argument, got %zu", argc - 1);
+    if (argc != 2) return errorf(c, "TypeError", "expected 1 argument, got %zu", argc - 1);
+    if (argv[1]->type != SPY_CELL) return spy_retain(c->not_implemented);
+    SPYValue *a = cell_contents(argv[0]), *b = cell_contents(argv[1]);
+    if (a && b) {
+        static const int tokens[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
+        return comparison(c, tokens[op], a, b);
+    }
+    int x = !b, y = !a;
+    int result = op == R_LT ? x < y : op == R_LE ? x <= y : op == R_EQ ? x == y : op == R_NE ? x != y : op == R_GT ? x > y : x >= y;
+    return spy_bool(c, result);
+}
 enum { SENTINEL_COPY, SENTINEL_DEEPCOPY, SENTINEL_REDUCE, SENTINEL_OR, SENTINEL_ROR };
 static const char *const sentinel_methods[] = {"__copy__", "__deepcopy__", "__reduce__", "__or__", "__ror__"};
 static SPYValue *sentinel_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -17424,7 +17605,15 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (id != B_COMPILE && !env) return NULL;
         SPYValue *unit = NULL;
         if (a->type == SPY_CODE && id != B_COMPILE) {
-            if (a->as.unit.definition) { spy_error(c, "NotImplementedError", "execution of function code objects is not implemented"); goto execution_fail; }
+            if (a->as.unit.definition) {
+                SPYValue *free = closure_names(c, a->as.unit.definition, 0);
+                if (free && free->as.seq.len) {
+                    if (expression) spy_error(c, "TypeError", "code object passed to eval() may not contain free variables");
+                    else errorf(c, "TypeError", "code object requires a closure of exactly length %zu", free->as.seq.len);
+                } else if (free) spy_error(c, "NotImplementedError", "execution of function code objects is not implemented");
+                spy_release(free);
+                goto execution_fail;
+            }
             unit = spy_retain(a);
         }
         else {
@@ -18719,6 +18908,9 @@ static int register_constructors(SPYContext *c) {
     for (size_t i = 0; i < sizeof(sentinel_methods) / sizeof(*sentinel_methods); i++)
         if (register_method(c, SPY_SENTINEL, sentinel_methods[i], sentinel_method, (intptr_t)i, METHOD_INSTANCE)) return -1;
     if (name_set(c, c->builtins, "sentinel", c->types[SPY_SENTINEL])) return -1;
+    for (size_t i = 0; i < sizeof(cell_methods) / sizeof(*cell_methods); i++)
+        if (register_method(c, SPY_CELL, cell_methods[i], cell_method, (intptr_t)i, METHOD_INSTANCE)) return -1;
+    if (name_set(c, c->types[SPY_CELL], "__hash__", c->none)) return -1;
     static const char sentinel_doc[] = "Create a unique sentinel object with the given name.";
     SPYValue *doc = spy_string(c, sentinel_doc, sizeof(sentinel_doc) - 1);
     int failed = !doc || name_set(c, c->types[SPY_SENTINEL], "__doc__", doc);
@@ -18984,7 +19176,7 @@ SPYContext *spy_context_new(void) {
         {"async_generator_asend", -1}, {"async_generator_athrow", -1}, {"anext_awaitable", -1}, {"super", B_SUPER},
         {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
         {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT},
-        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}
+        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}, {"cell", -1}
     };
     _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAST_TYPE + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {

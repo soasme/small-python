@@ -37,7 +37,10 @@ run the equivalent command directly.
   library modules (`math`, `_struct`, `_sre`, `os`, `array`, ...), even when a
   CPython test imports one; skip tests that are blocked only by a missing
   module and raise pass rates by fixing core semantics instead. Add a module
-  only when the user explicitly asks for it.
+  only when the user explicitly asks for it. The same holds inside the
+  existing modules: do not grow `sys`, `types`, `gc` and the rest with more
+  library surface (hooks, structseqs, helpers) just because a test reaches for
+  it; the engine reports core behavior such as ignored exceptions itself.
 - Cache at most one released tuple allocation for each length zero through
   eight inside its owning context. Cached storage owns no element references,
   is excluded from the live-value graph, and is freed during context shutdown.

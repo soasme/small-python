@@ -469,8 +469,12 @@ Module/class namespaces and explicit execution mappings are live; optimized
 function locals are snapshots. Class and execution locals may be arbitrary
 mappings. Globals must be dictionaries, including subclasses. Compile flags
 remain incomplete. Function code objects expose argument counts, names,
-filenames, and first-line metadata; execution and replacement of function code
-objects remain unsupported. Code objects are cached per parsed definition, so
+filenames, first-line metadata, and CPython's sorted `co_freevars` and
+`co_cellvars` (including names passed through to nested scopes and the
+implicit `__class__`). A function's `__closure__` holds cells that read and
+write the defining scope's variable; `types.CellType` cells compare by
+contents. Execution and replacement of function code objects remain
+unsupported; code with free variables is rejected as in CPython. Code objects are cached per parsed definition, so
 functions created from the same definition share their code object. `gi_code`,
 `cr_code`, and `ag_code` retain that identity after the suspended instance closes.
 Code objects retain parsed syntax and internal
@@ -576,9 +580,9 @@ checks and messages; the tee buffer and `_grouper` follow the C module.
 standard library's `_collections_abc`, which the host loader supplies on first
 use. `types` names the engine's builtin types and
 provides `SimpleNamespace`, `new_class`, `prepare_class`, `resolve_bases`,
-`get_original_bases`, and `DynamicClassAttribute`; cell, frame, traceback,
+`get_original_bases`, and `DynamicClassAttribute`; traceback,
 descriptor-member, and capsule types and `coroutine()` are absent; it names
-`FrameType` and `FrameLocalsProxyType`;
+`CellType`, `FrameType` and `FrameLocalsProxyType`;
 `LazyImportType` is the lazy-import placeholder type. `sys` keeps the runtime
 state natively: `modules`, `exception()`, the recursion limit, the integer
 string-conversion limit, and `stdout`/`stderr` streams that write to the host

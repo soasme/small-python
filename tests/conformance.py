@@ -3874,6 +3874,43 @@ for src in [r'"\N{NOPE}"', r'"\N{A"', r'"\N"', r'"\N{}"', r'"\N{CJK UNIFIED IDEO
     except SyntaxError as e: print(type(e).__name__)
 """)
 
+CASES.append(r"""
+# Closure cells, co_freevars/co_cellvars (with pass-through and __class__), and nested global declarations.
+def f():
+    x = 1
+    def g():
+        def h(): return x
+        return h
+    return g
+g = f()
+print(g.__code__.co_freevars, f.__code__.co_cellvars, g().__code__.co_freevars, g.__closure__ is g.__closure__)
+def f2():
+    x = 1
+    class C:
+        def m(self): return x, __class__
+        def n(self): return super()
+    return C
+C = f2()
+print(C.m.__code__.co_freevars, C.n.__code__.co_freevars, C.m.__closure__[0].cell_contents is C)
+def f3():
+    a = b = 1
+    def g(): nonlocal b; b = 5; return a
+    return g
+g3 = f3()
+print(g3.__closure__[1].cell_contents, g3(), g3.__closure__[1].cell_contents)
+g3.__closure__[0].cell_contents = 10; print(g3())
+del g3.__closure__[0].cell_contents
+for bad in [g3, lambda: g3.__closure__[0].cell_contents, lambda: setattr(g3, '__closure__', None), lambda: hash(g3.__closure__[1]),
+            lambda: eval(g3.__code__), lambda: exec(g3.__code__, {}), lambda: type(g3.__closure__[0])(1, 2)]:
+    try: bad()
+    except Exception as e: print(type(e).__name__, e)
+CT = type(g3.__closure__[0])
+print((lambda: 0).__closure__, CT() < CT(1), CT(1) < CT(2), CT(1) == CT(1), CT() == CT(), repr(CT()).endswith(': empty>'))
+glob, loc = {}, {}
+exec("def f():\n y = 1\n def g():\n  global y\n  return y\n def h(): return y + 1\n return g, h\ny = 9\ng, h = f()\nr = g(), h()", glob, loc)
+print(loc['r'], glob['y'], 'y' in loc)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),
