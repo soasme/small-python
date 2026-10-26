@@ -47,7 +47,8 @@ struct SPYValue {
     SPYContext *ctx;
     SPYValue *prev, *next, *pending;
     size_t refs, trial;
-    int type, marked;
+    int type;
+    unsigned char marked, weak; /* weak: a weak-table entry names this value. */
     union {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
@@ -87,8 +88,18 @@ struct SPYContext {
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
     SPYValue *types[SPY_TEMPLATE_ITERATOR + 1];
+    /* Weak references: targets and reference objects are borrowed. A reference
+     * keeps its callback as its own __callback__ attribute, so the collector
+     * sees that edge. weak_calls owns each reference whose target died, until
+     * its callback runs at the next statement boundary. */
+    struct WeakEntry { SPYValue *target, *ref; int64_t hash; int hashed; } *weak;
+    size_t weak_len, weak_cap;
+    SPYValue **weak_calls;
+    size_t weak_calls_len, weak_calls_cap;
+    int weak_running;
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
+    SPYValue *caller_env; /* Borrowed: where the running Python function was called. */
     SPYValue *inherited_exception; /* Borrowed from a suspended caller. */
     size_t live, steps, step_limit, depth;
     SPYWrite write;
@@ -293,8 +304,38 @@ static void edges(SPYValue *v, Visit visit, void *data) {
 static void free_scope(Scope *scope) {
     if (scope) { free(scope->symbols); free(scope); }
 }
+static int weak_push(SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
+    if (*len == *cap) {
+        size_t next = *cap ? *cap * 2 : 8;
+        SPYValue **grown = realloc(*items, next * sizeof(**items));
+        if (!grown) return -1;
+        *items = grown; *cap = next;
+    }
+    (*items)[(*len)++] = value;
+    return 0;
+}
+/* A weakly referenced value or a reference object is dying. While collecting,
+ * liveness is the collector's mark; otherwise a reference with a zero count is
+ * already queued to be freed by the running release. */
+static SPYValue *name_local(SPYValue *, const char *);
+static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
+    v->weak = 0;
+    for (size_t i = c->weak_len; i--;) {
+        struct WeakEntry *e = &c->weak[i];
+        int drop = e->ref == v;
+        if (!drop && e->target == v) {
+            e->target = NULL;
+            drop = collecting ? !e->ref->marked : !e->ref->refs;
+            SPYValue *callback = drop ? NULL : name_local(e->ref, "__callback__");
+            if (callback && callback->type != SPY_NONE &&
+                !weak_push(&c->weak_calls, &c->weak_calls_len, &c->weak_calls_cap, e->ref)) spy_retain(e->ref);
+        } else if (!drop) continue;
+        if (drop) { memmove(e, e + 1, (c->weak_len - i - 1) * sizeof(*e)); c->weak_len--; }
+    }
+}
 static void free_value(SPYValue *v) {
     SPYContext *c = v->ctx;
+    if (v->weak) weak_dead(c, v, 0);
     if (v->prev) v->prev->next = v->next;
     else c->values = v->next;
     if (v->next) v->next->prev = v->prev;
@@ -353,6 +394,8 @@ size_t spy_collect(SPYContext *c) {
     for (size_t i = 0; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     free(work.items);
     /* Inspect edges while every dead object still exists, then free storage. */
+    for (SPYValue *v = c->values; v; v = v->next)
+        if (!v->marked && v->weak) weak_dead(c, v, 1);
     for (SPYValue *v = c->values; v; v = v->next)
         if (!v->marked) edges(v, release_live_edge, NULL);
     size_t count = 0;
@@ -891,6 +934,7 @@ static int64_t hash_double(SPYValue *owner, double value) {
     return hash_signed(value < 0 ? 0 - hash : hash);
 }
 static int hash_value(SPYContext *, SPYValue *, int64_t *);
+static const char *builtin_module_of(SPYContext *, SPYValue *);
 static int hash_items(SPYContext *c, size_t len, SPYValue *const *items, int tuple, int64_t *result) {
     uint64_t hash = UINT64_C(2870177450012600261);
     for (size_t i = 0; i < len; i++) {
@@ -976,7 +1020,10 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     case SPY_LIST: case SPY_DICT: case SPY_SET: case SPY_BYTEARRAY: case SPY_DICT_KEYS: case SPY_DICT_ITEMS: break;
     default: *result = hash_pointer(value); return 0;
     }
-    errorf(c, "TypeError", "unhashable type: '%s'", type_name(value)); return -1;
+    const char *module = builtin_module_of(c, value);
+    if (module) errorf(c, "TypeError", "unhashable type: '%s.%s'", module, type_name(value));
+    else errorf(c, "TypeError", "unhashable type: '%s'", type_name(value));
+    return -1;
 }
 static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
     if (++c->depth > 256) { c->depth--; spy_error(c, "RecursionError", "hash nesting limit exceeded"); return -1; }
@@ -4756,6 +4803,17 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
             spy_error(c, "RuntimeError", sized->type == SPY_DICT ? "dictionary changed size during iteration" : "Set changed size during iteration");
             v->as.iterator.done = 1;
         } else if (!reversed) result = iter_at(c, source, v->as.iterator.index++);
+        else if (v->as.iterator.index && source->type == SPY_INSTANCE) {
+            /* reversed_next over a sequence: stop at IndexError or StopIteration. */
+            SPYValue *key = spy_int(c, (int64_t)v->as.iterator.index - 1);
+            result = key ? get_index(c, source, key) : NULL;
+            spy_release(key);
+            if (result) v->as.iterator.index--;
+            else {
+                v->as.iterator.index = 0;
+                if (error_is(c, "IndexError") || error_is(c, "StopIteration")) spy_clear_error(c);
+            }
+        }
         else if (v->as.iterator.index) result = iter_at(c, source, --v->as.iterator.index);
         break;
     }
@@ -8231,8 +8289,10 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     }
     return c->error_type[0] ? -1 : 0;
 }
+static void weak_callbacks(SPYContext *);
 static int tick(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
+    if (c->weak_calls_len) weak_callbacks(c);
     c->line = n->line;
     snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
     if (c->step_limit && ++c->steps > c->step_limit) {
@@ -8826,7 +8886,10 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
                 Frame frame = { env, fn->as.function.unit , 0};
                 if (def->code) result = new_generator(c, &frame, def);
                 else {
+                    SPYValue *caller = c->caller_env;
+                    c->caller_env = c->eval_env;
                     Result r = execute(c, &frame, def->b);
+                    c->caller_env = caller;
                     if (r.flow == FLOW_RETURN) result = r.value;
                     else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
                 }
@@ -8844,16 +8907,50 @@ static void not_callable(SPYContext *c, SPYValue *fn) {
     SPYValue *cls = value_class(c, fn);
     SPYValue *module = fn->type == SPY_INSTANCE && c->intrinsics && name_local(c->intrinsics, type_name(fn)) == cls ?
         name_local(cls, "__module__") : NULL;
+    const char *builtin = builtin_module_of(c, fn);
     if (module && module->type == SPY_STRING)
         errorf(c, "TypeError", "'%s.%s' object is not callable", module->as.string.data, type_name(fn));
+    else if (builtin) errorf(c, "TypeError", "'%s.%s' object is not callable", builtin, type_name(fn));
     else errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
 }
 static SPYValue *template_construct(SPYContext *, int, size_t, SPYValue *const *, SPYValue *);
+/* module(name, doc=None), as CPython's module___init___impl. */
+static SPYValue *module_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (argc > 2) return errorf(c, "TypeError", "module() takes at most 2 arguments (%zu given)", argc);
+    SPYValue *args[2] = {argc > 0 ? argv[0] : NULL, argc > 1 ? argv[1] : NULL};
+    static const char *const names[] = {"name", "doc"};
+    for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
+        SPYValue *key = keywords->as.map.items[i].key;
+        int slot = key->type != SPY_STRING ? -1 : !strcmp(key->as.string.data, "name") ? 0 : !strcmp(key->as.string.data, "doc") ? 1 : -1;
+        if (slot < 0) return errorf(c, "TypeError", "module() got an unexpected keyword argument '%s'", key->type == SPY_STRING ? key->as.string.data : "");
+        if (args[slot]) return errorf(c, "TypeError", "argument for module() given by name ('%s') and position (%d)", names[slot], slot + 1);
+        args[slot] = keywords->as.map.items[i].value;
+    }
+    if (!args[0]) return spy_error(c, "TypeError", "module() missing required argument 'name' (pos 1)");
+    if (args[0]->type != SPY_STRING) return errorf(c, "TypeError", "module() argument 'name' must be str, not %s", type_name(args[0]));
+    SPYValue *module = value_new(c, SPY_MODULE);
+    if (module) module->as.map.namespace = value_new(c, SPY_DICT);
+    if (!module || !module->as.map.namespace || name_set(c, module, "__name__", args[0]) ||
+        name_set(c, module, "__doc__", args[1] ? args[1] : c->none) || name_set(c, module, "__package__", c->none) ||
+        name_set(c, module, "__loader__", c->none) || name_set(c, module, "__spec__", c->none)) { spy_release(module); return NULL; }
+    return module;
+}
+static int callable_value(SPYContext *, SPYValue *);
+/* method(function, instance, /), as CPython's method_new. */
+static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "method() takes no keyword arguments");
+    if (argc != 2) return errorf(c, "TypeError", "method expected 2 arguments, got %zu", argc);
+    if (!callable_value(c, argv[0])) return spy_error(c, "TypeError", "first argument must be callable");
+    if (argv[1]->type == SPY_NONE) return spy_error(c, "TypeError", "instance must not be None");
+    return bind_method(c, argv[1], argv[0]);
+}
 /* type.__call__: allocate with __new__, then initialize with __init__. */
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *result = NULL;
     if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
         result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
+    else if (fn == c->types[SPY_MODULE]) result = module_construct(c, argc, argv, keywords);
+    else if (fn == c->types[SPY_METHOD]) result = method_construct(c, argc, argv, keywords);
     else if (fn->as.map.native) {
         result = builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, name_local(fn, "__name__")->as.string.data);
     } else if (fn->as.map.flags == 2) {
@@ -8885,6 +8982,159 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
 SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) {
     return call_keywords(c, fn, argc, argv, NULL);
 }
+static int weakref_natives(SPYContext *, SPYValue *);
+static int collections_natives(SPYContext *, SPYValue *);
+/* Built-in modules: Python sources embedded by tools/build_intrinsics.py,
+ * found before the host loader and parsed only when first imported. */
+static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); } builtin_modules[] = {
+    {"collections", module_collections, sizeof(module_collections) / sizeof(*module_collections), collections_natives},
+    {"types", module_types, sizeof(module_types) / sizeof(*module_types), NULL},
+    {"weakref", module_weakref, sizeof(module_weakref) / sizeof(*module_weakref), weakref_natives},
+};
+/* Weak references. The weakref module builds its reference, proxy, and
+ * container types on these private primitives; a reference object is any
+ * value registered here with a borrowed target. */
+static int slots_name(SPYValue *slots, const char *name) {
+    if (slots->type == SPY_STRING) return !strcmp(slots->as.string.data, name);
+    if (slots->type != SPY_TUPLE && slots->type != SPY_LIST) return 1;
+    for (size_t i = 0; i < slots->as.seq.len; i++)
+        if (slots->as.seq.items[i]->type == SPY_STRING && !strcmp(slots->as.seq.items[i]->as.string.data, name)) return 1;
+    return 0;
+}
+static int weak_referenceable(SPYContext *c, SPYValue *v) {
+    switch (v->type) {
+    case SPY_CLASS: case SPY_FUNCTION: case SPY_SET: case SPY_FROZENSET: case SPY_GENERATOR: case SPY_COROUTINE:
+    case SPY_ASYNC_GENERATOR: case SPY_CODE: case SPY_MODULE: return 1;
+    case SPY_NATIVE: case SPY_METHOD: { int kind = native_kind(v); return kind == NATIVE_FUNCTION || kind == NATIVE_BOUND; }
+    case SPY_INSTANCE: break;
+    default: return 0;
+    }
+    SPYValue *cls = v->as.map.parent;
+    /* Variable-size builtin layouts have no weak-reference slot. */
+    if (subclass(cls, c->types[SPY_INT]) || subclass(cls, c->types[SPY_TUPLE]) || subclass(cls, c->types[SPY_BYTES])) return 0;
+    SPYValue *mro = cls->as.map.mro;
+    size_t len = mro ? mro->as.seq.len : 1;
+    for (size_t i = 0; i < len; i++) {
+        SPYValue *klass = mro ? mro->as.seq.items[i] : cls, *name = name_local(klass, "__name__");
+        if (klass->as.map.native || klass->as.map.flags == 2 ||
+            (name && name->type == SPY_STRING && name_local(c->classes, name->as.string.data) == klass)) continue;
+        SPYValue *slots = name_local(klass, "__slots__");
+        if (!slots || slots_name(slots, "__weakref__")) return 1;
+    }
+    return 0;
+}
+/* These classes of the built-in modules stand in for CPython C types, whose
+ * names in messages carry their module. */
+static const char *builtin_module_of(SPYContext *c, SPYValue *v) {
+    static const char *const types[][2] = {
+        {"collections", "deque"}, {"collections", "_deque_iterator"}, {"collections", "defaultdict"},
+        {"collections", "OrderedDict"}, {"types", "SimpleNamespace"}, {"weakref", "ReferenceType"},
+        {"weakref", "ProxyType"}, {"weakref", "CallableProxyType"}};
+    (void)c;
+    if (v->type != SPY_INSTANCE) return NULL;
+    SPYValue *module = name_local(v->as.map.parent, "__module__"), *name = name_local(v->as.map.parent, "__qualname__");
+    if (!module || module->type != SPY_STRING || !name || name->type != SPY_STRING) return NULL;
+    for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++)
+        if (!strcmp(types[i][0], module->as.string.data) && !strcmp(types[i][1], name->as.string.data)) return types[i][0];
+    return NULL;
+}
+static struct WeakEntry *weak_entry(SPYContext *c, SPYValue *ref) {
+    for (size_t i = 0; i < c->weak_len; i++) if (c->weak[i].ref == ref) return &c->weak[i];
+    return NULL;
+}
+static SPYValue *weak_bind(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    if (argc != 3) return spy_error(c, "TypeError", "_weak_bind expects 3 arguments");
+    SPYValue *target = argv[0], *ref = argv[1], *callback = argv[2];
+    if (!weak_referenceable(c, target)) {
+        const char *module = builtin_module_of(c, target);
+        if (module) return errorf(c, "TypeError", "cannot create weak reference to '%s.%s' object", module, type_name(target));
+        return errorf(c, "TypeError", "cannot create weak reference to '%s' object", type_name(target));
+    }
+    if (weak_entry(c, ref)) return spy_error(c, "SystemError", "reference object is already bound");
+    if (c->weak_len == c->weak_cap) {
+        size_t next = c->weak_cap ? c->weak_cap * 2 : 16;
+        struct WeakEntry *grown = realloc(c->weak, next * sizeof(*grown));
+        if (!grown) return spy_error(c, "MemoryError", "allocation failed");
+        c->weak = grown; c->weak_cap = next;
+    }
+    if (ref->type != SPY_INSTANCE) return spy_error(c, "TypeError", "weak reference objects must be instances");
+    if (name_set(c, ref, "__callback__", callback)) return NULL;
+    c->weak[c->weak_len++] = (struct WeakEntry){target, ref, 0, 0};
+    target->weak = ref->weak = 1;
+    return spy_none(c);
+}
+static SPYValue *weak_get(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    struct WeakEntry *e = argc == 1 ? weak_entry(c, argv[0]) : NULL;
+    SPYValue *value = !e ? NULL : data ? name_local(e->ref, "__callback__") : e->target;
+    return spy_retain(value ? value : c->none);
+}
+static SPYValue *weak_hash(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    struct WeakEntry *e = argc == 1 ? weak_entry(c, argv[0]) : NULL;
+    if (!e) return spy_error(c, "TypeError", "not a weak reference");
+    if (!e->hashed) {
+        if (!e->target) return spy_error(c, "TypeError", "weak object has gone away");
+        int64_t hash;
+        SPYValue *target = spy_retain(e->target);
+        int status = hash_value(c, target, &hash);
+        spy_release(target);
+        if (status) return NULL;
+        e = weak_entry(c, argv[0]);
+        if (e) { e->hash = hash; e->hashed = 1; }
+        return spy_int(c, hash);
+    }
+    return spy_int(c, e->hash);
+}
+static SPYValue *weak_refs(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    SPYValue *list = spy_list(c);
+    if (argc == 1 && argv[0]->weak)
+        for (size_t i = 0; list && i < c->weak_len; i++)
+            if (c->weak[i].target == argv[0] && spy_list_append(c, list, c->weak[i].ref)) { spy_release(list); list = NULL; }
+    return list;
+}
+/* Run callbacks of references whose targets died, at a statement boundary.
+ * CPython reports their exceptions as unraisable; spy has no error stream, so
+ * they are discarded without disturbing the interrupted code. */
+static void weak_callbacks(SPYContext *c) {
+    if (c->weak_running) return;
+    c->weak_running = 1;
+    while (c->weak_calls_len) {
+        SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
+        memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
+        if (callback && callback->type != SPY_NONE && !name_set(c, ref, "__callback__", c->none))
+            spy_release(spy_call(c, callback, 1, &ref));
+        if (c->error_type[0]) spy_clear_error(c);
+        spy_release(callback); spy_release(ref);
+    }
+    c->weak_running = 0;
+}
+static int define_native(SPYContext *c, SPYValue *module, const char *name, SPYNative call, void *data) {
+    SPYValue *v = value_new(c, SPY_NATIVE);
+    if (!v) return -1;
+    v->as.native.call = call; v->as.native.data = data;
+    v->as.native.name = spy_string(c, name, strlen(name));
+    int status = v->as.native.name ? name_set(c, module, name, v) : -1;
+    spy_release(v);
+    return status;
+}
+/* The module name of the running Python function's caller, for namedtuple's
+ * sys._getframemodulename(1). */
+static SPYValue *caller_module(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)argc; (void)argv; (void)data;
+    SPYValue *env = c->caller_env ? c->caller_env : c->globals;
+    SPYValue *name = name_local(module_env(c, env), "__name__");
+    return spy_retain(name ? name : c->none);
+}
+static int collections_natives(SPYContext *c, SPYValue *module) {
+    return define_native(c, module, "_caller_module", caller_module, NULL);
+}
+static int weakref_natives(SPYContext *c, SPYValue *module) {
+    return define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
+        define_native(c, module, "_weak_callback", weak_get, c) || define_native(c, module, "_weak_hash", weak_hash, NULL) ||
+        define_native(c, module, "_weak_refs", weak_refs, NULL);
+}
 static SPYValue *import_module(SPYContext *, const char *);
 static SPYValue *load_source_module(SPYContext *c, const char *name) {
     SPYValue *cached = name_local(c->modules, name);
@@ -8896,8 +9146,11 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (name_set(c, c->modules, name, module)) { spy_release(module); return NULL; }
         return module;
     }
-    if (!c->loader) return errorf(c, "ModuleNotFoundError", "no loader installed for '%s'", name);
-    const char *dot = strrchr(name, '.');
+    size_t builtin = 0;
+    while (builtin < sizeof(builtin_modules) / sizeof(*builtin_modules) && strcmp(builtin_modules[builtin].name, name)) builtin++;
+    int embedded = builtin < sizeof(builtin_modules) / sizeof(*builtin_modules);
+    if (!embedded && !c->loader) return errorf(c, "ModuleNotFoundError", "no loader installed for '%s'", name);
+    const char *dot = embedded ? NULL : strrchr(name, '.');
     SPYValue *parent = NULL;
     if (dot) {
         char *prefix = copy_text(c, name, (size_t)(dot - name));
@@ -8911,18 +9164,27 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (cached) { spy_release(parent); return spy_retain(cached); }
     }
     char *source = NULL;
-    Buffer init = {.ctx = c};
-    if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c->loader_data, init.data);
-    free(init.data);
-    int package = source != NULL;
-    if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
-    if (!source) { spy_release(parent); return errorf(c, "ModuleNotFoundError", "no module named '%s'", name); }
+    int package = 0;
     Buffer filename = {.ctx = c};
-    for (const char *ch = name; *ch && !c->error_type[0]; ch++) {
-        char part = *ch == '.' ? '/' : *ch;
-        append(&filename, &part, 1);
+    if (embedded) {
+        Buffer text = {.ctx = c};
+        for (size_t i = 0; i < builtin_modules[builtin].lines; i++)
+            if (puts_buffer(&text, builtin_modules[builtin].source[i])) { free(text.data); return NULL; }
+        source = text.data;
+        puts_buffer(&filename, "<frozen "); puts_buffer(&filename, name); puts_buffer(&filename, ">");
+    } else {
+        Buffer init = {.ctx = c};
+        if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c->loader_data, init.data);
+        free(init.data);
+        package = source != NULL;
+        if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
+        if (!source) { spy_release(parent); return errorf(c, "ModuleNotFoundError", "no module named '%s'", name); }
+        for (const char *ch = name; *ch && !c->error_type[0]; ch++) {
+            char part = *ch == '.' ? '/' : *ch;
+            append(&filename, &part, 1);
+        }
+        puts_buffer(&filename, package ? "/__init__.py" : ".py");
     }
-    puts_buffer(&filename, package ? "/__init__.py" : ".py");
     SPYValue *unit = c->error_type[0] ? NULL : parse(c, source, filename.data);
     free(filename.data);
     free(source);
@@ -8949,7 +9211,8 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     }
     spy_release(module_name);
     Frame frame = {module, unit, 0};
-    Result result = execute_module(c, &frame);
+    Result result = embedded && builtin_modules[builtin].init && builtin_modules[builtin].init(c, module) ?
+        (Result){FLOW_ERROR, NULL} : execute_module(c, &frame);
     spy_release(result.value); spy_release(unit);
     if (result.flow == FLOW_ERROR) {
         /* A failed import must not leave a half-initialized cached module. */
@@ -14243,6 +14506,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (id == B_ENUMERATE && !argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
         if (id == B_ENUMERATE && argc > 2) return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", argc);
         if (id == B_REVERSED && argc != 1) return errorf(c, "TypeError", "reversed expected 1 argument, got %zu", argc);
+        if (id == B_REVERSED && builtin_base(c, a, "__reversed__", NULL)) a = builtin_base(c, a, "__reversed__", NULL);
         if (id == B_REVERSED && a->type == SPY_RANGE) {
             SPYValue *step = spy_int(c, -1);
             SPYValue *slice = step ? slice_new(c, c->none, c->none, step) : NULL;
@@ -14262,7 +14526,24 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
                 if (status) { spy_release(source); return NULL; }
             }
         } else if (id == B_ENUMERATE) source = get_iterator(c, a);
-        else {
+        else if (a->type == SPY_INSTANCE) {
+            /* reversed_new: __reversed__, else the sequence protocol. */
+            SPYValue *cls = value_class(c, a), *method = class_lookup(cls, "__reversed__");
+            if (method && method->type != SPY_NONE) return call_special(c, a, "__reversed__", 0, NULL);
+            if (method || !class_lookup(cls, "__getitem__") || subclass(cls, c->types[SPY_DICT]))
+                return errorf(c, "TypeError", "'%s' object is not reversible", type_name(a));
+            SPYValue *length = builtin_keywords(c, 1, &a, B_LEN, NULL, "len");
+            int64_t n;
+            int status = length ? spy_as_int(c, length, &n) : -1;
+            spy_release(length);
+            if (status) return NULL;
+            SPYValue *v = value_new(c, SPY_ITERATOR);
+            if (!v) return NULL;
+            v->as.iterator.source = spy_retain(a);
+            v->as.iterator.kind = I_REVERSED;
+            v->as.iterator.index = (size_t)n;
+            return v;
+        } else {
             if (a->type != SPY_LIST && a->type != SPY_TUPLE && a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_RANGE &&
                 a->type != SPY_DICT && !is_view(a))
                 return errorf(c, "TypeError", "'%s' object is not reversible", type_name(a));
@@ -14766,6 +15047,23 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         }
         if (!args[0] || !args[1]) return spy_error(c, "TypeError", "pow() requires base and exp");
         return builtin(c, args[2] ? 3 : 2, args, (void *)(intptr_t)id);
+    }
+    if (id == B_PROPERTY && keywords && keywords->as.map.len) {
+        if (argc + keywords->as.map.len > 4)
+            return errorf(c, "TypeError", "property() takes at most 4 arguments (%zu given)", argc + keywords->as.map.len);
+        SPYValue *args[4] = {c->none, c->none, c->none, c->none};
+        static const char *const names[] = {"fget", "fset", "fdel", "doc"};
+        for (size_t i = 0; i < argc; i++) args[i] = argv[i];
+        for (size_t i = 0; i < keywords->as.map.len; i++) {
+            Entry *entry = &keywords->as.map.items[i];
+            const char *key = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
+            size_t at = 0;
+            while (at < 4 && strcmp(key, names[at])) at++;
+            if (at == 4) return errorf(c, "TypeError", "property() got an unexpected keyword argument '%s'", key);
+            if (at < argc) return errorf(c, "TypeError", "argument for property() given by name ('%s') and position (%zu)", key, at + 1);
+            args[at] = entry->value;
+        }
+        return builtin(c, 4, args, (void *)(intptr_t)id);
     }
     if (id == B_INT && keywords && keywords->as.map.len) {
         SPYValue *base = name_local(keywords, "base");
@@ -15507,7 +15805,9 @@ void spy_context_free(SPYContext *c) {
     if (!c) return;
     /* Context destruction invalidates every value. Free storage directly so
      * shutdown cannot recurse through an arbitrarily deep object graph. */
+    c->weak_len = 0;
     while (c->values) free_value(c->values);
+    free(c->weak); free(c->weak_calls);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     free(c);
 }

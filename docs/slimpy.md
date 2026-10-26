@@ -497,9 +497,33 @@ finders, lazy imports, and extension loading remain missing.
 
 ### 3.3 Standard library and host services
 
-There are no general standard-library modules built into the core. The `builtins`
-module exposes language builtins. Core `print` requires an output
-callback; source imports require a loader. An embedding application opts into those
+Three minimal standard-library modules are built in: `collections`, `types`,
+and `weakref`. Their Python sources live in `modules/` and are embedded into
+`spy-intrinsics.h`; an import finds them before the host loader, needs no
+loader, and parses them only on first use. `collections` provides `deque`,
+`defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
+`UserList`, and `UserString` (the last six are CPython's own Python code);
+there is no `collections.abc`. `types` names the engine's builtin types and
+provides `SimpleNamespace`, `new_class`, `prepare_class`, `resolve_bases`,
+`get_original_bases`, and `DynamicClassAttribute`; cell, frame, traceback,
+descriptor-member, capsule, and lazy-import types and `coroutine()` are absent.
+`weakref` provides `ref`, `proxy`, `getweakrefcount`, `getweakrefs`,
+`WeakMethod`, `WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`, and
+`finalize` (which has no interpreter-exit hook).
+
+Weak references use a per-context table of borrowed (referent, reference)
+pairs. Instances of classes without `__slots__` (or with `__weakref__` in
+them), classes, functions, bound methods, builtin functions, sets, frozensets,
+generators, coroutines, code objects, and modules are weakly referenceable,
+as in CPython. Releasing a referent, or collecting it in a cycle, clears its
+references and queues their callbacks, which run at the next statement
+boundary; callback exceptions are discarded because there is no error stream.
+Closures retain their whole defining environment, so a closure can keep alive
+a local that CPython would have released.
+
+Other standard-library modules are not built in. The `builtins` module exposes
+language builtins. Core `print` requires an output callback; other source
+imports require a loader. An embedding application opts into those
 capabilities. Optional Python-level C library wrappers remain future work.
 
 Removing standard-library dependencies does not remove requirements for

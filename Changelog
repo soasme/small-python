@@ -156,3 +156,9 @@
 - CPython's assignment-target diagnostics: "cannot assign to/delete X",
   "... here. Maybe you meant '==' instead of '='?", augmented-assignment,
   assert, call keyword and starred-argument messages.
+- Minimal built-in modules collections, types, and weakref, embedded from
+  modules/ and parsed on first import without a host loader. Weak references
+  use a context weak table cleared on release and by the cycle collector;
+  callbacks run at the next statement boundary. Also module(name, doc) and
+  method(function, instance) constructors, property() keyword arguments, and
+  reversed() over __reversed__ and the sequence protocol.

@@ -27,6 +27,10 @@ run the equivalent command directly.
   protocols, and import semantics are part of the language and cannot be
   excluded merely because CPython documents them near its standard library.
   Host I/O and optional C library wrappers belong at an explicit host boundary.
+  The exceptions are the minimal built-in modules `collections`, `types`, and
+  `weakref`: Python sources in `modules/`, embedded by
+  `tools/build_intrinsics.py`, found before the host loader, and parsed only
+  on first import. Their private primitives (weak table, caller module) are C.
 - Cache at most one released tuple allocation for each length zero through
   eight inside its owning context. Cached storage owns no element references,
   is excluded from the live-value graph, and is freed during context shutdown.

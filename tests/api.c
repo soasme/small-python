@@ -538,6 +538,20 @@ int main(void) {
     assert(!spy_string(c, "", SIZE_MAX));
     assert(!strcmp(spy_error_type(c), "MemoryError"));
 
+    /* Built-in modules import without a loader. The collector clears weak
+     * references to cyclic garbage; callbacks run at the next statement. */
+    spy_set_step_limit(c, 0);
+    assert(!spy_exec(c, "import weakref\nclass Node: pass\nseen = []\nn = Node(); n.me = n\n"
+                        "wr = weakref.ref(n, seen.append)\ndel n", "weak.py"));
+    spy_collect(c);
+    assert(!spy_exec(c, "pass\nassert wr() is None and seen == [wr], seen", "weak_check.py"));
+    size_t before = spy_live_values(c);
+    for (int i = 0; i < 3; i++) {
+        assert(!spy_exec(c, "n = Node(); n.me = n; w = weakref.ref(n, lambda r: None); del n, w", "weak_loop.py"));
+        spy_collect(c);
+    }
+    assert(spy_live_values(c) <= before + 8);
+
     SPYContext *other = spy_context_new();
     assert(other);
     SPYValue *foreign = spy_int(other, 3);

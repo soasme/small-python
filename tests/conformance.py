@@ -3282,6 +3282,130 @@ for src in ["ub''", "turf''", "brft''", "def foo(/,a,b=,c):\n   pass", "def foo(
     except SyntaxError as e: print(type(e).__name__, e.msg, e.lineno)
 """)
 
+CASES += [r"""
+from collections import *
+import weakref, types
+def t(f):
+    try: r = f()
+    except Exception as e: r = f'{type(e).__name__}: {e}'
+    print(r)
+d = deque('abcde')
+t(lambda: d.index('c')); t(lambda: d.count('a')); t(lambda: 'q' in d); t(lambda: d * 2); t(lambda: 2 * d)
+d.insert(1, 'X'); d.remove('c'); t(lambda: d); del d[0]; t(lambda: d); d[0] = 'Z'; t(lambda: d)
+d.reverse(); t(lambda: d); d.rotate(-1); t(lambda: d); d.extendleft('12'); t(lambda: d)
+t(lambda: deque([1,2]) == deque([1,2])); t(lambda: deque([1]) <= deque([1, 0])); t(lambda: deque([3]) > deque([1]))
+t(lambda: deque(range(3), maxlen=0)); t(lambda: deque(maxlen=2).maxlen); x = deque([1,2,3]); x += [4]; t(lambda: x)
+x *= 0; t(lambda: x); t(lambda: deque([1]).copy()); t(lambda: bool(deque())); t(lambda: list(reversed(deque([1,2,3]))))
+t(lambda: deque([1, 2])[-1]); t(lambda: deque([1, 2])[-3]); t(lambda: deque[int])
+y = deque([1, 2, 3], 3); y.append(4); t(lambda: y); y.appendleft(0); t(lambda: y); y.extend([7, 8]); t(lambda: y)
+t(lambda: deque([1, 2]) + deque([3])); t(lambda: deque().pop())
+for i in range(100): y.appendleft(i)
+t(lambda: (len(y), y[0], y[2]))
+q = deque()
+for i in range(50): q.append(i)
+for i in range(45): q.popleft()
+t(lambda: q)
+dd = defaultdict(int)
+for ch in 'mississippi': dd[ch] += 1
+t(lambda: dd); t(lambda: dict(dd)); t(lambda: dd.copy()); t(lambda: dd == {'m': 1, 'i': 4, 's': 4, 'p': 2})
+t(lambda: defaultdict(list, {1: 2}) | {3: 4}); t(lambda: {3: 4} | defaultdict(list, {1: 2})); t(lambda: defaultdict(lambda: 5)['k'] if False else defaultdict(None))
+t(lambda: defaultdict(int).get('x')); t(lambda: 'x' in defaultdict(int)); t(lambda: defaultdict.__name__)
+t(lambda: isinstance(defaultdict(), dict)); t(lambda: defaultdict(int, a=1, b=2))
+od = OrderedDict.fromkeys('abc', 0); t(lambda: od); od['a'] = 5; t(lambda: list(od)); t(lambda: od.pop('b')); t(lambda: od.pop('b', 'dflt'))
+t(lambda: od.setdefault('z', 9)); t(lambda: od); t(lambda: od == {'a': 5, 'c': 0, 'z': 9}); t(lambda: od | {'q': 1})
+t(lambda: OrderedDict(a=1) == OrderedDict(a=1)); t(lambda: OrderedDict([('a', 1), ('b', 2)]) != OrderedDict([('b', 2), ('a', 1)]))
+t(lambda: od.copy()); t(lambda: list(reversed(od))); t(lambda: od.popitem()); t(lambda: od)
+P = namedtuple('Point', ['x', 'y'])
+p = P(1, 2); t(lambda: p); t(lambda: P(x=3, y=4)); t(lambda: P._make([5, 6])); t(lambda: P.__doc__); t(lambda: p.x + p.y)
+t(lambda: P(1)); t(lambda: P(1, 2, 3)); t(lambda: namedtuple('Bad', ['_a'])); t(lambda: namedtuple('Bad', ['a', 'a']))
+t(lambda: namedtuple('Bad', 'class')); t(lambda: namedtuple('R', 'a _b a class', rename=True)._fields); t(lambda: isinstance(p, tuple))
+t(lambda: p._replace(z=1)); t(lambda: P._field_defaults); t(lambda: hash(p) == hash((1, 2))); t(lambda: P.__match_args__)
+t(lambda: P.x.__doc__); t(lambda: p.__getnewargs__())
+match p:
+    case P(x=1, y=yy): print('matched', yy)
+c = Counter(a=3, b=1)
+t(lambda: c.most_common()); t(lambda: c.most_common(1)); c.update('aab'); t(lambda: c); c.subtract({'a': 10}); t(lambda: c)
+t(lambda: +c); t(lambda: -c); t(lambda: c | Counter(z=2)); t(lambda: c & Counter(b=1)); t(lambda: Counter('ab') ^ Counter('bc'))
+t(lambda: Counter('aab') <= Counter('aabb')); t(lambda: Counter.fromkeys('a')); t(lambda: Counter() == Counter(a=0))
+c2 = Counter('xy'); c2 += Counter('x'); t(lambda: c2); del c2['nope']; t(lambda: c2)
+cm = ChainMap({'a': 1}, {'b': 2})
+cm['c'] = 3; t(lambda: cm); t(lambda: cm.parents); t(lambda: cm.maps); t(lambda: 'b' in cm); t(lambda: cm.get('b'))
+t(lambda: dict(cm)); t(lambda: cm.pop('c')); t(lambda: cm.pop('b')); t(lambda: cm | {'x': 1}); t(lambda: list(cm.keys()))
+t(lambda: list(cm.items())); t(lambda: cm == {'a': 1, 'b': 2}); t(lambda: bool(ChainMap()))
+ud = UserDict({'k': 1}); t(lambda: ud | {'j': 2}); t(lambda: ud.copy()); t(lambda: ud.pop('k')); t(lambda: ud); t(lambda: ud.setdefault('m', 3))
+ul = UserList([3, 1, 2]); ul.sort(); t(lambda: ul); t(lambda: ul * 2); t(lambda: ul.index(2)); t(lambda: ul.count(1)); t(lambda: ul == [1, 2, 3])
+ul.reverse(); t(lambda: ul); t(lambda: ul.pop()); t(lambda: ul); t(lambda: 3 in ul); t(lambda: ul[0])
+us = UserString('abc'); t(lambda: us * 2); t(lambda: us.find('c')); t(lambda: us.split('b')); t(lambda: us == 'abc'); t(lambda: 'b' in us)
+t(lambda: us.replace('a', 'z')); t(lambda: us.zfill(5)); t(lambda: us.join(['1', '2'])); t(lambda: us < 'b'); t(lambda: str(us))
+ns = types.SimpleNamespace(x=1)
+t(lambda: ns.__replace__(x=2)); t(lambda: types.SimpleNamespace(1, 2)); t(lambda: types.SimpleNamespace({1: 2}))
+t(lambda: types.ModuleType()); t(lambda: types.ModuleType(1)); t(lambda: types.ModuleType('a', 'b', 'c'))
+t(lambda: types.ModuleType(name='q')); t(lambda: types.MethodType(1, 2)); t(lambda: types.MethodType(len, None))
+t(lambda: types.resolve_bases((int,))); t(lambda: types.prepare_class('A'))
+t(lambda: types.get_original_bases(int)); t(lambda: types.FunctionType.__name__); t(lambda: types.SimpleNamespace.__module__)
+class A: pass
+a = A()
+r = weakref.ref(a)
+t(lambda: r == weakref.ref(a)); t(lambda: hash(r) == hash(a)); t(lambda: weakref.getweakrefcount(a)); t(lambda: weakref.getweakrefs(a) == [r])
+t(lambda: weakref.ref(a, lambda x: None) == r); t(lambda: weakref.ref(1)); t(lambda: weakref.proxy(a) is weakref.proxy(a))
+p = weakref.proxy(a); a.v = [1, 2]; t(lambda: p.v); t(lambda: len(p.v))
+del a
+t(lambda: r()); t(lambda: hash(r) is not None); t(lambda: p.v)
+class B: pass
+b = B(); r2 = weakref.ref(b); del b
+t(lambda: hash(r2))
+wd = weakref.WeakValueDictionary()
+class V: pass
+vs = [V() for i in range(3)]
+for i, v in enumerate(vs): wd[i] = v
+t(lambda: sorted(wd.keys())); del vs[1]; t(lambda: sorted(wd.keys())); t(lambda: 1 in wd); t(lambda: wd.get(1, 'gone'))
+ws = weakref.WeakSet(vs); t(lambda: len(ws)); vs.pop(); t(lambda: len(ws))
+f = weakref.finalize(vs[0], print, 'fin', 1); t(lambda: f.alive); t(lambda: f()); t(lambda: f.alive); t(lambda: f())
+cp = weakref.proxy(len); t(lambda: cp([1, 2])); t(lambda: type(cp).__name__); t(lambda: callable(cp))
+t(lambda: weakref.ref.__module__); t(lambda: weakref.ReferenceType.__name__); t(lambda: weakref.ref[int])
+""", r"""
+import weakref
+class A: pass
+a = A(); calls = []
+r = weakref.ref(a, lambda wr: calls.append(wr))
+print(r() is a, weakref.getweakrefcount(a), r.__callback__ is not None)
+r2 = weakref.ref(a); print(r2 is weakref.ref(a), r2 is not r)
+del a
+print(r(), calls == [r], r2(), r.__callback__)
+for o in (1, 'x', [], {}, len, Exception(), A, set(), object(), r2, (1,), b'', range(1)):
+    try: weakref.ref(o); print(type(o).__name__, 'ok')
+    except TypeError as e: print(e)
+class S: __slots__ = ()
+class T(S): pass
+class U: __slots__ = ('__weakref__',)
+class I(int): pass
+for k in (S, T, U, I):
+    try: weakref.ref(k()); print('ok')
+    except TypeError as e: print(e)
+k = weakref.WeakKeyDictionary(); y = A(); k[y] = 1; print(len(k)); del y; print(len(k))
+class B:
+    def m(self): return 5
+b = B(); wm = weakref.WeakMethod(b.m); print(wm()()); del b; print(wm())
+q = A(); f = weakref.finalize(q, print, 'finalized'); print(f.alive); del q
+print('after', f.alive)
+def boom(wr): raise ValueError('ignored')
+z = A(); zr = weakref.ref(z, boom); del z
+print('still running', zr())
+order = []
+z = A(); r1 = weakref.ref(z, lambda w: order.append(1)); r2 = weakref.ref(z, lambda w: order.append(2)); del z
+print(order)
+def gen():
+    yield 1
+g = gen(); gr = weakref.ref(g); del g; print(gr())
+class L(list): pass
+print(list(reversed(L([1, 2]))))
+class Seq:
+    def __len__(self): return 3
+    def __getitem__(self, i): return i * 10
+print(list(reversed(Seq())))
+print(property(fget=len, doc='d').__doc__)
+"""]
+
 CASES.append(r"""
 extra = ['x = a < b = 1','x = f() = y = 1','x = 1 = 2','[1] + 2 = 3','(a) + 1 = 2','[x for x in y] = 1','x() = yield','x = f() = 1 if 2 else 3','-1 = 2','not a = 1','a, f() = 1','*a = 1','*a += 1','del *a','del (a, f())','if x == 1 = 2: pass','x = (yield) = 1','f() = 1 = 2','a.b, c() = 1','x = lambda: 1 = 2','await x = 1','(x = 1)','[a, b() = 1]','x = f() == 1 = 2','x = 1','a, b = 1, 2','x = y = z = 0','a[0], b.c = 1, 2','*a, b = c','[a, *b] = c','(a) = 1','x += 1','del a, b[0], c.d','for (a, b) in c: pass','with a as (b, c): pass','[x for (a, b) in y]','assert x == 1, "m"','assert (x := 1)','assert x := 1','assert 1, x := 2','f(a) = 1 = 2','a, *b() = 1','(a, b()) = 1','x = [y = 1]']
 for src in ['None = 1', 'True = 1', '(True := 1)', 'f() = 1', 'yield = 1', 'del f()', 'a + 1 = 2', '1 = 1', '"abc" = 1', 'b"" = 1', '... = 1', '(a, "b", c) = (1, 2, 3)', '(a, True, c) = (1, 2, 3)', '(a, *True, c) = (1, 2, 3)', '[a, b, c + 1] = [1, 2, 3]', '[a, b[1], c + 1] = [1, 2, 3]', '[a, b.c.d, c + 1] = [1, 2, 3]', 'a if 1 else b = 1', 'True = True = 3', 'x = y = True = z = 3', 'x = y = yield = 1', 'a, b += 1, 2', '(a, b) += 1, 2', '[a, b] += 1, 2', 'for a() in b: pass', 'for (a, b()) in b: pass', 'for [a, b()] in b: pass', 'for (*a, b, c+1) in b: pass', 'for (x, *(y, z.d())) in b: pass', 'for a, b() in c: pass', 'for a, b, (c + 1, d()): pass', 'with a as b(): pass', 'with a as (b, c()): pass', 'with a as [b, c()]: pass', 'with a as (*b, c, d+1): pass', 'with a as (x, *(y, z.d())): pass', 'with a as b, c as d(): pass', '[x for x() in a]', '[x for a, b, (c + 1, d()) in y]', '[x for x+1 in y]', '[x for x+1, x() in y]', 'f(True=1)', 'f(False=1)', 'f(None=1)', 'f(*args=[0])', 'f(a, b, *args=[0])', "f(**kwargs={'a': 1})", "f(a, b, *args, **kwargs={'a': 1})", 'None += 1', 'f() += 1', 'if 1:\n  x() = 1\nelif 1:\n  pass', 'if 1:\n  pass\nelif 1:\n  x() = 1', 'if 1:\n  x() = 1\nelif 1:\n  pass\nelse:\n  pass', 'if 1:\n  pass\nelif 1:\n  x() = 1\nelse:\n  pass', 'if 1:\n  pass\nelif 1:\n  pass\nelse:\n  x() = 1', 'if x = 3:\n   pass', 'while x = 3:\n   pass', 'if x.a = 3:\n   pass', 'while x.a = 3:\n   pass', '{1, 2, 3} = 42', '{1: 2, 3: 4} = 42', "f'{x}' = 42", "f'{x}-{y}' = 42", "t'{x}' = 42", "t'{x}-{y}' = 42", '(x, y, z=3, d, e)', '[x, y, z=3, d, e]', '[z=3]', '{x, y, z=3, d, e}', '{z=3}', 'import a as b; None = 1', 'import a, b as c; d = 1; None = 1', 'from a import b as c; None = 1', 'from a import b, c as d; e = 1; None = 1', 'assert a := 1', 'assert 1, a := 1', 'assert 1 = 2 = 3', 'assert 1 = 2', 'assert (1 = 2)', "assert 'a' = a", 'assert x[0] = 1', 'assert (yield a) = 2', 'assert a = 2', 'assert (a = 2)', 'assert a = b', 'assert 1, 1 = b', 'assert 1, (1 = b)', 'assert 1, a = 1', 'assert 1, (a = 1)', 'assert 1 = a, a = 1'] + extra:
