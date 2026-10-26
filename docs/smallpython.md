@@ -390,9 +390,14 @@ functions share their defining environment rather than holding cells.
 `compile` accepts `flags`, `dont_inherit`, `optimize`, `module`, and
 `_feature_version` with CPython's validation; flags do not change the
 resulting code, and `PyCF_ONLY_AST` raises `NotImplementedError`.
-Exception support still lacks
-traceback objects, complete chaining, and all builtin-specific
-constructors. Context-manager exit currently receives `None` for the traceback.
+Exceptions carry traceback objects as CPython builds them: an error adds an
+entry for each frame it passes through, `raise exc` continues `exc`'s
+traceback, and a bare `raise` adds none. Entries have `tb_next` (assignable,
+with loop detection), `tb_frame`, `tb_lineno` (the statement's line), and
+`tb_lasti` (always 0, since there is no bytecode); `__exit__`,
+`generator.throw`, `with_traceback`, and `types.TracebackType(...)` accept
+and pass them. Exception support still lacks complete chaining and all
+builtin-specific constructors.
 The 3.15 `sentinel` builtin creates unique named objects (PEP 661) that
 record their creating module, copy as themselves, reduce to their name, and
 form unions with `|`. `object.__reduce__`, `__reduce_ex__`, and `__getstate__`
@@ -606,9 +611,8 @@ checks and messages; the tee buffer and `_grouper` follow the C module.
 standard library's `_collections_abc`, which the host loader supplies on first
 use. `types` names the engine's builtin types and
 provides `SimpleNamespace`, `new_class`, `prepare_class`, `resolve_bases`,
-`get_original_bases`, and `DynamicClassAttribute`; traceback,
-descriptor-member, and capsule types and `coroutine()` are absent; it names
-`CellType`, `FrameType` and `FrameLocalsProxyType`;
+`get_original_bases`, and `DynamicClassAttribute`; descriptor-member, and capsule types and `coroutine()` are absent; it names
+`CellType`, `FrameType`, `FrameLocalsProxyType`, and `TracebackType`;
 `LazyImportType` is the lazy-import placeholder type. `sys` keeps the runtime
 state natively: `modules`, `exception()`, the recursion limit, the integer
 string-conversion limit, and `stdout`/`stderr` streams that write to the host
@@ -893,7 +897,7 @@ and cleanup. A static symbol pass records local bindings and validates
 `global`/`nonlocal` declarations before execution. Captured environments retain
 the source units that own their symbol tables. Private identifiers are mangled
 in their defining class context; attribute lookup uses the spelling it receives.
-Annotation scopes, complete traceback propagation, and introspection remain work.
+Annotation scopes and complete introspection remain work.
 
 ### 4.6 Repository and toolchain
 

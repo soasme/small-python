@@ -255,3 +255,6 @@
   Python callables as host functions with keywords, registered modules,
   Object wrappers, value conversion, and exception mapping both ways.
 - match subjects accept unparenthesized walrus items (match w := x, :).
+- Traceback objects: __traceback__ chains built as an error leaves each frame,
+  tb_next/tb_frame/tb_lineno/tb_lasti, types.TracebackType, with_traceback,
+  and tracebacks passed to __exit__ and accepted by generator throw().

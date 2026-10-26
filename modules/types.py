@@ -66,6 +66,10 @@ import sys as _sys
 _f = (lambda: _sys._getframe())()
 FrameType = type(_f)
 FrameLocalsProxyType = type(_f.f_locals)
+try:
+    raise TypeError
+except TypeError as _e:
+    TracebackType = type(_e.__traceback__)
 
 lazy import builtins as _lazy
 LazyImportType = type(globals()['_lazy'])

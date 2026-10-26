@@ -15,7 +15,7 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-#define SPY_LAST_TYPE SPY_CELL /* The last public value tag. */
+#define SPY_LAST_TYPE SPY_TRACEBACK /* The last public value tag. */
 enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* Instance layouts beyond the builtin value types. */
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE };
@@ -87,6 +87,9 @@ struct SPYValue {
         /* A closure cell: the variable name in its defining environment, or
          * its own value when env is NULL (types.CellType). */
         struct { SPYValue *env, *name, *value; } cell;
+        /* One entry of an exception's traceback: a frame and its line, then
+         * the entries of the frames the exception came from. */
+        struct { SPYValue *next, *frame; size_t line; int64_t lasti; } traceback;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
@@ -136,9 +139,14 @@ struct SPYContext {
     uintptr_t stack_top;
     /* The running Python frames, innermost last; py_depth entries. env and
      * owner are borrowed from the executing call, object is the frame
-     * object once sys._getframe has materialized it. */
-    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line; } *frames;
-    size_t frames_cap;
+     * object once sys._getframe has materialized it, and serial tells
+     * frames apart over the context's lifetime. */
+    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial; } *frames;
+    size_t frames_cap, frame_serial;
+    /* The pending error's traceback, innermost entry last, and the serial
+     * of the frame its head entry belongs to (0 when none). */
+    SPYValue *traceback;
+    size_t traceback_frame;
     SPYWrite write;
     SPYFlush flush;
     void *write_data;
@@ -174,6 +182,7 @@ static SPYValue *rich_compare(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *cell_contents(SPYValue *);
 static int cell_set(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *cell_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *traceback_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *function_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -201,6 +210,7 @@ static SPYValue *active_exception(SPYContext *c) {
 static SPYValue *errorf(SPYContext *c, const char *type, const char *fmt, ...) {
     if (!c->error_type[0]) {
         va_list ap;
+        spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
         snprintf(c->error_type, sizeof(c->error_type), "%s", type);
         va_start(ap, fmt);
         vsnprintf(c->error_message, sizeof(c->error_message), fmt, ap);
@@ -237,16 +247,35 @@ static int enter_frame(SPYContext *c, SPYValue *env, SPYValue *owner) {
         if (!frames) { errorf(c, "MemoryError", "out of memory"); return -1; }
         c->frames = frames; c->frames_cap = cap;
     }
-    c->frames[c->py_depth++] = (struct ActiveFrame){env, owner, NULL, c->line};
+    c->frames[c->py_depth++] = (struct ActiveFrame){env, owner, NULL, c->line, ++c->frame_serial};
     return 0;
 }
 static SPYValue *frame_object(SPYContext *, size_t);
+static SPYValue *value_new(SPYContext *, int);
 static size_t frame_line(SPYContext *, SPYValue *);
 enum { FRAME_KEYS, FRAME_VALUES, FRAME_ITEMS, FRAME_DICT };
 static SPYValue *frame_contents(SPYContext *, SPYValue *, int);
+/* PyTraceBack_Here: an error passing through the innermost frame prepends
+ * that frame's entry to the pending traceback, once per frame. */
+static void traceback_here(SPYContext *c) {
+    if (!c->py_depth || !c->error_type[0]) return;
+    struct ActiveFrame *top = &c->frames[c->py_depth - 1];
+    if (c->traceback_frame == top->serial) return;
+    char type[sizeof(c->error_type)];
+    memcpy(type, c->error_type, sizeof(type));
+    c->error_type[0] = 0;
+    SPYValue *frame = frame_object(c, c->py_depth - 1), *entry = frame ? value_new(c, SPY_TRACEBACK) : NULL;
+    memcpy(c->error_type, type, sizeof(type));
+    if (!entry) { spy_release(frame); return; }
+    entry->as.traceback.next = c->traceback;
+    entry->as.traceback.frame = frame;
+    entry->as.traceback.line = top->line;
+    c->traceback = entry; c->traceback_frame = top->serial;
+}
 /* A finished frame object keeps its last line and, like CPython's
  * take_ownership, its caller's frame object. */
 static void leave_frame(SPYContext *c) {
+    traceback_here(c);
     struct ActiveFrame *top = &c->frames[--c->py_depth];
     SPYValue *frame = top->object;
     if (!frame) return;
@@ -271,6 +300,7 @@ const char *spy_error_filename(const SPYContext *c) { return c->filename; }
 size_t spy_error_line(const SPYContext *c) { return c->line; }
 void spy_clear_error(SPYContext *c) {
     spy_release(c->exception); c->exception = NULL;
+    spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
     spy_release(c->error_object); c->error_object = NULL;
     c->error_type[0] = c->error_message[0] = c->filename[0] = c->error_name[0] = 0;
     c->line = 0;
@@ -370,6 +400,10 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_SENTINEL:
         visit(v->as.sentinel.name, data);
         visit(v->as.sentinel.module, data);
+        break;
+    case SPY_TRACEBACK:
+        if (v->as.traceback.next) visit(v->as.traceback.next, data);
+        visit(v->as.traceback.frame, data);
         break;
     case SPY_FRAME:
         if (v->as.frame.env) visit(v->as.frame.env, data);
@@ -1351,7 +1385,7 @@ static int native_kind(SPYValue *v) {
 }
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell", "traceback"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
@@ -7214,6 +7248,12 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         SPYValue *field = v->type == SPY_FRAME ? frame_attribute(c, v, name) : memory_attribute(c, v, name);
         if (field || c->error_type[0]) return field;
     }
+    if (v->type == SPY_TRACEBACK) {
+        if (!strcmp(name, "tb_next")) return spy_retain(v->as.traceback.next ? v->as.traceback.next : c->none);
+        if (!strcmp(name, "tb_frame")) return spy_retain(v->as.traceback.frame);
+        if (!strcmp(name, "tb_lineno")) return spy_int(c, (int64_t)v->as.traceback.line);
+        if (!strcmp(name, "tb_lasti")) return spy_int(c, v->as.traceback.lasti);
+    }
     if (v->type == SPY_CELL && !strcmp(name, "cell_contents")) {
         SPYValue *value = cell_contents(v);
         return value ? spy_retain(value) : spy_error(c, "ValueError", "Cell is empty");
@@ -8755,7 +8795,19 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name)
     else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object));
     spy_release(existing); return -1;
 }
+/* tb_next accepts a traceback or None that does not lead back to this one. */
+static int traceback_set_next(SPYContext *c, SPYValue *tb, SPYValue *next) {
+    if (!next) { spy_error(c, "TypeError", "can't delete tb_next attribute"); return -1; }
+    if (next->type != SPY_NONE && next->type != SPY_TRACEBACK) { errorf(c, "TypeError", "expected traceback object, got '%s'", type_name(next)); return -1; }
+    for (SPYValue *at = next->type == SPY_NONE ? NULL : next; at; at = at->as.traceback.next)
+        if (at == tb) { spy_error(c, "ValueError", "traceback loop detected"); return -1; }
+    SPYValue *old = tb->as.traceback.next;
+    tb->as.traceback.next = next->type == SPY_NONE ? NULL : spy_retain(next);
+    spy_release(old);
+    return 0;
+}
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
+    if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_PROPERTY && (!strcmp(name, "__name__") || !strcmp(name, "__doc__"))) {
@@ -8829,7 +8881,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             if (!strcmp(name, "__suppress_context__") && value->type != SPY_BOOL) {
                 spy_error(c, "TypeError", "attribute value type must be bool"); return -1;
             }
-            if (!strcmp(name, "__traceback__") && value->type != SPY_NONE) {
+            if (!strcmp(name, "__traceback__") && value->type != SPY_NONE && value->type != SPY_TRACEBACK) {
                 spy_error(c, "TypeError", "__traceback__ must be a traceback or None"); return -1;
             }
         }
@@ -10249,6 +10301,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_CELL]) return cell_construct(c, argc, argv, keywords);
+    if (fn == c->types[SPY_TRACEBACK]) return traceback_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_FUNCTION]) return function_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
         result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
@@ -11912,6 +11965,8 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
     else snprintf(type, sizeof(type), "%s", name->as.string.data);
     errorf(c, type, "%s", message ? message->as.string.data : "");
     spy_release(c->exception); c->exception = exception;
+    SPYValue *traceback = name_local(exception, "__traceback__");
+    if (traceback && traceback->type == SPY_TRACEBACK) c->traceback = spy_retain(traceback);
     spy_release(message);
     return NULL;
 }
@@ -11939,6 +11994,9 @@ static void attribute_details(SPYContext *c, SPYValue *error, SPYValue *object, 
 }
 static ErrorState take_error(SPYContext *c) {
     ErrorState state;
+    traceback_here(c);
+    SPYValue *traceback = c->traceback;
+    c->traceback = NULL;
     memcpy(state.type, c->error_type, sizeof(state.type));
     memcpy(state.message, c->error_message, sizeof(state.message));
     memcpy(state.filename, c->filename, sizeof(state.filename));
@@ -11966,6 +12024,8 @@ static ErrorState take_error(SPYContext *c) {
         spy_release(message);
         if (state.value) chain_exception(c, state.value);
     }
+    if (state.value && traceback && state.value->type == SPY_INSTANCE) name_set(c, state.value, "__traceback__", traceback);
+    spy_release(traceback);
     spy_release(object);
     return state;
 }
@@ -11975,6 +12035,13 @@ static void restore_error(SPYContext *c, ErrorState *state) {
     memcpy(c->error_message, state->message, sizeof(c->error_message));
     memcpy(c->filename, state->filename, sizeof(c->filename));
     c->line = state->line; c->exception = state->value; state->value = NULL;
+    /* The traceback continues from the exception's, which already has an
+     * entry for the frame that caught it. */
+    SPYValue *traceback = c->exception && c->exception->type == SPY_INSTANCE ? name_local(c->exception, "__traceback__") : NULL;
+    if (traceback && traceback->type == SPY_TRACEBACK) {
+        c->traceback = spy_retain(traceback);
+        c->traceback_frame = c->py_depth ? c->frames[c->py_depth - 1].serial : 0;
+    }
 }
 /* Exception display, as traceback.TracebackException formats the last line:
  * a SyntaxError with the generic message gets a keyword-typo suggestion. */
@@ -12421,6 +12488,7 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
+    if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, NULL);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
         (!strcmp(name, "__name__") || !strcmp(name, "__qualname__"))) {
@@ -12547,6 +12615,11 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
     }
     return c->error_type[0] ? -1 : 0;
 }
+/* An exception's traceback, or None: __exit__'s third argument. */
+static SPYValue *exception_traceback(SPYContext *c, SPYValue *exception) {
+    SPYValue *traceback = exception && exception->type == SPY_INSTANCE ? name_local(exception, "__traceback__") : NULL;
+    return traceback && traceback->type == SPY_TRACEBACK ? traceback : c->none;
+}
 static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     if (!item) return execute(c, f, body);
     if (deeper(c, "")) return (Result){FLOW_ERROR, NULL};
@@ -12562,7 +12635,7 @@ static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     ErrorState error = take_error(c);
     SPYValue *outer = c->handled;
     c->handled = error.value ? spy_retain(error.value) : spy_retain(outer);
-    SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none, error.value ? error.value : c->none, c->none};
+    SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none, error.value ? error.value : c->none, exception_traceback(c, error.value)};
     SPYValue *result = spy_call(c, exit, 3, args);
     spy_release(exit);
     if (!result) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
@@ -13004,7 +13077,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_COMPILE, B_EVAL, B_EXEC, B_SLICE, B_STATICMETHOD, B_CLASSMETHOD, B_PROPERTY, B_DIR, B_LOCALS, B_FORMAT, B_ASCII, B_MAP, B_GLOBALS, B_COMPLEX,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
-       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT,
+       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */ };
 /* CPython's argument-count errors for builtins, by their argument parser:
  * METH_O functions, _PyArg_CheckPositional, and Argument Clinic signatures
@@ -13674,6 +13747,7 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             SPYValue *cause = n->b && value ? eval(c, f, n->b) : NULL;
             if (value && !c->error_type[0]) {
                 raise_with_cause(c, value, cause);
+                if (!n->a && c->traceback && c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
             } else if (!value && !c->error_type[0]) spy_error(c, "RuntimeError", "No active exception to reraise");
             spy_release(value); spy_release(cause); break;
         }
@@ -13866,7 +13940,7 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             c->handled = spy_retain(b->error ? b->error->value : b->handled);
             SPYValue *exception = b->error ? b->error->value : NULL;
             SPYValue *args[] = {exception ? exception->as.map.parent : c->none,
-                               exception ? exception : c->none, c->none};
+                               exception ? exception : c->none, exception_traceback(c, exception)};
             SPYValue *awaitable = spy_call(c, exit, 3, args);
             spy_release(exit);
             if (!awaitable || machine_push(c, m, awaitable)) {
@@ -13879,7 +13953,7 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             SPYValue *outer = c->handled;
             c->handled = spy_retain(error.value ? error.value : outer);
             SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none,
-                               error.value ? error.value : c->none, c->none};
+                               error.value ? error.value : c->none, exception_traceback(c, error.value)};
             SPYValue *result = spy_call(c, b->value, 3, args);
             int suppress = result && error.type[0] && spy_truth(result);
             spy_release(result); spy_release(c->handled); c->handled = outer;
@@ -14344,7 +14418,8 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
     }
     if (method == M_THROW && argc >= 1 && argc <= 3) {
         SPYValue *exception = argv[0];
-        if (argc == 3 && argv[2]->type != SPY_NONE) return spy_error(c, "TypeError", "throw() third argument must be a traceback object");
+        if (argc == 3 && argv[2]->type != SPY_NONE && argv[2]->type != SPY_TRACEBACK)
+            return spy_error(c, "TypeError", "throw() third argument must be a traceback object");
         if (exception->type == SPY_CLASS && subclass(exception, name_local(c->classes, "BaseException"))) {
             if (argc > 1 && argv[1]->type == SPY_INSTANCE && subclass(argv[1]->as.map.parent, exception)) exception = spy_retain(argv[1]);
             else if (argc > 1 && argv[1]->type == SPY_TUPLE) exception = spy_call(c, exception, argv[1]->as.seq.len, argv[1]->as.seq.items);
@@ -14354,6 +14429,9 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
             exception = spy_retain(exception);
         } else return errorf(c, "TypeError", "exceptions must be classes or instances deriving from BaseException, not %s",
                             exception->type == SPY_CLASS ? "type" : type_name(exception));
+        if (exception && argc == 3 && argv[2]->type == SPY_TRACEBACK && set_attribute_default(c, exception, "__traceback__", argv[2])) {
+            spy_release(exception); return NULL;
+        }
         SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, argc, argv) : NULL;
         spy_release(exception); return result;
     }
@@ -15126,6 +15204,24 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
         return -1;
     }
     return 0;
+}
+/* types.TracebackType(tb_next, tb_frame, tb_lasti, tb_lineno) */
+static SPYValue *traceback_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    static const char *const names[] = {"tb_next", "tb_frame", "tb_lasti", "tb_lineno"};
+    SPYValue *args[4];
+    int64_t lasti, line;
+    if (parse_arguments(c, "traceback", argc, argv, keywords, names, 4, 4, 0, args)) return NULL;
+    if (args[0]->type != SPY_NONE && args[0]->type != SPY_TRACEBACK)
+        return errorf(c, "TypeError", "expected traceback object or None, got '%s'", type_name(args[0]));
+    if (args[1]->type != SPY_FRAME) return errorf(c, "TypeError", "traceback() argument 'tb_frame' must be frame, not %s", type_name(args[1]));
+    if (index_value(c, args[2], &lasti) || index_value(c, args[3], &line)) return NULL;
+    SPYValue *tb = value_new(c, SPY_TRACEBACK);
+    if (!tb) return NULL;
+    tb->as.traceback.next = args[0]->type == SPY_NONE ? NULL : spy_retain(args[0]);
+    tb->as.traceback.frame = spy_retain(args[1]);
+    tb->as.traceback.lasti = lasti;
+    tb->as.traceback.line = (size_t)line;
+    return tb;
 }
 static SPYValue *mappingproxy_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     static const char *const names[] = {"mapping"};
@@ -17680,6 +17776,12 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc > 2) return spy_error(c, "TypeError", "super() expected at most 2 arguments");
         return argc ? super_new(c, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c);
     }
+    if (id == B_WITH_TRACEBACK) {
+        if (!argc || argv[0]->type != SPY_INSTANCE || !subclass(argv[0]->as.map.parent, name_local(c->classes, "BaseException")))
+            return spy_error(c, "TypeError", "descriptor 'with_traceback' for 'BaseException' objects needs an exception");
+        if (argc != 2) return errorf(c, "TypeError", "BaseException.with_traceback() takes exactly one argument (%zu given)", argc - 1);
+        return set_attribute_default(c, argv[0], "__traceback__", argv[1]) ? NULL : spy_retain(argv[0]);
+    }
     if (id == B_ADD_NOTE) {
         if (argc != 2 || argv[0]->type != SPY_INSTANCE ||
             !subclass(argv[0]->as.map.parent, name_local(c->classes, "BaseException")))
@@ -19561,7 +19663,8 @@ SPYContext *spy_context_new(void) {
         {"async_generator_asend", -1}, {"async_generator_athrow", -1}, {"anext_awaitable", -1}, {"super", B_SUPER},
         {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
         {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT},
-        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}, {"cell", -1}
+        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}, {"cell", -1},
+        {"traceback", -1}
     };
     _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAST_TYPE + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
@@ -19675,7 +19778,7 @@ SPYContext *spy_context_new(void) {
         {"object", "__reduce__", B_OBJECT_REDUCE, 1}, {"object", "__reduce_ex__", B_OBJECT_REDUCE_EX, 1},
         {"object", "__getstate__", B_OBJECT_GETSTATE, 1},
         {"type", "mro", B_TYPE_MRO, 1}, {"type", "__subclasses__", B_TYPE_SUBCLASSES, 1},
-        {"BaseException", "add_note", B_ADD_NOTE, 1},
+        {"BaseException", "add_note", B_ADD_NOTE, 1}, {"BaseException", "with_traceback", B_WITH_TRACEBACK, 1},
         {"SyntaxError", "__init__", B_SYNTAX_INIT, 1},
         {"BaseException", "__new__", B_EXCEPTION_NEW, 0}, {"BaseException", "__init__", B_EXCEPTION_INIT, 1}
     };
