@@ -1225,6 +1225,67 @@ class B:
     def __buffer__(self, flags): return memoryview(b"custom")
 print(bytes(memoryview(B())))
 """,
+    r"""
+e=ImportError("a", name="n", path="p"); print(e.name, e.path, e.msg, e.args, e.name_from, str(e))
+try: ImportError(bad=1)
+except TypeError as x: print(x)
+e=AttributeError("q", name="n", obj=3); print(e.name, e.obj, AttributeError().name)
+try: AttributeError(foo=1)
+except TypeError as x: print(x)
+e=NameError("q", name="x"); print(e.name)
+try: KeyError(x=1)
+except TypeError as x: print(x)
+e=ImportError(); print(e.msg, e.name, e.path, repr(str(e)))
+e=ImportError("a","b"); print(e.msg, str(e))
+e=ImportError("a"); e.msg = "changed"; print(str(e), repr(e))
+print(ModuleNotFoundError("m", name="z").name)
+try: ImportError(name_from=1)
+except TypeError as x: print(x)
+e=ImportError("a", name_from="q"); print(e.name_from)
+try: NameError(obj=1)
+except TypeError as x: print(x)
+class E(ImportError):
+    def __init__(self, *a, **k): pass
+e=E(1, foo=2); print(e.args, e.name, e.msg)
+print(BaseException.__new__(ImportError, 1, x=2).args)
+class F(Exception): pass
+try: F(x=1)
+except TypeError as x: print(x)
+try: from sys import nothing_here
+except ImportError as x: print(x.name, x.msg)
+class C: pass
+o = C()
+for target, attr in ((o, "zz"), (C, "yy"), (1, "real2"), ("s", "nope")):
+    try: getattr(target, attr)
+    except AttributeError as e: print(e, e.name, e.obj is target)
+class G:
+    def __getattr__(self, n): raise AttributeError(n)
+try: G().foo
+except AttributeError as e: print(e.name, type(e.obj).__name__)
+try: undefined_name
+except NameError as e: print(e.name)
+def f():
+    x = 1
+    del x
+    del x
+try: f()
+except NameError as e: print(type(e).__name__, e, e.name)
+def g():
+    def h(): return y
+    try: h()
+    except NameError as e: print(type(e).__name__, e, e.name)
+    y = 2
+g()
+import sys
+m = type(sys)("m")
+try: m.x
+except AttributeError as e: print(e, e.name, e.obj is m)
+m.__getattr__ = lambda n: n * 2
+print(m.ab, getattr(m, "cd"), hasattr(m, "q"))
+m.__getattr__ = 5
+try: m.y
+except TypeError as e: print(e)
+""",
 ]
 CASES += [
     "print(', '.join(str(i) for i in range(4))); print('a%d:%s:%r:%%' % (3, 'x', 'y'))",

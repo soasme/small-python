@@ -14,9 +14,10 @@ list, set, and tuple.
 
 slim.py builds this module into the engine. namedtuple, Counter, ChainMap,
 UserDict, UserList, and UserString are CPython 3.15's pure-Python code;
-deque, defaultdict, and OrderedDict follow its C implementations. There is
-no collections.abc: private mixins supply the methods these classes inherit
-from it.
+deque, defaultdict, and OrderedDict follow its C implementations. Private
+mixins supply the methods these classes inherit from collections.abc, whose
+submodule is the standard library's _collections_abc and is imported on first
+use of collections.abc.
 '''
 
 __all__ = [
@@ -30,6 +31,14 @@ __all__ = [
     'deque',
     'namedtuple',
 ]
+
+def __getattr__(name):
+    # collections.abc loads _collections_abc through the host, so it is
+    # imported on first use rather than with this module.
+    if name == 'abc':
+        return __import__('collections.abc', fromlist=['*'])
+    raise AttributeError(f"module 'collections' has no attribute '{name}'")
+
 
 _GenericAlias = type(list[int])
 _mappingproxy = type({}.keys().mapping)

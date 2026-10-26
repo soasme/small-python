@@ -375,6 +375,10 @@ round trips remain untested because the pickle module is not implemented.
 Exception support still lacks
 traceback objects, complete chaining, and all builtin-specific
 constructors. Context-manager exit currently receives `None` for the traceback.
+`ImportError` accepts `name`, `path`, and `name_from` keywords and keeps a lone
+argument as `msg`. `AttributeError` accepts `name` and `obj`, and `NameError`
+accepts `name`. Failed attribute lookups and name lookups fill these attributes,
+as CPython does.
 Exception notes and `add_note` are supported; a failed `__set_name__` callback
 retains its exception and receives a note identifying the descriptor and class.
 Instance reads, writes, and deletions support `__getattribute__`, `__setattr__`,
@@ -506,6 +510,11 @@ context caches modules by name. A module is cached before execution to support
 simple circular imports. Failed initialization removes that module's cache
 entry. Each source module has a namespace, `__name__`, and `__package__`.
 Packages have `__path__`; the current loader does not search its contents.
+As in importlib, an import returns the module that `sys.modules` holds once
+the source has run, and a submodule that importing its parent placed in
+`sys.modules` needs no loading. A module-level `__getattr__` supplies missing
+attributes (PEP 562). Failed imports set `ImportError.name`. A missing `from`
+name reports the module, its file, and `name_from`, as CPython does.
 
 For `pkg.mod`, the core first requests `pkg.mod.__init__` from the callback,
 then `pkg.mod` if no package source exists. The CLI maps dots to directory
@@ -534,8 +543,10 @@ Four minimal standard-library modules are built in: `collections`, `sys`,
 `spy-intrinsics.h`; an import finds them before the host loader, needs no
 loader, and parses them only on first use. `collections` provides `deque`,
 `defaultdict`, `OrderedDict`, `namedtuple`, `Counter`, `ChainMap`, `UserDict`,
-`UserList`, and `UserString` (the last six are CPython's own Python code);
-there is no `collections.abc`. `types` names the engine's builtin types and
+`UserList`, and `UserString` (the last six are CPython's own Python code).
+`collections` is a package. As in CPython 3.15, `collections.abc` is the
+standard library's `_collections_abc`, which the host loader supplies on first
+use. `types` names the engine's builtin types and
 provides `SimpleNamespace`, `new_class`, `prepare_class`, `resolve_bases`,
 `get_original_bases`, and `DynamicClassAttribute`; cell, frame, traceback,
 descriptor-member, and capsule types and `coroutine()` are absent; it names

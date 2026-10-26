@@ -130,6 +130,9 @@ struct SPYContext {
     SPYModuleLoader loader;
     void *loader_data;
     char error_type[64], error_message[256], filename[256];
+    /* A pending AttributeError's name and object, attached when it is materialized. */
+    char error_name[256];
+    SPYValue *error_object;
     char error_display[320]; /* spy_error_display's result. */
     size_t line;
 };
@@ -180,6 +183,12 @@ static SPYValue *errorf(SPYContext *c, const char *type, const char *fmt, ...) {
         vsnprintf(c->error_message, sizeof(c->error_message), fmt, ap);
         va_end(ap);
     }
+    return NULL;
+}
+/* A NameError that records the missing name for its name attribute. */
+static SPYValue *name_error(SPYContext *c, const char *name, const char *format) {
+    errorf(c, "NameError", format, name);
+    if (strlen(name) < sizeof(c->error_name)) memcpy(c->error_name, name, strlen(name) + 1);
     return NULL;
 }
 /* As CPython's _Py_CheckRecursiveCall, bound native recursion by the stack
@@ -239,7 +248,8 @@ const char *spy_error_filename(const SPYContext *c) { return c->filename; }
 size_t spy_error_line(const SPYContext *c) { return c->line; }
 void spy_clear_error(SPYContext *c) {
     spy_release(c->exception); c->exception = NULL;
-    c->error_type[0] = c->error_message[0] = c->filename[0] = 0;
+    spy_release(c->error_object); c->error_object = NULL;
+    c->error_type[0] = c->error_message[0] = c->filename[0] = c->error_name[0] = 0;
     c->line = 0;
 }
 static void *allocate(SPYContext *c, size_t n) {
@@ -1374,8 +1384,8 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
                      * to globals, not a same-named enclosing function cell. */
                     return name_get(c, module_env(c, e), name);
                 }
-                if (e != env) return errorf(c, "NameError", "cannot access free variable '%s' where it is not associated with a value in enclosing scope", name);
-                return errorf(c, "UnboundLocalError", "local variable '%s' has no value", name);
+                if (e != env) return name_error(c, name, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
+                return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", name);
             }
             /* Global and class namespaces resolve lazy imports; function locals do not. */
             if (v->type == SPY_LAZY_IMPORT && (e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE ||
@@ -1384,7 +1394,7 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
             return v;
         }
     }
-    return errorf(c, "NameError", "name '%s' is not defined", name);
+    return name_error(c, name, "name '%s' is not defined");
 }
 static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v) {
     env = binding_env(c, env, name);
@@ -1985,6 +1995,9 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
                         puts_buffer(b, "line ") || format_value(b, line, 0);
                     if (!status) status = puts_buffer(b, ")");
                 }
+            } else if (subclass(v->as.map.parent, name_local(b->ctx->classes, "ImportError")) && name_local(v, "msg") &&
+                       name_local(v, "msg")->type == SPY_STRING) {
+                status = format_value(b, name_local(v, "msg"), 0);
             } else if (args->as.seq.len) status = format_value(b, args->as.seq.len == 1 ? args->as.seq.items[0] : args,
                 args->as.seq.len == 1 && subclass(v->as.map.parent, name_local(b->ctx->classes, "KeyError")));
         } else {
@@ -7243,7 +7256,18 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         SPYValue *item = name_local(v, name);
         if (item && item->type == SPY_LAZY_IMPORT) return lazy_reify(c, v, name, spy_retain(item));
-        return item ? spy_retain(item) : errorf(c, "AttributeError", "module has no attribute '%s'", name);
+        if (item) return spy_retain(item);
+        /* PEP 562: a module-level __getattr__ supplies missing attributes. */
+        SPYValue *fallback = name_local(v, "__getattr__");
+        if (fallback) {
+            SPYValue *key = spy_string(c, name, strlen(name));
+            SPYValue *result = key ? spy_call(c, fallback, 1, &key) : NULL;
+            spy_release(key); return result;
+        }
+        SPYValue *module_name = name_local(v, "__name__");
+        if (module_name && module_name->type == SPY_STRING)
+            return errorf(c, "AttributeError", "module '%s' has no attribute '%s'", module_name->as.string.data, name);
+        return errorf(c, "AttributeError", "module has no attribute '%s'", name);
     }
     int method = -1;
     if (v->type == SPY_STRING || v->type == SPY_BYTES) {
@@ -7330,7 +7354,19 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (bound && !(bound->as.bound.name = spy_string(c, name, strlen(name)))) { spy_release(bound); return NULL; }
     return bound;
 }
+static void attribute_details(SPYContext *, SPYValue *, SPYValue *, const char *);
+static SPYValue *attribute_lookup(SPYContext *, SPYValue *, const char *);
 static SPYValue *attribute(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *result = attribute_lookup(c, v, name);
+    if (result || !error_is(c, "AttributeError")) return result;
+    if (c->exception) attribute_details(c, c->exception, v, name);
+    else if (!c->error_object && strlen(name) < sizeof(c->error_name)) {
+        c->error_object = spy_retain(v);
+        memcpy(c->error_name, name, strlen(name) + 1);
+    }
+    return NULL;
+}
+static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *definition = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__getattribute__") : NULL;
     SPYValue *result;
     if (definition && definition != name_local(name_local(c->classes, "object"), "__getattribute__")) {
@@ -9011,6 +9047,7 @@ static Result execute_module(SPYContext *, Frame *);
 static int start_annotations(SPYContext *, Frame *, Node *, const char *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, const char *);
+static const char *const *exception_keywords(SPYContext *, SPYValue *);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static int store_target(SPYContext *, Frame *, Node *, SPYValue *);
 static SPYValue *eval_comprehension(SPYContext *, Frame *, Node *);
@@ -9507,6 +9544,15 @@ static int exception_args(SPYContext *c, SPYValue *value, size_t argc, SPYValue 
     if (!status) status = name_set(c, value, "args", args);
     spy_release(args); return status;
 }
+/* The keyword-only attributes of ImportError, AttributeError and NameError. */
+static const char *const *exception_keywords(SPYContext *c, SPYValue *cls) {
+    static const char *const import_fields[] = {"name", "path", "name_from", NULL}, *const attribute_fields[] = {"name", "obj", NULL},
+                      *const name_fields[] = {"name", NULL};
+    if (subclass(cls, name_local(c->classes, "ImportError"))) return import_fields;
+    if (subclass(cls, name_local(c->classes, "AttributeError"))) return attribute_fields;
+    if (subclass(cls, name_local(c->classes, "NameError"))) return name_fields;
+    return NULL;
+}
 static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv) {
     SPYValue *v = new_instance(c, cls);
     if (!v) return NULL;
@@ -9521,6 +9567,9 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
     }
     if (!status && subclass(cls, name_local(c->classes, "StopIteration")))
         status = name_set(c, v, "value", argc ? argv[0] : c->none);
+    const char *const *fields = exception_keywords(c, cls);
+    for (size_t i = 0; fields && fields[i] && !status; i++) status = name_set(c, v, fields[i], c->none);
+    if (!status && subclass(cls, name_local(c->classes, "ImportError"))) status = name_set(c, v, "msg", c->none);
     if (status) { spy_release(v); return NULL; }
     return v;
 }
@@ -9856,13 +9905,16 @@ static int weakref_natives(SPYContext *, SPYValue *);
 static int collections_natives(SPYContext *, SPYValue *);
 static int sys_natives(SPYContext *, SPYValue *);
 /* Built-in modules: Python sources embedded by tools/build_intrinsics.py,
- * found before the host loader and parsed only when first imported. */
-static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); } builtin_modules[] = {
-    {"_weakref", module__weakref, sizeof(module__weakref) / sizeof(*module__weakref), NULL},
-    {"collections", module_collections, sizeof(module_collections) / sizeof(*module_collections), collections_natives},
-    {"sys", module_sys, sizeof(module_sys) / sizeof(*module_sys), sys_natives},
-    {"types", module_types, sizeof(module_types) / sizeof(*module_types), NULL},
-    {"weakref", module_weakref, sizeof(module_weakref) / sizeof(*module_weakref), weakref_natives},
+ * found before the host loader and parsed only when first imported. A
+ * package's submodules are named with their dotted path. */
+#define BUILTIN_MODULE(name, source, init, package) {name, source, sizeof(source) / sizeof(*source), init, package}
+static const struct { const char *name; const char *const *source; size_t lines; int (*init)(SPYContext *, SPYValue *); int package; } builtin_modules[] = {
+    BUILTIN_MODULE("_weakref", module__weakref, NULL, 0),
+    BUILTIN_MODULE("collections", module_collections, collections_natives, 1),
+    BUILTIN_MODULE("collections.abc", module_collections_abc, NULL, 0),
+    BUILTIN_MODULE("sys", module_sys, sys_natives, 0),
+    BUILTIN_MODULE("types", module_types, NULL, 0),
+    BUILTIN_MODULE("weakref", module_weakref, weakref_natives, 0),
 };
 /* Weak references. The weakref module builds its reference, proxy, and
  * container types on these private primitives; a reference object is any
@@ -10134,21 +10186,22 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     while (builtin < sizeof(builtin_modules) / sizeof(*builtin_modules) && strcmp(builtin_modules[builtin].name, name)) builtin++;
     int embedded = builtin < sizeof(builtin_modules) / sizeof(*builtin_modules);
     if (!embedded && !c->loader) return errorf(c, "ModuleNotFoundError", "no loader installed for '%s'", name);
-    const char *dot = embedded ? NULL : strrchr(name, '.');
+    const char *dot = strrchr(name, '.');
     SPYValue *parent = NULL;
     if (dot) {
         char *prefix = copy_text(c, name, (size_t)(dot - name));
         parent = prefix ? import_module(c, prefix) : NULL;
         free(prefix);
         if (!parent) return NULL;
+        /* Importing the parent may have provided the submodule, as importlib allows. */
+        cached = name_local(c->modules, name);
+        if (cached) { spy_release(parent); return spy_retain(cached); }
         if (!name_local(parent, "__path__")) {
             spy_release(parent); return errorf(c, "ModuleNotFoundError", "parent of '%s' is not a package", name);
         }
-        cached = name_local(c->modules, name);
-        if (cached) { spy_release(parent); return spy_retain(cached); }
     }
     char *source = NULL;
-    int package = 0;
+    int package = embedded && builtin_modules[builtin].package;
     Buffer filename = {.ctx = c};
     if (embedded) {
         Buffer text = {.ctx = c};
@@ -10162,7 +10215,13 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         free(init.data);
         package = source != NULL;
         if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
-        if (!source) { spy_release(parent); return errorf(c, "ModuleNotFoundError", "No module named '%s'", name); }
+        if (!source) {
+            spy_release(parent);
+            if (c->error_type[0]) return NULL;
+            errorf(c, "ModuleNotFoundError", "No module named '%s'", name);
+            if (strlen(name) < sizeof(c->error_name)) memcpy(c->error_name, name, strlen(name) + 1);
+            return NULL;
+        }
         for (const char *ch = name; *ch && !c->error_type[0]; ch++) {
             char part = *ch == '.' ? '/' : *ch;
             append(&filename, &part, 1);
@@ -10211,6 +10270,9 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         }
         spy_release(module); spy_release(parent); return NULL;
     }
+    /* As in importlib, the result is whatever sys.modules holds once the module ran. */
+    SPYValue *final = name_local(c->modules, name);
+    if (final && final != module) { spy_retain(final); spy_release(module); module = final; }
     if (parent) name_set(c, parent, dot + 1, module);
     spy_release(parent);
     if (c->error_type[0]) { spy_release(module); return NULL; }
@@ -10258,6 +10320,7 @@ static SPYValue *import_module(SPYContext *c, const char *name) {
     SPYValue *module = load_source_module(c, name);
     c->depth--; return module;
 }
+static SPYValue *raise_value(SPYContext *, SPYValue *);
 static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, int required) {
     SPYValue *value = attribute(c, module, name);
     if (value || !error_is(c, "AttributeError")) return value;
@@ -10275,7 +10338,21 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
         if (value || !absent) return value;
         spy_clear_error(c);
     }
-    return required ? errorf(c, "ImportError", "cannot import name '%s'", name) : spy_none(c);
+    if (!required) return spy_none(c);
+    /* CPython names the module, the missing name, and the module's file. */
+    SPYValue *file = name_local(module, "__file__");
+    Buffer message = {.ctx = c};
+    int failed = puts_buffer(&message, "cannot import name '") || puts_buffer(&message, name) || puts_buffer(&message, "' from '") ||
+        puts_buffer(&message, module_name && module_name->type == SPY_STRING ? module_name->as.string.data : "<unknown module name>") ||
+        puts_buffer(&message, "' (") || puts_buffer(&message, file && file->type == SPY_STRING ? file->as.string.data : "unknown location") ||
+        puts_buffer(&message, ")");
+    SPYValue *text = failed ? NULL : spy_string(c, message.data, message.len), *from = text ? spy_string(c, name, strlen(name)) : NULL;
+    free(message.data);
+    SPYValue *error = from ? new_exception(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
+    if (error && !name_set(c, error, "msg", text) && !name_set(c, error, "name", module_name ? module_name : c->none) &&
+        !name_set(c, error, "name_from", from) && !name_set(c, error, "path", file ? file : c->none)) raise_value(c, error);
+    spy_release(error); spy_release(text); spy_release(from);
+    return NULL;
 }
 /* The absolute module name of an import, as importlib._bootstrap._resolve_name. */
 static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
@@ -11267,6 +11344,15 @@ static void raise_assertion(SPYContext *c, SPYValue *message) {
     if (error) raise_value(c, error);
     spy_release(error);
 }
+/* An AttributeError from an attribute lookup names the attribute and object, unless it already does. */
+static void attribute_details(SPYContext *c, SPYValue *error, SPYValue *object, const char *name) {
+    if (error->type != SPY_INSTANCE || !subclass(error->as.map.parent, name_local(c->classes, "AttributeError"))) return;
+    SPYValue *current = name_local(error, "name");
+    if (current && current->type != SPY_NONE) return;
+    SPYValue *text = spy_string(c, name, strlen(name));
+    if (text && !name_set(c, error, "name", text)) name_set(c, error, "obj", object);
+    spy_release(text);
+}
 static ErrorState take_error(SPYContext *c) {
     ErrorState state;
     memcpy(state.type, c->error_type, sizeof(state.type));
@@ -11274,6 +11360,10 @@ static ErrorState take_error(SPYContext *c) {
     memcpy(state.filename, c->filename, sizeof(state.filename));
     state.line = c->line;
     state.value = c->exception; c->exception = NULL;
+    SPYValue *object = c->error_object;
+    char attribute[sizeof(c->error_name)];
+    memcpy(attribute, c->error_name, sizeof(attribute));
+    c->error_object = NULL;
     spy_clear_error(c);
     if (!state.value && state.type[0]) {
         SPYValue *cls = name_local(c->classes, state.type);
@@ -11281,9 +11371,18 @@ static ErrorState take_error(SPYContext *c) {
         SPYValue *message = spy_string(c, state.message, strlen(state.message));
         if (message) state.value = subclass(cls, name_local(c->classes, "SyntaxError")) ?
             spy_call(c, cls, state.message[0] ? 1 : 0, &message) : new_exception(c, cls, state.message[0] ? 1 : 0, &message);
+        if (state.value && subclass(cls, name_local(c->classes, "ImportError")) && state.message[0]) name_set(c, state.value, "msg", message);
+        if (state.value && object) attribute_details(c, state.value, object, attribute);
+        else if (state.value && attribute[0] && (subclass(cls, name_local(c->classes, "NameError")) ||
+                                                 subclass(cls, name_local(c->classes, "ImportError")))) {
+            SPYValue *text = spy_string(c, attribute, strlen(attribute));
+            if (text) name_set(c, state.value, "name", text);
+            spy_release(text);
+        }
         spy_release(message);
         if (state.value) chain_exception(c, state.value);
     }
+    spy_release(object);
     return state;
 }
 static void restore_error(SPYContext *c, ErrorState *state) {
@@ -11801,13 +11900,15 @@ static int delete_target(SPYContext *c, Frame *f, Node *n) {
             int status = clear_binding(c, owner, n->text);
             if (status) {
                 spy_clear_error(c);
-                errorf(c, "NameError", "name '%s' is not defined", n->text);
+                name_error(c, n->text, "name '%s' is not defined");
             }
             return status;
         }
         SPYValue *value = name_local(owner, n->text);
         if (!value || value->type == V_UNBOUND) {
-            errorf(c, value && owner == f->env ? "UnboundLocalError" : "NameError", "name '%s' is not defined", n->text); return -1;
+            if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->text);
+            else name_error(c, n->text, "name '%s' is not defined");
+            return -1;
         }
         return clear_binding(c, f->env, n->text);
     }
@@ -17216,6 +17317,11 @@ execution_fail:
         if (a->type != SPY_INSTANCE || !subclass(a->as.map.parent, name_local(c->classes, id == B_SYNTAX_INIT ? "SyntaxError" : "BaseException")))
             return spy_error(c, "TypeError", "BaseException.__init__ requires an exception instance");
         if (exception_args(c, a, argc - 1, argv + 1)) return NULL;
+        /* Keyword attributes reset unless given; ImportError keeps a lone argument as msg. */
+        const char *const *fields = id == B_EXCEPTION_INIT ? exception_keywords(c, a->as.map.parent) : NULL;
+        for (size_t i = 0; fields && fields[i]; i++) if (name_set(c, a, fields[i], c->none)) return NULL;
+        if (fields && subclass(a->as.map.parent, name_local(c->classes, "ImportError")) &&
+            name_set(c, a, "msg", argc == 2 ? argv[1] : c->none)) return NULL;
         if (id == B_SYNTAX_INIT && argc > 1) {
             if (name_set(c, a, "msg", argv[1])) return NULL;
             if (argc == 3) {
@@ -17697,6 +17803,22 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
     if (id == B_FROZENDICT) {
         if (argc == 1 && argv[0]->type == SPY_FROZENDICT && (!keywords || !keywords->as.map.len)) return spy_retain(argv[0]);
         return frozendict_construct(c, argc, argv, keywords);
+    }
+    if (id == B_EXCEPTION_INIT && argc && argv[0]->type == SPY_INSTANCE && keywords && keywords->as.map.len) {
+        SPYValue *cls = argv[0]->as.map.parent;
+        const char *const *fields = subclass(cls, name_local(c->classes, "BaseException")) ? exception_keywords(c, cls) : NULL;
+        const char *owner = name_local(cls, "__name__")->as.string.data;
+        if (!fields) return errorf(c, "TypeError", "%s() takes no keyword arguments", owner);
+        for (size_t i = 0; i < keywords->as.map.len; i++) {
+            const char *key = keywords->as.map.items[i].key->as.string.data;
+            size_t k = 0;
+            while (fields[k] && strcmp(fields[k], key)) k++;
+            if (!fields[k]) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", owner, key);
+        }
+        SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
+        for (size_t i = 0; value && i < keywords->as.map.len; i++)
+            if (name_set(c, argv[0], keywords->as.map.items[i].key->as.string.data, keywords->as.map.items[i].value)) { spy_release(value); value = NULL; }
+        return value;
     }
     if (keywords && keywords->as.map.len && id != B_DICT) return errorf(c, "TypeError", "%s() takes no keyword arguments", name);
     SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);

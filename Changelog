@@ -211,3 +211,8 @@
 - memoryview over bytes, bytearray and __buffer__ objects, with native
   formats, casts, slicing and bytearray export locking; bytes consumers
   accept buffers.
+- collections is a package whose abc submodule is _collections_abc; module
+  __getattr__ (PEP 562); imports return the final sys.modules entry.
+- ImportError name/path/name_from/msg, AttributeError name/obj and NameError
+  name, filled by failed lookups; CPython's unbound-local and from-import
+  messages.
