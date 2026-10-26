@@ -3094,6 +3094,27 @@ try: type({}.keys())()
 except TypeError as e: print(e)
 """)
 
+# Builtin method types: method_descriptor, wrapper_descriptor, method-wrapper.
+CASES.append(r"""
+def clean(s):
+    out = ""; i = 0
+    while i < len(s):
+        if s.startswith("0x", i):
+            i += 2
+            while i < len(s) and s[i] in "0123456789abcdef": i += 1
+            out += "ADDR"
+        else:
+            out += s[i]; i += 1
+    return out
+for x in [list.append, [].append, int.__add__, (1).__add__, dict.fromkeys, object.__init__, object.__new__, int.__new__, list.__getitem__, [].__getitem__,
+          dict.__contains__, {}.__contains__, set.__contains__, list.__contains__, int.__round__, (1).__round__, object.__format__, str.upper, "a".upper,
+          list.__reversed__, float.__floor__, object.__repr__, object().__repr__, print, len, int.__init_subclass__, list.__class_getitem__]:
+    print(type(x).__name__, clean(repr(x)))
+print(type(list.append) is type(str.upper), type(list.append).__module__, type(int.__add__))
+try: type(list.append)()
+except TypeError as e: print(e)
+""")
+
 ERRORS = [
     ("len(range(10**100))", "OverflowError"),
     ("range(3)[10**100]", "IndexError"),

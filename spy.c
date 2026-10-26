@@ -83,6 +83,7 @@ struct SPYContext {
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
+    SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     int intrinsics_loading;
     SPYValue *types[SPY_TEMPLATE_ITERATOR + 1];
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
@@ -1041,6 +1042,30 @@ static SPYValue *name_local(SPYValue *env, const char *name) {
     }
     return NULL;
 }
+/* CPython's types for builtin methods: most unbound dunders of builtin types
+ * are slot wrappers, a few are method descriptors, and binding a slot wrapper
+ * gives a method-wrapper. Other natives are builtin_function_or_method. */
+enum { NATIVE_FUNCTION, NATIVE_METHOD_DESCRIPTOR, NATIVE_WRAPPER_DESCRIPTOR, NATIVE_METHOD_WRAPPER, NATIVE_BOUND };
+static int native_kind(SPYValue *v) {
+    SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
+    if ((v->type != SPY_NATIVE && v->type != SPY_METHOD) || function->type != SPY_NATIVE) return NATIVE_FUNCTION;
+    if (!function->as.native.owner || !function->as.native.method || !function->as.native.name ||
+        (v->type == SPY_METHOD && v->as.method.self->type == SPY_CLASS && !v->as.method.self->as.map.meta))
+        return v->type == SPY_METHOD ? NATIVE_BOUND : NATIVE_FUNCTION;
+    const char *name = function->as.native.name->as.string.data, *owner = "";
+    size_t len = strlen(name);
+    SPYValue *owner_name = name_local(function->as.native.owner, "__name__");
+    if (owner_name && owner_name->type == SPY_STRING) owner = owner_name->as.string.data;
+    static const char *const methods[] = {"__ceil__", "__floor__", "__round__", "__trunc__", "__format__", "__getnewargs__",
+        "__reduce__", "__reduce_ex__", "__sizeof__", "__dir__", "__reversed__", "__complex__", "__getstate__",
+        "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__"};
+    int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
+    for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
+    if (wrapper && !strcmp(name, "__contains__")) wrapper = strcmp(owner, "dict") && strcmp(owner, "set") && strcmp(owner, "frozenset");
+    if (wrapper && !strcmp(name, "__getitem__")) wrapper = strcmp(owner, "list") && strcmp(owner, "dict");
+    if (v->type == SPY_METHOD) return wrapper ? NATIVE_METHOD_WRAPPER : NATIVE_BOUND;
+    return wrapper ? NATIVE_WRAPPER_DESCRIPTOR : NATIVE_METHOD_DESCRIPTOR;
+}
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
         "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter"};
@@ -1048,6 +1073,9 @@ static const char *type_name(SPYValue *value) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
     }
+    int kind = native_kind(value);
+    if (kind) return kind == NATIVE_METHOD_DESCRIPTOR ? "method_descriptor" : kind == NATIVE_WRAPPER_DESCRIPTOR ? "wrapper_descriptor" :
+        kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
     return value->type <= SPY_TEMPLATE_ITERATOR ? names[value->type] : "object";
 }
 static Symbol *scope_symbol(Scope *scope, const char *name) {
@@ -1589,9 +1617,18 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         const char *name = text->as.string.data;
         size_t len = text->as.string.len;
         int dunder = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
+        if (function->type == SPY_NATIVE && function->as.native.owner) {
+            int kind = native_kind(v);
+            dunder = kind == NATIVE_WRAPPER_DESCRIPTOR || kind == NATIVE_METHOD_WRAPPER;
+        }
         if (!self) {
             SPYValue *owner = function->as.native.owner;
             if (!owner) return puts_buffer(b, "<built-in function ") || puts_buffer(b, name) || puts_buffer(b, ">");
+            if (!strcmp(name, "__new__")) {
+                /* Builtin allocators are bound to their type, as tp_new wrappers are. */
+                snprintf(num, sizeof(num), " object at %p>", (void *)owner);
+                return puts_buffer(b, "<built-in method __new__ of ") || puts_buffer(b, type_name(owner)) || puts_buffer(b, num);
+            }
             if (owner == name_local(b->ctx->classes, "object"))
                 return puts_buffer(b, dunder ? "<slot wrapper '" : "<method '") || puts_buffer(b, name) || puts_buffer(b, "'>");
             return puts_buffer(b, dunder ? "<slot wrapper '" : "<method '") || puts_buffer(b, name) || puts_buffer(b, "' of '") ||
@@ -10562,7 +10599,9 @@ static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_
 
 static SPYValue *value_class(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_CLASS && value->as.map.meta) return value->as.map.meta;
-    return value->type == SPY_INSTANCE ? value->as.map.parent : c->types[value->type];
+    if (value->type == SPY_INSTANCE) return value->as.map.parent;
+    int kind = native_kind(value);
+    return kind == NATIVE_BOUND ? c->types[SPY_NATIVE] : kind ? c->native_types[kind - 1] : c->types[value->type];
 }
 static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) {
     if (type->type != SPY_CLASS) return spy_error(c, "TypeError", "super() argument 1 must be a type");
@@ -13940,6 +13979,13 @@ SPYContext *spy_context_new(void) {
         cls->as.map.native = types[i].native + 1;
         if (types[i].native < 0) cls->as.map.flags = 2;
         if (types[i].native >= 0 && name_set(c, c->builtins, types[i].name, cls)) { spy_release(module); goto fail; }
+    }
+    static const char *const native_names[] = {"method_descriptor", "wrapper_descriptor", "method-wrapper"};
+    for (size_t i = 0; i < 3; i++) {
+        SPYValue *cls = new_class(c, native_names[i], name_local(c->classes, "object"), module);
+        if (!cls) { spy_release(module); goto fail; }
+        cls->as.map.flags = 2;
+        c->native_types[i] = cls;
     }
     static const int hashed_types[] = {SPY_INT, SPY_FLOAT, SPY_COMPLEX, SPY_STRING, SPY_BYTES, SPY_TUPLE, SPY_SLICE, SPY_RANGE};
     for (size_t i = 0; i < sizeof(hashed_types) / sizeof(*hashed_types); i++) {
