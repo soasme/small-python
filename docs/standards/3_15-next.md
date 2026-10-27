@@ -3428,8 +3428,7 @@ class_def_raw: 'class' NAME [type_params] ['(' [arguments] ')'] &&':' block
 
 1. Evaluate the decorator expressions, in order.
 2. If there are type parameters, the remaining steps run in the type parameters
-   scope (16.7), and the bases are followed by `%Generic%[`*params*`]` unless a
-   base already is a parameterized `%Generic%` or `%Protocol%`.
+   scope (16.7), and the bases are followed by `%Generic%[`*params*`]` (29.7).
 3. Evaluate the arguments as for a call (13.3.4): the positional arguments are
    *bases* and the keyword arguments *kwds*.
 4. Let *cls* be ? BuildClass(*body*, NAME, *bases*, *kwds*).
@@ -6893,8 +6892,11 @@ generic type aliases are subscriptable"). It supports `|`.
 ### 29.7 Generic
 
 %Generic% (`typing.Generic`) is a class. A class with a type parameter list
-(16.7) gets %Generic% appended to its bases (unless one of its bases already
-derives from it) and its `__type_params__` and `__parameters__` set to the
+(16.7) gets `%Generic%[`*params*`]` appended to its bases (16.4.1); that
+alias's `__mro_entries__` contributes %Generic% unless another base already
+derives from it, and %Generic%'s `__init_subclass__` raises `TypeError`
+("Cannot inherit from Generic[...] multiple times.") when the bases include a
+second `Generic[…]`. The class's `__type_params__` and `__parameters__` are the
 parameters. `Generic[T1, …]` requires type variables, TypeVarTuples, or
 ParamSpecs ("Parameters to Generic[...] must all be type variables or parameter
 specification variables.") and returns a generic alias usable as a base,
@@ -7799,3 +7801,116 @@ cannot change them otherwise:
 | int string limit | 4300 | 22.1.8 |
 | asyncgen hooks | `None`, `None` | 27.5.4 |
 | optimization level | 0; when greater than 0, `assert` statements are not evaluated and `__debug__` is `False` | 14.5, 19.1 |
+
+## Annex C (informative) Library Facades
+
+Programs written for CPython reach many of the intrinsics of this Standard
+through library modules. Those modules are not part of this Standard: a host
+may supply them (B.1.3) as ordinary modules, written in Python or otherwise,
+that bind names to intrinsics reachable from the language, add library
+functions, and call host hooks. This annex records the correspondence so that
+such a host binds each name to the object this Standard describes. Every
+intrinsic below can be obtained without a library: the third column shows a
+Core expression that evaluates to it.
+
+### C.1 `types`
+
+| Name | Intrinsic | Core expression |
+| --- | --- | --- |
+| `FunctionType`, `LambdaType` | %FunctionType% (28.1) | `type(lambda: None)` |
+| `CodeType` | %CodeType% (28.2) | `type((lambda: None).__code__)` |
+| `CellType` | %CellType% (28.6) | `type((lambda x: lambda: x)(0).__closure__[0])` |
+| `MethodType` | %MethodType% (28.4) | `type(C().f)` for a class `C` with method `f` |
+| `BuiltinFunctionType`, `BuiltinMethodType` | %BuiltinFunctionType% (28.5) | `type(len)` |
+| `WrapperDescriptorType`, `MethodWrapperType`, `MethodDescriptorType`, `ClassMethodDescriptorType` | 28.7 | `type(object.__init__)`, `type(object().__str__)`, `type(str.join)`, `type(dict.__dict__['fromkeys'])` |
+| `GetSetDescriptorType`, `MemberDescriptorType` | 28.8 | `type(int.__dict__['real'])`, `type(slice.__dict__['start'])` |
+| `MappingProxyType` | %MappingProxyType% (26.6) | `type(type.__dict__)` |
+| `ModuleType` | %ModuleType% (17.2) | `type(__import__('builtins'))` |
+| `GeneratorType`, `CoroutineType`, `AsyncGeneratorType` | 27.2, 27.4, 27.5 | `type` of instances |
+| `FrameType`, `TracebackType` | 28.3, 28.9 | `type(e.__traceback__.tb_frame)`, `type(e.__traceback__)` |
+| `GenericAlias` | %GenericAlias% (29.9) | `type(list[int])` |
+| `UnionType` | %UnionType% (29.5) | `type(int \| str)` |
+| `NoneType`, `EllipsisType`, `NotImplementedType` | 20.4 | `type(None)`, `type(...)`, `type(NotImplemented)` |
+| `LazyImportType` | %LazyImportType% (29.8) | `type(globals()['m'])` after `lazy import m` |
+
+`types.coroutine(f)` sets the iterable-coroutine flag (0x100, Table 28-1) on a
+generator function's code (27.4.5); `types.SimpleNamespace`, `new_class`,
+`prepare_class`, `resolve_bases`, and `get_original_bases` are library code
+built on the class-creation protocol of 16.4.
+
+### C.2 `typing`
+
+`TypeVar`, `TypeVarTuple`, `ParamSpec`, `ParamSpecArgs`, `ParamSpecKwargs`,
+`TypeAliasType`, `Generic`, `Union`, and `NoDefault` are the intrinsics of
+clause 29. `Unpack` (the origin of the alias that iterating a TypeVarTuple
+produces), `Protocol`, `Annotated`, `Literal`, `Callable`, `get_type_hints`,
+and the other `typing` names are library code. The library may add checks to
+`__typing_subst__` and to `Generic.__class_getitem__`.
+
+### C.3 `annotationlib`
+
+The annotate functions of 16.6 accept the formats `VALUE` (1) and
+`VALUE_WITH_FAKE_GLOBALS` (2). The library's `get_annotations`, `call_annotate_function`,
+`ForwardRef`, and the `FORWARDREF` (3) and `STRING` (4) formats evaluate an
+annotate function with substituted globals; they are not part of this
+Standard.
+
+### C.4 `string.templatelib`
+
+`Template` and `Interpolation` are %Template% and %Interpolation% (23.7);
+`convert(value, conversion)` applies `!s`, `!r`, or `!a` as 23.4 does.
+
+### C.5 `sys`
+
+| Name | Correspondence |
+| --- | --- |
+| `modules` | %ModuleCache% (17.3) |
+| `lazy_modules` | %LazyModules% (17.5) |
+| `getrecursionlimit`, `setrecursionlimit` | the recursion limit (B.6) |
+| `get_int_max_str_digits`, `set_int_max_str_digits` | the int string limit (22.1.8, B.6); values below 640 other than 0 are refused |
+| `set_asyncgen_hooks`, `get_asyncgen_hooks` | HostAsyncGenHooks (B.5.1) |
+| `stdout`, `stdin`, `stderr` | HostStandardOutput, HostInput, the stream of HostReportException |
+| `displayhook`, `excepthook`, `unraisablehook`, `breakpointhook` | HostDisplay, HostReportException, HostReportUnraisable, HostBreakpoint |
+| `exception()`, `exc_info()` | the handled exception (9.5) |
+| `_getframe(depth)` | the frame object (28.3) of the running frame or a caller |
+| `hash_info` | `width` 64, `modulus` 2<sup>61</sup> − 1, `inf` 314159, `nan` 0, `imag` 1000003 (22.1.9) |
+| `maxsize` | the largest index-size value (Annex D) |
+| `flags.optimize` | the optimization level (B.6) |
+| `exit(status)` | raises `SystemExit(status)` (B.4.4) |
+
+### C.6 `abc` and `collections.abc`
+
+`abc.ABCMeta` computes `__abstractmethods__` (20.2.8) from the attributes of a
+class whose `__isabstractmethod__` is true and implements `register` and the
+`__instancecheck__`/`__subclasscheck__` hooks of 19.3.21. Registering a class
+with `collections.abc.Sequence` or `collections.abc.Mapping` (or inheriting
+from them) designates it a sequence or a mapping for `match` (15.6.3, 15.6.4).
+
+### C.7 `copyreg` and `pickle`
+
+The `__reduce__` and `__reduce_ex__` results of built-in objects name library
+functions such as `copyreg.__newobj__` and `copyreg._reconstructor`; their
+form is not specified by this Standard beyond the cases given in clauses 21
+through 27.
+
+### C.8 Abstract syntax trees
+
+`compile` with the flag `ast.PyCF_ONLY_AST` (0x400), and `compile` of an AST
+object, are host facilities that expose the parse tree of Annex A as objects;
+a Core implementation without them rejects the flag.
+
+### C.9 `__future__`
+
+The `__future__` module binds the feature names that 14.13 recognizes to
+records of the releases in which they became optional and mandatory. Importing
+it is an ordinary import; only the future statement has a language effect.
+
+### C.10 `site` and `builtins` additions
+
+`exit`, `quit`, `help`, `copyright`, `credits`, and `license` (19.4) are added
+to the built-in namespace by the host's `site` module.
+
+### C.11 `warnings`
+
+The `warnings` module implements HostWarn (B.4.1): its filters decide whether a
+warning is ignored, displayed once per location, or raised.
