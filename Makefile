@@ -103,9 +103,9 @@ test-tla: spy $(TLA_JAR) tla-coverage
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(TLA_JAR)
 
 # Every section of docs/standards/3_15.md is mapped to the models covering it
-# (tests/tla/coverage.txt). TODO entries pass until their models are written.
+# (tests/tla/coverage.txt) or to a stated exclusion; a TODO entry fails.
 tla-coverage:
-	python3 tests/tla_coverage.py --allow-todo
+	python3 tests/tla_coverage.py
 
 test-cpython: test-cpython-doctests test-cpython-unittest
 	$(CPYTHON) tests/cpython.py discover
