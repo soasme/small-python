@@ -17586,7 +17586,8 @@ static int character_is(int type, int property, uint32_t code) {
         case C_ALPHA: return upper || lower;
         case C_DECIMAL: case C_DIGIT: case C_NUMERIC: return digit;
         case C_SPACE: return code == ' ' || (code >= '\t' && code <= '\r');
-        case C_UPPER: case C_TITLE: return upper;
+        case C_UPPER: return upper;
+        case C_TITLE: return 0;
         case C_LOWER: return lower;
         case C_CASED: return upper || lower;
         case C_ALNUM: return upper || lower || digit;
@@ -18005,11 +18006,15 @@ static SPYValue *text_pad(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     if (args[1]) {
         Units f;
         SPYValue *actual = builtin_value(c, args[1], type);
+        if (!actual && type != SPY_STRING) actual = builtin_value(c, args[1], type == SPY_BYTES ? SPY_BYTEARRAY : SPY_BYTES);
         if (!actual && type == SPY_STRING)
             return errorf(c, "TypeError", "The fill character must be a unicode character, not %s", type_name(args[1]));
-        if (!actual || (type == SPY_STRING ? string_length(actual) : actual->as.string.len) != 1)
-            return spy_error(c, "TypeError", type == SPY_STRING ? "The fill character must be exactly one character long" :
-                             "argument 2 must be a byte string of length 1");
+        if (!actual) return errorf(c, "TypeError", "%s() argument 2 must be a byte string of length 1, not %s", pad_names[mode], type_name(args[1]));
+        if (type != SPY_STRING && actual->as.string.len != 1)
+            return errorf(c, "TypeError", "%s(): argument 2 must be a byte string of length 1, not a %s object of length %zu",
+                          pad_names[mode], type_name(actual), actual->as.string.len);
+        if (type == SPY_STRING && string_length(actual) != 1)
+            return spy_error(c, "TypeError", "The fill character must be exactly one character long");
         if (units_from(c, actual, &f)) return NULL;
         fill = f.items[0]; free(f.items);
     }
@@ -18383,11 +18388,12 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     int64_t group = 1;
     const char *sep = NULL;
     if (args[0]) {
-        if (args[0]->type == SPY_STRING || args[0]->type == SPY_BYTES) {
-            if (args[0]->as.string.len != 1 || (unsigned char)args[0]->as.string.data[0] >= 128)
-                return spy_error(c, "ValueError", "sep must be ASCII.");
+        if (args[0]->type == SPY_STRING || args[0]->type == SPY_BYTES || args[0]->type == SPY_BYTEARRAY) {
+            if ((args[0]->type == SPY_STRING ? string_length(args[0]) : args[0]->as.string.len) != 1)
+                return spy_error(c, "ValueError", "sep must be length 1.");
+            if ((unsigned char)args[0]->as.string.data[0] >= 128) return spy_error(c, "ValueError", "sep must be ASCII.");
             sep = args[0]->as.string.data;
-        } else return spy_error(c, "TypeError", "sep must be str or bytes.");
+        } else return errorf(c, "TypeError", "object of type '%s' has no len()", type_name(args[0]));
     }
     if (args[1] && index_value(c, args[1], &group)) return NULL;
     Buffer out = {.ctx = c};
@@ -18415,6 +18421,9 @@ static SPYValue *bytes_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
         unsigned char ch = (unsigned char)text->as.string.data[i];
         if (ch == ' ' || (ch >= '\t' && ch <= '\r')) { i++; continue; }
         int high = hex_digit(ch), low = i + 1 < text->as.string.len ? hex_digit((unsigned char)text->as.string.data[i + 1]) : -1;
+        if (high >= 0 && i + 1 == text->as.string.len) {
+            spy_error(c, "ValueError", "fromhex() arg must contain an even number of hexadecimal digits"); break;
+        }
         if (high < 0 || low < 0) {
             errorf(c, "ValueError", "non-hexadecimal number found in fromhex() arg at position %zu", high < 0 ? i : i + 1);
             break;

@@ -95,6 +95,7 @@ and tied to real implementations by replaying them.
 | `Strings.tla` | find, rfind, index, count, startswith, endswith, split, rsplit, partition, rpartition, replace, removeprefix, removesuffix, and the strips derived over every string of up to three characters and argument of up to two; whitespace splitting; center, ljust, rjust, and zfill at every width; case mappings, predicates, splitlines, translate, encode, str(), and argument errors | yes |
 | `FormatSpec.tla` | the format specification mini-language derived for ints (every alignment, sign, alternate form, zero padding, width, grouping, and integer type) and for floats (f, %, and e at each precision, with half-even rounding and z), including grouping that extends into zero padding; str, complex, and object specs, and the format string syntax of str.format | yes |
 | `PercentFormat.tla` | printf-style formatting derived for ints and floats under every flag combination, width, precision, and numeric type, into str and bytes; %s, %r, %a, %c, mapping keys, `*` widths, and argument mismatches | yes |
+| `Bytes.tla` | the str search, split, replace, affix, strip, and pad functions derived again for bytes and bytearray receivers; constructors, fromhex and hex, ASCII-only case mappings and predicates, bytearray mutation, and argument errors | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -219,7 +220,9 @@ cannot convert, and iteration misreported an `__iter__` of None or one
 returning a non-iterator, and `range` attributes were writable in message,
 `range.index()` worded its miss differently, `len()` of a huge range
 reported a 64-bit limit, str methods worded many argument errors
-their own way, and bytes `%s` refused a memoryview.
+their own way, bytes `%s` refused a memoryview, `bytes.isupper()` was
+always false, `bytearray` padding refused a bytes fill byte, and `hex()`
+and `fromhex()` worded separator and odd-digit errors differently.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

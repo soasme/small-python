@@ -261,3 +261,16 @@ assert_eq("a\nb".splitlines("yes"), ["a\n", "b"])
 
 # bytes %s and %b take any buffer, memoryview included.
 assert_eq(b"%s|%b" % (memoryview(b"m"), bytearray(b"x")), b"m|x")
+
+# bytes have no titlecase; fill bytes may be bytes or bytearray; hex and fromhex errors.
+assert_true(b"AB".isupper() and bytearray(b"AB").isupper() and not b"Ab".isupper())
+assert_eq(bytearray(b"a").center(4, b"*"), bytearray(b"*a**"))
+assert_eq(b"a".ljust(3, bytearray(b"-")), b"a--")
+for call, message in ((lambda: b"ab".hex("--"), "sep must be length 1."),
+                      (lambda: bytes.fromhex("0ab"), "fromhex() arg must contain an even number of hexadecimal digits")):
+    try:
+        call()
+    except ValueError as error:
+        assert_eq(str(error), message)
+    else:
+        raise AssertionError(message)

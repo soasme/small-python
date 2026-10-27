@@ -501,6 +501,12 @@
   ("list.append() takes no keyword arguments"). TLA+ model of str.
 - bytes %s and %b format any buffer, a memoryview included. TLA+ models
   of format specifications and printf-style formatting.
+- bytes.isupper() and bytearray.isupper() hold for uppercase letters
+  (bytes have no titlecase); bytes and bytearray padding accept either
+  type as the fill byte, with CPython's errors; hex() reports a
+  separator's length before its ASCII-ness and a non-str one as having
+  no len(); fromhex() reports a final lone digit as an odd count. TLA+
+  model of bytes and bytearray.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
