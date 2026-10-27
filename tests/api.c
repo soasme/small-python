@@ -567,7 +567,8 @@ int main(void) {
     assert(calls == 2);
     assert(spy_exec(c, "import missing", "api.py") == -1);
     assert(!strcmp(spy_error_type(c), "ModuleNotFoundError"));
-    assert(calls == 4);
+    /* missing.__init__, missing, and missing.__namespace__. */
+    assert(calls == 5);
 
     /* Traceback suggestions preserve the raw exception and never execute
      * candidate source or invoke the module loader. Repeated formatting must
@@ -582,7 +583,7 @@ int main(void) {
         assert(!strcmp(spy_error_type(c), "SyntaxError"));
         assert(!strcmp(spy_error_message(c), "invalid syntax"));
         assert(!strcmp(spy_error_filename(c), "suggestion.py"));
-        assert(spy_error_line(c) == 1 && calls == 4);
+        assert(spy_error_line(c) == 1 && calls == 5);
         spy_collect(c);
         assert(spy_live_values(c) == display_baseline);
     }

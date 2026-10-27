@@ -34,7 +34,9 @@ typedef int (*SPYFlush)(void *);
 /* Return malloc-allocated, NUL-terminated source bytes, or NULL if absent.
  * The runtime decodes encoding declarations and frees source.
  * For a module "pkg.mod", it probes "pkg.mod.__init__" (package) first,
- * then "pkg.mod". The host controls search paths and source storage. */
+ * then "pkg.mod", then "pkg.mod.__namespace__", where any non-NULL result
+ * makes a namespace package (PEP 420) without source. The host controls
+ * search paths and source storage. */
 typedef char *(*SPYModuleLoader)(void *, const char *);
 
 SPYContext *spy_context_new(void);

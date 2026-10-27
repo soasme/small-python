@@ -125,6 +125,7 @@ struct SPYContext {
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     int compile_flags; /* compile()'s future flags while it parses. */
     int string_source; /* compile(), exec(), or eval() is parsing a string. */
+    int eval_input; /* The source is eval input: one expression list. */
     /* Modules a host registered with spy_new_module, created on first import. */
     struct HostModule { char *name; SPYModuleInit init; } *host_modules;
     /* Mounted host directories (resolved host path, normalized guest path)
@@ -198,6 +199,7 @@ static int set_index(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int delete_index(SPYContext *, SPYValue *, SPYValue *);
 static int error_is(SPYContext *, const char *);
 static void attach_syntax_error(SPYContext *, const char *, const char *, const char *, const char *, int);
+static SPYValue *range_overflow(SPYContext *);
 static void chain_exception(SPYContext *, SPYValue *);
 static int subclass(SPYValue *, SPYValue *);
 static SPYValue *class_lookup(SPYValue *, const char *);
@@ -866,7 +868,7 @@ static SPYValue *integer_bitwise(SPYContext *c, int op, SPYValue *a, SPYValue *b
 static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **quotient, SPYValue **remainder) {
     IntView x, y; integer_view(a, &x); integer_view(b, &y);
     *quotient = *remainder = NULL;
-    if (!y.len) { spy_error(c, "ZeroDivisionError", "integer division or modulo by zero"); return -1; }
+    if (!y.len) { spy_error(c, "ZeroDivisionError", "division by zero"); return -1; }
     BigInt *q = integer_alloc(c, x.len), *r = integer_alloc(c, y.len + 1);
     if (!q || !r) { free(q); free(r); return -1; }
     r->len = 0;
@@ -1338,12 +1340,15 @@ static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
 }
 static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) {
     int status = hash_value(c, key, hash);
-    if (status && map->type == SPY_FROZENDICT && !strcmp(c->error_type, "TypeError") &&
+    /* dict_unhashable_type: an exact TypeError names the container's role. */
+    const char *role = map->type == SPY_FROZENDICT ? "a frozendict key" : map->type == SPY_DICT ? "a dict key" :
+        map->type == SPY_SET || map->type == SPY_FROZENSET ? "a set element" : NULL;
+    if (status && role && !strcmp(c->error_type, "TypeError") &&
         (!c->exception || c->exception->as.map.parent == name_local(c->classes, "TypeError"))) {
         char message[sizeof(c->error_message)];
         snprintf(message, sizeof(message), "%s", c->error_message);
         spy_clear_error(c);
-        errorf(c, "TypeError", "cannot use '%s' as a frozendict key (%s)", type_name(key), message);
+        errorf(c, "TypeError", "cannot use '%s' as %s (%s)", type_name(key), role, message);
     }
     return status;
 }
@@ -5856,6 +5861,15 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             for (size_t i = p.pos; i < p.len; i++) if (p.tokens[i].kind != T_DEDENT && p.tokens[i].kind != T_END) at_end = 0;
         }
         if (c->error_type[0]) invalid_expression_error(&p);
+        Node *body = unit->as.unit.body;
+        if (!c->error_type[0] && c->eval_input && (!body || body->kind != N_EXPR || body->next)) {
+            /* eval_input is expressions NEWLINE* ENDMARKER: fail where it stops. */
+            p.pos = 0;
+            if (expression_list(&p, 0)) {
+                while (at(&p, T_NL)) p.pos++;
+                syntax(&p, "invalid syntax");
+            }
+        }
         /* _PyPegen_tokenize_full_source_to_check_for_errors: the unclosed
          * bracket wins once the parser read to the end or past its line. */
         if (p.unclosed && (!c->error_type[0] || ((!strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError")) &&
@@ -5897,7 +5911,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
         /* The compiler's errors read the line from the file, which a string has not. */
-        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | (p.error_end_zero ? 2 : 0) |
+        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | c->eval_input | (p.error_end_zero ? 2 : 0) |
                                               (!parsing && c->string_source ? 4 : 0));
         if (incomplete) *incomplete = syntax_error && parsing && (p.incomplete || at_end);
         if (syntax_error && parsing && c->exception) {
@@ -6737,7 +6751,7 @@ static SPYValue *big_integer_binary(SPYContext *c, int op, SPYValue *a, SPYValue
     case T_POW: {
         if (integer_sign(b) < 0) {
             double x, y;
-            if (!integer_sign(a)) return spy_error(c, "ZeroDivisionError", "zero cannot be raised to a negative power");
+            if (!integer_sign(a)) return spy_error(c, "ZeroDivisionError", "zero to a negative power");
             if (spy_as_float(c, a, &x) || spy_as_float(c, b, &y)) return NULL;
             return spy_float(c, pow(x, y));
         }
@@ -6844,7 +6858,7 @@ static SPYValue *integer_binary(SPYContext *c, int op, int64_t a, int64_t b) {
         r = a - b; break;
     case '*': if (int_mul(a, b, &r)) goto overflow; break;
     case T_FLOORDIV: case '%':
-        if (!b) return spy_error(c, "ZeroDivisionError", op == '%' ? "integer modulo by zero" : "division by zero");
+        if (!b) return spy_error(c, "ZeroDivisionError", "division by zero");
         if (a == INT64_MIN && b == -1) { if (op == '%') return spy_int(c, 0); goto overflow; }
         r = op == '%' ? a % b : a / b;
         if (a % b && ((a < 0) != (b < 0))) r += op == '%' ? b : -1;
@@ -6864,7 +6878,7 @@ static SPYValue *integer_binary(SPYContext *c, int op, int64_t a, int64_t b) {
         break;
     case T_POW:
         if (b < 0) {
-            if (!a) return spy_error(c, "ZeroDivisionError", "zero cannot be raised to a negative power");
+            if (!a) return spy_error(c, "ZeroDivisionError", "zero to a negative power");
             return spy_float(c, pow((double)a, (double)b));
         }
         r = 1;
@@ -7027,6 +7041,11 @@ seq_fail:
         {T_POW, "** or pow()"}, {T_FLOORDIV, "//"}, {T_LSHIFT, "<<"}, {T_RSHIFT, ">>"}};
     const char *symbol = "?";
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) if (names[i].op == op) symbol = names[i].text;
+    /* Sequence concatenation reports the left operand's type. */
+    if (op == '+' && (a->type == SPY_STRING || a->type == SPY_LIST || a->type == SPY_TUPLE))
+        return errorf(c, "TypeError", "can only concatenate %s (not \"%s\") to %s", type_name(a), type_name(b), type_name(a));
+    if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY))
+        return errorf(c, "TypeError", "can't concat %s to %s", type_name(b), type_name(a));
     return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(a), type_name(b));
 }
 static double complex numeric_complex(SPYContext *c, SPYValue *value) {
@@ -7097,7 +7116,7 @@ static SPYValue *complex_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b)
     case T_POW:
         if (y == 0) result = complex_parts(1, 0);
         else if (x == 0) {
-            if (cimag(y) != 0 || creal(y) < 0) return spy_error(c, "ZeroDivisionError", "0.0 to a negative or complex power");
+            if (cimag(y) != 0 || creal(y) < 0) return spy_error(c, "ZeroDivisionError", "zero to a negative or complex power");
             result = complex_parts(0, 0);
         } else if (cimag(y) == 0 && fabs(creal(y)) <= 100 && floor(creal(y)) == creal(y)) {
             int exponent = (int)fabs(creal(y));
@@ -7200,9 +7219,11 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             break;
         }
         case T_POW:
-            if (!x && y < 0) return spy_error(c, "ZeroDivisionError", "zero cannot be raised to a negative power");
+            if (!x && y < 0) return spy_error(c, "ZeroDivisionError", "zero to a negative power");
             if (x < 0 && floor(y) != y) return complex_binary(c, op, a, b);
-            r = pow(x, y); break;
+            r = pow(x, y);
+            if (isinf(r) && isfinite(x) && isfinite(y)) return range_overflow(c);
+            break;
         default: return spy_error(c, "TypeError", "unsupported floating-point operator");
         }
         return spy_float(c, r);
@@ -7817,7 +7838,20 @@ static SPYValue *binary_special(SPYContext *c, const Operator *op, SPYValue *lef
 }
 static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size_t argc, SPYValue *const *argv) {
     SPYValue *method = special_method(c, v, name);
-    if (!method) return errorf(c, "TypeError", "object does not support %s", name);
+    if (!method) {
+        if (c->error_type[0]) return NULL;
+        const char *type = type_name(v);
+        if (!strcmp(name, "__neg__") || !strcmp(name, "__pos__") || !strcmp(name, "__invert__"))
+            return errorf(c, "TypeError", "bad operand type for unary %c: '%s'", name[2] == 'n' && name[3] == 'e' ? '-' : name[2] == 'p' ? '+' : '~', type);
+        if (!strcmp(name, "__abs__")) return errorf(c, "TypeError", "bad operand type for abs(): '%s'", type);
+        if (!strcmp(name, "__len__")) return errorf(c, "TypeError", "object of type '%s' has no len()", type);
+        if (!strcmp(name, "__next__")) return errorf(c, "TypeError", "'%s' object is not an iterator", type);
+        if (!strcmp(name, "__reversed__")) return errorf(c, "TypeError", "'%s' object is not reversible", type);
+        if (!strcmp(name, "__getitem__")) return errorf(c, "TypeError", "'%s' object is not subscriptable", type);
+        if (!strcmp(name, "__setitem__")) return errorf(c, "TypeError", "'%s' object does not support item assignment", type);
+        if (!strcmp(name, "__delitem__")) return errorf(c, "TypeError", "'%s' object doesn't support item deletion", type);
+        return errorf(c, "TypeError", "'%s' object does not support %s", type, name);
+    }
     SPYValue *result = spy_call(c, method, argc, argv);
     spy_release(method); return result;
 }
@@ -7986,11 +8020,13 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             return def && def->kind != N_CLASS ? closure_names(c, def, name[3] == 'c') : value_new(c, SPY_TUPLE);
         if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->line : 1);
         if (!strcmp(name, "co_varnames") || !strcmp(name, "co_nlocals")) {
-            /* Parameters first, then other local bindings in first-use order.
-             * A class body has no fast locals. */
+            /* Named parameters, then *args and **kwargs, then other local
+             * bindings in first-use order. A class body has no fast locals. */
             SPYValue *names = value_new(c, SPY_TUPLE);
             Scope *scope = def && def->kind != N_CLASS ? def->scope : NULL;
+            for (int pass = 0; pass < 3; pass++)
             for (Node *arg = def && def->kind != N_COMPREHENSION && def->kind != N_CLASS ? def->args : NULL; names && arg; arg = arg->next) {
+                if ((arg->op == P_VARARGS) != (pass == 1) || (arg->op == P_KWARGS) != (pass == 2)) continue;
                 SPYValue *text = spy_string(c, arg->text, strlen(arg->text));
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
                 spy_release(text);
@@ -9010,8 +9046,13 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
 }
 static int memory_check(SPYContext *, SPYValue *);
 static SPYValue *memory_bytes(SPYContext *, SPYValue *);
+static SPYValue *method_arity(SPYContext *, const char *, const char *, size_t, size_t, size_t);
 static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t argc, SPYValue *const *argv) {
-    if (argc < 1 || argc > 3) return spy_error(c, "TypeError", "string search requires 1 to 3 arguments");
+    if (argc < 1 || argc > 3) {
+        const char *name = method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
+            method == M_RFIND ? "rfind" : method == M_STRING_INDEX ? "index" : method == M_RINDEX ? "rindex" : "count";
+        return method_arity(c, type_name(self), name, 1, 3, argc);
+    }
     int tail = method == M_STARTSWITH || method == M_ENDSWITH;
     if (self->type == SPY_BYTES && (argv[0]->type == SPY_MEMORYVIEW || (tail && argv[0]->type == SPY_TUPLE))) {
         // Buffer needles search as their bytes.
@@ -9091,7 +9132,7 @@ search:;
             return spy_int(c, (int64_t)matches);
         }
         if (found == SIZE_MAX) {
-            if (method == M_STRING_INDEX || method == M_RINDEX) return spy_error(c, "ValueError", "substring not found");
+            if (method == M_STRING_INDEX || method == M_RINDEX) return spy_error(c, "ValueError", self->type == SPY_STRING ? "substring not found" : "subsection not found");
             return spy_int(c, -1);
         }
         if (self->type == SPY_BYTES) return spy_int(c, start + (int64_t)found);
@@ -9108,6 +9149,39 @@ static SPYValue *string_search_method(SPYContext *c, size_t argc, SPYValue *cons
     SPYValue view = *self;
     if (view.type == SPY_BYTEARRAY) view.type = SPY_BYTES;
     return string_search(c, &view, method, argc - 1, argv + 1);
+}
+/* CPython's arity errors: METH_NOARGS and METH_O methods name their type,
+ * positional-only ranges use _PyArg_CheckPositional's wording. */
+static SPYValue *method_arity(SPYContext *c, const char *owner, const char *name, size_t min, size_t max, size_t argc) {
+    if (max == 0) return errorf(c, "TypeError", "%s.%s() takes no arguments (%zu given)", owner, name, argc);
+    if (min == 1 && max == 1) return errorf(c, "TypeError", "%s.%s() takes exactly one argument (%zu given)", owner, name, argc);
+    if (min == max) return errorf(c, "TypeError", "%s expected %zu argument%s, got %zu", name, min, min == 1 ? "" : "s", argc);
+    if (argc < min) return errorf(c, "TypeError", "%s expected at least %zu argument%s, got %zu", name, min, min == 1 ? "" : "s", argc);
+    return errorf(c, "TypeError", "%s expected at most %zu argument%s, got %zu", name, max, max == 1 ? "" : "s", argc);
+}
+static SPYValue *method_arity_error(SPYContext *c, SPYValue *bound, size_t argc) {
+    SPYValue *self = bound->as.bound.self;
+    int method = bound->as.bound.method;
+    const char *name = bound->as.bound.name ? bound->as.bound.name->as.string.data : "method", *owner = type_name(self);
+    size_t min = 0, max = 0;
+    switch (method) {
+    case M_NEXT: case M_ITER: case M_AWAIT: case M_AITER: case M_ANEXT:
+        return errorf(c, "TypeError", "expected 0 arguments, got %zu", argc);
+    case M_SPLITLINES: return errorf(c, "TypeError", "splitlines() takes at most 1 argument (%zu given)", argc);
+    case M_SORT: return errorf(c, "TypeError", "sort() takes at most 2 arguments (%zu given)", argc);
+    case M_APPEND: case M_EXTEND: case M_REMOVE: case M_JOIN: case M_SEND: case M_ASEND: case M_ISDISJOINT: case M_INDICES: case M_COUNT:
+        min = max = 1; break;
+    case M_INDEX: min = 1; max = self->type == SPY_RANGE ? 1 : 3; break;
+    case M_INSERT: min = max = 2; break;
+    case M_POP: max = 1; break;
+    case M_DICT_POP: case M_SETDEFAULT: case M_GET: min = 1; max = 2; break;
+    case M_UPDATE: max = 1; break;
+    case M_THROW: case M_ATHROW: case M_STARTSWITH: case M_ENDSWITH: case M_FIND: case M_RFIND:
+    case M_STRING_INDEX: case M_RINDEX: case M_STRING_COUNT: min = 1; max = 3; break;
+    case M_SUPER_GET: min = 1; max = 2; break;
+    default: break;
+    }
+    return method_arity(c, owner, name, min, max, argc);
 }
 static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValue *const *argv) {
     SPYValue *self = bound->as.bound.self;
@@ -9149,9 +9223,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
             if (method == M_COUNT) return spy_int(c, count);
             if (method == M_REMOVE) return spy_error(c, "ValueError", "list.remove(x): x not in list");
             if (self->type == SPY_TUPLE) return spy_error(c, "ValueError", "tuple.index(x): x not in tuple");
-            SPYValue *text = spy_repr(c, argv[0]);
-            if (text) errorf(c, "ValueError", "%s is not in list", text->as.string.data);
-            spy_release(text); return NULL;
+            return spy_error(c, "ValueError", "list.index(x): x not in list");
         }
         if (argc != 1) break;
         SPYValue *index = NULL;
@@ -9398,6 +9470,9 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     }
     case M_GET: case M_DICT_POP: case M_SETDEFAULT: {
         if (argc < 1 || argc > 2) break;
+        /* dict.pop on an empty dict skips hashing the key. */
+        if (bound->as.bound.method == M_DICT_POP && !self->as.map.len)
+            return argc == 2 ? spy_retain(argv[1]) : missing_key(c, argv[0]);
         int64_t hash;
         if (map_hash(c, self, argv[0], &hash)) return NULL;
         ptrdiff_t i = map_find_hash(self, argv[0], hash);
@@ -9436,7 +9511,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         return view;
     }
     }
-    return spy_error(c, "TypeError", "wrong number of method arguments");
+    return method_arity_error(c, bound, argc);
 }
 /* A NULL value requests deletion. */
 static int descriptor_set(SPYContext *c, SPYValue *descriptor, SPYValue *object, SPYValue *value) {
@@ -10155,13 +10230,17 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
         (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "keys"))) extend_display(c, dict, a);
     else {
         SPYValue *iterator = get_iterator(c, a);
-        while (iterator && !c->error_type[0]) {
+        for (size_t index = 0; iterator && !c->error_type[0]; index++) {
             if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
             SPYValue *pair = iterator_next(c, iterator);
             if (!pair) break;
-            SPYValue *items = spy_list(c);
-            if (items && !extend_display(c, items, pair)) {
-                if (items->as.seq.len != 2) spy_error(c, "ValueError", "dictionary update sequence element must have length 2");
+            /* PyDict_MergeFromSeq2 takes each element with PySequence_Fast. */
+            SPYValue *items = spy_list(c), *probe = items ? get_iterator(c, pair) : NULL;
+            if (!probe && error_is(c, "TypeError")) { spy_clear_error(c); spy_error(c, "TypeError", "object is not iterable"); }
+            spy_release(probe);
+            if (items && !c->error_type[0] && !extend_display(c, items, pair)) {
+                if (items->as.seq.len != 2)
+                    errorf(c, "ValueError", "dictionary update sequence element #%zu has length %zu; 2 is required", index, items->as.seq.len);
                 else map_set(c, dict, items->as.seq.items[0], items->as.seq.items[1]);
             }
             spy_release(items); spy_release(pair);
@@ -10445,7 +10524,7 @@ static SPYValue *unary(SPYContext *c, int op, SPYValue *a) {
         }
         return spy_float(c, op == '-' ? -a->as.real : a->as.real);
     }
-    return spy_error(c, "TypeError", "unsupported unary operand");
+    return errorf(c, "TypeError", "bad operand type for unary %c: '%s'", op, type_name(a));
 }
 static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *callable, SPYValue *args, SPYValue *keywords) {
     /* Python evaluates all positional arguments (including * after a
@@ -11592,7 +11671,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         }
     }
     char *source = NULL;
-    int package = 0;
+    int package = 0, namespace = 0;
     Buffer filename = {.ctx = c};
     if (!init) {
         Buffer init = {.ctx = c};
@@ -11600,7 +11679,14 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         free(init.data);
         package = source != NULL;
         if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
-        if (!source) {
+        if (!source && !c->error_type[0]) {
+            Buffer probe = {.ctx = c};
+            char *marker = puts_buffer(&probe, name) || puts_buffer(&probe, ".__namespace__") ? NULL : c->loader(c->loader_data, probe.data);
+            free(probe.data);
+            package = namespace = marker != NULL;
+            free(marker);
+        }
+        if (!source && !namespace) {
             spy_release(parent);
             if (c->error_type[0]) return NULL;
             errorf(c, "ModuleNotFoundError", "No module named '%s'", name);
@@ -11613,19 +11699,24 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         }
         puts_buffer(&filename, package ? "/__init__.py" : ".py");
     }
-    SPYValue *unit = c->error_type[0] || init ? NULL : parse(c, source, filename.data);
+    SPYValue *unit = c->error_type[0] || init || namespace ? NULL : parse(c, source, filename.data);
+    /* __file__ is the loader-relative name that tracebacks show. */
+    SPYValue *file = unit ? spy_string(c, filename.data, filename.len) : NULL;
     free(filename.data);
     free(source);
-    if (!unit && !init) { spy_release(parent); return NULL; }
+    if (!unit && !init && !namespace) { spy_release(parent); return NULL; }
+    if (unit && !file) { spy_release(unit); spy_release(parent); return NULL; }
     SPYValue *module = value_new(c, SPY_MODULE);
     SPYValue *module_name = spy_string(c, name, strlen(name));
-    if (!module || !module_name) { spy_release(module); spy_release(module_name); spy_release(unit); spy_release(parent); return NULL; }
+    if (!module || !module_name) { spy_release(module); spy_release(module_name); spy_release(unit); spy_release(parent); spy_release(file); return NULL; }
     module->as.map.parent = spy_retain(c->builtins);
     module->as.map.namespace = value_new(c, SPY_DICT);
     if (!module->as.map.namespace) {
-        spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); return NULL;
+        spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); spy_release(file); return NULL;
     }
     name_set(c, module, "__builtins__", c->builtins);
+    if (file) name_set(c, module, "__file__", file);
+    spy_release(file);
     SPYValue *package_name = spy_string(c, name, package ? strlen(name) : dot ? (size_t)(dot - name) : 0);
     if (package_name) name_set(c, module, "__package__", package_name);
     spy_release(package_name);
@@ -11646,7 +11737,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         /* An init that made a package also makes it its own __package__. */
         if (!c->error_type[0] && name_local(module, "__path__")) name_set(c, module, "__package__", name_local(module, "__name__"));
         if (c->error_type[0]) result.flow = FLOW_ERROR;
-    } else {
+    } else if (unit) {
         Frame frame = {module, unit, 0};
         result = execute_module(c, &frame);
     }
@@ -11941,9 +12032,17 @@ static int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     if (all) {
         SPYValue *iterator = get_iterator(c, all), *key;
         if (!iterator) return -1;
+        SPYValue *module_name = name_local(module, "__name__");
         while ((key = iterator_next(c, iterator))) {
-            SPYValue *value = key->type == SPY_STRING ? import_from(c, module, key->as.string.data, 1) :
-                spy_error(c, "TypeError", "items in __all__ must be strings");
+            if (key->type != SPY_STRING) {
+                errorf(c, "TypeError", "Item in %s.__all__ must be str, not %s",
+                       module_name && module_name->type == SPY_STRING ? module_name->as.string.data : "?", type_name(key));
+                spy_release(key); break;
+            }
+            /* A package's __all__ may name submodules, which are imported first. */
+            SPYValue *value = name_local(module, "__path__") ? import_from(c, module, key->as.string.data, 0) : NULL;
+            spy_release(value);
+            value = c->error_type[0] ? NULL : attribute(c, module, key->as.string.data);
             if (value) name_set(c, f->env, key->as.string.data, value);
             spy_release(value); spy_release(key);
             if (c->error_type[0]) break;
@@ -12330,7 +12429,8 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
     SPYValue *solid = NULL;
     for (size_t i = 0; i < bases->as.seq.len; i++) {
         SPYValue *base = bases->as.seq.items[i];
-        if (base->type != SPY_CLASS) return spy_error(c, "TypeError", "base must be a class");
+        if (base->type != SPY_CLASS)
+            return spy_error(c, "TypeError", "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases");
         if (base->as.map.native || base->as.map.flags == 2) {
             int accepted = 0;
             for (size_t t = 0; t < sizeof(subclassable_types) / sizeof(*subclassable_types); t++)
@@ -12967,6 +13067,14 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
     return NULL;
 }
 static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with_cause(c, value, NULL); }
+/* OverflowError(ERANGE, 'Result too large'), as a C math function's range error. */
+static SPYValue *range_overflow(SPYContext *c) {
+    SPYValue *args[] = {spy_int(c, 34), spy_string(c, "Result too large", 16)};
+    SPYValue *error = args[0] && args[1] ? new_exception(c, name_local(c->classes, "OverflowError"), 2, args) : NULL;
+    if (error) raise_value(c, error);
+    spy_release(error); spy_release(args[0]); spy_release(args[1]);
+    return NULL;
+}
 static SPYValue *missing_key(SPYContext *c, SPYValue *key) {
     if (c->error_type[0]) return NULL;
     SPYValue *error = new_exception(c, name_local(c->classes, "KeyError"), 1, &key);
@@ -14138,7 +14246,8 @@ static SPYValue *arity_error(SPYContext *c, int id, size_t argc) {
         {B_ISINSTANCE, "isinstance", 'E', 2, 2, 0, 0}, {B_ISSUBCLASS, "issubclass", 'E', 2, 2, 0, 0},
         {B_LIST, "list", 'E', 0, 1, 0, 0}, {B_NEXT, "next", 'E', 1, 2, 0, 0}, {B_SET, "set", 'E', 0, 1, 0, 0},
         {B_SETATTR, "setattr", 'E', 3, 3, 0, 0}, {B_SLICE, "slice", 'E', 1, 3, 0, 0}, {B_SORTED, "sorted", 'E', 1, 1, 0, 0},
-        {B_STR, "str", 'E', 0, 3, 0, 0}, {B_TUPLE, "tuple", 'E', 0, 1, 0, 0},
+        {B_STR, "str", 'E', 0, 3, 0, 0}, {B_TUPLE, "tuple", 'E', 0, 1, 0, 0}, {B_VARS, "vars", 'E', 0, 1, 0, 0},
+        {B_DIR, "dir", 'E', 0, 1, 0, 0}, {B_GLOBALS, "globals", 'N', 0, 0, 0, 0}, {B_LOCALS, "locals", 'N', 0, 0, 0, 0},
         {B_IMPORT, "__import__", 'K', 1, 5, "name", 0}, {B_POW, "pow", 'K', 2, 3, "base", "exp"},
         {B_BYTEARRAY, "bytearray", 'K', 0, 3, 0, 0}, {B_BYTES, "bytes", 'K', 0, 3, 0, 0}, {B_COMPLEX, "complex", 'K', 0, 2, 0, 0},
         {B_EVAL, "eval", 'P', 1, 3, 0, 0}, {B_EXEC, "exec", 'P', 1, 4, 0, 0}, {B_SUM, "sum", 'P', 1, 2, 0, 0},
@@ -14150,6 +14259,7 @@ static SPYValue *arity_error(SPYContext *c, int id, size_t argc) {
         if (argc >= min && argc <= max) break;
         switch (table[i].style) {
         case 'O': return errorf(c, "TypeError", "%s() takes exactly one argument (%zu given)", name, argc);
+        case 'N': return errorf(c, "TypeError", "%s() takes no arguments (%zu given)", name, argc);
         case 'E': {
             size_t n = argc < min ? min : max;
             return errorf(c, "TypeError", "%s expected %s%zu argument%s, got %zu", name,
@@ -16223,6 +16333,10 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
                            SPYValue *keywords, const char *const *names, size_t count, size_t required,
                            size_t keyword_start, SPYValue **out) {
     if (!names) keyword_start = count;
+    if (!count && (argc || (keywords && keywords->as.map.len))) {
+        errorf(c, "TypeError", "%s() takes no arguments (%zu given)", function, argc + (keywords ? keywords->as.map.len : 0));
+        return -1;
+    }
     if (argc > count) {
         errorf(c, "TypeError", "%s() takes at most %zu argument%s (%zu given)", function, count, count == 1 ? "" : "s", argc);
         return -1;
@@ -16386,6 +16500,11 @@ static SPYValue *builtin_value(SPYContext *c, SPYValue *v, int type) {
     return NULL;
 }
 /* Return the borrowed builtin value a method operates on. */
+/* "type.name", the name CPython's argument errors give a method. */
+static const char *method_label(SPYContext *c, int type, const char *name, char *buffer, size_t size) {
+    snprintf(buffer, size, "%s.%s", name_local(c->types[type], "__name__")->as.string.data, name);
+    return buffer;
+}
 static SPYValue *method_self(SPYContext *c, size_t argc, SPYValue *const *argv, int type, const char *name) {
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
     if (self) return self;
@@ -16647,7 +16766,8 @@ static const char *const text_case_names[] = {"lower", "upper", "casefold", "tit
 static SPYValue *text_case_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int operation = (int)((intptr_t)data & 255), type = (int)((intptr_t)data >> 8);
     SPYValue *self = method_self(c, argc, argv, type, text_case_names[operation]), *args[1];
-    if (!self || parse_arguments(c, text_case_names[operation], argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    char label[64];
+    if (!self || parse_arguments(c, method_label(c, type, text_case_names[operation], label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
     return text_case(c, self, operation);
 }
 enum { IS_ALPHA, IS_DECIMAL, IS_DIGIT, IS_NUMERIC, IS_SPACE, IS_ALNUM, IS_ASCII, IS_UPPER, IS_LOWER, IS_TITLE };
@@ -16655,7 +16775,8 @@ static const char *const predicate_names[] = {"isalpha", "isdecimal", "isdigit",
 static SPYValue *text_predicate(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int test = (int)((intptr_t)data & 255), type = (int)((intptr_t)data >> 8);
     SPYValue *self = method_self(c, argc, argv, type, predicate_names[test]), *args[1];
-    if (!self || parse_arguments(c, predicate_names[test], argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    char label[64];
+    if (!self || parse_arguments(c, method_label(c, type, predicate_names[test], label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
     Units text;
     if (units_from(c, self, &text)) return NULL;
     static const int properties[] = {C_ALPHA, C_DECIMAL, C_DIGIT, C_NUMERIC, C_SPACE, C_ALNUM};
@@ -16734,9 +16855,8 @@ static SPYValue *text_split(SPYContext *c, size_t argc, SPYValue *const *argv, S
                 if (i == text.len) break;
                 size_t start = i;
                 if (limit >= 0 && (int64_t)count == limit) {
-                    size_t end = text.len;
-                    while (end > start && character_is(type, C_SPACE, text.items[end - 1])) end--;
-                    if (list_add_units(c, list, self->type, text.items + start, end - start)) goto fail;
+                    /* The remainder keeps its trailing whitespace. */
+                    if (list_add_units(c, list, self->type, text.items + start, text.len - start)) goto fail;
                     break;
                 }
                 while (i < text.len && !character_is(type, C_SPACE, text.items[i])) i++;
@@ -16750,9 +16870,7 @@ static SPYValue *text_split(SPYContext *c, size_t argc, SPYValue *const *argv, S
                 if (!i) break;
                 size_t end = i;
                 if (limit >= 0 && (int64_t)count == limit) {
-                    size_t start = 0;
-                    while (start < end && character_is(type, C_SPACE, text.items[start])) start++;
-                    if (list_add_units(c, list, self->type, text.items + start, end - start)) goto fail;
+                    if (list_add_units(c, list, self->type, text.items, end)) goto fail;
                     break;
                 }
                 while (i && !character_is(type, C_SPACE, text.items[i - 1])) i--;
@@ -17463,7 +17581,8 @@ static SPYValue *int_simple(SPYContext *c, size_t argc, SPYValue *const *argv, S
     int which = (int)(intptr_t)data;
     const char *name = which == 0 ? "as_integer_ratio" : which == 1 ? "is_integer" : "__index__";
     SPYValue *self = method_self(c, argc, argv, SPY_INT, name), *args[1];
-    if (!self || parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    char label[64];
+    if (!self || parse_arguments(c, method_label(c, SPY_INT, name, label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
     if (which == 1) return spy_bool(c, 1);
     SPYValue *value = self->type == SPY_BOOL ? spy_int(c, self->as.integer_data.small) : spy_retain(self);
     if (which == 2 || !value) return value;
@@ -17476,7 +17595,8 @@ static SPYValue *float_method(SPYContext *c, size_t argc, SPYValue *const *argv,
     int which = (int)(intptr_t)data;
     const char *name = which == 0 ? "as_integer_ratio" : which == 1 ? "is_integer" : "hex";
     SPYValue *self = method_self(c, argc, argv, SPY_FLOAT, name), *args[1];
-    if (!self || parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    char label[64];
+    if (!self || parse_arguments(c, method_label(c, SPY_FLOAT, name, label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
     double x = self->as.real;
     if (which == 1) return spy_bool(c, isfinite(x) && floor(x) == x);
     if (which == 2) {
@@ -17629,7 +17749,8 @@ static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv
 static SPYValue *frozendict_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     const char *name = data ? "__getnewargs__" : "copy";
     SPYValue *self = method_self(c, argc, argv, SPY_FROZENDICT, name);
-    if (!self || parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 0, 0, 0, NULL)) return NULL;
+    char label[64];
+    if (!self || parse_arguments(c, method_label(c, SPY_FROZENDICT, name, label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, NULL)) return NULL;
     if (!data) return argv[0]->type == SPY_FROZENDICT ? spy_retain(self) : frozendict_construct(c, 1, &self, NULL);
     SPYValue *dict = builtin(c, 1, argv, (void *)(intptr_t)B_DICT);
     SPYValue *args = dict ? value_new(c, SPY_TUPLE) : NULL;
@@ -17639,7 +17760,7 @@ static SPYValue *frozendict_method(SPYContext *c, size_t argc, SPYValue *const *
 /* Sets and frozensets share the hashed map; values are unused. */
 static int set_add(SPYContext *c, SPYValue *set, SPYValue *item) {
     int64_t hash;
-    if (hash_value(c, item, &hash)) return -1;
+    if (map_hash(c, set, item, &hash)) return -1;
     ptrdiff_t found = map_find_hash(set, item, hash);
     if (c->error_type[0]) return -1;
     return found >= 0 ? 0 : map_append(c, set, item, c->none, hash);
@@ -17802,7 +17923,7 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
     case SET_DISCARD: case SET_REMOVE: {
         SPYValue *key = args[0], *frozen = NULL;
         int64_t hash;
-        if (hash_value(c, key, &hash)) {
+        if (map_hash(c, self, key, &hash)) {
             /* A set argument is looked up as the equivalent frozenset. */
             if (!error_is(c, "TypeError") || !builtin_value(c, key, SPY_SET)) return NULL;
             spy_clear_error(c);
@@ -17817,7 +17938,7 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
         return c->error_type[0] ? NULL : spy_none(c);
     }
     case SET_POP: {
-        if (!self->as.map.len) return spy_error(c, "KeyError", "'pop from an empty set'");
+        if (!self->as.map.len) return spy_error(c, "KeyError", "pop from an empty set");
         SPYValue *item = spy_retain(self->as.map.items[0].key);
         set_remove_at(self, 0);
         return item;
@@ -19103,14 +19224,23 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             } else {
                 SPYValue *bytes = builtin_value(c, a, SPY_BYTES);
                 if (!bytes) bytes = builtin_value(c, a, SPY_BYTEARRAY);
-                if (!bytes) { spy_error(c, "TypeError", "source must be a string or code object"); goto execution_fail; }
+                if (!bytes) {
+                    if (id == B_COMPILE) spy_error(c, "TypeError", "compile() arg 1 must be a string, bytes or AST object");
+                    else errorf(c, "TypeError", "%s() arg 1 must be a string, bytes or code object", id == B_EVAL ? "eval" : "exec");
+                    goto execution_fail;
+                }
                 text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
             }
             /* exec and eval inherit the running code's future statements. */
             int flags = c->compile_flags;
             if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
             c->string_source++;
-            if (text) unit = parse_source(c, text->as.string.data, filename, NULL);
+            c->eval_input = expression == 1;
+            /* eval() of a string ignores leading spaces and tabs. */
+            const char *code = text ? text->as.string.data : NULL;
+            while (code && id == B_EVAL && (*code == ' ' || *code == '\t')) code++;
+            if (text) unit = parse_source(c, code, filename, NULL);
+            c->eval_input = 0;
             c->string_source--;
             c->compile_flags = flags;
             spy_release(text);
@@ -19151,7 +19281,7 @@ execution_fail:
     }
     if (id == B_GETATTR || id == B_SETATTR || id == B_HASATTR || id == B_DELATTR) {
         if (argc < 2 || argc > 3 || (id == B_SETATTR && argc != 3) || ((id == B_HASATTR || id == B_DELATTR) && argc != 2)) goto arity;
-        if (argv[1]->type != SPY_STRING) return spy_error(c, "TypeError", "attribute name must be string");
+        if (argv[1]->type != SPY_STRING) return errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(argv[1]));
         if (id == B_DELATTR) return delete_attribute(c, a, argv[1]->as.string.data) ? NULL : spy_none(c);
         const char *name = argv[1]->as.string.data;
         if (id == B_SETATTR) {
@@ -19216,11 +19346,12 @@ execution_fail:
     if (id == B_ORD) {
         if (argc != 1) goto arity;
         if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
-        if (a->type == SPY_BYTES) {
-            if (a->as.string.len != 1) return spy_error(c, "TypeError", "ord() expected a character");
+        if (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) {
+            if (a->as.string.len != 1) return errorf(c, "TypeError", "ord() expected a character, but string of length %zu found", a->as.string.len);
             return spy_int(c, (unsigned char)a->as.string.data[0]);
         }
-        if (a->type != SPY_STRING || string_length(a) != 1) return spy_error(c, "TypeError", "ord() expected a character");
+        if (a->type != SPY_STRING) return errorf(c, "TypeError", "ord() expected string of length 1, but %s found", type_name(a));
+        if (string_length(a) != 1) return errorf(c, "TypeError", "ord() expected a character, but string of length %zu found", string_length(a));
         const unsigned char *s = (const unsigned char *)a->as.string.data;
         size_t width = utf8_width(s[0]);
         if (width > a->as.string.len) return spy_error(c, "UnicodeError", "invalid UTF-8");
@@ -19259,7 +19390,7 @@ execution_fail:
             if (!value && argc == 2 && error_is(c, "StopIteration")) { spy_clear_error(c); return spy_retain(argv[1]); }
             return value;
         }
-        if (a->type != SPY_TEMPLATE_ITERATOR && a->type != SPY_ITERATOR && a->type != SPY_GENERATOR) return spy_error(c, "TypeError", "object is not an iterator");
+        if (a->type != SPY_TEMPLATE_ITERATOR && a->type != SPY_ITERATOR && a->type != SPY_GENERATOR) return errorf(c, "TypeError", "'%s' object is not an iterator", type_name(a));
         SPYValue *value = iterator_next(c, a);
         if (value || c->error_type[0]) return value;
         return argc == 2 ? spy_retain(argv[1]) : spy_error(c, "StopIteration", "");
@@ -19405,7 +19536,7 @@ execution_fail:
     }
     if (id == B_FORMAT) {
         if (argc < 1 || argc > 2) goto arity;
-        if (argc == 2 && argv[1]->type != SPY_STRING) return spy_error(c, "TypeError", "format() argument 2 must be str");
+        if (argc == 2 && argv[1]->type != SPY_STRING) return errorf(c, "TypeError", "format() argument 2 must be str, not %s", type_name(argv[1]));
         return format_field(c, a, argc == 2 ? argv[1] : NULL);
     }
     if (id == B_PROPERTY) {
@@ -19458,13 +19589,39 @@ execution_fail:
     }
     if (id == B_SUM || id == B_ALL || id == B_ANY || id == B_MIN || id == B_MAX) {
         if (!argc || (argc > 1 && id != B_MIN && id != B_MAX && (id != B_SUM || argc != 2))) goto arity;
+        if (id == B_SUM && argc == 2) {
+            SPYValue *start = argv[1];
+            if (builtin_value(c, start, SPY_STRING)) return spy_error(c, "TypeError", "sum() can't sum strings [use ''.join(seq) instead]");
+            if (builtin_value(c, start, SPY_BYTES)) return spy_error(c, "TypeError", "sum() can't sum bytes [use b''.join(seq) instead]");
+            if (builtin_value(c, start, SPY_BYTEARRAY)) return spy_error(c, "TypeError", "sum() can't sum bytearray [use b''.join(seq) instead]");
+        }
         SPYValue *result = id == B_SUM ? (argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)) : NULL;
         int multiple = argc > 1 && (id == B_MIN || id == B_MAX);
         SPYValue *iterator = multiple ? NULL : get_iterator(c, a);
+        /* A float total accumulates with Neumaier's compensation, as CPython's sum. */
+        int compensating = 0;
+        double total = 0, compensation = 0;
         for (size_t i = 0;; i++) {
             if (c->error_type[0]) break;
             if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
             SPYValue *item = multiple ? (i < argc ? spy_retain(argv[i]) : NULL) : iterator_next(c, iterator);
+            if (id == B_SUM && result && result->type == SPY_FLOAT && item && !c->error_type[0] &&
+                (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
+                if (!compensating) { total = result->as.real; compensation = 0; compensating = 1; }
+                if (item->type == SPY_FLOAT) {
+                    double x = item->as.real, t = total + x;
+                    compensation += fabs(total) >= fabs(x) ? (total - t) + x : (x - t) + total;
+                    total = t;
+                } else total += (double)item->as.integer_data.small;
+                spy_release(item);
+                continue;
+            }
+            if (compensating) {
+                compensating = 0;
+                if (compensation && isfinite(compensation)) total += compensation;
+                spy_release(result);
+                if (!(result = spy_float(c, total))) { spy_release(item); break; }
+            }
             if (!item) break;
             if (id == B_ALL || id == B_ANY) {
                 int truth = spy_truth(item); spy_release(item);
@@ -19579,7 +19736,7 @@ execution_fail:
             return a->type == SPY_BOOL ? spy_int(c, a->as.integer_data.small) : spy_retain(a);
         }
         if (a->type == SPY_FLOAT) return spy_float(c, fabs(a->as.real));
-        return spy_error(c, "TypeError", "abs() expects a number");
+        return errorf(c, "TypeError", "bad operand type for abs(): '%s'", type_name(a));
     }
     if (id == B_LEN && argc == 1 && builtin_base(c, a, "__len__", NULL)) a = builtin_base(c, a, "__len__", NULL);
     if (id == B_LEN) {
@@ -19603,7 +19760,7 @@ execution_fail:
             if (spy_as_int(c, a->as.range.length, &length)) return NULL;
             return spy_int(c, length);
         }
-        else return spy_error(c, "TypeError", "object has no len()");
+        else return errorf(c, "TypeError", "object of type '%s' has no len()", type_name(a));
         if (n > INT64_MAX) return spy_error(c, "OverflowError", "length exceeds signed 64-bit limit");
         return spy_int(c, (int64_t)n);
     }
@@ -19632,8 +19789,8 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
         else if (!strcmp(name, "flush")) flush = entry->value;
         else return errorf(c, "TypeError", "print() got an unexpected keyword argument '%s'", name);
     }
-    if (sep && sep->type != SPY_STRING && sep->type != SPY_NONE) return spy_error(c, "TypeError", "sep must be None or a string");
-    if (end && end->type != SPY_STRING && end->type != SPY_NONE) return spy_error(c, "TypeError", "end must be None or a string");
+    if (sep && sep->type != SPY_STRING && sep->type != SPY_NONE) return errorf(c, "TypeError", "sep must be None or a string, not %s", type_name(sep));
+    if (end && end->type != SPY_STRING && end->type != SPY_NONE) return errorf(c, "TypeError", "end must be None or a string, not %s", type_name(end));
     int flushing = flush && spy_truth(flush);
     if (c->error_type[0]) return NULL;
     if (file && file->type == SPY_NONE) file = NULL;
@@ -19817,14 +19974,18 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (!argc) return spy_error(c, "TypeError", "constructor requires a first argument");
         SPYValue *object = name_local(c->classes, "object");
         SPYValue *cls = id == B_OBJECT_INIT ? value_class(c, argv[0]) : argv[0];
-        if (cls->type != SPY_CLASS) return spy_error(c, "TypeError", "__new__ requires a type object");
+        if (cls->type != SPY_CLASS) {
+            if (id == B_OBJECT_NEW) return errorf(c, "TypeError", "object.__new__(X): X is not a type object (%s)", type_name(cls));
+            return spy_error(c, "TypeError", "__new__ requires a type object");
+        }
         int exception = subclass(cls, name_local(c->classes, "BaseException"));
         if (id == B_EXCEPTION_NEW) {
             if (!exception) return spy_error(c, "TypeError", "BaseException.__new__ requires an exception type");
             return new_exception(c, cls, argc - 1, argv + 1);
         }
         if (id == B_OBJECT_NEW && (cls->as.map.native || cls->as.map.flags == 2 || exception))
-            return spy_error(c, "TypeError", "object.__new__ cannot allocate this builtin type");
+            return errorf(c, "TypeError", "object.__new__(%s) is not safe, use %s.__new__()", name_local(cls, "__name__")->as.string.data,
+                          name_local(cls, "__name__")->as.string.data);
         if (argc > 1 || (keywords && keywords->as.map.len)) {
             int default_new = class_lookup(cls, "__new__") == name_local(object, "__new__");
             int default_init = class_lookup(cls, "__init__") == name_local(object, "__init__");
@@ -20692,7 +20853,8 @@ static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, 
 static SPYValue *getnewargs(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *self = method_self(c, argc, argv, type, "__getnewargs__"), *args[1];
-    if (!self || parse_arguments(c, "__getnewargs__", argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    char label[64];
+    if (!self || parse_arguments(c, method_label(c, type, "__getnewargs__", label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
     if (type == SPY_COMPLEX) {
         SPYValue *items[] = {spy_float(c, creal(self->as.number)), spy_float(c, cimag(self->as.number))};
         SPYValue *result = items[0] && items[1] ? spy_tuple(c, 2, items) : NULL;
@@ -21287,6 +21449,8 @@ SPYValue *spy_raise(SPYContext *c, SPYValue *exception) {
  * which reach only mounted directories and descriptors this context opened. */
 static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
+    if (!argc && !(keywords && name_local(keywords, "file")))
+        return spy_error(c, "TypeError", "open() missing required argument 'file' (pos 1)");
     SPYValue *fn = intrinsic(c, "open");
     return fn ? spy_call_keywords(c, fn, argc, argv, keywords) : NULL;
 }

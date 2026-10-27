@@ -15,6 +15,10 @@ An optional `# negative: SyntaxError` line marks a test whose whole source
 must fail to compile with that exception. Every other test passes by running
 to completion.
 
+Files a test needs, such as the modules and packages of the import tests, go
+in a sibling directory named after it (`import_system.fixtures/` for
+`import_system.py`); its contents are copied beside the test.
+
 `tests/spec_runner.py ENGINE` stages each test beside `harness.py` and runs
 it with the pinned CPython 3.15 oracle (which must pass, validating the test)
 and with the engine. `make test-spec` runs it against ./spy.

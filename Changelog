@@ -315,3 +315,15 @@
 - bytes/bytearray splitlines and maketrans, float/complex from_number,
   __getnewargs__, range.__bool__, enumerate/slice/memoryview generics.
 - nonlocal cannot bind a type parameter.
+- PEP 420 namespace packages through a loader "name.__namespace__" probe;
+  modules record __file__; star imports check __all__ items and import a
+  package's listed submodules.
+- Spec tests can ship fixture modules in a sibling NAME.fixtures directory.
+- co_varnames orders *args and **kwargs after named parameters; str.split
+  keeps the remainder's whitespace after maxsplit; sum() compensates float
+  rounding and rejects str/bytes start values.
+- eval() syntax errors locate the error in the input and skip leading blanks.
+- CPython's wording for method arity, unary/len/iter/subscript type errors,
+  zero powers, float overflow, unhashable dict keys and set elements, empty
+  set pop, division by zero, eval/exec/format/open argument errors, and
+  dict.pop on an empty dict raises before hashing the key.

@@ -2,9 +2,10 @@
 
 usage: spec_runner.py ENGINE [--oracle PYTHON] [--report FILE] [--only SUBSTRING] [--strict]
 
-Each test is staged in a temporary directory beside harness.py and run as a
-script. The pinned CPython 3.15 oracle must pass every test, which validates
-the test itself; the engine's results are reported per chapter. With
+Each test is staged in a temporary directory beside harness.py, with the
+contents of a sibling NAME.fixtures directory, and run as a script. The
+pinned CPython 3.15 oracle must pass every test, which validates the test
+itself; the engine's results are reported per chapter. With
 --strict the exit status is nonzero when the engine fails any test.
 """
 import argparse
@@ -57,6 +58,9 @@ def check(path, engine, oracle):
     negative = fields.get("negative")
     with tempfile.TemporaryDirectory(prefix="spec-") as directory:
         shutil.copy(SPEC / "harness.py", directory)
+        fixtures = path.with_suffix(".fixtures")
+        if fixtures.is_dir():
+            shutil.copytree(fixtures, directory, dirs_exist_ok=True)
         shutil.copy(path, Path(directory) / "test_spec.py")
         oracle_ok, oracle_output = outcome(*run([str(oracle), "-E", "-s", "test_spec.py"], directory), negative)
         engine_ok, engine_output = outcome(*run([str(engine), "test_spec.py"], directory), negative)
@@ -78,7 +82,7 @@ def main():
     if not args.oracle.is_file():
         raise SystemExit("missing the pinned CPython oracle; run make oracle")
     engine = args.engine.resolve()
-    tests = sorted(path for path in SPEC.rglob("*.py") if path.name != "harness.py" and args.only in str(path))
+    tests = sorted(path for path in SPEC.rglob("*.py") if path.name != "harness.py" and ".fixtures" not in str(path.parent) and args.only in str(path))
     with ThreadPoolExecutor(os.cpu_count() or 4) as pool:
         results = list(pool.map(lambda path: check(path, engine, args.oracle), tests))
     chapters = {}
