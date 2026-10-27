@@ -169,6 +169,10 @@ struct SPYContext {
      * boundary, after which an unresurrected instance is freed. */
     SPYValue **finalize_calls;
     size_t finalize_calls_len, finalize_calls_cap;
+    /* The live cells of variables, borrowed: each variable has one cell,
+     * shared by every closure over it (9.1); a cell leaves when freed. */
+    SPYValue **cells;
+    size_t cells_len, cells_cap;
     int weak_running;
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
@@ -607,6 +611,10 @@ static void free_value(SPYValue *v) {
     case SPY_INT: free(v->as.integer_data.big); break;
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: free(v->as.string.data); break;
     case SPY_MEMORYVIEW: free(v->as.memory.layout); break;
+    case SPY_CELL:
+        for (size_t i = 0; v->as.cell.env && i < c->cells_len; i++)
+            if (c->cells[i] == v) { c->cells[i] = c->cells[--c->cells_len]; break; }
+        break;
     case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(v->as.generator.machine); break;
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
@@ -10882,6 +10890,9 @@ static int module_set_annotations(SPYContext *c, SPYValue *module, const char *n
     if (name_local(module, "__annotate__")) delete_name(module, "__annotate__");
     return 0;
 }
+/* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
+ * to the class (20.2.8), not by binding it in the class body. */
+enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64 };
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
@@ -10908,6 +10919,11 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1;
         }
         if (!strcmp(name, "__bases__")) return class_assign_bases(c, object, value);
+        if (!strcmp(name, "__abstractmethods__")) {
+            int abstract = spy_truth(value);
+            if (c->error_type[0]) return -1;
+            object->as.map.flags = abstract ? object->as.map.flags | CLASS_ABSTRACT : object->as.map.flags & ~CLASS_ABSTRACT;
+        }
         /* 10.4.2: names are strings; __module__ may be any object. */
         if (!strcmp(name, "__name__") || !strcmp(name, "__qualname__")) {
             SPYValue *text = builtin_value(c, value, SPY_STRING);
@@ -11869,12 +11885,16 @@ static SPYValue *code_names(SPYContext *c, Node *def) {
     return w.names;
 }
 static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYValue *value) {
+    for (size_t i = 0; env && i < c->cells_len; i++)
+        if (c->cells[i]->as.cell.env == env && !strcmp(c->cells[i]->as.cell.name->as.string.data, name))
+            return spy_retain(c->cells[i]);
     SPYValue *cell = value_new(c, SPY_CELL);
     if (!cell) return NULL;
     if (env) {
         cell->as.cell.name = spy_string(c, name, strlen(name));
         if (!cell->as.cell.name) { spy_release(cell); return NULL; }
         cell->as.cell.env = spy_retain(env);
+        if (weak_push(&c->cells, &c->cells_len, &c->cells_cap, cell)) { spy_release(cell); return NULL; }
     } else cell->as.cell.value = value ? spy_retain(value) : NULL;
     return cell;
 }
@@ -12203,14 +12223,11 @@ static int declare_locals(SPYContext *c, SPYValue *env) {
     return 0;
 }
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
-/* object_new refuses a class whose own __abstractmethods__ is true
- * (Py_TPFLAGS_IS_ABSTRACT), naming the sorted methods. */
+/* object_new refuses a class marked CLASS_ABSTRACT (Py_TPFLAGS_IS_ABSTRACT),
+ * naming the sorted methods of its own __abstractmethods__. */
 static int abstract_instance_error(SPYContext *c, SPYValue *cls) {
-    SPYValue *methods = name_local(cls, "__abstractmethods__");
+    SPYValue *methods = cls->as.map.flags & CLASS_ABSTRACT ? name_local(cls, "__abstractmethods__") : NULL;
     if (!methods) return 0;
-    int abstract = spy_truth(methods);
-    if (c->error_type[0]) return -1;
-    if (!abstract) return 0;
     SPYValue *sorted = builtin(c, 1, &methods, (void *)(intptr_t)B_LIST);
     if (!sorted || sort_list(c, sorted, NULL, 0)) { spy_release(sorted); return -1; }
     Buffer joined = {.ctx = c};
@@ -13971,7 +13988,6 @@ static int builtin_layout(SPYContext *c, SPYValue *cls) {
 /* Class flags beside the builtin marker 2: instances without a __dict__,
  * a class whose own nonempty __slots__ fix its instance layout, and slotted
  * instances with a __weakref__ slot. */
-enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32 };
 static int builtin_class(SPYContext *c, SPYValue *cls) {
     return cls->as.map.native || cls->as.map.flags == 2 || cls == name_local(c->classes, "object");
 }
@@ -15353,6 +15369,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
             if (!strcmp(name, "__mro__")) { errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1; }
             if (!strcmp(name, "__base__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
             if (!strcmp(name, "__abstractmethods__") && !name_local(object, name)) { spy_error(c, "AttributeError", name); return -1; }
+            if (!strcmp(name, "__abstractmethods__")) object->as.map.flags &= ~CLASS_ABSTRACT;
         }
     }
     if (!object || !name_local(object, name)) {
@@ -23634,6 +23651,10 @@ SPYContext *spy_context_new(void) {
     for (int t = 0; t <= SPY_LAST_TYPE; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
     for (size_t i = 0; i < c->classes->as.map.len; i++)
         if (name_natives(c, c->classes->as.map.items[i].value, c->classes->as.map.items[i].value)) goto fail;
+    /* B.1.3: the module cache holds builtins before the main module runs. */
+    SPYValue *builtins_module = load_source_module(c, "builtins");
+    if (!builtins_module) goto fail;
+    spy_release(builtins_module);
     SPYValue *name = spy_string(c, "__main__", 8);
     if (!name) goto fail;
     /* sys.modules["__main__"] is the module whose namespace is the globals. */
@@ -23654,7 +23675,7 @@ void spy_context_free(SPYContext *c) {
      * shutdown cannot recurse through an arbitrarily deep object graph. */
     c->weak_len = 0;
     while (c->values) free_value(c->values);
-    free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->frames); free(c->repr_stack);
+    free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->cells); free(c->frames); free(c->repr_stack);
     for (size_t i = 0; i < c->host_modules_len; i++) free(c->host_modules[i].name);
     free(c->host_modules);
     for (size_t i = 0; i < c->mounts_len; i++) { free(c->mounts[i].host); free(c->mounts[i].path); }

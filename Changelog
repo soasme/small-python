@@ -720,3 +720,19 @@
   reported as an asynchronous comprehension, that only unparenthesized
   names have their annotations recorded, and the message for an
   __await__ that returns a coroutine. The harness gains fqname().
+- spy puts builtins in the module cache before the main module runs
+  (B.1.3); a variable has one cell, shared by the __closure__ of every
+  function over it (9.1); and a class is abstract only when a true
+  __abstractmethods__ is assigned to it, not bound in its body, and is
+  concrete again once the attribute is false or deleted (20.2.8).
+- Spec tests for namespaces, frames and lines, suspension and the
+  handled exception, the recursion limit, finalization, the main
+  module, instance creation, source text and tokens, warnings, the
+  built-in namespace, staticmethod and classmethod, sentinel, exception
+  groups, OS errors, character properties, str.format, the format
+  mini-language, printf-style formatting, bytearray, bytes operations,
+  memoryview, tuple, and slice. PLS-315 now lists _IncompleteInputError
+  as a host-provided built-in name, states that the 0 format flag sets
+  the fill even with an explicit alignment, and gives the exception
+  type of a missing printf mapping key. The harness host gains
+  collect(), warnings() and recursion_limit().

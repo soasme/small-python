@@ -162,6 +162,28 @@ class Host:
     def set_display_hook(self, hook):
         self._sys().displayhook = hook
 
+    def collect(self):
+        """Reclaim every unreachable object now, finalizers included (9.7)."""
+        __import__("gc").collect()
+
+    def warnings(self, thunk):
+        """Call thunk and return the (category, message, line) of each
+        warning HostWarn received meanwhile (18.3), shown, not raised; or
+        None, after calling thunk, when the host supplies no HostWarn."""
+        try:
+            module = __import__("warnings")
+        except ImportError:
+            thunk()
+            return None
+        with module.catch_warnings(record=True) as caught:
+            module.simplefilter("always")
+            thunk()
+        return [(w.category, str(w.message), w.lineno) for w in caught]
+
+    def recursion_limit(self):
+        """The recursion limit execution parameter (B.6)."""
+        return self._sys().getrecursionlimit()
+
 
 host = Host()
 
