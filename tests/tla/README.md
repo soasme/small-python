@@ -106,6 +106,7 @@ and tied to real implementations by replaying them.
 | `BuiltinsText.tla` | repr's quote choice and ascii's escapes (\\x, \\u, \\U) over every string of up to two characters from a mix of quotes, controls, and non-ASCII points; chr/ord, format hooks, and print's sep, end, file, and flush | yes |
 | `BuiltinsCompile.tla` | exec's name resolution across a locals mapping, globals, and builtins for loads, stores, global stores, deletes, and functions defined there; compile modes and flags, eval and exec arguments, locals() snapshots, and `__import__` | yes |
 | `ExceptionHierarchy.tla` | the MRO and module of every built-in exception class and alias, derived from a parent table (ExceptionGroup by C3), with the classes that escape `except Exception` | yes |
+| `ExceptionObjects.tla` | str, repr, and args of exceptions built from up to two arguments, KeyError's repr-of-one rule included; args, tracebacks, notes, cause and context, pickling state, SystemExit.code, and StopIteration.value | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 

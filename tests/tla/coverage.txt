@@ -373,8 +373,8 @@ Reference chapter contents | - table of contents
 14. Built-in exceptions | = sections
 14. Built-in exceptions > Built-in Exceptions | = sections
 14. Built-in exceptions > Built-in Exceptions > Exception context | Raise
-14. Built-in exceptions > Built-in Exceptions > Inheriting from built-in exceptions | TODO: ExceptionObjects
-14. Built-in exceptions > Built-in Exceptions > Base classes | TODO: ExceptionObjects
+14. Built-in exceptions > Built-in Exceptions > Inheriting from built-in exceptions | ExceptionObjects
+14. Built-in exceptions > Built-in Exceptions > Base classes | ExceptionObjects
 14. Built-in exceptions > Built-in Exceptions > Concrete exceptions | TODO: ConcreteExceptions
 14. Built-in exceptions > Built-in Exceptions > Concrete exceptions > OS exceptions | TODO: OSErrors
 14. Built-in exceptions > Built-in Exceptions > Warnings | ExceptionHierarchy
