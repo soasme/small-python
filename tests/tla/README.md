@@ -109,6 +109,7 @@ and tied to real implementations by replaying them.
 | `ExceptionObjects.tla` | str, repr, and args of exceptions built from up to two arguments, KeyError's repr-of-one rule included; args, tracebacks, notes, cause and context, pickling state, SystemExit.code, and StopIteration.value | yes |
 | `ConcreteExceptions.tla` | str() of the three Unicode errors for every start and end from -1 to 5 (one byte or character, else a range); attributes of AttributeError, NameError, ImportError, OSError, SyntaxError, and the rest | yes |
 | `OSErrors.tla` | the subclass OSError picks for each errno shared by Linux and macOS, for one to five arguments and for subclass calls, with the fields and str() each gets | yes |
+| `ExceptionGroups.tla` | split and subgroup by type and by predicate over every group of up to three leaves and nested groups, keeping nesting and dropping emptied groups; construction checks, derive, copied metadata, and str | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
