@@ -167,3 +167,8 @@ class Mapping(dict): pass
 instance = Plain()
 instance.__dict__ = Mapping(x=1)
 assert_eq((type(instance.__dict__), instance.x), (Mapping, 1))
+# __isabstractmethod__ is a getset of staticmethod and classmethod.
+for wrapper in (staticmethod(len), classmethod(len)):
+    message = f"attribute '__isabstractmethod__' of '{type(wrapper).__name__}' objects is not writable"
+    assert_eq(str(assert_raises(AttributeError, setattr, wrapper, "__isabstractmethod__", True)), message)
+    assert_eq(str(assert_raises(AttributeError, delattr, wrapper, "__isabstractmethod__")), message)

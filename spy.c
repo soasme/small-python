@@ -3934,16 +3934,34 @@ static int call_arguments(Parser *p, Node *n) {
             }
             /* invalid_starred_expression_unpacking and invalid_kwarg */
             if (at(p, '=')) {
-                size_t equals = p->pos++;
+                p->pos++;
                 Node *value = plain_expression(p, 0);
                 if (!value) return -1;
-                p->pos = equals;
-                syntax(p, unpack_mapping ? "cannot assign to keyword argument unpacking" : "cannot assign to iterable argument unpacking");
+                syntax_span(p, star, p->pos, unpack_mapping ? "cannot assign to keyword argument unpacking" : "cannot assign to iterable argument unpacking");
                 return -1;
             }
             if (!unpack_mapping && mapping) {
-                p->pos = star;
-                syntax(p, "iterable argument unpacking follows keyword argument unpacking"); return -1;
+                /* RAISE_SYNTAX_ERROR_STARTING_FROM the comma to the furthest token
+                 * read: one past the starred items, or after a following comma. */
+                size_t end = p->pos + 1;
+                while (at(p, ',')) {
+                    end = p->pos + 2;
+                    if (p->tokens[p->pos + 1].kind != '*') break;
+                    size_t item = ++p->pos;
+                    p->pos++;
+                    if (!plain_expression(p, 0)) { spy_clear_error(p->ctx); break; }
+                    if (at(p, '=')) {
+                        /* invalid_starred_expression_unpacking fires while parsing args. */
+                        p->pos++;
+                        if (!plain_expression(p, 0)) return -1;
+                        syntax_span(p, item, p->pos, "cannot assign to iterable argument unpacking"); return -1;
+                    }
+                    end = p->pos + 1;
+                }
+                if (end > p->len) end = p->len;
+                syntax_span(p, star - 1, end, "iterable argument unpacking follows keyword argument unpacking");
+                p->error_end--; /* CURRENT_POS is a 0-based end column */
+                return -1;
             }
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
@@ -3974,7 +3992,10 @@ static int call_arguments(Parser *p, Node *n) {
                     }
                 if (!(arg->a = plain_expression(p, 0))) return -1;
                 keywords = 1;
-            } else if (keywords) { syntax(p, "positional argument follows keyword argument"); return -1; }
+            } else if (keywords && !keyword(p, "for") && !keyword(p, "async")) {
+                syntax(p, mapping ? "positional argument follows keyword argument unpacking" : "positional argument follows keyword argument");
+                return -1;
+            }
         }
         if (!arg) return -1;
         if (keyword(p, "for") || keyword(p, "async")) {
@@ -10700,6 +10721,10 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             spy_error(c, "AttributeError", "readonly attribute"); return -1;
         }
         if (object->type == SPY_FUNCTION && !strcmp(name, "__code__")) return function_set_code(c, object, value);
+        /* The getset on the type comes before the instance __dict__. */
+        if (object->type != SPY_FUNCTION && !strcmp(name, "__isabstractmethod__")) {
+            errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object)); return -1;
+        }
         SPYValue **attributes = object->type == SPY_FUNCTION ? &object->as.function.attributes : &object->as.wrapper.attributes;
         if (!strcmp(name, "__dict__")) {
             if (value->type != SPY_DICT) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
@@ -11485,7 +11510,15 @@ static int append_qualname(Buffer *out, Scope *scope) {
     if (!scope || !scope->owner) return 0;
     Node *definition = scope->owner;
     if (definition->kind == N_GENERIC) return append_qualname(out, scope->parent);
-    if (definition->flags & F_TYPEPARAMS) return puts_buffer(out, source_name(definition->a));
+    if (definition->flags & F_TYPEPARAMS) {
+        /* A lazy bound, default or alias value is named in the scope that
+         * holds the generic definition or type statement. */
+        Scope *parent = scope->parent;
+        while (parent && parent->owner && parent->owner->kind == N_GENERIC) parent = parent->parent;
+        if (append_qualname(out, parent)) return -1;
+        if (out->len && puts_buffer(out, parent->kind == S_FUNCTION ? ".<locals>." : ".")) return -1;
+        return puts_buffer(out, source_name(definition->a));
+    }
     if (definition->flags & F_ANNOTATE) {
         if (definition->annotate && (append_qualname(out, definition->annotate->scope) || puts_buffer(out, "."))) return -1;
         return puts_buffer(out, "__annotate__");
@@ -15069,6 +15102,9 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         if (!strcmp(name, "__func__") || !strcmp(name, "__wrapped__")) {
             spy_error(c, "AttributeError", "readonly attribute"); return -1;
         }
+        if (!strcmp(name, "__isabstractmethod__")) {
+            errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object)); return -1;
+        }
         if (!strcmp(name, "__dict__")) { spy_error(c, "TypeError", "cannot delete __dict__"); return -1; }
         object = object->as.wrapper.attributes;
     } else {
@@ -16209,42 +16245,53 @@ static int match_class(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYV
             goto done;
         }
     }
-    size_t index = 0;
-    for (Node *item = n->args; item; item = item->next, index++) {
-        SPYValue *value;
-        if (!match_args) value = spy_retain(subject);
-        else {
-            SPYValue *name = match_args->as.seq.items[index];
-            if (name->type != SPY_STRING) { errorf(c, "TypeError", "__match_args__ elements must be strings (got %s)", type_name(name)); goto done; }
-            for (Node *keyword = n->c; keyword; keyword = keyword->next)
-                if (!strcmp(keyword->text, name->as.string.data)) {
-                    errorf(c, "TypeError", "%s() got multiple sub-patterns for attribute '%s'", cls_name, keyword->text); goto done;
-                }
-            for (size_t j = 0; j < index; j++)
-                if (equal(match_args->as.seq.items[j], name, 0)) {
-                    errorf(c, "TypeError", "%s() got multiple sub-patterns for attribute '%s'", cls_name, name->as.string.data); goto done;
-                }
-            value = attribute(c, subject, name->as.string.data);
-            if (!value) {
-                if (!error_is(c, "AttributeError")) goto done;
-                spy_clear_error(c); result = 0; goto done;
-            }
+    /* _PyEval_MatchClass: look up every attribute, positional then keyword,
+     * refusing a name seen before; a missing one fails the match. The
+     * sub-patterns are matched only afterwards. */
+    size_t keywords = 0, count = 0;
+    for (Node *keyword = n->c; keyword; keyword = keyword->next) keywords++;
+    SPYValue **values = allocate(c, (positional + keywords + 1) * sizeof(*values));
+    const char **seen = allocate(c, (positional + keywords + 1) * sizeof(*seen));
+    size_t seen_count = 0;
+    if (!values || !seen) { free(values); free(seen); goto done; }
+    Node *item = n->args;
+    for (size_t index = 0; index < positional + keywords; index++) {
+        const char *name;
+        if (index < positional) {
+            if (!match_args) { values[count++] = spy_retain(subject); continue; }
+            SPYValue *entry = match_args->as.seq.items[index];
+            if (entry->type != SPY_STRING) { errorf(c, "TypeError", "__match_args__ elements must be strings (got %s)", type_name(entry)); goto collected; }
+            name = entry->as.string.data;
+        } else {
+            Node *keyword = n->c;
+            for (size_t k = positional; k < index; k++) keyword = keyword->next;
+            name = keyword->text;
         }
-        int matched = match_pattern(c, f, item, value, bindings);
-        spy_release(value);
-        if (matched <= 0) { result = matched; goto done; }
-    }
-    for (Node *keyword = n->c; keyword; keyword = keyword->next) {
-        SPYValue *value = attribute(c, subject, keyword->text);
+        for (size_t j = 0; j < seen_count; j++)
+            if (!strcmp(seen[j], name)) { errorf(c, "TypeError", "%s() got multiple sub-patterns for attribute '%s'", cls_name, name); goto collected; }
+        seen[seen_count++] = name;
+        SPYValue *value = attribute(c, subject, name);
         if (!value) {
-            if (!error_is(c, "AttributeError")) goto done;
-            spy_clear_error(c); result = 0; goto done;
+            if (error_is(c, "AttributeError")) { spy_clear_error(c); result = 0; }
+            goto collected;
         }
-        int matched = match_pattern(c, f, keyword->b, value, bindings);
-        spy_release(value);
-        if (matched <= 0) { result = matched; goto done; }
+        values[count++] = value;
     }
     result = 1;
+    for (size_t index = 0; index < count && result == 1; index++) {
+        Node *pattern;
+        if (index < positional) { pattern = item; item = item->next; }
+        else {
+            Node *keyword = n->c;
+            for (size_t k = positional; k < index; k++) keyword = keyword->next;
+            pattern = keyword->b;
+        }
+        int matched = match_pattern(c, f, pattern, values[index], bindings);
+        if (matched <= 0) result = matched;
+    }
+collected:
+    for (size_t i = 0; i < count; i++) spy_release(values[i]);
+    free(values); free(seen);
 done:
     spy_release(cls); spy_release(match_args);
     return result;
@@ -22675,7 +22722,7 @@ static int register_constructors(SPYContext *c) {
         register_method(c, SPY_TEMPLATE, "__new__", template_method, SPY_TEMPLATE, METHOD_STATIC) ||
         register_method(c, SPY_INTERPOLATION, "__new__", template_method, SPY_INTERPOLATION, METHOD_STATIC) ||
         register_method(c, SPY_TEMPLATE_ITERATOR, "__next__", template_method, SPY_TEMPLATE_ITERATOR, METHOD_INSTANCE)) return -1;
-    static const int generic_types[] = {SPY_LIST, SPY_DICT, SPY_TUPLE, SPY_SET, SPY_FROZENSET, SPY_CLASSMETHOD, SPY_STATICMETHOD, SPY_MAPPINGPROXY, SPY_FROZENDICT};
+    static const int generic_types[] = {SPY_LIST, SPY_DICT, SPY_TUPLE, SPY_SET, SPY_FROZENSET, SPY_CLASSMETHOD, SPY_STATICMETHOD, SPY_MAPPINGPROXY, SPY_FROZENDICT, SPY_TEMPLATE, SPY_INTERPOLATION};
     for (size_t i = 0; i < sizeof(generic_types) / sizeof(*generic_types); i++)
         if (register_method(c, generic_types[i], "__class_getitem__", class_getitem, 0, METHOD_CLASS)) return -1;
     {

@@ -648,3 +648,16 @@
   objects report a positive co_stacksize; generic aliases print NoneType
   as None. Imported modules and __main__ carry __loader__ and __spec__
   (None, as the host supplies none) and __main__ its __package__.
+- Class patterns obtain every attribute, refusing repeated names as they
+  go, before matching any sub-pattern, so a missing attribute fails the
+  match first. Call arguments report "positional argument follows keyword
+  argument unpacking" and give iterable-unpacking and starred-assignment
+  errors CPython's ranges; a generator argument after keywords needs
+  parentheses.
+- staticmethod and classmethod refuse to set or delete
+  __isabstractmethod__. Type parameters, ParamSpec args and kwargs, unions
+  and type aliases report member, getset and missing-attribute writes as
+  CPython does; TypeVarTuple and ParamSpec have __bound__ and the variance
+  members. Type aliases and lazily evaluated bounds, defaults and values
+  carry their qualified names, and TypeAliasType() parses its arguments
+  as typealias() does. Template and Interpolation are subscriptable.

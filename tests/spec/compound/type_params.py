@@ -71,3 +71,32 @@ assert_eq(repr(T), "~T") if False else None
 assert_eq(repr(ident.__type_params__[0]), "T")
 assert_eq(repr(Box.__type_params__[1]), "Ts")
 assert_eq(repr(Box.__type_params__[2]), "P")
+# Type parameter objects: members are readonly, getsets are not writable.
+def generic[T: int, *Ts, **P](): pass
+T, Ts, P = generic.__type_params__
+for param, name, message in ((T, "__name__", "readonly attribute"),
+                             (T, "__bound__", "attribute '__bound__' of 'typing.TypeVar' objects is not writable"),
+                             (P, "__bound__", "readonly attribute"),
+                             (Ts, "__default__", "attribute '__default__' of 'typing.TypeVarTuple' objects is not writable"),
+                             (P.args, "__origin__", "readonly attribute"),
+                             (P.args, "x", "'typing.ParamSpecArgs' object has no attribute 'x' and no __dict__ for setting new attributes")):
+    assert_eq(str(assert_raises(AttributeError, setattr, param, name, 1)), message)
+    assert_eq(str(assert_raises(AttributeError, delattr, param, name)), message)
+union = int | str
+assert_eq(str(assert_raises(AttributeError, delattr, union, "__args__")), "readonly attribute")
+assert_eq(str(assert_raises(AttributeError, setattr, union, "__origin__", 1)),
+          "attribute '__origin__' of 'typing.Union' objects is not writable")
+# Lazily evaluated values are named in the scope of their definition.
+class Holder:
+    type Alias[W: int = str] = list[W]
+    def make(self):
+        type Local = int
+        return Local
+assert_eq(Holder.Alias.__qualname__, "Holder.Alias")
+assert_eq(Holder.Alias.evaluate_value.__qualname__, "Holder.Alias")
+assert_eq(Holder.Alias.__type_params__[0].evaluate_bound.__qualname__, "Holder.W")
+assert_eq(Holder().make().__qualname__, "Holder.make.<locals>.Local")
+TypeAliasType = type(Holder.Alias)
+assert_eq(str(assert_raises(TypeError, TypeAliasType, "B")), "typealias() missing required argument 'value' (pos 2)")
+assert_eq(TypeAliasType("B", int, qualname="Q.B").__qualname__, "Q.B")
+assert_eq(repr(type(t"")[int]), "string.templatelib.Template[int]")

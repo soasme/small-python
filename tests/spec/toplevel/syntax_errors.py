@@ -147,3 +147,13 @@ error = assert_syntax_error("if 1:\n    x\n  y = 1\n", exception=IndentationErro
 assert_eq((error.lineno, error.offset, error.end_offset), (3, 8, -1))
 error = assert_syntax_error("a) + 1\n")
 assert_eq((error.text, error.offset, error.end_offset), ("a) + 1", 2, 2))
+# Call argument ordering errors.
+for source, message, offset, end in (
+        ("f(**k, a)", "positional argument follows keyword argument unpacking", 9, 10),
+        ("f(a=1, b)", "positional argument follows keyword argument", 9, 10),
+        ("f(**k, *a)", "iterable argument unpacking follows keyword argument unpacking", 6, 10),
+        ("f(**k, *a, *b, c)", "iterable argument unpacking follows keyword argument unpacking", 6, 16),
+        ("f(*a=1)", "cannot assign to iterable argument unpacking", 3, 7),
+        ("f(a=1, b for b in c)", "Generator expression must be parenthesized", 8, 20)):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, error.offset, error.end_offset), (message, offset, end))

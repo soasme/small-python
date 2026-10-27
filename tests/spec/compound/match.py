@@ -159,3 +159,12 @@ e = assert_syntax_error("match x:\n    case a:\n        pass\n    case 1:\n     
 assert_eq((e.msg, e.lineno), ("name capture 'a' makes remaining patterns unreachable", 2))
 e = assert_syntax_error("match x:\n    case [a, a]:\n        pass\n")
 assert_eq((e.msg, e.lineno), ("multiple assignments to name 'a' in pattern", 2))
+# Class patterns look up every attribute before matching sub-patterns; a
+# missing attribute fails the match before a later duplicate is checked.
+class Point:
+    __match_args__ = ("a",)
+def classify(value):
+    match value:
+        case Point(1, a=1): return "matched"
+        case _: return "no"
+assert_eq(classify(Point()), "no")

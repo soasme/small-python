@@ -373,6 +373,18 @@ class GenericAlias:
 
 # typing.Union: int | str, Union[int, str].
 
+def _union_readonly(union, name):
+    # A union has the member __args__, getsets, and no __dict__.
+    if name == '__args__':
+        raise AttributeError('readonly attribute')
+    if name in ('__parameters__', '__origin__', '__name__', '__qualname__'):
+        raise AttributeError(f"attribute '{name}' of 'typing.Union' objects is not writable")
+    if name != '__module__' and any(name in vars(cls) for cls in type(union).__mro__):
+        raise AttributeError(f"'typing.Union' object attribute '{name}' is read-only")
+    raise AttributeError(f"'typing.Union' object has no attribute '{name}'"
+                         " and no __dict__ for setting new attributes")
+
+
 class Union:
     """Represent a union type
 
@@ -398,8 +410,10 @@ class Union:
         return object.__getattribute__(self, name)
 
     def __setattr__(self, name, value):
-        raise AttributeError(f"'typing.Union' object has no attribute '{name}'"
-                             " and no __dict__ for setting new attributes")
+        _union_readonly(self, name)
+
+    def __delattr__(self, name):
+        _union_readonly(self, name)
 
     def __repr__(self):
         return ' | '.join('None' if a is type(None) else _alias_repr_item(a) for a in self.__args__)
@@ -473,10 +487,6 @@ class _ConstEvaluator:
 
 
 _UNSET = object()
-_READONLY = frozenset({
-    '__name__', '__bound__', '__constraints__', '__default__', '__covariant__',
-    '__contravariant__', '__infer_variance__', 'evaluate_bound', 'evaluate_constraints',
-    'evaluate_default', 'args', 'kwargs'})
 
 
 def _param_init(self, name, bound, covariant, contravariant, infer_variance, default):
@@ -511,10 +521,46 @@ def _lazy(self, value_name, evaluate_name, missing):
     return value
 
 
-def _param_setattr(self, name, value):
-    if name in _READONLY:
+# The members and getsets of CPython's type parameter objects; any other
+# name goes to the instance __dict__.
+_PARAM_MEMBERS = {
+    'TypeVar': {'__name__', '__covariant__', '__contravariant__', '__infer_variance__'},
+    'ParamSpec': {'__name__', '__bound__', '__covariant__', '__contravariant__', '__infer_variance__'},
+    'TypeVarTuple': {'__name__', '__bound__', '__covariant__', '__contravariant__', '__infer_variance__'}}
+_PARAM_GETSETS = {
+    'TypeVar': {'__bound__', '__constraints__', '__default__', 'evaluate_bound', 'evaluate_constraints',
+                'evaluate_default'},
+    'ParamSpec': {'__default__', 'evaluate_default', 'args', 'kwargs'},
+    'TypeVarTuple': {'__default__', 'evaluate_default'}}
+
+
+def _param_check(self, name):
+    kind = type(self).__name__
+    if name in _PARAM_MEMBERS[kind]:
         raise AttributeError('readonly attribute')
+    if name in _PARAM_GETSETS[kind]:
+        raise AttributeError(f"attribute '{name}' of 'typing.{kind}' objects is not writable")
+
+
+def _param_setattr(self, name, value):
+    _param_check(self, name)
     object.__setattr__(self, name, value)
+
+
+def _param_delattr(self, name):
+    _param_check(self, name)
+    object.__delattr__(self, name)
+
+
+def _args_readonly(self, name):
+    # ParamSpecArgs and ParamSpecKwargs have the member __origin__ and no __dict__.
+    kind = type(self).__name__
+    if name == '__origin__':
+        raise AttributeError('readonly attribute')
+    if any(name in vars(cls) for cls in type(self).__mro__):
+        raise AttributeError(f"'typing.{kind}' object attribute '{name}' is read-only")
+    raise AttributeError(f"'typing.{kind}' object has no attribute '{name}'"
+                         " and no __dict__ for setting new attributes")
 
 
 def _variance_repr(self):
@@ -577,6 +623,7 @@ class TypeVar:
         object.__setattr__(self, '_constraints', tuple(_type_check(t, msg) for t in constraints))
 
     __setattr__ = _param_setattr
+    __delattr__ = _param_delattr
     __repr__ = _variance_repr
     __mro_entries__ = _no_subclass('TypeVar')
     has_default = _has_default
@@ -636,6 +683,7 @@ class TypeVarTuple:
         _param_init(self, name, bound, covariant, contravariant, infer_variance, default)
 
     __setattr__ = _param_setattr
+    __delattr__ = _param_delattr
     __repr__ = _variance_repr
     __mro_entries__ = _no_subclass('TypeVarTuple')
     has_default = _has_default
@@ -694,7 +742,13 @@ class ParamSpecArgs:
     __init_subclass__ = _final('typing.ParamSpecArgs')
 
     def __init__(self, origin):
-        self.__origin__ = origin
+        object.__setattr__(self, '__origin__', origin)
+
+    def __setattr__(self, name, value):
+        _args_readonly(self, name)
+
+    def __delattr__(self, name):
+        _args_readonly(self, name)
 
     def __repr__(self):
         return f"{self.__origin__.__name__}.args"
@@ -716,7 +770,13 @@ class ParamSpecKwargs:
     __init_subclass__ = _final('typing.ParamSpecKwargs')
 
     def __init__(self, origin):
-        self.__origin__ = origin
+        object.__setattr__(self, '__origin__', origin)
+
+    def __setattr__(self, name, value):
+        _args_readonly(self, name)
+
+    def __delattr__(self, name):
+        _args_readonly(self, name)
 
     def __repr__(self):
         return f"{self.__origin__.__name__}.kwargs"
@@ -744,6 +804,7 @@ class ParamSpec:
             object.__setattr__(self, '_bound', _type_check(bound, 'Bound must be a type.'))
 
     __setattr__ = _param_setattr
+    __delattr__ = _param_delattr
     __repr__ = _variance_repr
     __mro_entries__ = _no_subclass('ParamSpec')
     has_default = _has_default
@@ -1054,7 +1115,7 @@ class Generic:
 # typing.TypeAliasType: the `type` statement (PEP 695).
 
 def _alias_readonly(name):
-    if name == '__name__':
+    if name in ('__name__', '__qualname__'):
         raise AttributeError('readonly attribute')
     if name in {'__value__', '__type_params__', '__parameters__', 'evaluate_value'}:
         raise AttributeError(f"attribute '{name}' of 'typing.TypeAliasType' objects is not writable")
@@ -1066,7 +1127,22 @@ class TypeAliasType:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.TypeAliasType')
 
-    def __init__(self, name, value, *, type_params=()):
+    def __init__(self, *arguments, **keywords):
+        # Argument Clinic: typealias(name, value, *, type_params=(), qualname=None).
+        if len(arguments) > 2:
+            raise TypeError(f'typealias() takes exactly 2 positional arguments ({len(arguments)} given)')
+        for key in keywords:
+            if key not in ('name', 'value', 'type_params', 'qualname'):
+                raise TypeError(f"typealias() got an unexpected keyword argument '{key}'")
+        for position, key in enumerate(('name', 'value')):
+            if key in keywords and position < len(arguments):
+                raise TypeError(f"argument for typealias() given by name ('{key}') and position ({position + 1})")
+        for position, key in enumerate(('name', 'value')):
+            if position >= len(arguments) and key not in keywords:
+                raise TypeError(f"typealias() missing required argument '{key}' (pos {position + 1})")
+        name, value = arguments + tuple(keywords[key] for key in ('name', 'value')[len(arguments):])
+        type_params = keywords.get('type_params', ())
+        qualname = keywords.get('qualname')
         if not isinstance(name, str):
             raise TypeError(f"typealias() argument 'name' must be str, not {_type_name(name)}")
         if not isinstance(type_params, tuple):
@@ -1079,8 +1155,11 @@ class TypeAliasType:
                 default_seen = True
             elif default_seen:
                 raise TypeError(f"non-default type parameter '{param!r}' follows default type parameter")
+        if qualname is not None and not isinstance(qualname, str):
+            raise TypeError('qualname must be a string')
         object.__setattr__(self, '_name', name)
         object.__setattr__(self, '__name__', name)
+        object.__setattr__(self, '__qualname__', name if qualname is None else qualname)
         object.__setattr__(self, '_value', value)
         object.__setattr__(self, '_evaluate_value', None)
         object.__setattr__(self, '_type_params', type_params)
@@ -1172,6 +1251,7 @@ def _type_alias(name, evaluate, type_params, module):
     alias = object.__new__(TypeAliasType)
     object.__setattr__(alias, '_name', name)
     object.__setattr__(alias, '__name__', name)
+    object.__setattr__(alias, '__qualname__', evaluate.__qualname__)
     object.__setattr__(alias, '_value', _UNSET)
     object.__setattr__(alias, '_evaluate_value', evaluate)
     object.__setattr__(alias, '_type_params', type_params)
