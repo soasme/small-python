@@ -372,6 +372,10 @@
 - A name that normalizes to None, True, or False (such as one with a
   full-width letter) raises ValueError at compile time, as in CPython;
   TLA+ model of identifiers.
+- f-string replacement fields nested more than two format specifications
+  deep are "f-string: expressions nested too deeply"; Interpolation.expression
+  leaves out comments. TLA+ models of tokens, f-strings, t-strings, and
+  private name mangling complete the lexical analysis chapter.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

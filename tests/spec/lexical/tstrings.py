@@ -42,3 +42,10 @@ assert_false(isinstance(t"x", str))
 joined = t"a{name}" + t"b{width}"
 assert_eq(joined.strings, ("a", "b", ""))
 assert_raises(TypeError, lambda: t"a" + "b")
+
+# Interpolation.expression is the expression's source text without comments.
+template = t'{1 + 1 # two
+}'
+assert_eq(template.interpolations[0].expression, "1 + 1 \n")
+assert_eq(t'{"#" # x
+}'.interpolations[0].expression, '"#" \n')

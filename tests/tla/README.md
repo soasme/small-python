@@ -28,6 +28,10 @@ and tied to real implementations by replaying them.
 | `Indentation.tla` | the indentation stack: INDENT/DEDENT, tab stops, TabError, IndentationError, and blank lines | yes |
 | `LineStructure.tla` | physical and logical lines, comments, explicit and implicit line joining, and encoding declarations | yes |
 | `Identifiers.tla` | names: XID start and continue characters, NFKC normalization, keywords and soft keywords, and `__debug__` | yes |
+| `Tokens.tla` | tokens: the longest operator or delimiter, whitespace between tokens, precedence, chained comparisons, and chained assignment | yes |
+| `FStrings.tla` | f-strings: doubled braces, fields, `=`, conversions, nested format specifications and their depth limit, and comments | yes |
+| `TStrings.tla` | t-strings: the Template's strings and each interpolation's value, expression text, conversion, and format specification | yes |
+| `Mangling.tla` | private name mangling in class bodies, methods, parameters, and `global`, and keyword arguments that are not mangled | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -94,7 +98,9 @@ The models found these bugs in spy, since fixed: the lexer reported an
 error on a later line before a syntax error on an earlier one (CPython's
 lexer runs only as far as the parser reads), accepted a backslash
 continuation at the end of the source, and bound a name such as `Ｔrue`
-(full-width T) that normalizes to `True`, which CPython cannot compile.
+(full-width T) that normalizes to `True`, which CPython cannot compile;
+f-string format specifications nested more than two deep were accepted,
+and a t-string interpolation's expression text kept its comments.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

@@ -17,7 +17,7 @@ Reference chapter contents | - table of contents
 1. Language reference introduction and notation > Introduction > Notation | - informative: the notation this document uses
 1. Language reference introduction and notation > Introduction > Notation > Lexical and Syntactic definitions | - informative: the notation this document uses
 2. Lexical analysis | = sections
-2. Lexical analysis > Lexical analysis | TODO: Tokens
+2. Lexical analysis > Lexical analysis | Tokens
 2. Lexical analysis > Lexical analysis > Line structure | = sections
 2. Lexical analysis > Lexical analysis > Line structure > Logical lines | LineStructure
 2. Lexical analysis > Lexical analysis > Line structure > Physical lines | LineStructure
@@ -27,13 +27,13 @@ Reference chapter contents | - table of contents
 2. Lexical analysis > Lexical analysis > Line structure > Implicit line joining | LineStructure
 2. Lexical analysis > Lexical analysis > Line structure > Blank lines | LineStructure
 2. Lexical analysis > Lexical analysis > Line structure > Indentation | Indentation
-2. Lexical analysis > Lexical analysis > Line structure > Whitespace between tokens | TODO: Tokens
+2. Lexical analysis > Lexical analysis > Line structure > Whitespace between tokens | Tokens
 2. Lexical analysis > Lexical analysis > Line structure > End marker | Indentation
-2. Lexical analysis > Lexical analysis > Other tokens | TODO: Tokens
+2. Lexical analysis > Lexical analysis > Other tokens | Tokens
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) | Identifiers
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Keywords | Identifiers
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Soft Keywords | Identifiers, Match
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Reserved classes of identifiers | TODO: Identifiers, Mangling
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Reserved classes of identifiers | Identifiers, Mangling
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Non-ASCII characters in names | Identifiers
 2. Lexical analysis > Lexical analysis > Literals | StringLiterals, NumericLiterals
 2. Lexical analysis > Lexical analysis > String and Bytes literals | StringLiterals
@@ -50,14 +50,14 @@ Reference chapter contents | - table of contents
 2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Unrecognized escape sequences | StringLiterals
 2. Lexical analysis > Lexical analysis > String and Bytes literals > Bytes literals | StringLiterals
 2. Lexical analysis > Lexical analysis > String and Bytes literals > Raw string literals | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > f-strings | TODO: FStrings
-2. Lexical analysis > Lexical analysis > String and Bytes literals > t-strings | TODO: TStrings
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar for f-strings | TODO: FStrings
+2. Lexical analysis > Lexical analysis > String and Bytes literals > f-strings | FStrings
+2. Lexical analysis > Lexical analysis > String and Bytes literals > t-strings | TStrings
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar for f-strings | FStrings
 2. Lexical analysis > Lexical analysis > Numeric literals | = sections
 2. Lexical analysis > Lexical analysis > Numeric literals > Integer literals | NumericLiterals
 2. Lexical analysis > Lexical analysis > Numeric literals > Floating-point literals | NumericLiterals
 2. Lexical analysis > Lexical analysis > Numeric literals > Imaginary literals | NumericLiterals
-2. Lexical analysis > Lexical analysis > Operators and delimiters | TODO: Tokens
+2. Lexical analysis > Lexical analysis > Operators and delimiters | Tokens
 3. Data model | = sections
 3. Data model > Data model | = sections
 3. Data model > Data model > Objects, values and types | TODO: Objects
@@ -188,7 +188,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Atoms | TODO: Atoms
 6. Expressions > Expressions > Atoms > Built-in constants | TODO: Singletons
 6. Expressions > Expressions > Atoms > Identifiers (Names) | = sections
-6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | TODO: Mangling
+6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | Mangling
 6. Expressions > Expressions > Atoms > Literals | TODO: LiteralIdentity
 6. Expressions > Expressions > Atoms > Literals > Literals and object identity | TODO: LiteralIdentity
 6. Expressions > Expressions > Atoms > Literals > String literal concatenation | StringLiterals
@@ -327,11 +327,11 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Text and Binary Sequence Type Methods Summary | - informative: an index of the methods specified in the sections that follow
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` | TODO: StrBasics
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > String Methods | TODO: StrSearch, StrSplit, StrCase, StrPad
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) | TODO: FStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Debug specifier | TODO: FStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Conversion specifier | TODO: FStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) | FStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Debug specifier | FStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Conversion specifier | FStrings
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Format specifier | TODO: FStrings, FormatSpec
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Template String Literals (t-strings) | TODO: TStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Template String Literals (t-strings) | TStrings
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > `printf`-style String Formatting | TODO: PercentFormat
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` | = sections
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes Objects | TODO: Bytes
@@ -391,8 +391,8 @@ Reference chapter contents | - table of contents
 15. Formatting protocols and optional string helpers > `string` --- Common string operations > Helper functions | - Host profile: string.capwords in the string module facade (SLP315-CORE)
 16. Template string objects | = sections
 16. Template string objects > `string.templatelib` --- Support for template string literals | = sections
-16. Template string objects > `string.templatelib` --- Support for template string literals > Template strings | TODO: TStrings
-16. Template string objects > `string.templatelib` --- Support for template string literals > Types | TODO: TStrings
+16. Template string objects > `string.templatelib` --- Support for template string literals > Template strings | TStrings
+16. Template string objects > `string.templatelib` --- Support for template string literals > Types | TStrings
 16. Template string objects > `string.templatelib` --- Support for template string literals > Helper functions | - Host profile: string.templatelib.convert in the module facade (SLP315-CORE)
 17. Annotation objects and evaluation | = sections
 17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations | TODO: Annotations

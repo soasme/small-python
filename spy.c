@@ -2489,7 +2489,8 @@ static const char *scan_field_expression(Parser *p, const char *s, size_t depth,
     }
     spy_error(p->ctx, "SyntaxError", outer_flags & L_TEMPLATE ? "'{' was never closed" : "f-string: expecting '}'"); return NULL;
 }
-static const char *scan_field(Parser *p, const char *s, size_t depth, int flags) {
+/* specs counts the format specifications this field is nested in. */
+static const char *scan_field(Parser *p, const char *s, size_t depth, size_t specs, int flags) {
     char kind = flags & L_TEMPLATE ? 't' : 'f';
     if (depth > 128) { errorf(p->ctx, "SyntaxError", "%c-string nesting too deep", kind); return NULL; }
     const char *begin = s;
@@ -2534,7 +2535,11 @@ static const char *scan_field(Parser *p, const char *s, size_t depth, int flags)
                 if (s[1] == ';') {
                     errorf(p->ctx, "SyntaxError", "%c-string: expecting a valid expression after '{'", kind); return NULL;
                 }
-                s = scan_field(p, s + 1, depth + 1, flags);
+                if (specs == 2) {
+                    p->error_start = p->error_end = s - 1;
+                    errorf(p->ctx, "SyntaxError", "%c-string: expressions nested too deeply", kind); return NULL;
+                }
+                s = scan_field(p, s + 1, depth + 1, specs + 1, flags);
                 if (!s) return NULL;
             }
         }
@@ -2562,7 +2567,7 @@ static const char *scan_literal(Parser *p, const char *s, size_t depth, int fiel
             if (*s == '}') {
                 errorf(p->ctx, "SyntaxError", "%c-string: single '}' is not allowed", flags & L_TEMPLATE ? 't' : 'f'); return NULL;
             }
-            s = scan_field(p, s + 1, depth + 1, flags);
+            s = scan_field(p, s + 1, depth + 1, 0, flags);
             if (!s) return NULL;
         } else if (*s == '\\' && s[1] == 'N' && s[2] == '{' && (flags & L_FORMAT) && !(flags & L_RAW)) {
             /* A named escape's braces are not a replacement field. */
@@ -2765,8 +2770,13 @@ static int lex(Parser *p, const char *s) {
         if (string_prefix_error(p, start, line)) return -1;
         if (literal_prefix(start, &prefix, &flags)) {
             p->ctx->line = line;
+            p->error_start = NULL;
             s = scan_literal(p, start, 0, 0);
-            if (!s) return -1;
+            if (!s) {
+                /* An error placed inside the literal is on its line. */
+                for (const char *ch = start; p->error_start && ch < p->error_start; ch++) if (*ch == '\n') p->ctx->line++;
+                return -1;
+            }
             for (const char *ch = start; ch < s; ch++) if (*ch == '\n') line++;
             kind = T_STRING;
         } else if (isalpha((unsigned char)*start) || *start == '_' || (unsigned char)*start >= 128) {
@@ -3477,8 +3487,20 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             if (nonspace == expr_end) { syntax(p, "f-string: empty expression not allowed"); return -1; }
             Node *field = node(p, !spec && (flags & L_TEMPLATE) ? N_INTERPOLATION : N_FORMAT);
             if (!field || !(field->a = field_expression(p, begin, expr_end, flags))) return -1;
-            if (field->kind == N_INTERPOLATION &&
-                !(field->text = copy_text(p->ctx, begin, (size_t)(expr_end - begin)))) return -1;
+            if (field->kind == N_INTERPOLATION) {
+                /* Interpolation.expression is the source text without comments. */
+                Buffer source = {.ctx = p->ctx};
+                for (const char *ch = begin; ch < expr_end;) {
+                    size_t prefix; int literal_flags;
+                    const char *next = literal_prefix(ch, &prefix, &literal_flags) ? scan_literal(p, ch, 1, 0) : NULL;
+                    if (next && next <= expr_end) { if (append(&source, ch, (size_t)(next - ch))) break; ch = next; continue; }
+                    if (*ch == '#') { while (ch < expr_end && *ch != '\n') ch++; continue; }
+                    if (append(&source, ch++, 1)) break;
+                }
+                if (!source.data && !(source.data = copy_text(p->ctx, "", 0))) return -1;
+                if (p->ctx->error_type[0]) { free(source.data); return -1; }
+                field->text = source.data;
+            }
             s = expr_end;
             int debug = *s == '=';
             if (debug) {
