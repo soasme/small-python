@@ -12033,9 +12033,11 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     else if (fn->as.map.native) {
         result = builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, name_local(fn, "__name__")->as.string.data);
     } else if (fn->as.map.flags == 2) {
-        if (!argc && (!keywords || !keywords->as.map.len) &&
-            (fn == c->types[SPY_NONE] || fn == c->types[SPY_NOT_IMPLEMENTED] || fn == c->types[SPY_ELLIPSIS]))
+        int singleton = fn == c->types[SPY_NONE] || fn == c->types[SPY_NOT_IMPLEMENTED] || fn == c->types[SPY_ELLIPSIS];
+        if (singleton && !argc && (!keywords || !keywords->as.map.len))
             result = spy_retain(fn == c->types[SPY_NONE] ? c->none : fn == c->types[SPY_ELLIPSIS] ? c->ellipsis : c->not_implemented);
+        /* The singletons' tp_new names the C type: ellipsis is EllipsisType. */
+        else if (singleton) errorf(c, "TypeError", "%s takes no arguments", fn == c->types[SPY_ELLIPSIS] ? "EllipsisType" : name_local(fn, "__name__")->as.string.data);
         else errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
     } else {
         SPYValue *allocator = class_lookup(fn, "__new__");

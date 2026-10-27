@@ -517,6 +517,9 @@
   CPython does, and word other argument types' errors as CPython does;
   float() parses strings longer than 4096 characters. TLA+ model of the
   integer string conversion length limit.
+- NoneType, NotImplementedType, and the ellipsis type reject arguments
+  with CPython's "takes no arguments" message. TLA+ model of the built-in
+  constants and the targets they may not occupy.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

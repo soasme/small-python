@@ -366,7 +366,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Integer string conversion length limitation > Configuring the limit | IntStrLimit
 11. Built-in types > Built-in Types > Integer string conversion length limitation > Recommended configuration | - informative: advice on choosing the limit
 12. Built-in constants | = sections
-12. Built-in constants > Built-in Constants | TODO: Singletons, Constants
+12. Built-in constants > Built-in Constants | Singletons, Constants
 12. Built-in constants > Built-in Constants > Constants added by the `site` module | - Host profile: added by the site module for interactive use (SLP315-HOST)
 13. Built-in functions | = sections
 13. Built-in functions > Built-in functions | TODO: BuiltinsNumeric, BuiltinsIter, BuiltinsObjects, BuiltinsText, BuiltinsCompile, Sorting

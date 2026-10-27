@@ -298,3 +298,8 @@ except ValueError as error:
     assert_eq(str(error), "invalid literal for int() with base 10: b'x'")
 else:
     raise AssertionError("int(bytearray(b'x'))")
+
+# The singletons' types take no arguments.
+assert_eq(type_error(lambda: type(None)(1)), "NoneType takes no arguments")
+assert_eq(type_error(lambda: type(...)(x=1)), "EllipsisType takes no arguments")
+assert_eq(type_error(lambda: type(NotImplemented)(1)), "NotImplementedType takes no arguments")
