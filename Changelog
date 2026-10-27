@@ -532,6 +532,7 @@
 - exec() and eval() word bad globals and locals as CPython does, naming
   the type for exec() and suggesting a dict for an eval() mapping. TLA+
   model of compile(), eval(), exec(), and their namespaces.
+- TLA+ model of the built-in exception hierarchy.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

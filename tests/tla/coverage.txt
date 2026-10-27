@@ -377,9 +377,9 @@ Reference chapter contents | - table of contents
 14. Built-in exceptions > Built-in Exceptions > Base classes | TODO: ExceptionObjects
 14. Built-in exceptions > Built-in Exceptions > Concrete exceptions | TODO: ConcreteExceptions
 14. Built-in exceptions > Built-in Exceptions > Concrete exceptions > OS exceptions | TODO: OSErrors
-14. Built-in exceptions > Built-in Exceptions > Warnings | TODO: ExceptionHierarchy
+14. Built-in exceptions > Built-in Exceptions > Warnings | ExceptionHierarchy
 14. Built-in exceptions > Built-in Exceptions > Exception groups | TODO: ExceptionGroups
-14. Built-in exceptions > Built-in Exceptions > Exception hierarchy | TODO: ExceptionHierarchy
+14. Built-in exceptions > Built-in Exceptions > Exception hierarchy | ExceptionHierarchy
 15. Formatting protocols and optional string helpers | = sections
 15. Formatting protocols and optional string helpers > `string` --- Common string operations | = sections
 15. Formatting protocols and optional string helpers > `string` --- Common string operations > String constants | - Host profile: the importable string module facade (SLP315-CORE)
