@@ -279,3 +279,9 @@
   reached again through a user __repr__ prints as [...] or {...}; deep
   containers raise RecursionError instead of a fixed 128-level limit.
 - collections' UserDict, OrderedDict, and defaultdict | accept frozendict.
+- Exception fields are member_descriptor/getset_descriptor objects in the
+  builtin exception classes.
+- __slots__: sorted, name-mangled member descriptors, instances without a
+  __dict__, and CPython's slot validation and layout-conflict errors.
+- CPython unittest ports add test_contains, test_exception_group,
+  test_iterlen, and test_userdict (322 cases in 18 modules).

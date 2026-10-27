@@ -345,7 +345,8 @@ def main():
                                                   "test.test_unary", "test.test_keywordonlyarg", "test.test_named_expressions",
                                                   "test.test_longexp", "test.test_unicode_identifiers", "test.test_exception_variations",
                                                   "test.test_typechecks", "test.test_subclassinit", "test.test_utf8source",
-                                                  "test.test_binop", "test.test_isinstance"])
+                                                  "test.test_binop", "test.test_isinstance", "test.test_contains",
+                                                  "test.test_exception_group", "test.test_iterlen", "test.test_userdict"])
         for entry in report["files"]:
             cases = [case for case in report["cases"] if case["file"] == entry["file"]]
             if cases:

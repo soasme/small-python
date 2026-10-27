@@ -1367,6 +1367,83 @@ class R:
     def __reduce__(self): return "custom"
 print(R().__reduce_ex__(2))
 """,    r"""
+class A:
+    __slots__ = ("x", "y")
+a = A()
+try: a.x
+except AttributeError as e: print(e)
+a.x = 1; print(a.x)
+del a.x
+try: del a.x
+except AttributeError as e: print(e)
+print(type(A.__dict__["x"]).__name__, A.__dict__["x"], A.x.__get__(None, A) is A.x)
+try: a.__dict__
+except AttributeError as e: print(e)
+class B(A): pass
+b = B(); b.z = 3; print(b.__dict__)
+class C:
+    __slots__ = ("__dict__", "w")
+c = C(); c.k = 1; c.w = 2; print(c.__dict__)
+class D:
+    __slots__ = "one"
+print(D.__slots__, hasattr(D(), "__weakref__"))
+try:
+    class E:
+        __slots__ = ("x",)
+        x = 1
+except ValueError as e: print(e)
+try:
+    class F:
+        __slots__ = ("1x",)
+except TypeError as e: print(e)
+class G:
+    __slots__ = ("__private",)
+print([k for k in G.__dict__ if "private" in k])
+""",    r"""
+for base in (int, bytes, tuple, str, float, list, dict, BaseException):
+    try:
+        class X(base): __slots__ = ("a",)
+        print(base.__name__, "ok", hasattr(X(), "__dict__"))
+    except TypeError as e: print(e)
+class O: __slots__ = ("a",)
+o = O()
+try: del o.b
+except AttributeError as e: print(e)
+try: o.__dict__ = {}
+except AttributeError as e: print(e)
+try: vars(o)
+except TypeError as e: print(e)
+class P: __slots__ = ("p",)
+class Q: __slots__ = ("q",)
+try:
+    class R(P, Q): pass
+except TypeError as e: print(e)
+class R2(P, O.__mro__[-1]): pass
+class E: __slots__ = ()
+class F(P, E): pass
+try:
+    class G: __slots__ = (1,)
+except TypeError as e: print(e)
+try:
+    class H(BaseException): __slots__ = ("__dict__",)
+except TypeError as e: print(e)
+class I: __slots__ = ("__weakref__",)
+class J(I): __slots__ = ("x",)
+try:
+    class K(J): __slots__ = ("__weakref__",)
+except TypeError as e: print(e)
+class L: __slots__ = {"a": "doc a"}
+print(L.a.__doc__, L.__slots__)
+class M: __slots__ = ["m"]
+print(M.__slots__, O.a.__objclass__, O.a.__name__)
+try: O.a.__get__(1)
+except TypeError as e: print(e)
+o.a = 5; print(o.a, getattr(o, "a"))
+print(type(O.__dict__["a"]), repr(type(O.__dict__["a"]).__name__))
+try:
+    class N: __slots__ = ("a", "a")
+except Exception as e: print(type(e).__name__, e)
+""",    r"""
 def f(self): return self
 class A:
     def m(self): pass

@@ -227,12 +227,13 @@ remaining coverage gaps. `make test-cpython-doctests` is strict about the curren
 ports; `make test-cpython` additionally requires closing the full inventory.
 Both strict upstream targets currently fail.
 
-`make test-cpython-unittest` passes all 215 cases in fourteen unchanged modules:
+`make test-cpython-unittest` passes all 322 cases in eighteen unchanged modules:
 decorators, augmented assignments, integer literals, unary operators, keyword-only
 arguments, assignment expressions, large expressions, Unicode identifiers, exception
 variations, type checks, subclass initialization, UTF-8 source, binary operators,
-and isinstance/issubclass.
-It also checks all 99 executed subtests
+isinstance/issubclass, containment, exception groups, iterator length hints, and
+UserDict.
+It also checks all 119 executed subtests
 against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
 properties for all 1,114,112 code points, plus 297,124 source/NFKC cases against
@@ -357,8 +358,13 @@ Three-argument `type()` shares this construction path. Metaclasses support
 `__prepare__`, `__new__`, `__init__`, custom `mro()`, and base resolution through
 `__mro_entries__`. Class namespace writes and reads honor mapping overrides;
 native `type.__new__` accepts dictionaries, frozendicts, and their subclasses. Class metadata includes
-`__firstlineno__` and `__static_attributes__`. Changing bases, slots, complete
-class-cell propagation, and some builtin subclasses remain unsupported. Descriptor
+`__firstlineno__` and `__static_attributes__`. `__slots__` (a string, an iterable,
+or a mapping's keys) become sorted, name-mangled `member_descriptor` attributes;
+without a `__dict__` slot or a base with a dictionary, instances refuse new
+attributes with CPython's messages, and `__weakref__`/`__dict__` slots, class
+variable conflicts, `int`/`bytes` bases, and conflicting slotted bases are
+checked. Changing bases, complete class-cell propagation, and some builtin
+subclasses remain unsupported. Descriptor
 lookup honors data-descriptor precedence and supports `__get__`, `__set__`,
 and `__delete__`. Builtin types expose method descriptors and slot wrappers
 (`list.append`, `int.__add__`, `object.__repr__`) with CPython reprs and
@@ -399,7 +405,8 @@ a custom one. `__reduce__` and `__setstate__` follow `BaseException`,
 `OSError`, `ImportError`, and `AttributeError`. Unicode errors take and expose
 `encoding`, `object`, `start`, `end`, and `reason`, and codec failures raise
 them with those fields, covering a run of unencodable characters. The class
-attributes are not yet `member_descriptor` objects. `exit` and `quit`
+attributes are `member_descriptor` and `getset_descriptor` objects with
+`__get__`, `__set__`, and `__delete__`. `exit` and `quit`
 raise `SystemExit` with their code, and `SystemExit.code` follows CPython.
 `__build_class__` creates a class as a class statement does, calling an
 ordinary function for the body; `__lazy_import__` returns a lazy import object

@@ -30,7 +30,7 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-#define SPY_LAST_TYPE SPY_TRACEBACK /* The last public value tag. */
+#define SPY_LAST_TYPE SPY_GETSET_DESCRIPTOR /* The last public value tag. */
 enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* Instance layouts beyond the builtin value types. */
 enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE };
@@ -105,6 +105,9 @@ struct SPYValue {
         /* One entry of an exception's traceback: a frame and its line, then
          * the entries of the frames the exception came from. */
         struct { SPYValue *next, *frame; size_t line; int64_t lasti; } traceback;
+        /* A member or getset descriptor: the attribute name, its class, and
+         * DESC_ flags; values live in the instance's hidden fields. */
+        struct { SPYValue *name, *owner; int flags; } member;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
@@ -456,6 +459,10 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_TRACEBACK:
         if (v->as.traceback.next) visit(v->as.traceback.next, data);
         visit(v->as.traceback.frame, data);
+        break;
+    case SPY_MEMBER_DESCRIPTOR: case SPY_GETSET_DESCRIPTOR:
+        visit(v->as.member.name, data);
+        visit(v->as.member.owner, data);
         break;
     case SPY_FRAME:
         if (v->as.frame.env) visit(v->as.frame.env, data);
@@ -1437,7 +1444,7 @@ static int native_kind(SPYValue *v) {
 }
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell", "traceback"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell", "traceback", "member_descriptor", "getset_descriptor"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
         if (name && name->type == SPY_STRING) return name->as.string.data;
@@ -1954,6 +1961,10 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             (repr && puts_buffer(b, ")"));
         repr_leave(b->ctx); return status ? -1 : 0;
     }
+    case SPY_MEMBER_DESCRIPTOR: case SPY_GETSET_DESCRIPTOR:
+        return puts_buffer(b, v->type == SPY_MEMBER_DESCRIPTOR ? "<member '" : "<attribute '") ||
+            puts_buffer(b, v->as.member.name->as.string.data) || puts_buffer(b, "' of '") ||
+            puts_buffer(b, name_local(v->as.member.owner, "__name__")->as.string.data) || puts_buffer(b, "' objects>");
     case SPY_TEMPLATE:
         return puts_buffer(b, "Template(strings=") || format_value(b, v->as.template.strings, 1) ||
             puts_buffer(b, ", interpolations=") || format_value(b, v->as.template.interpolations, 1) || puts_buffer(b, ")");
@@ -7269,14 +7280,110 @@ static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, SPYType type)
     if (c->error_type[0]) { spy_release(v); return NULL; }
     return v;
 }
+/* member_descriptor and getset_descriptor: the slots of __slots__ classes
+ * and the fields of builtin exception classes. Values live in the
+ * instance's hidden fields; an unset slot is missing, an unset exception
+ * member reads as None. */
+enum { DESC_READONLY = 1, DESC_SLOT = 2 };
+static int instance_has_dict(SPYValue *);
+static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
+static void delete_name(SPYValue *, const char *);
+static int is_member(SPYValue *v) { return v && (v->type == SPY_MEMBER_DESCRIPTOR || v->type == SPY_GETSET_DESCRIPTOR); }
+static SPYValue *member_new(SPYContext *c, int type, const char *name, SPYValue *owner, int flags) {
+    SPYValue *d = value_new(c, type);
+    if (!d) return NULL;
+    d->as.member.name = spy_string(c, name, strlen(name));
+    d->as.member.owner = spy_retain(owner);
+    d->as.member.flags = flags;
+    if (!d->as.member.name) { spy_release(d); return NULL; }
+    return d;
+}
+static int member_applies(SPYContext *c, SPYValue *d, SPYValue *object) {
+    if (subclass(value_class(c, object), d->as.member.owner)) return 1;
+    errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d->as.member.name->as.string.data,
+           name_local(d->as.member.owner, "__name__")->as.string.data, type_name(object));
+    return 0;
+}
+static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
+    if (!member_applies(c, d, object)) return NULL;
+    const char *name = d->as.member.name->as.string.data;
+    SPYValue *value = hidden_field(object, name);
+    if (value) return spy_retain(value);
+    if (d->as.member.flags & DESC_SLOT) return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(object), name);
+    if (!strcmp(name, "characters_written")) return spy_error(c, "AttributeError", "characters_written");
+    return spy_none(c);
+}
+/* Set or, without a value, delete; exception fields check their values as
+ * BaseException's and OSError's setters do. */
+static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *value) {
+    if (!member_applies(c, d, object)) return -1;
+    const char *name = d->as.member.name->as.string.data;
+    if ((d->as.member.flags & DESC_READONLY) || object->type != SPY_INSTANCE) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
+    int slot = d->as.member.flags & DESC_SLOT;
+    if (!value) {
+        if (slot || !strcmp(name, "characters_written")) {
+            if (!hidden_field(object, name)) { spy_error(c, "AttributeError", name); return -1; }
+            delete_name(object->as.map.class_cell, name); return 0;
+        }
+        if (!strcmp(name, "args") || !strcmp(name, "__traceback__") || !strcmp(name, "__context__") || !strcmp(name, "__cause__")) {
+            errorf(c, "TypeError", "%s may not be deleted", name); return -1;
+        }
+        if (!strcmp(name, "__suppress_context__")) { spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1; }
+        return set_hidden_field(c, object, name, c->none);
+    }
+    if (!slot) {
+        if ((!strcmp(name, "__cause__") || !strcmp(name, "__context__")) && value->type != SPY_NONE &&
+            (value->type != SPY_INSTANCE || !subclass(value->as.map.parent, name_local(c->classes, "BaseException")))) {
+            errorf(c, "TypeError", "exception %s must be None or derive from BaseException", !strcmp(name, "__cause__") ? "cause" : "context");
+            return -1;
+        }
+        if (!strcmp(name, "__suppress_context__") && value->type != SPY_BOOL) {
+            spy_error(c, "TypeError", "attribute value type must be bool"); return -1;
+        }
+        if (!strcmp(name, "__traceback__") && value->type != SPY_NONE && value->type != SPY_TRACEBACK) {
+            spy_error(c, "TypeError", "__traceback__ must be a traceback or None"); return -1;
+        }
+        if ((!strcmp(name, "start") || !strcmp(name, "end")) && !builtin_value(c, value, SPY_INT)) {
+            spy_error(c, "TypeError", "an integer is required"); return -1;
+        }
+    }
+    SPYValue *stored = slot ? spy_retain(value) : !strcmp(name, "args") ?
+        (value->type == SPY_TUPLE ? spy_retain(value) : builtin(c, 1, &value, (void *)(intptr_t)B_TUPLE)) :
+        !strcmp(name, "characters_written") ? index_object(c, value) : spy_retain(value);
+    int status = stored ? set_hidden_field(c, object, name, stored) : -1;
+    spy_release(stored);
+    if (!status && !slot && !strcmp(name, "__cause__")) status = set_hidden_field(c, object, "__suppress_context__", c->booleans[1]);
+    return status;
+}
+/* The descriptors' __get__, __set__, and __delete__. */
+static SPYValue *member_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    int which = (int)(intptr_t)data;
+    static const char *const names[] = {"__get__", "__set__", "__delete__"};
+    if (keywords && keywords->as.map.len) return errorf(c, "TypeError", "%s() takes no keyword arguments", names[which]);
+    if (!argc || !is_member(argv[0])) return errorf(c, "TypeError", "descriptor '%s' requires a descriptor", names[which]);
+    SPYValue *self = argv[0];
+    argc--; argv++;
+    if (which == 0) {
+        if (argc < 1 || argc > 2) return errorf(c, "TypeError", "expected 1 or 2 arguments, got %zu", argc);
+        if (argv[0]->type == SPY_NONE) {
+            if (argc < 2 || argv[1]->type == SPY_NONE) return spy_error(c, "TypeError", "__get__(None, None) is invalid");
+            return spy_retain(self);
+        }
+        return member_get(c, self, argv[0]);
+    }
+    size_t expected = which == 1 ? 2 : 1;
+    if (argc != expected) return errorf(c, "TypeError", "expected %zu argument%s, got %zu", expected, expected == 1 ? "" : "s", argc);
+    return member_set(c, self, argv[0], which == 1 ? argv[1] : NULL) ? NULL : spy_none(c);
+}
 static int data_descriptor(SPYValue *value) {
-    return value && (value->type == SPY_PROPERTY || (value->type == SPY_INSTANCE &&
+    return value && (value->type == SPY_PROPERTY || is_member(value) || (value->type == SPY_INSTANCE &&
         (class_lookup(value->as.map.parent, "__set__") || class_lookup(value->as.map.parent, "__delete__"))));
 }
 static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self, SPYValue *owner) {
     if (value->type == SPY_SUPER && !value->as.super.self && self)
         return super_new(c, value->as.super.type, self);
     if (value->type == SPY_PROPERTY) return property_get(c, value, value, self);
+    if (is_member(value)) return self ? member_get(c, value, self) : spy_retain(value);
     if (value->type == SPY_INSTANCE) {
         SPYValue *get = special_method(c, value, "__get__");
         if (get) {
@@ -7415,8 +7522,8 @@ static SPYValue *class_annotations(SPYContext *c, SPYValue *cls, const char *nam
 }
 /* An instance's attributes move into a real dictionary once __dict__ is
  * requested; later reads and writes go through that dictionary. */
-/* The members of the builtin exception classes, by the class defining them;
- * group members are read-only. */
+/* The members of the builtin exception classes, by the class defining them,
+ * created as descriptors in their namespaces; group members are read-only. */
 static const struct { const char *owner; const char *const names[10]; } exception_members[] = {
     {"BaseException", {"args", "__traceback__", "__context__", "__cause__", "__suppress_context__"}},
     {"StopIteration", {"value"}}, {"SystemExit", {"code"}},
@@ -7427,20 +7534,6 @@ static const struct { const char *owner; const char *const names[10]; } exceptio
     {"AttributeError", {"name", "obj"}}, {"NameError", {"name"}},
     {"BaseExceptionGroup", {"message", "exceptions"}},
 };
-enum { MEMBER_NONE, MEMBER_WRITABLE, MEMBER_READONLY };
-/* Whether name is a member of the exception's class, not shadowed by a class
- * attribute in a subclass. */
-static int exception_member(SPYContext *c, SPYValue *v, const char *name) {
-    if (v->type != SPY_INSTANCE || !v->as.map.class_cell) return MEMBER_NONE;
-    for (size_t i = 0; i < sizeof(exception_members) / sizeof(*exception_members); i++)
-        for (size_t j = 0; j < 10 && exception_members[i].names[j]; j++) {
-            if (strcmp(name, exception_members[i].names[j])) continue;
-            if (!subclass(v->as.map.parent, name_local(c->classes, exception_members[i].owner))) continue;
-            if (instance_lookup(v->as.map.parent, name)) return MEMBER_NONE;
-            return !strcmp(exception_members[i].owner, "BaseExceptionGroup") ? MEMBER_READONLY : MEMBER_WRITABLE;
-        }
-    return MEMBER_NONE;
-}
 static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
     if (!v->as.map.namespace) {
         SPYValue *dict = value_new(c, SPY_DICT);
@@ -7468,6 +7561,18 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "tb_frame")) return spy_retain(v->as.traceback.frame);
         if (!strcmp(name, "tb_lineno")) return spy_int(c, (int64_t)v->as.traceback.line);
         if (!strcmp(name, "tb_lasti")) return spy_int(c, v->as.traceback.lasti);
+    }
+    if (is_member(v)) {
+        SPYValue *owner = v->as.member.owner;
+        if (!strcmp(name, "__name__")) return spy_retain(v->as.member.name);
+        if (!strcmp(name, "__objclass__")) return spy_retain(owner);
+        if (!strcmp(name, "__doc__")) return spy_none(c);
+        if (!strcmp(name, "__qualname__")) {
+            Buffer out = {.ctx = c};
+            SPYValue *result = puts_buffer(&out, name_local(owner, "__qualname__")->as.string.data) || puts_buffer(&out, ".") ||
+                puts_buffer(&out, v->as.member.name->as.string.data) ? NULL : spy_string(c, out.data, out.len);
+            free(out.data); return result;
+        }
     }
     if (v->type == SPY_CELL && !strcmp(name, "cell_contents")) {
         SPYValue *value = cell_contents(v);
@@ -7710,17 +7815,11 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         SPYValue *value = v->type == SPY_INSTANCE ? instance_lookup(v->as.map.parent, name) : NULL;
         if (data_descriptor(value)) return descriptor_get(c, value, v, v->as.map.parent);
-        if (!value && exception_member(c, v, name)) {
-            SPYValue *member = hidden_field(v, name);
-            if (member) return spy_retain(member);
-            /* A deleted member reads as None; characters_written is absent until set. */
-            if (!strcmp(name, "characters_written")) return spy_error(c, "AttributeError", "characters_written");
-            return spy_none(c);
-        }
         SPYValue *meta = v->type == SPY_CLASS ? v->as.map.meta : NULL;
         SPYValue *meta_value = meta ? class_lookup(meta, name) : NULL;
         if (data_descriptor(meta_value)) return descriptor_get(c, meta_value, v, meta);
         if (!value && !strcmp(name, "__dict__")) {
+            if (!instance_has_dict(v)) return errorf(c, "AttributeError", "'%s' object has no attribute '__dict__'", type_name(v));
             SPYValue *dict = instance_dict(c, v);
             if (!dict || v->type == SPY_INSTANCE) return dict;
             SPYValue *proxy = mappingproxy_new(c, dict);
@@ -8994,6 +9093,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
 /* A NULL value requests deletion. */
 static int descriptor_set(SPYContext *c, SPYValue *descriptor, SPYValue *object, SPYValue *value) {
     if (descriptor->type == SPY_PROPERTY) return property_set(c, descriptor, object, value);
+    if (is_member(descriptor)) return member_set(c, descriptor, object, value);
     SPYValue *method = special_method(c, descriptor, value ? "__set__" : "__delete__");
     if (!method) { spy_error(c, "AttributeError", value ? "__set__" : "__delete__"); return -1; }
     SPYValue *args[] = {object, value};
@@ -9085,6 +9185,11 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     if (object->type == SPY_INSTANCE) {
         SPYValue *descriptor = class_lookup(object->as.map.parent, name);
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, value);
+        if (!instance_has_dict(object)) {
+            if (descriptor && !c->error_type[0]) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
+            else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+            return -1;
+        }
         if (!descriptor && !strcmp(name, "__dict__")) {
             if (value->type != SPY_DICT) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
             SPYValue *old = instance_dict(c, object);
@@ -9092,28 +9197,6 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             object->as.map.namespace = spy_retain(value);
             spy_release(old); spy_release(old);
             return 0;
-        }
-        int member = exception_member(c, object, name);
-        if (member == MEMBER_READONLY) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
-        if (member) {
-            if ((!strcmp(name, "__cause__") || !strcmp(name, "__context__")) && value->type != SPY_NONE &&
-                (value->type != SPY_INSTANCE || !subclass(value->as.map.parent, name_local(c->classes, "BaseException")))) {
-                errorf(c, "TypeError", "exception %s must be None or derive from BaseException",
-                       !strcmp(name, "__cause__") ? "cause" : "context"); return -1;
-            }
-            if (!strcmp(name, "__cause__") && set_hidden_field(c, object, "__suppress_context__", c->booleans[1])) return -1;
-            if (!strcmp(name, "__suppress_context__") && value->type != SPY_BOOL) {
-                spy_error(c, "TypeError", "attribute value type must be bool"); return -1;
-            }
-            if (!strcmp(name, "__traceback__") && value->type != SPY_NONE && value->type != SPY_TRACEBACK) {
-                spy_error(c, "TypeError", "__traceback__ must be a traceback or None"); return -1;
-            }
-            if ((!strcmp(name, "start") || !strcmp(name, "end")) && subclass(object->as.map.parent, name_local(c->classes, "UnicodeError")) &&
-                !builtin_value(c, value, SPY_INT)) { spy_error(c, "TypeError", "an integer is required"); return -1; }
-            SPYValue *stored = !strcmp(name, "args") ? (value->type == SPY_TUPLE ? spy_retain(value) : builtin(c, 1, &value, (void *)(intptr_t)B_TUPLE)) :
-                !strcmp(name, "characters_written") ? index_object(c, value) : spy_retain(value);
-            int status = stored ? set_hidden_field(c, object, name, stored) : -1;
-            spy_release(stored); return status;
         }
     }
     if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
@@ -11808,9 +11891,29 @@ static int builtin_layout(SPYContext *c, SPYValue *cls) {
             if (mro->as.seq.items[i] == c->types[subclassable_types[t]]) return subclassable_types[t];
     return -1;
 }
+/* Class flags beside the builtin marker 2: instances without a __dict__,
+ * a class whose own nonempty __slots__ fix its instance layout, and slotted
+ * instances with a __weakref__ slot. */
+enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32 };
+static int class_has_dict(SPYContext *c, SPYValue *cls) {
+    if (subclass(cls, name_local(c->classes, "BaseException"))) return 1;
+    if (cls->as.map.native || cls->as.map.flags == 2 || cls == name_local(c->classes, "object")) return 0;
+    return !(cls->as.map.flags & CLASS_NO_DICT);
+}
+static int instance_has_dict(SPYValue *v) {
+    return v->type != SPY_INSTANCE || !(v->as.map.parent->as.map.flags & CLASS_NO_DICT);
+}
+/* The nearest class in cls's MRO whose __slots__ fix the layout, or NULL. */
+static SPYValue *slots_base(SPYValue *cls) {
+    SPYValue *mro = cls->as.map.mro;
+    for (size_t i = 0; mro && i < mro->as.seq.len; i++)
+        if (mro->as.seq.items[i]->as.map.flags & CLASS_SLOTS && mro->as.seq.items[i]->as.map.flags != 2) return mro->as.seq.items[i];
+    return NULL;
+}
 static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases, SPYValue *module) {
     SPYValue *exception = name_local(c->classes, "BaseException");
     int layout = -1;
+    SPYValue *solid = NULL;
     for (size_t i = 0; i < bases->as.seq.len; i++) {
         SPYValue *base = bases->as.seq.items[i];
         if (base->type != SPY_CLASS) return spy_error(c, "TypeError", "base must be a class");
@@ -11831,6 +11934,11 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
         if (kind < 0 && subclass(base, c->types[SPY_CLASS])) kind = LAYOUT_TYPE;
         if (kind >= 0 && layout >= 0 && kind != layout) return spy_error(c, "TypeError", "multiple bases have instance lay-out conflict");
         if (kind >= 0) layout = kind;
+        SPYValue *slotted = slots_base(base);
+        if (slotted && solid && !subclass(solid, slotted)) {
+            if (!subclass(slotted, solid)) return spy_error(c, "TypeError", "multiple bases have instance lay-out conflict");
+            solid = slotted;
+        } else if (slotted && !solid) solid = slotted;
     }
     SPYValue *base = bases->as.seq.len ? bases->as.seq.items[0] : name_local(c->classes, "object");
     SPYValue *cls = new_class(c, name, base, module);
@@ -11920,6 +12028,74 @@ static int initialize_mro(SPYContext *c, SPYValue *cls) {
     spy_release(cls->as.map.mro); cls->as.map.mro = order;
     return 0;
 }
+/* Turn the namespace's __slots__ into member descriptors on cls. */
+static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
+    SPYValue *slots = name_local(namespace, "__slots__");
+    if (!slots) return 0;
+    SPYValue *names = slots->type == SPY_STRING ? value_new(c, SPY_TUPLE) : builtin(c, 1, &slots, (void *)(intptr_t)B_TUPLE);
+    if (!names || (slots->type == SPY_STRING && sequence_append(c, names, slots))) { spy_release(names); return -1; }
+    SPYValue *list = spy_list(c);
+    int dict = 0, weakref = 0, inherited = 0, weakrefs = 0, status = list ? 0 : -1;
+    for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
+        SPYValue *base = cls->as.map.bases->as.seq.items[i];
+        inherited |= class_has_dict(c, base);
+        weakrefs |= class_has_dict(c, base) || (base->as.map.flags != 2 && base->as.map.flags & CLASS_WEAKREF);
+    }
+    const char *owner = name_local(cls, "__name__")->as.string.data;
+    while (*owner == '_') owner++;
+    for (size_t i = 0; !status && i < names->as.seq.len; i++) {
+        SPYValue *item = names->as.seq.items[i];
+        if (item->type != SPY_STRING && !builtin_value(c, item, SPY_STRING)) {
+            errorf(c, "TypeError", "__slots__ items must be strings, not '%s'", type_name(item)); status = -1; break;
+        }
+        item = builtin_value(c, item, SPY_STRING);
+        const char *text = item->as.string.data;
+        int valid = item->as.string.len > 0;
+        for (size_t at = 0; valid && at < item->as.string.len;) {
+            size_t width;
+            unsigned code = utf8_decode(text + at, item->as.string.len - at, &width);
+            valid = identifier_character(code, !at);
+            at += width;
+        }
+        if (!valid) { spy_error(c, "TypeError", "__slots__ must be identifiers"); status = -1; break; }
+        if (!strcmp(text, "__dict__") || !strcmp(text, "__weakref__")) {
+            int *seen = text[2] == 'd' ? &dict : &weakref;
+            if ((text[2] == 'd' ? inherited : weakrefs) || *seen) { errorf(c, "TypeError", "%s slot disallowed: we already got one", text); status = -1; break; }
+            *seen = 1; continue;
+        }
+        size_t len = item->as.string.len;
+        SPYValue *mangled;
+        if (len > 2 && text[0] == '_' && text[1] == '_' && !(text[len - 1] == '_' && text[len - 2] == '_') && *owner) {
+            size_t size = strlen(owner) + len + 2;
+            char *buffer = malloc(size);
+            if (buffer) snprintf(buffer, size, "_%s%s", owner, text);
+            mangled = buffer ? spy_string(c, buffer, size - 1) : spy_error(c, "MemoryError", "out of memory");
+            free(buffer);
+        } else mangled = spy_retain(item);
+        if (!mangled) { status = -1; break; }
+        if (strcmp(mangled->as.string.data, "__qualname__") && name_local(namespace, mangled->as.string.data)) {
+            errorf(c, "ValueError", "'%s' in __slots__ conflicts with class variable", mangled->as.string.data);
+            spy_release(mangled); status = -1; break;
+        }
+        status = sequence_append(c, list, mangled);
+        spy_release(mangled);
+    }
+    int layout = builtin_layout(c, cls);
+    if (!status && list->as.seq.len && (layout == SPY_INT || layout == SPY_BYTES)) {
+        errorf(c, "TypeError", "arbitrary __slots__ not supported for subtype of '%s'", layout == SPY_INT ? "int" : "bytes"); status = -1;
+    }
+    if (!status) status = sort_list(c, list, NULL, 0);
+    for (size_t i = 0; !status && i < list->as.seq.len; i++) {
+        SPYValue *member = member_new(c, SPY_MEMBER_DESCRIPTOR, list->as.seq.items[i]->as.string.data, cls, DESC_SLOT);
+        status = member ? name_set(c, cls, list->as.seq.items[i]->as.string.data, member) : -1;
+        spy_release(member);
+    }
+    if (!status && !dict && !inherited) cls->as.map.flags |= CLASS_NO_DICT;
+    if (!status && list->as.seq.len) cls->as.map.flags |= CLASS_SLOTS;
+    if (!status && (weakref || weakrefs)) cls->as.map.flags |= CLASS_WEAKREF;
+    spy_release(list); spy_release(names);
+    return status;
+}
 /* type.__new__(meta, name, bases, namespace, **keywords). */
 static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *bases, SPYValue *namespace, SPYValue *keywords) {
     SPYValue *storage = dictionary_value(c, namespace);
@@ -11954,7 +12130,7 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (qualname->type != SPY_STRING) spy_error(c, "TypeError", "type __qualname__ must be a str");
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
-    if (!c->error_type[0] && !initialize_mro(c, cls)) finish_class(c, cls, keywords);
+    if (!c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace)) finish_class(c, cls, keywords);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
 }
@@ -12907,19 +13083,10 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     } else {
         SPYValue *descriptor = object->type == SPY_INSTANCE ? class_lookup(object->as.map.parent, name) : NULL;
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, NULL);
-        int member = exception_member(c, object, name);
-        if (member == MEMBER_READONLY) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
-        if (member) {
-            /* BaseException's getset fields refuse deletion; other members become None. */
-            if (!strcmp(name, "args") || !strcmp(name, "__traceback__") || !strcmp(name, "__context__") || !strcmp(name, "__cause__")) {
-                errorf(c, "TypeError", "%s may not be deleted", name); return -1;
-            }
-            if (!strcmp(name, "__suppress_context__")) { spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1; }
-            if (!strcmp(name, "characters_written")) {
-                if (!hidden_field(object, name)) { spy_error(c, "AttributeError", "characters_written"); return -1; }
-                delete_name(object->as.map.class_cell, name); return 0;
-            }
-            return set_hidden_field(c, object, name, c->none);
+        if (object->type == SPY_INSTANCE && !instance_has_dict(object)) {
+            if (descriptor) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
+            else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+            return -1;
         }
         if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name);
         if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__"))) {
@@ -15491,16 +15658,6 @@ static SPYValue *directory(SPYContext *c, SPYValue *object) {
                 Entry *entry = &bindings->as.map.items[i];
                 if (entry->value->type == V_UNBOUND || entry->key->type != SPY_STRING) continue;
                 if (map_set(c, names, entry->key, c->none)) break;
-            }
-        }
-        /* Exception members are attributes of their classes. */
-        SPYValue *cls = !object ? NULL : object->type == SPY_CLASS ? object : object->type == SPY_INSTANCE ? object->as.map.parent : NULL;
-        for (size_t i = 0; cls && i < sizeof(exception_members) / sizeof(*exception_members) && !c->error_type[0]; i++) {
-            if (!subclass(cls, name_local(c->classes, exception_members[i].owner))) continue;
-            for (size_t j = 0; j < 10 && exception_members[i].names[j] && !c->error_type[0]; j++) {
-                SPYValue *key = spy_string(c, exception_members[i].names[j], strlen(exception_members[i].names[j]));
-                if (!key || map_set(c, names, key, c->none)) { spy_release(key); break; }
-                spy_release(key);
             }
         }
         for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++)
@@ -20161,6 +20318,18 @@ SPYContext *spy_context_new(void) {
             spy_release(method);
         }
         spy_release(cls); spy_release(bases);
+        for (size_t i = 0; !status && i < sizeof(exception_members) / sizeof(*exception_members); i++) {
+            SPYValue *owner = name_local(c->classes, exception_members[i].owner);
+            for (size_t j = 0; !status && j < 10 && exception_members[i].names[j]; j++) {
+                const char *field = exception_members[i].names[j];
+                int getset = !strcmp(field, "args") || !strcmp(field, "__traceback__") || !strcmp(field, "__context__") ||
+                    !strcmp(field, "__cause__") || !strcmp(field, "characters_written");
+                SPYValue *descriptor = member_new(c, getset ? SPY_GETSET_DESCRIPTOR : SPY_MEMBER_DESCRIPTOR, field, owner,
+                                                  owner == group ? DESC_READONLY : 0);
+                status = !descriptor || name_set(c, owner, field, descriptor);
+                spy_release(descriptor);
+            }
+        }
         if (status || name_set(c, c->builtins, "EnvironmentError", name_local(c->classes, "OSError")) ||
             name_set(c, c->builtins, "IOError", name_local(c->classes, "OSError"))) { spy_release(module); goto fail; }
     }
@@ -20176,7 +20345,7 @@ SPYContext *spy_context_new(void) {
         {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
         {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT},
         {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}, {"cell", -1},
-        {"traceback", -1}
+        {"traceback", -1}, {"member_descriptor", -1}, {"getset_descriptor", -1}
     };
     _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAST_TYPE + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
@@ -20187,6 +20356,18 @@ SPYContext *spy_context_new(void) {
         if (types[i].native < 0) cls->as.map.flags = 2;
         if (types[i].native >= 0 && name_set(c, c->builtins, types[i].name, cls)) { spy_release(module); goto fail; }
     }
+    static const char *const accessors[] = {"__get__", "__set__", "__delete__"};
+    for (int t = SPY_MEMBER_DESCRIPTOR; t <= SPY_GETSET_DESCRIPTOR; t++)
+        for (size_t i = 0; i < 3; i++) {
+            SPYValue *method = value_new(c, SPY_NATIVE);
+            if (!method) { spy_release(module); goto fail; }
+            method->as.native.kwcall = member_method;
+            method->as.native.data = (void *)(intptr_t)i;
+            method->as.native.method = 1;
+            int status = name_set(c, c->types[t], accessors[i], method);
+            spy_release(method);
+            if (status) { spy_release(module); goto fail; }
+        }
     static const char *const native_names[] = {"method_descriptor", "wrapper_descriptor", "method-wrapper"};
     for (size_t i = 0; i < 3; i++) {
         SPYValue *cls = new_class(c, native_names[i], name_local(c->classes, "object"), module);
