@@ -131,6 +131,9 @@ struct SPYContext {
     size_t host_modules_len;
     void *opaque;
     SPYValue *slots; /* Method descriptors of builtin classes, created on first use. */
+    /* Containers whose repr is being built, across nested repr() calls (Py_ReprEnter); borrowed. */
+    SPYValue **repr_stack;
+    size_t repr_len, repr_cap;
     SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
@@ -1558,7 +1561,7 @@ int spy_define(SPYContext *c, const char *name, SPYNative call, void *data) {
     return status;
 }
 
-typedef struct { SPYContext *ctx; char *data; size_t len, cap; SPYValue *path[128]; size_t depth; } Buffer;
+typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
 static int append(Buffer *b, const char *s, size_t n) {
     if (n > SIZE_MAX - b->len - 1 || grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1, 1)) return -1;
     memcpy(b->data + b->len, s, n);
@@ -1924,6 +1927,19 @@ static int append_conversion(Buffer *b, SPYValue *v, SPYValue *text, const char 
     errorf(b->ctx, "TypeError", "%s.%s() must return a str, not %s", type_name(v), method, type_name(text));
     return -1;
 }
+/* Py_ReprEnter: 1 when v's repr is already being built, else push it (0). */
+static int repr_enter(SPYContext *c, SPYValue *v) {
+    for (size_t i = 0; i < c->repr_len; i++) if (c->repr_stack[i] == v) return 1;
+    if (c->repr_len == c->repr_cap) {
+        size_t cap = c->repr_cap ? c->repr_cap * 2 : 16;
+        SPYValue **stack = realloc(c->repr_stack, cap * sizeof(*stack));
+        if (!stack) { spy_error(c, "MemoryError", "out of memory"); return -1; }
+        c->repr_stack = stack; c->repr_cap = cap;
+    }
+    c->repr_stack[c->repr_len++] = v;
+    return 0;
+}
+static void repr_leave(SPYContext *c) { c->repr_len--; }
 static int format_value(Buffer *b, SPYValue *v, int repr) {
     char num[96];
     switch (v->type) {
@@ -1933,11 +1949,10 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     case SPY_LAZY_IMPORT:
         return puts_buffer(b, "<lazy_import '") || lazy_name(b, v) || puts_buffer(b, "'>");
     case SPY_MAPPINGPROXY: {
-        if (b->depth == 128) { spy_error(b->ctx, "RecursionError", "representation is too deep"); return -1; }
-        b->path[b->depth++] = v;
+        if (repr_enter(b->ctx, v) < 0) return -1;
         int status = (repr && puts_buffer(b, "mappingproxy(")) || format_value(b, v->as.bound.self, repr) ||
             (repr && puts_buffer(b, ")"));
-        b->depth--; return status ? -1 : 0;
+        repr_leave(b->ctx); return status ? -1 : 0;
     }
     case SPY_TEMPLATE:
         return puts_buffer(b, "Template(strings=") || format_value(b, v->as.template.strings, 1) ||
@@ -1987,14 +2002,11 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     }
     case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: {
         /* Like dictview_repr: a view shown inside itself prints as an ellipsis. */
-        for (size_t i = 0; i < b->depth; i++)
-            if (b->path[i] == v) return puts_buffer(b, "...");
-        if (b->depth == 128) { spy_error(b->ctx, "RecursionError", "representation is too deep"); return -1; }
+        int entered = repr_enter(b->ctx, v);
+        if (entered) return entered < 0 ? -1 : puts_buffer(b, "...");
         SPYValue *list = view_list(b->ctx, v);
-        if (!list) return -1;
-        b->path[b->depth++] = v;
-        int status = puts_buffer(b, type_name(v)) || puts_buffer(b, "(") || format_value(b, list, 1) || puts_buffer(b, ")");
-        b->depth--;
+        int status = !list || puts_buffer(b, type_name(v)) || puts_buffer(b, "(") || format_value(b, list, 1) || puts_buffer(b, ")");
+        repr_leave(b->ctx);
         spy_release(list);
         return status ? -1 : 0;
     }
@@ -2011,23 +2023,27 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             if (puts_buffer(b, "frozendict(")) return -1;
         }
         if (v->type == SPY_SET && !v->as.map.len) return puts_buffer(b, "set()");
-        for (size_t i = 0; i < b->depth; i++)
-            if (b->path[i] == v) return puts_buffer(b, v->type == SPY_LIST ? "[...]" : v->type == SPY_FROZENDICT ? "{...})" : v->type == SPY_DICT ? "{...}" : "(...)");
-        if (b->depth == 128) { spy_error(b->ctx, "RecursionError", "representation is too deep"); return -1; }
-        b->path[b->depth++] = v;
+        int entered = repr_enter(b->ctx, v);
+        if (entered) return entered < 0 ? -1 : puts_buffer(b, v->type == SPY_LIST ? "[...]" : v->type == SPY_FROZENDICT ? "{...})" : v->type == SPY_DICT ? "{...}" : "(...)");
+        if (deeper(b->ctx, " while getting the repr of an object")) { repr_leave(b->ctx); return -1; }
         int dict = is_dict(v) || v->type == SPY_SET;
-        if (puts_buffer(b, dict ? "{" : v->type == SPY_LIST ? "[" : "(")) return -1;
-        size_t n = dict ? v->as.map.len : v->as.seq.len;
-        for (size_t i = 0; i < n; i++) {
-            if (i && puts_buffer(b, ", ")) return -1;
+        int status = puts_buffer(b, dict ? "{" : v->type == SPY_LIST ? "[" : "(");
+        /* Items are read by index: a nested repr may resize the container. */
+        for (size_t i = 0; !status && i < (dict ? v->as.map.len : v->as.seq.len); i++) {
+            if (i && puts_buffer(b, ", ")) { status = -1; break; }
             if (dict) {
-                if (format_value(b, v->as.map.items[i].key, 1)) return -1;
-                if (is_dict(v) && (puts_buffer(b, ": ") || format_value(b, v->as.map.items[i].value, 1))) return -1;
-            } else if (format_value(b, v->as.seq.items[i], 1)) return -1;
+                SPYValue *key = spy_retain(v->as.map.items[i].key), *value = spy_retain(v->as.map.items[i].value);
+                status = format_value(b, key, 1) || (is_dict(v) && (puts_buffer(b, ": ") || format_value(b, value, 1)));
+                spy_release(key); spy_release(value);
+            } else {
+                SPYValue *item = spy_retain(v->as.seq.items[i]);
+                status = format_value(b, item, 1);
+                spy_release(item);
+            }
         }
-        if (v->type == SPY_TUPLE && n == 1 && puts_buffer(b, ",")) return -1;
-        b->depth--;
-        return puts_buffer(b, dict ? "}" : v->type == SPY_LIST ? "]" : ")") ||
+        if (!status && v->type == SPY_TUPLE && v->as.seq.len == 1) status = puts_buffer(b, ",");
+        b->ctx->depth--; repr_leave(b->ctx);
+        return status || puts_buffer(b, dict ? "}" : v->type == SPY_LIST ? "]" : ")") ||
             (v->type == SPY_FROZENDICT && puts_buffer(b, ")")) ? -1 : 0;
     }
     case SPY_FUNCTION: {
@@ -2208,13 +2224,11 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         return puts_buffer(b, num);
     }
     case SPY_FRAME_LOCALS: {
-        for (size_t i = 0; i < b->depth; i++)
-            if (b->path[i] == v) return puts_buffer(b, "{...}");
-        if (b->depth == 128) { spy_error(b->ctx, "RecursionError", "representation is too deep"); return -1; }
+        int entered = repr_enter(b->ctx, v);
+        if (entered) return entered < 0 ? -1 : puts_buffer(b, "{...}");
         SPYValue *copy = frame_contents(b->ctx, v->as.bound.self, FRAME_DICT);
-        b->path[b->depth++] = v;
         int status = !copy || format_value(b, copy, 1);
-        b->depth--; spy_release(copy); return status ? -1 : 0;
+        repr_leave(b->ctx); spy_release(copy); return status ? -1 : 0;
     }
     case SPY_CODE:
         snprintf(num, sizeof(num), "<code object <module> at %p>", (void *)v);
@@ -20338,7 +20352,7 @@ void spy_context_free(SPYContext *c) {
      * shutdown cannot recurse through an arbitrarily deep object graph. */
     c->weak_len = 0;
     while (c->values) free_value(c->values);
-    free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->frames);
+    free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->frames); free(c->repr_stack);
     for (size_t i = 0; i < c->host_modules_len; i++) free(c->host_modules[i].name);
     free(c->host_modules);
     for (size_t i = 0; i < c->mounts_len; i++) { free(c->mounts[i].host); free(c->mounts[i].path); }

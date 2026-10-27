@@ -275,3 +275,7 @@
   AttributeError __reduce__, __setstate__, and __getstate__; Unicode error
   fields, constructor checks, and str; codec errors carry their fields.
 - __repr__/__str__ returning a non-str raise CPython 3.15's message.
+- Recursive-repr detection is per context (Py_ReprEnter), so a container
+  reached again through a user __repr__ prints as [...] or {...}; deep
+  containers raise RecursionError instead of a fixed 128-level limit.
+- collections' UserDict, OrderedDict, and defaultdict | accept frozendict.
