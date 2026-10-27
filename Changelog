@@ -520,6 +520,9 @@
 - NoneType, NotImplementedType, and the ellipsis type reject arguments
   with CPython's "takes no arguments" message. TLA+ model of the built-in
   constants and the targets they may not occupy.
+- complex() parses a string only as its sole positional argument and
+  names the offending argument and type in its errors, as CPython does.
+  TLA+ model of the numeric built-in functions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

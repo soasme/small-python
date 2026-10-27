@@ -303,3 +303,9 @@ else:
 assert_eq(type_error(lambda: type(None)(1)), "NoneType takes no arguments")
 assert_eq(type_error(lambda: type(...)(x=1)), "EllipsisType takes no arguments")
 assert_eq(type_error(lambda: type(NotImplemented)(1)), "NotImplementedType takes no arguments")
+
+# complex() parses a string only as its sole positional argument.
+assert_eq(type_error(lambda: complex("1", 2)), "complex() argument 'real' must be a real number, not str")
+assert_eq(type_error(lambda: complex(real="1")), "complex() argument 'real' must be a real number, not str")
+assert_eq(type_error(lambda: complex(1, None)), "complex() argument 'imag' must be a real number, not NoneType")
+assert_eq(type_error(lambda: complex([])), "complex() argument must be a string or a number, not list")

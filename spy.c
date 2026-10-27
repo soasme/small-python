@@ -17319,7 +17319,8 @@ static SPYValue *parse_complex_ascii(SPYContext *c, const char *data, size_t dat
 invalid:
     free(source); return spy_error(c, "ValueError", "complex() arg is a malformed string");
 }
-static int as_complex(SPYContext *c, SPYValue *value, double complex *number, int *was_complex, int allow_complex) {
+/* role names the argument of complex(real, imag), or is NULL for complex(x). */
+static int as_complex(SPYContext *c, SPYValue *value, double complex *number, int *was_complex, int allow_complex, const char *role) {
     SPYValue *base = builtin_base(c, value, allow_complex ? "__complex__" : "__float__", "__float__");
     if (base && (base->type == SPY_COMPLEX || is_number(base))) value = base;
     *was_complex = value->type == SPY_COMPLEX;
@@ -17330,7 +17331,12 @@ static int as_complex(SPYContext *c, SPYValue *value, double complex *number, in
     const char *kind = "__complex__";
     if (!method && !c->error_type[0]) { method = special_method(c, value, "__float__"); kind = "__float__"; }
     if (!method && !c->error_type[0]) { method = special_method(c, value, "__index__"); kind = "__index__"; }
-    if (!method) { spy_error(c, "TypeError", "complex() argument must be a string or a number"); return -1; }
+    if (!method) {
+        if (c->error_type[0]) return -1;
+        if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_name(value));
+        else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_name(value));
+        return -1;
+    }
     SPYValue *converted = spy_call(c, method, 0, NULL);
     spy_release(method);
     if (!converted) return -1;
@@ -17339,6 +17345,22 @@ static int as_complex(SPYContext *c, SPYValue *value, double complex *number, in
     if (valid) { *number = numeric_complex(c, converted); *was_complex = converted->type == SPY_COMPLEX; }
     else errorf(c, "TypeError", "%s returned an invalid type", kind);
     spy_release(converted); return valid && !c->error_type[0] ? 0 : -1;
+}
+/* complex(x) parses a string or converts a number; complex(real, imag), or
+ * either given by keyword, takes numbers only, as actual_complex_new and
+ * complex_new_impl do. */
+static SPYValue *complex_construct(SPYContext *c, SPYValue *real_value, SPYValue *imag_value, int pair) {
+    if (!pair && real_value->type == SPY_STRING) return parse_complex(c, real_value);
+    if (!pair && real_value->type == SPY_COMPLEX) return spy_retain(real_value);
+    double complex real, imag = complex_parts(0, 0);
+    int real_complex, imag_complex = 0;
+    if (as_complex(c, real_value, &real, &real_complex, 1, pair ? "real" : NULL) ||
+        (imag_value && as_complex(c, imag_value, &imag, &imag_complex, 0, "imag"))) return NULL;
+    if (!imag_value) return complex_new(c, real);
+    double x = creal(real), y = creal(imag);
+    if (imag_complex) x -= cimag(imag);
+    if (real_complex) y += cimag(real);
+    return complex_new(c, complex_parts(x, y));
 }
 static int import_fromlist(SPYContext *c, SPYValue *module, SPYValue *names, int depth) {
     if (depth > 128) { spy_error(c, "RecursionError", "recursive import names"); return -1; }
@@ -20706,20 +20728,7 @@ execution_fail:
     if (id == B_COMPLEX) {
         if (argc > 2) goto arity;
         if (!argc) return complex_new(c, complex_parts(0, 0));
-        if (a->type == SPY_STRING) {
-            if (argc != 1) return spy_error(c, "TypeError", "complex() can't take second arg if first is a string");
-            return parse_complex(c, a);
-        }
-        if (argc == 1 && a->type == SPY_COMPLEX) return spy_retain(a);
-        double complex real, imag = complex_parts(0, 0);
-        int real_complex, imag_complex = 0;
-        if (as_complex(c, a, &real, &real_complex, 1) ||
-            (argc == 2 && as_complex(c, argv[1], &imag, &imag_complex, 0))) return NULL;
-        if (argc == 1) return complex_new(c, real);
-        double x = creal(real), y = creal(imag);
-        if (imag_complex) x -= cimag(imag);
-        if (real_complex) y += cimag(real);
-        return complex_new(c, complex_parts(x, y));
+        return complex_construct(c, a, argc == 2 ? argv[1] : NULL, argc == 2);
     }
     if (id == B_ASCII) {
         if (argc != 1) goto arity;
@@ -21210,7 +21219,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (!args[0] && !args[1]) return builtin(c, 0, args, (void *)(intptr_t)id);
         SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
         if (!args[0]) { if (!zero) return NULL; args[0] = zero; }
-        SPYValue *result = builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)id);
+        SPYValue *result = complex_construct(c, args[0], args[1], 1);
         spy_release(zero);
         return result;
     }

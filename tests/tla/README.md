@@ -100,6 +100,7 @@ and tied to real implementations by replaying them.
 | `TypeAnnotations.tla` | GenericAlias origin, arguments, parameters, substitution, unpacking, and refusals; X \| Y unions over every two- and three-term chain, flattened and deduplicated in order, with isinstance() over them | yes |
 | `IntStrLimit.tla` | the integer string conversion limit over limits 0, 640, and 1000 and digit counts around them: which conversions it governs, its two messages, and the settings API | yes |
 | `Constants.tla` | None, True, False, and `__debug__` in every target position with their SyntaxErrors, the shadowable Ellipsis and NotImplemented, the singletons' constructors, and NotImplemented's reflected fallback | yes |
+| `BuiltinsNumeric.tla` | divmod's floor convention, pow with modular inverses, round's ties to even at negative ndigits, bin/oct/hex digits, min/max with key and default, and sum, over a grid of signed integers; the numeric constructors and their errors | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -230,7 +231,8 @@ and `fromhex()` worded separator and odd-digit errors differently, and
 `set.intersection()` with an iterable named an unhashable item a set
 element, `int()` and `float()` refused bytearray and memoryview, and
 `float()` refused strings over 4096 characters, and the singletons'
-types worded their refusal of arguments differently.
+types worded their refusal of arguments differently, and `complex()`
+accepted a string by keyword.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
