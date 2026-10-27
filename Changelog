@@ -417,6 +417,10 @@
 - Wrong-typed results from __str__, __repr__, __bool__, __format__,
   __bytes__, and __init__ report CPython's messages, naming the class and
   the returned type. TLA+ model of basic customization.
+- Class bodies whose methods use __class__ or super() pass a __classcell__
+  that type.__new__ fills; a metaclass that drops it or fills it with
+  another class raises CPython's RuntimeError or TypeError. TLA+ model of
+  metaclass selection.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

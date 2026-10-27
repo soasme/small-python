@@ -53,6 +53,7 @@ and tied to real implementations by replaying them.
 | `Descriptors.tla` | descriptor invocation for every mix of `__get__`, `__set__`, and `__delete__`: instance, class, super, and direct binding, assignment, deletion, and precedence over the instance dictionary | yes |
 | `Slots.tla` | `__slots__` with and without `__dict__`, inherited from plain and slotted bases: `__dict__` and `__weakref__`, assignment, unset slots, class variable conflicts, and `__class__` assignment | yes |
 | `BasicCustomization.tla` | rich comparison order (a subclass's reflected method first), `NotImplemented` and the identity fallback, `__ne__` inverting `__eq__`, `__hash__` with and without `__eq__`, truth from `__bool__` or `__len__`, and `str()`, `repr()`, and `format(x, "")` falling back to `__repr__` | yes |
+| `Metaclasses.tla` | `__mro_entries__` and `__orig_bases__`, the most derived metaclass among the explicit one and the bases', metaclass conflicts, a non-class metaclass, and the `__classcell__` that `type.__new__` fills | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -136,9 +137,10 @@ to a builtin method instead of a method object; `-C` ignored a metaclass's
 `next()`, and a metaclass's `__getattribute__` and `__getattr__`); a data
 descriptor without `__get__` hid a value in the instance dictionary;
 `__class__` could not be assigned on a slotted instance, nor between classes
-with the same slots; and a `__str__`, `__bool__`, `__format__`, `__bytes__`, or
+with the same slots; a `__str__`, `__bool__`, `__format__`, `__bytes__`, or
 `__init__` returning the wrong type was reported without naming the class,
-the method, or the returned type.
+the method, or the returned type; and a metaclass that dropped
+`__classcell__` left `__class__` bound instead of raising RuntimeError.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

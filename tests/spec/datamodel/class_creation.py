@@ -114,3 +114,27 @@ try:
     type("Clash", (HasDict,), {"__slots__": ("a", "__dict__"), "a": 0})
 except TypeError as error:
     assert_eq(str(error), "__dict__ slot disallowed: we already got one")
+
+# A method using __class__ or super() gets a __classcell__ that type.__new__ fills.
+seen = []
+class CellMeta(type):
+    def __new__(meta, name, bases, namespace):
+        seen.append(type(namespace.get("__classcell__")).__name__)
+        if name == "Dropped":
+            namespace = {k: v for k, v in namespace.items() if k != "__classcell__"}
+        return super().__new__(meta, name, bases, namespace)
+class Uses(metaclass=CellMeta):
+    def f(self):
+        return __class__
+class Unused(metaclass=CellMeta):
+    def f(self):
+        return 1
+assert_eq(seen, ["cell", "NoneType"])
+assert_true(Uses().f() is Uses)
+assert_true("__classcell__" not in Uses.__dict__)
+def dropped():
+    class Dropped(metaclass=CellMeta):
+        def f(self):
+            return super()
+e = assert_raises(RuntimeError, dropped)
+assert_true(str(e).startswith("__class__ not set defining 'Dropped' as <class '"))

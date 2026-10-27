@@ -13284,12 +13284,12 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
         if (entry->value->type == V_UNBOUND) continue;
         if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__qualname__")) name_set(c, cls, "__qualname__", entry->value);
         else if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__classcell__")) {
-            /* spy binds __class__ itself; the cell is validated, not stored. */
+            /* The cell is filled with the class, not stored. */
             if (entry->value->type != SPY_CELL) {
                 SPYValue *kind = value_class(c, entry->value), *text = kind ? stringify(c, kind, 1) : NULL;
                 if (text) errorf(c, "TypeError", "__classcell__ must be a nonlocal cell, not %s", text->as.string.data);
                 spy_release(text);
-            }
+            } else cell_set(c, entry->value, cls);
         } else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
     SPYValue *qualname = name_local(cls, "__qualname__");
@@ -13357,7 +13357,7 @@ static int setup_annotations(SPYContext *c, Frame *f, int setup) {
 static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function, SPYValue *name,
                             SPYValue *bases, SPYValue *arguments, SPYValue *type_params) {
     SPYValue *keywords = value_new(c, SPY_DICT), *cls = NULL;
-    SPYValue *tuple = NULL, *namespace = NULL, *env = NULL, *original = NULL;
+    SPYValue *tuple = NULL, *namespace = NULL, *env = NULL, *original = NULL, *classcell = NULL;
     if (!keywords) goto done;
     if (!(original = value_new(c, SPY_TUPLE)) || extend_display(c, original, bases)) goto done;
     int resolved = update_bases(c, bases, original);
@@ -13440,6 +13440,13 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
     if (attributes) name_set(c, env, "__static_attributes__", attributes);
     spy_release(attributes);
     if (c->error_type[0]) goto done;
+    /* A method using __class__ or super() gets a cell that type.__new__ fills. */
+    SPYValue *cells = closure_names(c, n, 1);
+    for (size_t i = 0; cells && i < cells->as.seq.len && !classcell; i++)
+        if (!strcmp(cells->as.seq.items[i]->as.string.data, "__class__")) classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL);
+    spy_release(cells);
+    if (classcell) name_set(c, env, "__classcell__", classcell);
+    if (c->error_type[0]) goto done;
 create:
     if (resolved && name_set(c, env, "__orig_bases__", original)) goto done;
     if (meta == c->types[SPY_CLASS]) cls = create_class(c, meta, name, tuple, namespace, keywords);
@@ -13447,9 +13454,19 @@ create:
         SPYValue *args[] = {name, tuple, namespace};
         cls = call_keywords(c, meta, 3, args, keywords);
     }
-    if (cls && cls->type == SPY_CLASS) name_set(c, env->as.map.class_cell, "__class__", cls);
+    if (cls && cls->type == SPY_CLASS && classcell) {
+        SPYValue *set = cell_contents(classcell);
+        if (set != cls) {
+            SPYValue *text = stringify(c, cls, 1), *other = set ? stringify(c, set, 1) : NULL;
+            if (!set && text) errorf(c, "RuntimeError", "__class__ not set defining '%s' as %s. Was __classcell__ propagated to type.__new__?",
+                                     name->as.string.data, text->as.string.data);
+            else if (text && other) errorf(c, "TypeError", "__class__ set to %s defining '%s' as %s", other->as.string.data,
+                                           name->as.string.data, text->as.string.data);
+            spy_release(text); spy_release(other);
+        }
+    } else if (cls && cls->type == SPY_CLASS) name_set(c, env->as.map.class_cell, "__class__", cls);
 done:
-    spy_release(env); spy_release(namespace); spy_release(tuple); spy_release(original); spy_release(keywords);
+    spy_release(classcell); spy_release(env); spy_release(namespace); spy_release(tuple); spy_release(original); spy_release(keywords);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
 }
