@@ -313,7 +313,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Integer Types | NumberMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Float | NumberMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | NumericTypes, NumberMethods
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | TODO: NumericHash
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | NumericHash
 11. Built-in types > Built-in Types > Boolean Type - `bool` | Truth, NumericTypes
 11. Built-in types > Built-in Types > Iterator Types | TODO: Iteration, Iterators
 11. Built-in types > Built-in Types > Iterator Types > Generator Types | Generators

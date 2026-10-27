@@ -89,6 +89,7 @@ and tied to real implementations by replaying them.
 | `Atoms.tla` | the keyword constants and why they cannot be targets, name evaluation, the type of each kind of literal, negative and complex numbers as operations, literal immutability, and which identities of literals are guaranteed | yes |
 | `Grammar.tla` | every compound statement with every form of suite (one-line, semicolon-separated, indented, nested, missing, misindented), and the acceptance or rejection, with its message, of the full grammar's productions | yes |
 | `NumberMethods.tla` | `bit_length`, `bit_count`, `to_bytes`, and `from_bytes` computed over boundary integers, every length up to three bytes, byte order, and signedness; the float and complex methods `from_number`, `as_integer_ratio`, `is_integer`, `hex`, and `fromhex` | yes |
+| `NumericHash.tla` | the hash of m * 2^e as an int and as a float, positive and negative, from subnormal exponents past the modulus period, in the rotated form the prime 2^61 - 1 gives it; infinities, NaNs, the modulus itself, complex numbers, and equal numbers of different types | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
