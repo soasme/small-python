@@ -7946,3 +7946,58 @@ implementation is recommended to follow where it can.
 
 An implementation shall not use this annex to differ from a behaviour that the
 body of this Standard specifies.
+
+## Annex E (informative) Changes from Revision 1
+
+Revision 1 (`SLP-315:2026-draft1`) consolidated the chapters of the Python
+Language Reference and the Python Standard Library documentation for the pinned
+CPython release, under their license, and marked which facilities were Core
+and which belonged to hosts. Revision 2 replaces it with an original text:
+
+1. **Structure.** The document is organized as ECMA-262 is: conformance and
+   notation; data types and abstract operations; execution contexts and object
+   behaviours; source text and grammar; expressions, statements, functions,
+   classes, and modules; then the built-in namespace and the intrinsic objects
+   by kind. The grammar summary, host hooks, library facades, and
+   implementation-defined items are annexes.
+2. **Algorithms.** Semantics that revision 1 gave in prose are given as
+   numbered algorithms with the `?` and `!` completion shorthands of 5.2, so
+   that the order of evaluation, of lookups, and of checks is stated.
+3. **No library dependence.** Revision 1 specified objects through the modules
+   that expose them (`types`, `typing`, `annotationlib`, `string.templatelib`,
+   `sys`, `abc`, `copyreg`, `codecs`, `warnings`, `site`). Revision 2 defines
+   those objects as intrinsics reachable from the language and the facilities
+   behind the modules as host hooks (Annex B); the modules are described only
+   informatively (Annex C).
+4. **Normative messages.** Exception types and message texts are normative in
+   the Core profile (5.2.6), including the dotted type names of intrinsics
+   outside `builtins`.
+5. **Codecs.** Only UTF-8, ASCII, and Latin-1 and the seven error handlers of
+   23.3 are Core; other encodings are host-supplied.
+6. **Decisions recorded.** Questions revision 1 left to the reference's prose
+   are decided: the identity of empty immutable containers and of `copy()`
+   results is implementation-defined (Annex D); a match that fails after
+   binding names may leave them bound (Annex D); hash algorithms for numbers,
+   tuples, and frozensets are specified (22.1.9, 25.2, 26.3.4); the operand
+   order of reflected operators and comparisons is specified (7.2, 7.6); class
+   creation stores `__firstlineno__` and `__static_attributes__` (16.4.2).
+7. **Removed material.** The glossary, the history and license chapters, the
+   upstream license notice, and the source integrity manifest of revision 1
+   are not part of revision 2, which contains no upstream text.
+
+## Bibliography
+
+- *The Python Language Reference*, release 3.15. Python Software Foundation.
+- *The Python Standard Library*, release 3.15. Python Software Foundation.
+- CPython source code, version 3.15.0, in particular `Grammar/python.gram`,
+  `Objects/`, and `Python/`. Python Software Foundation.
+- ECMA-262, *ECMAScript Language Specification*, 16th edition (2025). Ecma
+  International. (Model for the structure and notation of this Standard.)
+- The Python Enhancement Proposals that introduced the features specified
+  here; in particular PEP 479 (generator `StopIteration`),
+  PEP 525 (asynchronous generators), PEP 584 (dict union), PEP 604 (union
+  types), PEP 634 (structural pattern matching), PEP 649 and PEP 749 (deferred
+  annotations), PEP 654 (exception groups), PEP 695 (type parameter syntax),
+  PEP 696 (type parameter defaults), PEP 701 (f-string grammar), PEP 750
+  (template strings), PEP 810 (lazy imports), and PEP 814 (frozendict).
+- Revision 1 of this Standard, `SLP-315:2026-draft1`.
