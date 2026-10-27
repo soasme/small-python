@@ -130,8 +130,8 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > Emulating generic types > The purpose of *\_\_class_getitem\_\_* | ClassGetitem
 3. Data model > Data model > Special method names > Emulating generic types > *\_\_class_getitem\_\_* versus *\_\_getitem\_\_* | ClassGetitem
 3. Data model > Data model > Special method names > Emulating callable objects | Callables
-3. Data model > Data model > Special method names > Emulating container types | TODO: Containers
-3. Data model > Data model > Special method names > Emulating numeric types | TODO: Operators, NumericProtocol
+3. Data model > Data model > Special method names > Emulating container types | Containers
+3. Data model > Data model > Special method names > Emulating numeric types | Operators, NumericProtocol
 3. Data model > Data model > Special method names > With Statement Context Managers | TODO: With
 3. Data model > Data model > Special method names > Customizing positional arguments in class pattern matching | Match
 3. Data model > Data model > Special method names > Emulating buffer types | TODO: Buffers

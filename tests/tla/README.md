@@ -56,6 +56,8 @@ and tied to real implementations by replaying them.
 | `Metaclasses.tla` | `__mro_entries__` and `__orig_bases__`, the most derived metaclass among the explicit one and the bases', metaclass conflicts, a non-class metaclass, and the `__classcell__` that `type.__new__` fills | yes |
 | `InstanceChecks.tla` | `__instancecheck__` and `__subclasscheck__` on a metaclass (and ignored on the class), bool conversion, the exact-type shortcut, tuples of classes, and a bad second argument | yes |
 | `ClassGetitem.tla` | `__class_getitem__` (plain or a classmethod) against a metaclass's and an instance's `__getitem__`, unsubscriptable classes, and builtin generic aliases | yes |
+| `Containers.tla` | `in` through `__contains__`, `__iter__`, or `__getitem__`; iteration and `__iter__ = None`; `reversed()` through `__reversed__` or `__len__` and `__getitem__`; `__missing__`; and storing without `__setitem__` | yes |
+| `NumericProtocol.tla` | binary operator dispatch with reflected methods (a subclass's override first), `NotImplemented`, in-place fallback, and `__index__` against `__int__` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
