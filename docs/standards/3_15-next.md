@@ -4545,3 +4545,325 @@ context; it is equal only to itself and hashable by identity; it has no
 instance namespace; `copy` and `deepcopy` return it unchanged; and
 `s.__reduce__()` returns *name*, so that it pickles by reference to its module.
 `sentinel` is not an acceptable base type.
+
+## 21 Exception Objects
+
+### 21.1 The `BaseException` class
+
+`BaseException` is the root of the exception hierarchy (21.2). An object can be
+raised (14.8) only if it is an instance of `BaseException`, and a class can be
+raised (being instantiated with no arguments) only if it is a subclass of it.
+
+#### 21.1.1 BaseException.\_\_new\_\_ ( *cls*, ...*args*, ...*kwargs* )
+
+1. If *cls* is not a type, raise a `TypeError` exception
+   ("BaseException.\_\_new\_\_(X): X is not a type object (*tname*(*cls*))").
+2. If *kwargs* is not empty and *cls*.`__init__` is `BaseException.__init__`,
+   raise a `TypeError` exception ("*cls*.\_\_name\_\_() takes no keyword
+   arguments").
+3. Let *e* be a new instance of *cls* with an empty instance namespace,
+   `__traceback__`, `__cause__`, and `__context__` set to `None`, and
+   `__suppress_context__` set to `False`.
+4. Set *e*.`args` to a tuple of *args*.
+5. Return *e*.
+
+Because `__new__` stores the arguments, a subclass whose `__init__` does not
+call `super().__init__()` still has them as `args`.
+
+#### 21.1.2 BaseException.\_\_init\_\_ ( *self*, ...*args*, ...*kwargs* )
+
+Raises the `TypeError` of 21.1.1 step 2 if *kwargs* is not empty, and
+otherwise sets *self*.`args` to a tuple of *args* and returns `None`.
+
+#### 21.1.3 Attributes
+
+| Attribute | Value |
+| --- | --- |
+| `args` | a tuple; assignment converts any iterable to a tuple and raises the `TypeError` of GetIterator otherwise |
+| `__traceback__` | a traceback (28.9) or `None`; assigning anything else raises `TypeError` ("\_\_traceback\_\_ must be a traceback or None") |
+| `__cause__` | an exception or `None` ("exception cause must be None or derive from BaseException"); assignment sets `__suppress_context__` to `True` |
+| `__context__` | an exception or `None` ("exception context must be None or derive from BaseException") |
+| `__suppress_context__` | a `bool` |
+| `__notes__` | absent until created by `add_note` or assignment |
+| `__dict__` | the instance namespace |
+
+#### 21.1.4 BaseException.prototype.add\_note ( *note* )
+
+1. If *note* is not a `str`, raise a `TypeError` exception ("add\_note()
+   argument must be str, not *tname*(*note*)").
+2. If *self* has no attribute `__notes__`, set it to a new empty list.
+3. Let *notes* be *self*.`__notes__`. If *notes* is not a `list`, raise a
+   `TypeError` exception ("Cannot add note: \_\_notes\_\_ is not a list").
+4. Append *note* to *notes* and return `None`.
+
+#### 21.1.5 BaseException.prototype.with\_traceback ( *tb* )
+
+Sets *self*.`__traceback__` to *tb*, as the attribute setter of 21.1.3 does,
+and returns *self*.
+
+#### 21.1.6 String conversion
+
+`BaseException.__str__` returns `""` when `args` is empty, `str(args[0])` when
+it has one element, and `str(args)` otherwise. `KeyError.__str__` differs
+only in using `repr(args[0])` for the one-element case.
+
+`BaseException.__repr__` returns *tname*(*self*) followed by `(`, the reprs of
+the elements of `args` separated by `", "`, and `)`; for one element no
+trailing comma is written.
+
+#### 21.1.7 Other methods
+
+- `__reduce__()` returns (Type(*self*), *self*.`args`) when the instance
+  namespace is empty, and (Type(*self*), *self*.`args`, the namespace)
+  otherwise.
+- `__setstate__(state)` updates the instance namespace from the dict *state*
+  (or does nothing for `None`).
+- Exceptions compare and hash by identity (`object.__eq__`, `object.__hash__`).
+
+### 21.2 The exception hierarchy
+
+Every class in Table 21-1 is an intrinsic, bound in the built-in namespace
+under its name, with `__module__` equal to `"builtins"`. Each derives from the
+class in its *Base* column; every class other than those so marked derives
+through `Exception`. `EnvironmentError` and `IOError` are additional names
+bound to `OSError` itself.
+
+Table 21-1: Built-in exception classes
+
+| Class | Base |
+| --- | --- |
+| `BaseException` | `object` |
+| `SystemExit`, `KeyboardInterrupt`, `GeneratorExit` | `BaseException` (not through `Exception`) |
+| `BaseExceptionGroup` | `BaseException` (not through `Exception`) |
+| `Exception` | `BaseException` |
+| `ExceptionGroup` | `BaseExceptionGroup`, `Exception` |
+| `ArithmeticError` | `Exception` |
+| `FloatingPointError`, `OverflowError`, `ZeroDivisionError` | `ArithmeticError` |
+| `AssertionError`, `AttributeError`, `BufferError`, `EOFError`, `MemoryError`, `ReferenceError`, `StopIteration`, `StopAsyncIteration`, `SystemError`, `TypeError` | `Exception` |
+| `ImportError` | `Exception` |
+| `ModuleNotFoundError`, `ImportCycleError` | `ImportError` |
+| `LookupError` | `Exception` |
+| `IndexError`, `KeyError` | `LookupError` |
+| `NameError` | `Exception` |
+| `UnboundLocalError` | `NameError` |
+| `OSError` | `Exception` |
+| `BlockingIOError`, `ChildProcessError`, `FileExistsError`, `FileNotFoundError`, `InterruptedError`, `IsADirectoryError`, `NotADirectoryError`, `PermissionError`, `ProcessLookupError`, `TimeoutError` | `OSError` |
+| `ConnectionError` | `OSError` |
+| `BrokenPipeError`, `ConnectionAbortedError`, `ConnectionRefusedError`, `ConnectionResetError` | `ConnectionError` |
+| `RuntimeError` | `Exception` |
+| `NotImplementedError`, `PythonFinalizationError`, `RecursionError` | `RuntimeError` |
+| `SyntaxError` | `Exception` |
+| `IndentationError` | `SyntaxError` |
+| `TabError` | `IndentationError` |
+| `ValueError` | `Exception` |
+| `UnicodeError` | `ValueError` |
+| `UnicodeDecodeError`, `UnicodeEncodeError`, `UnicodeTranslateError` | `UnicodeError` |
+| `Warning` | `Exception` |
+| the warning categories of 21.6 | `Warning` |
+
+The MRO of each class is its chain of bases ending in `BaseException`,
+`object`; that of `ExceptionGroup` is `ExceptionGroup`, `BaseExceptionGroup`,
+`Exception`, `BaseException`, `object`. Each class in the table is an
+acceptable base type. Classes that add instance fields (`OSError`,
+`SyntaxError`, `ImportError`, `AttributeError`, `NameError`, `StopIteration`,
+`SystemExit`, the `Unicode*Error` classes, `BaseExceptionGroup`) have distinct
+instance layouts; a class definition combining two of them raises the
+`TypeError` of 10.2 ("multiple bases have instance lay-out conflict").
+
+### 21.3 Concrete exceptions
+
+Unless this clause says otherwise, a class of Table 21-1 has the constructor and
+methods of `BaseException` unchanged.
+
+#### 21.3.1 SystemExit and StopIteration
+
+`SystemExit.code` is `None` when `args` is empty, `args[0]` when it has one
+element, and `args` otherwise. `StopIteration.value` is `args[0]`, or `None`
+when `args` is empty. Both are writable. A generator's
+`return v` raises `StopIteration` whose `value` is *v* (27.2).
+
+#### 21.3.2 AttributeError and NameError
+
+`AttributeError` accepts the keyword arguments `name` and `obj`, and
+`NameError` the keyword argument `name`; any other keyword raises a
+`TypeError` exception ("*tname*() got an unexpected keyword argument
+'*k*'"). The attributes default to `None`. The attribute lookup and name
+resolution failures of this Standard set them to the missing name and, for
+`AttributeError`, to the object searched.
+
+#### 21.3.3 ImportError
+
+`ImportError` accepts the keyword arguments `name`, `path`, and `name_from`,
+stored as attributes defaulting to `None`, and refuses others as 21.3.2.
+`ImportError.__str__` returns `msg`, which is `args[0]` when `args` has
+exactly one element and otherwise `None`, in which case `__str__` behaves as
+21.1.6. `__reduce__` includes the keyword attributes that are not `None` in
+its state.
+
+#### 21.3.4 OSError
+
+`OSError(*args)` interprets its positional arguments as follows:
+
+1. If 2 ≤ len(*args*) ≤ 5, let *errno* be *args*[0], *strerror* *args*[1],
+   *filename* *args*[2] if present, and *filename2* *args*[4] if present
+   (*args*[3], `winerror`, is ignored on hosts that are not Windows); set
+   `args` to (*errno*, *strerror*). Otherwise all four attributes are `None`
+   and `args` is *args*.
+2. If the class called is `OSError` itself and *errno* is an `int` that
+   appears in Table 21-2, the instance created is of the class in that table.
+   A call of a subclass, including a user-defined one, never changes the class.
+3. `BlockingIOError` takes a third integer argument as `characters_written`;
+   the attribute is absent (`AttributeError` "characters\_written") when not
+   given.
+
+`OSError.__str__` returns "[Errno *errno*] *strerror*: *r1*" where *r1* is the
+repr of `filename`, followed by " -> *r2*" with the repr of `filename2` when
+it is not `None`; "[Errno *errno*] *strerror*" when `filename` is `None` and
+*errno* and *strerror* were given; and the result of 21.1.6 otherwise.
+
+Table 21-2: OSError subclass by errno
+
+| errno names | Class |
+| --- | --- |
+| EAGAIN, EALREADY, EWOULDBLOCK, EINPROGRESS | `BlockingIOError` |
+| ECHILD | `ChildProcessError` |
+| EPIPE, ESHUTDOWN | `BrokenPipeError` |
+| ECONNABORTED | `ConnectionAbortedError` |
+| ECONNREFUSED | `ConnectionRefusedError` |
+| ECONNRESET | `ConnectionResetError` |
+| EEXIST | `FileExistsError` |
+| ENOENT | `FileNotFoundError` |
+| EISDIR | `IsADirectoryError` |
+| ENOTDIR | `NotADirectoryError` |
+| EINTR | `InterruptedError` |
+| EACCES, EPERM, ENOTCAPABLE | `PermissionError` |
+| ESRCH | `ProcessLookupError` |
+| ETIMEDOUT | `TimeoutError` |
+
+The numeric values of the errno names are those of the host (Annex D); the
+values 1 (EPERM), 2 (ENOENT), 3 (ESRCH), 4 (EINTR), 10 (ECHILD), 13 (EACCES),
+17 (EEXIST), 20 (ENOTDIR), 21 (EISDIR), and 32 (EPIPE) are common to the POSIX
+hosts.
+
+#### 21.3.5 SyntaxError
+
+`SyntaxError(msg, details)` sets `msg` to *msg* and, when *details* is given,
+unpacks it into `filename`, `lineno`, `offset`, `text`, and optionally
+`end_lineno` and `end_offset` (a sequence of other length raises `TypeError`,
+"function takes at least 4 arguments (*n* given)"). With one argument only
+`msg` is set; attributes not set are `None`. `args` is the positional
+arguments, unchanged.
+
+`SyntaxError.__str__` returns str(`msg`) followed, when `filename` is a `str`,
+by " (*b*, line *lineno*)" where *b* is the last path component of `filename`,
+or " (*b*)" when `lineno` is not an `int`, or by " (line *lineno*)" when only
+`lineno` is set. `IndentationError` and `TabError` add nothing. Syntax errors
+raised by the language itself are specified in 18.2.
+
+#### 21.3.6 Unicode errors
+
+`UnicodeDecodeError(encoding, object, start, end, reason)` takes a `str`, a
+bytes-like object (copied to `bytes`), two integers, and a `str`;
+`UnicodeEncodeError` takes a `str` object; `UnicodeTranslateError(object,
+start, end, reason)` takes no encoding. A different count raises `TypeError`
+("function takes exactly *n* arguments (*m* given)"). The arguments are
+attributes of those names.
+
+The `__str__` of each, with *s* and *e* being `start` and `end` and *o* the
+object:
+
+1. If 0 ≤ *s* < len(*o*) and *e* = *s* + 1, it names the single unit: for a
+   decode error "'*encoding*' codec can't decode byte 0x*hh* in position *s*:
+   *reason*" (two lower-case hex digits); for an encode or translate error
+   "… can't encode character '*c*' in position *s*: *reason*" (respectively
+   "can't translate character …") where *c* is `\x`*hh*, `\u`*hhhh*, or
+   `\U`*hhhhhhhh*, the shortest that holds the code point.
+2. Otherwise it names a range: "'*encoding*' codec can't decode bytes in
+   position *s*-*e*′: *reason*", where *e*′ is *e* − 1 written in decimal
+   (so a negative *e*′ is written with its sign), and similarly "can't encode
+   characters" and "can't translate characters".
+
+### 21.4 Exception groups
+
+#### 21.4.1 BaseExceptionGroup ( *message*, *exceptions* )
+
+1. Exactly two positional arguments are accepted
+   ("BaseExceptionGroup.\_\_new\_\_() takes exactly 2 arguments (*n* given)").
+2. If *message* is not a `str`, raise a `TypeError` exception
+   ("BaseExceptionGroup.\_\_new\_\_() argument 1 must be str, not
+   *tname*(*message*)").
+3. If *exceptions* is not a sequence (a set or dict is not), raise a
+   `TypeError` exception ("second argument (exceptions) must be a sequence").
+   Let *excs* be a tuple of its elements. If *excs* is empty, raise a
+   `ValueError` exception ("second argument (exceptions) must be a non-empty
+   sequence").
+4. If an element at index *i* is not an instance of `BaseException`, raise a
+   `ValueError` exception ("Item *i* of second argument (exceptions) is not an
+   exception").
+5. Let *cls* be the class called. If *cls* is `BaseExceptionGroup` and every
+   element is an `Exception`, let *cls* be `ExceptionGroup`. If *cls* is a
+   subclass of `Exception` and an element is not, raise a `TypeError`
+   exception ("Cannot nest BaseExceptions in an ExceptionGroup"), or, when
+   *cls* is not `ExceptionGroup` itself, ("Cannot nest BaseExceptions in
+   '*cls*.\_\_name\_\_'").
+6. Return a new instance of *cls* with `message` *message*, `exceptions`
+   *excs*, and `args` (*message*, *exceptions*).
+
+`message` and `exceptions` are read-only ("readonly attribute").
+`str(g)` is *message* followed by " (*n* sub-exception)" or " (*n*
+sub-exceptions)"; `repr(g)` is *tname*(*g*) with the reprs of `args`.
+
+#### 21.4.2 BaseExceptionGroup.prototype.derive ( *excs* )
+
+Returns `BaseExceptionGroup(self.message, excs)` (so a subclass is not kept,
+and the class is chosen as 21.4.1 step 5 does). Subclasses override it to keep
+their class.
+
+#### 21.4.3 split, subgroup, and DeriveAndCopy
+
+The abstract operation MatcherFor(*condition*) returns a predicate on
+exceptions: if *condition* is a subclass of `BaseException`, or a tuple all of
+whose elements are, the predicate is IsInstance(*x*, *condition*); if it is a
+callable that is not a class, the predicate is ToBoolean(? Call(*condition*,
+« *x* »)); otherwise raise a `TypeError` exception ("expected an exception
+type, a tuple of exception types, or a callable (other than a class)").
+
+The abstract operation SplitGroup(*g*, *match*, *keepRest*) returns a pair:
+
+1. If *match*(*g*), return (*g*, `None`).
+2. Let *m* and *r* be empty Lists.
+3. For each *x* of *g*.`exceptions`: if *x* is an exception group, let (*mx*,
+   *rx*) be ? SplitGroup(*x*, *match*, *keepRest*); otherwise let it be
+   (*x*, `None`) if *match*(*x*) and (`None`, *x*) if not. Append *mx* to *m*
+   and *rx* to *r* when not `None`.
+4. Let *mg* be `None` if *m* is empty and otherwise ? DeriveAndCopy(*g*, *m*);
+   let *rg* be likewise for *r*, or `None` when *keepRest* is **false**.
+5. Return (*mg*, *rg*).
+
+DeriveAndCopy(*g*, *list*) calls ? *g*.`derive`(*list*), raising `TypeError`
+if the result is not an exception group ("derive must return an instance of
+BaseExceptionGroup"), and sets its `__traceback__`, `__cause__`,
+`__context__`, and `__notes__` (a copy of the list, when present) to those of
+*g*.
+
+`g.split(condition)` returns ? SplitGroup(*g*, ? MatcherFor(*condition*),
+**true**) as a tuple; `g.subgroup(condition)` returns its first element,
+computed with *keepRest* **false**. When the whole group matches, the result
+is *g* itself.
+
+### 21.5 OS exceptions
+
+`OSError` and its subclasses are raised by the host hooks of Annex B that
+reach the operating system (HostOpen and those the host adds). A Core
+implementation raises them only through those hooks; the classes themselves,
+and 21.3.4, are part of every profile.
+
+### 21.6 Warning categories
+
+`Warning` and the following subclasses of it are the warning categories:
+`BytesWarning`, `DeprecationWarning`, `EncodingWarning`, `FutureWarning`,
+`ImportWarning`, `PendingDeprecationWarning`, `ResourceWarning`,
+`RuntimeWarning`, `SyntaxWarning`, `UnicodeWarning`, and `UserWarning`. They
+are ordinary exception classes: they can be raised and caught like any other.
+HostWarn (18.3) receives one of them, or a user-defined subclass of `Warning`,
+as the category.
