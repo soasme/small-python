@@ -3935,3 +3935,384 @@ An implementation shall not extend this Standard by:
 4. adding names to the built-in namespace that a conforming program could
    observe through `dir(builtins)`, other than through a documented host
    option.
+
+## 19 The Built-in Namespace
+
+The *built-in namespace* is the namespace of the module named `builtins`, which
+is always present in the module cache. Every frame whose globals have no
+`__builtins__` entry uses it (9.3.4). Its contents are listed below; it has no
+other names in the Core profile. A program may add, change, or delete its
+entries; LoadGlobal sees such changes.
+
+Unless a function's clause says otherwise, the built-in functions are
+%BuiltinFunctionType% objects (28.5): they are not descriptors, so they do not
+bind to instances when stored in a class; their `__name__` is the name under
+which they are listed; their `__module__` is `"builtins"`; and their arguments
+are bound to the Signature shown, as 7.4.4 specifies. In the error messages of a
+function whose Signature is not given in full, *name* stands for the function's
+name.
+
+### 19.1 Value properties
+
+| Name | Value |
+| --- | --- |
+| `None` | the object `None` (20.4.1) |
+| `False`, `True` | the `bool` objects (22.2) |
+| `NotImplemented` | the object `NotImplemented` (20.4.2) |
+| `Ellipsis` | the object `Ellipsis`, also written `...` (20.4.3) |
+| `__debug__` | `True` if assertions are enabled (14.5), `False` otherwise; it is not assignable ("cannot assign to `__debug__`") |
+| `__name__` | `"builtins"` |
+| `__doc__`, `__package__`, `__loader__`, `__spec__` | module attributes (17.2) |
+
+### 19.2 Constructor properties
+
+The built-in namespace binds the following classes, each specified in the clause
+named: `object` (20.1), `type` (20.2), `super` (20.3), `property` (20.5),
+`staticmethod` (20.6), `classmethod` (20.7), `sentinel` (20.8), `bool` (22.2),
+`int` (22.1), `float` (22.3), `complex` (22.4), `str` (23.1), `bytes` (24.1),
+`bytearray` (24.2), `memoryview` (24.4), `list` (25.1), `tuple` (25.2), `range`
+(25.3), `slice` (25.4), `dict` (26.1), `frozendict` (26.2), `set` and
+`frozenset` (26.3), `enumerate`, `filter`, `map`, `reversed`, and `zip` (27.1),
+and the exception classes of clause 21.
+
+### 19.3 Function properties
+
+#### 19.3.1 abs ( *x*, / )
+
+Return ? UnaryOp(*x*, `abs()`) (7.6.4). Its message is "bad operand type for
+abs(): '*tname*(*x*)'".
+
+#### 19.3.2 aiter ( *async_iterable*, / )
+
+1. Let *m* be ? LookupSpecial(*async_iterable*, `"__aiter__"`). If it is
+   **absent**, raise a `TypeError` exception ("'*tname*' object is not an async
+   iterable").
+2. Let *it* be ? Call(*m*, «»). If LookupInMRO(Type(*it*), `"__anext__"`) is
+   **absent**, raise a `TypeError` exception ("aiter() returned not an async
+   iterator of type '*tname*(*it*)'").
+3. Return *it*.
+
+#### 19.3.3 all ( *iterable*, / ) and any ( *iterable*, / )
+
+`all`: iterate *iterable* (7.7.3, one item at a time); return `False` at the
+first item for which ? ToBoolean is **false**, and `True` at the end. `any`:
+return `True` at the first item for which ToBoolean is **true**, and `False` at
+the end. Items after the deciding one are not requested.
+
+#### 19.3.4 anext ( *async_iterator*, *default*, / )
+
+1. Let *m* be ? LookupSpecial(*async_iterator*, `"__anext__"`). If it is
+   **absent**, raise a `TypeError` exception ("'*tname*' object is not an async
+   iterator").
+2. Let *a* be ? Call(*m*, «»).
+3. If *default* is not given, return *a*.
+4. Return a new awaitable that awaits *a* and returns its result, or returns
+   *default* if awaiting *a* raises `StopAsyncIteration`.
+
+#### 19.3.5 ascii ( *obj*, / )
+
+Let *r* be ? ToRepr(*obj*). Return *r* with every code point above U+007F
+replaced by `\x` and two hexadecimal digits if it is at most U+00FF, `\u` and
+four if at most U+FFFF, and `\U` and eight otherwise (lowercase digits).
+
+#### 19.3.6 bin ( *integer*, / ), oct ( *integer*, / ), hex ( *integer*, / )
+
+Let *i* be ? ToIndex(*integer*). Return the representation of ℝ(*i*) in base 2,
+8, or 16 with lowercase digits, prefixed by `0b`, `0o`, or `0x`, and by `-`
+before the prefix if it is negative.
+
+#### 19.3.7 breakpoint ( *args, **kws )
+
+Return ? HostBreakpoint(*args*, *kws*) (Annex B). When the host supplies no
+debugger, return `None`.
+
+#### 19.3.8 callable ( *obj*, / )
+
+Return `True` if IsCallable(*obj*) is **true**, and `False` otherwise.
+
+#### 19.3.9 chr ( *i*, / )
+
+1. Let *n* be ? ToIndex(*i*).
+2. If ℝ(*n*) is not in the interval [0, 0x10FFFF], raise a `ValueError`
+   exception ("chr() arg not in range(0x110000)").
+3. Return the `str` of length 1 whose code point is ℝ(*n*).
+
+#### 19.3.10 compile ( *source*, *filename*, *mode*, *flags*=0, *dont_inherit*=False, *optimize*=-1, *, *module*=None )
+
+1. If *source* is a `bytes`-like object, decode it as 11.2 specifies. If it is
+   neither a `str` nor bytes-like (nor an AST object of a host that supports
+   them, Annex C), raise a `TypeError` exception ("compile() arg 1 must be a
+   string, bytes or AST object").
+2. *filename* shall be a `str` or bytes ("expected str, bytes or os.PathLike
+   object, not *tname*").
+3. *mode* shall be `'exec'`, `'eval'`, or `'single'` ("compile() mode must be
+   'exec', 'eval' or 'single'"), selecting the start rule of 17.6.
+4. *flags* selects future features (14.13) by their compiler flag values and
+   other compiler options defined by the host; unless *dont_inherit* is true,
+   the future features in effect in the calling code are added. Unrecognized
+   flag bits raise a `ValueError` exception ("compile(): unrecognised flags").
+5. *optimize* is the assertion setting: `-1` the current one, `0` enabled, `1` or
+   more disabled (14.5).
+6. Parse and analyse the source, raising any early error (18.2).
+7. Return a new code object (28.2) for the module, expression, or interactive
+   statement.
+
+#### 19.3.11 delattr ( *obj*, *name*, / ), getattr ( *obj*, *name* [, *default*] ), hasattr ( *obj*, *name*, / ), setattr ( *obj*, *name*, *value*, / )
+
+- `delattr` performs ? DeleteAttribute(*obj*, *name*) and returns `None`.
+- `getattr` returns ? GetAttribute(*obj*, *name*); if that raises
+  `AttributeError` and *default* is given, it returns *default*. Its argument
+  count errors read "getattr expected at least 2 arguments, got *n*" and
+  "getattr expected at most 3 arguments, got *n*".
+- `hasattr` returns `True` if GetAttribute succeeds and `False` if it raises
+  `AttributeError`; any other exception propagates.
+- `setattr` performs ? SetAttribute(*obj*, *name*, *value*) and returns `None`.
+
+#### 19.3.12 dir ( [ *object* ] )
+
+1. Without an argument, return a new sorted list of the names bound in the
+   current local scope (the keys of `locals()`).
+2. Let *m* be ? LookupSpecial(*object*, `"__dir__"`); call it; return
+   ? IterateToList of the result, sorted (25.1.4).
+
+`object.__dir__` (20.1) lists the instance namespace and the attributes of the
+class and its bases; `type.__dir__` lists the class's and its bases' and its
+metaclass's attributes; a module's is 17.2.
+
+#### 19.3.13 divmod ( *x*, *y*, / )
+
+Return ? BinaryOp(*x*, *y*, `divmod`).
+
+#### 19.3.14 eval ( *source*, /, *globals*=None, *locals*=None )
+
+1. If *globals* is not `None` and is not a `dict` or `frozendict`, raise a
+   `TypeError` exception ("globals must be a real dict or a frozendict; try
+   eval(expr, {}, mapping)") when *locals* is a mapping, and ("globals must be a
+   dict or a frozendict") otherwise.
+2. If *locals* is not `None` and is not a mapping, raise a `TypeError`
+   exception ("locals must be a mapping").
+3. If *globals* is `None`, use the globals of the calling frame, and if *locals*
+   is also `None`, the calling frame's locals (as by `locals()`). If only
+   *locals* is `None`, use *globals* as locals.
+4. If *globals* has no `__builtins__` key, set it to the current built-in
+   namespace's module.
+5. If *source* is a code object, run it; otherwise compile *source* (a `str` or
+   bytes, with leading spaces and tabs removed) with mode `'eval'` and run it.
+   Code from `eval` sees the future features of the calling code.
+6. Return the value of the expression.
+
+#### 19.3.15 exec ( *source*, /, *globals*=None, *locals*=None, *, *closure*=None )
+
+As `eval`, with mode `'exec'`, returning `None`. The errors read ("exec()
+globals must be a dict or a frozendict, not *tname*") and ("locals must be a
+mapping or None, not *tname*"). *closure* is a tuple of cells, given only when
+*source* is a code object with free variables ("cannot use a closure with this
+code object"), whose length equals their number ("code object requires a
+closure of exactly length *n*"); running such a code object without *closure*
+raises the latter error.
+
+#### 19.3.16 format ( *value*, *format_spec*=`''`, / )
+
+Return ? Format(*value*, *format_spec*) (7.5.8).
+
+#### 19.3.17 globals ( )
+
+Return the globals `dict` of the calling frame.
+
+#### 19.3.18 hash ( *obj*, / )
+
+Return ? Hash(*obj*) as an `int` (7.5.7).
+
+#### 19.3.19 id ( *obj*, / )
+
+Return an `int` that is distinct for every object that exists at the same time
+as *obj* and constant for *obj*'s lifetime.
+
+#### 19.3.20 input ( *prompt*=`''`, / )
+
+Return ? HostInput(*prompt*) (Annex B): the host writes ? ToStr(*prompt*), if
+non-empty, to standard output, reads a line from standard input, and returns it
+without its line terminator; at end of input it raises `EOFError`. When the host
+supplies no input, raise a `RuntimeError` exception ("input(): lost sys.stdin").
+
+#### 19.3.21 isinstance ( *obj*, *class_or_tuple*, / )
+
+IsInstanceRecursive(*obj*, *c*):
+
+1. If Type(*obj*) is *c*, return **true**.
+2. If *c* is exactly `type` or another class whose type does not define
+   `__instancecheck__` other than `type.__instancecheck__`, return
+   IsInstance(*obj*, *c*) (7.1.3).
+3. If *c* is a %UnionType% (29.5), let *c* be its `__args__`.
+4. If *c* is a tuple, return **true** if IsInstanceRecursive(*obj*, *x*) is
+   **true** for some element *x*, and **false** otherwise.
+5. Let *m* be ? LookupSpecial(*c*, `"__instancecheck__"`). If it is not
+   **absent**, return ? ToBoolean(? Call(*m*, «*obj*»)).
+6. If *c* is not a class and has no `__bases__` attribute that is a tuple, raise
+   a `TypeError` exception ("isinstance() arg 2 must be a type, a tuple of types,
+   or a union").
+7. Return IsInstance(*obj*, *c*), where for an object with `__bases__` the
+   subclass test walks `__bases__`.
+
+`isinstance` returns `True` or `False` accordingly. Nesting of tuples and the
+calls to `__instancecheck__` count toward the recursion depth.
+
+#### 19.3.22 issubclass ( *cls*, *class_or_tuple*, / )
+
+As `isinstance`, with `__subclasscheck__` and IsSubclass. Its errors are "issubclass()
+arg 1 must be a class" and "issubclass() arg 2 must be a class, a tuple of
+classes, or a union". A non-class object with a `__bases__` tuple is treated as
+a class whose bases are those of `__bases__`.
+
+#### 19.3.23 iter ( *object* [, *sentinel*] )
+
+With one argument, return ? GetIterator(*object*). With two, *object* shall be
+callable ("iter(v, w): v must be callable"); return a new callable iterator
+(27.1.3).
+
+#### 19.3.24 len ( *obj*, / )
+
+Return ? Length(*obj*) (7.5.2).
+
+#### 19.3.25 locals ( )
+
+In a module scope, a class body, or `exec`/`eval` code, return the locals
+mapping of the calling frame. In a function-like scope, return a new `dict`
+snapshot of the current bindings of the frame's local, cell, and free names
+that are bound (free names included only as the frame sees them); changing the
+snapshot does not change the variables.
+
+#### 19.3.26 max ( *iterable*, *, *key*=None, *default* ) and max ( *a*, *b*, *args, *key*=None )
+
+1. If one positional argument is given, let *items* be its items (iterated
+   once); with several, the arguments themselves. With no positional
+   arguments raise a `TypeError` exception ("max expected at least 1 argument,
+   got 0"). Giving *default* with several positional arguments raises a
+   `TypeError` exception ("Cannot specify a default for max() with multiple
+   positional arguments").
+2. Let *best* be **absent**. For each item *x*, in order: let *k* be ? Call(*key*,
+   «*x*») if *key* is not `None`, else *x*; if *best* is **absent** or
+   ? RichCompareBool(*k*, *bestKey*, `>`) is **true**, set *best* to *x* and
+   *bestKey* to *k*.
+3. If *best* is **absent**: return *default* if given; otherwise raise a
+   `ValueError` exception ("max() iterable argument is empty").
+4. Return *best*.
+
+`min` is the same with `<` and "min" in the messages. Both return the first of
+several maximal (minimal) items.
+
+#### 19.3.27 next ( *iterator* [, *default*] )
+
+1. Let *m* be ? LookupSpecial(*iterator*, `"__next__"`). If it is **absent**,
+   raise a `TypeError` exception ("'*tname*' object is not an iterator").
+2. Let *r* be Call(*m*, «»).
+3. If *r* is a raise completion with a `StopIteration` exception and *default*
+   is given, return *default*.
+4. Return ? *r*.
+
+#### 19.3.28 open ( *file*, *mode*=`'r'`, … )
+
+Return ? HostOpen(*arguments*) (Annex B). When the host supplies no files, raise
+an `OSError` exception.
+
+#### 19.3.29 ord ( *character*, / )
+
+1. If *character* is a `str` of length 1, return its code point.
+2. If it is a `bytes` or `bytearray` of length 1, return its byte.
+3. If it is a `str`, `bytes`, or `bytearray` of another length, raise a
+   `TypeError` exception ("ord() expected a character, but string of length *n*
+   found").
+4. Raise a `TypeError` exception ("ord() expected string of length 1, but
+   *tname* found").
+
+#### 19.3.30 pow ( *base*, *exp*, *mod*=None )
+
+If *mod* is `None`, return ? BinaryOp(*base*, *exp*, `**`); otherwise return
+? BinaryOp(*base*, *exp*, `**`, *mod*). Clause 22 specifies the numeric
+results.
+
+#### 19.3.31 print ( *objects, *sep*=`' '`, *end*=`'\n'`, *file*=None, *flush*=False )
+
+1. *sep* and *end* shall be `None` or `str` ("sep must be None or a string, not
+   *tname*", "end must be None or a string, not *tname*"); `None` means the
+   default.
+2. If *file* is `None`, let *file* be HostStandardOutput() (Annex B); if the
+   host has none, return `None`.
+3. Let *write* be ? GetAttribute(*file*, `"write"`).
+4. For each object, in order: if it is not the first, call *write* with *sep*;
+   call *write* with ? ToStr(*object*).
+5. Call *write* with *end*.
+6. If ? ToBoolean(*flush*) is **true**, call ? GetAttribute(*file*, `"flush"`).
+7. Return `None`.
+
+#### 19.3.32 repr ( *obj*, / )
+
+Return ? ToRepr(*obj*).
+
+#### 19.3.33 round ( *number*, *ndigits*=None )
+
+1. Let *m* be ? LookupSpecial(*number*, `"__round__"`). If it is **absent**,
+   raise a `TypeError` exception ("type *tname* doesn't define `__round__`
+   method").
+2. If *ndigits* is `None`, return ? Call(*m*, «»); otherwise return ? Call(*m*,
+   «*ndigits*»).
+
+#### 19.3.34 sorted ( *iterable*, /, *, *key*=None, *reverse*=False )
+
+Let *l* be a new list of ? IterateToList(*iterable*); perform ? *l*.`sort`(key=*key*,
+reverse=*reverse*) (25.1.4); return *l*. The argument errors are "sorted expected
+1 argument, got *n*".
+
+#### 19.3.35 sum ( *iterable*, /, *start*=0 )
+
+1. If *start* is an instance of `str`, `bytes`, or `bytearray`, raise a
+   `TypeError` exception ("sum() can't sum strings [use ''.join(seq) instead]",
+   "sum() can't sum bytes [use b''.join(seq) instead]", or "sum() can't sum
+   bytearray [use b''.join(seq) instead]").
+2. Let *it* be ? GetIterator(*iterable*) and *acc* be *start*.
+3. While Type(*acc*) is exactly `int`: take the next item *x*; at the end
+   return *acc*; if Type(*x*) is exactly `int` or `bool`, set *acc* to the `int`
+   whose value is ℝ(*acc*) + ℝ(*x*) without calling any method; otherwise set
+   *acc* to ? BinaryOp(*acc*, *x*, `+`).
+4. While Type(*acc*) is exactly `float`: keep the compensated sum (*hi*, *lo*)
+   = (*acc*, 0); for each next item *x* that is exactly a `float`, or an `int`
+   (or `int` subclass) converted to `float` (22.1.7), perform CompensatedAdd;
+   at the end return CompensatedValue; at any other item set *acc* to
+   ? BinaryOp(CompensatedValue as a `float`, *x*, `+`) and leave this step.
+5. While Type(*acc*) is exactly `complex`: as step 4, with separate compensated
+   sums for the real and imaginary parts, accepting exact `complex` items,
+   `int` items (real part), and `float` items (real part).
+6. For each remaining item *x*, set *acc* to ? BinaryOp(*acc*, *x*, `+`).
+7. Return *acc*.
+
+CompensatedAdd(*x*): let *t* be *hi* + *x* (rounded); if |*hi*| ≥ |*x*|, add
+(*hi* − *t*) + *x* to *lo*, otherwise add (*x* − *t*) + *hi* to *lo* (each
+operation rounded as binary64); set *hi* to *t*. CompensatedValue is *hi* + *lo*
+if *lo* is non-zero and finite, and *hi* otherwise.
+
+#### 19.3.36 vars ( [ *object* ] )
+
+Without an argument, return `locals()`. Otherwise return ? GetAttribute(*object*,
+`"__dict__"`), raising a `TypeError` exception ("vars() argument must have
+`__dict__` attribute") if that raises `AttributeError`.
+
+#### 19.3.37 `__import__` ( *name*, *globals*=None, *locals*=None, *fromlist*=(), *level*=0 )
+
+17.4.4.
+
+#### 19.3.38 `__build_class__` ( *func*, *name*, /, *bases, *metaclass*, **kwds* )
+
+Performs BuildClass (16.4.2) with *func* as the class body. The class statement
+calls it from the built-in namespace. Its errors: "`__build_class__`: not enough
+arguments", "`__build_class__`: func must be a function", "`__build_class__`:
+name is not a string".
+
+#### 19.3.39 `__lazy_import__` ( *name*, *globals*=None, *locals*=None, *fromlist*=(), *level*=0 )
+
+Creates the lazy import object of 17.5 for the given import.
+
+### 19.4 Host-provided names
+
+The names `exit`, `quit`, `help`, `copyright`, `credits`, and `license` are not
+part of the Core built-in namespace. A host may add them (Annex C); `exit` and
+`quit` then raise `SystemExit` when called.
