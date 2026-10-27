@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla tla-coverage
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -99,8 +99,13 @@ $(TLA_JAR):
 	echo "$(TLA_SHA256)  $@.tmp" | shasum -a 256 -c -
 	mv $@.tmp $@
 
-test-tla: spy $(TLA_JAR)
+test-tla: spy $(TLA_JAR) tla-coverage
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(TLA_JAR)
+
+# Every section of docs/standards/3_15.md is mapped to the models covering it
+# (tests/tla/coverage.txt). TODO entries pass until their models are written.
+tla-coverage:
+	python3 tests/tla_coverage.py --allow-todo
 
 test-cpython: test-cpython-doctests test-cpython-unittest
 	$(CPYTHON) tests/cpython.py discover

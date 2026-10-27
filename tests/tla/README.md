@@ -41,6 +41,22 @@ set `JAVA` to choose one) runs `tests/tla_check.py`, which:
 3. Runs the replay on the pinned CPython 3.15 oracle, which must pass and so
    validates the model, then on spy, which must pass to conform to it.
 
+## Coverage of the standard
+
+`coverage.txt` maps every section of `docs/standards/3_15.md` to the models
+that cover it, to `= sections` when its own text is a short introduction to
+subsections that are covered, or to `- reason` when it states no behavior of
+the Core profile (licenses, history, the glossary, and host services such as
+module discovery, which the standard's profile clauses place outside Core).
+`TODO: models` marks a section whose planned models are not written yet.
+`make tla-coverage` (part of `make test-tla`) checks the map against the
+standard's headings.
+
+A section mapped to a model means the model formalizes that section's
+behavior for the cases its bounds enumerate, and that the oracle and spy
+agree with it on every one of them. It does not mean every sentence of the
+section is in the model, and it is not a proof about spy.c.
+
 ## What this does and does not show
 
 TLC checks the models exhaustively, but only within their bounds: two

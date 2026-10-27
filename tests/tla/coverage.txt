@@ -1,0 +1,454 @@
+# Sections of docs/standards/3_15.md and the TLA+ models that cover them;
+# checked by tests/tla_coverage.py.
+0. Scope and conformance | = sections
+0. Scope and conformance > 0.1 Purpose [SLP315-SCOPE] | - informative: the document's purpose and status
+0. Scope and conformance > 0.2 Normative language [SLP315-NORM] | - defines this document's terms, not language behavior
+0. Scope and conformance > 0.3 Core profile [SLP315-CORE] | - profile definition: its requirements are the chapters it lists, mapped below
+0. Scope and conformance > 0.4 Host profile [SLP315-HOST] | - profile definition: host services are outside Core
+0. Scope and conformance > 0.5 Extension profile [SLP315-EXT] | - Extension profile: CPython C API compatibility, separate from Core
+0. Scope and conformance > 0.6 Required 3.15 distinctions [SLP315-EDITION] | TODO: LazyImports, FrozenDicts, Sentinels, Comprehensions, Identifiers
+0. Scope and conformance > 0.7 Abstract operations and observable behavior [SLP315-OBS] | Evaluation, Operators, GC, SpyGC, IntArith
+0. Scope and conformance > 0.8 Evidence and conformance claims [SLP315-TEST] | - requirements on test reports, not language behavior
+0. Scope and conformance > 0.9 Edition stability and regeneration [SLP315-VERSION] | - the edition's revision process
+Reference chapter contents | - table of contents
+1. Language reference introduction and notation | = sections
+1. Language reference introduction and notation > Introduction | - informative: introduction
+1. Language reference introduction and notation > Introduction > Alternate Implementations | - informative: survey of implementations
+1. Language reference introduction and notation > Introduction > Notation | - informative: the notation this document uses
+1. Language reference introduction and notation > Introduction > Notation > Lexical and Syntactic definitions | - informative: the notation this document uses
+2. Lexical analysis | = sections
+2. Lexical analysis > Lexical analysis | TODO: Tokens
+2. Lexical analysis > Lexical analysis > Line structure | = sections
+2. Lexical analysis > Lexical analysis > Line structure > Logical lines | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Physical lines | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Comments | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Encoding declarations | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Explicit line joining | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Implicit line joining | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Blank lines | TODO: LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Indentation | TODO: Indentation
+2. Lexical analysis > Lexical analysis > Line structure > Whitespace between tokens | TODO: Tokens
+2. Lexical analysis > Lexical analysis > Line structure > End marker | TODO: Indentation
+2. Lexical analysis > Lexical analysis > Other tokens | TODO: Tokens
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) | TODO: Identifiers
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Keywords | TODO: Identifiers
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Soft Keywords | TODO: Identifiers, Match
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Reserved classes of identifiers | TODO: Identifiers, Mangling
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Non-ASCII characters in names | TODO: Identifiers
+2. Lexical analysis > Lexical analysis > Literals | TODO: StringLiterals, NumericLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Triple-quoted strings | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > String prefixes | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Ignored end of line | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Escaped characters | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Octal character | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal character | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Named Unicode character | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal Unicode characters | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Unrecognized escape sequences | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Bytes literals | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Raw string literals | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > f-strings | TODO: FStrings
+2. Lexical analysis > Lexical analysis > String and Bytes literals > t-strings | TODO: TStrings
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar for f-strings | TODO: FStrings
+2. Lexical analysis > Lexical analysis > Numeric literals | = sections
+2. Lexical analysis > Lexical analysis > Numeric literals > Integer literals | TODO: NumericLiterals
+2. Lexical analysis > Lexical analysis > Numeric literals > Floating-point literals | TODO: NumericLiterals
+2. Lexical analysis > Lexical analysis > Numeric literals > Imaginary literals | TODO: NumericLiterals
+2. Lexical analysis > Lexical analysis > Operators and delimiters | TODO: Tokens
+3. Data model | = sections
+3. Data model > Data model | = sections
+3. Data model > Data model > Objects, values and types | TODO: Objects
+3. Data model > Data model > The standard type hierarchy | = sections
+3. Data model > Data model > The standard type hierarchy > None | TODO: Singletons
+3. Data model > Data model > The standard type hierarchy > NotImplemented | TODO: Singletons, Operators
+3. Data model > Data model > The standard type hierarchy > Ellipsis | TODO: Singletons
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` | = sections
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Integral` | TODO: NumericTypes, IntArith
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Real` (`float`) | TODO: NumericTypes
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Complex` (`complex`) | TODO: NumericTypes
+3. Data model > Data model > The standard type hierarchy > Sequences | = sections
+3. Data model > Data model > The standard type hierarchy > Sequences > Immutable sequences | TODO: SeqOps
+3. Data model > Data model > The standard type hierarchy > Sequences > Mutable sequences | TODO: Lists
+3. Data model > Data model > The standard type hierarchy > Set types | TODO: Sets
+3. Data model > Data model > The standard type hierarchy > Mappings | = sections
+3. Data model > Data model > The standard type hierarchy > Mappings > Dictionaries | Dicts
+3. Data model > Data model > The standard type hierarchy > Mappings > Frozen dictionaries | TODO: FrozenDicts
+3. Data model > Data model > The standard type hierarchy > Callable types | = sections
+3. Data model > Data model > The standard type hierarchy > Callable types > User-defined functions | TODO: FunctionObjects
+3. Data model > Data model > The standard type hierarchy > Callable types > Special read-only attributes | TODO: FunctionObjects
+3. Data model > Data model > The standard type hierarchy > Callable types > Special writable attributes | TODO: FunctionObjects
+3. Data model > Data model > The standard type hierarchy > Callable types > Instance methods | TODO: Methods
+3. Data model > Data model > The standard type hierarchy > Callable types > Generator functions | Generators
+3. Data model > Data model > The standard type hierarchy > Callable types > Coroutine functions | TODO: Generators, Awaitables
+3. Data model > Data model > The standard type hierarchy > Callable types > Asynchronous generator functions | AsyncGenerators
+3. Data model > Data model > The standard type hierarchy > Callable types > Built-in functions | TODO: Methods
+3. Data model > Data model > The standard type hierarchy > Callable types > Built-in methods | TODO: Methods
+3. Data model > Data model > The standard type hierarchy > Callable types > Classes | TODO: Callables
+3. Data model > Data model > The standard type hierarchy > Callable types > Class Instances | TODO: Callables
+3. Data model > Data model > The standard type hierarchy > Modules | = sections
+3. Data model > Data model > The standard type hierarchy > Modules > Import-related attributes on module objects | TODO: Imports
+3. Data model > Data model > The standard type hierarchy > Modules > Other writable attributes on module objects | TODO: ModuleObjects
+3. Data model > Data model > The standard type hierarchy > Modules > Module dictionaries | TODO: ModuleObjects
+3. Data model > Data model > The standard type hierarchy > Custom classes | = sections
+3. Data model > Data model > The standard type hierarchy > Custom classes > Special attributes | TODO: ClassObjects
+3. Data model > Data model > The standard type hierarchy > Custom classes > Special methods | TODO: SpecialLookup
+3. Data model > Data model > The standard type hierarchy > Class instances | = sections
+3. Data model > Data model > The standard type hierarchy > Class instances > Special attributes | TODO: ClassObjects
+3. Data model > Data model > The standard type hierarchy > I/O objects (also known as file objects) | - Host profile: file objects come from the Files service (SLP315-HOST)
+3. Data model > Data model > The standard type hierarchy > Internal types | = sections
+3. Data model > Data model > The standard type hierarchy > Internal types > Code objects | TODO: CodeObjects
+3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes | TODO: CodeObjects
+3. Data model > Data model > The standard type hierarchy > Internal types > Methods on code objects | TODO: CodeObjects
+3. Data model > Data model > The standard type hierarchy > Internal types > Frame objects | TODO: Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes (2) | TODO: Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Special writable attributes | TODO: Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Frame object methods | TODO: Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Traceback objects | TODO: Tracebacks
+3. Data model > Data model > The standard type hierarchy > Internal types > Slice objects | TODO: Slices
+3. Data model > Data model > The standard type hierarchy > Internal types > Static method objects | TODO: MethodDescriptors
+3. Data model > Data model > The standard type hierarchy > Internal types > Class method objects | TODO: MethodDescriptors
+3. Data model > Data model > Special method names | = sections
+3. Data model > Data model > Special method names > Basic customization | TODO: BasicCustomization
+3. Data model > Data model > Special method names > Customizing attribute access | TODO: Attributes, Descriptors
+3. Data model > Data model > Special method names > Customizing attribute access > Customizing module attribute access | TODO: ModuleObjects
+3. Data model > Data model > Special method names > Customizing attribute access > Implementing Descriptors | TODO: Attributes, Descriptors
+3. Data model > Data model > Special method names > Customizing attribute access > Invoking Descriptors | TODO: Descriptors
+3. Data model > Data model > Special method names > Customizing attribute access > \_\_slots\_\_ | TODO: Slots
+3. Data model > Data model > Special method names > Customizing class creation | TODO: ClassCreation, Metaclasses
+3. Data model > Data model > Special method names > Customizing class creation > Metaclasses | TODO: Metaclasses
+3. Data model > Data model > Special method names > Customizing class creation > Resolving MRO entries | TODO: Metaclasses
+3. Data model > Data model > Special method names > Customizing class creation > Determining the appropriate metaclass | TODO: Metaclasses
+3. Data model > Data model > Special method names > Customizing class creation > Preparing the class namespace | ClassCreation
+3. Data model > Data model > Special method names > Customizing class creation > Executing the class body | ClassCreation, Scopes
+3. Data model > Data model > Special method names > Customizing class creation > Creating the class object | TODO: ClassCreation, Metaclasses
+3. Data model > Data model > Special method names > Customizing class creation > Uses for metaclasses | - informative: suggests uses for metaclasses
+3. Data model > Data model > Special method names > Customizing instance and subclass checks | TODO: InstanceChecks
+3. Data model > Data model > Special method names > Emulating generic types | TODO: ClassGetitem
+3. Data model > Data model > Special method names > Emulating generic types > The purpose of *\_\_class_getitem\_\_* | TODO: ClassGetitem
+3. Data model > Data model > Special method names > Emulating generic types > *\_\_class_getitem\_\_* versus *\_\_getitem\_\_* | TODO: ClassGetitem
+3. Data model > Data model > Special method names > Emulating callable objects | TODO: Callables
+3. Data model > Data model > Special method names > Emulating container types | TODO: Containers
+3. Data model > Data model > Special method names > Emulating numeric types | TODO: Operators, NumericProtocol
+3. Data model > Data model > Special method names > With Statement Context Managers | TODO: With
+3. Data model > Data model > Special method names > Customizing positional arguments in class pattern matching | Match
+3. Data model > Data model > Special method names > Emulating buffer types | TODO: Buffers
+3. Data model > Data model > Special method names > Annotations | TODO: Annotations
+3. Data model > Data model > Special method names > Special method lookup | TODO: SpecialLookup
+3. Data model > Data model > Coroutines | = sections
+3. Data model > Data model > Coroutines > Awaitable Objects | TODO: Awaitables
+3. Data model > Data model > Coroutines > Coroutine Objects | TODO: Generators, Awaitables
+3. Data model > Data model > Coroutines > Asynchronous Iterators | TODO: AsyncFor
+3. Data model > Data model > Coroutines > Asynchronous Context Managers | TODO: AsyncWith
+4. Execution model | = sections
+4. Execution model > Execution model | = sections
+4. Execution model > Execution model > Structure of a program | TODO: CompileModes
+4. Execution model > Execution model > Naming and binding | = sections
+4. Execution model > Execution model > Naming and binding > Binding of names | TODO: Scopes, ScopeErrors
+4. Execution model > Execution model > Naming and binding > Resolution of names | Scopes
+4. Execution model > Execution model > Naming and binding > Annotation scopes | TODO: Annotations, Generics
+4. Execution model > Execution model > Naming and binding > Lazy evaluation | TODO: Annotations, TypeAliases
+4. Execution model > Execution model > Naming and binding > Builtins and restricted execution | TODO: BuiltinsScope
+4. Execution model > Execution model > Naming and binding > Interaction with dynamic features | TODO: DynamicScopes
+4. Execution model > Execution model > Exceptions | TODO: Exceptions, Raise
+4. Execution model > Execution model > Runtime Components | = sections
+4. Execution model > Execution model > Runtime Components > General Computing Model | - informative: describes processes, threads, and the host computer
+4. Execution model > Execution model > Runtime Components > Python Runtime Model | - informative: describes interpreters and threads; Core does not require threads (SLP315-HOST)
+5. Import system | = sections
+5. Import system > The import system | = sections
+5. Import system > The import system > `importlib` | - Host profile: importable compatibility facade (SLP315-CORE)
+5. Import system > The import system > Packages | = sections
+5. Import system > The import system > Packages > Regular packages | TODO: Imports
+5. Import system > The import system > Packages > Namespace packages | TODO: Imports
+5. Import system > The import system > Searching | = sections
+5. Import system > The import system > Searching > The module cache | TODO: Imports
+5. Import system > The import system > Searching > Finders and loaders | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > Searching > Import hooks | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > Searching > The meta path | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > Loading | TODO: Imports
+5. Import system > The import system > Loading > Loaders | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > Loading > Submodules | TODO: Imports
+5. Import system > The import system > Loading > Module specs | - Host profile: module discovery metadata (SLP315-HOST)
+5. Import system > The import system > Loading > \_\_path\_\_ attributes on modules | TODO: Imports
+5. Import system > The import system > Loading > Module reprs | TODO: ModuleObjects
+5. Import system > The import system > Loading > Cached bytecode invalidation | - Host profile: module discovery service; bytecode is not prescribed (SLP315-NORM)
+5. Import system > The import system > The Path Based Finder | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > The Path Based Finder > Path entry finders | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > The Path Based Finder > Path entry finder protocol | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > Replacing the standard import system | - Host profile: module discovery service (SLP315-HOST)
+5. Import system > The import system > Package Relative Imports | TODO: Imports
+5. Import system > The import system > Special considerations for \_\_main\_\_ | - Host profile: the entry module is chosen by the host (SLP315-HOST)
+5. Import system > The import system > Special considerations for \_\_main\_\_ > \_\_main\_\_.\_\_spec\_\_ | - Host profile: the entry module is chosen by the host (SLP315-HOST)
+5. Import system > The import system > References | - informative: bibliography
+6. Expressions | = sections
+6. Expressions > Expressions | = sections
+6. Expressions > Expressions > Arithmetic conversions | TODO: ArithConversions
+6. Expressions > Expressions > Atoms | TODO: Atoms
+6. Expressions > Expressions > Atoms > Built-in constants | TODO: Singletons
+6. Expressions > Expressions > Atoms > Identifiers (Names) | = sections
+6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | TODO: Mangling
+6. Expressions > Expressions > Atoms > Literals | TODO: LiteralIdentity
+6. Expressions > Expressions > Atoms > Literals > Literals and object identity | TODO: LiteralIdentity
+6. Expressions > Expressions > Atoms > Literals > String literal concatenation | TODO: StringLiterals
+6. Expressions > Expressions > Atoms > Parenthesized groups | TODO: Displays
+6. Expressions > Expressions > Atoms > Container displays | TODO: Displays
+6. Expressions > Expressions > Atoms > Container displays > List displays | TODO: Displays
+6. Expressions > Expressions > Atoms > Container displays > Set displays | TODO: Displays
+6. Expressions > Expressions > Atoms > Container displays > Tuple displays | TODO: Displays
+6. Expressions > Expressions > Atoms > Container displays > Dictionary displays | TODO: Displays
+6. Expressions > Expressions > Atoms > Comprehensions | TODO: Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Filtering in comprehensions | TODO: Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Complex comprehensions | TODO: Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Unpacking in comprehensions | TODO: Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Asynchronous comprehensions | TODO: AsyncFor
+6. Expressions > Expressions > Atoms > Comprehensions > Formal grammar for comprehensions | TODO: Comprehensions
+6. Expressions > Expressions > Atoms > Generator expressions | TODO: GenExprs
+6. Expressions > Expressions > Atoms > Yield expressions | Generators, YieldFrom
+6. Expressions > Expressions > Atoms > Yield expressions > Generator-iterator methods | Generators
+6. Expressions > Expressions > Atoms > Yield expressions > Examples | Generators
+6. Expressions > Expressions > Atoms > Yield expressions > Asynchronous generator functions | AsyncGenerators
+6. Expressions > Expressions > Atoms > Yield expressions > Asynchronous generator-iterator methods | AsyncGenerators
+6. Expressions > Expressions > Primaries | = sections
+6. Expressions > Expressions > Primaries > Attribute references | Attributes
+6. Expressions > Expressions > Primaries > Subscriptions and slicings | TODO: Subscripts, Slices
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > Slicings | TODO: Slices
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > Comma-separated subscripts | TODO: Subscripts
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > "Starred" subscriptions | TODO: Subscripts
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | TODO: Subscripts
+6. Expressions > Expressions > Primaries > Calls | Calls
+6. Expressions > Expressions > Await expression | TODO: Awaitables
+6. Expressions > Expressions > The power operator | TODO: Power
+6. Expressions > Expressions > Unary arithmetic and bitwise operations | TODO: IntArith, ArithConversions
+6. Expressions > Expressions > Binary arithmetic operations | TODO: BinaryArith, ArithConversions
+6. Expressions > Expressions > Shifting operations | IntArith
+6. Expressions > Expressions > Binary bitwise operations | IntArith
+6. Expressions > Expressions > Comparisons | TODO: Comparisons
+6. Expressions > Expressions > Comparisons > Value comparisons | TODO: Comparisons
+6. Expressions > Expressions > Comparisons > Membership test operations | TODO: Membership
+6. Expressions > Expressions > Comparisons > Identity comparisons | TODO: Comparisons
+6. Expressions > Expressions > Boolean operations | TODO: Evaluation, Truth
+6. Expressions > Expressions > Assignment expressions | TODO: AssignExpr
+6. Expressions > Expressions > Conditional expressions | Evaluation
+6. Expressions > Expressions > Lambdas | TODO: Lambdas
+6. Expressions > Expressions > Expression lists | TODO: Unpacking, Displays
+6. Expressions > Expressions > Expression lists > Iterable unpacking | TODO: Unpacking, Displays
+6. Expressions > Expressions > Evaluation order | Evaluation
+6. Expressions > Expressions > Operator precedence | TODO: Precedence
+7. Simple statements | = sections
+7. Simple statements > Simple statements | TODO: Grammar
+7. Simple statements > Simple statements > Expression statements | TODO: CompileModes
+7. Simple statements > Simple statements > Assignment statements | TODO: Unpacking, Evaluation, Assignment
+7. Simple statements > Simple statements > Assignment statements > Augmented assignment statements | TODO: Operators, Evaluation, Assignment
+7. Simple statements > Simple statements > Assignment statements > Annotated assignment statements | TODO: Annotations
+7. Simple statements > Simple statements > The `assert` statement | TODO: Assert
+7. Simple statements > Simple statements > The `pass` statement | TODO: Grammar
+7. Simple statements > Simple statements > The `del` statement | TODO: Del
+7. Simple statements > Simple statements > The `return` statement | Exceptions, Generators
+7. Simple statements > Simple statements > The `yield` statement | Generators
+7. Simple statements > Simple statements > The `raise` statement | TODO: Raise
+7. Simple statements > Simple statements > The `break` statement | Iteration, Exceptions
+7. Simple statements > Simple statements > The `continue` statement | Iteration, Exceptions
+7. Simple statements > Simple statements > The `import` statement | TODO: Imports
+7. Simple statements > Simple statements > The `import` statement > Lazy imports | TODO: LazyImports
+7. Simple statements > Simple statements > The `import` statement > Lazy imports > Compatibility via `__lazy_modules__` | TODO: LazyImports
+7. Simple statements > Simple statements > The `import` statement > Future statements | TODO: Future
+7. Simple statements > Simple statements > The `global` statement | TODO: Scopes, ScopeErrors
+7. Simple statements > Simple statements > The `nonlocal` statement | TODO: Scopes, ScopeErrors
+7. Simple statements > Simple statements > The `type` statement | TODO: TypeAliases
+8. Compound statements | = sections
+8. Compound statements > Compound statements | TODO: Grammar
+8. Compound statements > Compound statements > The `if` statement | TODO: Conditionals
+8. Compound statements > Compound statements > The `while` statement | TODO: Conditionals
+8. Compound statements > Compound statements > The `for` statement | Iteration
+8. Compound statements > Compound statements > The `try` statement | Exceptions
+8. Compound statements > Compound statements > The `try` statement > `except` clause | Exceptions
+8. Compound statements > Compound statements > The `try` statement > `except*` clause | ExceptStar
+8. Compound statements > Compound statements > The `try` statement > `else` clause | Exceptions
+8. Compound statements > Compound statements > The `try` statement > `finally` clause | Exceptions
+8. Compound statements > Compound statements > The `with` statement | TODO: With
+8. Compound statements > Compound statements > The `match` statement | Match
+8. Compound statements > Compound statements > The `match` statement > Overview | Match
+8. Compound statements > Compound statements > The `match` statement > Guards | TODO: MatchGuards
+8. Compound statements > Compound statements > The `match` statement > Irrefutable Case Blocks | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > OR Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > AS Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > Literal Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > Capture Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > Wildcard Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > Value Patterns | TODO: MatchGuards
+8. Compound statements > Compound statements > The `match` statement > Patterns > Group Patterns | TODO: MatchGuards
+8. Compound statements > Compound statements > The `match` statement > Patterns > Sequence Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > Mapping Patterns | Match
+8. Compound statements > Compound statements > The `match` statement > Patterns > Class Patterns | Match
+8. Compound statements > Compound statements > Function definitions | TODO: FunctionDefs, Calls
+8. Compound statements > Compound statements > Class definitions | ClassCreation, MRO
+8. Compound statements > Compound statements > Class definitions > Multiple inheritance | MRO, Super
+8. Compound statements > Compound statements > Coroutines | = sections
+8. Compound statements > Compound statements > Coroutines > Coroutine function definition | TODO: Awaitables
+8. Compound statements > Compound statements > Coroutines > The `async for` statement | TODO: AsyncFor
+8. Compound statements > Compound statements > Coroutines > The `async with` statement | TODO: AsyncWith
+8. Compound statements > Compound statements > Type parameter lists | TODO: Generics
+8. Compound statements > Compound statements > Type parameter lists > Generic functions | TODO: Generics
+8. Compound statements > Compound statements > Type parameter lists > Generic classes | TODO: Generics
+8. Compound statements > Compound statements > Type parameter lists > Generic type aliases | TODO: Generics, TypeAliases
+8. Compound statements > Compound statements > Annotations | TODO: Annotations
+9. Top-level components | = sections
+9. Top-level components > Top-level components | = sections
+9. Top-level components > Top-level components > Complete Python programs | TODO: CompileModes
+9. Top-level components > Top-level components > File input | TODO: CompileModes
+9. Top-level components > Top-level components > Interactive input | TODO: CompileModes
+9. Top-level components > Top-level components > Expression input | TODO: CompileModes
+10. Complete grammar | = sections
+10. Complete grammar > Full Grammar specification | TODO: Grammar, Precedence
+11. Built-in types | = sections
+11. Built-in types > Built-in Types | = sections
+11. Built-in types > Built-in Types > Truth Value Testing | TODO: Truth
+11. Built-in types > Built-in Types > Boolean Operations --- `and`, `or`, `not` | TODO: Truth, Evaluation
+11. Built-in types > Built-in Types > Comparisons | TODO: Comparisons
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` | TODO: NumericTypes, BinaryArith, ArithConversions
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Bitwise Operations on Integer Types | IntArith
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Integer Types | TODO: IntMethods
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Float | TODO: FloatMethods
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | TODO: NumericTypes
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | TODO: NumericHash
+11. Built-in types > Built-in Types > Boolean Type - `bool` | TODO: Truth, NumericTypes
+11. Built-in types > Built-in Types > Iterator Types | TODO: Iteration, Iterators
+11. Built-in types > Built-in Types > Iterator Types > Generator Types | Generators
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` | = sections
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Common Sequence Operations | TODO: SeqOps
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Immutable Sequence Types | TODO: SeqOps
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Mutable Sequence Types | TODO: Lists
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Lists | TODO: Lists
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Tuples | TODO: SeqOps
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Ranges | TODO: Ranges
+11. Built-in types > Built-in Types > Text and Binary Sequence Type Methods Summary | - informative: an index of the methods specified in the sections that follow
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` | TODO: StrBasics
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > String Methods | TODO: StrSearch, StrSplit, StrCase, StrPad
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) | TODO: FStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Debug specifier | TODO: FStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Conversion specifier | TODO: FStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Format specifier | TODO: FStrings, FormatSpec
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Template String Literals (t-strings) | TODO: TStrings
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > `printf`-style String Formatting | TODO: PercentFormat
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` | = sections
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes Objects | TODO: Bytes
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytearray Objects | TODO: Bytearray
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes and Bytearray Operations | TODO: Bytes, Bytearray
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | TODO: PercentFormat
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | TODO: Buffers
+11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | TODO: Sets
+11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | TODO: Dicts, DictMethods
+11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Dictionary view objects | TODO: DictViews
+11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | TODO: FrozenDicts
+11. Built-in types > Built-in Types > Context Manager Types | TODO: With
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) | = sections
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type | TODO: GenericAlias
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Standard Generic Classes | TODO: GenericAlias
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Special Attributes of `GenericAlias` objects | TODO: GenericAlias
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Union Type | TODO: UnionType
+11. Built-in types > Built-in Types > Other Built-in Types | = sections
+11. Built-in types > Built-in Types > Other Built-in Types > Modules | TODO: ModuleObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | TODO: ClassObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Functions | TODO: FunctionObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Methods | TODO: Methods
+11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | TODO: CodeObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | TODO: ClassObjects
+11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | TODO: Singletons
+11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | TODO: Singletons
+11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | TODO: Singletons
+11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | TODO: Frames, CodeObjects
+11. Built-in types > Built-in Types > Special Attributes | TODO: ClassObjects
+11. Built-in types > Built-in Types > Integer string conversion length limitation | TODO: IntStrLimit
+11. Built-in types > Built-in Types > Integer string conversion length limitation > Affected APIs | TODO: IntStrLimit
+11. Built-in types > Built-in Types > Integer string conversion length limitation > Configuring the limit | TODO: IntStrLimit
+11. Built-in types > Built-in Types > Integer string conversion length limitation > Recommended configuration | - informative: advice on choosing the limit
+12. Built-in constants | = sections
+12. Built-in constants > Built-in Constants | TODO: Singletons, Constants
+12. Built-in constants > Built-in Constants > Constants added by the `site` module | - Host profile: added by the site module for interactive use (SLP315-HOST)
+13. Built-in functions | = sections
+13. Built-in functions > Built-in functions | TODO: BuiltinsNumeric, BuiltinsIter, BuiltinsObjects, BuiltinsText, BuiltinsCompile, Sorting
+14. Built-in exceptions | = sections
+14. Built-in exceptions > Built-in Exceptions | = sections
+14. Built-in exceptions > Built-in Exceptions > Exception context | TODO: Raise
+14. Built-in exceptions > Built-in Exceptions > Inheriting from built-in exceptions | TODO: ExceptionObjects
+14. Built-in exceptions > Built-in Exceptions > Base classes | TODO: ExceptionObjects
+14. Built-in exceptions > Built-in Exceptions > Concrete exceptions | TODO: ConcreteExceptions
+14. Built-in exceptions > Built-in Exceptions > Concrete exceptions > OS exceptions | TODO: OSErrors
+14. Built-in exceptions > Built-in Exceptions > Warnings | TODO: ExceptionHierarchy
+14. Built-in exceptions > Built-in Exceptions > Exception groups | TODO: ExceptionGroups
+14. Built-in exceptions > Built-in Exceptions > Exception hierarchy | TODO: ExceptionHierarchy
+15. Formatting protocols and optional string helpers | = sections
+15. Formatting protocols and optional string helpers > `string` --- Common string operations | = sections
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > String constants | - Host profile: the importable string module facade (SLP315-CORE)
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Custom string formatting | - Host profile: string.Formatter in the string module facade (SLP315-CORE)
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax | TODO: StrFormat, FormatSpec
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format specification mini-language | TODO: FormatSpec
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format examples | TODO: StrFormat, FormatSpec
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Template strings (\$-strings) | - Host profile: string.Template in the string module facade (SLP315-CORE)
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Helper functions | - Host profile: string.capwords in the string module facade (SLP315-CORE)
+16. Template string objects | = sections
+16. Template string objects > `string.templatelib` --- Support for template string literals | = sections
+16. Template string objects > `string.templatelib` --- Support for template string literals > Template strings | TODO: TStrings
+16. Template string objects > `string.templatelib` --- Support for template string literals > Types | TODO: TStrings
+16. Template string objects > `string.templatelib` --- Support for template string literals > Helper functions | - Host profile: string.templatelib.convert in the module facade (SLP315-CORE)
+17. Annotation objects and evaluation | = sections
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations | TODO: Annotations
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Annotation semantics | TODO: Annotations
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Classes | - Host profile: annotationlib's classes are the module facade (SLP315-CORE)
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Functions | - Host profile: annotationlib's functions are the module facade (SLP315-CORE)
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes | = sections
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes > Using annotations in a metaclass | - informative: a recipe
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes > Creating a custom callable annotate function | - informative: a recipe
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Limitations of the `STRING` format | - informative: limitations of the annotationlib facade
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Limitations of the `FORWARDREF` format | - informative: limitations of the annotationlib facade
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Security implications of introspecting annotations | - informative: security advice
+18. Intrinsic types and optional type helpers | = sections
+18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types | = sections
+18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Dynamic Type Creation | - Host profile: types.new_class and friends are the module facade; type() itself is in ClassCreation
+18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Standard Interpreter Types | TODO: IntrinsicTypes
+18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Additional Utility Classes and Functions | - Host profile: library classes of the types module facade (SLP315-CORE)
+18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Coroutine Utility Functions | - Host profile: types.coroutine in the module facade (SLP315-CORE)
+19. Glossary | = sections
+19. Glossary > Glossary | - informative: glossary
+20. Copyright | = sections
+20. Copyright > Copyright | - informative: copyright notice
+21. History and licenses | = sections
+21. History and licenses > History and License | - informative: history and licenses
+21. History and licenses > History and License > History of the software | - informative: history and licenses
+21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python | - informative: history and licenses
+21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2 | - informative: history and licenses
+21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0 | - informative: history and licenses
+21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1 | - informative: history and licenses
+21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2 | - informative: history and licenses
+21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > ZERO-CLAUSE BSD LICENSE FOR CODE IN THE PYTHON DOCUMENTATION | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Mersenne Twister | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Sockets | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Asynchronous socket services | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Cookie management | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Execution tracing | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > UUencode and UUdecode functions | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > XML Remote Procedure Calls | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > test_epoll | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Select kqueue | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > SipHash24 | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > strtod and dtoa | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > OpenSSL | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > expat | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > libffi | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > zlib | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > cfuhash | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > libmpdec | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > W3C C14N test suite | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > mimalloc | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > asyncio | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Global Unbounded Sequences (GUS) | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Zstandard bindings | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Profiling module | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Pixi packages | - informative: history and licenses
+21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Unicode Character Database | - informative: history and licenses
+A. Complete upstream license notice | - informative: license
+B. Source integrity manifest | - informative: source manifest
