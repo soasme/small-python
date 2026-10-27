@@ -71,6 +71,8 @@ and tied to real implementations by replaying them.
 | `DynamicScopes.tla` | `exec()` and `eval()` with default and given namespaces, free variables, `locals()` snapshots, `f_locals` write-through, and class-body `eval()` | yes |
 | `Raise.tla` | `raise` with classes, instances, non-exceptions, and bare re-raise, `from` causes and `None`, and implicit `__context__` for raised and failing operations in handlers | yes |
 | `CompileModes.tla` | `compile()` in exec, eval, and single modes: what each accepts, its result, values passed to `sys.displayhook`, and bad modes | yes |
+| `Imports.tla` | the import system over fixture packages (`Imports.files`): submodules and parents, run-once caching, `sys.modules` entries that are None or replaced, failed and circular imports, regular and namespace packages, module attributes, relative imports, `from ... import *`, and import errors | yes |
+| `LazyImports.tla` | lazy imports (PEP 810): placeholders, reification on first use, lazy submodules in `sys.lazy_modules`, where `lazy` is allowed, and `__lazy_modules__` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -168,8 +170,12 @@ with older messages and no hints; an annotated name could be declared
 global or nonlocal, and global with nonlocal was reported at the second
 declaration; an error raised by an operation (rather than a raise
 statement) in an except handler, a finally block, or `__exit__` lost its
-`__context__` once it left the handler; and interactive input printed values
-itself instead of calling `sys.displayhook`.
+`__context__` once it left the handler; interactive input printed values
+itself instead of calling `sys.displayhook`; a None in `sys.modules` was
+imported as the module instead of halting the import, and a namespace
+package had no `__file__`; and `lazy import a.b` imported `a.b` when `a`
+was first used (rather than when `a.b` was looked up), and
+`__lazy_modules__` was ignored.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

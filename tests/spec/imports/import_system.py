@@ -74,7 +74,7 @@ assert_raises(ModuleNotFoundError, run, "import spec_mod.sub\n")
 # Namespace packages have no __init__ and no __file__.
 import spec_ns.inner.leaf
 assert_true(spec_ns.inner.leaf.leaf)
-assert_is(getattr(spec_ns, "__file__", None), None)
+assert_is(spec_ns.__file__, None)
 
 # Circular imports see the partially initialized module.
 import spec_cycle_a
@@ -103,5 +103,25 @@ assert_syntax_error("class C:\n    lazy import x\n")
 assert_syntax_error("try:\n    lazy import x\nexcept: pass\n")
 assert_syntax_error("lazy from x import *\n")
 assert_syntax_error("lazy from __future__ import annotations\n")
+# The submodule of a lazy dotted import waits in sys.lazy_modules until
+# it is first looked up as an attribute.
+import sys
+lazy import spec_lazy_pkg.part
+assert_true("spec_lazy_pkg.part" in sys.lazy_modules)
+assert_eq(spec_lazy_pkg.part.value, "part")
+assert_false("spec_lazy_pkg.part" in sys.lazy_modules)
+# __lazy_modules__ makes the module-level imports it lists lazy, but not
+# those inside try statements.
+write("spec_lazy_compat.py", "value = 'compat'\n")
+ns = run("__lazy_modules__ = ['spec_lazy_compat']\nimport spec_lazy_compat\nimport spec_mod\n")
+assert_eq(type(ns["spec_lazy_compat"]).__name__, "lazy_import")
+assert_eq(type(ns["spec_mod"]).__name__, "module")
+ns = run("__lazy_modules__ = ['spec_lazy_compat']\ntry:\n    import spec_lazy_compat\nfinally:\n    pass\n")
+assert_eq(type(ns["spec_lazy_compat"]).__name__, "module")
+# None in sys.modules halts an import.
+sys.modules["spec_halted"] = None
+e = assert_raises(ModuleNotFoundError, run, "import spec_halted\n")
+assert_eq(str(e), "import of spec_halted halted; None in sys.modules")
+del sys.modules["spec_halted"]
 lazy = "soft keyword"
 assert_eq(lazy, "soft keyword")

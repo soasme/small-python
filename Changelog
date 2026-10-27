@@ -447,6 +447,11 @@
   model of the raise statement.
 - Interactive (single mode) expression statements call sys.displayhook once
   sys is loaded. TLA+ model of compile modes.
+- A None in sys.modules halts an import with ModuleNotFoundError; namespace
+  packages have __file__ = None. `lazy import a.b` reifies only a, leaving
+  a.b in sys.lazy_modules until looked up; __lazy_modules__ makes the
+  module-level imports it lists lazy. TLA+ models of imports and lazy
+  imports.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

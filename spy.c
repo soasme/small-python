@@ -48,7 +48,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512 };
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024 };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -127,6 +127,7 @@ struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
+    SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     int compile_flags; /* compile()'s future flags while it parses. */
     int optimize; /* compile(optimize>=1) while it parses: no asserts, __debug__ is False. */
     int string_source; /* compile(), exec(), or eval() is parsing a string. */
@@ -256,6 +257,7 @@ static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
+static void set_remove_at(SPYValue *, size_t);
 static SPYValue *active_exception(SPYContext *c) {
     return c->handled ? c->handled : c->inherited_exception;
 }
@@ -5753,6 +5755,8 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             if (where) { errorf(c, "SyntaxError", "lazy %s not allowed inside %s", what, where); return -1; }
             if (n->args->kind == N_STAR) { spy_error(c, "SyntaxError", "lazy from ... import * is not allowed"); return -1; }
         }
+        /* __lazy_modules__ may make a module-level import outside try lazy. */
+        else if (scope->kind == S_MODULE && !scope->tries && n->args->kind != N_STAR) n->flags |= F_LAZY_COMPAT;
         if (n->args->kind == N_STAR) {
             if (scope->kind != S_MODULE) { c->line = n->line; spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
             return 0;
@@ -8108,6 +8112,29 @@ static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Node *definition
     return spy_retain(definition->code_value);
 }
 /* Call an __annotate__ function with the VALUE format, or return {}. */
+/* A missing module attribute that a lazy import named as a submodule
+ * (sys.lazy_modules holds "module.name" or a name below it) imports it. */
+static SPYValue *import_module(SPYContext *, const char *);
+static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *name) {
+    SPYValue *module_name = name_local(module, "__name__");
+    if (!c->lazy_modules || !module_name || module_name->type != SPY_STRING) return NULL;
+    size_t prefix = module_name->as.string.len, length = strlen(name);
+    for (size_t i = 0; i < c->lazy_modules->as.map.len; i++) {
+        SPYValue *key = c->lazy_modules->as.map.items[i].key;
+        const char *text = key->as.string.data;
+        if (key->as.string.len < prefix + 1 + length || strncmp(text, module_name->as.string.data, prefix) ||
+            text[prefix] != '.' || strncmp(text + prefix + 1, name, length) ||
+            (text[prefix + 1 + length] && text[prefix + 1 + length] != '.')) continue;
+        char *full = copy_text(c, text, prefix + 1 + length);
+        SPYValue *imported = full ? import_module(c, full) : NULL;
+        free(full);
+        spy_release(imported);
+        if (c->error_type[0]) return NULL;
+        SPYValue *value = name_local(module, name);
+        return value ? spy_retain(value) : NULL;
+    }
+    return NULL;
+}
 static SPYValue *annotation_dict(SPYContext *c, SPYValue *annotate) {
     if (!annotate || annotate->type == SPY_NONE) return value_new(c, SPY_DICT);
     SPYValue *format = spy_int(c, 1);
@@ -8695,6 +8722,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         SPYValue *item = name_local(v, name);
         if (item && item->type == SPY_LAZY_IMPORT) return lazy_reify(c, v, name, spy_retain(item));
         if (item) return spy_retain(item);
+        SPYValue *submodule = lazy_submodule(c, v, name);
+        if (submodule || c->error_type[0]) return submodule;
         /* PEP 562: a module-level __getattr__ supplies missing attributes. */
         SPYValue *fallback = name_local(v, "__getattr__");
         if (fallback) {
@@ -12272,6 +12301,10 @@ static SPYValue *frame_module_name(SPYContext *c, size_t depth) {
     SPYValue *name = name_local(namespace_map(module_env(c, frame->env)), "__name__");
     return spy_retain(name ? name : c->none);
 }
+static SPYValue *lazy_registry(SPYContext *c) {
+    if (!c->lazy_modules) c->lazy_modules = value_new(c, SPY_SET);
+    return c->lazy_modules;
+}
 static int sys_natives(SPYContext *c, SPYValue *module) {
     static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits", "_write", "_flush", "_getframe", "_frame_module"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
@@ -12294,7 +12327,8 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     SPYValue *values[] = {spy_int(c, PTRDIFF_MAX), spy_string(c, *(unsigned char *)&probe ? "little" : "big", *(unsigned char *)&probe ? 6 : 3),
                           spy_string(c, platform, strlen(platform))};
     static const char *const fields[] = {"maxsize", "byteorder", "platform"};
-    int status = name_set(c, module, "modules", c->modules);
+    int status = name_set(c, module, "modules", c->modules) || !lazy_registry(c) ||
+        name_set(c, module, "lazy_modules", c->lazy_modules);
     for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
         status = status || !values[i] || name_set(c, module, fields[i], values[i]);
         spy_release(values[i]);
@@ -12302,9 +12336,16 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     return status;
 }
 static SPYValue *import_module(SPYContext *, const char *);
+/* A module already in sys.modules; None there halts the import. */
+static SPYValue *cached_module(SPYContext *c, const char *name, SPYValue *cached) {
+    if (cached->type != SPY_NONE) return spy_retain(cached);
+    errorf(c, "ModuleNotFoundError", "import of %s halted; None in sys.modules", name);
+    if (strlen(name) < sizeof(c->error_name)) memcpy(c->error_name, name, strlen(name) + 1);
+    return NULL;
+}
 static SPYValue *load_source_module(SPYContext *c, const char *name) {
     SPYValue *cached = name_local(c->modules, name);
-    if (cached) return spy_retain(cached);
+    if (cached) return cached_module(c, name, cached);
     if (!strcmp(name, "builtins")) {
         SPYValue *module = value_new(c, SPY_MODULE);
         if (!module) return NULL;
@@ -12338,7 +12379,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (!parent) return NULL;
         /* Importing the parent may have provided the submodule, as importlib allows. */
         cached = name_local(c->modules, name);
-        if (cached) { spy_release(parent); return spy_retain(cached); }
+        if (cached) { spy_release(parent); return cached_module(c, name, cached); }
         if (!name_local(parent, "__path__")) {
             spy_release(parent); return errorf(c, "ModuleNotFoundError", "parent of '%s' is not a package", name);
         }
@@ -12388,7 +12429,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); spy_release(file); return NULL;
     }
     name_set(c, module, "__builtins__", c->builtins);
-    if (file) name_set(c, module, "__file__", file);
+    if (file || namespace) name_set(c, module, "__file__", file ? file : c->none);
     spy_release(file);
     SPYValue *package_name = spy_string(c, name, package ? strlen(name) : dot ? (size_t)(dot - name) : 0);
     if (package_name) name_set(c, module, "__package__", package_name);
@@ -12401,6 +12442,9 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     if (name_set(c, module, "__name__", module_name) || name_set(c, c->modules, name, module)) {
         spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); return NULL;
     }
+    /* A module being imported is no longer a pending lazy submodule. */
+    for (size_t i = 0; c->lazy_modules && i < c->lazy_modules->as.map.len; i++)
+        if (!strcmp(c->lazy_modules->as.map.items[i].key->as.string.data, name)) { set_remove_at(c->lazy_modules, i); break; }
     spy_release(module_name);
     Result result = {FLOW_NORMAL, NULL};
     if (init) {
@@ -12627,10 +12671,14 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
     }
     SPYValue *level = spy_int(c, 0), *module = NULL, *value = NULL;
     lazy->as.lazy.resolving = 1;
-    if (fromlist && level) {
-        SPYValue *args[] = {root->as.lazy.from, c->none, c->none, fromlist, level};
+    /* A bare `lazy import a.b` resolves to a alone; a.b loads on attribute access. */
+    const char *full = root->as.lazy.from->as.string.data, *dot = strchr(full, '.');
+    SPYValue *target = lazy == root && dot && !lazy_from_import(root) ? spy_string(c, full, (size_t)(dot - full)) : spy_retain(root->as.lazy.from);
+    if (fromlist && level && target) {
+        SPYValue *args[] = {target, c->none, c->none, fromlist, level};
         module = spy_call(c, function, 5, args);
     }
+    spy_release(target);
     if (module && module->type == SPY_LAZY_IMPORT) { SPYValue *inner = lazy_resolve(c, module); spy_release(module); module = inner; }
     if (module) value = lazy_replay(c, module, lazy);
     lazy->as.lazy.resolving = 0;
@@ -12652,11 +12700,11 @@ static SPYValue *lazy_reify(SPYContext *c, SPYValue *env, const char *name, SPYV
 }
 /* Bind each name of a lazy import statement, as _PyImport_LazyImportModuleLevelObject
  * and _PyEval_LazyImportFrom: a loaded module's concrete attribute binds directly. */
-static int lazy_statement(SPYContext *c, Frame *f, Node *n) {
+static int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only) {
     SPYValue *globals = module_env(c, f->env);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
     if (n->kind == N_IMPORT) {
-        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
+        for (Node *item = only ? only : n->args; item && !c->error_type[0]; item = only ? NULL : item->next) {
             const char *name = source_name(item->a);
             SPYValue *text = spy_string(c, name, strlen(name));
             SPYValue *value = text ? lazy_new(c, text, c->none, builtins) : NULL;
@@ -12667,6 +12715,12 @@ static int lazy_statement(SPYContext *c, Frame *f, Node *n) {
                 SPYValue *attr = spy_string(c, part + 1, end ? (size_t)(end - part - 1) : strlen(part + 1));
                 SPYValue *next = attr ? lazy_new(c, value, attr, NULL) : NULL;
                 spy_release(attr); spy_release(value); value = next;
+            }
+            /* import a.b.c binds a and leaves a.b.c to be found as an attribute. */
+            if (value && !item->b && strchr(name, '.') && !name_local(c->modules, name)) {
+                SPYValue *full = lazy_registry(c) ? spy_string(c, name, strlen(name)) : NULL;
+                if (!full || set_add(c, c->lazy_modules, full)) { spy_release(value); value = NULL; }
+                spy_release(full);
             }
             Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
             if (value) name_set(c, f->env, binding->text, value);
@@ -12697,6 +12751,19 @@ static int lazy_statement(SPYContext *c, Frame *f, Node *n) {
     }
     free(name); spy_release(text); spy_release(fromlist); spy_release(root);
     return c->error_type[0] ? -1 : 0;
+}
+/* Whether __lazy_modules__ of a module-level frame names the module of an
+ * import (ITEM of an import statement), by its absolute name. */
+static int lazy_listed(SPYContext *c, Frame *f, Node *n, Node *item) {
+    SPYValue *globals = module_env(c, f->env);
+    SPYValue *listed = (n->flags & F_LAZY_COMPAT) && namespace_map(f->env) == namespace_map(globals) ? name_local(globals, "__lazy_modules__") : NULL;
+    if (!listed) return 0;
+    char *name = item ? copy_text(c, source_name(item->a), strlen(source_name(item->a))) :
+        absolute_name(c, n->a ? source_name(n->a) : "", namespace_map(globals), n->op);
+    SPYValue *text = name ? spy_string(c, name, strlen(name)) : NULL;
+    int result = text ? contains(c, listed, text) : -1;
+    free(name); spy_release(text);
+    return result;
 }
 static int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     if (module->type != SPY_MODULE && module->type != SPY_INSTANCE && module->type != SPY_CLASS)
@@ -15717,7 +15784,11 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             break;
         }
         case N_IMPORT: case N_FROM: {
-            if (n->flags & F_LAZY) { lazy_statement(c, f, n); break; }
+            if (n->flags & F_LAZY) { lazy_statement(c, f, n, NULL); break; }
+            if (n->kind == N_FROM) {
+                int listed = lazy_listed(c, f, n, NULL);
+                if (listed) { if (listed > 0) lazy_statement(c, f, n, NULL); break; }
+            }
             SPYValue *fromlist = n->kind == N_FROM ? value_new(c, SPY_TUPLE) : NULL;
             if (n->kind == N_FROM && !fromlist) break;
             if (fromlist) for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
@@ -15735,6 +15806,8 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             if (n->kind == N_FROM && !module) break;
             for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
                 if (module && item->kind == N_STAR) { import_star(c, f, module); continue; }
+                int listed = module ? 0 : lazy_listed(c, f, n, item);
+                if (listed) { if (listed > 0) lazy_statement(c, f, n, item); continue; }
                 Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
                 SPYValue *value = module ? import_from(c, module, source_name(item->a), 1) : call_import(c, f, source_name(item->a), NULL, 0);
                 if (value && !module && item->b && item->a->a) {

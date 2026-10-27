@@ -10,7 +10,8 @@ state followed by the transition itself. The cases are inserted into the
 replay script, which performs each step on real Python objects and compares
 what happens with the model's state. The pinned CPython oracle must pass
 every case, which validates the model against the reference implementation;
-the engine must pass them to conform to it.
+the engine must pass them to conform to it. Modules and packages a replay
+imports go in a NAME.files directory, copied next to the script for each run.
 """
 import argparse
 import os
@@ -272,8 +273,19 @@ def replay(name, all_cases, engine, oracle, directory):
     outcomes = {}
     # PEP 765's warnings about return, break, and continue in finally go to
     # stderr; the programs use those on purpose.
-    for label, command in (("oracle", [str(oracle), "-E", "-s", "-W", "ignore::SyntaxWarning", script.name]),
+    fixtures = TLA / f"{name}.files"
+    for label, command in (("oracle", [str(oracle), "-E", "-s", "-B", "-W", "ignore::SyntaxWarning", script.name]),
                            ("engine", [str(engine), script.name])):
+        # A NAME.files directory (modules and packages to import) is copied
+        # fresh next to the script for each run.
+        for item in sorted(fixtures.iterdir()) if fixtures.is_dir() else ():
+            target = Path(directory) / item.name
+            if target.is_dir():
+                shutil.rmtree(target)
+            if item.is_dir():
+                shutil.copytree(item, target)
+            else:
+                shutil.copy(item, target)
         result = subprocess.run(command, cwd=directory, capture_output=True, text=True, timeout=600,
                                 env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"})
         output = result.stdout.strip()

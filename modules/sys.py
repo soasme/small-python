@@ -12,7 +12,7 @@ are not provided.
 
 from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,
                   set_int_max_str_digits, modules, maxsize, byteorder, platform, _write, _flush,
-                  _getframe, _frame_module)
+                  _getframe, _frame_module, lazy_modules)
 
 
 def _structseq(name, fields, doc, instantiable=False):

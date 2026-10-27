@@ -3532,7 +3532,7 @@ static const char *const module_sys[] = {
     "\n",
     "from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,\n",
     "                  set_int_max_str_digits, modules, maxsize, byteorder, platform, _write, _flush,\n",
-    "                  _getframe, _frame_module)\n",
+    "                  _getframe, _frame_module, lazy_modules)\n",
     "\n",
     "\n",
     "def _structseq(name, fields, doc, instantiable=False):\n",

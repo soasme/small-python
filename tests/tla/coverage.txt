@@ -89,7 +89,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Callable types > Classes | Callables
 3. Data model > Data model > The standard type hierarchy > Callable types > Class Instances | Callables
 3. Data model > Data model > The standard type hierarchy > Modules | = sections
-3. Data model > Data model > The standard type hierarchy > Modules > Import-related attributes on module objects | TODO: Imports
+3. Data model > Data model > The standard type hierarchy > Modules > Import-related attributes on module objects | Imports
 3. Data model > Data model > The standard type hierarchy > Modules > Other writable attributes on module objects | ModuleObjects
 3. Data model > Data model > The standard type hierarchy > Modules > Module dictionaries | ModuleObjects
 3. Data model > Data model > The standard type hierarchy > Custom classes | = sections
@@ -160,25 +160,25 @@ Reference chapter contents | - table of contents
 5. Import system > The import system | = sections
 5. Import system > The import system > `importlib` | - Host profile: importable compatibility facade (SLP315-CORE)
 5. Import system > The import system > Packages | = sections
-5. Import system > The import system > Packages > Regular packages | TODO: Imports
-5. Import system > The import system > Packages > Namespace packages | TODO: Imports
+5. Import system > The import system > Packages > Regular packages | Imports
+5. Import system > The import system > Packages > Namespace packages | Imports
 5. Import system > The import system > Searching | = sections
-5. Import system > The import system > Searching > The module cache | TODO: Imports
+5. Import system > The import system > Searching > The module cache | Imports
 5. Import system > The import system > Searching > Finders and loaders | - Host profile: module discovery service (SLP315-HOST)
 5. Import system > The import system > Searching > Import hooks | - Host profile: module discovery service (SLP315-HOST)
 5. Import system > The import system > Searching > The meta path | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Loading | TODO: Imports
+5. Import system > The import system > Loading | Imports
 5. Import system > The import system > Loading > Loaders | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Loading > Submodules | TODO: Imports
+5. Import system > The import system > Loading > Submodules | Imports
 5. Import system > The import system > Loading > Module specs | - Host profile: module discovery metadata (SLP315-HOST)
-5. Import system > The import system > Loading > \_\_path\_\_ attributes on modules | TODO: Imports
+5. Import system > The import system > Loading > \_\_path\_\_ attributes on modules | Imports
 5. Import system > The import system > Loading > Module reprs | ModuleObjects
 5. Import system > The import system > Loading > Cached bytecode invalidation | - Host profile: module discovery service; bytecode is not prescribed (SLP315-NORM)
 5. Import system > The import system > The Path Based Finder | - Host profile: module discovery service (SLP315-HOST)
 5. Import system > The import system > The Path Based Finder > Path entry finders | - Host profile: module discovery service (SLP315-HOST)
 5. Import system > The import system > The Path Based Finder > Path entry finder protocol | - Host profile: module discovery service (SLP315-HOST)
 5. Import system > The import system > Replacing the standard import system | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Package Relative Imports | TODO: Imports
+5. Import system > The import system > Package Relative Imports | Imports
 5. Import system > The import system > Special considerations for \_\_main\_\_ | - Host profile: the entry module is chosen by the host (SLP315-HOST)
 5. Import system > The import system > Special considerations for \_\_main\_\_ > \_\_main\_\_.\_\_spec\_\_ | - Host profile: the entry module is chosen by the host (SLP315-HOST)
 5. Import system > The import system > References | - informative: bibliography
@@ -250,9 +250,9 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `raise` statement | Raise
 7. Simple statements > Simple statements > The `break` statement | Iteration, Exceptions
 7. Simple statements > Simple statements > The `continue` statement | Iteration, Exceptions
-7. Simple statements > Simple statements > The `import` statement | TODO: Imports
-7. Simple statements > Simple statements > The `import` statement > Lazy imports | TODO: LazyImports
-7. Simple statements > Simple statements > The `import` statement > Lazy imports > Compatibility via `__lazy_modules__` | TODO: LazyImports
+7. Simple statements > Simple statements > The `import` statement | Imports
+7. Simple statements > Simple statements > The `import` statement > Lazy imports | LazyImports
+7. Simple statements > Simple statements > The `import` statement > Lazy imports > Compatibility via `__lazy_modules__` | LazyImports
 7. Simple statements > Simple statements > The `import` statement > Future statements | TODO: Future
 7. Simple statements > Simple statements > The `global` statement | Scopes, ScopeErrors
 7. Simple statements > Simple statements > The `nonlocal` statement | Scopes, ScopeErrors
