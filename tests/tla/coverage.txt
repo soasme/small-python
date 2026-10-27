@@ -135,7 +135,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > With Statement Context Managers | With
 3. Data model > Data model > Special method names > Customizing positional arguments in class pattern matching | Match
 3. Data model > Data model > Special method names > Emulating buffer types | Buffers
-3. Data model > Data model > Special method names > Annotations | TODO: Annotations
+3. Data model > Data model > Special method names > Annotations | Annotations
 3. Data model > Data model > Special method names > Special method lookup | SpecialLookup
 3. Data model > Data model > Coroutines | = sections
 3. Data model > Data model > Coroutines > Awaitable Objects | TODO: Awaitables
@@ -241,7 +241,7 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > Expression statements | TODO: CompileModes
 7. Simple statements > Simple statements > Assignment statements | TODO: Unpacking, Evaluation, Assignment
 7. Simple statements > Simple statements > Assignment statements > Augmented assignment statements | TODO: Operators, Evaluation, Assignment
-7. Simple statements > Simple statements > Assignment statements > Annotated assignment statements | TODO: Annotations
+7. Simple statements > Simple statements > Assignment statements > Annotated assignment statements | Annotations
 7. Simple statements > Simple statements > The `assert` statement | TODO: Assert
 7. Simple statements > Simple statements > The `pass` statement | TODO: Grammar
 7. Simple statements > Simple statements > The `del` statement | TODO: Del
@@ -294,7 +294,7 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > Type parameter lists > Generic functions | TODO: Generics
 8. Compound statements > Compound statements > Type parameter lists > Generic classes | TODO: Generics
 8. Compound statements > Compound statements > Type parameter lists > Generic type aliases | TODO: Generics, TypeAliases
-8. Compound statements > Compound statements > Annotations | TODO: Annotations
+8. Compound statements > Compound statements > Annotations | Annotations
 9. Top-level components | = sections
 9. Top-level components > Top-level components | = sections
 9. Top-level components > Top-level components > Complete Python programs | TODO: CompileModes
@@ -395,8 +395,8 @@ Reference chapter contents | - table of contents
 16. Template string objects > `string.templatelib` --- Support for template string literals > Types | TStrings
 16. Template string objects > `string.templatelib` --- Support for template string literals > Helper functions | - Host profile: string.templatelib.convert in the module facade (SLP315-CORE)
 17. Annotation objects and evaluation | = sections
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations | TODO: Annotations
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Annotation semantics | TODO: Annotations
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations | Annotations
+17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Annotation semantics | Annotations
 17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Classes | - Host profile: annotationlib's classes are the module facade (SLP315-CORE)
 17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Functions | - Host profile: annotationlib's functions are the module facade (SLP315-CORE)
 17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes | = sections

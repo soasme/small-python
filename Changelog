@@ -427,6 +427,9 @@
   block, destruction, or bytes() finishing its copy) calls the exporter's
   __release_buffer__; a non-memoryview __buffer__ result reports CPython's
   message. TLA+ models of the with statement and buffer export.
+- Assigning a function's or class's __annotations__ clears __annotate__, a
+  callable __annotate__ drops cached annotations, and __annotate__ must be
+  callable or None and cannot be deleted. TLA+ model of annotations.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

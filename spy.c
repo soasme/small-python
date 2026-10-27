@@ -227,6 +227,7 @@ static SPYValue *function_construct(SPYContext *, size_t, SPYValue *const *, SPY
 static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Node *, int);
+static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, Node *);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
 static SPYValue *builtin_value(SPYContext *, SPYValue *, int);
@@ -8119,6 +8120,24 @@ static SPYValue *class_annotations(SPYContext *c, SPYValue *cls, const char *nam
     if (value && name_set(c, cls, "__annotations_cache__", value)) { spy_release(value); return NULL; }
     return value;
 }
+/* Setting or deleting (value NULL) a class's __annotations__ or
+ * __annotate__; each replaces the other. */
+static int class_set_annotations(SPYContext *c, SPYValue *cls, const char *name, SPYValue *value) {
+    if (!strcmp(name, "__annotate__")) {
+        if (!value) { spy_error(c, "TypeError", "cannot delete __annotate__ attribute"); return -1; }
+        if (value->type != SPY_NONE && !callable_value(c, value)) { spy_error(c, "TypeError", "__annotate__ must be callable or None"); return -1; }
+        if (value->type != SPY_NONE) delete_name(cls, "__annotations_cache__");
+        return name_set(c, cls, "__annotate__", value);
+    }
+    if (value && name_set(c, cls, "__annotations_cache__", value)) return -1;
+    if (!value) {
+        if (!name_local(cls, "__annotations_cache__")) { spy_error(c, "AttributeError", "__annotations__"); return -1; }
+        delete_name(cls, "__annotations_cache__");
+    }
+    delete_name(cls, "__annotate_func__");
+    delete_name(cls, "__annotate__");
+    return 0;
+}
 /* An instance's attributes move into a real dictionary once __dict__ is
  * requested; later reads and writes go through that dictionary. */
 /* The members of the builtin exception classes, by the class defining them,
@@ -10154,6 +10173,8 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         if (!strcmp(name, "__bases__")) {
             spy_error(c, "NotImplementedError", "changing class bases is not implemented"); return -1;
         }
+        if ((!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) && !object->as.map.native && object->as.map.flags != 2)
+            return class_set_annotations(c, object, name, value);
     }
     if (object->type == SPY_FUNCTION || object->type == SPY_STATICMETHOD || object->type == SPY_CLASSMETHOD) {
         if (object->type == SPY_FUNCTION && (!strcmp(name, "__globals__") ||
@@ -10166,6 +10187,14 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             if (value->type != SPY_DICT) { spy_error(c, "TypeError", "__dict__ must be set to a dictionary"); return -1; }
             spy_retain(value); spy_release(*attributes); *attributes = value; return 0;
         }
+        /* __annotations__ and __annotate__ replace each other. */
+        if (object->type == SPY_FUNCTION && !strcmp(name, "__annotate__")) {
+            if (value->type != SPY_NONE && !callable_value(c, value)) { spy_error(c, "TypeError", "__annotate__ must be callable or None"); return -1; }
+            if (value->type != SPY_NONE && name_set(c, object->as.function.metadata, "__annotations__", c->none)) return -1;
+            return name_set(c, object->as.function.metadata, name, value);
+        }
+        if (object->type == SPY_FUNCTION && !strcmp(name, "__annotations__") && (value->type == SPY_NONE || value->type == SPY_DICT) &&
+            name_set(c, object->as.function.metadata, "__annotate__", c->none)) return -1;
         if (object->type == SPY_FUNCTION && (name_local(object->as.function.metadata, name) ||
             !strcmp(name, "__annotations__") || !strcmp(name, "__type_params__"))) {
             if ((!strcmp(name, "__name__") || !strcmp(name, "__qualname__")) && value->type != SPY_STRING) {
@@ -11856,7 +11885,6 @@ static SPYValue *module_construct(SPYContext *c, size_t argc, SPYValue *const *a
         name_set(c, module, "__loader__", c->none) || name_set(c, module, "__spec__", c->none)) { spy_release(module); return NULL; }
     return module;
 }
-static int callable_value(SPYContext *, SPYValue *);
 /* method(function, instance, /), as CPython's method_new. */
 static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "method() takes no keyword arguments");
@@ -14274,10 +14302,16 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (object->type == SPY_CLASS && !strcmp(name, "__dict__")) {
         spy_error(c, "AttributeError", "readonly attribute"); return -1;
     }
+    if (object->type == SPY_CLASS && (!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) &&
+        !object->as.map.native && object->as.map.flags != 2)
+        return class_set_annotations(c, object, name, NULL);
     if (object->type == SPY_PROPERTY && !strcmp(name, "__name__")) {
         spy_release(object->as.property.name); object->as.property.name = NULL; return 0;
     }
     if (object->type == SPY_FUNCTION) {
+        if (!strcmp(name, "__annotate__")) { spy_error(c, "TypeError", "__annotate__ cannot be deleted"); return -1; }
+        /* Deleting __annotations__ forgets __annotate__ too. */
+        if (!strcmp(name, "__annotations__") && name_set(c, object->as.function.metadata, "__annotate__", c->none)) return -1;
         if (!strcmp(name, "__defaults__") || !strcmp(name, "__kwdefaults__") ||
             !strcmp(name, "__annotations__") || !strcmp(name, "__doc__") || !strcmp(name, "__module__"))
             return name_set(c, object->as.function.metadata, name, c->none);

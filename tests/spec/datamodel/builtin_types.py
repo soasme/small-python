@@ -255,3 +255,23 @@ class BadExporter:
         return b"abc"
 e = assert_raises(TypeError, memoryview, BadExporter())
 assert_eq(str(e), "BadExporter.__buffer__() must return a memoryview, not bytes")
+
+# __annotations__ and __annotate__ replace each other.
+def annotated(x: int): pass
+annotated.__annotations__ = {"z": 1}
+assert_true(annotated.__annotate__ is None)
+annotated.__annotate__ = lambda format: {"w": 2}
+assert_eq(annotated.__annotations__, {"w": 2})
+e = assert_raises(TypeError, setattr, annotated, "__annotate__", 5)
+assert_eq(str(e), "__annotate__ must be callable or None")
+e = assert_raises(TypeError, delattr, annotated, "__annotate__")
+assert_eq(str(e), "__annotate__ cannot be deleted")
+class Annotated:
+    x: int
+Annotated.__annotations__ = {"q": 1}
+assert_true(Annotated.__annotate__ is None)
+assert_eq(Annotated.__annotations__, {"q": 1})
+del Annotated.__annotations__
+assert_eq(Annotated.__annotations__, {})
+e = assert_raises(TypeError, delattr, Annotated, "__annotate__")
+assert_eq(str(e), "cannot delete __annotate__ attribute")
