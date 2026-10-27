@@ -1367,6 +1367,54 @@ class R:
     def __reduce__(self): return "custom"
 print(R().__reduce_ex__(2))
 """,    r'''
+from __future__ import annotations
+def f(x: f(y for y in z), y: f((y for y in z), 1), z: 1 .real, w: f"a{b!r:>{w}}c{{'\"", v: lambda a, /, b=1, *, c, **k: 0,
+      u: lambda *a, b: 0, t: -(-1) ** -2 ** 3, s: (a if b else c) if d else e, r: not not a, q: (a, ), p: (), o: {*()},
+      n: a[1:2, ::3, :], m: a[1,], l: a[(1, 2)], k: a[*b], j: [x for x in y if z if w], i: {k: v for k, v in d},
+      g: 0x10 + 1_000 + 1e3 + 1e1000 + 1j + 1e1000j + 0.5, ff: 'a' "b" 'c\n\x00ሴ', ee: b'x\'"', dd: ...,
+      cc: a < b < c, bb: a or b and c or not d, aa: (a or b) and c, ab: a ** -b, ac: (-a) ** b, ad: (a + b) * c - d / e // f % g @ h,
+      ae: a << b | c ^ d & e, af: f(*a, *b, x=1, **k), ai: a.b.c[d](e), aj: (1).real, ak: 1.5.real, al: (lambda: 1)(),
+      an: {**a, 'b': 1}, ao: [*a, *b], ap: f'{x=}', aq: f'{"a"}', ar: f'{a:{b}}', at: 'it\'s', au: "a'b\"c", av: -1, aw: ~a + +b, ax: x if y else lambda: z,
+      ay: (not a) + b, az: not a + b, ba: a is not b, bc: a not in b, bd: [] , be: {}, bf: (a, *b), bg: f(a)(b), bh: a[b][c]):
+    pass
+for k, v in f.__annotations__.items(): print(k, v)
+''',    r'''
+from __future__ import annotations
+def f(x: int, *a: List[ int ], y: "q" = 1, **k: (a, b)) -> lambda: 1: pass
+print(f.__annotations__, callable(f.__annotate__))
+class A:
+    y: List[int]
+    z: int = 3
+    if 1:
+        w: {1: 2, **d}
+print(A.__annotations__, A.__annotate__, A.__dict__.get("__annotations__"))
+x: 1 + 2 * 3
+print(__annotations__, "__annotate__" in globals())
+
+print(__annotate__ if "__annotate__" in globals() else None)
+''',    r'''
+from __future__ import annotations
+class A:
+    __p: Undefined[1]
+    if False:
+        q: int
+    r: str = "x"
+class B(A): pass
+print(A.__annotations__, B.__annotations__, A.r)
+def g():
+    x: Nope = 1
+    return x
+print(g(), g.__annotations__)
+ns = {}
+exec("y: int = 2\nclass C:\n    z: 'q'\n", ns)
+print(ns.get("__annotations__"), ns["C"].__annotate__)
+ns = {}
+exec(compile("y: a.b\nclass C:\n    z: list[int]\n", "<s>", "exec", 0x1000000), ns)
+print(ns["__annotations__"], ns["C"].__annotations__, ns["C"].__annotate__)
+def h(a: x.y, *, b: int = 3) -> None: pass
+import_ok = h.__annotate__(1)
+print(import_ok)
+''',    r'''
 class __future__: CO_FUTURE_BARRY_AS_BDFL = 0x400000
 def t(src, flags=0):
     try:

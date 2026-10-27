@@ -290,3 +290,6 @@
   a __future__ module. Compiler-phase errors in strings have text None.
 - A comparison's result is tested for truth only between chained comparisons.
 - test.support's recursion and digit limit helpers also decorate functions.
+- PEP 563: from __future__ import annotations stores annotations as strings
+  in CPython's unparsed form; module and class bodies fill __annotations__
+  as they run. compile/exec/eval inherit the caller's future flags.

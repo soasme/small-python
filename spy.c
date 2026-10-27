@@ -48,7 +48,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128 };
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512 };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -76,7 +76,7 @@ struct SPYValue {
         struct { char *data; size_t len, exports; } string; /* exports: live memoryviews of a bytearray */
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         struct { Entry *items; size_t len, cap; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner; size_t statements; int expression; } unit;
+        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner; size_t statements; int expression, setup_annotations, future_flags; } unit;
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; } function;
         struct { SPYNative call; void *data; int method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
@@ -2320,7 +2320,7 @@ typedef struct {
     size_t unclosed_line;
     /* Future statements: nesting of statement(), top-level statements seen,
      * whether one may still appear, and barry_as_FLUFL. */
-    int statement_level, future_closed, barry;
+    int statement_level, future_closed, barry, future_annotations;
     size_t top_statements;
 } Parser;
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -2791,6 +2791,7 @@ static void future_feature(Parser *p, size_t name) {
                                            "print_function", "unicode_literals", "barry_as_FLUFL", "generator_stop", "annotations"};
     Token *t = &p->tokens[name];
     if (token_is(t, "barry_as_FLUFL")) p->barry = 1;
+    if (token_is(t, "annotations")) p->future_annotations = 1;
     for (size_t i = 0; i < sizeof(features) / sizeof(*features); i++) if (token_is(t, features[i])) return;
     if (p->deferred) return;
     char message[128];
@@ -4096,10 +4097,191 @@ static Node *if_statement(Parser *p) {
     return n;
 }
 /* Build the hidden __annotate__(format, /) function for an owner. */
+/* PEP 563 annotation strings, as CPython's ast_unparse.c writes them. */
+enum { PR_TUPLE, PR_TEST, PR_OR, PR_AND, PR_NOT, PR_CMP, PR_BOR, PR_BXOR, PR_BAND, PR_SHIFT, PR_ARITH, PR_TERM,
+       PR_FACTOR, PR_POWER, PR_AWAIT, PR_ATOM };
+static SPYValue *number_literal(SPYContext *, Node *);
+static int unparse(Buffer *b, Node *n, int level);
+static int unparse_list(Buffer *b, Node *items, int level) {
+    for (Node *item = items; item; item = item->next)
+        if ((item != items && puts_buffer(b, ", ")) || unparse(b, item, level)) return -1;
+    return 0;
+}
+static int unparse_comprehension(Buffer *b, Node *n) {
+    Node *element = n->args;
+    if (element->kind == N_ASSIGN) {
+        if (unparse(b, element->a, PR_TEST) || puts_buffer(b, ": ") || unparse(b, element->b, PR_TEST)) return -1;
+    } else if (unparse(b, element, PR_TEST)) return -1;
+    for (Node *clause = n->a; clause; clause = clause->b) {
+        if (clause->kind == N_FOR) {
+            if (puts_buffer(b, clause->op ? " async for " : " for ") || unparse(b, clause->args, PR_TUPLE) ||
+                puts_buffer(b, " in ") || unparse(b, clause->a, PR_TEST + 1)) return -1;
+        } else if (puts_buffer(b, " if ") || unparse(b, clause->a, PR_TEST + 1)) return -1;
+    }
+    return 0;
+}
+/* An f-string body: literal braces doubled, fields unparsed. */
+static int unparse_fstring_body(Buffer *b, Node *parts) {
+    for (Node *part = parts; part; part = part->next) {
+        if (part->kind == N_STRING) {
+            for (int i = 0; i < part->op; i++)
+                if (append(b, part->text + i, 1) || ((part->text[i] == '{' || part->text[i] == '}') && append(b, part->text + i, 1))) return -1;
+            continue;
+        }
+        Buffer field = {.ctx = b->ctx};
+        int status = unparse(&field, part->a, PR_TEST + 1);
+        status = status || puts_buffer(b, "{") || (field.len && field.data[0] == '{' && puts_buffer(b, " ")) ||
+                 append(b, field.data, field.len);
+        free(field.data);
+        if (status) return -1;
+        if (part->op) { char conversion[] = {'!', (char)part->op, 0}; if (puts_buffer(b, conversion)) return -1; }
+        if (part->b && (puts_buffer(b, ":") || unparse_fstring_body(b, part->b->args))) return -1;
+        if (puts_buffer(b, "}")) return -1;
+    }
+    return 0;
+}
+static int unparse_lambda_arguments(Buffer *b, Node *args) {
+    int first = 1, starred = 0;
+    for (Node *arg = args; arg; arg = arg->next) {
+        if (arg->op == P_KWONLY && !starred) {
+            if ((!first && puts_buffer(b, ", ")) || puts_buffer(b, "*")) return -1;
+            first = 0;
+        }
+        if (arg->op == P_VARARGS || arg->op == P_KWONLY) starred = 1;
+        if (!first && puts_buffer(b, ", ")) return -1;
+        first = 0;
+        if (puts_buffer(b, arg->op == P_VARARGS ? "*" : arg->op == P_KWARGS ? "**" : "") || puts_buffer(b, source_name(arg))) return -1;
+        if (arg->a && (puts_buffer(b, "=") || unparse(b, arg->a, PR_TEST))) return -1;
+        if (arg->op == P_POSONLY && (!arg->next || arg->next->op != P_POSONLY) && puts_buffer(b, ", /")) return -1;
+    }
+    return 0;
+}
+static int unparse(Buffer *b, Node *n, int level) {
+    switch (n->kind) {
+    case N_NAME: return puts_buffer(b, source_name(n));
+    case N_NONE: return puts_buffer(b, "None");
+    case N_BOOL: return puts_buffer(b, n->op ? "True" : "False");
+    case N_ELLIPSIS: return puts_buffer(b, "...");
+    case N_INT: case N_FLOAT: case N_IMAG: {
+        SPYValue *value = number_literal(b->ctx, n);
+        if (!value) return -1;
+        int infinite = (value->type == SPY_FLOAT && isinf(value->as.real)) || (value->type == SPY_COMPLEX && isinf(cimag(value->as.number)));
+        int status = infinite ? puts_buffer(b, value->type == SPY_COMPLEX ? "1e309j" : "1e309") : format_value(b, value, 1);
+        spy_release(value); return status;
+    }
+    case N_STRING: case N_BYTES: {
+        SPYValue *value = n->kind == N_STRING ? spy_string(b->ctx, n->text, (size_t)n->op) : spy_bytes(b->ctx, n->text, (size_t)n->op);
+        int status = value ? format_value(b, value, 1) : -1;
+        spy_release(value); return status;
+    }
+    case N_JOINED: case N_TEMPLATE: {
+        Buffer body = {.ctx = b->ctx};
+        int status = unparse_fstring_body(&body, n->args);
+        SPYValue *text = status ? NULL : spy_string(b->ctx, body.data ? body.data : "", body.len);
+        free(body.data);
+        status = !text || puts_buffer(b, n->kind == N_JOINED ? "f" : "t") || format_value(b, text, 1);
+        spy_release(text); return status ? -1 : 0;
+    }
+    case N_LIST: case N_SET:
+        return puts_buffer(b, n->kind == N_LIST ? "[" : "{") || unparse_list(b, n->args, PR_TEST) || puts_buffer(b, n->kind == N_LIST ? "]" : "}");
+    case N_DICT:
+        if (puts_buffer(b, "{")) return -1;
+        for (Node *item = n->args; item; item = item->next) {
+            if (item != n->args && puts_buffer(b, ", ")) return -1;
+            if (item->kind == N_MAPPING ? puts_buffer(b, "**") || unparse(b, item->a, PR_BOR) :
+                unparse(b, item->a, PR_TEST) || puts_buffer(b, ": ") || unparse(b, item->b, PR_TEST)) return -1;
+        }
+        return puts_buffer(b, "}");
+    case N_TUPLE:
+        if (!n->args) return puts_buffer(b, "()");
+        return (level > PR_TUPLE && puts_buffer(b, "(")) || unparse_list(b, n->args, PR_TEST) ||
+               (!n->args->next && puts_buffer(b, ",")) || (level > PR_TUPLE && puts_buffer(b, ")"));
+    case N_COMPREHENSION: {
+        const char *open = n->op == N_LIST ? "[" : n->op == N_TUPLE ? "(" : "{", *close = n->op == N_LIST ? "]" : n->op == N_TUPLE ? ")" : "}";
+        return puts_buffer(b, open) || unparse_comprehension(b, n) || puts_buffer(b, close);
+    }
+    case N_STAR: return puts_buffer(b, "*") || unparse(b, n->a, PR_BOR);
+    case N_MAPPING: return puts_buffer(b, "**") || unparse(b, n->a, PR_BOR);
+    case N_KEYWORD: return puts_buffer(b, n->text) || puts_buffer(b, "=") || unparse(b, n->a, PR_TEST);
+    case N_AWAIT:
+        return (level > PR_AWAIT && puts_buffer(b, "(")) || puts_buffer(b, "await ") || unparse(b, n->a, PR_ATOM) ||
+               (level > PR_AWAIT && puts_buffer(b, ")"));
+    case N_YIELD:
+        return puts_buffer(b, n->op ? "(yield from " : n->a ? "(yield " : "(yield") || (n->a && unparse(b, n->a, PR_TEST)) || puts_buffer(b, ")");
+    case N_NAMED:
+        return (level > PR_TUPLE && puts_buffer(b, "(")) || unparse(b, n->a, PR_ATOM) || puts_buffer(b, " := ") ||
+               unparse(b, n->b, PR_ATOM) || (level > PR_TUPLE && puts_buffer(b, ")"));
+    case N_LAMBDA: {
+        int positional = n->args && (n->args->op == P_POSITIONAL || n->args->op == P_POSONLY);
+        return (level > PR_TEST && puts_buffer(b, "(")) || puts_buffer(b, positional ? "lambda " : "lambda") ||
+               unparse_lambda_arguments(b, n->args) || puts_buffer(b, ": ") || unparse(b, n->b->a, PR_TEST) ||
+               (level > PR_TEST && puts_buffer(b, ")"));
+    }
+    case N_COND:
+        return (level > PR_TEST && puts_buffer(b, "(")) || unparse(b, n->a, PR_TEST + 1) || puts_buffer(b, " if ") ||
+               unparse(b, n->b, PR_TEST + 1) || puts_buffer(b, " else ") || unparse(b, n->c, PR_TEST) ||
+               (level > PR_TEST && puts_buffer(b, ")"));
+    case N_UNARY: {
+        int pr = n->op == O_NOT ? PR_NOT : PR_FACTOR;
+        const char *text = n->op == O_NOT ? "not " : n->op == '-' ? "-" : n->op == '+' ? "+" : "~";
+        return (level > pr && puts_buffer(b, "(")) || puts_buffer(b, text) || unparse(b, n->a, pr) || (level > pr && puts_buffer(b, ")"));
+    }
+    case N_BINARY: {
+        static const struct { int op, pr; const char *text; } ops[] = {
+            {O_OR, PR_OR, " or "}, {O_AND, PR_AND, " and "}, {'|', PR_BOR, " | "}, {'^', PR_BXOR, " ^ "}, {'&', PR_BAND, " & "},
+            {T_LSHIFT, PR_SHIFT, " << "}, {T_RSHIFT, PR_SHIFT, " >> "}, {'+', PR_ARITH, " + "}, {'-', PR_ARITH, " - "},
+            {'*', PR_TERM, " * "}, {'/', PR_TERM, " / "}, {'%', PR_TERM, " % "}, {'@', PR_TERM, " @ "}, {T_FLOORDIV, PR_TERM, " // "},
+            {T_POW, PR_POWER, " ** "}};
+        size_t i = 0;
+        while (i + 1 < sizeof(ops) / sizeof(*ops) && ops[i].op != n->op) i++;
+        int pr = ops[i].pr, power = n->op == T_POW;
+        return (level > pr && puts_buffer(b, "(")) || unparse(b, n->a, power ? pr + 1 : pr) || puts_buffer(b, ops[i].text) ||
+               unparse(b, n->b, power ? pr : pr + 1) || (level > pr && puts_buffer(b, ")"));
+    }
+    case N_COMPARE:
+        if ((level > PR_CMP && puts_buffer(b, "(")) || unparse(b, n->a, PR_CMP + 1)) return -1;
+        for (Node *cmp = n->args; cmp; cmp = cmp->next) {
+            const char *text = cmp->op == T_EQ ? " == " : cmp->op == T_NE ? " != " : cmp->op == '<' ? " < " : cmp->op == '>' ? " > " :
+                cmp->op == T_LE ? " <= " : cmp->op == T_GE ? " >= " : cmp->op == O_IN ? " in " : cmp->op == O_NOTIN ? " not in " :
+                cmp->op == O_IS ? " is " : " is not ";
+            if (puts_buffer(b, text) || unparse(b, cmp->a, PR_CMP + 1)) return -1;
+        }
+        return level > PR_CMP && puts_buffer(b, ")");
+    case N_ATTR:
+        return unparse(b, n->a, PR_ATOM) || puts_buffer(b, n->a->kind == N_INT ? " ." : ".") || puts_buffer(b, source_name(n->b));
+    case N_CALL:
+        if (unparse(b, n->a, PR_ATOM) || puts_buffer(b, "(")) return -1;
+        if (n->args && !n->args->next && n->args->kind == N_COMPREHENSION && n->args->op == N_TUPLE) {
+            if (unparse_comprehension(b, n->args)) return -1;
+        } else if (unparse_list(b, n->args, PR_TEST)) return -1;
+        return puts_buffer(b, ")");
+    case N_INDEX:
+        if (unparse(b, n->a, PR_ATOM) || puts_buffer(b, "[")) return -1;
+        if (n->b->kind == N_TUPLE && n->b->args) {
+            if (unparse_list(b, n->b->args, PR_TEST) || (!n->b->args->next && puts_buffer(b, ","))) return -1;
+        } else if (unparse(b, n->b, PR_TUPLE)) return -1;
+        return puts_buffer(b, "]");
+    case N_SLICE:
+        return (n->a && unparse(b, n->a, PR_TEST)) || puts_buffer(b, ":") || (n->b && unparse(b, n->b, PR_TEST)) ||
+               (n->c && (puts_buffer(b, ":") || unparse(b, n->c, PR_TEST)));
+    }
+    return puts_buffer(b, "...");
+}
+/* The annotation as a string constant node. */
+static Node *annotation_string(Parser *p, Node *annotation) {
+    Buffer text = {.ctx = p->ctx};
+    Node *n = node(p, N_STRING);
+    if (!n || unparse(&text, annotation, PR_TEST) || text.len > INT_MAX) { free(text.data); return NULL; }
+    n->line = annotation->line;
+    n->text = text.data ? text.data : copy_text(p->ctx, "", 0);
+    n->op = (int)text.len;
+    return n->text ? n : NULL;
+}
 static Node *annotation_entry(Parser *p, const char *name, Node *annotation, int index, int flags) {
     Node *entry = node(p, N_KEYWORD);
     if (!entry) return NULL;
     entry->text = copy_text(p->ctx, name, strlen(name));
+    if (p->future_annotations && !(annotation = annotation_string(p, annotation))) return NULL;
     entry->a = annotation; entry->op = index; entry->flags = flags;
     return entry->text ? entry : NULL;
 }
@@ -4119,7 +4301,11 @@ static Node *annotation_function(Parser *p, Node *owner, Node *entries) {
 /* Collect simple annotated names of a module or class body in order. */
 static int collect_annotations(Parser *p, Node *body, int conditional, Node ***tail, int *index) {
     for (Node *n = body; n; n = n->next) {
-        if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE)) {
+        if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE) && p->future_annotations) {
+            /* PEP 563 stores each string in __annotations__ as it runs. */
+            if (!(n->b = annotation_string(p, n->b))) return -1;
+            n->flags |= F_FUTURE; (*index)++;
+        } else if (n->kind == N_ANNASSIGN && (n->flags & F_SIMPLE)) {
             Node *entry = annotation_entry(p, n->a->text, n->b, *index, conditional ? F_CONDITIONAL : 0);
             if (!entry) return -1;
             n->op = (*index)++;
@@ -4149,6 +4335,10 @@ static int body_annotations(Parser *p, Node *owner, Node *body, Node **out) {
     int index = 0;
     *out = NULL;
     if (collect_annotations(p, body, 0, &tail, &index)) return -1;
+    if (p->future_annotations && index) {
+        if (owner) owner->flags |= F_SETUP_ANNOTATIONS;
+        else p->unit->as.unit.setup_annotations = 1;
+    }
     if (entries && !(*out = annotation_function(p, owner, entries))) return -1;
     return 0;
 }
@@ -5585,7 +5775,8 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
     unit->as.unit.filename = copy_text(c, filename, strlen(filename));
-    Parser p = { .ctx = c, .unit = unit, .barry = (c->compile_flags & 0x400000) != 0 };
+    Parser p = { .ctx = c, .unit = unit, .barry = (c->compile_flags & 0x400000) != 0,
+                .future_annotations = (c->compile_flags & 0x1000000) != 0 };
     int parsing = 1, at_end = 0;
     if (unit->as.unit.filename && !lex(&p, source)) {
         unit->as.unit.body = statements(&p);
@@ -5606,6 +5797,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             p.error_end_zero = 1;
         }
         parsing = c->error_type[0] != 0;
+        unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         if (!c->error_type[0]) body_annotations(&p, NULL, unit->as.unit.body, &unit->as.unit.annotate);
         NamedScope comps[128];
         if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0, 0);
@@ -5681,6 +5873,12 @@ static SPYValue *parse_source(SPYContext *c, const char *source, const char *fil
     SPYValue *unit = parse_normalized(c, normalized, filename, incomplete);
     free(normalized);
     return unit;
+}
+/* The future flags of the innermost running Python code. */
+static int caller_future_flags(SPYContext *c) {
+    SPYValue *unit = c->py_depth ? c->frames[c->py_depth - 1].owner : NULL;
+    while (unit && unit->type == V_UNIT && unit->as.unit.owner && unit->as.unit.owner->type == V_UNIT) unit = unit->as.unit.owner;
+    return unit && unit->type == V_UNIT ? unit->as.unit.future_flags : 0;
 }
 static SPYValue *decode_source(SPYContext *, const char *, size_t, const char *);
 static SPYValue *parse(SPYContext *c, const char *source, const char *filename) {
@@ -12227,6 +12425,13 @@ static SPYValue *static_attributes(SPYContext *c, SPYValue *unit, Scope *scope) 
 /* Create a class from evaluated bases (a list) and keyword arguments. The
  * body is either a class statement n run in frame f, or a call of function,
  * as builtins.__build_class__ makes it. */
+/* SETUP_ANNOTATIONS: a PEP 563 body starts its own __annotations__. */
+static int setup_annotations(SPYContext *c, Frame *f, int setup) {
+    if (!setup) return 0;
+    SPYValue *dict = value_new(c, SPY_DICT);
+    int status = dict ? name_set(c, f->env, "__annotations__", dict) : -1;
+    spy_release(dict); return status;
+}
 static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function, SPYValue *name,
                             SPYValue *bases, SPYValue *arguments, SPYValue *type_params) {
     SPYValue *keywords = value_new(c, SPY_DICT), *cls = NULL;
@@ -12305,7 +12510,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
     declare_locals(c, env);
     Frame frame = {env, f->unit, 0};
     if (enter_frame(c, env, f->unit)) goto done;
-    r = start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
+    r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
     leave_frame(c);
     spy_release(r.value);
     if (r.flow != FLOW_NORMAL || c->error_type[0]) goto done;
@@ -13653,6 +13858,13 @@ static void annotated_assign(SPYContext *c, Frame *f, Node *n) {
         SPYValue *index = object && n->a->kind == N_INDEX ? eval(c, f, n->a->b) : NULL;
         spy_release(object); spy_release(index);
     }
+    if (!c->error_type[0] && (n->flags & F_FUTURE)) {
+        SPYValue *annotations = name_get(c, f->env, "__annotations__");
+        SPYValue *key = annotations ? spy_string(c, n->a->text, strlen(n->a->text)) : NULL;
+        SPYValue *value = key ? spy_string(c, n->b->text, (size_t)n->b->op) : NULL;
+        if (value) set_index(c, annotations, key, value);
+        spy_release(value); spy_release(key); spy_release(annotations);
+    }
     if (!c->error_type[0] && (n->flags & F_CONDITIONAL)) {
         SPYValue *executed = name_get(c, f->env, "__conditional_annotations__");
         SPYValue *index = executed ? spy_int(c, n->op) : NULL;
@@ -13719,7 +13931,7 @@ static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char
 }
 static Result execute_module(SPYContext *c, Frame *f) {
     if (enter_frame(c, f->env, f->unit)) return (Result){FLOW_ERROR, NULL};
-    Result r = start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
+    Result r = setup_annotations(c, f, f->unit->as.unit.setup_annotations) || start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
         (Result){FLOW_ERROR, NULL} : execute(c, f, f->unit->as.unit.body);
     leave_frame(c);
     return r;
@@ -18700,9 +18912,13 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
                 if (!bytes) { spy_error(c, "TypeError", "source must be a string or code object"); goto execution_fail; }
                 text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
             }
+            /* exec and eval inherit the running code's future statements. */
+            int flags = c->compile_flags;
+            if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
             c->string_source++;
             if (text) unit = parse_source(c, text->as.string.data, filename, NULL);
             c->string_source--;
+            c->compile_flags = flags;
             spy_release(text);
             if (!unit) goto execution_fail;
             Node *body = unit->as.unit.body;
@@ -19277,8 +19493,8 @@ static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *ar
     if (args[6] && args[6]->type != SPY_NONE && !builtin_value(c, args[6], SPY_STRING))
         return errorf(c, "TypeError", "compile() argument 'module' must be str or None, not %s", type_name(args[6]));
     if (flags & CF_ONLY_AST) return spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
-    int saved = c->compile_flags;
-    c->compile_flags = (int)(flags & CF_FUTURE_MASK);
+    int saved = c->compile_flags, inherit = !args[4] || !spy_truth(args[4]);
+    c->compile_flags = (int)(flags & CF_FUTURE_MASK) | (inherit ? caller_future_flags(c) : 0);
     SPYValue *code = builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
     c->compile_flags = saved;
     return code;

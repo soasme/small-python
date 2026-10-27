@@ -562,8 +562,12 @@ Future statements are checked as CPython's compiler does: they must come
 first (after at most a docstring), name a known feature (`braces` is "not a
 chance"), and `barry_as_FLUFL` or compile()'s `CO_FUTURE_BARRY_AS_BDFL` flag
 makes `<>` the inequality operator. The statement still imports `__future__`
-when a host provides it and binds nothing otherwise. `from __future__ import
-annotations` does not yet turn annotations into strings. Compiler-phase
+when a host provides it and binds nothing otherwise. Under `from __future__
+import annotations` (PEP 563) annotations become strings written as CPython's
+AST unparser writes them; functions return them from `__annotate__`, and module
+and class bodies store them in an eager `__annotations__` dict. compile(),
+exec(), and eval() inherit the running code's future statements unless
+`dont_inherit` is true. Compiler-phase
 SyntaxErrors from compile(), exec(), and eval() strings have no `text`, as in
 CPython.
 
