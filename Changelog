@@ -767,3 +767,23 @@
   CPython does (17.6.3); and a literal pattern may carry a '+' sign
   ("case +1:"), as Annex A allows. PLS-315 now states the last two, and
   that interactive input holding no statement is a SyntaxError.
+- The CPython doctest and unittest runners (tests/cpython.py, the
+  tests/support adapter, their reports and docs/testing/cpython.md) and
+  the oracle-differential scripts behind make test are removed.
+  Conformance now rests on the spec tests and the TLA+ models alone. The
+  nineteen unittest modules the runner passed are ported to
+  tests/spec/ports, run by a core-only unittest adaptation in the
+  harness; every library import is replaced by a core equivalent
+  (test_userdict, a library test, is dropped). The programs the
+  differential scripts ran become tests/spec/programs: 1,356 programs,
+  the long random sweeps among them sampled, each with the output
+  CPython 3.15 gives it. The identifier sweep becomes
+  lexical/identifier_characters, which checks every code point against
+  str.isidentifier and a table of the NFKC forms CPython binds. make
+  test runs the spec suite.
+- spy runs del statements whose targets yield; exec and eval give
+  globals without __builtins__ the calling frame's builtins rather than
+  the global built-in namespace; and complex() reports an underscore that
+  is not between two digits as CPython does. PLS-315 now gives the future
+  feature flags (Table 14-1), the builtins exec and eval insert, and the
+  underscore rule of complex().

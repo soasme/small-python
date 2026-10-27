@@ -28,11 +28,10 @@ make test
 - [Upstream Cython baseline](docs/testing/cython.md): 343 passing and 11,107 failing
   discovered examples; 13 files need another adapter. Reproduce with
   `make upstream` followed by `make cython-report`.
-- [CPython 3.15 coverage](docs/testing/cpython.md): pinned development oracle,
-  full upstream file inventory, dynamic case discovery, unchanged doctest
-  examples, and 180 passing cases from twelve complete unittest modules, including
-  99 checked subtests. Reproduce
-  with `make oracle cpython-discover cpython-report test-cpython-unittest`.
+- [Specification tests](tests/spec/README.md): test262-style, core-only tests
+  of every clause of PLS-315, including CPython's language tests ported without
+  their library dependencies; `make test-spec` runs them on spy, and
+  `make test-spec-oracle` validates them against the pinned CPython 3.15.
 - [Development instructions](AGENTS.md): architecture, naming, code taste, and
   requirements for honest upstream test evidence.
 

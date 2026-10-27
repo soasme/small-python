@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -66,21 +66,13 @@ cython-report: run-cython
 cython-dynamic-report: run-cython
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/run_cython.py --dynamic --report tests/results/cython-dynamic.json --report-only
 
-# CPython is an out-of-tree development oracle, never linked into the engine.
+# CPython is an out-of-tree development oracle for validating spec tests and
+# TLA replays; it is never linked into the engine or required by a test.
 oracle:
 	$(PYTHON) tests/fetch_upstream.py cpython
 	mkdir -p tests/upstream/cpython-build
 	cd tests/upstream/cpython-build && ../cpython/configure --without-ensurepip
 	$(MAKE) -C tests/upstream/cpython-build -j4
-
-test-cpython-doctests: run-cython
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py doctests
-
-test-cpython-unittest: run-cython
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py unittest
-
-cpython-unittest-report: run-cython
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py unittest --report-only
 
 # Language reference tests (PLS-315) on spy; they need no other implementation.
 test-spec: spy
@@ -116,15 +108,6 @@ test-tla-oracle: spy $(TLA_JAR) tla-coverage
 tla-coverage:
 	python3 tests/tla_coverage.py
 
-test-cpython: test-cpython-doctests test-cpython-unittest
-	$(CPYTHON) tests/cpython.py discover
-
-cpython-report: run-cython
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py doctests --report-only
-
-cpython-discover:
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py discover --report-only
-
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -m755 spy spyc "$(DESTDIR)$(PREFIX)/bin"
@@ -132,29 +115,20 @@ install: all
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
 	install -m644 docs/smallpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
-	install -m644 docs/testing/cython.md docs/testing/cpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
+	install -m644 docs/testing/cython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -d "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
 	install -m644 docs/licenses/unicode.txt docs/licenses/python.txt "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
 
 docs:
 	$(PYTHON) tools/check_docs.py
 
-.PHONY: unicode-data check-unicode test-unicode test-async test-stringsearch intrinsics check-intrinsics
+.PHONY: unicode-data check-unicode test-unicode intrinsics check-intrinsics
 # The intrinsics header is checked in; regenerate it after editing intrinsics.py.
 intrinsics:
 	$(PYTHON) tools/build_intrinsics.py
 
 check-intrinsics:
 	$(PYTHON) tools/build_intrinsics.py --check
-
-test-stringsearch: spy
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/stringsearch.py ./spy
-
-test-async: spy
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/async.py ./spy
-
-test-templates: spy
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/templates.py ./spy
 
 unicode-data:
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tools/build_unicode.py
@@ -164,26 +138,12 @@ check-unicode:
 
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
-	$(CPYTHON) tests/identifiers.py ./spy
 
 test: all tests/api run-cython check-intrinsics
 	./tests/api
-	$(PYTHON) tests/conformance.py ./spy
-	$(PYTHON) tests/numbers.py ./spy
-	$(PYTHON) tests/ranges.py ./spy
-	$(PYTHON) tests/comparisons.py ./spy
-	$(PYTHON) tests/arguments.py ./spy
-	$(PYTHON) tests/construction.py ./spy
-	$(PYTHON) tests/classcreation.py ./spy
-	$(PYTHON) tests/hashing.py ./spy
-	$(PYTHON) tests/mappingproxy.py ./spy
-	$(PYTHON) tests/generator_metadata.py ./spy
-	$(PYTHON) tests/source_encoding.py ./spy
-	$(PYTHON) tests/frozendict.py ./spy
-	$(PYTHON) tests/rounding.py ./spy
-	$(PYTHON) tests/strings.py ./spy
+	python3 tests/spec_coverage.py
+	python3 tests/spec_runner.py ./spy --strict
 	$(PYTHON) tests/files.py ./spy
-	$(PYTHON) tests/framework.py ./run-cython
 	$(PYTHON) tests/executable.py
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.

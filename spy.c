@@ -11078,7 +11078,7 @@ enum {
     BC_SAVE_TARGET, BC_INPLACE, BC_FUNCTION, BC_DEFAULT, BC_COMPREHENSION, BC_SLICE,
     BC_UNPACK, BC_ASSERT, BC_RAISE, BC_DECORATE, BC_CONVERT, BC_FORMAT, BC_JOIN, BC_TEMPLATE, BC_INTERPOLATION,
     BC_AENTER, BC_AWITH, BC_END_AWITH, BC_PATTERN,
-    BC_STAR_BEGIN, BC_STAR_MATCH, BC_STAR_DONE, BC_STAR_CAUGHT, BC_STAR_RERAISE
+    BC_STAR_BEGIN, BC_STAR_MATCH, BC_STAR_DONE, BC_STAR_CAUGHT, BC_STAR_RERAISE, BC_DELETE
 };
 typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
 struct Program { Instruction *items; size_t len, cap; };
@@ -11331,6 +11331,18 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
         }
     }
 }
+/* A del target that suspends evaluates its object (and key) on the stack;
+ * BC_DELETE with argument 0 deletes a target that does not suspend. */
+static void compile_delete(SPYContext *c, Program *p, Node *n) {
+    if (!suspends(n)) { emit(c, p, BC_DELETE, n, 0); return; }
+    if (n->kind == N_LIST || n->kind == N_TUPLE) {
+        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) compile_delete(c, p, item);
+        return;
+    }
+    compile_expr(c, p, n->a);
+    if (n->kind == N_INDEX) compile_expr(c, p, n->b);
+    emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
+}
 static void compile_body(SPYContext *c, Program *p, Node *body) {
     for (Node *n = body; n && !c->error_type[0]; n = n->next) {
         size_t branch, end, start, loop;
@@ -11467,6 +11479,7 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
             break;
         }
         case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
+        case N_DELETE: compile_delete(c, p, n->a); break;
         default: spy_error(c, "NotImplementedError", "yield in this statement is not implemented"); break;
         }
     }
@@ -15424,6 +15437,7 @@ static int delete_attribute(SPYContext *c, SPYValue *object, const char *name) {
     return delete_attribute_default(c, object, name);
 }
 static int delete_index(SPYContext *, SPYValue *, SPYValue *);
+static void delete_evaluated(SPYContext *, Node *, SPYValue *, SPYValue *);
 static int delete_target(SPYContext *c, Frame *f, Node *n) {
     if (n->kind == N_LIST || n->kind == N_TUPLE) {
         for (Node *item = n->args; item; item = item->next)
@@ -15452,19 +15466,16 @@ static int delete_target(SPYContext *c, Frame *f, Node *n) {
     }
     SPYValue *object = eval(c, f, n->a);
     if (!object) return -1;
-    if (n->kind == N_ATTR) {
-        delete_attribute(c, object, n->b->text);
-    } else {
-        SPYValue *key = eval(c, f, n->b);
-        SPYValue *base = key ? builtin_base(c, object, "__delitem__", NULL) : NULL;
-        if (base) { spy_release(object); object = spy_retain(base); }
-        if (key) {
-            delete_index(c, object, key);
-        }
-        spy_release(key);
-    }
-    spy_release(object);
+    SPYValue *key = n->kind == N_INDEX ? eval(c, f, n->b) : NULL;
+    if (n->kind == N_ATTR || key) delete_evaluated(c, n, object, key);
+    spy_release(key); spy_release(object);
     return c->error_type[0] ? -1 : 0;
+}
+/* Delete the attribute or item a target names, its object and key evaluated. */
+static void delete_evaluated(SPYContext *c, Node *n, SPYValue *object, SPYValue *key) {
+    if (n->kind == N_ATTR) { delete_attribute(c, object, n->b->text); return; }
+    SPYValue *base = builtin_base(c, object, "__delitem__", NULL);
+    delete_index(c, base ? base : object, key);
 }
 /* PyObject_DelItem's error: a type with sequence methods hands an index key
  * to PySequence_DelItem, which words it differently. */
@@ -17339,6 +17350,10 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (ins->op == BC_STAR_DONE) m->pc = ins->target;
             break;
         }
+        case BC_DELETE:
+            if (!ins->arg) { delete_target(c, &f, n); break; }
+            b = ins->arg == 2 ? machine_pop(m) : NULL; a = machine_pop(m);
+            delete_evaluated(c, n, a, b); break;
         case BC_STAR_RERAISE: {
             Block *block = &m->blocks[m->block_len - 1];
             SPYValue *rest = block->value->as.seq.items[0], *raised = block->value->as.seq.items[1];
@@ -18180,8 +18195,10 @@ static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv
         if (storage->type == SPY_FROZENDICT) {
             spy_release(locals); return spy_error(c, "TypeError", "cannot assign __builtins__ to frozendict globals");
         }
-        if (name_set(c, storage, "__builtins__", c->builtins)) { spy_release(locals); return NULL; }
-        builtins = c->builtins;
+        /* The calling frame's builtins (9.3.4), which its global env leads to. */
+        SPYValue *caller = module_env(c, current)->as.map.parent;
+        builtins = caller && is_dict(caller) ? caller : c->builtins;
+        if (name_set(c, storage, "__builtins__", builtins)) { spy_release(locals); return NULL; }
     }
     if (builtins->type == SPY_MODULE) builtins = namespace_map(builtins);
     if (!is_dict(builtins)) {
@@ -18248,10 +18265,16 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
 static SPYValue *directory(SPYContext *c, SPYValue *object) { return directory_of(c, object, 0); }
 static char *numeric_ascii(SPYContext *, SPYValue *, size_t *);
 static SPYValue *parse_complex_ascii(SPYContext *, const char *, size_t);
+static SPYValue *numeric_error(SPYContext *, SPYValue *, const char *, int);
 static SPYValue *parse_complex(SPYContext *c, SPYValue *text) {
     size_t ascii_len;
     char *ascii = numeric_ascii(c, text, &ascii_len);
     if (!ascii) return NULL;
+    /* Each underscore stands between two digits, or the text is not a number. */
+    for (size_t i = 0; i < ascii_len; i++)
+        if (ascii[i] == '_' && (!i || i + 1 == ascii_len || !isdigit((unsigned char)ascii[i - 1]) || !isdigit((unsigned char)ascii[i + 1]))) {
+            free(ascii); return numeric_error(c, text, "could not convert string to complex: %s", -1);
+        }
     SPYValue *result = parse_complex_ascii(c, ascii, ascii_len);
     free(ascii);
     return result;

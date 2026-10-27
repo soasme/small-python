@@ -29,6 +29,20 @@ Examples that relied on a library (collections, itertools, random, weakref,
 warnings, test.support) were rewritten to use only the core language; each
 rewrite is explained by a "(Ported ...)" note inside the docstring.
 
+The `ports/` chapter carries CPython's unittest-based language test modules
+(test_augassign, test_binop, test_contains, ...), copied once from CPython
+3.15.0 and run by `harness.unittest`, a core-only adaptation of the unittest
+names they use (TestCase with its assertions, skips, subtests and fixtures, and
+a subset of regular expressions for assertRaisesRegex). Each library import is
+replaced by a core equivalent, and each change is marked "(Ported)". Modules
+that test a library facility (test_userdict, for one) are not ported.
+`harness.support` holds core versions of the test.support helpers they use.
+
+The `programs/` chapter holds programs with the output CPython 3.15 gives them:
+`harness.check_program` runs each with `print` and `input` bound in its own
+namespace, and with its own copy of the built-in namespace, and compares what
+it printed, followed by the last line of any escaping exception.
+
 Tests name no library module. A host facility that PLS-315 leaves to the
 implementation (the module cache, the lazy module set, the display hook, the
 asynchronous generator hooks, and the texts *host*(f) by which messages name them) is reached through

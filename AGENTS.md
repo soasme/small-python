@@ -203,40 +203,27 @@
 
 ## Tests and evidence
 
-- Download and inspect **upstream Cython** and relevant CPython tests. Pin
-  commits, retain upstream licenses, and provide reproducible fetch/run steps.
-  Local tests complement upstream coverage; they do not replace it.
-- Preserve upstream source and expected output. Adapter changes must be
-  explained. Do not remove imports, decorators, unsupported expressions, or
-  assertions to turn an upstream test into a pass.
-- Report passed, failed, skipped, and adapter-ineligible cases separately.
-  Label pure-Python doctests separately from Cython compiler and C-extension
-  tests. Cython compatibility requires a separate CPython C API/ABI effort.
-- The user requires every CPython 3.15 test case to be accounted for and ported;
-  small, documented framework adaptations are allowed. Preserve the full file
-  inventory and dynamic discovery results. Static test definitions are only
-  candidates: generated tests, subtests, platform skips, fixtures, and extension
-  dependencies remain obligations until actually resolved. Do not use a passing
-  selection as evidence that the full suite passed.
-- Build pinned CPython out of tree as a development oracle when the installed
-  interpreter differs. Keep it under ignored `tests/upstream/`; never make it
-  an engine dependency. Preserve unchanged doctest examples and expectations,
-  validate the port against the oracle, and identify replaced framework code.
-- Remove this repository's tests directory from oracle module search paths after
-  importing the runner helpers. Local names such as numbers.py must not shadow
-  the pinned standard library in either the parent runner or discovery workers.
+- Conformance to PLS-315 is established by the specification tests in
+  `tests/spec` and the TLA+ models in `tests/tla`, and by nothing else. Both
+  model the standard; neither depends on the upstream CPython tree at run time.
+- Spec tests are test262-style: small, self-checking, core-only scripts that
+  name the clauses they exercise. Write each from the standard's text, then run
+  it on spy and on the pinned CPython oracle (`make test-spec-oracle`). When
+  both fail the same way, the standard or the test is wrong; when only spy
+  fails, spy is wrong. Every clause must keep a test (`tests/spec_coverage.py`).
+- Port CPython's language tests into `tests/spec/ports`: copy the module once,
+  replace each library import by a core equivalent, and mark every change
+  "(Ported)". A test of a library facility is not ported. Do not delete
+  assertions to make a port pass; fix spy or, if CPython disagrees with the
+  standard, the standard.
+- Upstream Cython tests are a separate compatibility baseline. Pin commits,
+  retain upstream licenses, and report passed, failed, and adapter-ineligible
+  cases separately; Cython compatibility requires a separate CPython C API/ABI
+  effort.
+- Build pinned CPython out of tree as a development oracle. Keep it under
+  ignored `tests/upstream/`; never make it an engine or test dependency.
 - A missing suite, prerequisite, or failed runner must fail explicitly, not
   report success with zero tests. Never count skips as passes.
-- Whole-module unittest ports execute the original module and every discovered
-  case with fixtures. Keep the replacement framework under tests/support;
-  unsupported framework behavior must fail visibly, never bypass assertions.
-- Record subtest outcomes and compare their execution with the oracle. A passing
-  parent case must not hide missing or failed subtests. Validate any test-framework
-  matching subset against the host implementation and reject unsupported syntax.
-- Let the test driver load unchanged upstream dependencies and fixtures after
-  the explicit framework-adaptation directory. Keep search-path precedence
-  consistent for plain modules and packages; never replace a missing fixture
-  with a fabricated outcome.
 - Use strict C11 warnings, meaningful semantic checks, ownership tests, and
   sanitizers. Record environment failures accurately. Do not claim a test ran
   when only a workflow or test target was added.

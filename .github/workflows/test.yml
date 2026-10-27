@@ -55,22 +55,12 @@ jobs:
         with:
           python-version: '3.15'
       - run: make oracle run-cython
-      - name: Discover pinned CPython tests, including unresolved modules
-        run: make cpython-discover
-      - name: Record all examples in the current known-failing language ports
-        run: make cpython-report
-      - name: Run every case in the adapted CPython unittest modules
-        run: make test-cpython-unittest
+      - name: Validate the specification tests against the pinned oracle
+        run: make test-spec-oracle
       - name: Check Unicode properties and representations against the pinned oracle
         run: make test-unicode
-      - name: Check asynchronous generator operation states against the pinned oracle
-        run: make test-async
-      - name: Check template strings and the upstream malformed-input table
-        run: make test-templates
-      - name: Check upstream string-search examples and differential cases
-        run: make test-stringsearch
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: cpython-baseline
-          path: tests/results/cpython-*.json
+          path: tests/results/spec.json

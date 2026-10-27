@@ -172,92 +172,42 @@ make test
 make sanitize
 ```
 
-The local suite covers C API ownership, context isolation, error recovery,
-closures, reference cycles, deep graph destruction, an execution budget,
-malformed source, differential behavior against host CPython, standalone
-program generation, and interactive submissions.
+`make test` builds everything, runs the C API tests (ownership, context
+isolation, error recovery, reference cycles, deep graph destruction, an
+execution budget), the host file and standalone-executable checks, and the
+language specification suite.
 
-The current local suite includes 218 differential programs, 160 error cases, 300
-integer expressions, 300 floating-point representations, 300 complex expressions
-(420 with the 3.15 oracle), and 5,000 malformed
-source inputs. A separate numeric suite covers 1,329 arbitrary-integer,
-conversion, modular-power, and rounding expressions. These are project tests,
-not the upstream compatibility suite.
-A separate range suite checks 768 large-bound, slicing, and reverse-iteration
-cases against CPython, including bounds and slice lengths with hundreds of digits.
-The comparison matrix checks 1,536 combinations of rich-comparison methods,
-subclass priority, reflection, and NotImplemented results, plus 600 slice
-comparisons. Mutation checks cover
-callbacks that change a list or delete a dictionary key during comparison.
-The argument matrix compares 560 binding and diagnostic cases with CPython.
-The construction matrix checks 288 allocator and initializer combinations.
-The class-creation suite checks 240 C3 inheritance hierarchies and exercises
-construction callbacks, descriptor mutation, `super` binding, lexical class
-cells, and argument evaluation. The rounding suite compares 5,238 numeric
-cases, plus special-method dispatch and argument validation.
-`make test-stringsearch` uses the pinned oracle to check 286 literal search
-examples derived from upstream `string_tests.py` and 5,600 differential cases.
-These examples preserve the upstream expected values; ASCII examples are also
-checked as bytes. They do not count as passing whole upstream test methods:
-nonliteral calls, loops, fixtures, and subclass checks remain port obligations.
-`make test-templates` checks 336 template literals and all 21 malformed sources
-from the pinned `test_tstring.py` diagnostic table, preserving its expected
-messages. Additional checks cover constructors, raw value retention, iteration,
-concatenation, matching, and interpolation suspended by `yield` or `await`.
-These checks do not count as passing whole upstream template test modules.
-The hashing suite compares 913 numeric and compound hashes, with additional
-checks for hash callbacks, failures, collision mutations, dictionary methods,
-and Python 3.15 tuple hash caching.
-It also checks collection of cycles through defaults, bound methods, iterators,
-and suspended generator/coroutine stacks, including operands, async iteration,
-async context-manager exits, and pending exceptions. The async ownership checks
-also pass UndefinedBehaviorSanitizer with recovery disabled.
-`make test-async` checks 120 asynchronous-generator operation/state combinations
-against the pinned 3.15 oracle, including reuse, concurrent operations, and
-closing during suspension. It does not check finalization warnings.
-Semantic checks use the separately built, pinned Python 3.15.0 oracle when
-available; set `PYTHON` to choose another development interpreter explicitly.
-An older host can differ in diagnostics and representations and is not the
-language compatibility target.
+Conformance to PLS-315 rests on two kinds of evidence, and no other:
 
-`make test-spec` runs the language specification suite in `tests/spec`. Each
-test follows a clause of PLS-315 (`docs/standards/3_15.md`), imports only
-`tests/spec/harness.py`, and states its expectations directly, so the suite
-needs neither a library nor another implementation. `make test-spec-oracle`
-also runs every test on the pinned CPython oracle, which must pass it, to
-validate the tests. The `doctests` chapter runs CPython's doctest-based tests
-through a core-only runner in the harness, with library-dependent examples
-rewritten to use only the language. All 136 tests currently pass.
+- `make test-spec` runs the specification tests in `tests/spec`, test262-style
+  scripts that each name the clauses of PLS-315 (`docs/standards/3_15.md`)
+  they exercise, import only `tests/spec/harness.py`, and state their
+  expectations directly, so the suite needs neither a library nor another
+  implementation. `tests/spec_coverage.py` fails unless every clause of the
+  normative chapters has a test. The `ports` chapter holds CPython's language
+  test modules with each library import replaced by a core equivalent, the
+  `doctests` chapter CPython's doctest-based tests, and the `programs` chapter
+  1,356 programs (arithmetic, comparisons, argument binding, class creation,
+  rounding, string search, template strings, asynchronous
+  generator states, and more) with the output CPython 3.15 gives them.
+  `make test-spec-oracle` also runs every test on the pinned CPython oracle,
+  which must pass it, to validate the tests.
+- `make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
+  (fetched by `make tla-tools`; it needs a Java runtime) and replays every
+  transition of the bounded models on spy (`make test-tla-oracle` replays them
+  on the oracle too). They cover generator and coroutine methods, try/with
+  control flow and exception context, name resolution, integer arithmetic,
+  argument binding, unpacking, method resolution order, operator dispatch,
+  attribute access, pattern matching, evaluation order, class creation,
+  `yield from`, async generators, `except*`, the iteration protocol, `super()`,
+  dict order, and object finalization and cycle collection; `SpyGC.tla` also
+  checks spy's own memory-management algorithm against the language model
+  step for step. The [README](../tests/tla/README.md) states what these checks
+  do and do not establish.
 
-`make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
-(fetched by `make tla-tools`; it needs a Java runtime) and replays every
-transition of the bounded models on spy (`make test-tla-oracle` replays them
-on the oracle too). They cover
-generator and coroutine methods, try/with control flow and exception context,
-name resolution, integer arithmetic, argument binding, unpacking, method
-resolution order, operator dispatch, attribute access, pattern matching,
-evaluation order, class creation, `yield from`, async generators,
-`except*`, the iteration protocol, `super()`, dict order, and object
-finalization and cycle collection; `SpyGC.tla`
-also checks spy's own memory-management algorithm against the language
-model step for step. The [README](../tests/tla/README.md) states what these
-checks do and do not establish.
+The pinned CPython 3.15.0 oracle (`make oracle`) validates tests and models;
+no test needs it to run.
 
-For CPython coverage, run `make oracle`, `make cpython-discover`, and
-`make cpython-report`. The [CPython coverage report](testing/cpython.md) explains
-the complete file inventory, dynamic discovery, framework adaptations, and
-remaining coverage gaps. `make test-cpython-doctests` is strict about the current
-ports; `make test-cpython` additionally requires closing the full inventory.
-Both strict upstream targets currently fail.
-
-`make test-cpython-unittest` passes all 326 cases in nineteen unchanged modules:
-decorators, augmented assignments, integer literals, unary operators, keyword-only
-arguments, assignment expressions, large expressions, Unicode identifiers, exception
-variations, type checks, subclass initialization, UTF-8 source, binary operators,
-isinstance/issubclass, containment, exception groups, iterator length hints,
-UserDict, and barry_as_FLUFL.
-It also checks all 119 executed subtests
-against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
 properties for all 1,114,112 code points, plus 297,124 source/NFKC cases against
 the pinned oracle. These checks pass; they do not
