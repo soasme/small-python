@@ -5304,7 +5304,7 @@ instance of *C* with the code points computed above. `str.__new__(T)` for a
 
 #### 23.1.2 Sequence operations
 
-Strings support the common sequence operations (clause 25) with these specific
+Strings support the common sequence operations (25.5) with these specific
 messages: an index out of range raises `IndexError` ("string index out of
 range"); a non-integer index `TypeError` ("string indices must be integers,
 not '*tname*(*i*)'"); `s + t` with a non-string *t* `TypeError` ("can only
@@ -5782,7 +5782,7 @@ constructed as `bytes` is (24.1.1, without `__bytes__` taking part for a
 BytesRepr of its contents, and it is unhashable. Indexing yields an `int`;
 slicing yields a `bytearray`.
 
-Beyond the operations of 24.3 and the mutable sequence operations (clause 25):
+Beyond the operations of 24.3 and the mutable sequence operations (25.5.4):
 
 - Item assignment takes an integer in range(0, 256) (`ValueError` "byte must be
   in range(0, 256)"; a non-integer raises the error of ToIndex); slice
@@ -5885,3 +5885,230 @@ Any operation other than `release` and `repr` on a released view raises
 `ValueError` ("operation forbidden on released memoryview object"). Ordering
 comparisons are not defined. `repr(m)` is "\<memory at *address*\>", or
 "\<released memory at *address*\>".
+
+## 25 Sequences
+
+A *sequence* is an object that supports Length and integer subscription from 0
+to its length − 1. The built-in sequences are `str`, `bytes`, `bytearray`,
+`memoryview`, `list`, `tuple`, and `range`; `bytearray` and `list` are
+*mutable sequences*. This clause specifies the `list`, `tuple`, `range`, and `slice` types and, in
+25.5, the common sequence operations, which apply to every sequence unless its
+type's clause says otherwise.
+
+### 25.1 The `list` type
+
+#### 25.1.1 list ( [ *iterable* ] )
+
+Returns a new list of the items of ? GetIterator(*iterable*), or an empty list.
+`list` takes no keyword arguments ("list() takes no keyword arguments") and at
+most one argument ("list expected at most 1 argument, got *n*"). The arguments
+are consumed by `list.__init__`, which clears the list first, so that
+`__init__` called again on a list replaces its contents. `list.__new__(T)` for
+a non-subtype *T* raises `TypeError` ("list.\_\_new\_\_(*T*): *T* is not a
+subtype of list").
+
+#### 25.1.2 Representation
+
+`repr(l)` is `[`, the reprs of the items separated by `", "`, and `]`. A list
+already being represented by the same execution context is written `[...]`.
+
+#### 25.1.3 Methods
+
+| Method | Effect |
+| --- | --- |
+| `append(x)` | add *x* at the end |
+| `extend(iterable)` | append the items of the iterable (of a copy, when it is the list itself) |
+| `insert(i, x)` | insert before index *i*, clamped to [0, *n*] after adding *n* to a negative *i* |
+| `pop(i=-1)` | remove and return the item at *i* ("pop from empty list"; "pop index out of range") |
+| `remove(x)` | remove the first item that is *x* or equals *x* ("list.remove(x): x not in list") |
+| `clear()`, `copy()`, `reverse()` | empty the list; return a shallow copy; reverse in place |
+| `index`, `count` | 25.5.2 |
+| `sort(*, key=None, reverse=False)` | 25.1.4 |
+
+#### 25.1.4 sort ( *, *key*=None, *reverse*=False )
+
+1. `sort` takes keyword arguments only ("sort() takes no positional
+   arguments").
+2. Let *items* be the items of the list, and empty the list for the duration of
+   the sort.
+3. If *key* is not `None`, let *keys* be ? Call(*key*, «*x*») for each item
+   *x*, in order; otherwise let *keys* be *items*. If a call raises, restore
+   *items* and propagate.
+4. Sort *items* by *keys* stably, comparing two keys *a* and *b* only by
+   ToBoolean(? RichCompare(*a*, *b*, `<`)). If *reverse* is true, the result
+   is as if the list were reversed, sorted, and reversed again, so that
+   stability is preserved. If a comparison raises, the list holds all of
+   *items* in an implementation-defined order and the exception propagates.
+5. If the list was modified during the sort, raise a `ValueError` exception
+   ("list modified during sort") after restoring the sorted *items*.
+6. Store *items* in the list and return `None`.
+
+The algorithm, and therefore the number and order of comparisons, is
+implementation-defined (Annex D); a conforming sort makes O(*n* log *n*)
+comparisons.
+
+#### 25.1.5 List iteration
+
+A list iterator holds the list and an index, initially 0. Each `__next__`
+returns the item at the index and increments it, or, if the index is not less
+than the list's current length, releases the list and raises `StopIteration`;
+items added during iteration are therefore visited. `reversed(l)` returns an
+iterator starting at the last index and stepping down, ending if the index
+falls outside the current length. Both have `__length_hint__`, and support
+`__reduce__` and `__setstate__` (Annex C).
+
+### 25.2 The `tuple` type
+
+`tuple(iterable=(), /)` returns a tuple of the items of the iterable; at most
+one argument ("tuple expected at most 1 argument, got *n*"). Whether
+`tuple(t)` for an exact tuple *t* returns *t* itself, and whether every empty
+tuple is the same object, is implementation-defined (Annex D).
+
+`repr(t)` is `(` and the reprs of the items separated by `", "`, with a
+trailing `,` for a one-item tuple, and `)`. A recursive tuple (possible
+through a mutable item) is written `(...)`.
+
+A tuple is hashable when its items are. TupleHash(*t*) uses unsigned 64-bit
+wrapping arithmetic with *P1* = 11400714785074694791, *P2* =
+14029467366897019727, and *P5* = 2870177450012600261:
+
+1. Let *acc* be *P5*.
+2. For each item *x*: let *lane* be ? Hash(*x*) as an unsigned 64-bit value;
+   set *acc* to *acc* + *lane* × *P2*; rotate *acc* left by 31 bits; set *acc*
+   to *acc* × *P1*.
+3. Set *acc* to *acc* + (len(*t*) XOR (*P5* XOR 3527539)).
+4. If *acc*, as a signed value, is −1, return 1546275796; otherwise return
+   *acc* as a signed value.
+
+(Annex D permits a 32-bit hash width with the corresponding constants.)
+
+### 25.3 The `range` type
+
+A `range` represents an immutable arithmetic progression of integers.
+
+#### 25.3.1 range ( *stop* ) and range ( *start*, *stop*, *step*=1 )
+
+1. One to three arguments are accepted ("range expected at least 1 argument,
+   got 0"; "range expected at most 3 arguments, got *n*"), and no keywords.
+2. Each argument is converted by ToIndex. With one argument *start* is 0.
+3. If *step* is 0, raise a `ValueError` exception ("range() arg 3 must not be
+   zero").
+4. Return a range with those `start`, `stop`, and `step` attributes
+   (read-only, "readonly attribute").
+
+The *length* of a range is the number of integers *start* + *k* × *step*, *k*
+≥ 0, that lie before *stop* in the direction of *step*. `len(r)` raises an
+`OverflowError` exception ("Python int too large to convert to C ssize_t")
+when the length is outside the index-size range; subscription and the other
+operations work with the exact length.
+
+#### 25.3.2 Operations
+
+- `r[i]` is *start* + *i* × *step* for 0 ≤ *i* < length, negative *i* counting
+  from the end ("range object index out of range").
+- `r[i:j:k]` is the range whose items are the selected items: its start is the
+  item at the slice's first index, its step *step* × *k*, and its stop
+  computed so that the length matches.
+- `x in r`, `r.count(x)`, and `r.index(x)` are computed arithmetically when *x*
+  is an `int` (or `bool`), and by scanning with `==` otherwise; `index` raises
+  `ValueError` ("range.index(x): x not in range" for an integer,
+  "sequence.index(x): x not in sequence" otherwise).
+- Two ranges are equal when they represent the same sequence: equal lengths,
+  and, unless the length is 0, the same start, and, unless the length is 1, the
+  same step. The hash is TupleHash of (length, `None`, `None`) when the length
+  is 0, (1, *start*, `None`) when it is 1, and (length, *start*, *step*)
+  otherwise. Ordering comparisons, concatenation, and repetition are not
+  defined.
+- `repr(r)` is "range(*start*, *stop*)" when *step* is 1 and "range(*start*,
+  *stop*, *step*)" otherwise. `reversed(r)` iterates from the last item down.
+
+### 25.4 The `slice` type
+
+#### 25.4.1 slice ( *stop* ) and slice ( *start*, *stop*, *step*=None )
+
+Returns a slice object with read-only attributes `start`, `stop`, and `step`
+(`None` when omitted, of any type). One to three arguments ("slice expected at
+least 1 argument, got 0"; "slice expected at most 3 arguments, got *n*").
+Slices compare as the tuples (*start*, *stop*, *step*) and are hashable when
+their parts are. `repr` is "slice(*r*, *r*, *r*)". `slice[T]` is a generic
+alias (29.9).
+
+#### 25.4.2 SliceIndices ( *slice*, *length* )
+
+1. If *step* is `None`, let *k* be 1; otherwise let *k* be its ToIndex value
+   (a non-integer raises `TypeError` "slice indices must be integers or None or
+   have an \_\_index\_\_ method"). If *k* is 0, raise a `ValueError` exception
+   ("slice step cannot be zero").
+2. Let *lo* be −1 and *hi* be *length* − 1 if *k* < 0, and *lo* be 0 and *hi*
+   be *length* otherwise.
+3. If *start* is `None`, let *a* be *hi* if *k* < 0 and *lo* otherwise.
+   Otherwise let *a* be its ToIndex value; if *a* < 0, set *a* to *a* +
+   *length* and, if still less than *lo*, to *lo*; if *a* > *hi*, set *a* to
+   *hi*.
+4. Compute *b* from *stop* likewise, with `None` meaning *lo* if *k* < 0 and
+   *hi* otherwise.
+5. Return (*a*, *b*, *k*). The selected indices are *a*, *a* + *k*, …, while
+   less than *b* (for *k* > 0) or greater than *b* (for *k* < 0).
+
+`slice.indices(length)` returns SliceIndices as a tuple; *length* is
+converted by ToIndex, and a negative one raises `ValueError` ("length should
+not be negative"). For subscription the bounds are converted with the message
+"slice indices must be integers or have an \_\_index\_\_ method", and values
+outside the index-size range are clamped to it.
+
+### 25.5 Common sequence operations
+
+#### 25.5.1 NormalizeIndex ( *s*, *i* )
+
+1. Let *n* be ? ToIndex(*i*); a non-integer raises a `TypeError` exception
+   ("*tname*(*s*) indices must be integers or slices, not *tname*(*i*)").
+2. If *n* < 0, set *n* to *n* + Length(*s*).
+3. If *n* < 0 or *n* ≥ Length(*s*), raise an `IndexError` exception ("*tname*(*s*)
+   index out of range"; for an assignment "*tname*(*s*) assignment index out
+   of range"). An *n* outside the index-size range raises an `IndexError`
+   exception ("cannot fit 'int' into an index-sized integer").
+4. Return *n*.
+
+#### 25.5.2 Common operations
+
+For a sequence *s* of length *n*:
+
+| Operation | Result |
+| --- | --- |
+| `s[i]` | the item at NormalizeIndex(*s*, *i*) |
+| `s[i:j:k]` | a new sequence of the same type (a `list` for a `list` subclass, and so on) holding the items at the indices that SliceIndices (25.4.2) selects |
+| `x in s` | **true** if some item *e* has *e* is *x* or ? RichCompare(*e*, *x*, `==`) is true, scanning from the start |
+| `s + t` | a new sequence of the items of *s* then *t*; *t* shall be of the same kind ("can only concatenate *tname*(*s*) (not "*tname*(*t*)") to *tname*(*s*)") |
+| `s * m`, `m * s` | *s* repeated ToIndexSize(*m*) times, empty for *m* ≤ 0; a non-integer *m* declines, making BinaryOp raise "can't multiply sequence by non-int of type '*tname*(*m*)'" |
+| `s.count(x)` | the number of items *e* with *e* is *x* or *e* == *x* |
+| `s.index(x[, i[, j]])` | the least index in the slice range [*i*:*j*] whose item is *x* or equals *x*; otherwise `ValueError` ("*tname*.index(x): x not in *tname*"); *i* and *j* shall be integers ("slice indices must be integers or have an \_\_index\_\_ method") |
+| `len(s)`, `iter(s)`, `reversed(s)` | *n*; an iterator over the items in order; in reverse |
+
+The sequence results are of the base built-in type, not of a subclass.
+`range`, `memoryview`, and `bytearray` repetition and concatenation are as
+their clauses specify (`range` has neither).
+
+#### 25.5.3 SequenceCompare ( *s*, *t*, *op* )
+
+Sequences of the same kind (`list` with `list`, `tuple` with `tuple`) compare
+lexicographically:
+
+1. Let *i* be the least index less than both lengths such that *s*[*i*] is not
+   *t*[*i*] and ? RichCompare(*s*[*i*], *t*[*i*], `==`) is false, if any.
+2. If there is no such *i*: compare the lengths with *op*.
+3. Otherwise: if *op* is `==` return **false**; if `!=` return **true**; else
+   return ? RichCompare(*s*[*i*], *t*[*i*], *op*).
+
+Sequences of different kinds compare unequal and are unordered.
+
+#### 25.5.4 Mutable sequence operations
+
+For a mutable sequence *s*:
+
+| Operation | Effect |
+| --- | --- |
+| `s[i] = x`, `del s[i]` | replace or remove the item at NormalizeIndex (assignment message) |
+| `s[i:j] = t` | replace the selected items, step 1, by the items of the iterable *t* ("must assign iterable to extended slice"); *t* may be *s* itself (a copy is taken first) |
+| `s[i:j:k] = t` | for a step other than 1, *t* shall have exactly as many items as are selected ("attempt to assign sequence of size *m* to extended slice of size *n*") |
+| `del s[i:j:k]` | remove the selected items |
+| `s += t`, `s *= m` | extend by the items of *t*; repeat in place (clear for *m* ≤ 0); both return *s* |
