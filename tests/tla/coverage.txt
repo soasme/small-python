@@ -192,19 +192,19 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Atoms > Literals | TODO: LiteralIdentity
 6. Expressions > Expressions > Atoms > Literals > Literals and object identity | TODO: LiteralIdentity
 6. Expressions > Expressions > Atoms > Literals > String literal concatenation | StringLiterals
-6. Expressions > Expressions > Atoms > Parenthesized groups | TODO: Displays
-6. Expressions > Expressions > Atoms > Container displays | TODO: Displays
-6. Expressions > Expressions > Atoms > Container displays > List displays | TODO: Displays
-6. Expressions > Expressions > Atoms > Container displays > Set displays | TODO: Displays
-6. Expressions > Expressions > Atoms > Container displays > Tuple displays | TODO: Displays
-6. Expressions > Expressions > Atoms > Container displays > Dictionary displays | TODO: Displays
-6. Expressions > Expressions > Atoms > Comprehensions | TODO: Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Filtering in comprehensions | TODO: Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Complex comprehensions | TODO: Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Unpacking in comprehensions | TODO: Comprehensions
+6. Expressions > Expressions > Atoms > Parenthesized groups | Displays
+6. Expressions > Expressions > Atoms > Container displays | Displays
+6. Expressions > Expressions > Atoms > Container displays > List displays | Displays
+6. Expressions > Expressions > Atoms > Container displays > Set displays | Displays
+6. Expressions > Expressions > Atoms > Container displays > Tuple displays | Displays
+6. Expressions > Expressions > Atoms > Container displays > Dictionary displays | Displays
+6. Expressions > Expressions > Atoms > Comprehensions | Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Filtering in comprehensions | Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Complex comprehensions | Comprehensions
+6. Expressions > Expressions > Atoms > Comprehensions > Unpacking in comprehensions | Comprehensions
 6. Expressions > Expressions > Atoms > Comprehensions > Asynchronous comprehensions | AsyncFor
-6. Expressions > Expressions > Atoms > Comprehensions > Formal grammar for comprehensions | TODO: Comprehensions
-6. Expressions > Expressions > Atoms > Generator expressions | TODO: GenExprs
+6. Expressions > Expressions > Atoms > Comprehensions > Formal grammar for comprehensions | Comprehensions
+6. Expressions > Expressions > Atoms > Generator expressions | Comprehensions
 6. Expressions > Expressions > Atoms > Yield expressions | Generators, YieldFrom
 6. Expressions > Expressions > Atoms > Yield expressions > Generator-iterator methods | Generators
 6. Expressions > Expressions > Atoms > Yield expressions > Examples | Generators
@@ -232,8 +232,8 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Assignment expressions | TODO: AssignExpr
 6. Expressions > Expressions > Conditional expressions | Evaluation
 6. Expressions > Expressions > Lambdas | TODO: Lambdas
-6. Expressions > Expressions > Expression lists | TODO: Unpacking, Displays
-6. Expressions > Expressions > Expression lists > Iterable unpacking | TODO: Unpacking, Displays
+6. Expressions > Expressions > Expression lists | Unpacking, Displays
+6. Expressions > Expressions > Expression lists > Iterable unpacking | Unpacking, Displays
 6. Expressions > Expressions > Evaluation order | Evaluation
 6. Expressions > Expressions > Operator precedence | TODO: Precedence
 7. Simple statements | = sections

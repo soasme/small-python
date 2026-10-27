@@ -74,6 +74,8 @@ and tied to real implementations by replaying them.
 | `Imports.tla` | the import system over fixture packages (`Imports.files`): submodules and parents, run-once caching, `sys.modules` entries that are None or replaced, failed and circular imports, regular and namespace packages, module attributes, relative imports, `from ... import *`, and import errors | yes |
 | `LazyImports.tla` | lazy imports (PEP 810): placeholders, reification on first use, lazy submodules in `sys.lazy_modules`, where `lazy` is allowed, and `__lazy_modules__` | yes |
 | `Future.tla` | future statements: placement, known and historical features, stringized annotations, inheritance by `exec()` and `compile()`, and relative imports of `__future__` | yes |
+| `Displays.tla` | list, tuple, set, and dict displays of plain, starred, and double-starred items: evaluation order, first-kept equal elements and keys, last-kept values, and failing items; parenthesized forms and display syntax errors | yes |
+| `Comprehensions.tla` | comprehensions and generator expressions of up to three for and if clauses with plain and unpacking elements (PEP 798): nesting, filtering, evaluation order, the eager first iterable, scoping, assignment expressions, and syntax errors | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -176,9 +178,11 @@ itself instead of calling `sys.displayhook`; a None in `sys.modules` was
 imported as the module instead of halting the import, and a namespace
 package had no `__file__`; `lazy import a.b` imported `a.b` when `a`
 was first used (rather than when `a.b` was looked up), and
-`__lazy_modules__` was ignored; and a relative import from globals without
+`__lazy_modules__` was ignored; a relative import from globals without
 `__name__` raised ImportError instead of KeyError, with other messages for
-a non-string `__name__` or `__package__`.
+a non-string `__name__` or `__package__`; and a `**` mapping whose `keys()`
+returned a non-iterable was reported with the module of a class defined in
+`__main__` or `builtins`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

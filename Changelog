@@ -455,6 +455,9 @@
 - A relative import whose globals lack __name__ raises KeyError, and a
   non-string __name__ or __package__ raises TypeError with CPython's
   messages. TLA+ model of future statements.
+- The error for a ** mapping whose keys() returns a non-iterable omits
+  the module builtins or __main__ from the class name. TLA+ models of
+  displays and of comprehensions and generator expressions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

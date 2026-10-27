@@ -37,3 +37,11 @@ assert_same(list(d)[0], 1)
 s = {1, 1.0, True}
 assert_eq(len(s), 1)
 assert_same(next(iter(s)), 1)
+# ** needs a mapping; keys() must return an iterable.
+e = assert_raises(TypeError, lambda: {**5})
+assert_eq(str(e), "'int' object is not a mapping")
+class BadKeys:
+    def keys(self): return 5
+    def __getitem__(self, k): return k
+e = assert_raises(TypeError, lambda: {**BadKeys()})
+assert_eq(str(e), "BadKeys.keys() must return an iterable, not int")

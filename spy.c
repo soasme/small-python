@@ -10799,7 +10799,9 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
             if (!iterator && error_is(c, "TypeError") && !iterable_type(keys)) {
                 SPYValue *module = source->type == SPY_INSTANCE ? name_local(source->as.map.parent, "__module__") : NULL;
                 spy_clear_error(c);
-                if (module && module->type == SPY_STRING)
+                /* %T names the module, unless it is builtins or __main__. */
+                if (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins") &&
+                    strcmp(module->as.string.data, "__main__"))
                     errorf(c, "TypeError", "%s.%s.keys() must return an iterable, not %s", module->as.string.data, type_name(source), type_name(keys));
                 else errorf(c, "TypeError", "%s.keys() must return an iterable, not %s", type_name(source), type_name(keys));
             }
