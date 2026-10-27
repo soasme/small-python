@@ -1,4 +1,4 @@
-# Small Python Engine
+# Small Python
 
 Version 0.1.0 — development edition
 
@@ -232,7 +232,9 @@ the language. All 50 tests currently pass.
 (fetched by `make tla-tools`; it needs a Java runtime) and replays every
 transition of the bounded models on the oracle and on spy. They cover
 generator and coroutine methods, try/with control flow and exception context,
-name resolution, and object finalization and cycle collection; `SpyGC.tla`
+name resolution, integer arithmetic, argument binding, unpacking, method
+resolution order, operator dispatch, attribute access, and object
+finalization and cycle collection; `SpyGC.tla`
 also checks spy's own memory-management algorithm against the language
 model step for step. The [README](../tests/tla/README.md) states what these
 checks do and do not establish.

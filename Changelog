@@ -358,6 +358,8 @@
   flow, name resolution, and finalization, model-checked with TLC and
   replayed transition by transition on the oracle and spy (make test-tla);
   SpyGC.tla checks spy's memory manager against the language model.
+- TLA+ models of integer arithmetic, argument binding, unpacking, method
+  resolution order, operator dispatch, and attribute access.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
