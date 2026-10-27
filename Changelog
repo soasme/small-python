@@ -414,6 +414,9 @@
 - __class__ can be assigned on instances without a __dict__, and between
   classes that add the same slots over the same layout; __slots__ checks
   every name before class variable conflicts. TLA+ model of __slots__.
+- Wrong-typed results from __str__, __repr__, __bool__, __format__,
+  __bytes__, and __init__ report CPython's messages, naming the class and
+  the returned type. TLA+ model of basic customization.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

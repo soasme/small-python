@@ -166,3 +166,31 @@ n = NI()
 assert_true(n == n)
 assert_false(n == NI())
 assert_true(n != NI())
+
+# Conversions name the method whose result has the wrong type.
+class Wrong:
+    def __str__(self):
+        return 1
+    def __repr__(self):
+        return 2
+    def __bool__(self):
+        return 1
+    def __format__(self, spec):
+        return 3
+    def __bytes__(self):
+        return 4
+e = assert_raises(TypeError, str, Wrong())
+assert_eq(str(e), "Wrong.__str__() must return a str, not int")
+e = assert_raises(TypeError, repr, Wrong())
+assert_eq(str(e), "Wrong.__repr__() must return a str, not int")
+e = assert_raises(TypeError, bool, Wrong())
+assert_eq(str(e), "Wrong.__bool__() must return a bool, not int")
+e = assert_raises(TypeError, format, Wrong(), "")
+assert_eq(str(e), "Wrong.__format__() must return a str, not int")
+e = assert_raises(TypeError, bytes, Wrong())
+assert_eq(str(e), "Wrong.__bytes__() must return a bytes, not int")
+class BadInit:
+    def __init__(self):
+        return 1
+e = assert_raises(TypeError, BadInit)
+assert_eq(str(e), "__init__() should return None, not 'int'")

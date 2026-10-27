@@ -1047,7 +1047,7 @@ int spy_truth(SPYValue *v) {
         spy_release(method);
         if (!result) return 0;
         int truth = 0;
-        if (boolean && result->type != SPY_BOOL) spy_error(c, "TypeError", "__bool__ should return bool");
+        if (boolean && result->type != SPY_BOOL) errorf(c, "TypeError", "%s.__bool__() must return a bool, not %s", type_name(v), type_name(result));
         else if (!boolean && !is_int(result)) spy_error(c, "TypeError", "__len__ should return an integer");
         else if (integer_sign(result) < 0) spy_error(c, "ValueError", "__len__() should return >= 0");
         else if (result->as.integer_data.big) spy_error(c, "OverflowError", "__len__() result is too large");
@@ -2210,7 +2210,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             if (method) {
                 SPYValue *text = spy_call(b->ctx, method, 0, NULL);
                 spy_release(method);
-                int status = append_conversion(b, v, text, name);
+                int status = append_conversion(b, v, text, repr ? "__repr__" : "__str__");
                 spy_release(text); return status;
             }
             if (b->ctx->error_type[0]) return -1;
@@ -2247,7 +2247,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         if (method) {
             SPYValue *text = spy_call(b->ctx, method, 0, NULL);
             spy_release(method);
-            int status = append_conversion(b, v, text, name);
+            int status = append_conversion(b, v, text, repr ? "__repr__" : "__str__");
             spy_release(text); b->ctx->depth--; return status;
         }
         SPYValue *args = hidden_field(v, "args");
@@ -9243,7 +9243,8 @@ static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
             SPYValue *result = spy_call(c, method, 1, &spec);
             spy_release(method);
             if (result && result->type != SPY_STRING) {
-                spy_release(result); return spy_error(c, "TypeError", "__format__ must return a str");
+                errorf(c, "TypeError", "%s.__format__() must return a str, not %s", type_name(value), type_name(result));
+                spy_release(result); return NULL;
             }
             return result;
         }
@@ -11892,7 +11893,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
             SPYValue *init = special_method(c, result, "__init__");
             if (init) {
                 SPYValue *value = call_keywords(c, init, argc, argv, keywords);
-                if (value && value->type != SPY_NONE) spy_error(c, "TypeError", "__init__() should return None");
+                if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
                 spy_release(value); spy_release(init);
             }
         }
@@ -19813,7 +19814,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             SPYValue *result = spy_call(c, method, 0, NULL);
             spy_release(method);
             if (result && result->type != SPY_BYTES) {
-                spy_release(result); return spy_error(c, "TypeError", "__bytes__ returned non-bytes");
+                errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_name(a), type_name(result));
+                spy_release(result); return NULL;
             }
             return result;
         }
@@ -20680,7 +20682,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (init) {
             SPYValue *value = call_keywords(c, init, argc, argv, keywords);
             spy_release(init);
-            if (value && value->type != SPY_NONE) spy_error(c, "TypeError", "__init__() should return None");
+            if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
             spy_release(value);
         }
         if (c->error_type[0]) { spy_release(cls); return NULL; }
