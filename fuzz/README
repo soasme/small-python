@@ -1,0 +1,37 @@
+libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
+
+  fuzz_eval     executes the input as a module: lexer, parser, compiler,
+                and runtime together.
+  fuzz_compile  passes the input to compile() as bytes without running it:
+                source decoding, lexer, parser, and compiler. The first byte
+                picks the mode (exec, eval, or single).
+
+Each input gets a fresh context with the standard layer (spy_std_init), no
+output, no input, no module loader, and no mounts, and a step limit so loops
+end. The context is collected and freed after every input, so AddressSanitizer
+reports leaks and use-after-free per input.
+
+Building needs a clang with libFuzzer. Apple clang has none; use Homebrew's
+LLVM, linking its libc++:
+
+  make libfuzzer
+  make libfuzzer FUZZ_CC=$(brew --prefix llvm)/bin/clang \
+      LIB_FUZZING_ENGINE="-fsanitize=fuzzer,address,undefined \
+        -L$(brew --prefix llvm)/lib/c++ -Wl,-rpath,$(brew --prefix llvm)/lib/c++"
+
+Where AddressSanitizer does not start (it hangs on recent macOS), build and
+run in Linux instead: docker run with python:3.14 and apt-get install clang,
+then plain make libfuzzer.
+
+Running, seeded from the examples and language tests:
+
+  mkdir -p corpus
+  for f in examples/*.py tests/spec/*/*.py; do cp $f corpus/$(echo $f | tr / _); done
+  ./fuzz/fuzz_eval -dict=fuzz/fuzz.dict -timeout=10 -rss_limit_mb=2048 corpus
+  ./fuzz/fuzz_compile -dict=fuzz/fuzz.dict corpus
+
+Reproduce a crash with ./fuzz/fuzz_eval crash-<hash>. Regenerate fuzz.dict
+from the engine's builtins after `make spy` with python3 fuzz/generate_dict.py.
+
+The engine has no memory limit, so an input like 'x' * 10**10 is reported as
+an out-of-memory; -rss_limit_mb and -malloc_limit_mb set where that happens.

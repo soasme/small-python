@@ -16,3 +16,10 @@ libspy-std.a
 /build/
 *.egg-info/
 *.so
+/fuzz/fuzz_eval
+/fuzz/fuzz_compile
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*

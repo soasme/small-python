@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla tla-coverage
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla tla-coverage libfuzzer
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -189,6 +189,27 @@ test-binding:
 	cp python/src/small_python/__init__.py python/src/small_python/_core.pyi python/src/small_python/py.typed $(OBJDIR)/binding/small_python/
 	PYTHONPATH=$(OBJDIR)/binding python3 -m unittest discover -s python/tests
 
+# libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.
+# Apple clang lacks libFuzzer; on macOS use FUZZ_CC=$$(brew --prefix llvm)/bin/clang.
+FUZZ_CC ?= clang
+FUZZ_CFLAGS = -O1 -g -std=c11 -I. -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined
+LIB_FUZZING_ENGINE ?= -fsanitize=fuzzer,address,undefined
+FUZZ_OBJS = $(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o $(OBJDIR)/fuzz/fuzz_common.o
+FUZZERS = fuzz/fuzz_eval fuzz/fuzz_compile
+
+libfuzzer: $(FUZZERS)
+
+$(FUZZERS): fuzz/%: $(OBJDIR)/fuzz/%.o $(FUZZ_OBJS)
+	$(FUZZ_CC) $^ $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
+
+$(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o: $(OBJDIR)/fuzz/%.o: %.c spy.h spy-std.h spy-unicode.h spy-intrinsics.h spy-std-modules.h
+	mkdir -p $(dir $@)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -c $< -o $@
+
+$(OBJDIR)/fuzz/fuzz_common.o $(OBJDIR)/fuzz/fuzz_eval.o $(OBJDIR)/fuzz/fuzz_compile.o: $(OBJDIR)/fuzz/%.o: fuzz/%.c fuzz/fuzz_common.h spy.h spy-std.h
+	mkdir -p $(dir $@)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -c $< -o $@
+
 bench: bench/lifecycle spy
 	./bench/lifecycle
 	size spy
@@ -198,5 +219,5 @@ sanitize:
 	$(MAKE) CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer' LDFLAGS='-fsanitize=$(SANITIZERS)' test
 
 clean:
-	rm -f spy spyc run-cython *.o *.a tests/*.o tests/api bench/*.o bench/lifecycle
+	rm -f spy spyc run-cython *.o *.a tests/*.o tests/api bench/*.o bench/lifecycle $(FUZZERS)
 	rm -rf $(OBJDIR)

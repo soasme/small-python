@@ -236,6 +236,10 @@
 - Use strict C11 warnings, meaningful semantic checks, ownership tests, and
   sanitizers. Record environment failures accurately. Do not claim a test ran
   when only a workflow or test target was added.
+- When a tool does not work on macOS, run it in a Linux Docker container
+  instead (e.g. `python:3.14` plus `apt-get install clang`) on a copy of the
+  tree, not the mounted checkout. AddressSanitizer hangs at startup on this
+  macOS, so `make sanitize` and `make libfuzzer` (see fuzz/README) run there.
 
 ## Code taste
 
