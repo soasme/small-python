@@ -392,6 +392,11 @@
   co_linetable, co_stacksize, co_lines(), co_positions(), replace() and
   __replace__, compare and hash by value, and a replaced code assigned to
   __code__ is kept. TLA+ model of code objects.
+- Frames: a generator keeps one gi_frame, which reports where it resumes
+  or ended (not its def line) and no f_generator once finished; f_lasti,
+  f_trace, f_trace_lines, and f_trace_opcodes; f_lineno writes refused
+  outside a trace function; frame.clear(); a coroutine frame's f_code.
+  TLA+ model of frame objects.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

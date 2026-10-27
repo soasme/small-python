@@ -168,3 +168,36 @@ assert_true(coded.__code__ is renamed)
 assert_raises(TypeError, code.replace, co_name=1)
 assert_raises(TypeError, code.replace, nope=1)
 assert_eq(code.__replace__(co_qualname="Q").co_qualname, "Q")
+
+# Frames: a generator keeps one frame, which reports where it resumes and,
+# once finished, where it ended; trace settings are stored; clear() drops
+# the locals of a finished frame and refuses an executing or suspended one.
+def stepper(a):
+    b = a + 1
+    yield b
+    yield b
+gen = stepper(1)
+frame = gen.gi_frame
+assert_true(frame is gen.gi_frame and frame.f_generator is gen)
+next(gen)
+assert_eq((frame.f_lineno, sorted(frame.f_locals)), (stepper.__code__.co_firstlineno + 2, ["a", "b"]))
+assert_raises(RuntimeError, frame.clear)
+list(gen)
+assert_eq((frame.f_lineno, frame.f_generator, gen.gi_frame), (stepper.__code__.co_firstlineno + 3, None, None))
+def finished(v):
+    def inner():
+        return v
+    w = inner()
+    try:
+        raise KeyError
+    except KeyError as error:
+        return error.__traceback__.tb_frame
+frame = finished(1)
+frame.f_trace = len
+frame.f_trace_lines = False
+assert_eq((frame.f_trace, frame.f_trace_lines, frame.f_trace_opcodes, type(frame.f_lasti)), (len, False, False, int))
+assert_raises(TypeError, setattr, frame, "f_trace_lines", 1)
+assert_raises(ValueError, setattr, frame, "f_lineno", 1)
+assert_raises(AttributeError, setattr, frame, "f_code", None)
+frame.clear()
+assert_eq(dict(frame.f_locals), {})

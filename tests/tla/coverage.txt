@@ -102,10 +102,10 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Internal types > Code objects | CodeObjects
 3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes | CodeObjects
 3. Data model > Data model > The standard type hierarchy > Internal types > Methods on code objects | CodeObjects
-3. Data model > Data model > The standard type hierarchy > Internal types > Frame objects | TODO: Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes (2) | TODO: Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Special writable attributes | TODO: Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Frame object methods | TODO: Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Frame objects | Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes (2) | Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Special writable attributes | Frames
+3. Data model > Data model > The standard type hierarchy > Internal types > Frame object methods | Frames
 3. Data model > Data model > The standard type hierarchy > Internal types > Traceback objects | TODO: Tracebacks
 3. Data model > Data model > The standard type hierarchy > Internal types > Slice objects | TODO: Slices
 3. Data model > Data model > The standard type hierarchy > Internal types > Static method objects | TODO: MethodDescriptors
@@ -359,7 +359,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | Singletons
-11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | TODO: Frames, CodeObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | Frames, CodeObjects
 11. Built-in types > Built-in Types > Special Attributes | ClassObjects
 11. Built-in types > Built-in Types > Integer string conversion length limitation | TODO: IntStrLimit
 11. Built-in types > Built-in Types > Integer string conversion length limitation > Affected APIs | TODO: IntStrLimit

@@ -45,6 +45,7 @@ and tied to real implementations by replaying them.
 | `ModuleObjects.tla` | module attributes and namespace, read-only `__dict__`, annotations, and attributes of modules made by the module type | yes |
 | `ClassObjects.tla` | class special attributes (bases, layout base, MRO, docs not inherited, annotations, type parameters, static attributes), the read-only namespace view, and class versus instance assignment | yes |
 | `CodeObjects.tla` | code attributes (names, parameter counts, local, cell, free, and global names, flags, docstring constant), immutability, `co_lines()`, `co_positions()`, and `replace()` | yes |
+| `Frames.tla` | frame attributes of running, finished, and generator frames, the writable trace attributes, and `clear()` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -118,7 +119,10 @@ a function's `__code__` and reading its `__builtins__` were missing; bound
 built-in methods had `__func__` and the wrong `__module__`; a module's
 `__dict__` could be replaced and it had no `__annotate__`; a class with
 several bases reported the first as `__base__`, not the one with the layout;
-code objects lacked `co_names`, `co_consts`, and `replace()`.
+code objects lacked `co_names`, `co_consts`, and `replace()`; a generator
+made a new frame object for each `gi_frame` read, and a finished one's frame
+reported its `def` line; frames lacked `f_lasti`, the trace attributes, and
+`clear()`, and a coroutine's frame had no `f_code`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

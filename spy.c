@@ -96,7 +96,7 @@ struct SPYValue {
         /* A frame owns its environment and its function, generator, or code
          * unit. While running, index is its 1-based place on the context's
          * frame stack; afterwards line and back keep its final state. */
-        struct { SPYValue *env, *owner, *back, *extra; size_t line, index; } frame;
+        struct { SPYValue *env, *owner, *back, *extra, *trace; size_t line, index; int trace_lines_off, trace_opcodes, cleared; } frame;
         struct { SPYValue *obj, *source; ptrdiff_t *layout, offset; size_t itemsize; int64_t hash;
                  int ndim, readonly, released, hashed; char format[4]; } memory;
         struct { SPYValue *strings, *interpolations; } template;
@@ -114,7 +114,7 @@ struct SPYValue {
         struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
         struct {
-            SPYValue *env, *unit, *name, *qualname, *code;
+            SPYValue *env, *unit, *name, *qualname, *code, *frame; /* frame: gi_frame, once read */
             Node *node;
             Machine *machine;
             int running, done, started, returned, async_running, async_closed;
@@ -347,7 +347,9 @@ static void leave_frame(SPYContext *c) {
     if (!frame) return;
     frame->as.frame.index = 0;
     frame->as.frame.line = top->line;
-    if (frame->refs > 1 && c->py_depth && !frame->as.frame.back) {
+    SPYValue *owner = frame->as.frame.owner;
+    int generator = owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR;
+    if (frame->refs > 1 && c->py_depth && !frame->as.frame.back && !generator) {
         char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
         memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
         c->error_type[0] = 0;
@@ -481,6 +483,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         if (v->as.frame.owner) visit(v->as.frame.owner, data);
         if (v->as.frame.back) visit(v->as.frame.back, data);
         if (v->as.frame.extra) visit(v->as.frame.extra, data);
+        if (v->as.frame.trace) visit(v->as.frame.trace, data);
         break;
     case SPY_MAPPINGPROXY: case SPY_BOUND_METHOD: case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: case SPY_FRAME_LOCALS:
         visit(v->as.bound.self, data);
@@ -534,6 +537,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         if (v->as.generator.code) visit(v->as.generator.code, data);
         if (v->as.generator.name) visit(v->as.generator.name, data);
         if (v->as.generator.qualname) visit(v->as.generator.qualname, data);
+        if (v->as.generator.frame) visit(v->as.generator.frame, data);
         if (v->as.generator.machine) machine_edges(v->as.generator.machine, visit, data);
         if (v->as.generator.env) visit(v->as.generator.env, data);
         if (v->as.generator.unit) visit(v->as.generator.unit, data);
@@ -7585,7 +7589,8 @@ enum { M_APPEND, M_POP, M_GET, M_KEYS, M_VALUES, M_ITEMS, M_JOIN, M_FORMAT,
        M_EXTEND, M_INSERT, M_REMOVE, M_CLEAR, M_COPY, M_REVERSE, M_SORT,
        M_DICT_POP, M_POPITEM, M_SETDEFAULT, M_ISIDENTIFIER, M_SUPER_GET,
        M_STARTSWITH, M_ENDSWITH, M_FIND, M_RFIND, M_STRING_INDEX, M_RINDEX, M_STRING_COUNT, M_ISDISJOINT,
-       M_CODE_REPLACE, M_CODE_LINES };
+       M_CODE_REPLACE, M_CODE_LINES, M_FRAME_CLEAR };
+static SPYValue *frame_clear(SPYContext *, SPYValue *);
 static SPYValue *bound_method(SPYContext *c, SPYValue *self, int method) {
     SPYValue *bound = value_new(c, SPY_BOUND_METHOD);
     if (bound) { bound->as.bound.self = spy_retain(self); bound->as.bound.method = method; }
@@ -8355,12 +8360,17 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         /* A running generator's frame is on the stack; a suspended one gets
          * a detached frame over its environment. */
         for (size_t i = c->py_depth; v->as.generator.running && i; i--)
-            if (c->frames[i - 1].owner == v) return frame_object(c, i - 1);
+            if (c->frames[i - 1].owner == v) {
+                SPYValue *frame = frame_object(c, i - 1);
+                if (frame && !v->as.generator.frame) v->as.generator.frame = spy_retain(frame);
+                return frame;
+            }
+        if (v->as.generator.frame) return spy_retain(v->as.generator.frame);
         SPYValue *frame = value_new(c, SPY_FRAME);
         if (!frame) return NULL;
         frame->as.frame.env = spy_retain(v->as.generator.env);
         frame->as.frame.owner = spy_retain(v);
-        frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.node ? v->as.generator.node->line : 0;
+        v->as.generator.frame = spy_retain(frame);
         return frame;
     }
     if (v->type == SPY_RANGE) {
@@ -9582,6 +9592,9 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
 static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValue *const *argv) {
     SPYValue *self = bound->as.bound.self;
     switch (bound->as.bound.method) {
+    case M_FRAME_CLEAR:
+        if (argc) break;
+        return frame_clear(c, self);
     case M_CODE_REPLACE:
         if (argc) break;
         return code_replace(c, self, NULL);
@@ -9946,6 +9959,26 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name)
     spy_release(existing); return -1;
 }
 /* tb_next accepts a traceback or None that does not lead back to this one. */
+/* A frame's writable attributes (value NULL deletes); 1 if name is none of them. */
+static int frame_set(SPYContext *c, SPYValue *frame, const char *name, SPYValue *value) {
+    if (!strcmp(name, "f_trace")) {
+        SPYValue *trace = value && value->type != SPY_NONE ? spy_retain(value) : NULL;
+        spy_release(frame->as.frame.trace); frame->as.frame.trace = trace; return 0;
+    }
+    if (!strcmp(name, "f_trace_lines") || !strcmp(name, "f_trace_opcodes")) {
+        if (!value) { spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1; }
+        if (value->type != SPY_BOOL) { spy_error(c, "TypeError", "attribute value type must be bool"); return -1; }
+        if (name[8] == 'l') frame->as.frame.trace_lines_off = !value->as.integer_data.small;
+        else frame->as.frame.trace_opcodes = (int)value->as.integer_data.small;
+        return 0;
+    }
+    /* spy has no trace functions, so no frame may jump. */
+    if (!strcmp(name, "f_lineno")) { spy_error(c, "ValueError", "f_lineno can only be set in a trace function"); return -1; }
+    static const char *const fixed[] = {"f_back", "f_code", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator"};
+    for (size_t i = 0; i < sizeof(fixed) / sizeof(*fixed); i++)
+        if (!strcmp(name, fixed[i])) { errorf(c, "AttributeError", "attribute '%s' of 'frame' objects is not writable", name); return -1; }
+    return 1;
+}
 static int traceback_set_next(SPYContext *c, SPYValue *tb, SPYValue *next) {
     if (!next) { spy_error(c, "TypeError", "can't delete tb_next attribute"); return -1; }
     if (next->type != SPY_NONE && next->type != SPY_TRACEBACK) { errorf(c, "TypeError", "expected traceback object, got '%s'", type_name(next)); return -1; }
@@ -10017,6 +10050,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
+    if (object->type == SPY_FRAME) { int status = frame_set(c, object, name, value); if (status <= 0) return status; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_PROPERTY && (!strcmp(name, "__name__") || !strcmp(name, "__doc__"))) {
@@ -10534,7 +10568,8 @@ static int compile_generator(SPYContext *c, Node *n) {
     n->code = allocate(c, sizeof(*n->code));
     if (!n->code) return -1;
     compile_body(c, n->code, n->b);
-    emit(c, n->code, BC_NONE, n, 0); emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
+    /* The implicit return has no node: it runs on the last line executed. */
+    emit(c, n->code, BC_NONE, NULL, 0); emit(c, n->code, BC_FLOW, NULL, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *eval(SPYContext *, Frame *, Node *);
@@ -14104,6 +14139,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, NULL);
+    if (object->type == SPY_FRAME) { int status = frame_set(c, object, name, NULL); if (status <= 0) return status; }
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
         (!strcmp(name, "__name__") || !strcmp(name, "__qualname__"))) {
@@ -15742,7 +15778,9 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         }
         Instruction *ins = &m->code->items[m->pc++];
         Node *n = ins->node ? ins->node : generator->as.generator.node;
+        size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
         if (tick(c, &f, n)) continue;
+        if (!ins->node && line) c->line = c->frames[c->py_depth - 1].line = line;
         SPYValue *a = NULL, *b = NULL, *value = NULL;
         switch (ins->op) {
         case BC_EVAL: machine_push(c, m, eval(c, &f, n)); break;
@@ -16465,17 +16503,28 @@ static SPYValue *local_snapshot(SPYContext *c, SPYValue *env) {
 static SPYValue *frame_object(SPYContext *c, size_t i) {
     struct ActiveFrame *entry = &c->frames[i];
     if (!entry->object) {
-        SPYValue *frame = value_new(c, SPY_FRAME);
+        /* A generator whose gi_frame was read keeps that frame. */
+        SPYValue *owner = entry->owner;
+        SPYValue *kept = owner && (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE ||
+                                   owner->type == SPY_ASYNC_GENERATOR) ? owner->as.generator.frame : NULL;
+        SPYValue *frame = kept ? spy_retain(kept) : value_new(c, SPY_FRAME);
         if (!frame) return NULL;
-        frame->as.frame.env = spy_retain(entry->env);
-        frame->as.frame.owner = spy_retain(entry->owner);
+        if (!kept) {
+            frame->as.frame.env = spy_retain(entry->env);
+            frame->as.frame.owner = spy_retain(entry->owner);
+        }
         frame->as.frame.index = i + 1;
         entry->object = frame;
     }
     return spy_retain(entry->object);
 }
 static size_t frame_line(SPYContext *c, SPYValue *frame) {
-    return frame->as.frame.index ? c->frames[frame->as.frame.index - 1].line : frame->as.frame.line;
+    if (frame->as.frame.index) return c->frames[frame->as.frame.index - 1].line;
+    SPYValue *owner = frame->as.frame.owner;
+    /* A suspended generator's frame is where it resumes; a finished one's, where it ended. */
+    if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR)
+        return owner->as.generator.line ? owner->as.generator.line : owner->as.generator.node ? owner->as.generator.node->line : 0;
+    return frame->as.frame.line;
 }
 static int function_frame(SPYValue *frame) {
     SPYValue *env = frame->as.frame.env;
@@ -16488,6 +16537,7 @@ static SPYValue *frame_local_env(SPYContext *c, SPYValue *frame, SPYValue *key) 
     if (!text || !function_frame(frame) || strlen(text->as.string.data) != text->as.string.len) return NULL;
     const char *name = text->as.string.data;
     if (name_local(env, name)) return env;
+    if (frame->as.frame.cleared) return NULL;
     Symbol *symbol = scope_symbol(env->as.map.scope, name);
     if (!symbol || (symbol->flags & S_GLOBAL) || ((symbol->flags & (S_LOCAL | S_PARAM)) && !(symbol->flags & S_NONLOCAL))) return NULL;
     for (SPYValue *outer = env->as.map.parent; outer && outer->as.map.scope; outer = outer->as.map.parent) {
@@ -16505,7 +16555,7 @@ static SPYValue *frame_local_env(SPYContext *c, SPYValue *frame, SPYValue *key) 
 static SPYValue *frame_contents(SPYContext *c, SPYValue *frame, int what) {
     SPYValue *result = value_new(c, what == FRAME_DICT ? SPY_DICT : SPY_LIST);
     if (!result) return NULL;
-    SPYValue *env = frame->as.frame.env, *names = function_frame(frame) ? local_snapshot(c, env) : value_new(c, SPY_DICT);
+    SPYValue *env = frame->as.frame.env, *names = function_frame(frame) && !frame->as.frame.cleared ? local_snapshot(c, env) : value_new(c, SPY_DICT);
     SPYValue *extra = frame->as.frame.extra;
     for (int source = 0; source < 2 && names && !c->error_type[0]; source++) {
         SPYValue *map = source ? extra : names;
@@ -16571,11 +16621,50 @@ static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *nam
     if (!strcmp(name, "f_code") && owner->type == V_UNIT && scope && scope->kind == S_CLASS && scope->owner)
         return definition_code(c, owner, scope->owner);
     if (!strcmp(name, "f_code"))
-        return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT ? spy_retain(owner) : attribute(c, owner, "gi_code");
+        return owner->type == SPY_FUNCTION ? attribute(c, owner, "__code__") : owner->type == V_UNIT ? spy_retain(owner) : spy_retain(owner->as.generator.code);
     if (!strcmp(name, "f_generator"))
-        return spy_retain(owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR ? owner : c->none);
-    if (!strcmp(name, "f_trace")) return spy_none(c);
+        return spy_retain((owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) &&
+                          !owner->as.generator.done ? owner : c->none);
+    if (!strcmp(name, "f_trace")) return spy_retain(frame->as.frame.trace ? frame->as.frame.trace : c->none);
+    if (!strcmp(name, "f_trace_lines")) return spy_bool(c, !frame->as.frame.trace_lines_off);
+    if (!strcmp(name, "f_trace_opcodes")) return spy_bool(c, frame->as.frame.trace_opcodes);
+    /* No bytecode: every instruction index is 0. */
+    if (!strcmp(name, "f_lasti")) return spy_int(c, 0);
+    if (!strcmp(name, "clear")) {
+        SPYValue *bound = bound_method(c, frame, M_FRAME_CLEAR);
+        if (bound && !(bound->as.bound.name = spy_string(c, name, strlen(name)))) { spy_release(bound); return NULL; }
+        return bound;
+    }
     return NULL;
+}
+/* frame.clear(): drop the frame's local variables, or finalize a generator
+ * that has not started. An executing or suspended frame cannot be cleared. */
+static SPYValue *frame_clear(SPYContext *c, SPYValue *frame) {
+    SPYValue *owner = frame->as.frame.owner;
+    int generator = owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR;
+    if (frame->as.frame.index || (generator && owner->as.generator.running))
+        return errorf(c, "RuntimeError", "cannot clear an executing frame");
+    if (generator && owner->as.generator.started && !owner->as.generator.done)
+        return errorf(c, "RuntimeError", "cannot clear an suspended frame");
+    /* A generator still owns its frame: finalizing it is all clear() does. */
+    if (generator && !owner->as.generator.done) {
+        SPYValue *result = generator_method(c, owner, M_CLOSE, 0, NULL);
+        return result ? (spy_release(result), spy_none(c)) : NULL;
+    }
+    SPYValue *old = frame->as.frame.env;
+    if (function_frame(frame)) {
+        SPYValue *env = value_new(c, V_ENV);
+        if (!env) return NULL;
+        env->as.map.parent = spy_retain(old->as.map.parent);
+        env->as.map.scope = old->as.map.scope;
+        env->as.map.unit = spy_retain(old->as.map.unit);
+        env->as.map.flags = old->as.map.flags;
+        frame->as.frame.env = env;
+        frame->as.frame.cleared = 1;
+        spy_release(old);
+    }
+    spy_release(frame->as.frame.extra); frame->as.frame.extra = NULL;
+    return spy_none(c);
 }
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static const char *const frame_locals_methods[] = {
