@@ -21160,13 +21160,14 @@ execution_fail:
         if (id == B_SYNTAX_INIT && argc > 1) {
             if (set_hidden_field(c, a, "msg", argv[1])) return NULL;
             if (argc == 3) {
-                SPYValue *details = value_new(c, SPY_TUPLE);
+                /* Four to seven items; a seventh is CPython's private metadata. */
+                SPYValue *details = builtin(c, 1, &argv[2], (void *)(intptr_t)B_TUPLE);
                 if (!details) return NULL;
-                if (extend_display(c, details, argv[2])) { spy_release(details); return NULL; }
                 const char *fields[] = {"filename", "lineno", "offset", "text", "end_lineno", "end_offset"};
                 size_t count = details->as.seq.len;
-                if (count != 4 && count != 6) spy_error(c, "TypeError", "SyntaxError details must contain 4 or 6 items");
-                else for (size_t i = 0; i < count && !c->error_type[0]; i++) set_hidden_field(c, a, fields[i], details->as.seq.items[i]);
+                if (count < 4 || count > 7) errorf(c, "TypeError", "function takes at %s %d arguments (%zu given)", count < 4 ? "least" : "most", count < 4 ? 4 : 7, count);
+                else if (count == 5) spy_error(c, "TypeError", "end_offset must be provided when end_lineno is provided");
+                else for (size_t i = 0; i < count && i < 6 && !c->error_type[0]; i++) set_hidden_field(c, a, fields[i], details->as.seq.items[i]);
                 spy_release(details);
                 if (c->error_type[0]) return NULL;
             }
@@ -21635,12 +21636,13 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         SPYValue *object = name_local(c->classes, "object");
         SPYValue *cls = id == B_OBJECT_INIT ? value_class(c, argv[0]) : argv[0];
         if (cls->type != SPY_CLASS) {
-            if (id == B_OBJECT_NEW) return errorf(c, "TypeError", "object.__new__(X): X is not a type object (%s)", type_name(cls));
+            if (id == B_OBJECT_NEW || id == B_EXCEPTION_NEW)
+                return errorf(c, "TypeError", "%s.__new__(X): X is not a type object (%s)", id == B_OBJECT_NEW ? "object" : "BaseException", type_name(cls));
             return spy_error(c, "TypeError", "__new__ requires a type object");
         }
         int exception = subclass(cls, name_local(c->classes, "BaseException"));
         if (id == B_EXCEPTION_NEW) {
-            if (!exception) return spy_error(c, "TypeError", "BaseException.__new__ requires an exception type");
+            if (!exception) return errorf(c, "TypeError", "BaseException.__new__(%s): %s is not a subtype of BaseException", class_tname(cls), class_tname(cls));
             return new_exception(c, cls, argc - 1, argv + 1);
         }
         if (id == B_OBJECT_NEW && (cls->as.map.native || cls->as.map.flags == 2 || exception))
@@ -21697,6 +21699,11 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         size_t used = count;
         while (used > 1 && !args[used - 1]) used--;
         SPYValue *call[3] = {args[0], args[1] ? args[1] : NULL, args[2] ? args[2] : NULL};
+        if ((id == B_BYTES || id == B_BYTEARRAY) && args[2] && !args[1]) {
+            int text = args[0]->type == SPY_STRING;
+            spy_release(args[0]);
+            return spy_error(c, "TypeError", text ? "string argument without an encoding" : "errors without a string argument");
+        }
         if (id != B_SUM && args[2] && !args[1]) {
             SPYValue *utf8 = spy_string(c, "utf-8", 5);
             call[1] = utf8;
@@ -21934,6 +21941,17 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     if (cls->type != SPY_CLASS) return errorf(c, "TypeError", "%s.__new__(X): X is not a type object (%s)", name, type_name(cls));
     const char *cls_name = name_local(cls, "__name__")->as.string.data;
     if (!subclass(cls, owner)) return errorf(c, "TypeError", "%s.__new__(%s): %s is not a subtype of %s", name, cls_name, cls_name, name);
+    /* tp_new_wrapper: the nearest builtin class of cls must share this
+     * __new__, so int.__new__(bool) cannot skip bool's. */
+    SPYValue *mro = cls->as.map.mro;
+    for (size_t i = 0; mro && i < mro->as.seq.len; i++) {
+        SPYValue *base = mro->as.seq.items[i];
+        if (!builtin_class(c, base)) continue;
+        SPYValue *own = name_local(base, "__new__");
+        if (base != owner && own && own != name_local(owner, "__new__"))
+            return errorf(c, "TypeError", "%s.__new__(%s) is not safe, use %s.__new__()", name, cls_name, class_tname(base));
+        break;
+    }
     if (cls == owner && type == SPY_FROZENDICT) return frozendict_construct(c, argc - 1, argv + 1, keywords);
     if (type == SPY_PROPERTY || type == SPY_CLASSMETHOD || type == SPY_STATICMETHOD)
         return descriptor_new(c, cls, type, argc - 1, argv + 1, keywords);
@@ -22453,8 +22471,9 @@ static int register_constructors(SPYContext *c) {
         spy_release(method);
         if (status) return -1;
     }
-    for (size_t t = 0; t < sizeof(subclassable_types) / sizeof(*subclassable_types); t++) {
-        int type = subclassable_types[t];
+    /* bool is not subclassable but has its own __new__, as in CPython. */
+    for (size_t t = 0; t <= sizeof(subclassable_types) / sizeof(*subclassable_types); t++) {
+        int type = t < sizeof(subclassable_types) / sizeof(*subclassable_types) ? subclassable_types[t] : SPY_BOOL;
         SPYValue *method = value_new(c, SPY_NATIVE);
         if (!method) return -1;
         method->as.native.kwcall = type_new;

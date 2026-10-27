@@ -590,3 +590,10 @@
   the library classes that stand in for CPython's C types, in every message
   that names a type (operands, attributes, len, subscripts, bases,
   descriptors). One table, class_tname, replaces the per-message prefixes.
+- T.__new__(S) refuses a class whose nearest builtin base has its own
+  __new__ ("int.__new__(bool) is not safe, use bool.__new__()"), and bool
+  gains its own __new__; BaseException.__new__ reports a non-type and a
+  non-exception class as CPython does. SyntaxError details are converted
+  like tuple() and take four to seven items, with CPython's messages.
+  bytes() and bytearray() with errors but no encoding no longer assume
+  UTF-8. SLP-315 19.2 states the T.__new__ checks.
