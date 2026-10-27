@@ -61,6 +61,8 @@ and tied to real implementations by replaying them.
 | `With.tla` | `__enter__` and `__exit__` lookup, a raising `__enter__`, `__exit__` arguments and suppression after a normal end, an exception, or a return, an exception from `__exit__`, and nested managers | yes |
 | `Buffers.tla` | `__buffer__` exporters through `memoryview()` and `bytes()`, `__release_buffer__` on release, `with`, and destruction, a non-memoryview result, and resizing an exported bytearray | yes |
 | `Annotations.tla` | lazy evaluation of function, class, and local annotations, `__annotate__` formats, unbound and string annotations, annotation scopes, evaluation at most once, and replacing `__annotations__` and `__annotate__` | yes |
+| `Generics.tla` | type parameter kinds, bounds, constraints, defaults, and variance; lazy evaluation; visibility through annotation scopes; parameter list syntax errors; and generic classes | yes |
+| `TypeAliases.tla` | the `type` statement: lazy, single evaluation of `__value__` (forward and self references), alias attributes, subscription, and read-only attributes | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -150,7 +152,9 @@ the method, or the returned type; a metaclass that dropped
 `__classcell__` left `__class__` bound instead of raising RuntimeError;
 a `__buffer__` exporter's `__release_buffer__` was never called; and setting
 `__annotations__` kept the old `__annotate__`, and `__annotate__` could be
-set to a non-callable or deleted.
+set to a non-callable or deleted; `TypeVarTuple` lacked `__bound__` and the
+variance attributes, type parameters from `*Ts` did not infer variance, and
+`ParamSpec` had an `evaluate_bound` that CPython 3.15 no longer has.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

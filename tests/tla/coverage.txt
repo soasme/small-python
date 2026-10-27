@@ -148,8 +148,8 @@ Reference chapter contents | - table of contents
 4. Execution model > Execution model > Naming and binding | = sections
 4. Execution model > Execution model > Naming and binding > Binding of names | TODO: Scopes, ScopeErrors
 4. Execution model > Execution model > Naming and binding > Resolution of names | Scopes
-4. Execution model > Execution model > Naming and binding > Annotation scopes | TODO: Annotations, Generics
-4. Execution model > Execution model > Naming and binding > Lazy evaluation | TODO: Annotations, TypeAliases
+4. Execution model > Execution model > Naming and binding > Annotation scopes | Annotations, Generics
+4. Execution model > Execution model > Naming and binding > Lazy evaluation | Annotations, TypeAliases
 4. Execution model > Execution model > Naming and binding > Builtins and restricted execution | TODO: BuiltinsScope
 4. Execution model > Execution model > Naming and binding > Interaction with dynamic features | TODO: DynamicScopes
 4. Execution model > Execution model > Exceptions | TODO: Exceptions, Raise
@@ -256,7 +256,7 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `import` statement > Future statements | TODO: Future
 7. Simple statements > Simple statements > The `global` statement | TODO: Scopes, ScopeErrors
 7. Simple statements > Simple statements > The `nonlocal` statement | TODO: Scopes, ScopeErrors
-7. Simple statements > Simple statements > The `type` statement | TODO: TypeAliases
+7. Simple statements > Simple statements > The `type` statement | TypeAliases
 8. Compound statements | = sections
 8. Compound statements > Compound statements | TODO: Grammar
 8. Compound statements > Compound statements > The `if` statement | TODO: Conditionals
@@ -290,10 +290,10 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > Coroutines > Coroutine function definition | TODO: Awaitables
 8. Compound statements > Compound statements > Coroutines > The `async for` statement | TODO: AsyncFor
 8. Compound statements > Compound statements > Coroutines > The `async with` statement | TODO: AsyncWith
-8. Compound statements > Compound statements > Type parameter lists | TODO: Generics
-8. Compound statements > Compound statements > Type parameter lists > Generic functions | TODO: Generics
-8. Compound statements > Compound statements > Type parameter lists > Generic classes | TODO: Generics
-8. Compound statements > Compound statements > Type parameter lists > Generic type aliases | TODO: Generics, TypeAliases
+8. Compound statements > Compound statements > Type parameter lists | Generics
+8. Compound statements > Compound statements > Type parameter lists > Generic functions | Generics
+8. Compound statements > Compound statements > Type parameter lists > Generic classes | Generics
+8. Compound statements > Compound statements > Type parameter lists > Generic type aliases | Generics, TypeAliases
 8. Compound statements > Compound statements > Annotations | Annotations
 9. Top-level components | = sections
 9. Top-level components > Top-level components | = sections

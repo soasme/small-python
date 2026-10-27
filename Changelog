@@ -430,6 +430,10 @@
 - Assigning a function's or class's __annotations__ clears __annotate__, a
   callable __annotate__ drops cached annotations, and __annotate__ must be
   callable or None and cannot be deleted. TLA+ model of annotations.
+- TypeVarTuple takes bound and variance arguments and has their attributes,
+  every PEP 695 type parameter infers variance, ParamSpec has no
+  evaluate_bound, and TypeAliasType reports CPython's read-only messages
+  and lets __module__ be set. TLA+ models of type parameters and aliases.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

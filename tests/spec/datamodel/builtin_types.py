@@ -275,3 +275,16 @@ del Annotated.__annotations__
 assert_eq(Annotated.__annotations__, {})
 e = assert_raises(TypeError, delattr, Annotated, "__annotate__")
 assert_eq(str(e), "cannot delete __annotate__ attribute")
+
+# Type parameters infer their variance; TypeVarTuple has a bound in 3.15.
+def generic[T, *Ts, **P](): pass
+assert_eq([t.__infer_variance__ for t in generic.__type_params__], [True, True, True])
+assert_true(generic.__type_params__[1].__bound__ is None)
+assert_false(hasattr(generic.__type_params__[2], "evaluate_bound"))
+type Alias = int
+e = assert_raises(AttributeError, setattr, Alias, "__value__", 1)
+assert_eq(str(e), "attribute '__value__' of 'typing.TypeAliasType' objects is not writable")
+e = assert_raises(AttributeError, setattr, Alias, "other", 1)
+assert_eq(str(e), "'typing.TypeAliasType' object has no attribute 'other' and no __dict__ for setting new attributes")
+Alias.__module__ = "elsewhere"
+assert_eq(Alias.__module__, "elsewhere")

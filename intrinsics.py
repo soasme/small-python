@@ -624,17 +624,20 @@ class TypeVarTuple:
     __module__ = 'typing'
     __init_subclass__ = _final('typing.TypeVarTuple')
 
-    def __init__(self, name, *, default=NoDefault):
-        _param_init(self, name, None, False, False, False, default)
+    def __init__(self, name, *, bound=None, covariant=False, contravariant=False,
+                 infer_variance=False, default=NoDefault):
+        _param_init(self, name, bound, covariant, contravariant, infer_variance, default)
 
     __setattr__ = _param_setattr
+    __repr__ = _variance_repr
     __mro_entries__ = _no_subclass('TypeVarTuple')
     has_default = _has_default
+    __covariant__ = property(lambda self: self._covariant)
+    __contravariant__ = property(lambda self: self._contravariant)
+    __infer_variance__ = property(lambda self: self._infer_variance)
+    __bound__ = property(_bound_get)
     __default__ = property(_default_get)
     evaluate_default = property(_evaluate_default_get)
-
-    def __repr__(self):
-        return self._name
 
     def __iter__(self):
         yield Unpack[self]
@@ -741,7 +744,6 @@ class ParamSpec:
     __contravariant__ = property(lambda self: self._contravariant)
     __infer_variance__ = property(lambda self: self._infer_variance)
     __bound__ = property(_bound_get)
-    evaluate_bound = property(_evaluate_bound_get)
     __default__ = property(_default_get)
     evaluate_default = property(_evaluate_default_get)
     args = property(lambda self: ParamSpecArgs(self))
@@ -1044,6 +1046,14 @@ class Generic:
 
 # typing.TypeAliasType: the `type` statement (PEP 695).
 
+def _alias_readonly(name):
+    if name == '__name__':
+        raise AttributeError('readonly attribute')
+    if name in {'__value__', '__type_params__', '__parameters__', 'evaluate_value'}:
+        raise AttributeError(f"attribute '{name}' of 'typing.TypeAliasType' objects is not writable")
+    raise AttributeError(f"'typing.TypeAliasType' object has no attribute '{name}' and no __dict__ for setting new attributes")
+
+
 class TypeAliasType:
     """Type alias."""
     __module__ = 'typing'
@@ -1068,15 +1078,18 @@ class TypeAliasType:
         object.__setattr__(self, '_evaluate_value', None)
         object.__setattr__(self, '_type_params', type_params)
         object.__setattr__(self, '__module__', 'typing')
+        object.__setattr__(self, '_defining_module', 'typing')
 
     def __setattr__(self, name, value):
-        if name in {'__name__', '__value__', '__type_params__', '__parameters__',
-                    '__module__', 'evaluate_value'}:
-            raise AttributeError('readonly attribute')
-        raise AttributeError(f"'typing.TypeAliasType' object has no attribute '{name}'")
+        if name != '__module__':
+            _alias_readonly(name)
+        object.__setattr__(self, name, value)
 
     def __delattr__(self, name):
-        raise AttributeError('readonly attribute')
+        # Without its own, an alias reports the module that defined it.
+        if name != '__module__':
+            _alias_readonly(name)
+        object.__setattr__(self, name, self._defining_module)
 
     __type_params__ = property(lambda self: self._type_params)
 
@@ -1133,7 +1146,7 @@ def _type_param(kind, name, bound, constraints, default):
     # A PEP 695 type parameter; bound, constraints and default are lazy evaluators.
     cls = (TypeVar, TypeVarTuple, ParamSpec)[kind]
     param = object.__new__(cls)
-    _param_init(param, name, _UNSET, False, False, kind != 1, _UNSET)
+    _param_init(param, name, _UNSET, False, False, True, _UNSET)
     if bound is None:
         object.__setattr__(param, '_bound', None)
     else:
@@ -1156,6 +1169,7 @@ def _type_alias(name, evaluate, type_params, module):
     object.__setattr__(alias, '_evaluate_value', evaluate)
     object.__setattr__(alias, '_type_params', type_params)
     object.__setattr__(alias, '__module__', module)
+    object.__setattr__(alias, '_defining_module', module)
     return alias
 
 
