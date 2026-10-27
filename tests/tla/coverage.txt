@@ -99,9 +99,9 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Class instances > Special attributes | ClassObjects
 3. Data model > Data model > The standard type hierarchy > I/O objects (also known as file objects) | - Host profile: file objects come from the Files service (SLP315-HOST)
 3. Data model > Data model > The standard type hierarchy > Internal types | = sections
-3. Data model > Data model > The standard type hierarchy > Internal types > Code objects | TODO: CodeObjects
-3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes | TODO: CodeObjects
-3. Data model > Data model > The standard type hierarchy > Internal types > Methods on code objects | TODO: CodeObjects
+3. Data model > Data model > The standard type hierarchy > Internal types > Code objects | CodeObjects
+3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes | CodeObjects
+3. Data model > Data model > The standard type hierarchy > Internal types > Methods on code objects | CodeObjects
 3. Data model > Data model > The standard type hierarchy > Internal types > Frame objects | TODO: Frames
 3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes (2) | TODO: Frames
 3. Data model > Data model > The standard type hierarchy > Internal types > Special writable attributes | TODO: Frames
@@ -354,7 +354,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | ClassObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Functions | FunctionObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Methods | Methods
-11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | TODO: CodeObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | CodeObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | ClassObjects
 11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | Singletons

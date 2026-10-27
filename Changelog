@@ -388,6 +388,10 @@
 - A class with several bases reports its layout base as __base__; code
   objects have CPython's co_flags, and co_varnames leaves out cell-only
   locals. TLA+ model of custom classes and instances.
+- Code objects have co_names, co_consts (the docstring first), co_code,
+  co_linetable, co_stacksize, co_lines(), co_positions(), replace() and
+  __replace__, compare and hash by value, and a replaced code assigned to
+  __code__ is kept. TLA+ model of code objects.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

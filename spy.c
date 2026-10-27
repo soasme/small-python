@@ -78,7 +78,7 @@ struct SPYValue {
         struct { char *data; size_t len, exports, chars; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         struct { Entry *items; size_t len, cap; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner; size_t statements; int expression, setup_annotations, future_flags; } unit;
+        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; } function;
         struct { SPYNative call; void *data; int method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
@@ -224,6 +224,7 @@ static SPYValue *function_construct(SPYContext *, size_t, SPYValue *const *, SPY
 static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Node *, int);
+static SPYValue *code_names(SPYContext *, Node *);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
 static SPYValue *builtin_value(SPYContext *, SPYValue *, int);
 /* Builtin function ids, the data of their native values. */
@@ -427,6 +428,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     switch (v->type) {
     case SPY_CODE:
         if (v->as.unit.owner) visit(v->as.unit.owner, data);
+        if (v->as.unit.replaced) visit(v->as.unit.replaced, data);
         for (Node *node = v->as.unit.nodes; node; node = node->allocated)
             if (node->code_value) visit(node->code_value, data);
         break;
@@ -1126,6 +1128,13 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
     if (ta != tb) return 0;
     switch (ta) {
     case SPY_NONE: return 1;
+    case SPY_CODE: {
+        /* Codes for one definition are equal when replace() changed the same fields alike. */
+        if (!a->as.unit.owner || a->as.unit.owner != b->as.unit.owner || a->as.unit.definition != b->as.unit.definition) return 0;
+        SPYValue *x = a->as.unit.replaced, *y = b->as.unit.replaced;
+        if (!x || !y) return !(x ? x : y) || !(x ? x : y)->as.map.len;
+        return equal_value(x, y, depth + 1);
+    }
     case SPY_RANGE: {
         if (integer_compare(a->as.range.length, b->as.range.length)) return 0;
         if (!integer_sign(a->as.range.length)) return 1;
@@ -1268,6 +1277,8 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
             value->as.seq.hashed = 1;
         }
         *result = value->as.seq.hash; return 0;
+    case SPY_CODE:
+        *result = value->as.unit.owner ? (int64_t)((uintptr_t)value->as.unit.definition >> 4) : hash_pointer(value); return 0;
     case SPY_SLICE: {
         SPYValue *items[] = {value->as.slice.start, value->as.slice.stop, value->as.slice.step};
         return hash_items(c, 3, items, 0, result);
@@ -7573,7 +7584,8 @@ enum { M_APPEND, M_POP, M_GET, M_KEYS, M_VALUES, M_ITEMS, M_JOIN, M_FORMAT,
        M_AITER, M_ANEXT, M_ASEND, M_ATHROW, M_ACLOSE, M_COUNT, M_INDEX,
        M_EXTEND, M_INSERT, M_REMOVE, M_CLEAR, M_COPY, M_REVERSE, M_SORT,
        M_DICT_POP, M_POPITEM, M_SETDEFAULT, M_ISIDENTIFIER, M_SUPER_GET,
-       M_STARTSWITH, M_ENDSWITH, M_FIND, M_RFIND, M_STRING_INDEX, M_RINDEX, M_STRING_COUNT, M_ISDISJOINT };
+       M_STARTSWITH, M_ENDSWITH, M_FIND, M_RFIND, M_STRING_INDEX, M_RINDEX, M_STRING_COUNT, M_ISDISJOINT,
+       M_CODE_REPLACE, M_CODE_LINES };
 static SPYValue *bound_method(SPYContext *c, SPYValue *self, int method) {
     SPYValue *bound = value_new(c, SPY_BOUND_METHOD);
     if (bound) { bound->as.bound.self = spy_retain(self); bound->as.bound.method = method; }
@@ -8241,6 +8253,29 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_CODE) {
         Node *def = v->as.unit.definition;
         SPYValue *unit = v->as.unit.owner ? v->as.unit.owner : v;
+        SPYValue *replaced = v->as.unit.replaced ? name_local(v->as.unit.replaced, name) : NULL;
+        if (replaced) return spy_retain(replaced);
+        if (!strcmp(name, "replace") || !strcmp(name, "__replace__") || !strcmp(name, "co_lines") || !strcmp(name, "co_positions")) {
+            SPYValue *bound = bound_method(c, v, name[0] == 'r' || name[1] == '_' ? M_CODE_REPLACE : M_CODE_LINES);
+            if (bound && !(bound->as.bound.name = spy_string(c, name, strlen(name)))) { spy_release(bound); return NULL; }
+            return bound;
+        }
+        /* spy runs no bytecode: no instructions, line table, or stack. */
+        if (!strcmp(name, "co_code") || !strcmp(name, "co_linetable") || !strcmp(name, "co_exceptiontable")) return spy_bytes(c, "", 0);
+        if (!strcmp(name, "co_stacksize")) return spy_int(c, 0);
+        if (!strcmp(name, "co_consts")) {
+            /* The docstring comes first. */
+            Node *body = def && def->kind == N_DEF ? def->b : NULL;
+            SPYValue *consts = value_new(c, SPY_TUPLE);
+            if (consts && body && body->kind == N_EXPR && body->a->kind == N_STRING) {
+                SPYValue *doc = spy_string(c, body->a->text, (size_t)body->a->op);
+                if (!doc || sequence_append(c, consts, doc)) { spy_release(consts); consts = NULL; }
+                spy_release(doc);
+            }
+            return consts;
+        }
+        if (!strcmp(name, "co_names"))
+            return def && (def->kind == N_DEF || def->kind == N_LAMBDA) ? code_names(c, def) : value_new(c, SPY_TUPLE);
         if (!strcmp(name, "co_filename")) return spy_string(c, unit->as.unit.filename, strlen(unit->as.unit.filename));
         if (!strcmp(name, "co_name") || (!strcmp(name, "co_qualname") && !def)) {
             const char *text = !def ? "<module>" : def->kind == N_COMPREHENSION ?
@@ -8415,7 +8450,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             spy_release(module);
             return dict;
         }
-        if (!strcmp(name, "__code__")) return definition_code(c, v->as.function.unit, v->as.function.def);
+        if (!strcmp(name, "__code__")) {
+            SPYValue *code = name_local(v->as.function.metadata, "__code__");
+            return code ? spy_retain(code) : definition_code(c, v->as.function.unit, v->as.function.def);
+        }
         if (!strcmp(name, "__closure__")) return function_closure(c, v);
         if (!strcmp(name, "__dict__")) {
             if (!v->as.function.attributes) v->as.function.attributes = value_new(c, SPY_DICT);
@@ -9510,9 +9548,49 @@ static SPYValue *method_arity_error(SPYContext *c, SPYValue *bound, size_t argc)
     }
     return method_arity(c, owner, name, min, max, argc);
 }
+/* code.replace(**changes): a copy of code for the same definition with
+ * those attributes changed. spy keeps no bytecode, so only the naming and
+ * location attributes can change. */
+static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) {
+    static const char *const names[] = {"co_name", "co_qualname", "co_filename", "co_firstlineno"};
+    SPYValue *replaced = value_new(c, SPY_DICT);
+    if (!replaced || (code->as.unit.replaced && dict_update(c, replaced, code->as.unit.replaced))) { spy_release(replaced); return NULL; }
+    for (size_t i = 0; changes && i < changes->as.map.len; i++) {
+        Entry *entry = &changes->as.map.items[i];
+        const char *name = entry->key->as.string.data;
+        size_t known = 0;
+        while (known < sizeof(names) / sizeof(*names) && strcmp(names[known], name)) known++;
+        if (known == sizeof(names) / sizeof(*names)) {
+            spy_release(replaced);
+            if (!strncmp(name, "co_", 3)) return errorf(c, "NotImplementedError", "replace() cannot change %s in spy", name);
+            return errorf(c, "TypeError", "replace() got an unexpected keyword argument '%s'", name);
+        }
+        int number = known == 3;
+        if (number ? !is_int(entry->value) || entry->value->type == SPY_BOOL : entry->value->type != SPY_STRING) {
+            spy_release(replaced);
+            return errorf(c, "TypeError", "replace() argument '%s' must be %s, not %s", name, number ? "int" : "str", type_name(entry->value));
+        }
+        if (name_set(c, replaced, name, entry->value)) { spy_release(replaced); return NULL; }
+    }
+    SPYValue *copy = value_new(c, SPY_CODE);
+    if (!copy) { spy_release(replaced); return NULL; }
+    copy->as.unit.owner = spy_retain(code->as.unit.owner ? code->as.unit.owner : code);
+    copy->as.unit.definition = code->as.unit.definition;
+    copy->as.unit.replaced = replaced;
+    return copy;
+}
 static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValue *const *argv) {
     SPYValue *self = bound->as.bound.self;
     switch (bound->as.bound.method) {
+    case M_CODE_REPLACE:
+        if (argc) break;
+        return code_replace(c, self, NULL);
+    case M_CODE_LINES: {
+        /* No bytecode, so no instructions to map to lines or positions. */
+        if (argc) break;
+        SPYValue *empty = value_new(c, SPY_TUPLE), *iterator = empty ? get_iterator(c, empty) : NULL;
+        spy_release(empty); return iterator;
+    }
     case M_STARTSWITH: case M_ENDSWITH: case M_FIND: case M_RFIND:
     case M_STRING_INDEX: case M_RINDEX: case M_STRING_COUNT:
         return string_search(c, self, bound->as.bound.method, argc, argv);
@@ -9926,7 +10004,8 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
     fn->as.function.unit = spy_retain(code->as.unit.owner);
     fn->as.function.def = def;
     spy_release(unit);
-    return 0;
+    /* Keep a replace()d code object as given. */
+    return name_set(c, fn->as.function.metadata, "__code__", code);
 }
 /* Builtin classes, the builtin exceptions included, refuse attribute changes. */
 static int immutable_type(SPYContext *c, SPYValue *cls, const char *name) {
@@ -10738,6 +10817,59 @@ static int closure_walk(ClosureNames *w, Node *n, int depth) {
     }
     return 0;
 }
+/* co_names: global and attribute names a function's body uses, in source
+ * order, leaving out nested scopes (inlined comprehensions are the body's). */
+static int code_name_add(ClosureNames *w, const char *name) {
+    for (size_t i = 0; i < w->names->as.seq.len; i++) if (!strcmp(w->names->as.seq.items[i]->as.string.data, name)) return 0;
+    SPYValue *text = spy_string(w->c, name, strlen(name));
+    int status = !text || sequence_append(w->c, w->names, text);
+    spy_release(text); return status ? -1 : 0;
+}
+static int code_names_walk(ClosureNames *w, Scope *scope, Node *n, int depth) {
+    for (; n && depth < 1000; n = n->next) {
+        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA || (n->kind == N_COMPREHENSION && n->op == N_TUPLE)) {
+            /* A generator expression's first iterable is evaluated here. */
+            Node *first = n->kind == N_COMPREHENSION && n->a ? n->a->a : NULL;
+            if (code_names_walk(w, scope, n->decorators, depth + 1) || (first && code_names_walk(w, scope, first, depth + 1))) return -1;
+            continue;
+        }
+        if (n->kind == N_IMPORT || n->kind == N_FROM) {
+            /* The module imported, then a renamed dotted import's later parts. */
+            if (n->kind == N_FROM && code_name_add(w, n->a ? source_name(n->a) : "")) return -1;
+            for (Node *item = n->args; item; item = item->next) {
+                const char *text = item->a && (item->a->text || item->a->original) ? source_name(item->a) : NULL;
+                if (text && code_name_add(w, text)) return -1;
+                for (const char *dot = n->kind == N_IMPORT && item->b && text ? strchr(text, '.') : NULL; dot; dot = strchr(dot + 1, '.')) {
+                    const char *end = strchr(dot + 1, '.');
+                    size_t len = end ? (size_t)(end - dot - 1) : strlen(dot + 1);
+                    char *part = malloc(len + 1);
+                    if (!part) { spy_error(w->c, "MemoryError", "allocation failed"); return -1; }
+                    memcpy(part, dot + 1, len); part[len] = 0;
+                    int status = code_name_add(w, part);
+                    free(part);
+                    if (status) return -1;
+                }
+            }
+            continue;
+        }
+        if (n->kind == N_ATTR) {
+            if (code_names_walk(w, scope, n->a, depth + 1) || (n->b && n->b->text && code_name_add(w, n->b->text))) return -1;
+            continue;
+        }
+        Scope *inner = n->kind == N_COMPREHENSION && n->scope ? n->scope : scope;
+        if (n->kind == N_NAME && n->text) {
+            Symbol *symbol = NULL;
+            for (Scope *at = scope; at && !symbol; at = at == w->self ? NULL : at->parent) symbol = scope_symbol(at, n->text);
+            int local = symbol && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)) && (symbol->flags & (S_LOCAL | S_PARAM));
+            if (!local && !(symbol && (symbol->flags & S_NONLOCAL)) && !free_binding(w->self, n->text) && code_name_add(w, n->text)) return -1;
+        }
+        if (code_names_walk(w, inner, n->a, depth + 1) || code_names_walk(w, inner, n->b, depth + 1) ||
+            code_names_walk(w, inner, n->c, depth + 1) || code_names_walk(w, inner, n->args, depth + 1) ||
+            code_names_walk(w, inner, n->decorators, depth + 1))
+            return -1;
+    }
+    return 0;
+}
 /* co_freevars (cells 0) or co_cellvars (cells 1) of a definition, sorted. */
 static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     ClosureNames w = {c, def ? def->scope : NULL, value_new(c, SPY_TUPLE), cells};
@@ -10749,6 +10881,11 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
         for (size_t j = i; j > 0 && strcmp(items[j - 1]->as.string.data, items[j]->as.string.data) > 0; j--) {
             SPYValue *item = items[j]; items[j] = items[j - 1]; items[j - 1] = item;
         }
+    return w.names;
+}
+static SPYValue *code_names(SPYContext *c, Node *def) {
+    ClosureNames w = {c, def->scope, value_new(c, SPY_TUPLE), 0};
+    if (w.names && w.self && code_names_walk(&w, w.self, def->b, 0)) { spy_release(w.names); return NULL; }
     return w.names;
 }
 static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYValue *value) {
@@ -11486,6 +11623,8 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
             result = string_format(c, fn->as.bound.self, argc, argv, keywords, 1);
         else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_SORT)
             result = sort_method(c, fn->as.bound.self, argc, argv, keywords);
+        else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_CODE_REPLACE && !argc)
+            result = code_replace(c, fn->as.bound.self, keywords);
         else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_UPDATE) {
             result = bound_call(c, fn, argc, argv);
             if (result && keywords) dict_update(c, fn->as.bound.self, keywords);

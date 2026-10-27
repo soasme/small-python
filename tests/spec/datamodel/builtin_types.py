@@ -150,3 +150,21 @@ class Slotted: __slots__ = ("x",)
 assert_true(type("X", (Plain, int), {}).__base__ is int)
 assert_true(type("Y", (Plain, Slotted), {}).__base__ is Slotted)
 assert_true(type("Z", (Plain, object), {}).__base__ is Plain)
+
+# Code objects: flags, names the body uses, the docstring constant, and
+# replace(), which copies the code with some attributes changed.
+def coded(a, *args, **kw):
+    "coded doc"
+    return len(a.real) + missing
+code = coded.__code__
+assert_eq(code.co_flags & 0x400000F, 0x400000F)
+assert_eq(sorted(code.co_names), ["len", "missing", "real"])
+assert_eq(code.co_consts[0], "coded doc")
+renamed = code.replace(co_name="other", co_firstlineno=7)
+assert_eq((renamed.co_name, renamed.co_firstlineno, code.co_name), ("other", 7, "coded"))
+assert_true(code.replace() == code and hash(code.replace()) == hash(code) and renamed != code)
+coded.__code__ = renamed
+assert_true(coded.__code__ is renamed)
+assert_raises(TypeError, code.replace, co_name=1)
+assert_raises(TypeError, code.replace, nope=1)
+assert_eq(code.__replace__(co_qualname="Q").co_qualname, "Q")
