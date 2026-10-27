@@ -103,3 +103,17 @@ i.__get__ = lambda *a: "never"
 class Holder:
     attr = i
 assert_is(Holder.attr, i)
+
+# A data descriptor without __get__ yields to the instance dictionary on
+# reads, and is returned itself when the dictionary lacks the name.
+class SetOnly:
+    def __set__(self, instance, value):
+        instance.__dict__["seen"] = value
+class Holder:
+    x = SetOnly()
+holder = Holder()
+assert_true(holder.x is Holder.__dict__["x"])
+holder.__dict__["x"] = "inst"
+assert_eq(holder.x, "inst")
+holder.x = 5
+assert_eq((holder.x, holder.seen), ("inst", 5))

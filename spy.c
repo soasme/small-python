@@ -7954,6 +7954,11 @@ static int data_descriptor(SPYValue *value) {
     return value && (value->type == SPY_PROPERTY || is_member(value) || (value->type == SPY_INSTANCE &&
         (class_lookup(value->as.map.parent, "__set__") || class_lookup(value->as.map.parent, "__delete__"))));
 }
+/* A data descriptor that takes precedence over the instance dictionary on
+ * reads: one without __get__ yields to a value stored there. */
+static int data_descriptor_get(SPYValue *value) {
+    return data_descriptor(value) && (value->type != SPY_INSTANCE || class_lookup(value->as.map.parent, "__get__"));
+}
 static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self, SPYValue *owner) {
     if (value->type == SPY_SUPER && !value->as.super.self && self)
         return super_new(c, value->as.super.type, self);
@@ -8604,10 +8609,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             }
         }
         SPYValue *value = v->type == SPY_INSTANCE ? instance_lookup(v->as.map.parent, name) : NULL;
-        if (data_descriptor(value)) return descriptor_get(c, value, v, v->as.map.parent);
+        if (data_descriptor_get(value)) return descriptor_get(c, value, v, v->as.map.parent);
         SPYValue *meta = v->type == SPY_CLASS ? v->as.map.meta : NULL;
         SPYValue *meta_value = meta ? class_lookup(meta, name) : NULL;
-        if (data_descriptor(meta_value)) return descriptor_get(c, meta_value, v, meta);
+        if (data_descriptor_get(meta_value)) return descriptor_get(c, meta_value, v, meta);
         if (!value && !strcmp(name, "__dict__")) {
             if (!instance_has_dict(v)) return errorf(c, "AttributeError", "'%s' object has no attribute '__dict__'", type_name(v));
             SPYValue *dict = v->type == SPY_CLASS && static_type(c, v) ? class_namespace(c, v) : instance_dict(c, v);

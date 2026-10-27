@@ -409,6 +409,8 @@
   item assignment and deletion, divmod(), three-argument pow(), next(),
   __getattribute__, and __getattr__; the MRO hook is looked up on the
   metaclass. TLA+ model of special method lookup.
+- A data descriptor without __get__ yields to the instance dictionary on
+  reads. TLA+ model of descriptor invocation.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
