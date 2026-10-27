@@ -5714,3 +5714,174 @@ one of 's', 'a' or 'r'"). The four arguments are read-only attributes
 ("readonly attribute"). `__match_args__` is (`'value'`, `'expression'`,
 `'conversion'`, `'format_spec'`). `repr` is "Interpolation(*r*, *r*, *r*,
 *r*)" with the reprs of the four attributes.
+
+## 24 Binary Data
+
+### 24.1 The `bytes` type
+
+A `bytes` value is an immutable finite sequence of integers in range(0, 256).
+Indexing yields an `int`; slicing yields a `bytes`. Equal byte sequences have
+equal hashes. A `bytes` never compares equal to a `str` (a host may issue a
+`BytesWarning` for the comparison, Annex B), and ordering comparisons with a
+`str` raise the `TypeError` of RichCompare.
+
+#### 24.1.1 bytes ( [ *source* [ , *encoding* [ , *errors* ] ] ] )
+
+1. If no argument is given, return an empty `bytes`.
+2. If *source* is a `str`: if *encoding* is not given, raise a `TypeError`
+   exception ("string argument without an encoding"); otherwise return
+   ? Encode(*source*, *encoding*, *errors*) (23.3).
+3. If *encoding* or *errors* is given, raise a `TypeError` exception
+   ("encoding without a string argument" or, when only *errors* is given,
+   "errors without a string argument").
+4. Let *m* be ? LookupSpecial(*source*, `"__bytes__"`). If it is not **absent**,
+   let *r* be ? Call(*m*, «»); if *r* is not a `bytes` (or subclass), raise a
+   `TypeError` exception ("*fqname*(*source*).`__bytes__`() must return a
+   bytes, not *tname*(*r*)"); return a `bytes` with the contents of *r*.
+5. If *source* supports the buffer protocol (24.4), return a copy of its bytes.
+6. If LookupSpecial(*source*, `"__index__"`) is not **absent**, let *n* be
+   ? ToIndexSize(*source*); if *n* < 0 raise a `ValueError` exception
+   ("negative count"); return *n* zero bytes.
+7. If *source* is iterable, return the bytes of its elements, each converted by
+   ToIndex ("'*tname*' object cannot be interpreted as an integer") and in
+   range(0, 256) (`ValueError` "bytes must be in range(0, 256)").
+8. Raise a `TypeError` exception ("cannot convert '*tname*(*source*)' object to
+   bytes").
+
+When the class called is a strict subclass of `bytes`, the result is an
+instance of it. `bytes.__new__(T)` for a non-subtype *T* raises `TypeError`
+("bytes.\_\_new\_\_(*T*): *T* is not a subtype of bytes").
+
+#### 24.1.2 BytesRepr ( *b* )
+
+The repr of a `bytes` is `b` followed by its contents quoted as StrRepr (23.1.3)
+quotes a string, except that the quote is chosen the same way, each byte below
+0x20 or at least 0x7F other than `\t`, `\n`, `\r` is written `\x`*hh*, and the
+other bytes are written as their ASCII characters. `str(b)` is `repr(b)`.
+
+#### 24.1.3 fromhex and hex
+
+The class method `fromhex(string)` takes a `str` or bytes-like object
+("fromhex() argument must be str or bytes-like, not *tname*") of pairs of
+hexadecimal digits, ignoring ASCII white space between pairs, and returns an
+instance of the class it is called on. A character other than a digit or white
+space raises `ValueError` ("non-hexadecimal number found in fromhex() arg at
+position *i*"), and an odd digit at the end ("fromhex() arg must contain an
+even number of hexadecimal digits").
+
+`hex(sep, bytes_per_sep=1)` returns the bytes as lower-case hexadecimal pairs;
+when *sep* (a `str` or `bytes` of length 1, "sep must be length 1.") is given,
+it is inserted between groups of *bytes_per_sep* bytes, counted from the right
+(from the left when *bytes_per_sep* is negative).
+
+### 24.2 The `bytearray` type
+
+A `bytearray` is a mutable sequence of integers in range(0, 256). It is
+constructed as `bytes` is (24.1.1, without `__bytes__` taking part for a
+`bytearray` subclass result), its repr is "bytearray(*r*)" with *r* the
+BytesRepr of its contents, and it is unhashable. Indexing yields an `int`;
+slicing yields a `bytearray`.
+
+Beyond the operations of 24.3 and the mutable sequence operations (clause 25):
+
+- Item assignment takes an integer in range(0, 256) (`ValueError` "byte must be
+  in range(0, 256)"; a non-integer raises the error of ToIndex); slice
+  assignment takes a bytes-like object or an iterable of such integers
+  ("can assign only bytes, buffers, or iterables of ints in range(0, 256)") and
+  may change the length.
+- `append`, `extend`, `insert`, `pop` ("pop from empty bytearray"), `remove`
+  ("value not found in bytearray"), `clear`, `copy`, and `reverse` behave as
+  the list methods (25.1) for byte values; `+=` and `*=` mutate in place.
+- An operation that would change the length while a buffer export of the
+  `bytearray` is not released raises a `BufferError` exception ("Existing
+  exports of data: object cannot be re-sized"); writes that keep the length
+  are allowed.
+
+### 24.3 Bytes and bytearray operations
+
+`bytes` and `bytearray` provide the methods of 23.1.4–23.1.7 with these
+differences:
+
+1. Arguments that are byte sequences accept any bytes-like object; a `str`
+   raises `TypeError` ("a bytes-like object is required, not 'str'"; for
+   `startswith` and `endswith` "startswith first arg must be bytes or a tuple
+   of bytes, not *tname*"). The searching methods and `in` also accept an
+   integer in range(0, 256) for a single byte ("argument should be integer or
+   bytes-like object, not '*tname*'", `ValueError` "byte must be in range(0,
+   256)").
+2. Results are of the receiver's type; methods that return the receiver's
+   contents unchanged still return a new object for a `bytearray`.
+3. Case mappings, `title`, `capitalize`, `swapcase`, the predicates, and the
+   white space of `split` and `strip` consider only ASCII: letters are
+   `a`–`z` and `A`–`Z`, digits `0`–`9`, and white space the bytes
+   `\t\n\v\f\r` and space. There is no title case and no `casefold`,
+   `isdecimal`, `isnumeric`, `isidentifier`, `isprintable`, or `format`.
+   `splitlines` recognizes only `\n`, `\r`, and `\r\n`.
+4. The fill argument of `center`, `ljust`, and `rjust` is a byte string of
+   length 1 ("center() argument 2 must be a byte string of length 1, not
+   *tname*").
+5. `join` requires bytes-like items ("sequence item *i*: expected a
+   bytes-like object, *tname* found").
+6. `translate(table, /, delete=b'')` deletes the bytes in *delete* and maps the
+   rest through *table*, a bytes-like object of exactly 256 bytes
+   ("translation table must be 256 characters long") or `None`.
+   `bytes.maketrans(from, to)` returns the 256-byte table mapping each byte of
+   *from* to that of *to* ("maketrans arguments must have same length").
+7. `decode(encoding='utf-8', errors='strict')` returns ? Decode (23.3).
+8. `b % values` is printf-style formatting (23.6) producing bytes: `s` and `b`
+   take a bytes-like object or an object with `__bytes__` ("format argument:
+   %b requires a bytes-like object, or an object that implements \_\_bytes\_\_,
+   not *tname*"), `r` and `a` are ASCII(*v*) encoded as ASCII, and `c` takes
+   an integer in range(256) (`OverflowError` "format argument: %c argument not
+   in range(256)") or a bytes object of length 1.
+9. Concatenation with a `str` raises `TypeError` ("can't concat str to
+   *tname*"); the result type is that of the left operand.
+
+### 24.4 The buffer protocol and `memoryview`
+
+#### 24.4.1 Buffers
+
+An object *supports the buffer protocol*, or is *bytes-like*, if its type is
+`bytes`, `bytearray`, `memoryview`, or a subclass of them, or if its type
+defines `__buffer__`. GetBuffer(*o*, *flags*):
+
+1. If *o* is a `bytes`, `bytearray`, or `memoryview`, return a new export of
+   its memory (for a `bytearray`, the export count increases until it is
+   released).
+2. Let *m* be ? LookupSpecial(*o*, `"__buffer__"`). If **absent**, raise a
+   `TypeError` exception ("a bytes-like object is required, not
+   '*tname*(*o*)'", or the caller's message).
+3. Let *v* be ? Call(*m*, « *flags* »). If *v* is not a `memoryview`, raise a
+   `TypeError` exception ("*fqname*(*o*).`__buffer__`() must return a
+   memoryview, not *tname*(*v*)").
+4. Return *v*, remembering *o* as its exporter.
+
+ReleaseBuffer(*v*): if the exporter's type defines `__release_buffer__`, call
+it with *v*; then release *v*. A consumer that obtained a buffer only to copy
+it (such as `bytes(o)`) releases it before returning.
+
+#### 24.4.2 memoryview ( *object* )
+
+Returns a view of ? GetBuffer(*object*) (`TypeError` "memoryview: a bytes-like
+object is required, not '*tname*'"). A view has a format, an item size, a
+shape, and strides; the Core profile provides one-dimensional views and
+multi-dimensional views created by `cast`, with the formats `B`, `b`, `c`,
+`h`, `H`, `i`, `I`, `l`, `L`, `q`, `Q`, `n`, `N`, `e`, `f`, `d`, `?`, and `P` in
+native size and byte order (Annex D).
+
+| Member | Result |
+| --- | --- |
+| `len(m)`, `m[i]`, `m[i:j:k]` | the number of items, an item converted by the format (`IndexError` "index out of bounds on dimension 1"; non-integer keys `TypeError` "memoryview: invalid slice key"), a view of the selected items |
+| `m[i] = v`, `m[i:j] = b` | write an item ("cannot modify read-only memory" for a read-only view; `TypeError` "memoryview: invalid type for format '*f*'"; `ValueError` "memoryview: invalid value for format '*f*'") or a same-shaped buffer ("memoryview assignment: lvalue and rvalue have different structures") |
+| `obj`, `nbytes`, `readonly`, `itemsize`, `format`, `ndim`, `shape`, `strides`, `suboffsets`, `c_contiguous`, `f_contiguous`, `contiguous` | the view's properties |
+| `tobytes(order='C')`, `tolist()`, `hex(…)` | the contents as `bytes`, as a (nested) list of items, as `bytes.hex` |
+| `toreadonly()` | a read-only view of the same memory |
+| `cast(format[, shape])` | a view with another format and shape ("memoryview: length is not a multiple of itemsize") |
+| `release()`, `__enter__()`, `__exit__(…)` | release the view (idempotent); `with m:` releases it on exit |
+| `==` | equal when the shapes and the items, compared as values, are equal; also with any bytes-like object |
+| `hash(m)` | for a read-only view, the hash of `m.tobytes()`; otherwise `ValueError` ("cannot hash writable memoryview object") |
+
+Any operation other than `release` and `repr` on a released view raises
+`ValueError` ("operation forbidden on released memoryview object"). Ordering
+comparisons are not defined. `repr(m)` is "\<memory at *address*\>", or
+"\<released memory at *address*\>".
