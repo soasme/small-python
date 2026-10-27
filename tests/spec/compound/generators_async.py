@@ -140,3 +140,42 @@ assert_syntax_error("def f():\n    return [x async for x in y]\n")
 assert_compiles("async def f():\n    return [[x async for x in y] for z in w]\n")
 assert_compiles("await x", ) if False else None
 assert_compiles("await x\n", "exec") if False else None
+
+# async for and async with report CPython's protocol errors.
+def protocol_error(coroutine):
+    try:
+        coroutine.send(None)
+    except TypeError as error:
+        return str(error)
+class NoAiter:
+    pass
+class BadAnext:
+    def __aiter__(self):
+        return self
+    def __anext__(self):
+        return 5
+class NoAnext:
+    def __aiter__(self):
+        return 5
+async def loop_over(source):
+    async for x in source:
+        pass
+assert_eq(protocol_error(loop_over(NoAiter())), "'async for' requires an object with __aiter__ method, got NoAiter")
+assert_eq(protocol_error(loop_over(BadAnext())), "'async for' received an invalid object from __anext__: int")
+assert_eq(protocol_error(loop_over(NoAnext())),
+          "'async for' received an object from __aiter__ that does not implement __anext__: int")
+e = assert_raises(TypeError, aiter, NoAiter())
+assert_eq(str(e), "'NoAiter' object is not an async iterable")
+e = assert_raises(TypeError, aiter, NoAnext())
+assert_eq(str(e), "NoAnext.__aiter__() must return an async iterator, not int")
+class SyncManager:
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+async def async_with_sync():
+    async with SyncManager():
+        pass
+assert_eq(protocol_error(async_with_sync()),
+          "'SyncManager' object does not support the asynchronous context manager protocol (missed __aexit__ method)"
+          " but it supports the context manager protocol. Did you mean to use 'with'?")

@@ -82,7 +82,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Callable types > Special writable attributes | FunctionObjects
 3. Data model > Data model > The standard type hierarchy > Callable types > Instance methods | Methods
 3. Data model > Data model > The standard type hierarchy > Callable types > Generator functions | Generators
-3. Data model > Data model > The standard type hierarchy > Callable types > Coroutine functions | TODO: Generators, Awaitables
+3. Data model > Data model > The standard type hierarchy > Callable types > Coroutine functions | Generators, Awaitables
 3. Data model > Data model > The standard type hierarchy > Callable types > Asynchronous generator functions | AsyncGenerators
 3. Data model > Data model > The standard type hierarchy > Callable types > Built-in functions | Methods
 3. Data model > Data model > The standard type hierarchy > Callable types > Built-in methods | Methods
@@ -138,10 +138,10 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > Annotations | Annotations
 3. Data model > Data model > Special method names > Special method lookup | SpecialLookup
 3. Data model > Data model > Coroutines | = sections
-3. Data model > Data model > Coroutines > Awaitable Objects | TODO: Awaitables
-3. Data model > Data model > Coroutines > Coroutine Objects | TODO: Generators, Awaitables
-3. Data model > Data model > Coroutines > Asynchronous Iterators | TODO: AsyncFor
-3. Data model > Data model > Coroutines > Asynchronous Context Managers | TODO: AsyncWith
+3. Data model > Data model > Coroutines > Awaitable Objects | Awaitables
+3. Data model > Data model > Coroutines > Coroutine Objects | Generators, Awaitables
+3. Data model > Data model > Coroutines > Asynchronous Iterators | AsyncFor
+3. Data model > Data model > Coroutines > Asynchronous Context Managers | AsyncWith
 4. Execution model | = sections
 4. Execution model > Execution model | = sections
 4. Execution model > Execution model > Structure of a program | TODO: CompileModes
@@ -202,7 +202,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Atoms > Comprehensions > Filtering in comprehensions | TODO: Comprehensions
 6. Expressions > Expressions > Atoms > Comprehensions > Complex comprehensions | TODO: Comprehensions
 6. Expressions > Expressions > Atoms > Comprehensions > Unpacking in comprehensions | TODO: Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Asynchronous comprehensions | TODO: AsyncFor
+6. Expressions > Expressions > Atoms > Comprehensions > Asynchronous comprehensions | AsyncFor
 6. Expressions > Expressions > Atoms > Comprehensions > Formal grammar for comprehensions | TODO: Comprehensions
 6. Expressions > Expressions > Atoms > Generator expressions | TODO: GenExprs
 6. Expressions > Expressions > Atoms > Yield expressions | Generators, YieldFrom
@@ -218,7 +218,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > "Starred" subscriptions | TODO: Subscripts
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | TODO: Subscripts
 6. Expressions > Expressions > Primaries > Calls | Calls
-6. Expressions > Expressions > Await expression | TODO: Awaitables
+6. Expressions > Expressions > Await expression | Awaitables
 6. Expressions > Expressions > The power operator | TODO: Power
 6. Expressions > Expressions > Unary arithmetic and bitwise operations | TODO: IntArith, ArithConversions
 6. Expressions > Expressions > Binary arithmetic operations | TODO: BinaryArith, ArithConversions
@@ -287,9 +287,9 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > Class definitions | ClassCreation, MRO
 8. Compound statements > Compound statements > Class definitions > Multiple inheritance | MRO, Super
 8. Compound statements > Compound statements > Coroutines | = sections
-8. Compound statements > Compound statements > Coroutines > Coroutine function definition | TODO: Awaitables
-8. Compound statements > Compound statements > Coroutines > The `async for` statement | TODO: AsyncFor
-8. Compound statements > Compound statements > Coroutines > The `async with` statement | TODO: AsyncWith
+8. Compound statements > Compound statements > Coroutines > Coroutine function definition | Awaitables
+8. Compound statements > Compound statements > Coroutines > The `async for` statement | AsyncFor
+8. Compound statements > Compound statements > Coroutines > The `async with` statement | AsyncWith
 8. Compound statements > Compound statements > Type parameter lists | Generics
 8. Compound statements > Compound statements > Type parameter lists > Generic functions | Generics
 8. Compound statements > Compound statements > Type parameter lists > Generic classes | Generics

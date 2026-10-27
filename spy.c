@@ -6195,7 +6195,7 @@ static SPYValue *generator_next(SPYContext *, SPYValue *);
 static SPYValue *generator_send(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *generator_send_args(SPYContext *, SPYValue *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
-static SPYValue *async_iterator(SPYContext *, SPYValue *);
+static SPYValue *async_iterator(SPYContext *, SPYValue *, int);
 static SPYValue *stop_value(SPYContext *);
 static SPYValue *awaitable_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static int awaitable_iterator(SPYValue *v) {
@@ -12806,7 +12806,7 @@ static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
 static int machine_push(SPYContext *, Machine *, SPYValue *);
 static Result run_machine(SPYContext *, SPYValue *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
-    SPYValue *iterator = n->a->op ? async_iterator(c, source) : get_iterator(c, source);
+    SPYValue *iterator = n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source);
     if (!iterator) return NULL;
     SPYValue *env = value_new(c, V_ENV);
     SPYValue *result = env ? value_new(c, n->asynchronous ?
@@ -14436,9 +14436,17 @@ static SPYValue *exception_traceback(SPYContext *c, SPYValue *exception) {
 }
 /* TypeError for a with (or async with) manager missing a protocol method. */
 static SPYValue *manager_error(SPYContext *c, SPYValue *manager, int async, int has_exit) {
-    return errorf(c, "TypeError", "'%s' object does not support the %scontext manager protocol (missed %s method)",
+    /* A manager of the other kind gets a hint, as in CPython. */
+    SPYValue *enter = special_method(c, manager, async ? "__enter__" : "__aenter__");
+    SPYValue *exit = enter ? special_method(c, manager, async ? "__exit__" : "__aexit__") : NULL;
+    int other = enter && exit;
+    spy_release(enter); spy_release(exit);
+    if (c->error_type[0]) spy_clear_error(c);
+    return errorf(c, "TypeError", "'%s' object does not support the %scontext manager protocol (missed %s method)%s",
                   type_name(manager), async ? "asynchronous " : "",
-                  has_exit ? (async ? "__aenter__" : "__enter__") : (async ? "__aexit__" : "__exit__"));
+                  has_exit ? (async ? "__aenter__" : "__enter__") : (async ? "__aexit__" : "__exit__"),
+                  !other ? "" : async ? " but it supports the context manager protocol. Did you mean to use 'with'?" :
+                  " but it supports the asynchronous context manager protocol. Did you mean to use 'async with'?");
 }
 static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     if (!item) return execute(c, f, body);
@@ -15885,6 +15893,8 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
     }
     SPYValue *method = special_method(c, value, "__await__");
     if (!method) {
+        if (method_name && !strcmp(method_name, "__anext__"))
+            return errorf(c, "TypeError", "'async for' received an invalid object from __anext__: %s", type_name(value));
         if (method_name) return errorf(c, "TypeError", "'async with' received an object from %s that does not implement __await__: %s", method_name, type_name(value));
         return errorf(c, "TypeError", "'%s' object can't be awaited", type_name(value));
     }
@@ -15899,13 +15909,25 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
     spy_release(iterator);
     return NULL;
 }
-static SPYValue *async_iterator(SPYContext *c, SPYValue *value) {
-    SPYValue *iterator = call_special(c, value, "__aiter__", 0, NULL);
+/* __aiter__ for async for (statement) or aiter(), with their messages. */
+static SPYValue *async_iterator(SPYContext *c, SPYValue *value, int statement) {
+    SPYValue *method = special_method(c, value, "__aiter__");
+    if (!method) {
+        if (c->error_type[0]) return NULL;
+        if (statement) return errorf(c, "TypeError", "'async for' requires an object with __aiter__ method, got %s", type_name(value));
+        return errorf(c, "TypeError", "'%s' object is not an async iterable", type_name(value));
+    }
+    SPYValue *iterator = spy_call(c, method, 0, NULL);
+    spy_release(method);
     if (!iterator) return NULL;
     SPYValue *next = special_method(c, iterator, "__anext__");
     if (next) { spy_release(next); return iterator; }
+    if (!c->error_type[0]) {
+        if (statement) errorf(c, "TypeError", "'async for' received an object from __aiter__ that does not implement __anext__: %s", type_name(iterator));
+        else errorf(c, "TypeError", "%s.__aiter__() must return an async iterator, not %s", type_name(value), type_name(iterator));
+    }
     spy_release(iterator);
-    return spy_error(c, "TypeError", "__aiter__() returned an object without __anext__");
+    return NULL;
 }
 static void finish_delegate(SPYContext *c, Machine *m) {
     if (m->delegate && error_is(c, "StopIteration") &&
@@ -16073,7 +16095,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             flow = (Result){ins->arg, ins->arg == FLOW_RETURN ? machine_pop(m) : NULL}; break;
         case BC_LOOP: {
             if (ins->arg) {
-                a = machine_pop(m); b = ins->arg == 3 ? spy_retain(a) : ins->arg == 2 ? async_iterator(c, a) : get_iterator(c, a);
+                a = machine_pop(m); b = ins->arg == 3 ? spy_retain(a) : ins->arg == 2 ? async_iterator(c, a, 1) : get_iterator(c, a);
                 if (!b) break;
             }
             Block *block = push_block(c, m, BLOCK_LOOP, ins);
@@ -16084,7 +16106,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (ins->arg) {
                 a = call_special(c, m->blocks[m->block_len - 1].value, "__anext__", 0, NULL);
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target;
-                if (a) m->delegate = await_iterator(c, a, NULL);
+                if (a) m->delegate = await_iterator(c, a, "__anext__");
                 if (m->delegate) {
                     value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL);
                     if (value) { spy_release(a); return (Result){FLOW_YIELD, value}; }
@@ -20212,7 +20234,7 @@ execution_fail:
     }
     if (id == B_AITER) {
         if (argc != 1) goto arity;
-        return async_iterator(c, a);
+        return async_iterator(c, a, 0);
     }
     if (id == B_ANEXT) {
         if (argc < 1 || argc > 2) goto arity;

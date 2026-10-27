@@ -63,6 +63,9 @@ and tied to real implementations by replaying them.
 | `Annotations.tla` | lazy evaluation of function, class, and local annotations, `__annotate__` formats, unbound and string annotations, annotation scopes, evaluation at most once, and replacing `__annotations__` and `__annotate__` | yes |
 | `Generics.tla` | type parameter kinds, bounds, constraints, defaults, and variance; lazy evaluation; visibility through annotation scopes; parameter list syntax errors; and generic classes | yes |
 | `TypeAliases.tla` | the `type` statement: lazy, single evaluation of `__value__` (forward and self references), alias attributes, subscription, and read-only attributes | yes |
+| `Awaitables.tla` | `await` on coroutines, `__await__` iterators and generators, and non-awaitables; reusing an awaited coroutine; and coroutine `send`, `close`, and `throw` | yes |
+| `AsyncFor.tla` | `async for` over async generators and `__aiter__`/`__anext__` classes with `else`, `break`, and exceptions; protocol errors; asynchronous comprehensions; and async constructs outside async functions | yes |
+| `AsyncWith.tla` | `async with`: awaited `__aenter__` and `__aexit__`, suppression, raising methods, and protocol errors with their hints | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -150,11 +153,13 @@ with the same slots; a `__str__`, `__bool__`, `__format__`, `__bytes__`, or
 `__init__` returning the wrong type was reported without naming the class,
 the method, or the returned type; a metaclass that dropped
 `__classcell__` left `__class__` bound instead of raising RuntimeError;
-a `__buffer__` exporter's `__release_buffer__` was never called; and setting
+a `__buffer__` exporter's `__release_buffer__` was never called; setting
 `__annotations__` kept the old `__annotate__`, and `__annotate__` could be
 set to a non-callable or deleted; `TypeVarTuple` lacked `__bound__` and the
-variance attributes, type parameters from `*Ts` did not infer variance, and
-`ParamSpec` had an `evaluate_bound` that CPython 3.15 no longer has.
+variance attributes, type parameters from `*Ts` did not infer variance,
+`ParamSpec` had an `evaluate_bound` that CPython 3.15 no longer has; and
+`async for`, `aiter()`, `with`, and `async with` reported protocol errors
+with older messages and no hints.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
