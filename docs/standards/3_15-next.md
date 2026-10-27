@@ -1091,7 +1091,7 @@ iterator is exhausted.
 
 #### 7.7.5 GetAwaitable ( *o* )
 
-GetAwaitable implements the operand of `await` (13.6).
+GetAwaitable implements the operand of `await` (13.4).
 
 1. If *o* is a coroutine object (27.4), or a generator object whose code is
    marked as an iterable coroutine (27.4.5), return *o*.
@@ -6312,3 +6312,271 @@ raise `TypeError` ("'mappingproxy' object does not support item assignment" /
 `TypeError` ("'|=' is not supported by mappingproxy; use '|' instead"). It is
 not an acceptable base type. A program reaches it as `type(type.__dict__)`;
 Annex C describes the library name `types.MappingProxyType`.
+
+## 27 Control Abstraction Objects
+
+### 27.1 Iteration
+
+#### 27.1.1 Iterators
+
+An *iterator* is an object whose type defines `__next__`, which returns the
+next item or raises `StopIteration`. Every built-in iterator's `__iter__`
+returns the iterator itself, and once it has raised `StopIteration` it raises
+it on every later call (it is *exhausted*, and releases its source). Table
+27-1 lists the intrinsic iterator types; none is an acceptable base type, and
+each has `__length_hint__` where the length is known, and `__reduce__` and
+`__setstate__` for the library facade (Annex C).
+
+Table 27-1: Intrinsic iterator types
+
+| `__name__` | Produced by |
+| --- | --- |
+| `iterator` | the sequence protocol (27.1.2) |
+| `callable_iterator` | `iter(callable, sentinel)` (27.1.3) |
+| `list_iterator`, `list_reverseiterator` | `iter` and `reversed` of a `list` |
+| `tuple_iterator`, `range_iterator`, `bytes_iterator`, `bytearray_iterator` | `iter` (and for ranges `reversed`) of those types |
+| `str_ascii_iterator`, `str_iterator` | `iter` of a `str` (the name depends on whether the string is ASCII and is implementation-defined, Annex D) |
+| `dict_keyiterator`, `dict_valueiterator`, `dict_itemiterator`, and their `dict_reverse…` forms | `iter` and `reversed` of a dict or view |
+| `set_iterator` | `iter` of a set |
+| `enumerate`, `filter`, `map`, `reversed`, `zip` | the classes of 27.1.4–27.1.8, which are themselves iterators and acceptable base types |
+
+#### 27.1.2 Sequence iterators
+
+A sequence iterator over *o* holds *o* and an index *i*, initially 0. Its
+`__next__`:
+
+1. If the iterator is exhausted, raise `StopIteration`.
+2. Let *r* be ? GetItem(*o*, *i*).
+3. If *r* is a raise completion with an `IndexError` or `StopIteration`
+   exception, mark the iterator exhausted and raise `StopIteration`. Other
+   exceptions propagate.
+4. Set *i* to *i* + 1 and return *r*.
+
+#### 27.1.3 Callable iterators
+
+`iter(callable, sentinel)` requires a callable ("iter(v, w): v must be
+callable") and returns a callable iterator. Its `__next__` calls *callable*
+with no arguments; if the call raises `StopIteration`, or the result *r* is
+*sentinel* or ? RichCompare(*r*, *sentinel*, `==`) is true, it is exhausted
+and raises `StopIteration`; otherwise it returns *r*.
+
+#### 27.1.4 enumerate ( *iterable*, *start*=0 )
+
+Returns an iterator yielding (*count*, *item*) pairs for the items of
+? GetIterator(*iterable*), *count* starting at ToIndex(*start*) and increasing
+by 1 ("enumerate() missing required argument 'iterable'").
+
+#### 27.1.5 filter ( *function*, *iterable* )
+
+Exactly two arguments ("filter expected 2 arguments, got *n*"). Yields the
+items *x* of the iterable for which ToBoolean(? Call(*function*, «*x*»)) is
+true, or ToBoolean(*x*) when *function* is `None`.
+
+#### 27.1.6 map ( *function*, *iterable*, ...*iterables*, *strict*=False )
+
+At least two arguments ("map() must have at least two arguments."). Each step
+takes the next item of every iterable, left to right, and yields ? Call of
+*function* with them; it stops when any iterable is exhausted. With *strict*
+true, an iterable that ends while another does not raises the `ValueError` of
+27.1.8 with "map()" in place of "zip()".
+
+#### 27.1.7 reversed ( *seq* )
+
+If LookupSpecial(*seq*, `"__reversed__"`) is not **absent** (and not `None`),
+return ? Call of it. Otherwise, if *seq* has `__len__` and `__getitem__` (and
+is not a dict), return an iterator yielding *seq*[*n* − 1], …, *seq*[0], with
+*n* = ? Length(*seq*), stopping early at an `IndexError` or `StopIteration`.
+Otherwise raise a `TypeError` exception ("'*tname*(*seq*)' object is not
+reversible").
+
+#### 27.1.8 zip ( ...*iterables*, *strict*=False )
+
+Each step takes the next item of every iterator, left to right, and yields
+their tuple; with no iterables it is immediately exhausted. When an iterable
+*k* (1-based) is exhausted:
+
+1. Without *strict*, stop.
+2. With *strict*, if *k* > 1, raise a `ValueError` exception ("zip() argument
+   *k* is shorter than argument 1" or "… than arguments 1-*j*" when *k* − 1 =
+   *j* > 1). If *k* = 1, check each later iterable *m*: if it yields an item,
+   raise a `ValueError` exception ("zip() argument *m* is longer than argument
+   1" or "… than arguments 1-*j*"); if all are exhausted, stop.
+
+### 27.2 Generator objects
+
+A *generator object* is created by calling a generator function (16.1) or by
+evaluating a generator expression (13.2.6); it owns a frame and a *state*:
+**created**, **suspended**, **running**, or **closed**. Coroutines (27.4) are
+generator-like objects with the same machinery and the state names apply to
+them too.
+
+#### 27.2.1 GeneratorResume ( *g*, *mode*, *value* )
+
+The abstract operation GeneratorResume resumes *g* with *mode* **send**
+(delivering *value*), **throw** (delivering the exception *value*), or
+**close**. *kind* is "generator", "coroutine", or "async generator".
+
+1. If *g*'s state is **running**, raise a `ValueError` exception ("*kind*
+   already executing").
+2. If the state is **closed**: for **send**, raise `StopIteration` (for a
+   coroutine, a `RuntimeError` exception "cannot reuse already awaited
+   coroutine"); for **throw**, raise *value*; for **close**,
+   return `None`.
+3. If the state is **created**: for **send** with *value* not `None`, raise a
+   `TypeError` exception ("can't send non-None value to a just-started
+   *kind*"); for **throw**, set the state to **closed** and raise *value*; for
+   **close**, set the state to **closed** and return `None`.
+4. Set the state to **running** and resume the frame: in **created** state at
+   the start of the body; otherwise at the suspended `yield` (or
+   `yield from`/`await`), which receives *value* or the exception as 13.16.1
+   and 13.16.3 specify (for **close**, a new `GeneratorExit`).
+5. If the frame suspends with *v*, set the state to **suspended** and return
+   *v*.
+6. If the frame completes, set the state to **closed**, release the frame, and:
+   1. For a return completion with value *v*, raise a new `StopIteration`
+      whose `value` is *v* (with no argument when *v* is `None`).
+   2. For a raise completion with a `StopIteration` exception *s*, raise a new
+      `RuntimeError` exception ("*kind* raised StopIteration") whose
+      `__cause__` is *s* (for an async generator, likewise for
+      `StopAsyncIteration`).
+   3. Otherwise propagate the completion.
+
+#### 27.2.2 Methods
+
+- `__next__()` is GeneratorResume(*g*, **send**, `None`).
+- `send(value)` is GeneratorResume(*g*, **send**, *value*).
+- `throw(value)`: *value* shall be an exception instance or class
+  ("exceptions must be classes or instances deriving from BaseException, not
+  *tname*"); a class is instantiated. The deprecated forms `throw(type,
+  value[, tb])` normalize *value* to an instance of *type* (an instance with a
+  separate value raises `TypeError` "instance exception may not have a
+  separate value"; a non-traceback *tb* "throw() third argument must be a
+  traceback object") and issue a `DeprecationWarning`. Then
+  GeneratorResume(*g*, **throw**, the exception).
+- `close()`: let *r* be GeneratorResume(*g*, **close**, —). If it raised
+  `GeneratorExit` or `StopIteration` (with value *v*), return `None` (or *v*,
+  the value of a `return` in the generator). If it returned a value, the
+  generator yielded: raise a `RuntimeError` exception ("*kind* ignored
+  GeneratorExit"). Otherwise propagate.
+- `__iter__()` returns *g* (generators only).
+
+#### 27.2.3 Attributes
+
+| Attribute | Value |
+| --- | --- |
+| `__name__`, `__qualname__` | from the function; writable, requiring a `str` ("\_\_name\_\_ must be set to a string object", "\_\_qualname\_\_ must be set to a string object") |
+| `gi_frame` | the frame, or `None` once closed |
+| `gi_running`, `gi_suspended` | whether the state is **running**, **suspended** (read-only) |
+| `gi_code` | the code object |
+| `gi_yieldfrom` | the iterator a suspended `yield from` is delegating to, or `None` |
+
+`repr(g)` is "\<generator object *qualname* at *address*\>".
+
+#### 27.2.4 Finalization
+
+When a generator, coroutine, or asynchronous generator in **suspended** state
+becomes unreachable, the implementation calls its `close()` (for an
+asynchronous generator, the host finalizer of 27.5.4) before reclaiming it. An
+exception from that call is passed to HostReportUnraisable. A coroutine that
+is reclaimed in **created** state causes a `RuntimeWarning` ("coroutine
+'*qualname*' was never awaited") to be issued.
+
+### 27.3 Awaitables
+
+An *awaitable* is a coroutine, an iterable coroutine (27.4.5), or an object
+whose type defines `__await__` returning an iterator (GetAwaitable, 7.7.5).
+`await` delegates to that iterator with YieldFrom (13.16.3): the values it
+yields pass out to the code driving the outermost coroutine, and the value of
+its `StopIteration` is the result of the `await`.
+
+### 27.4 Coroutine objects
+
+#### 27.4.1 Coroutines
+
+Calling a coroutine function (`async def`) creates a *coroutine object* in
+**created** state; its body runs only when it is driven. Coroutines are not
+iterable ("'coroutine' object is not iterable") and have no `__next__`.
+
+#### 27.4.2 Methods
+
+`send`, `throw`, and `close` are those of 27.2.2 with *kind* "coroutine".
+`__await__()` returns a *coroutine wrapper* (`__name__`
+`"coroutine_wrapper"`), an iterator whose `__next__`, `send`, `throw`, and
+`close` operate on the coroutine.
+
+#### 27.4.3 Awaiting once
+
+A coroutine may be awaited only once: GetAwaitable of a coroutine whose state
+is **closed** after running, or that is already being awaited, raises a
+`RuntimeError` exception ("cannot reuse already awaited coroutine"; "coroutine
+is being awaited already").
+
+#### 27.4.4 Attributes
+
+`cr_frame`, `cr_running`, `cr_suspended`, `cr_code`, and `cr_await` (the
+awaitable being awaited, or `None`) correspond to 27.2.3; `cr_origin` is
+`None` unless the host tracks origins. `repr` is "\<coroutine object
+*qualname* at *address*\>".
+
+#### 27.4.5 Iterable coroutines
+
+A generator function whose code carries the *iterable coroutine* flag (set by
+the host's facade, Annex C: `types.coroutine`) creates generators that
+GetAwaitable accepts directly and that may `yield from` a coroutine.
+
+### 27.5 Asynchronous generator objects
+
+Calling an asynchronous generator function creates an *asynchronous generator
+object* (`async_generator`). It is not iterable ("'async_generator' object is
+not iterable"); its `__aiter__` returns itself.
+
+#### 27.5.1 Asynchronous generator awaitables
+
+`__anext__()` and `asend(value)` return a new `async_generator_asend` object,
+and `athrow(…)` and `aclose()` a new `async_generator_athrow` object. Each is an
+awaitable whose iterator drives the generator once:
+
+1. Driving one of these awaitables a second time after it finished, or after
+   `close()`, raises a `RuntimeError` exception ("cannot reuse already awaited
+   \_\_anext\_\_()/asend()" or "cannot reuse already awaited
+   aclose()/athrow()").
+2. If another such awaitable of the same generator is in progress, raise a
+   `RuntimeError` exception ("anext(): asynchronous generator is already
+   running", or "athrow(): …", "aclose(): …").
+3. Resume the generator with GeneratorResume (kind "async generator"),
+   passing *value* (`None` for `__anext__`) on the first step, and passing
+   through the values that `await` expressions in the body yield, to the
+   driver.
+4. When the body executes `yield v`, the awaitable finishes: it raises
+   `StopIteration` with value *v*.
+5. When the body finishes normally, the awaitable raises
+   `StopAsyncIteration`.
+
+#### 27.5.2 athrow and aclose
+
+- `athrow(value)` throws *value* into the generator at the suspended `yield`.
+  If the generator is finished, the awaitable completes with `None`; if
+  `aclose()` was called and the generator was not finished, it raises
+  `StopAsyncIteration` without running the body. Thrown into a generator in
+  **created** state, the exception is raised and the generator is closed.
+- `aclose()` throws `GeneratorExit`. If the body handles it by finishing or
+  re-raising, the awaitable completes with `None`; if the body yields again,
+  the awaitable raises a `RuntimeError` exception ("async generator ignored
+  GeneratorExit"). After the first `aclose()`, later `aclose()` and `athrow()`
+  awaitables raise `StopAsyncIteration` until the generator finishes, and
+  complete with `None` afterwards; `asend()` still resumes the body.
+
+#### 27.5.3 Attributes
+
+`ag_frame`, `ag_running`, `ag_suspended`, `ag_code`, `ag_await`,
+`__name__`, and `__qualname__` correspond to 27.2.3. `repr` is
+"\<async_generator object *qualname* at *address*\>".
+
+#### 27.5.4 Host hooks
+
+On the first iteration of an asynchronous generator the implementation calls
+the host's *firstiter* hook, and when a suspended one becomes unreachable it
+calls the host's *finalizer* hook with the generator, if the host installed
+them (HostAsyncGenHooks, Annex B); without a finalizer it calls `aclose()` and
+drives the resulting awaitable to completion, reporting any exception as
+unraisable.
