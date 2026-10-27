@@ -216,3 +216,20 @@ for convert, target in ((int.from_bytes, "bytes"), (bytes, "bytes"), (bytearray,
         raise AssertionError("converted a float")
 assert_raises(TypeError, int.from_bytes, 5)
 assert_raises(TypeError, int.from_bytes, b"\x01", b"big")
+
+# range attributes are read-only; index() names its search; a huge range has no len().
+r = range(0, 20, 2)
+try:
+    r.start = 1
+except AttributeError as error:
+    assert_eq(str(error), "readonly attribute")
+else:
+    raise AssertionError("range.start is writable")
+for missing, message in ((11, "range.index(x): x not in range"), ("a", "sequence.index(x): x not in sequence")):
+    try:
+        r.index(missing)
+    except ValueError as error:
+        assert_eq(str(error), message)
+    else:
+        raise AssertionError("found %r" % missing)
+assert_raises(OverflowError, len, range(2 ** 64))

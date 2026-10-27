@@ -9841,9 +9841,10 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
             SPYValue *count = spy_int(c, index != NULL); spy_release(index); return count;
         }
         if (index) return index;
-        SPYValue *text = stringify(c, argv[0], 1);
-        if (text) errorf(c, "ValueError", "%s is not in range", text->as.string.data);
-        spy_release(text); return NULL;
+        /* Exact ints and bools take range's own search; anything else the
+         * generic sequence search. */
+        if (argv[0]->type == SPY_INT || argv[0]->type == SPY_BOOL) return spy_error(c, "ValueError", "range.index(x): x not in range");
+        return spy_error(c, "ValueError", "sequence.index(x): x not in sequence");
     }
     case M_AWAIT: {
         if (argc) break;
@@ -10249,7 +10250,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
-    if (object->type == SPY_SLICE && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
+    if ((object->type == SPY_SLICE || object->type == SPY_RANGE) && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
         spy_error(c, "AttributeError", "readonly attribute"); return -1;
     }
     if (object->type == SPY_TRACEBACK && (!strcmp(name, "tb_frame") || !strcmp(name, "tb_lasti"))) {
@@ -14445,7 +14446,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, NULL);
-    if (object->type == SPY_SLICE && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
+    if ((object->type == SPY_SLICE || object->type == SPY_RANGE) && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
         spy_error(c, "AttributeError", "readonly attribute"); return -1;
     }
     if (object->type == SPY_TRACEBACK && (!strcmp(name, "tb_frame") || !strcmp(name, "tb_lasti"))) {
@@ -20822,9 +20823,8 @@ execution_fail:
             return status ? NULL : spy_int(c, value);
         }
         else if (a->type == SPY_RANGE) {
-            int64_t length;
-            if (spy_as_int(c, a->as.range.length, &length)) return NULL;
-            return spy_int(c, length);
+            if (a->as.range.length->as.integer_data.big) return spy_error(c, "OverflowError", "Python int too large to convert to C ssize_t");
+            return spy_retain(a->as.range.length);
         }
         else return errorf(c, "TypeError", "object of type '%s' has no len()", type_name(a));
         if (n > INT64_MAX) return spy_error(c, "OverflowError", "length exceeds signed 64-bit limit");

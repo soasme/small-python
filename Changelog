@@ -486,6 +486,10 @@
   a non-iterable instance, and report an __iter__ that returns a
   non-iterator as "T.__iter__() must return an iterator, not U". TLA+
   models of numeric hashing and iterators.
+- Setting or deleting a range's start, stop, or step raises "readonly
+  attribute"; range.index() reports a miss as CPython does; len() of a
+  range beyond sys.maxsize raises CPython's OverflowError. TLA+ model of
+  ranges.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

@@ -323,7 +323,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Mutable Sequence Types | Lists
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Lists | Lists
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Tuples | SeqOps
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Ranges | TODO: Ranges
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Ranges | Ranges
 11. Built-in types > Built-in Types > Text and Binary Sequence Type Methods Summary | - informative: an index of the methods specified in the sections that follow
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` | TODO: StrBasics
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > String Methods | TODO: StrSearch, StrSplit, StrCase, StrPad
