@@ -2877,6 +2877,13 @@ static int lex(Parser *p, const char *s) {
             line++;
             continue;
         }
+        if (*s == '\\' && !s[1] && brackets) { s++; continue; }
+        if (*s == '\\') {
+            /* 12.2.2: a backslash outside a literal must end the line. */
+            p->ctx->line = line; p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2;
+            spy_error(p->ctx, "SyntaxError", s[1] ? "unexpected character after line continuation character" : "unexpected EOF while parsing");
+            return -1;
+        }
         if (*s == '\n') {
             if (!brackets && p->len && p->tokens[p->len - 1].kind != T_NL &&
                 token_add(p, T_NL, s, 1, line)) return -1;
@@ -2896,7 +2903,6 @@ static int lex(Parser *p, const char *s) {
                 for (const char *ch = start; p->error_start && ch < p->error_start; ch++) if (*ch == '\n') p->ctx->line++;
                 return -1;
             }
-            for (const char *ch = start; ch < s; ch++) if (*ch == '\n') line++;
             kind = T_STRING;
         } else if (isalpha((unsigned char)*start) || *start == '_' || (unsigned char)*start >= 128) {
             s = start;
@@ -2907,7 +2913,8 @@ static int lex(Parser *p, const char *s) {
                     if (code < 128 && s != start) break;
                     p->ctx->line = line;
                     p->error_start = p->error_end = s; p->error_trim_line = 1;
-                    errorf(p->ctx, "SyntaxError", "invalid character '%.*s' (U+%04X)", (int)width, s, code);
+                    if (!unicode_printable(code)) errorf(p->ctx, "SyntaxError", "invalid non-printable character U+%04X", code);
+                    else errorf(p->ctx, "SyntaxError", "invalid character '%.*s' (U+%04X)", (int)width, s, code);
                     return -1;
                 }
                 s += width;
@@ -2916,6 +2923,11 @@ static int lex(Parser *p, const char *s) {
         } else if (isdigit((unsigned char)*start) || (*start == '.' && isdigit((unsigned char)*s))) {
             if (!(s = scan_number(p, start, line, &kind))) return -1;
         } else {
+            if ((unsigned char)*start < 0x20 || *start == 0x7f) {
+                p->ctx->line = line; p->error_start = p->error_end = start; p->error_trim_line = 1;
+                errorf(p->ctx, "SyntaxError", "invalid non-printable character U+%04X", (unsigned char)*start);
+                return -1;
+            }
             const char *pairs[] = {"==", "!=", "<>", "<=", ">=", "**", "//", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", ":=", "->"};
             const int kinds[] = {T_EQ, T_NE, T_NE, T_LE, T_GE, T_POW, T_FLOORDIV, T_LSHIFT, T_RSHIFT, T_ADDEQ, T_SUBEQ, T_MULEQ, T_DIVEQ, T_MODEQ, T_MATEQ, T_ANDEQ, T_OREQ, T_XOREQ, T_WALRUS, T_ARROW};
             for (size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); i++)
@@ -2945,8 +2957,10 @@ static int lex(Parser *p, const char *s) {
                 }
             }
         }
+        /* A string token is on its first line, as CPython's are. */
         if (token_add(p, kind, start, (size_t)(s - start), line)) return -1;
         p->tokens[p->len - 1].level = brackets;
+        if (kind == T_STRING) for (const char *ch = start; ch < s; ch++) if (*ch == '\n') line++;
     }
     /* An unclosed bracket is reported once the parser reaches the end, as
      * CPython's lexer does lazily; a second END guards one-token lookahead. */
@@ -3488,11 +3502,26 @@ static int unicode_lookup(const char *name, size_t len, unsigned *code) {
     }
     return 0;
 }
+/* Escape errors count positions in the literal's contents, a non-ASCII
+ * code point as ten, since CPython decodes it as a \UXXXXXXXX escape. */
+static size_t escape_position(Parser *p, const char *at) {
+    size_t n = 0;
+    for (const char *s = p->literal_start; s < at; s++)
+        if (((unsigned char)*s & 0xc0) != 0x80) n += (unsigned char)*s < 0x80 ? 1 : 10;
+    return n;
+}
+static int escape_error(Parser *p, const char *backslash, const char *stop, const char *reason) {
+    char message[200];
+    snprintf(message, sizeof(message), "(unicode error) 'unicodeescape' codec can't decode bytes in position %zu-%zu: %s",
+             escape_position(p, backslash), escape_position(p, stop) - 1, reason);
+    syntax(p, message); return -1;
+}
 static int literal_character(Parser *p, Buffer *out, const char **cursor, const char *end, int flags) {
     const char *s = *cursor;
     char ch = *s++;
     if ((flags & L_BYTES) && (unsigned char)ch >= 128) { syntax(p, "bytes can only contain ASCII literal characters"); return -1; }
     if (ch == '\\' && !(flags & L_RAW)) {
+        const char *backslash = s - 1;
         if (s == end) { syntax(p, "unterminated escape sequence"); return -1; }
         ch = *s++;
         if (ch == 'n') ch = '\n';
@@ -3506,13 +3535,19 @@ static int literal_character(Parser *p, Buffer *out, const char **cursor, const 
         else if (ch == 'x' || (!(flags & L_BYTES) && (ch == 'u' || ch == 'U'))) {
             size_t digits = ch == 'x' ? 2 : ch == 'u' ? 4 : 8;
             unsigned code = 0;
-            if ((size_t)(end - s) < digits) { syntax(p, "truncated character escape"); return -1; }
             for (size_t i = 0; i < digits; i++) {
-                int digit = hex_digit((unsigned char)s[i]);
-                if (digit < 0) { syntax(p, "invalid hexadecimal escape"); return -1; }
+                int digit = s + i < end ? hex_digit((unsigned char)s[i]) : -1;
+                if (digit < 0 && (flags & L_BYTES)) {
+                    char message[64];
+                    snprintf(message, sizeof(message), "(value error) invalid \\x escape at position %zu", (size_t)(backslash - p->literal_start));
+                    syntax(p, message); return -1;
+                }
+                if (digit < 0)
+                    return escape_error(p, backslash, s + i, ch == 'x' ? "truncated \\xXX escape" : ch == 'u' ? "truncated \\uXXXX escape" :
+                                        "truncated \\UXXXXXXXX escape");
                 code = code * 16 + (unsigned)digit;
             }
-            if (code > 0x10ffff) { syntax(p, "illegal Unicode character"); return -1; }
+            if (code > 0x10ffff) return escape_error(p, backslash, s + digits, "illegal Unicode character");
             *cursor = s + digits;
             if (flags & L_BYTES) { char byte = (char)code; return append(out, &byte, 1); }
             return append_codepoint(out, code);
@@ -3525,13 +3560,9 @@ static int literal_character(Parser *p, Buffer *out, const char **cursor, const 
         } else if (ch == 'N' && !(flags & L_BYTES)) {
             const char *close = s < end && *s == '{' ? memchr(s, '}', (size_t)(end - s)) : NULL;
             unsigned code;
-            if (!close || close == s + 1) { syntax(p, "(unicode error) malformed \\N character escape"); return -1; }
-            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) {
-                char message[160];
-                snprintf(message, sizeof(message), "(unicode error) 'unicodeescape' codec can't decode bytes in position %zu-%zu: unknown Unicode character name",
-                         (size_t)(s - 2 - p->literal_start), (size_t)(close - p->literal_start));
-                syntax(p, message); return -1;
-            }
+            if (!close || close == s + 1)
+                return escape_error(p, backslash, close ? close : s < end && *s == '{' ? end : s, "malformed \\N character escape");
+            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) return escape_error(p, backslash, close + 1, "unknown Unicode character name");
             *cursor = close + 1;
             return append_codepoint(out, code);
         } else if (ch != '\\' && ch != '\'' && ch != '"') {
@@ -3652,7 +3683,9 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             } else if (debug && !field->op) field->op = 'r';
             if (s >= end || *s != '}') { syntax(p, "f-string: expecting '}'"); return -1; }
             **tail = field; *tail = &field->next;
-            s++; continue;
+            /* Escape errors count from the literal text after the field. */
+            p->literal_start = ++s;
+            continue;
         }
         if (literal_character(p, literal, &s, end, flags)) return -1;
     }
@@ -8157,7 +8190,7 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
     if (d->as.member.flags & DESC_GENERIC) {
         if (name[2] == 'w') { spy_error(c, "AttributeError", "attribute '__weakref__' of 'object' objects is not writable"); return -1; }
         if (object->type != SPY_INSTANCE || !instance_has_dict(object)) { spy_error(c, "AttributeError", "This object has no __dict__"); return -1; }
-        if (value && value->type != SPY_DICT) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
+        if (value && !builtin_value(c, value, SPY_DICT)) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
         SPYValue *fresh = value ? spy_retain(value) : value_new(c, SPY_DICT), *old = fresh ? instance_dict(c, object) : NULL;
         if (!old) { spy_release(fresh); return -1; }
         object->as.map.namespace = fresh;
@@ -10591,10 +10624,21 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         spy_retain(value); spy_release(*field); *field = value; return 0;
     }
     if (object->type == SPY_CLASS) {
-        if (!strcmp(name, "__mro__") || !strcmp(name, "__base__") || !strcmp(name, "__dict__")) {
-            spy_error(c, "AttributeError", "readonly attribute"); return -1;
+        if (!strcmp(name, "__base__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
+        if (!strcmp(name, "__mro__") || !strcmp(name, "__dict__")) {
+            errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1;
         }
         if (!strcmp(name, "__bases__")) return class_assign_bases(c, object, value);
+        /* 10.4.2: names are strings; __module__ may be any object. */
+        if (!strcmp(name, "__name__") || !strcmp(name, "__qualname__")) {
+            SPYValue *text = builtin_value(c, value, SPY_STRING);
+            if (!text) {
+                errorf(c, "TypeError", "can only assign string to %s.%s, not '%s'", class_tname(object), name, type_name(value)); return -1;
+            }
+            if (name[2] == 'n' && memchr(text->as.string.data, 0, text->as.string.len)) {
+                spy_error(c, "ValueError", "type name must not contain null characters"); return -1;
+            }
+        }
         if ((!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) && !object->as.map.native && object->as.map.flags != 2)
             return class_set_annotations(c, object, name, value);
     }
@@ -10654,7 +10698,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             return -1;
         }
         if (!descriptor && !strcmp(name, "__dict__")) {
-            if (value->type != SPY_DICT) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
+            if (!builtin_value(c, value, SPY_DICT)) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
             SPYValue *old = instance_dict(c, object);
             if (!old) return -1;
             object->as.map.namespace = spy_retain(value);
@@ -10670,9 +10714,6 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     }
     if (!strcmp(name, "__class__")) return set_class(c, object, value);
     if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name, value);
-    if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__")) && value->type != SPY_STRING) {
-        spy_error(c, "TypeError", "class name and module attributes must be strings"); return -1;
-    }
     return name_set(c, object, name, value);
 }
 /* Attribute writes use type-level hooks, just like implicit reads. A native
@@ -14868,7 +14909,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         errorf(c, "TypeError", "%s must be set to a string object", name); return -1;
     }
     if (object->type == SPY_CLASS && !strcmp(name, "__dict__")) {
-        spy_error(c, "AttributeError", "readonly attribute"); return -1;
+        spy_error(c, "AttributeError", "attribute '__dict__' of 'type' objects is not writable"); return -1;
     }
     if (object->type == SPY_CLASS && !strcmp(name, "__bases__")) return class_assign_bases(c, object, NULL);
     if (object->type == SPY_CLASS && (!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) &&
@@ -14920,8 +14961,15 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
             return -1;
         }
         if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name, NULL);
-        if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__"))) {
-            spy_error(c, "TypeError", "cannot delete class name or module attributes"); return -1;
+        if (object->type == SPY_CLASS) {
+            static const char *const fixed[] = {"__name__", "__qualname__", "__module__", "__bases__", "__doc__", "__type_params__"};
+            for (size_t i = 0; i < sizeof(fixed) / sizeof(*fixed); i++)
+                if (!strcmp(name, fixed[i])) {
+                    errorf(c, "TypeError", "cannot delete '%s' attribute of type '%s'", name, class_tname(object)); return -1;
+                }
+            if (!strcmp(name, "__mro__")) { errorf(c, "AttributeError", "attribute '%s' of 'type' objects is not writable", name); return -1; }
+            if (!strcmp(name, "__base__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
+            if (!strcmp(name, "__abstractmethods__") && !name_local(object, name)) { spy_error(c, "AttributeError", name); return -1; }
         }
     }
     if (!object || !name_local(object, name)) {

@@ -607,3 +607,17 @@
   unchanged size. Error handler names are looked up only when an error
   occurs, and xmlcharrefreplace refuses to decode. GenericAlias() counts
   its arguments as CPython does.
+- A class's own special attributes check assignment and deletion as
+  type_setattro does: __base__ is readonly, __mro__ and __dict__ are not
+  writable, __name__ and __qualname__ take only strings without NUL, and
+  __module__ takes any object; deleting __name__, __qualname__,
+  __module__, __bases__ or __doc__ is refused by name, and an unset
+  __abstractmethods__ raises AttributeError. An instance's __dict__ may be
+  a dict subclass.
+- The tokenizer reports a stray backslash ("unexpected character after
+  line continuation character", or "unexpected EOF while parsing" at the
+  end of input) and non-printable characters as CPython does. Escape
+  errors carry the unicodeescape codec message with CPython's positions
+  (a non-ASCII code point counts ten, f-string text counts from the last
+  replacement field) and the line where the literal begins; bytes literals
+  report "invalid \x escape at position i". SLP-315 12.5.3 states this.

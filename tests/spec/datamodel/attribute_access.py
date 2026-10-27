@@ -149,3 +149,21 @@ error = UnicodeDecodeError("utf-8", b"", 0, 1, "reason")
 assert_eq(str(assert_raises(TypeError, delattr, error, "start")), "can't delete numeric/char attribute")
 error.end = True
 assert_eq((type(error.end), error.end), (int, 1))
+# A class's own special attributes check what is assigned or deleted.
+class Plain: pass
+assert_eq(str(assert_raises(AttributeError, setattr, Plain, "__base__", object)), "readonly attribute")
+for name in ("__mro__", "__dict__"):
+    assert_eq(str(assert_raises(AttributeError, setattr, Plain, name, ())), f"attribute '{name}' of 'type' objects is not writable")
+assert_eq(str(assert_raises(TypeError, setattr, Plain, "__name__", 1)), "can only assign string to Plain.__name__, not 'int'")
+assert_eq(str(assert_raises(TypeError, setattr, Plain, "__qualname__", 1)), "can only assign string to Plain.__qualname__, not 'int'")
+assert_eq(str(assert_raises(ValueError, setattr, Plain, "__name__", "a\0b")), "type name must not contain null characters")
+Plain.__module__ = 5
+assert_eq(Plain.__module__, 5)
+for name in ("__name__", "__qualname__", "__module__", "__bases__", "__doc__"):
+    assert_eq(str(assert_raises(TypeError, delattr, Plain, name)), f"cannot delete '{name}' attribute of type 'Plain'")
+assert_eq(str(assert_raises(AttributeError, delattr, Plain, "__abstractmethods__")), "__abstractmethods__")
+# An instance's __dict__ may be replaced by a dict subclass.
+class Mapping(dict): pass
+instance = Plain()
+instance.__dict__ = Mapping(x=1)
+assert_eq((type(instance.__dict__), instance.x), (Mapping, 1))
