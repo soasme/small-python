@@ -17184,12 +17184,15 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
     }
     return NULL;
 }
-static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv) {
+/* exec() and eval() word their argument errors differently. */
+static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv, int exec) {
     SPYValue *current = c->eval_env ? c->eval_env : c->globals;
     int explicit_globals = argc > 1 && argv[1]->type != SPY_NONE;
     SPYValue *globals = explicit_globals ? argv[1] : namespace_map(module_env(c, current));
     SPYValue *storage = dictionary_value(c, globals);
-    if (!storage) return spy_error(c, "TypeError", "globals must be a dict or a frozendict");
+    if (!storage && exec) return errorf(c, "TypeError", "exec() globals must be a dict or a frozendict, not %s", type_name(globals));
+    if (!storage) return spy_error(c, "TypeError", mapping_type(c, globals)
+        ? "globals must be a real dict or a frozendict; try eval(expr, {}, mapping)" : "globals must be a dict or a frozendict");
     SPYValue *locals;
     if (argc > 2 && argv[2]->type != SPY_NONE) locals = spy_retain(argv[2]);
     else if (explicit_globals) locals = spy_retain(globals);
@@ -17197,7 +17200,9 @@ static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv
     else locals = local_snapshot(c, current);
     if (!locals) return NULL;
     if (!mapping_type(c, locals)) {
-        spy_release(locals); return spy_error(c, "TypeError", "locals must be a mapping");
+        spy_release(locals);
+        return exec ? errorf(c, "TypeError", "locals must be a mapping or None, not %s", type_name(locals))
+                    : spy_error(c, "TypeError", "locals must be a mapping");
     }
     SPYValue *builtins = name_local(storage, "__builtins__");
     if (!builtins) {
@@ -20401,7 +20406,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             else if (!strcmp(mode, "single")) expression = 2;
             else if (strcmp(mode, "exec")) return spy_error(c, "ValueError", "compile() mode must be 'exec', 'eval' or 'single'");
         }
-        SPYValue *env = id != B_COMPILE ? execution_env(c, argc, argv) : NULL;
+        SPYValue *env = id != B_COMPILE ? execution_env(c, argc, argv, id != B_EVAL) : NULL;
         if (id != B_COMPILE && !env) return NULL;
         SPYValue *unit = NULL;
         if (closure && a->type != SPY_CODE) {

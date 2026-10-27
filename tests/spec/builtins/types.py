@@ -327,3 +327,9 @@ except ValueError as error:
     assert_eq(str(error), "chr() arg not in range(0x110000)")
 else:
     raise AssertionError("chr(2 ** 64)")
+
+# exec() and eval() word their namespace errors as CPython does.
+assert_eq(type_error(lambda: exec("1", [])), "exec() globals must be a dict or a frozendict, not list")
+assert_eq(type_error(lambda: exec("1", {}, 1)), "locals must be a mapping or None, not int")
+assert_eq(type_error(lambda: eval("1", [])), "globals must be a real dict or a frozendict; try eval(expr, {}, mapping)")
+assert_eq(type_error(lambda: eval("1", 1)), "globals must be a dict or a frozendict")

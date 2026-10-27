@@ -369,7 +369,7 @@ Reference chapter contents | - table of contents
 12. Built-in constants > Built-in Constants | Singletons, Constants
 12. Built-in constants > Built-in Constants > Constants added by the `site` module | - Host profile: added by the site module for interactive use (SLP315-HOST)
 13. Built-in functions | = sections
-13. Built-in functions > Built-in functions | TODO: BuiltinsNumeric, BuiltinsIter, BuiltinsObjects, BuiltinsText, BuiltinsCompile
+13. Built-in functions > Built-in functions | BuiltinsNumeric, BuiltinsIter, BuiltinsObjects, BuiltinsText, BuiltinsCompile
 14. Built-in exceptions | = sections
 14. Built-in exceptions > Built-in Exceptions | = sections
 14. Built-in exceptions > Built-in Exceptions > Exception context | Raise
