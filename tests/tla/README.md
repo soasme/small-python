@@ -86,6 +86,7 @@ and tied to real implementations by replaying them.
 | `FunctionDefs.tla` | the evaluation order of decorators, defaults, bases, and bodies for every def, lambda, and class of up to three decorators and two defaults or bases; parameter list rules, docstrings and names, lambdas, and assignment expressions | yes |
 | `Precedence.tla` | the grouping of every pair of binary arithmetic and bitwise operators and of each unary operator on either side of one, over symbolic operands; boolean operators, comparisons, conditional expressions, lambda, await, and primaries | yes |
 | `Sentinels.tla` | `sentinel()` construction and its argument errors, representation, identity and equality, attributes, copying, pickling reduction, `\|` in type expressions, and the type's restrictions | yes |
+| `Atoms.tla` | the keyword constants and why they cannot be targets, name evaluation, the type of each kind of literal, negative and complex numbers as operations, literal immutability, and which identities of literals are guaranteed | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 

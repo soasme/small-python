@@ -185,12 +185,12 @@ Reference chapter contents | - table of contents
 6. Expressions | = sections
 6. Expressions > Expressions | = sections
 6. Expressions > Expressions > Arithmetic conversions | BinaryArith
-6. Expressions > Expressions > Atoms | TODO: Atoms
+6. Expressions > Expressions > Atoms | Atoms
 6. Expressions > Expressions > Atoms > Built-in constants | Singletons
 6. Expressions > Expressions > Atoms > Identifiers (Names) | = sections
 6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | Mangling
-6. Expressions > Expressions > Atoms > Literals | TODO: LiteralIdentity
-6. Expressions > Expressions > Atoms > Literals > Literals and object identity | TODO: LiteralIdentity
+6. Expressions > Expressions > Atoms > Literals | Atoms
+6. Expressions > Expressions > Atoms > Literals > Literals and object identity | Atoms
 6. Expressions > Expressions > Atoms > Literals > String literal concatenation | StringLiterals
 6. Expressions > Expressions > Atoms > Parenthesized groups | Displays
 6. Expressions > Expressions > Atoms > Container displays | Displays
