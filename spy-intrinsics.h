@@ -26,6 +26,8 @@ static const char *const intrinsics_source[] = {
     "def _alias_repr_item(p):\n",
     "    if p is ...:\n",
     "        return '...'\n",
+    "    if p is type(None):\n",
+    "        return 'None'\n",
     "    if isinstance(p, GenericAlias):\n",
     "        return repr(p)\n",
     "    try:\n",

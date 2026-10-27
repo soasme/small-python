@@ -638,3 +638,13 @@
   text and columns.
 - The main module is sys.modules["__main__"], with __file__ when spy runs
   a file, and a module's repr shows " from " and the repr of __file__.
+- Raising a class whose call returns a non-exception names the class and
+  the result's type; super() reports a non-type and a mismatched object
+  with CPython's messages; a class body's non-str __qualname__ names its
+  type. The duplicate-keyword error names the callable as
+  _PyObject_FunctionStr does, through __qualname__ and __module__.
+- compile() takes a str, bytes or __fspath__ file name and checks that
+  the mode is a str; anext() of a non-async-iterator says so; code
+  objects report a positive co_stacksize; generic aliases print NoneType
+  as None. Imported modules and __main__ carry __loader__ and __spec__
+  (None, as the host supplies none) and __main__ its __package__.

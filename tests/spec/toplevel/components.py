@@ -81,3 +81,6 @@ assert_eq(ns["s"], "\xe9")
 # The main module is in sys.modules under "__main__", with globals as its namespace.
 import sys
 assert_is(sys.modules["__main__"].__dict__, globals())
+# The main module has the standard module attributes.
+for name in ("__spec__", "__loader__", "__package__", "__doc__"):
+    assert_true(name in globals())

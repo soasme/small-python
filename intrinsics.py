@@ -25,6 +25,8 @@ def _alias_repr_item(p):
     # types.GenericAlias and Union print classes by qualified name.
     if p is ...:
         return '...'
+    if p is type(None):
+        return 'None'
     if isinstance(p, GenericAlias):
         return repr(p)
     try:

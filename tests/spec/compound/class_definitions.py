@@ -319,4 +319,14 @@ class _(metaclass=meta): pass
 
 # check that non-callables don't fail on an absent prepare:
 with assert_raises(TypeError):
-    class _(metaclass=20): pass
+    class _(metaclass=20): pass# Raising a class whose call returns a non-exception names both.
+class NotRaised(Exception):
+    def __new__(cls): return 1
+def raise_it(): raise NotRaised
+message = str(assert_raises(TypeError, raise_it))
+assert_eq(message, f"calling {NotRaised!r} should have returned an instance of BaseException, not <class 'int'>")
+def bad_qualname():
+    class Q:
+        __qualname__ = 1
+assert_eq(str(assert_raises(TypeError, bad_qualname)), "type __qualname__ must be a str, not int")
+assert_eq(repr(list[type(None)]), "list[None]")

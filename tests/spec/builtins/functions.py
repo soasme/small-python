@@ -227,3 +227,20 @@ except AttributeError as error:
     assert_eq(str(error), "readonly attribute")
 else:
     raise AssertionError("sentinel __name__ is writable")
+# compile() takes a str, bytes or path-like file name and a str mode.
+class Path:
+    def __fspath__(self): return "path.py"
+assert_eq(compile("1", Path(), "exec").co_filename, "path.py")
+assert_eq(compile("1", b"bytes.py", "exec").co_filename, "bytes.py")
+assert_eq(str(assert_raises(TypeError, compile, "1", 1, "exec")), "expected str, bytes or os.PathLike object, not int")
+assert_eq(str(assert_raises(TypeError, compile, "1", "x", 1)), "compile() argument 'mode' must be str, not int")
+assert_eq(str(assert_raises(ValueError, compile, "1", "x\0", "exec")), "embedded null character")
+assert_eq(str(assert_raises(TypeError, anext, 1)), "'int' object is not an async iterator")
+assert_true((lambda: 0).__code__.co_stacksize > 0)
+# The duplicate-keyword error names the callable as _PyObject_FunctionStr does.
+class Holder:
+    def method(self, **k): pass
+def duplicate(f):
+    return str(assert_raises(TypeError, lambda: f(**{"a": 1}, a=2)))
+assert_eq(duplicate(Holder().method), f"{__name__}.Holder.method() got multiple values for keyword argument 'a'")
+assert_eq(duplicate(dict), "dict() got multiple values for keyword argument 'a'")

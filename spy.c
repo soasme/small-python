@@ -8419,6 +8419,7 @@ static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size
         if (!strcmp(name, "__abs__")) return errorf(c, "TypeError", "bad operand type for abs(): '%s'", type);
         if (!strcmp(name, "__len__")) return errorf(c, "TypeError", "object of type '%s' has no len()", type);
         if (!strcmp(name, "__next__")) return errorf(c, "TypeError", "'%s' object is not an iterator", type);
+        if (!strcmp(name, "__anext__")) return errorf(c, "TypeError", "'%s' object is not an async iterator", type);
         if (!strcmp(name, "__reversed__")) return errorf(c, "TypeError", "'%s' object is not reversible", type);
         if (!strcmp(name, "__getitem__")) return errorf(c, "TypeError", "'%s' object is not subscriptable", type);
         if (!strcmp(name, "__setitem__")) return errorf(c, "TypeError", "'%s' object does not support item assignment", type);
@@ -8745,7 +8746,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         /* spy runs no bytecode: no instructions, line table, or stack. */
         if (!strcmp(name, "co_code") || !strcmp(name, "co_linetable") || !strcmp(name, "co_exceptiontable")) return spy_bytes(c, "", 0);
-        if (!strcmp(name, "co_stacksize")) return spy_int(c, 0);
+        if (!strcmp(name, "co_stacksize")) return spy_int(c, 1); /* positive; the depth is implementation-defined */
         if (!strcmp(name, "co_consts")) {
             /* The docstring comes first. */
             Node *body = def && def->kind == N_DEF ? def->b : NULL;
@@ -11266,22 +11267,58 @@ static int display_add(SPYContext *c, SPYValue *result, SPYValue *item) {
     int status = map_set(c, result, item, none);
     spy_release(none); return status;
 }
+/* PyUnicode_FSDecoder: a str, bytes decoded as UTF-8, or the str or bytes
+ * an object's type's __fspath__ returns. Returns a new str. */
+static SPYValue *filesystem_path(SPYContext *c, SPYValue *value) {
+    SPYValue *text = builtin_value(c, value, SPY_STRING);
+    if (text) return spy_string(c, text->as.string.data, text->as.string.len);
+    SPYValue *data = builtin_value(c, value, SPY_BYTES);
+    if (data) return spy_string(c, data->as.string.data, data->as.string.len);
+    SPYValue *method = class_lookup(value_class(c, value), "__fspath__");
+    if (!method || method->type == SPY_NONE)
+        return errorf(c, "TypeError", "expected str, bytes or os.PathLike object, not %s", type_name(value));
+    SPYValue *result = call_special(c, value, "__fspath__", 0, NULL);
+    if (!result) return NULL;
+    SPYValue *converted = result->type == SPY_STRING || result->type == SPY_BYTES ? filesystem_path(c, result) : NULL;
+    if (!converted && !c->error_type[0])
+        errorf(c, "TypeError", "expected %s.__fspath__() to return str or bytes, not %s", type_name(value), type_name(result));
+    spy_release(result);
+    return converted;
+}
+/* _PyObject_FunctionStr: "module.qualname()", "qualname()" when the module
+ * is None or builtins, or str(f) when f has no __qualname__. */
+static SPYValue *function_str(SPYContext *c, SPYValue *f) {
+    /* Statements that merge keywords themselves pass their name. */
+    if (f->type == SPY_STRING) {
+        Buffer text = {.ctx = c};
+        SPYValue *result = puts_buffer(&text, f->as.string.data) || puts_buffer(&text, "()") ? NULL :
+            spy_string(c, text.data ? text.data : "", text.len);
+        free(text.data); return result;
+    }
+    SPYValue *qualname = attribute(c, f, "__qualname__"), *module = NULL, *result = NULL;
+    if (!qualname) {
+        if (!error_is(c, "AttributeError")) return NULL;
+        spy_clear_error(c);
+        return stringify(c, f, 0);
+    }
+    if (!(module = attribute(c, f, "__module__"))) {
+        if (!error_is(c, "AttributeError")) { spy_release(qualname); return NULL; }
+        spy_clear_error(c);
+    }
+    Buffer text = {.ctx = c};
+    int builtins = !module || module->type == SPY_NONE ||
+        (module->type == SPY_STRING && !strcmp(module->as.string.data, "builtins"));
+    if (!(!builtins && (format_value(&text, module, 0) || puts_buffer(&text, "."))) &&
+        !format_value(&text, qualname, 0) && !puts_buffer(&text, "()"))
+        result = spy_string(c, text.data ? text.data : "", text.len);
+    free(text.data); spy_release(qualname); spy_release(module);
+    return result;
+}
 static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
     if (map_find(result, key) >= 0) {
-        SPYValue *text = stringify(c, key, 0);
-        char name[256];
-        SPYValue *fn = callable->type == SPY_METHOD ? callable->as.method.function : callable;
-        snprintf(name, sizeof(name), "%s", fn->type == SPY_STRING ? fn->as.string.data : type_name(fn));
-        if (fn->type == SPY_NATIVE && fn->as.native.name)
-            snprintf(name, sizeof(name), "%s", fn->as.native.name->as.string.data);
-        if (fn->type == SPY_FUNCTION) {
-            SPYValue *module = NULL;
-            for (SPYValue *env = fn->as.function.env; env && !module; env = env->as.map.parent) module = name_local(env, "__name__");
-            if (module && module->type == SPY_STRING) snprintf(name, sizeof(name), "%s.%s", module->as.string.data, source_name(fn->as.function.def->a));
-            else snprintf(name, sizeof(name), "%s", source_name(fn->as.function.def->a));
-        }
-        if (text) errorf(c, "TypeError", "%s() got multiple values for keyword argument '%s'", name, text->as.string.data);
-        spy_release(text);
+        SPYValue *name = function_str(c, callable), *text = name ? stringify(c, key, 0) : NULL;
+        if (text) errorf(c, "TypeError", "%s got multiple values for keyword argument '%s'", name->as.string.data, text->as.string.data);
+        spy_release(name); spy_release(text);
         return -1;
     }
     return map_set(c, result, key, value);
@@ -12937,7 +12974,9 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (path) name_set(c, module, "__path__", path);
         spy_release(path);
     }
-    if (name_set(c, module, "__name__", module_name) || name_set(c, module, "__doc__", c->none) || name_set(c, c->modules, name, module)) {
+    /* The host supplies no loader or spec (SLP-315 17.2). */
+    if (name_set(c, module, "__name__", module_name) || name_set(c, module, "__doc__", c->none) ||
+        name_set(c, module, "__loader__", c->none) || name_set(c, module, "__spec__", c->none) || name_set(c, c->modules, name, module)) {
         spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); return NULL;
     }
     /* A module being imported is no longer a pending lazy submodule. */
@@ -14007,7 +14046,7 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
         } else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
     SPYValue *qualname = name_local(cls, "__qualname__");
-    if (qualname->type != SPY_STRING) spy_error(c, "TypeError", "type __qualname__ must be a str");
+    if (qualname->type != SPY_STRING) errorf(c, "TypeError", "type __qualname__ must be a str, not %s", type_name(qualname));
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
     if (!c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace)) finish_class(c, cls, keywords);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
@@ -14402,8 +14441,13 @@ static SPYValue *normalize_exception(SPYContext *c, SPYValue *value, int cause) 
         SPYValue *exception = spy_call(c, value, 0, NULL);
         if (!exception) return NULL;
         if (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, base)) return exception;
-        spy_release(exception);
-        return spy_error(c, "TypeError", "calling exception class should have returned an instance of BaseException");
+        Buffer message = {.ctx = c};
+        if (!puts_buffer(&message, "calling ") && !format_value(&message, value, 1) &&
+            !puts_buffer(&message, " should have returned an instance of BaseException, not ") &&
+            !format_value(&message, value_class(c, exception), 1))
+            spy_error(c, "TypeError", message.data);
+        free(message.data); spy_release(exception);
+        return NULL;
     }
     if (value->type == SPY_INSTANCE && subclass(value->as.map.parent, base)) return spy_retain(value);
 invalid:
@@ -17237,7 +17281,7 @@ static SPYValue *value_class(SPYContext *c, SPYValue *value) {
     return kind == NATIVE_BOUND ? c->types[SPY_NATIVE] : kind ? c->native_types[kind - 1] : c->types[value->type];
 }
 static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) {
-    if (type->type != SPY_CLASS) return spy_error(c, "TypeError", "super() argument 1 must be a type");
+    if (type->type != SPY_CLASS) return errorf(c, "TypeError", "super() argument 1 must be a type, not %s", type_name(type));
     SPYValue *owner = NULL;
     if (self && self->type != SPY_NONE) {
         SPYValue *actual = self->type == SPY_CLASS && subclass(self, type) ? self : value_class(c, self);
@@ -17245,7 +17289,10 @@ static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) {
         if (!owner) return NULL;
         if (owner->type != SPY_CLASS || !subclass(owner, type)) {
             spy_release(owner);
-            return spy_error(c, "TypeError", "super(type, obj): obj must be an instance or subtype of type");
+            const char *kind = self->type == SPY_CLASS ? "type" : "instance of";
+            const char *name = class_tname(self->type == SPY_CLASS ? self : value_class(c, self));
+            return errorf(c, "TypeError", "super(type, obj): obj (%s %s) is not an instance or subtype of type (%s).",
+                          kind, name ? name : "?", class_tname(type) ? class_tname(type) : "?");
         }
     }
     SPYValue *result = value_new(c, SPY_SUPER);
@@ -20997,13 +21044,20 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
         if (id == B_COMPILE ? argc != 3 : argc < 1 || argc > 3) goto arity;
         const char *filename = "<string>";
+        char filename_buffer[sizeof(c->filename)];
         int expression = id == B_EVAL;
         if (id == B_COMPILE) {
-            if (argv[1]->type != SPY_STRING || argv[2]->type != SPY_STRING) return spy_error(c, "TypeError", "filename and mode must be strings");
-            filename = argv[1]->as.string.data;
-            if (strlen(filename) != argv[1]->as.string.len) return spy_error(c, "ValueError", "embedded null character in filename");
-            const char *mode = argv[2]->as.string.data;
-            if (strlen(mode) != argv[2]->as.string.len) return spy_error(c, "ValueError", "invalid compilation mode");
+            SPYValue *path = filesystem_path(c, argv[1]);
+            if (!path) return NULL;
+            int embedded_null = strlen(path->as.string.data) != path->as.string.len;
+            snprintf(filename_buffer, sizeof(filename_buffer), "%s", path->as.string.data);
+            spy_release(path);
+            if (embedded_null) return spy_error(c, "ValueError", "embedded null character");
+            filename = filename_buffer;
+            SPYValue *mode_value = builtin_value(c, argv[2], SPY_STRING);
+            if (!mode_value) return errorf(c, "TypeError", "compile() argument 'mode' must be str, not %s", type_name(argv[2]));
+            const char *mode = mode_value->as.string.data;
+            if (strlen(mode) != mode_value->as.string.len) return spy_error(c, "ValueError", "invalid compilation mode");
             if (!strcmp(mode, "eval")) expression = 1;
             else if (!strcmp(mode, "single")) expression = 2;
             else if (strcmp(mode, "exec")) return spy_error(c, "ValueError", "compile() mode must be 'exec', 'eval' or 'single'");
@@ -23282,7 +23336,8 @@ SPYContext *spy_context_new(void) {
     SPYValue *main_module = value_new(c, SPY_MODULE);
     if (main_module) main_module->as.map.namespace = spy_retain(c->globals);
     int status = !main_module || name_set(c, c->globals, "__name__", name) || name_set(c, c->globals, "__doc__", c->none) ||
-        name_set(c, c->modules, "__main__", main_module);
+        name_set(c, c->globals, "__package__", c->none) || name_set(c, c->globals, "__loader__", c->none) ||
+        name_set(c, c->globals, "__spec__", c->none) || name_set(c, c->modules, "__main__", main_module);
     spy_release(name); spy_release(main_module);
     if (status) goto fail;
     return c;
