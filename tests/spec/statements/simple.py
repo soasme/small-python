@@ -121,3 +121,7 @@ try:
 finally:
     sys.displayhook = saved_hook
 assert_eq(shown, [2, None])
+# A deleted global is gone, not unbound, also in exec()'s namespace.
+e = assert_raises(NameError, run, "a = 1\ndel a\na\n")
+assert_eq(type(e), NameError)
+assert_eq(str(e), "name 'a' is not defined")

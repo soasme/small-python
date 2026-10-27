@@ -14418,7 +14418,8 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
         return status;
     }
     delete_name(env, name);
-    return env->type == V_ENV && env->as.map.scope ? declare_name(c, env, name) : 0;
+    /* A deleted function local reads as unbound; a global is just gone. */
+    return env->type == V_ENV && env->as.map.scope && env->as.map.scope->kind != S_MODULE ? declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
     SPYValue *target = object;

@@ -237,14 +237,14 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Evaluation order | Evaluation
 6. Expressions > Expressions > Operator precedence | TODO: Precedence
 7. Simple statements | = sections
-7. Simple statements > Simple statements | TODO: Grammar
+7. Simple statements > Simple statements | SimpleStatements
 7. Simple statements > Simple statements > Expression statements | CompileModes
-7. Simple statements > Simple statements > Assignment statements | TODO: Unpacking, Evaluation, Assignment
-7. Simple statements > Simple statements > Assignment statements > Augmented assignment statements | TODO: Operators, Evaluation, Assignment
+7. Simple statements > Simple statements > Assignment statements | Unpacking, Evaluation, SimpleStatements
+7. Simple statements > Simple statements > Assignment statements > Augmented assignment statements | Operators, Evaluation, SimpleStatements
 7. Simple statements > Simple statements > Assignment statements > Annotated assignment statements | Annotations
-7. Simple statements > Simple statements > The `assert` statement | TODO: Assert
-7. Simple statements > Simple statements > The `pass` statement | TODO: Grammar
-7. Simple statements > Simple statements > The `del` statement | TODO: Del
+7. Simple statements > Simple statements > The `assert` statement | SimpleStatements
+7. Simple statements > Simple statements > The `pass` statement | SimpleStatements
+7. Simple statements > Simple statements > The `del` statement | SimpleStatements
 7. Simple statements > Simple statements > The `return` statement | Exceptions, Generators
 7. Simple statements > Simple statements > The `yield` statement | Generators
 7. Simple statements > Simple statements > The `raise` statement | Raise

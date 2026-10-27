@@ -80,6 +80,7 @@ and tied to real implementations by replaying them.
 | `Comparisons.tla` | rich comparison dispatch for every operator over classes with all, no, declining, or only `__eq__` methods, unrelated or subclassed (reflected first); chains, identity, built-in sequence, mapping, set, and numeric comparisons, and membership through `__contains__`, iteration, and `__getitem__` | yes |
 | `BinaryArith.tla` | binary and augmented operator dispatch over classes with forward, reflected, declining, or in-place methods, unrelated, subclassed (overriding reflected first), or the same; numeric widening, division, modulo, power, unary operators, three-argument `pow()`, and the errors of unsupported operands | yes |
 | `Subscripts.tla` | getting, setting, and deleting items with single, comma-separated, starred, and slice subscripts, evaluation order, and the errors and indexing rules of built-in sequences and mappings | yes |
+| `SimpleStatements.tla` | chained and unpacking assignments to names, attributes, and items, augmented assignment, and del, with their evaluation order; assignment, annotation, assert, del, and pass cases and the targets the grammar rejects | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -189,14 +190,15 @@ returned a non-iterable was reported with the module of a class defined in
 `__main__` or `builtins`; `len()` and truth testing rejected a `__len__`
 result with `__index__` and reported other results with other messages;
 a `__bool__` or `__contains__` of None was called; `in` with a string
-or bytes reported a wrong left operand with other messages; and an
+or bytes reported a wrong left operand with other messages; an
 unsupported operator on numbers raised spy's own messages, an augmented
 assignment's error named the plain operator, `*` named its operands in
 swapped order, three-argument `pow()` reported every unsupported case as
-needing integers, `(1+1j) ** 1000000` returned an infinity; and an
+needing integers, and `(1+1j) ** 1000000` returned an infinity; an
 index too large for a Py_ssize_t was reported as out of range, and
 deleting an item from a type without `__delitem__` was worded without
-regard to whether the type has sequence methods and the key is an index.
+regard to whether the type has sequence methods and the key is an index;
+and a global deleted in `exec()`'s namespace read as an unbound local.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

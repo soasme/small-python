@@ -470,6 +470,8 @@
   into an index-sized integer"; deleting an item without __delitem__
   says "doesn't support item deletion" only for an index into a type with
   sequence methods, as CPython does. TLA+ model of subscriptions.
+- A global deleted at module level of exec()'s namespace raises NameError
+  when read, not UnboundLocalError. TLA+ model of simple statements.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
