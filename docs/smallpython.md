@@ -455,7 +455,10 @@ expose `__buffer__`. Struct-module formats beyond native single items,
 multi-dimensional sub-views, and CPython's allocation introspection remain
 unsupported. Encoding and decoding support a limited set of codecs;
 the standard-library codec registry is unavailable. Iterator types
-are not yet distinguished completely by `type()`. Syntax errors for parameter
+are not yet distinguished completely by `type()`. The sequence, dict, set,
+range, and reversed iterators provide CPython's `__length_hint__`, and
+`list()`, `list.extend`, and `bytearray.extend` propagate errors from a user
+iterable's `__len__` or `__length_hint__` as `PyObject_LengthHint` does. Syntax errors for parameter
 lists, assignment, deletion, loop, `with`, and keyword-argument targets, `assert`
 and condition `=` typos, starred arguments, string prefixes, unbalanced brackets,
 missing indented blocks, and conditional expressions follow CPython's lexer and `invalid_*` grammar rules;

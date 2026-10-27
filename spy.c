@@ -1413,7 +1413,7 @@ static int native_kind(SPYValue *v) {
     if (owner_name && owner_name->type == SPY_STRING) owner = owner_name->as.string.data;
     static const char *const methods[] = {"__ceil__", "__floor__", "__round__", "__trunc__", "__format__", "__getnewargs__",
         "__reduce__", "__reduce_ex__", "__sizeof__", "__dir__", "__reversed__", "__complex__", "__getstate__",
-        "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__"};
+        "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__"};
     int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
     for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
     if (wrapper && !strcmp(name, "__contains__")) wrapper = strcmp(owner, "dict") && strcmp(owner, "set") && strcmp(owner, "frozenset");
@@ -5879,6 +5879,95 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     if (!result && !c->error_type[0]) v->as.iterator.done = 1;
     c->depth--;
     return result;
+}
+static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
+static SPYValue *range_find(SPYContext *, SPYValue *, SPYValue *);
+/* len() of a user sequence for the iterator length hints; -1 on error. */
+static int64_t sequence_size(SPYContext *c, SPYValue *v) {
+    SPYValue *length = builtin(c, 1, &v, (void *)(intptr_t)1 /* B_LEN */);
+    int64_t n = -1;
+    if (length && spy_as_int(c, length, &n)) n = -1;
+    spy_release(length); return n;
+}
+/* The built-in iterators' __length_hint__, as listiter_len, dictiter_len,
+ * rangeiter_len, reversed_len, and iter_len (a sequence without __len__
+ * gives NotImplemented). Exhausted iterators report 0. */
+static SPYValue *iterator_length_hint(SPYContext *c, SPYValue *v) {
+    SPYValue *source = v->as.iterator.source;
+    size_t index = v->as.iterator.index;
+    if (v->as.iterator.done) return spy_int(c, 0);
+    switch (v->as.iterator.kind) {
+    case I_RANGE: {
+        SPYValue *at = range_find(c, source, v->as.iterator.counter);
+        if (!at) return c->error_type[0] ? NULL : spy_int(c, 0);
+        SPYValue *left = integer_add(c, source->as.range.length, at, 1);
+        spy_release(at); return left;
+    }
+    case I_GETITEM: case I_REVERSED: {
+        if (source->type != SPY_INSTANCE && v->as.iterator.kind == I_REVERSED) {
+            SPYValue *sized = is_view(source) ? source->as.bound.self : source;
+            if ((sized->type == SPY_DICT || sized->type == SPY_FROZENDICT) && v->as.iterator.size != sized->as.map.len) return spy_int(c, 0);
+            size_t len = sized->type == SPY_LIST ? sized->as.seq.len : sized->as.map.len;
+            return spy_int(c, index <= len ? (int64_t)index : 0);
+        }
+        if (v->as.iterator.kind == I_GETITEM) {
+            SPYValue *method = special_method(c, source, "__len__");
+            if (!method) return c->error_type[0] ? NULL : spy_retain(c->not_implemented);
+            spy_release(method);
+        }
+        int64_t len = sequence_size(c, source);
+        if (len < 0) return NULL;
+        if (v->as.iterator.kind == I_REVERSED) return spy_int(c, (int64_t)index <= len ? (int64_t)index : 0);
+        return spy_int(c, (int64_t)index <= len ? len - (int64_t)index : 0);
+    }
+    case I_SEQUENCE: {
+        SPYValue *sized = is_view(source) ? source->as.bound.self : source;
+        size_t len;
+        if (is_dict(sized) || sized->type == SPY_SET || sized->type == SPY_FROZENSET) {
+            if (v->as.iterator.size != sized->as.map.len) return spy_int(c, 0);
+            len = sized->as.map.len;
+        } else if (sized->type == SPY_STRING || sized->type == SPY_BYTES || sized->type == SPY_BYTEARRAY) len = string_length(sized);
+        else len = sized->as.seq.len;
+        return spy_int(c, index < len ? (int64_t)(len - index) : 0);
+    }
+    default: return spy_retain(c->not_implemented);
+    }
+}
+static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    SPYValue *owner = c->iterator_types[(intptr_t)data];
+    const char *owner_name = iterator_names[(intptr_t)data];
+    if (!argc) return errorf(c, "TypeError", "unbound method %s.__length_hint__() needs an argument", owner_name);
+    if (argv[0]->type != SPY_ITERATOR || c->iterator_types[iterator_class_id(argv[0])] != owner)
+        return errorf(c, "TypeError", "descriptor '__length_hint__' for '%s' objects doesn't apply to a '%s' object", owner_name, type_name(argv[0]));
+    if (argc != 1) return errorf(c, "TypeError", "%s.__length_hint__() takes no arguments (%zu given)", owner_name, argc - 1);
+    return iterator_length_hint(c, argv[0]);
+}
+/* PyObject_LengthHint's errors for a user iterable: __len__, then
+ * __length_hint__; a TypeError or NotImplemented falls back silently. */
+static int length_hint_check(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_INSTANCE) return 0;
+    SPYValue *method = special_method(c, v, "__len__");
+    if (method) {
+        spy_release(method);
+        if (sequence_size(c, v) >= 0) return 0;
+        if (!error_is(c, "TypeError")) return -1;
+        spy_clear_error(c);
+    } else if (c->error_type[0]) return -1;
+    method = special_method(c, v, "__length_hint__");
+    if (!method) return c->error_type[0] ? -1 : 0;
+    SPYValue *hint = spy_call(c, method, 0, NULL);
+    spy_release(method);
+    if (!hint) {
+        if (!error_is(c, "TypeError")) return -1;
+        spy_clear_error(c); return 0;
+    }
+    int status = 0;
+    if (hint != c->not_implemented) {
+        SPYValue *integer = builtin_value(c, hint, SPY_INT);
+        if (!integer) { errorf(c, "TypeError", "__length_hint__ must be an integer, not %s", type_name(hint)); status = -1; }
+        else if (integer_sign(integer) < 0) { spy_error(c, "ValueError", "__length_hint__() should return >= 0"); status = -1; }
+    }
+    spy_release(hint); return status;
 }
 static SPYValue *slice_new(SPYContext *c, SPYValue *start, SPYValue *stop, SPYValue *step) {
     SPYValue *v = value_new(c, SPY_SLICE);
@@ -11401,7 +11490,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     }
     if (old->type == SPY_DICT && token == '|') return dict_update(c, old, rhs) ? NULL : spy_retain(old);
     if (op == T_ADDEQ && old->type == SPY_LIST) {
-        SPYValue *iterator = rhs == old ? NULL : get_iterator(c, rhs);
+        SPYValue *iterator = rhs == old || length_hint_check(c, rhs) ? NULL : get_iterator(c, rhs);
         if (rhs == old) {
             size_t len = old->as.seq.len;
             for (size_t i = 0; i < len; i++) if (sequence_append(c, old, old->as.seq.items[i])) return NULL;
@@ -17655,7 +17744,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_none(c);
     case BA_EXTEND: {
         Buffer out = {.ctx = c};
-        if (collect_bytes(c, args[0], &out)) { free(out.data); return NULL; }
+        if (length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out)) { free(out.data); return NULL; }
         len = self->as.string.len;
         if (out.len > SIZE_MAX - len - 1) { free(out.data); return spy_error(c, "MemoryError", "bytearray is too large"); }
         if (bytearray_resize(c, self, len + out.len)) { free(out.data); return NULL; }
@@ -18452,7 +18541,7 @@ execution_fail:
         if (argc > 1) goto arity;
         SPYValue *v = value_new(c, id == B_LIST ? SPY_LIST : SPY_TUPLE);
         if (!v) return NULL;
-        SPYValue *iterator = argc ? get_iterator(c, a) : NULL;
+        SPYValue *iterator = argc && (id == B_TUPLE || !length_hint_check(c, a)) ? get_iterator(c, a) : NULL;
         if (iterator) for (;;) {
             if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
             SPYValue *item = iterator_next(c, iterator);
@@ -19907,6 +19996,18 @@ SPYContext *spy_context_new(void) {
             cls->as.map.native = iterator_natives[i - IT_MAP] + 1;
             if (name_set(c, c->builtins, iterator_names[i], cls)) { spy_release(module); goto fail; }
         } else cls->as.map.flags = 2;
+    }
+    for (int i = 0; i < IT_COUNT; i++) {
+        if (i == IT_CALLABLE || i == IT_TEMPLATE || (i >= IT_MAP && i != IT_REVERSED)) continue;
+        SPYValue *hint = value_new(c, SPY_NATIVE);
+        if (!hint) { spy_release(module); goto fail; }
+        hint->as.native.call = iterator_length_hint_call; hint->as.native.data = (void *)(intptr_t)i;
+        hint->as.native.method = 1;
+        hint->as.native.name = spy_string(c, "__length_hint__", 15);
+        hint->as.native.owner = spy_retain(c->iterator_types[i]);
+        int status = !hint->as.native.name || name_set(c, c->iterator_types[i], "__length_hint__", hint);
+        spy_release(hint);
+        if (status) { spy_release(module); goto fail; }
     }
     static const struct { const char *type, *name; int id, method; } constructors[] = {
         {"object", "__new__", B_OBJECT_NEW, 0}, {"object", "__init__", B_OBJECT_INIT, 1},

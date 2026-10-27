@@ -266,3 +266,6 @@
   errno, strerror, filename, filename2, and characters_written.
 - Errors raised inside intrinsic code report the caller's location and add no
   traceback entries.
+- Built-in iterators' __length_hint__ (sequence, dict, set, range, reversed),
+  and PyObject_LengthHint error propagation in list(), list.extend, and
+  bytearray.extend.
