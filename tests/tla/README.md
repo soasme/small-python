@@ -101,6 +101,7 @@ and tied to real implementations by replaying them.
 | `IntStrLimit.tla` | the integer string conversion limit over limits 0, 640, and 1000 and digit counts around them: which conversions it governs, its two messages, and the settings API | yes |
 | `Constants.tla` | None, True, False, and `__debug__` in every target position with their SyntaxErrors, the shadowable Ellipsis and NotImplemented, the singletons' constructors, and NotImplemented's reflected fallback | yes |
 | `BuiltinsNumeric.tla` | divmod's floor convention, pow with modular inverses, round's ties to even at negative ndigits, bin/oct/hex digits, min/max with key and default, and sum, over a grid of signed integers; the numeric constructors and their errors | yes |
+| `BuiltinsIter.tla` | sorted's stability with key and reverse, reversed, enumerate, strict zip, filter, map, any/all with what they leave unconsumed, iter with a sentinel, and max with key, over every list of up to four items; iter/next/len protocols and sort errors | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 

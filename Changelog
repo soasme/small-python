@@ -523,6 +523,7 @@
 - complex() parses a string only as its sole positional argument and
   names the offending argument and type in its errors, as CPython does.
   TLA+ model of the numeric built-in functions.
+- TLA+ model of the iteration and sorting built-in functions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
