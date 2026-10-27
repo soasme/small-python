@@ -86,9 +86,10 @@ struct SPYValue {
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; } function;
         struct { SPYNative call; void *data; int method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
+                 SPYValue *module; /* An assigned __module__, or NULL for the default. */
                  void (*release)(void *); /* Host cleanup for data, run when the value is freed. */ } native;
-        struct { SPYValue *self; int method; SPYValue *name; } bound;
-        struct { SPYValue *self, *function; int plain; /* a method object even over a builtin */ } method;
+        struct { SPYValue *self; int method; SPYValue *name, *module; /* module: as native.module */ } bound;
+        struct { SPYValue *self, *function; int plain; /* a method object even over a builtin */ SPYValue *module; } method;
         struct { SPYValue *type, *self, *owner; } super;
         struct { SPYValue *function, *attributes; int user; /* made by calling the type */ } wrapper;
         struct { SPYValue *get, *set, *del, *doc, *name; int getter_doc; } property;
@@ -503,10 +504,12 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_MAPPINGPROXY: case SPY_BOUND_METHOD: case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: case SPY_FRAME_LOCALS:
         visit(v->as.bound.self, data);
         if (v->as.bound.name) visit(v->as.bound.name, data);
+        if (v->as.bound.module) visit(v->as.bound.module, data);
         break;
     case SPY_NATIVE:
         if (v->as.native.name) visit(v->as.native.name, data);
         if (v->as.native.owner) visit(v->as.native.owner, data);
+        if (v->as.native.module) visit(v->as.native.module, data);
         break;
     case SPY_TEMPLATE:
         if (v->as.template.strings) visit(v->as.template.strings, data);
@@ -523,7 +526,9 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_ASYNC_GENERATOR_ASEND: case SPY_ASYNC_GENERATOR_ATHROW:
         visit(v->as.async_operation.generator, data); visit(v->as.async_operation.args, data); break;
     case SPY_METHOD:
-        visit(v->as.method.self, data); visit(v->as.method.function, data); break;
+        visit(v->as.method.self, data); visit(v->as.method.function, data);
+        if (v->as.method.module) visit(v->as.method.module, data);
+        break;
     case SPY_SUPER:
         visit(v->as.super.type, data);
         if (v->as.super.self) visit(v->as.super.self, data);
@@ -1537,6 +1542,16 @@ static SPYValue *classmethod_descriptor_call(SPYContext *c, SPYValue *descriptor
     SPYValue *bound = classmethod_descriptor_get(c, descriptor, argv[0]);
     SPYValue *result = bound ? call_keywords(c, bound, argc - 1, argv + 1, keywords) : NULL;
     spy_release(bound); return result;
+}
+static int native_kind(SPYValue *);
+/* The writable m_module field of a builtin_function_or_method, which
+ * descriptors and method-wrappers do not have. */
+static SPYValue **builtin_module_slot(SPYValue *v) {
+    if (v->type == SPY_BOUND_METHOD) return &v->as.bound.module;
+    if (v->type == SPY_NATIVE && !native_kind(v)) return &v->as.native.module;
+    if (v->type == SPY_METHOD && !v->as.method.plain && v->as.method.function->type == SPY_NATIVE &&
+        native_kind(v) == NATIVE_BOUND) return &v->as.method.module;
+    return NULL;
 }
 static int native_kind(SPYValue *v) {
     if (v->type == SPY_METHOD && v->as.method.plain) return NATIVE_FUNCTION;
@@ -8176,9 +8191,19 @@ static SPYValue *class_lookup(SPYValue *cls, const char *name) {
     }
     return NULL;
 }
+static int static_type(SPYContext *, SPYValue *);
 /* Class attributes seen from an instance. A class's own __name__ and
- * __qualname__ describe the class, not its instances. */
+ * __qualname__ describe the class, not its instances, and so does a static
+ * type's __module__, which CPython keeps outside the type's __dict__. */
 static SPYValue *instance_lookup(SPYValue *cls, const char *name) {
+    if (cls && !strcmp(name, "__module__")) {
+        SPYValue *mro = cls->as.map.mro;
+        for (size_t i = 0; mro && i < mro->as.seq.len; i++) {
+            SPYValue *base = mro->as.seq.items[i], *value = name_local(base, name);
+            if (value && !static_type(cls->ctx, base)) return value;
+        }
+        return mro ? NULL : class_lookup(cls, name);
+    }
     if (strcmp(name, "__name__") && strcmp(name, "__qualname__")) return class_lookup(cls, name);
     SPYValue *mro = cls ? cls->as.map.mro : NULL;
     for (size_t i = 0; mro && i < mro->as.seq.len; i++) {
@@ -8838,6 +8863,12 @@ static SPYValue *docstring(SPYContext *c, Node *body) {
 }
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (!strcmp(name, "__class__") && v->type != SPY_INSTANCE) return spy_retain(value_class(c, v));
+    if ((v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD) && !strcmp(name, "__module__")) {
+        SPYValue **slot = builtin_module_slot(v);
+        if (slot && *slot) return spy_retain(*slot);
+        /* The builtins module's functions name it; their type's __module__ is not theirs. */
+        if (slot && v->type == SPY_NATIVE && !v->as.native.owner) return spy_string(c, "builtins", 8);
+    }
     if (v->type == SPY_FRAME || v->type == SPY_MEMORYVIEW) {
         SPYValue *field = v->type == SPY_FRAME ? frame_attribute(c, v, name) : memory_attribute(c, v, name);
         if (field || c->error_type[0]) return field;
@@ -8898,7 +8929,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             while (i < mro->as.seq.len && mro->as.seq.items[i] != v->as.super.type) i++;
             while (++i < mro->as.seq.len) {
                 SPYValue *cls = mro->as.seq.items[i], *self = v->as.super.self;
-                definition = name_local(cls, name);
+                /* Only the classes' __dict__s: not their names, nor a static type's __module__. */
+                definition = class_slot_name(name) || (!strcmp(name, "__module__") && static_type(c, cls)) ? NULL : name_local(cls, name);
                 if (definition) break;
                 if ((definition = builtin_descriptor(c, cls, name))) break;
                 if (c->error_type[0]) return NULL;
@@ -10672,6 +10704,19 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name,
     /* Builtin callables: the descriptors' __objclass__ and __name__ and a
      * method-wrapper's __self__ are members; their other fields, getsets. */
     int kind = native_kind(object);
+    SPYValue **module = !strcmp(name, "__module__") ? builtin_module_slot(object) : NULL;
+    if (module) {
+        /* A member: deleting it leaves None. */
+        SPYValue *old = *module;
+        *module = spy_retain(value ? value : c->none);
+        spy_release(old); return 0;
+    }
+    /* Other builtin objects have no __module__ member: their type's own
+     * __module__ describes the type. */
+    if (!strcmp(name, "__module__")) {
+        errorf(c, "AttributeError", "'%s' object has no attribute '__module__' and no __dict__ for setting new attributes", type_name(object));
+        return -1;
+    }
     if (kind || object->type == SPY_NATIVE || object->type == SPY_BOUND_METHOD) {
         int descriptor_kind = kind == NATIVE_METHOD_DESCRIPTOR || kind == NATIVE_WRAPPER_DESCRIPTOR;
         if ((descriptor_kind && (!strcmp(name, "__objclass__") || !strcmp(name, "__name__"))) ||
@@ -10927,7 +10972,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         return *attributes ? name_set(c, *attributes, name, value) : -1;
     }
     if (object->type == SPY_INSTANCE) {
-        SPYValue *descriptor = class_lookup(object->as.map.parent, name);
+        SPYValue *descriptor = instance_lookup(object->as.map.parent, name);
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, value);
         /* __class__ is object's to assign, dictionary or not. */
         if (!instance_has_dict(object) && strcmp(name, "__class__")) {
@@ -13904,6 +13949,13 @@ static SPYValue *new_class(SPYContext *c, const char *name, SPYValue *base, SPYV
     if (status) { spy_release(cls); return NULL; }
     return cls;
 }
+/* Every type's namespace has a __doc__; a builtin type's text is
+ * implementation-defined, and here None. */
+static SPYValue *builtin_class_new(SPYContext *c, const char *name, SPYValue *base, SPYValue *module) {
+    SPYValue *cls = new_class(c, name, base, module);
+    if (cls && name_set(c, cls, "__doc__", c->none)) { spy_release(cls); return NULL; }
+    return cls;
+}
 /* Builtin types whose instances a Python subclass can extend. */
 static const int subclassable_types[] = {SPY_INT, SPY_FLOAT, SPY_COMPLEX, SPY_STRING, SPY_BYTES, SPY_TUPLE,
                                          SPY_LIST, SPY_DICT, SPY_SET, SPY_FROZENSET, SPY_BYTEARRAY, SPY_FROZENDICT,
@@ -15279,7 +15331,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         if (!strcmp(name, "__dict__")) { spy_error(c, "TypeError", "cannot delete __dict__"); return -1; }
         object = object->as.wrapper.attributes;
     } else {
-        SPYValue *descriptor = object->type == SPY_INSTANCE ? class_lookup(object->as.map.parent, name) : NULL;
+        SPYValue *descriptor = object->type == SPY_INSTANCE ? instance_lookup(object->as.map.parent, name) : NULL;
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, NULL);
         /* BaseException's __dict__ getset refuses deletion. */
         if (object->type == SPY_INSTANCE && !descriptor && !strcmp(name, "__dict__") &&
@@ -22783,6 +22835,20 @@ static SPYValue *class_namespace(SPYContext *c, SPYValue *cls) {
         SPYValue *descriptor = builtin_descriptor(c, cls, name);
         if (descriptor && name_set(c, view, name, descriptor)) break;
     }
+    /* type's data descriptors for the class attributes of 10.4.2, which read
+     * and write through the class. */
+    static const struct { const char *name; int type, flags; } type_fields[] = {
+        {"__name__", SPY_GETSET_DESCRIPTOR, 0}, {"__qualname__", SPY_GETSET_DESCRIPTOR, 0},
+        {"__module__", SPY_GETSET_DESCRIPTOR, 0}, {"__bases__", SPY_GETSET_DESCRIPTOR, 0},
+        {"__mro__", SPY_GETSET_DESCRIPTOR, DESC_READONLY}, {"__dict__", SPY_GETSET_DESCRIPTOR, DESC_READONLY},
+        {"__doc__", SPY_GETSET_DESCRIPTOR, 0}, {"__type_params__", SPY_GETSET_DESCRIPTOR, 0},
+        {"__annotations__", SPY_GETSET_DESCRIPTOR, 0}, {"__annotate__", SPY_GETSET_DESCRIPTOR, 0},
+        {"__abstractmethods__", SPY_GETSET_DESCRIPTOR, 0}, {"__base__", SPY_MEMBER_DESCRIPTOR, DESC_READONLY}};
+    for (size_t i = 0; cls == c->types[SPY_CLASS] && i < sizeof(type_fields) / sizeof(*type_fields) && !c->error_type[0]; i++) {
+        SPYValue *descriptor = member_new(c, type_fields[i].type, type_fields[i].name, cls, DESC_VALUE | type_fields[i].flags);
+        if (descriptor) name_set(c, view, type_fields[i].name, descriptor);
+        spy_release(descriptor);
+    }
     if (c->error_type[0]) { spy_release(view); return NULL; }
     return view;
 }
@@ -23301,7 +23367,7 @@ SPYContext *spy_context_new(void) {
     }
     for (size_t i = 0; i < sizeof(classes) / sizeof(*classes); i++) {
         SPYValue *base = classes[i].base ? name_local(c->classes, classes[i].base) : NULL;
-        SPYValue *cls = new_class(c, classes[i].name, base, module);
+        SPYValue *cls = builtin_class_new(c, classes[i].name, base, module);
         /* Plain object() instances have no __dict__. */
         if (cls && !base) cls->as.map.flags |= CLASS_NO_DICT;
         int status = cls ? name_set(c, c->builtins, classes[i].name, cls) ||
@@ -23312,7 +23378,7 @@ SPYContext *spy_context_new(void) {
     {
         /* ExceptionGroup derives from both BaseExceptionGroup and Exception. */
         SPYValue *group = name_local(c->classes, "BaseExceptionGroup");
-        SPYValue *cls = new_class(c, "ExceptionGroup", group, module), *bases = value_new(c, SPY_TUPLE);
+        SPYValue *cls = builtin_class_new(c, "ExceptionGroup", group, module), *bases = value_new(c, SPY_TUPLE);
         int status = !cls || !bases || sequence_append(c, bases, group) ||
             sequence_append(c, bases, name_local(c->classes, "Exception")) || class_bases(c, cls, bases) ||
             name_set(c, c->builtins, "ExceptionGroup", cls) || name_set(c, c->classes, "ExceptionGroup", cls);
@@ -23358,7 +23424,7 @@ SPYContext *spy_context_new(void) {
     };
     _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAST_TYPE + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
-        SPYValue *cls = new_class(c, types[i].name, name_local(c->classes, "object"), module);
+        SPYValue *cls = builtin_class_new(c, types[i].name, name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
         c->types[i] = cls;
         cls->as.map.native = types[i].native + 1;
@@ -23379,7 +23445,7 @@ SPYContext *spy_context_new(void) {
         }
     static const char *const native_names[] = {"method_descriptor", "wrapper_descriptor", "method-wrapper", "classmethod_descriptor"};
     for (size_t i = 0; i < 4; i++) {
-        SPYValue *cls = new_class(c, native_names[i], name_local(c->classes, "object"), module);
+        SPYValue *cls = builtin_class_new(c, native_names[i], name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
         cls->as.map.flags = 2;
         c->native_types[i] = cls;
@@ -23474,7 +23540,7 @@ SPYContext *spy_context_new(void) {
     c->iterator_types[IT_TEMPLATE] = spy_retain(c->types[SPY_TEMPLATE_ITERATOR]);
     for (int i = 1; i < IT_COUNT; i++) {
         if (i == IT_TEMPLATE) continue;
-        SPYValue *cls = new_class(c, iterator_names[i], name_local(c->classes, "object"), module);
+        SPYValue *cls = builtin_class_new(c, iterator_names[i], name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
         c->iterator_types[i] = cls;
         if (i >= IT_MAP) {

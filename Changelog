@@ -684,3 +684,13 @@
   annotation scopes, assignments inside assert, class-pattern keywords,
   as-patterns and except clauses that bind __debug__, and annotated
   parameters.
+- A builtin function's __module__ is a writable member, and deleting it
+  leaves None. The builtin types keep their own __module__ out of
+  their namespace for instances and super(), so those see no
+  __module__ and assigning one without a __dict__ reports a missing
+  attribute, as SLP-315 10.4.2 and 28.5 now state.
+- type.__dict__ holds getset descriptors for __name__, __qualname__,
+  __module__, __bases__, __mro__, __dict__, __doc__, __type_params__,
+  __annotations__, __annotate__ and __abstractmethods__, and a member
+  descriptor for __base__, which read and write through the class. Every
+  builtin type's namespace has a __doc__ (None).

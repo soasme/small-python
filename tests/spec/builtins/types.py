@@ -364,3 +364,44 @@ assert_eq(type(marker).__repr__(marker), "MARKER")
 assert_eq(str(assert_raises(TypeError, type(marker).__repr__, 1)),
           "descriptor '__repr__' requires a 'sentinel' object but received a 'int'")
 assert_eq(str(assert_raises(TypeError, marker.__copy__, 1)), "sentinel.__copy__() takes no arguments (1 given)")
+# A builtin function's __module__ is a writable member; the builtin types'
+# own __module__ is not an attribute of their instances.
+assert_eq(len.__module__, "builtins")
+method = [].append
+assert_eq(method.__module__, None)
+method.__module__ = "m"
+assert_eq((method.__module__, [].append.__module__), ("m", None))
+del method.__module__
+assert_eq(method.__module__, None)
+error = ValueError()
+assert_eq(hasattr(error, "__module__"), False)
+error.__module__ = "x"
+assert_eq(error.__module__, "x")
+for value in (1, "s", [], 1.0, object(), slice(1), (1).__add__, str.join):
+    assert_eq(hasattr(value, "__module__"), False)
+    with assert_raises(AttributeError) as caught:
+        value.__module__ = "x"
+    assert_eq(str(caught.exception),
+              "'%s' object has no attribute '__module__' and no __dict__ for setting new attributes" % type(value).__name__)
+class Local: pass
+assert_eq((Local().__module__, int.__module__), (__name__, "builtins"))
+for name in ("__name__", "__qualname__", "__module__"):
+    assert_eq(hasattr(super(Local, Local()), name), False)
+# type's namespace holds data descriptors for the class attributes.
+descriptors = type.__dict__
+for name in ("__name__", "__qualname__", "__module__", "__bases__", "__mro__", "__dict__", "__doc__", "__type_params__"):
+    assert_eq(type(descriptors[name]).__name__, "getset_descriptor")
+assert_eq(type(descriptors["__base__"]).__name__, "member_descriptor")
+assert_eq(descriptors["__mro__"].__get__(int), int.__mro__)
+class Renamed: pass
+descriptors["__name__"].__set__(Renamed, "Other")
+assert_eq(Renamed.__name__, "Other")
+with assert_raises(TypeError) as caught:
+    descriptors["__name__"].__set__(int, "x")
+assert_eq(str(caught.exception), "cannot set '__name__' attribute of immutable type 'int'")
+with assert_raises(AttributeError) as caught:
+    descriptors["__mro__"].__set__(Renamed, ())
+assert_eq(str(caught.exception), "attribute '__mro__' of 'type' objects is not writable")
+# Every type has a __doc__.
+for cls in (int, object, type, ValueError):
+    assert_eq("__doc__" in cls.__dict__, True)
