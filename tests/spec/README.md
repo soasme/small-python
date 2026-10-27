@@ -30,8 +30,8 @@ warnings, test.support) were rewritten to use only the core language; each
 rewrite is explained by a "(Ported ...)" note inside the docstring.
 
 Tests name no library module. A host facility that PLS-315 leaves to the
-implementation (the module cache, the lazy module set, the display hook, and
-the texts *host*(f) by which messages name them) is reached through
+implementation (the module cache, the lazy module set, the display hook, the
+asynchronous generator hooks, and the texts *host*(f) by which messages name them) is reached through
 `harness.host`, as test262 reaches its host through `$262`; an implementation
 adapts the `Host` class to wherever it exposes them. `harness.qualified(cls)`
 gives *tname* of an intrinsic type, its home module name and name, so a test
@@ -46,4 +46,8 @@ The first line of every test, `# spec: PLS-315 X.Y[.Z], ...`, names the
 clauses of `docs/standards/3_15.md` it exercises. `tests/spec_coverage.py`
 (run by `make test-spec`) checks that each named clause exists and counts the
 clauses of the normative chapters some test reaches; `--missing` lists the
-rest.
+rest. Every clause X.Y of chapters 6 to 29 and Annexes A and B has a test,
+and the script fails when one does not.
+
+The `grammar/` chapter checks the productions of Annex A by the sources they
+accept and the sources they reject.

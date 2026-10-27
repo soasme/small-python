@@ -6,7 +6,8 @@ Every test names the clauses it exercises on its "# spec: PLS-315 ..." line.
 Each name must be a clause of docs/standards/3_15.md. A test of a subclause
 covers the enclosing clause too, so the report counts the clauses X.Y of the
 normative chapters (6 to 29 and Annexes A and B) that some test reaches.
-With --missing it lists the clauses no test reaches.
+With --missing it lists the clauses no test reaches. It fails when some
+clause has no test.
 """
 import re
 import sys
@@ -54,6 +55,8 @@ def main():
             print(f"{number}{headings[number]}")
     print(f"Spec coverage: {len(targets) - len(missing)}/{len(targets)} clauses of PLS-315 chapters 6-29 "
           f"and Annexes A-B have a test")
+    if missing:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

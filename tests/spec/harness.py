@@ -180,6 +180,15 @@ class Host:
             thunk()
         return [(w.category, str(w.message), w.lineno) for w in caught]
 
+    def async_gen_hooks(self):
+        """The (firstiter, finalizer) pair HostAsyncGenHooks returns (B.5.1),
+        or None when the host offers programs no way to install them."""
+        get = getattr(self._sys(), "get_asyncgen_hooks", None)
+        return tuple(get()) if get else None
+
+    def set_async_gen_hooks(self, firstiter, finalizer):
+        self._sys().set_asyncgen_hooks(firstiter, finalizer)
+
     def recursion_limit(self):
         """The recursion limit execution parameter (B.6)."""
         return self._sys().getrecursionlimit()

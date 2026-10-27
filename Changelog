@@ -755,3 +755,15 @@
   calling NoDefaultType returns NoDefault, that a union's isinstance tries
   its members in order, that subclassing plain Generic fails, and gives
   the exact messages for too few or too many arguments to a generic class.
+- Every clause of PLS-315 chapters 6-29 and Annexes A-B now has a spec
+  test, and tests/spec_coverage.py fails when one has none. A new
+  grammar/ chapter checks the Annex A productions for lexical tokens,
+  start rules, definitions, f- and t-strings, targets, and patterns;
+  further tests cover host-provided encodings (B.2) and asynchronous
+  generator hooks (B.5), reached through new harness host methods.
+- spy closes an unreachable suspended asynchronous generator by driving
+  its aclose() to completion, as it already did for generators (27.5.4);
+  eval input rejects a starred item outside brackets ("*a, b") as
+  CPython does (17.6.3); and a literal pattern may carry a '+' sign
+  ("case +1:"), as Annex A allows. PLS-315 now states the last two, and
+  that interactive input holding no statement is a SyntaxError.

@@ -644,7 +644,7 @@ static void memory_unexport(SPYValue *);
  * __release_buffer__, once per object. */
 static int finalize_later(SPYValue *v) {
     if (v->finalized) return 0;
-    if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) {
+    if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
         if (!v->as.generator.started || v->as.generator.running || v->as.generator.done) return 0;
     } else if (v->type == SPY_MEMORYVIEW) {
         if (!v->as.memory.view || v->as.memory.released) return 0;
@@ -4312,9 +4312,15 @@ static Node *expression(Parser *p, int min) { return expression_mode(p, min, 1);
 static Node *plain_expression(Parser *p, int min) { return expression_mode(p, min, 0); }
 /* Commas belong to the enclosing grammar, not the precedence parser. Named
  * items (star_named_expressions) allow an unparenthesized walrus. */
+/* eval input is expressions, without starred items outside brackets. */
+static int eval_star(Parser *p) {
+    if (!at(p, '*') || !p->ctx->eval_input || peek(p)->level) return 0;
+    syntax(p, "invalid syntax"); return 1;
+}
 static Node *expression_items(Parser *p, int min, int named) {
     Node *first;
     size_t start = p->pos;
+    if (eval_star(p)) return NULL;
     if (take(p, '*')) {
         first = node(p, N_STAR);
         if (!first || !(first->a = expression(p, 4))) return NULL;
@@ -4329,6 +4335,7 @@ static Node *expression_items(Parser *p, int min, int named) {
            !at(p, ':') && !at(p, ')') && !at(p, ']') && !keyword(p, "in")) {
         Node *item;
         size_t item_start = p->pos;
+        if (eval_star(p)) return NULL;
         if (take(p, '*')) {
             item = node(p, N_STAR);
             if (!item || !(item->a = expression(p, 4))) return NULL;
@@ -4880,10 +4887,10 @@ static Node *literal_pattern(Parser *p) {
         return n;
     }
     Node *value;
-    if (at(p, '-')) {
+    if (at(p, '-') || at(p, '+')) {
         value = node(p, N_UNARY);
         if (!value) return NULL;
-        value->op = '-'; p->pos++;
+        value->op = peek(p)->kind; p->pos++;
         if (!at(p, T_INT) && !at(p, T_FLOAT) && !at(p, T_IMAG)) return syntax(p, "invalid syntax");
         if (!(value->a = atom(p))) return NULL;
     } else if (!(value = atom(p))) return NULL;
@@ -5056,7 +5063,7 @@ static Node *closed_pattern_body(Parser *p) {
         if (n && n->op == PT_CAPTURE) n->a = name;
         return n;
     }
-    if (at(p, '-') || at(p, T_INT) || at(p, T_FLOAT) || at(p, T_IMAG) || at(p, T_STRING)) return literal_pattern(p);
+    if (at(p, '-') || at(p, '+') || at(p, T_INT) || at(p, T_FLOAT) || at(p, T_IMAG) || at(p, T_STRING)) return literal_pattern(p);
     return syntax(p, "invalid syntax");
 }
 static Node *pattern_body(Parser *);
@@ -12903,7 +12910,8 @@ static SPYValue *weak_refs(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     return list;
 }
 static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
-/* Run __del__ of dead instances and close dead suspended generators, then
+/* Run __del__ of dead instances and close dead suspended generators and
+ * asynchronous generators, then
  * callbacks of references whose targets died, at a statement boundary. CPython reports their exceptions as
  * unraisable; spy has no error stream, so they are discarded without
  * disturbing the interrupted code. */
@@ -12917,7 +12925,17 @@ static void weak_callbacks(SPYContext *c) {
         SPYValue *method = self->type == SPY_INSTANCE ? special_method(c, self, "__del__") : NULL;
         if (method) spy_release(spy_call(c, method, 0, NULL));
         else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
-        else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
+        else if (self->type == SPY_ASYNC_GENERATOR) {
+            /* No host finalizer (27.5.4): drive aclose() to completion. */
+            SPYValue *closing = value_new(c, SPY_ASYNC_GENERATOR_ATHROW), *step;
+            if (closing) {
+                closing->as.async_operation.generator = spy_retain(self);
+                closing->as.async_operation.args = value_new(c, SPY_TUPLE);
+                closing->as.async_operation.method = M_ACLOSE;
+            }
+            while (closing && (step = awaitable_method(c, closing, M_SEND, 1, &c->none))) spy_release(step);
+            spy_release(closing);
+        } else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
         /* CPython finalizes what an object's destruction frees before moving

@@ -16,13 +16,15 @@
 (* A program compiles SOURCE in MODE and runs it with a fresh namespace,   *)
 (* recording the values passed to sys.displayhook. SOURCE is "1 + 1",      *)
 (* "x = 1", "x = 1; 2", "x = 1\ny = 2", an if statement whose body is the  *)
-(* expressions 3 and 4, "None", "", " 1", or "1\n\n"; MODE is exec, eval,  *)
-(* single, or bad. The outcome is the result, then the displayed values,   *)
+(* expressions 3 and 4, "None", "", " 1", "1\n\n", or the starred list     *)
+(* "*[1], 2", which only eval input, a list of plain expressions           *)
+(* (PLS-315 17.6.3), rejects; MODE is exec, eval, single, or bad. The      *)
+(* outcome is the result, then the displayed values,                       *)
 (* or the exception.                                                       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Sources == {"expr", "assign", "list", "lines", "compound", "none", "empty", "indented", "trailing"}
+Sources == {"expr", "assign", "list", "lines", "compound", "none", "empty", "indented", "trailing", "starred"}
 Programs == [source : Sources, mode : {"exec", "eval", "single", "bad"}]
 
 VARIABLES program, outcome
@@ -42,6 +44,7 @@ Single(s) == CASE s = "expr" -> "None [2]"
                [] s = "none" -> "None [None]"
                [] s = "trailing" -> "None [2]"
                [] s = "assign" -> "None []"
+               [] s = "starred" -> "None [(1, 2)]"
                [] OTHER -> "SyntaxError"                      \* two statements, nothing, or an indent
 
 Run(p) == CASE p.mode = "bad" -> "ValueError"
