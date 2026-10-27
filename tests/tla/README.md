@@ -46,6 +46,8 @@ and tied to real implementations by replaying them.
 | `ClassObjects.tla` | class special attributes (bases, layout base, MRO, docs not inherited, annotations, type parameters, static attributes), the read-only namespace view, and class versus instance assignment | yes |
 | `CodeObjects.tla` | code attributes (names, parameter counts, local, cell, free, and global names, flags, docstring constant), immutability, `co_lines()`, `co_positions()`, and `replace()` | yes |
 | `Frames.tla` | frame attributes of running, finished, and generator frames, the writable trace attributes, and `clear()` | yes |
+| `Tracebacks.tla` | traceback chains as handlers unwind (through `finally`, re-raise, and `raise from`), line numbers, writable `tb_next`, and made tracebacks | yes |
+| `Slices.tla` | slice attributes, `indices()` against CPython's clamping, subscripts, a zero step or bad bound, equality and hashing, and `slice[float]` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -122,7 +124,8 @@ several bases reported the first as `__base__`, not the one with the layout;
 code objects lacked `co_names`, `co_consts`, and `replace()`; a generator
 made a new frame object for each `gi_frame` read, and a finished one's frame
 reported its `def` line; frames lacked `f_lasti`, the trace attributes, and
-`clear()`, and a coroutine's frame had no `f_code`.
+`clear()`, and a coroutine's frame had no `f_code`; a slice with a bad bound
+and a zero step reported the bound, not the step.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

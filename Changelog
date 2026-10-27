@@ -397,6 +397,9 @@
   f_trace, f_trace_lines, and f_trace_opcodes; f_lineno writes refused
   outside a trace function; frame.clear(); a coroutine frame's f_code.
   TLA+ model of frame objects.
+- A slice checks its step before its bounds, and a bound without __index__
+  gets CPython's message; tb_frame, tb_lasti, and slice attributes are
+  "readonly attribute". TLA+ models of traceback and slice objects.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

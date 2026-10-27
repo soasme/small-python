@@ -6547,12 +6547,22 @@ static SPYValue *slice_bound(SPYContext *c, SPYValue *value, SPYValue *length,
     if (limit) { spy_release(index); index = spy_retain(limit); }
     return index;
 }
+/* A slice bound or step _PyEval_SliceIndex refuses: not None, an int, or __index__. */
+static int slice_part_bad(SPYContext *c, SPYValue *v) {
+    return v->type != SPY_NONE && !is_int(v) && !(special_dispatch(v) && class_lookup(value_class(c, v), "__index__"));
+}
 static SPYValue *normalize_slice(SPYContext *c, SPYValue *slice, SPYValue *length) {
     if (integer_sign(length) < 0) return spy_error(c, "ValueError", "length should not be negative");
+    /* The step, then the bounds (slice.indices's message). */
+    const char *message = "slice indices must be integers or None or have an __index__ method";
+    if (slice_part_bad(c, slice->as.slice.step)) return spy_error(c, "TypeError", message);
     SPYValue *step = slice->as.slice.step->type == SPY_NONE ? spy_int(c, 1) : index_object(c, slice->as.slice.step);
     if (!step) return NULL;
     int sign = integer_sign(step);
     if (!sign) { spy_release(step); return spy_error(c, "ValueError", "slice step cannot be zero"); }
+    if (slice_part_bad(c, slice->as.slice.start) || slice_part_bad(c, slice->as.slice.stop)) {
+        spy_release(step); return spy_error(c, "TypeError", message);
+    }
     SPYValue *lower = spy_int(c, sign < 0 ? -1 : 0);
     SPYValue *upper = lower ? integer_add(c, length, lower, 0) : NULL;
     SPYValue *start = upper ? slice_bound(c, slice->as.slice.start, length, lower, upper, sign < 0 ? upper : lower) : NULL;
@@ -6621,8 +6631,14 @@ typedef struct { int64_t start, stop, step; int has_start, has_stop; } SliceBoun
 static int slice_bounds(SPYContext *c, SPYValue *slice, SliceBounds *out) {
     *out = (SliceBounds){.step = 1, .has_start = slice->as.slice.start->type != SPY_NONE,
                         .has_stop = slice->as.slice.stop->type != SPY_NONE};
+    /* The step, then the bounds, as _PyEval_SliceIndex checks them for a subscript. */
+    const char *message = "slice indices must be integers or have an __index__ method";
+    if (slice_part_bad(c, slice->as.slice.step)) { spy_error(c, "TypeError", message); return -1; }
     if (slice->as.slice.step->type != SPY_NONE && slice_index(c, slice->as.slice.step, &out->step)) return -1;
     if (!out->step) { spy_error(c, "ValueError", "slice step cannot be zero"); return -1; }
+    if (slice_part_bad(c, slice->as.slice.start) || slice_part_bad(c, slice->as.slice.stop)) {
+        spy_error(c, "TypeError", message); return -1;
+    }
     if (out->has_start && slice_index(c, slice->as.slice.start, &out->start)) return -1;
     if (out->has_stop && slice_index(c, slice->as.slice.stop, &out->stop)) return -1;
     return 0;
@@ -10050,6 +10066,12 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
+    if (object->type == SPY_SLICE && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
+        spy_error(c, "AttributeError", "readonly attribute"); return -1;
+    }
+    if (object->type == SPY_TRACEBACK && (!strcmp(name, "tb_frame") || !strcmp(name, "tb_lasti"))) {
+        spy_error(c, "AttributeError", "readonly attribute"); return -1;
+    }
     if (object->type == SPY_FRAME) { int status = frame_set(c, object, name, value); if (status <= 0) return status; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
@@ -14139,6 +14161,12 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, NULL);
+    if (object->type == SPY_SLICE && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
+        spy_error(c, "AttributeError", "readonly attribute"); return -1;
+    }
+    if (object->type == SPY_TRACEBACK && (!strcmp(name, "tb_frame") || !strcmp(name, "tb_lasti"))) {
+        spy_error(c, "AttributeError", "readonly attribute"); return -1;
+    }
     if (object->type == SPY_FRAME) { int status = frame_set(c, object, name, NULL); if (status <= 0) return status; }
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&

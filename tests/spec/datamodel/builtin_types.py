@@ -201,3 +201,24 @@ assert_raises(ValueError, setattr, frame, "f_lineno", 1)
 assert_raises(AttributeError, setattr, frame, "f_code", None)
 frame.clear()
 assert_eq(dict(frame.f_locals), {})
+
+# Traceback and slice attributes are read-only; a slice checks its step
+# (type, then zero) before its bounds.
+try:
+    raise KeyError
+except KeyError as error:
+    traceback = error.__traceback__
+for target, name in [(traceback, "tb_frame"), (traceback, "tb_lasti"), (slice(1), "start"), (slice(1), "step")]:
+    try:
+        setattr(target, name, None)
+    except AttributeError as error:
+        assert_eq(str(error), "readonly attribute")
+try:
+    slice("a").indices(3)
+except TypeError as error:
+    assert_eq(str(error), "slice indices must be integers or None or have an __index__ method")
+try:
+    [1, 2]["a":]
+except TypeError as error:
+    assert_eq(str(error), "slice indices must be integers or have an __index__ method")
+assert_raises(ValueError, slice("a", None, 0).indices, 3)

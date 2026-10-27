@@ -106,8 +106,8 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes (2) | Frames
 3. Data model > Data model > The standard type hierarchy > Internal types > Special writable attributes | Frames
 3. Data model > Data model > The standard type hierarchy > Internal types > Frame object methods | Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Traceback objects | TODO: Tracebacks
-3. Data model > Data model > The standard type hierarchy > Internal types > Slice objects | TODO: Slices
+3. Data model > Data model > The standard type hierarchy > Internal types > Traceback objects | Tracebacks
+3. Data model > Data model > The standard type hierarchy > Internal types > Slice objects | Slices
 3. Data model > Data model > The standard type hierarchy > Internal types > Static method objects | TODO: MethodDescriptors
 3. Data model > Data model > The standard type hierarchy > Internal types > Class method objects | TODO: MethodDescriptors
 3. Data model > Data model > Special method names | = sections
@@ -213,7 +213,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Primaries | = sections
 6. Expressions > Expressions > Primaries > Attribute references | Attributes
 6. Expressions > Expressions > Primaries > Subscriptions and slicings | TODO: Subscripts, Slices
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > Slicings | TODO: Slices
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > Slicings | Slices
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > Comma-separated subscripts | TODO: Subscripts
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > "Starred" subscriptions | TODO: Subscripts
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | TODO: Subscripts
