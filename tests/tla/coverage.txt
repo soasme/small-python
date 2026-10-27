@@ -258,7 +258,7 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `nonlocal` statement | Scopes, ScopeErrors
 7. Simple statements > Simple statements > The `type` statement | TypeAliases
 8. Compound statements | = sections
-8. Compound statements > Compound statements | TODO: Grammar
+8. Compound statements > Compound statements | Grammar
 8. Compound statements > Compound statements > The `if` statement | Conditionals
 8. Compound statements > Compound statements > The `while` statement | Conditionals
 8. Compound statements > Compound statements > The `for` statement | Iteration
@@ -302,7 +302,7 @@ Reference chapter contents | - table of contents
 9. Top-level components > Top-level components > Interactive input | CompileModes
 9. Top-level components > Top-level components > Expression input | CompileModes
 10. Complete grammar | = sections
-10. Complete grammar > Full Grammar specification | TODO: Grammar, Precedence
+10. Complete grammar > Full Grammar specification | Grammar, Precedence
 11. Built-in types | = sections
 11. Built-in types > Built-in Types | = sections
 11. Built-in types > Built-in Types > Truth Value Testing | Truth
