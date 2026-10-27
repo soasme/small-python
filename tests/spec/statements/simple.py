@@ -79,3 +79,33 @@ assert_eq(type(1), int)
 global gg
 gg = 1
 assert_eq(gg, 1)
+
+# An error raised by an operation inside a handler, finally, or __exit__
+# gets the exception being handled as its __context__.
+def fails_in_handler():
+    try:
+        raise KeyError
+    except KeyError:
+        1 / 0
+def fails_in_finally():
+    try:
+        raise KeyError
+    finally:
+        [][1]
+def bad_raise_in_handler():
+    try:
+        raise KeyError
+    except KeyError:
+        raise 5
+class FailingExit:
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        1 / 0
+def fails_in_exit():
+    with FailingExit():
+        raise KeyError
+for function, kind in [(fails_in_handler, ZeroDivisionError), (fails_in_finally, IndexError),
+                       (bad_raise_in_handler, TypeError), (fails_in_exit, ZeroDivisionError)]:
+    e = assert_raises(kind, function)
+    assert_type(e.__context__, KeyError)

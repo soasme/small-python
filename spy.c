@@ -13849,6 +13849,14 @@ static void restore_error(SPYContext *c, ErrorState *state) {
         c->traceback_frame = c->py_depth ? c->frames[c->py_depth - 1].serial : 0;
     }
 }
+/* Create the exception for an error raised while c->handled is still the
+ * exception being handled, so that it becomes the new one's __context__. */
+static void materialize_error(SPYContext *c) {
+    if (!c->error_type[0] || c->exception) return;
+    ErrorState state = take_error(c);
+    restore_error(c, &state);
+    spy_release(state.value);
+}
 /* Exception display, as traceback.TracebackException formats the last line:
  * a SyntaxError with the generic message gets a keyword-typo suggestion. */
 static const char *const python_keywords[] = {
@@ -14478,6 +14486,7 @@ static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     c->handled = error.value ? spy_retain(error.value) : spy_retain(outer);
     SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none, error.value ? error.value : c->none, exception_traceback(c, error.value)};
     SPYValue *result = spy_call(c, exit, 3, args);
+    materialize_error(c);
     spy_release(exit);
     if (!result) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
     else if (error.value) {
@@ -14803,6 +14812,7 @@ static Result execute_try(SPYContext *c, Frame *f, Node *n) {
         SPYValue *outer = c->handled;
         c->handled = error.value ? spy_retain(error.value) : spy_retain(outer);
         Result final = execute(c, f, n->c);
+        materialize_error(c);
         spy_release(c->handled); c->handled = outer;
         if (final.flow == FLOW_NORMAL) {
             spy_release(final.value);
@@ -14826,6 +14836,7 @@ static Result execute_try(SPYContext *c, Frame *f, Node *n) {
             caught = 1;
             if (h->c) name_set(c, f->env, h->c->text, error.value);
             spy_release(r.value); r = execute(c, f, h->b);
+            materialize_error(c);
             if (h->c) {
                 clear_binding(c, f->env, h->c->text);
             }
@@ -14842,6 +14853,7 @@ static Result execute_try(SPYContext *c, Frame *f, Node *n) {
         ErrorState error = take_error(c);
         c->handled = error.value ? spy_retain(error.value) : spy_retain(outer);
         Result final = execute(c, f, n->c);
+        materialize_error(c);
         spy_release(c->handled); c->handled = outer;
         if (final.flow == FLOW_NORMAL) {
             spy_release(final.value);

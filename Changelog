@@ -441,6 +441,10 @@
   SyntaxError, and a name declared both global and nonlocal is reported at
   the first declaration. TLA+ models of scope errors, builtins lookup, and
   dynamic scopes.
+- An error raised by an operation in an except handler, a finally block, or
+  __exit__ keeps the exception being handled as its __context__ after it
+  propagates out (it was created only once the handler had exited). TLA+
+  model of the raise statement.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

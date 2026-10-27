@@ -152,7 +152,7 @@ Reference chapter contents | - table of contents
 4. Execution model > Execution model > Naming and binding > Lazy evaluation | Annotations, TypeAliases
 4. Execution model > Execution model > Naming and binding > Builtins and restricted execution | BuiltinsScope
 4. Execution model > Execution model > Naming and binding > Interaction with dynamic features | DynamicScopes
-4. Execution model > Execution model > Exceptions | TODO: Exceptions, Raise
+4. Execution model > Execution model > Exceptions | Exceptions, Raise
 4. Execution model > Execution model > Runtime Components | = sections
 4. Execution model > Execution model > Runtime Components > General Computing Model | - informative: describes processes, threads, and the host computer
 4. Execution model > Execution model > Runtime Components > Python Runtime Model | - informative: describes interpreters and threads; Core does not require threads (SLP315-HOST)
@@ -247,7 +247,7 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `del` statement | TODO: Del
 7. Simple statements > Simple statements > The `return` statement | Exceptions, Generators
 7. Simple statements > Simple statements > The `yield` statement | Generators
-7. Simple statements > Simple statements > The `raise` statement | TODO: Raise
+7. Simple statements > Simple statements > The `raise` statement | Raise
 7. Simple statements > Simple statements > The `break` statement | Iteration, Exceptions
 7. Simple statements > Simple statements > The `continue` statement | Iteration, Exceptions
 7. Simple statements > Simple statements > The `import` statement | TODO: Imports
@@ -372,7 +372,7 @@ Reference chapter contents | - table of contents
 13. Built-in functions > Built-in functions | TODO: BuiltinsNumeric, BuiltinsIter, BuiltinsObjects, BuiltinsText, BuiltinsCompile, Sorting
 14. Built-in exceptions | = sections
 14. Built-in exceptions > Built-in Exceptions | = sections
-14. Built-in exceptions > Built-in Exceptions > Exception context | TODO: Raise
+14. Built-in exceptions > Built-in Exceptions > Exception context | Raise
 14. Built-in exceptions > Built-in Exceptions > Inheriting from built-in exceptions | TODO: ExceptionObjects
 14. Built-in exceptions > Built-in Exceptions > Base classes | TODO: ExceptionObjects
 14. Built-in exceptions > Built-in Exceptions > Concrete exceptions | TODO: ConcreteExceptions
