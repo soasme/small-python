@@ -7666,3 +7666,136 @@ keyword_patterns:
 keyword_pattern:
     | NAME '=' pattern
 ```
+
+## Annex B (normative) Host Hooks
+
+A *host hook* is an implementation-supplied operation through which a language
+construct reaches a facility outside the language. A Core implementation need
+supply none of them; each subclause states the behaviour when the hook is
+absent. A Host implementation documents the hooks it supplies. A hook may call
+back into the language (to run code, raise exceptions, or call `write`
+methods); it shall return a normal completion with a value of the stated kind
+or a raise completion.
+
+### B.1 Modules
+
+#### B.1.1 HostFindModule ( *name*, *path* )
+
+Locates the module named by the absolute dotted *name*; *path* is the parent
+package's `__path__`, or **absent** for a top-level module. Returns **absent**
+when no module of that name exists, or a *module spec*: a record of the
+attributes to give the new module (`__file__`, `__path__` for a package,
+`__spec__`, `__loader__`, `__package__`) and the means to execute it. When the
+hook is absent, every name not already in the module cache (17.3) is not
+found.
+
+#### B.1.2 HostExecuteModule ( *spec*, *module* )
+
+Executes the module described by *spec* in *module*: for a module of Python
+source, obtains its source text (decoded as clause 11 specifies) and evaluates
+it as a `file` input (17.6.1) in *module*.`__dict__`. A host may supply modules
+implemented in other ways; they shall behave as module objects (17.2).
+
+#### B.1.3 Initial modules
+
+Before the main module runs, the module cache holds the module `builtins`,
+whose namespace is the built-in namespace (clause 19). A host may preload other
+modules, including the library facades of Annex C.
+
+### B.2 Source text
+
+#### B.2.1 HostDecodeSource ( *bytes*, *encoding* )
+
+Decodes source bytes declared in an encoding other than UTF-8, ISO 8859-1, or
+US-ASCII (11.2). Returns the text and the canonical encoding name, or
+**absent** if the host does not know the encoding (11.2 then raises the
+`SyntaxError`).
+
+#### B.2.2 HostLookupCodec ( *name* )
+
+Returns an encoder and a decoder for an encoding not in Table 23-1, or
+**absent** (23.3.1 then raises `LookupError`). The codec shall report errors
+by the `UnicodeError` subclasses of 21.3.6 and apply the error handlers of
+23.3.2.
+
+### B.3 Program interaction
+
+#### B.3.1 HostStandardOutput ( )
+
+Returns the object to which `print` writes by default, which shall have a
+`write` method taking a `str`, or **absent** (then `print` writes nothing).
+
+#### B.3.2 HostInput ( *prompt* )
+
+Implements `input` (19.3.20). When absent, `input` raises a `RuntimeError`
+exception ("input(): lost sys.stdin").
+
+#### B.3.3 HostOpen ( *arguments* )
+
+Implements `open` (19.3.28), returning a file object. When absent, `open`
+raises an `OSError` exception.
+
+#### B.3.4 HostDisplay ( *value* )
+
+Displays the value of an expression statement in interactive input (17.6.2).
+The default, used when the hook is absent, writes ToRepr(*value*) and a line
+terminator to HostStandardOutput() and binds `_` in the built-in namespace to
+*value*.
+
+#### B.3.5 HostBreakpoint ( *args*, *kws* )
+
+Implements `breakpoint` (19.3.7). When absent, `breakpoint` returns `None`.
+
+### B.4 Diagnostics
+
+#### B.4.1 HostWarn ( *category*, *message*, *location* )
+
+Receives a warning: a subclass of `Warning` (21.6), a message string, and the
+file name and line where it was issued (for warnings issued while running, the
+location of the code that triggered the operation). The host may ignore it,
+display it, or raise it: in the last case it returns a raise completion with an
+instance of *category* with argument *message*, which propagates from the point
+where the warning was issued. When the hook is absent, warnings are ignored.
+`BytesWarning` (24.1) and `ResourceWarning` are issued only when the host asks
+for them.
+
+#### B.4.2 HostReportException ( *e* )
+
+Reports an exception that propagated out of the main module or out of code the
+host ran, typically by writing a traceback display (18.1.2, 18.1.3) to the
+standard error stream. When absent, nothing is reported. After it, the
+program ends unsuccessfully.
+
+#### B.4.3 HostReportUnraisable ( *e*, *context* )
+
+Reports an exception that could not propagate (18.1.4), with an object
+describing where it occurred. When absent, nothing is reported.
+
+#### B.4.4 SystemExit
+
+When a `SystemExit` exception *e* propagates out of the main module, the
+program ends without HostReportException. Its exit status is: 0 if *e*.`code` is
+`None`; *e*.`code` if it is an `int`; and otherwise 1, after writing
+ToStr(*e*.`code`) to the standard error stream if the host has one. How the
+status reaches the environment is host-defined.
+
+### B.5 Asynchronous generators
+
+#### B.5.1 HostAsyncGenHooks ( )
+
+Returns the pair (*firstiter*, *finalizer*) of callables (or `None`) that 27.5.4
+calls for asynchronous generators; the host's facade (Annex C) lets programs
+install them. When absent, both are `None`.
+
+### B.6 Execution parameters
+
+The following values are held by the implementation and may be changed by the
+host, for example through the facade of Annex C; a program of the Core profile
+cannot change them otherwise:
+
+| Parameter | Initial value | Used by |
+| --- | --- | --- |
+| recursion limit | implementation-defined (Annex D), 1000 recommended | 9.6 |
+| int string limit | 4300 | 22.1.8 |
+| asyncgen hooks | `None`, `None` | 27.5.4 |
+| optimization level | 0; when greater than 0, `assert` statements are not evaluated and `__debug__` is `False` | 14.5, 19.1 |
