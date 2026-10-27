@@ -11,6 +11,18 @@
 
 enum { MAX_DEPTH = 200 };
 
+/* Engine values the binding uses, captured when a runtime starts so that later
+ * globals named int, set, ... cannot replace them. The comparisons follow
+ * CPython's Py_LT..Py_GE order. */
+enum {
+    H_INT, H_HEX, H_COMPLEX, H_BYTEARRAY, H_BYTES, H_SET, H_FROZENSET, H_LEN, H_HASH, H_DIR, H_NEXT,
+    H_BUILTINS, H_GLOBALS, H_LT, H_LE, H_EQ, H_NE, H_GT, H_GE, H_CONTAINS, H_COUNT
+};
+static const char HELPERS[] =
+    "(int, hex, complex, bytearray, bytes, set, frozenset, len, hash, dir, next, __import__('builtins'), globals(),"
+    " lambda a, b: a < b, lambda a, b: a <= b, lambda a, b: a == b, lambda a, b: a != b,"
+    " lambda a, b: a > b, lambda a, b: a >= b, lambda a, b: a in b)";
+
 typedef struct ObjectRef ObjectRef;
 typedef struct {
     PyObject_HEAD
@@ -20,6 +32,12 @@ typedef struct {
     PyObject *modules;  /* Registered module name -> members dict, source string, or both. */
     ObjectRef *objects; /* Live Object wrappers, released when the runtime closes. */
     int callbacks;      /* Host callbacks currently running. */
+    unsigned long owner;  /* Thread running those callbacks. */
+    SPYValue *helper[H_COUNT];
+    /* The last Python exception a callback turned into an engine exception,
+     * and that engine exception, so the original can be its Error's cause. */
+    PyObject *host_error;
+    SPYValue *host_value;
 } Runtime;
 typedef struct ObjectRef {
     PyObject_HEAD
@@ -39,6 +57,18 @@ static SPYValue *to_spy(Runtime *, PyObject *, int);
 static PyObject *raise_spy_error(Runtime *rt) {
     SPYContext *c = rt->ctx;
     SPYValue *value = spy_error_value(c);
+    /* An exception from a host function that nothing caught: KeyboardInterrupt,
+     * SystemExit, and other non-Exception errors come back as themselves, and
+     * the rest become the cause of the Error. */
+    PyObject *cause = NULL;
+    if (value && value == rt->host_value) cause = Py_NewRef(rt->host_error);
+    Py_CLEAR(rt->host_error);
+    spy_release(rt->host_value); rt->host_value = NULL;
+    if (cause && !PyErr_GivenExceptionMatches(cause, PyExc_Exception)) {
+        spy_release(value); spy_clear_error(c);
+        PyErr_SetRaisedException(cause);
+        return NULL;
+    }
     PyObject *exception = value ? to_python(rt, value, 0) : Py_NewRef(Py_None);
     spy_release(value);
     if (!exception) { PyErr_Clear(); exception = Py_NewRef(Py_None); }
@@ -55,8 +85,28 @@ static PyObject *raise_spy_error(Runtime *rt) {
     }
     spy_clear_error(c);
     Py_DECREF(exception);
+    if (error && cause) PyException_SetCause(error, Py_NewRef(cause));
+    Py_XDECREF(cause);
     if (error) { PyErr_SetObject(Error, error); Py_DECREF(error); }
     return NULL;
+}
+
+/* Python protocols (len, hash, items, iteration) raise the builtin exception
+ * Python code expects for TypeError, KeyError, and IndexError; key is the
+ * KeyError's argument. Other engine errors raise Error. */
+static PyObject *raise_protocol_error(Runtime *rt, PyObject *key) {
+    const char *type = spy_error_type(rt->ctx);
+    PyObject *cls = !strcmp(type, "TypeError") ? PyExc_TypeError : !strcmp(type, "KeyError") ? PyExc_KeyError
+                  : !strcmp(type, "IndexError") ? PyExc_IndexError : NULL;
+    if (!cls) return raise_spy_error(rt);
+    if (cls == PyExc_KeyError && key) PyErr_SetObject(cls, key);
+    else PyErr_SetString(cls, spy_error_message(rt->ctx));
+    spy_clear_error(rt->ctx);
+    return NULL;
+}
+
+static SPYValue *helper_call(Runtime *rt, int which, size_t argc, SPYValue *const *argv) {
+    return spy_call(rt->ctx, rt->helper[which], argc, argv);
 }
 
 /* A Python exception raised inside a host callback becomes the engine's
@@ -83,7 +133,7 @@ static SPYValue *raise_python_error(Runtime *rt) {
     PyObject *mro = PyObject_GetAttrString((PyObject *)Py_TYPE(exception), "__mro__");
     for (Py_ssize_t i = 0; mro && i < PyTuple_GET_SIZE(mro) && !cls; i++) {
         const char *name = ((PyTypeObject *)PyTuple_GET_ITEM(mro, i))->tp_name;
-        cls = spy_get_global(c, name);
+        cls = spy_get_attr(c, rt->helper[H_BUILTINS], name);
         if (cls && spy_type(cls) != SPY_CLASS) { spy_release(cls); cls = NULL; }
         if (!cls) spy_clear_error(c);
     }
@@ -107,8 +157,22 @@ static SPYValue *raise_python_error(Runtime *rt) {
     for (Py_ssize_t i = 0; argv && i < (n > 0 ? n : 1); i++) spy_release(argv[i]);
     PyMem_Free(argv); spy_release(error); spy_release(cls);
     Py_XDECREF(args);
-    Py_XDECREF(message); Py_DECREF(exception);
+    Py_XDECREF(message);
+    spy_release(rt->host_value);
+    rt->host_value = spy_error_value(c);
+    Py_XSETREF(rt->host_error, exception);
     return NULL;
+}
+
+/* Host code (functions, output, the loader) runs with the engine suspended.
+ * It may call into the engine, but only from the thread that is running it. */
+static void enter_callback(Runtime *rt) {
+    if (!rt->callbacks++) rt->owner = PyThread_get_thread_ident();
+}
+static int other_thread(Runtime *rt) {
+    if (!rt->callbacks || rt->owner == PyThread_get_thread_ident()) return 0;
+    PyErr_SetString(PyExc_RuntimeError, "the runtime is in use by another thread");
+    return 1;
 }
 
 static Object *object_new(Runtime *rt, SPYValue *value) {
@@ -122,7 +186,7 @@ static Object *object_new(Runtime *rt, SPYValue *value) {
     return o;
 }
 static int closed(Runtime *rt) {
-    if (rt->ctx) return 0;
+    if (rt->ctx) return other_thread(rt);
     PyErr_SetString(PyExc_RuntimeError, "the runtime is closed");
     return 1;
 }
@@ -143,7 +207,7 @@ static SPYValue *host_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         else { Py_XDECREF(converted); if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "keywords must be a dict"); Py_CLEAR(args); }
     }
     if (args) {
-        rt->callbacks++;
+        enter_callback(rt);
         result = PyObject_Call((PyObject *)data, args, kwargs);
         rt->callbacks--;
     }
@@ -162,14 +226,6 @@ static SPYValue *native_function(Runtime *rt, PyObject *callable, const char *fa
     return native;
 }
 
-/* Call a builtin by name with converted arguments, for types the C API has no
- * constructor for. Steals nothing; returns an owned value or NULL with a spy error. */
-static SPYValue *call_builtin(SPYContext *c, const char *name, size_t argc, SPYValue *const *argv) {
-    SPYValue *fn = spy_get_global(c, name), *result = fn ? spy_call(c, fn, argc, argv) : NULL;
-    spy_release(fn);
-    return result;
-}
-
 /* Python -> spy. Returns an owned value, or NULL with a Python exception set. */
 static SPYValue *to_spy(Runtime *rt, PyObject *obj, int depth) {
     SPYContext *c = rt->ctx;
@@ -183,18 +239,19 @@ static SPYValue *to_spy(Runtime *rt, PyObject *obj, int depth) {
         if (n == -1 && PyErr_Occurred()) return NULL;
         if (!overflow) v = spy_int(c, n);
         else {
-            PyObject *text = PyObject_Str(obj);
+            /* Hexadecimal, which has no digit limit, unlike decimal strings. */
+            PyObject *text = PyNumber_ToBase(obj, 16);
             Py_ssize_t len;
             const char *s = text ? PyUnicode_AsUTF8AndSize(text, &len) : NULL;
-            SPYValue *string = s ? spy_string(c, s, (size_t)len) : NULL;
-            v = string ? call_builtin(c, "int", 1, &string) : NULL;
-            spy_release(string); Py_XDECREF(text);
+            SPYValue *args[] = {s ? spy_string(c, s, (size_t)len) : NULL, s ? spy_int(c, 0) : NULL};
+            v = args[0] && args[1] ? helper_call(rt, H_INT, 2, args) : NULL;
+            spy_release(args[0]); spy_release(args[1]); Py_XDECREF(text);
             if (!s) return NULL;
         }
     } else if (PyFloat_Check(obj)) v = spy_float(c, PyFloat_AS_DOUBLE(obj));
     else if (PyComplex_Check(obj)) {
         SPYValue *parts[] = {spy_float(c, PyComplex_RealAsDouble(obj)), spy_float(c, PyComplex_ImagAsDouble(obj))};
-        v = parts[0] && parts[1] ? call_builtin(c, "complex", 2, parts) : NULL;
+        v = parts[0] && parts[1] ? helper_call(rt, H_COMPLEX, 2, parts) : NULL;
         spy_release(parts[0]); spy_release(parts[1]);
     } else if (PyUnicode_Check(obj)) {
         PyObject *bytes = PyUnicode_AsEncodedString(obj, "utf-8", "surrogatepass");
@@ -204,7 +261,7 @@ static SPYValue *to_spy(Runtime *rt, PyObject *obj, int depth) {
     } else if (PyBytes_Check(obj)) v = spy_bytes(c, PyBytes_AS_STRING(obj), (size_t)PyBytes_GET_SIZE(obj));
     else if (PyByteArray_Check(obj)) {
         SPYValue *bytes = spy_bytes(c, PyByteArray_AS_STRING(obj), (size_t)PyByteArray_GET_SIZE(obj));
-        v = bytes ? call_builtin(c, "bytearray", 1, &bytes) : NULL;
+        v = bytes ? helper_call(rt, H_BYTEARRAY, 1, &bytes) : NULL;
         spy_release(bytes);
     } else if (PyList_Check(obj) || PyTuple_Check(obj) || PyAnySet_Check(obj)) {
         PyObject *items = PySequence_Fast(obj, "expected a sequence");
@@ -221,7 +278,7 @@ static SPYValue *to_spy(Runtime *rt, PyObject *obj, int depth) {
                 for (Py_ssize_t i = 0; list && i < n; i++)
                     if (spy_list_append(c, list, converted[i])) { spy_release(list); list = NULL; }
                 if (list && PyAnySet_Check(obj)) {
-                    v = call_builtin(c, PyFrozenSet_Check(obj) ? "frozenset" : "set", 1, &list);
+                    v = helper_call(rt, PyFrozenSet_Check(obj) ? H_FROZENSET : H_SET, 1, &list);
                     spy_release(list);
                 } else v = list;
             }
@@ -271,9 +328,9 @@ static PyObject *to_python(Runtime *rt, SPYValue *v, int depth) {
         int64_t n;
         if (!spy_as_int(c, v, &n)) return PyLong_FromLongLong(n);
         spy_clear_error(c);
-        SPYValue *text = spy_str(c, v);
+        SPYValue *text = helper_call(rt, H_HEX, 1, &v);
         const char *s = text ? spy_as_string(c, text, NULL) : NULL;
-        PyObject *result = s ? PyLong_FromString(s, NULL, 10) : NULL;
+        PyObject *result = s ? PyLong_FromString(s, NULL, 0) : NULL;
         spy_release(text);
         return s ? result : raise_spy_error(rt);
     }
@@ -295,7 +352,7 @@ static PyObject *to_python(Runtime *rt, SPYValue *v, int depth) {
     }
     case SPY_BYTES: case SPY_BYTEARRAY: {
         size_t len;
-        SPYValue *bytes = spy_type(v) == SPY_BYTES ? spy_retain(v) : call_builtin(c, "bytes", 1, &v);
+        SPYValue *bytes = spy_type(v) == SPY_BYTES ? spy_retain(v) : helper_call(rt, H_BYTES, 1, &v);
         const unsigned char *s = bytes ? spy_as_bytes(c, bytes, &len) : NULL;
         PyObject *result = !s ? NULL : spy_type(v) == SPY_BYTES ? PyBytes_FromStringAndSize((const char *)s, (Py_ssize_t)len)
                                                                : PyByteArray_FromStringAndSize((const char *)s, (Py_ssize_t)len);
@@ -348,13 +405,15 @@ static PyObject *to_python(Runtime *rt, SPYValue *v, int depth) {
 /* Output and module loading call back into Python. */
 static int write_output(void *data, const char *s, size_t n) {
     Runtime *rt = data;
-    PyObject *text = PyUnicode_DecodeUTF8(s, (Py_ssize_t)n, "surrogateescape"), *result = NULL;
+    PyObject *text = PyUnicode_DecodeUTF8(s, (Py_ssize_t)n, "surrogatepass"), *result = NULL;
     if (text) {
+        enter_callback(rt);
         if (rt->output) result = PyObject_CallOneArg(rt->output, text);
         else {
             PyObject *out = PySys_GetObject("stdout");
             result = out && out != Py_None ? PyObject_CallMethod(out, "write", "O", text) : Py_NewRef(Py_None);
         }
+        rt->callbacks--;
     }
     Py_XDECREF(text);
     if (!result) { PyErr_WriteUnraisable(NULL); return -1; }
@@ -363,7 +422,9 @@ static int write_output(void *data, const char *s, size_t n) {
 }
 static char *load_module(void *data, const char *name) {
     Runtime *rt = data;
+    enter_callback(rt);
     PyObject *source = PyObject_CallFunction(rt->loader, "s", name);
+    rt->callbacks--;
     char *copy = NULL;
     if (source && source != Py_None) {
         Py_ssize_t len;
@@ -418,23 +479,39 @@ static int Runtime_init(Runtime *self, PyObject *args, PyObject *kwargs) {
         PyErr_SetString(PyExc_TypeError, "output and loader must be callable or None");
         return -1;
     }
-    if (!(self->modules = PyDict_New())) return -1;
+    PyObject *modules = PyDict_New();
+    if (!modules) return -1;
+    Py_XSETREF(self->modules, modules);
     if (!(self->ctx = spy_context_new())) { PyErr_NoMemory(); return -1; }
     spy_set_opaque(self->ctx, self);
-    self->output = output == Py_None ? NULL : Py_NewRef(output);
-    self->loader = loader == Py_None ? NULL : Py_NewRef(loader);
+    Py_XSETREF(self->output, output == Py_None ? NULL : Py_NewRef(output));
+    Py_XSETREF(self->loader, loader == Py_None ? NULL : Py_NewRef(loader));
     spy_set_output(self->ctx, write_output, self);
     if (self->loader) spy_set_module_loader(self->ctx, load_module, self);
-    spy_set_step_limit(self->ctx, (size_t)step_limit);
     if (std && spy_std_init(self->ctx)) { raise_spy_error(self); return -1; }
+    SPYValue *helpers = spy_eval(self->ctx, HELPERS, "<small_python>");
+    for (int i = 0; helpers && i < H_COUNT; i++) {
+        SPYValue *index = spy_int(self->ctx, i);
+        self->helper[i] = index ? spy_get_item(self->ctx, helpers, index) : NULL;
+        spy_release(index);
+        if (!self->helper[i]) { spy_release(helpers); helpers = NULL; }
+    }
+    if (!helpers) { raise_spy_error(self); return -1; }
+    spy_release(helpers);
+    spy_set_step_limit(self->ctx, (size_t)step_limit);
     return 0;
 }
 static void runtime_close(Runtime *self) {
     if (!self->ctx) return;
     for (Object *o = self->objects; o; o = o->next) { spy_release(o->value); o->value = NULL; }
+    for (int i = 0; i < H_COUNT; i++) { spy_release(self->helper[i]); self->helper[i] = NULL; }
+    spy_release(self->host_value); self->host_value = NULL;
+    Py_CLEAR(self->host_error);
     SPYContext *ctx = self->ctx;
     self->ctx = NULL;
     spy_context_free(ctx);
+    /* Host callables often refer back to the runtime; drop them with it. */
+    Py_CLEAR(self->output); Py_CLEAR(self->loader); Py_CLEAR(self->modules);
 }
 static void Runtime_dealloc(Runtime *self) {
     runtime_close(self);
@@ -457,8 +534,13 @@ static PyObject *run_source(Runtime *self, PyObject *args, PyObject *kwargs, int
 }
 static PyObject *Runtime_eval(Runtime *self, PyObject *args, PyObject *kwargs) { return run_source(self, args, kwargs, 1); }
 static PyObject *Runtime_exec(Runtime *self, PyObject *args, PyObject *kwargs) { return run_source(self, args, kwargs, 0); }
+static const char *global_name(PyObject *key) {
+    if (PyUnicode_Check(key)) return PyUnicode_AsUTF8(key);
+    PyErr_Format(PyExc_TypeError, "global names must be str, not '%.200s'", Py_TYPE(key)->tp_name);
+    return NULL;
+}
 static PyObject *Runtime_getitem(Runtime *self, PyObject *key) {
-    const char *name = PyUnicode_AsUTF8(key);
+    const char *name = global_name(key);
     if (!name || closed(self)) return NULL;
     SPYValue *value = spy_get_global(self->ctx, name);
     if (!value) {
@@ -470,12 +552,12 @@ static PyObject *Runtime_getitem(Runtime *self, PyObject *key) {
     return result;
 }
 static int Runtime_setitem(Runtime *self, PyObject *key, PyObject *item) {
-    const char *name = PyUnicode_AsUTF8(key);
+    const char *name = global_name(key);
     if (!name || closed(self)) return -1;
     if (!item) {
-        SPYValue *globals = spy_eval(self->ctx, "globals()", "<host>"), *k = globals ? spy_string(self->ctx, name, strlen(name)) : NULL;
-        SPYValue *pop = globals ? spy_get_attr(self->ctx, globals, "pop") : NULL, *removed = pop && k ? spy_call(self->ctx, pop, 1, &k) : NULL;
-        spy_release(globals); spy_release(k); spy_release(pop);
+        SPYValue *k = spy_string(self->ctx, name, strlen(name));
+        SPYValue *pop = k ? spy_get_attr(self->ctx, self->helper[H_GLOBALS], "pop") : NULL, *removed = pop ? spy_call(self->ctx, pop, 1, &k) : NULL;
+        spy_release(k); spy_release(pop);
         if (!removed) {
             if (!strcmp(spy_error_type(self->ctx), "KeyError")) { spy_clear_error(self->ctx); PyErr_SetObject(PyExc_KeyError, key); return -1; }
             raise_spy_error(self); return -1;
@@ -566,6 +648,7 @@ static PyObject *Runtime_collect(Runtime *self, PyObject *unused) {
 }
 static PyObject *Runtime_close(Runtime *self, PyObject *unused) {
     (void)unused;
+    if (other_thread(self)) return NULL;
     if (self->callbacks) { PyErr_SetString(PyExc_RuntimeError, "cannot close a runtime from its own host function"); return NULL; }
     runtime_close(self);
     Py_RETURN_NONE;
@@ -602,9 +685,11 @@ static PyTypeObject RuntimeType = {
 
 /* Object: an engine value the binding does not copy. */
 static SPYValue *live_value(Object *self) {
-    if (self->value && self->runtime->ctx) return self->value;
-    PyErr_SetString(PyExc_RuntimeError, "the runtime is closed");
-    return NULL;
+    if (!self->value || !self->runtime->ctx) {
+        PyErr_SetString(PyExc_RuntimeError, "the runtime is closed");
+        return NULL;
+    }
+    return other_thread(self->runtime) ? NULL : self->value;
 }
 static void Object_dealloc(Object *self) {
     Runtime *rt = self->runtime;
@@ -614,6 +699,18 @@ static void Object_dealloc(Object *self) {
     if (self->value && rt->ctx) spy_release(self->value);
     Py_DECREF((PyObject *)rt);
     PyObject_Free(self);
+}
+/* Run a helper on the object and other values; returns an owned engine value
+ * or NULL with a Python exception set. */
+static SPYValue *object_helper(Object *self, int which, PyObject *other, int other_first, PyObject *key) {
+    if (!live_value(self)) return NULL;
+    SPYValue *args[2] = {self->value, NULL};
+    if (other && !(args[1] = to_spy(self->runtime, other, 0))) return NULL;
+    if (other && other_first) { args[0] = args[1]; args[1] = self->value; }
+    SPYValue *result = helper_call(self->runtime, which, other ? 2 : 1, args);
+    if (other) spy_release(other_first ? args[0] : args[1]);
+    if (!result) raise_protocol_error(self->runtime, key);
+    return result;
 }
 static PyObject *Object_call(Object *self, PyObject *args, PyObject *kwargs) {
     if (!live_value(self)) return NULL;
@@ -625,20 +722,20 @@ static PyObject *Object_call(Object *self, PyObject *args, PyObject *kwargs) {
     Py_DECREF(full);
     return result;
 }
+/* Attributes come from the engine; the wrapper's own (__dir__, __class__, ...)
+ * answer only names the engine value does not have. */
 static PyObject *Object_getattr(Object *self, PyObject *name) {
-    PyObject *found = PyObject_GenericGetAttr((PyObject *)self, name);
-    if (found || !PyErr_ExceptionMatches(PyExc_AttributeError)) return found;
-    PyErr_Clear();
     const char *text = PyUnicode_AsUTF8(name);
     if (!text || !live_value(self)) return NULL;
     SPYValue *value = spy_get_attr(self->runtime->ctx, self->value, text);
     if (!value) {
-        if (!strcmp(spy_error_type(self->runtime->ctx), "AttributeError")) {
-            PyErr_SetString(PyExc_AttributeError, spy_error_message(self->runtime->ctx));
-            spy_clear_error(self->runtime->ctx);
-            return NULL;
-        }
-        return raise_spy_error(self->runtime);
+        if (strcmp(spy_error_type(self->runtime->ctx), "AttributeError")) return raise_spy_error(self->runtime);
+        PyObject *found = PyObject_GenericGetAttr((PyObject *)self, name);
+        if (found || !PyErr_ExceptionMatches(PyExc_AttributeError)) { spy_clear_error(self->runtime->ctx); return found; }
+        PyErr_Clear();
+        PyErr_SetString(PyExc_AttributeError, spy_error_message(self->runtime->ctx));
+        spy_clear_error(self->runtime->ctx);
+        return NULL;
     }
     PyObject *result = to_python(self->runtime, value, 0);
     spy_release(value);
@@ -651,14 +748,17 @@ static int Object_setattr(Object *self, PyObject *name, PyObject *item) {
     SPYValue *value = to_spy(self->runtime, item, 0);
     int status = value ? spy_set_attr(self->runtime->ctx, self->value, text, value) : -1;
     spy_release(value);
-    if (status && !PyErr_Occurred()) raise_spy_error(self->runtime);
+    if (status && !PyErr_Occurred()) {
+        if (strcmp(spy_error_type(self->runtime->ctx), "AttributeError")) raise_protocol_error(self->runtime, NULL);
+        else { PyErr_SetString(PyExc_AttributeError, spy_error_message(self->runtime->ctx)); spy_clear_error(self->runtime->ctx); }
+    }
     return status;
 }
 static PyObject *Object_getitem(Object *self, PyObject *key) {
     if (!live_value(self)) return NULL;
     SPYValue *k = to_spy(self->runtime, key, 0), *value = k ? spy_get_item(self->runtime->ctx, self->value, k) : NULL;
     spy_release(k);
-    if (!value) return PyErr_Occurred() ? NULL : raise_spy_error(self->runtime);
+    if (!value) return PyErr_Occurred() ? NULL : raise_protocol_error(self->runtime, key);
     PyObject *result = to_python(self->runtime, value, 0);
     spy_release(value);
     return result;
@@ -669,19 +769,24 @@ static int Object_setitem(Object *self, PyObject *key, PyObject *item) {
     SPYValue *k = to_spy(self->runtime, key, 0), *value = k ? to_spy(self->runtime, item, 0) : NULL;
     int status = value ? spy_set_item(self->runtime->ctx, self->value, k, value) : -1;
     spy_release(k); spy_release(value);
-    if (status && !PyErr_Occurred()) raise_spy_error(self->runtime);
+    if (status && !PyErr_Occurred()) raise_protocol_error(self->runtime, key);
     return status;
 }
 static PyObject *Object_iter(Object *self) {
     if (!live_value(self)) return NULL;
     SPYValue *iterator = spy_iter(self->runtime->ctx, self->value);
-    if (!iterator) return raise_spy_error(self->runtime);
+    if (!iterator) return raise_protocol_error(self->runtime, NULL);
     return (PyObject *)object_new(self->runtime, iterator);
 }
+/* Through the builtin next(), which checks that the value is an iterator. */
 static PyObject *Object_next(Object *self) {
     if (!live_value(self)) return NULL;
-    SPYValue *item = spy_next(self->runtime->ctx, self->value);
-    if (!item) return spy_error_type(self->runtime->ctx)[0] ? raise_spy_error(self->runtime) : NULL;
+    SPYValue *item = helper_call(self->runtime, H_NEXT, 1, &self->value);
+    if (!item) {
+        if (strcmp(spy_error_type(self->runtime->ctx), "StopIteration")) return raise_protocol_error(self->runtime, NULL);
+        spy_clear_error(self->runtime->ctx);
+        return NULL;
+    }
     PyObject *result = to_python(self->runtime, item, 0);
     spy_release(item);
     return result;
@@ -697,10 +802,55 @@ static PyObject *Object_text(Object *self, int repr) {
 static PyObject *Object_repr(Object *self) { return self->value && self->runtime->ctx ? Object_text(self, 1) : PyUnicode_FromString("<small_python.Object (closed)>"); }
 static PyObject *Object_str(Object *self) { return Object_text(self, 0); }
 static int Object_bool(Object *self) { return live_value(self) ? spy_truth(self->value) : -1; }
+static Py_ssize_t Object_length(Object *self) {
+    SPYValue *n = object_helper(self, H_LEN, NULL, 0, NULL);
+    int64_t length = -1;
+    if (n && spy_as_int(self->runtime->ctx, n, &length)) { raise_spy_error(self->runtime); length = -1; }
+    spy_release(n);
+    return (Py_ssize_t)length;
+}
+static int Object_contains(Object *self, PyObject *item) {
+    SPYValue *found = object_helper(self, H_CONTAINS, item, 1, NULL);
+    int result = found ? spy_truth(found) : -1;
+    spy_release(found);
+    return result;
+}
+static Py_hash_t Object_hash(Object *self) {
+    SPYValue *hash = object_helper(self, H_HASH, NULL, 0, NULL);
+    int64_t n = -1;
+    if (hash && spy_as_int(self->runtime->ctx, hash, &n)) { raise_spy_error(self->runtime); n = -1; }
+    spy_release(hash);
+    if (!hash || PyErr_Occurred()) return -1;
+    return n == -1 ? -2 : (Py_hash_t)n;
+}
+/* Comparisons run in the engine; values it cannot receive compare as
+ * NotImplemented, so == against them is False. */
+static PyObject *Object_richcompare(Object *self, PyObject *other, int op) {
+    if (!live_value(self)) return NULL;
+    SPYValue *value = to_spy(self->runtime, other, 0);
+    if (!value) {
+        if (!PyErr_ExceptionMatches(PyExc_TypeError) && !PyErr_ExceptionMatches(PyExc_ValueError)) return NULL;
+        PyErr_Clear();
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    SPYValue *args[] = {self->value, value}, *result = helper_call(self->runtime, H_LT + op, 2, args);
+    spy_release(value);
+    if (!result) return raise_protocol_error(self->runtime, NULL);
+    PyObject *converted = to_python(self->runtime, result, 0);
+    spy_release(result);
+    return converted;
+}
+static PyObject *Object_dir(Object *self, PyObject *unused) {
+    (void)unused;
+    SPYValue *names = object_helper(self, H_DIR, NULL, 0, NULL);
+    PyObject *result = names ? to_python(self->runtime, names, 0) : NULL;
+    spy_release(names);
+    return result;
+}
+static PyMethodDef Object_methods[] = {{"__dir__", (PyCFunction)Object_dir, METH_NOARGS, "The engine's dir() of the value."}, {0}};
 static PyNumberMethods Object_number = {.nb_bool = (inquiry)Object_bool};
-static PyMappingMethods Object_mapping = {0, (binaryfunc)Object_getitem, (objobjargproc)Object_setitem};
-static PyObject *Object_runtime(Object *self, void *unused) { (void)unused; return Py_NewRef((PyObject *)self->runtime); }
-static PyGetSetDef Object_getset[] = {{"runtime", (getter)Object_runtime, NULL, "The runtime that owns this value.", NULL}, {0}};
+static PyMappingMethods Object_mapping = {(lenfunc)Object_length, (binaryfunc)Object_getitem, (objobjargproc)Object_setitem};
+static PySequenceMethods Object_sequence = {.sq_contains = (objobjproc)Object_contains};
 static PyTypeObject ObjectType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "small_python._core.Object",
@@ -712,12 +862,15 @@ static PyTypeObject ObjectType = {
     .tp_getattro = (getattrofunc)Object_getattr,
     .tp_setattro = (setattrofunc)Object_setattr,
     .tp_as_mapping = &Object_mapping,
+    .tp_as_sequence = &Object_sequence,
     .tp_as_number = &Object_number,
+    .tp_hash = (hashfunc)Object_hash,
+    .tp_richcompare = (richcmpfunc)Object_richcompare,
     .tp_iter = (getiterfunc)Object_iter,
     .tp_iternext = (iternextfunc)Object_next,
     .tp_repr = (reprfunc)Object_repr,
     .tp_str = (reprfunc)Object_str,
-    .tp_getset = Object_getset,
+    .tp_methods = Object_methods,
 };
 
 static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "small_python._core", "Small Python engine binding.", -1, NULL, NULL, NULL, NULL, NULL};

@@ -30,7 +30,7 @@ package-dir = { "" = "src" }
 packages = ["small_python"]
 
 [tool.setuptools.package-data]
-small_python = ["py.typed"]
+small_python = ["py.typed", "*.pyi"]
 
 [tool.setuptools.exclude-package-data]
 small_python = ["*.c"]
@@ -39,4 +39,4 @@ small_python = ["*.c"]
 [tool.cibuildwheel]
 build = "cp3*-manylinux_* cp3*-musllinux_* cp3*-macosx_*"
 skip = "*t-*"
-test-command = "python {project}/tests/binding.py"
+test-command = "python -m unittest discover -s {project}/python/tests"

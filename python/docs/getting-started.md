@@ -99,8 +99,8 @@ with Runtime() as rt:
 
 Values that are not plain data, such as functions, class instances,
 generators, and modules, come back as `small_python.Object`. An `Object` forwards
-calls, attribute access, item access, iteration, `repr`, `str`, and truth
-testing to the engine.
+calls, attributes, items, `len`, `in`, iteration, comparisons, hashing,
+`repr`, `str`, `dir`, and truth testing to the engine.
 
 ```python
 from small_python import Runtime

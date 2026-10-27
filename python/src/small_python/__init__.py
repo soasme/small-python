@@ -29,6 +29,8 @@ def _error_property(index):
 Error.type = _error_property(0)
 Error.message = _error_property(1)
 Error.exception = _error_property(2)
+Error.filename = None  # set on errors raised by the engine
+Error.lineno = None
 Error.__str__ = lambda self: f"{self.type}: {self.message}" if self.message else str(self.type)
 
 

@@ -377,3 +377,11 @@
   release script, PyPI publish workflow with cibuildwheel wheels for Linux and
   macOS, a standalone sdist carrying the engine sources, and user
   documentation in python/docs.
+- small_python fixes: integers beyond 4,300 digits, Object len/in/==/hash/dir,
+  engine-first attributes, protocol exceptions (KeyError, IndexError,
+  TypeError), next() on non-iterators (previously read invalid memory), host
+  exceptions matched to builtins only and kept as the Error's __cause__,
+  KeyboardInterrupt and SystemExit passed through, del rt[name] no longer
+  resetting the step count, re-entry refused from output and loader and from
+  other threads, and close() releasing host callables. Tests in python/tests
+  (98 cases, also run under ASan and UBSan) and a type stub.

@@ -54,8 +54,18 @@ An independent engine context with its own globals and modules.
 - `closed`: `True` after `close()`.
 
 A runtime is a context manager; leaving the `with` block calls `close()`.
-Methods of a closed runtime raise `RuntimeError`. `eval`, `exec`, and `close`
-raise `RuntimeError` when called from a host function of the same runtime.
+Closing also drops the runtime's references to host functions, module
+members, `output`, and `loader`. Methods of a closed runtime raise
+`RuntimeError`. `eval`, `exec`, and `close` raise `RuntimeError` when called
+from a host function, `output`, or `loader` of the same runtime.
+
+While a host function, `output`, or `loader` runs, the runtime belongs to the
+thread running it: using the runtime or its objects from another thread raises
+`RuntimeError`.
+
+`rt[name]` looks a name up the way engine code does, in globals and then
+builtins, so `rt["len"]` is the builtin `len`. Assigning and deleting change
+globals only.
 
 ## `Object`
 
@@ -66,13 +76,27 @@ An engine value that is not converted to a Python value. It supports:
 | `obj(*args, **kwargs)` | call |
 | `obj.name`, `obj.name = v` | attribute get and set |
 | `obj[key]`, `obj[key] = v` | item get and set |
+| `len(obj)`, `x in obj` | `len`, `in` |
 | `iter(obj)`, `next(obj)` | iteration |
-| `repr(obj)`, `str(obj)` | `repr` and `str` |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | the same comparison |
+| `hash(obj)` | `hash` |
+| `repr(obj)`, `str(obj)`, `dir(obj)` | `repr`, `str`, `dir` |
 | `bool(obj)` | truth value |
 
-Deleting attributes or items is not supported (`TypeError`). `obj.runtime` is
-the owning `Runtime`. After the runtime closes, every operation except `repr`
-raises `RuntimeError`.
+Every attribute comes from the engine value, including `__doc__`,
+`__class__`, and `__dict__`; Python's own attributes of the wrapper are used
+only for names the engine value lacks. Comparing with a Python value that
+cannot be converted is not equal (`==` is `False`) and ordering raises
+`TypeError`. Objects from different runtimes are never equal.
+
+These operations raise the Python exception a protocol expects: a missing
+attribute raises `AttributeError`, a missing key `KeyError` (with the key),
+an index out of range `IndexError`, and an unsupported operation (`len` of a
+value without one, hashing a list, `next` on a non-iterator) `TypeError`.
+Other engine exceptions, and any exception from a call, raise `Error`.
+
+Deleting attributes or items is not supported (`TypeError`). After the runtime
+closes, every operation except `repr` raises `RuntimeError`.
 
 ## `Error`
 
@@ -87,6 +111,13 @@ Subclass of `Exception` raised when an exception escapes the engine.
 | `lineno` | Line number |
 
 `str(error)` is `"type: message"`, or `type` alone when there is no message.
+`filename` and `lineno` are `None` on an `Error` made directly.
+
+When the escaping exception came from a host function (or the loader) and
+engine code did not handle it, the original Python exception is the `Error`'s
+`__cause__`. If that original is a `KeyboardInterrupt`, `SystemExit`, or other
+`BaseException` that is not an `Exception`, it is re-raised itself instead of
+an `Error`.
 
 ## Value conversion
 
@@ -114,3 +145,5 @@ callable.
 
 - `SPY_VERSION`: Version of the engine compiled into the package.
 - `__version__`: Version of the `small-python` distribution.
+
+The package ships type information (`py.typed` and `_core.pyi`).

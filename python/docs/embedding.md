@@ -46,7 +46,7 @@ with Runtime() as rt:
 
 A host function must not call `eval`, `exec`, or `close` on the runtime that
 is calling it; those raise `RuntimeError`, which reaches the engine as a
-`RuntimeError`.
+`RuntimeError`. The same holds for the `output` and `loader` callbacks.
 
 The runtime keeps a reference to each callable until it closes.
 
@@ -55,7 +55,9 @@ The runtime keeps a reference to each callable until it closes.
 A Python exception raised by a host function becomes an engine exception, so
 engine code can catch it. The engine class is the builtin exception whose name
 matches the nearest class in the Python exception's MRO, falling back to
-`RuntimeError`, and it gets the same `args`.
+`RuntimeError`, and it gets the same `args` (or its message, if the `args`
+cannot be converted). Only engine builtins are matched, so a class of the
+same name defined by engine code is never used.
 
 ```python
 from small_python import Runtime
@@ -78,6 +80,11 @@ A custom subclass such as `class NotFound(KeyError)` arrives as `KeyError`.
 If a host function lets a `small_python.Error` escape (for example, from
 calling an engine function that raised), the original engine exception is
 re-raised unchanged.
+
+If engine code does not handle the exception, the `Error` raised to your code
+has the original Python exception as its `__cause__`, so its traceback shows
+where the host function failed. A `KeyboardInterrupt` or `SystemExit` from a
+host function is re-raised as itself.
 
 ## Modules
 

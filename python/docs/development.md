@@ -9,8 +9,10 @@ python/
   src/small_python/
     __init__.py           Runtime, Object, Error, and the version
     _core.c               the CPython binding to the spy_* C API
+    _core.pyi             type stub for the extension
   csrc/                   engine sources copied in at build time (ignored by git)
   docs/                   this documentation
+  tests/                  unittest suite for the package
   scripts/bumpversion.py  release helper
 ```
 
@@ -26,7 +28,7 @@ With [uv](https://docs.astral.sh/uv/), from `python/`:
 
 ```sh
 uv sync --locked                    # build and install into .venv
-uv run python ../tests/binding.py   # run the binding tests
+uv run python -m unittest discover -s tests   # run the tests
 uv build                            # sdist and wheel into dist/
 ```
 
@@ -37,15 +39,16 @@ make test-binding
 ```
 
 which builds the extension into `.obj/binding` with `setuptools` and runs the
-same tests. Rebuild after changing the engine sources: `uv sync --reinstall-package small-python`.
+same tests. The tests use only the standard library; `pytest tests` also
+runs them. Rebuild after changing the engine sources: `uv sync --reinstall-package small-python`.
 
 ## Release
 
 Wheels are built for CPython 3.13 and later on Linux (manylinux and musllinux,
 x86_64 and aarch64) and macOS (arm64 and x86_64) by
 [cibuildwheel](https://cibuildwheel.pypa.io/), configured under
-`[tool.cibuildwheel]` in `pyproject.toml`; each wheel runs
-`tests/binding.py`.
+`[tool.cibuildwheel]` in `pyproject.toml`; each wheel runs the tests in
+`python/tests`.
 
 Pushing a tag `vX.Y.Z` that matches the `version` in `python/pyproject.toml`
 runs `.github/workflows/publish.yml`, which builds the sdist and wheels and

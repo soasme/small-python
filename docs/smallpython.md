@@ -884,17 +884,19 @@ Values cross the boundary by copy when they are `None`, `bool`, `int`
 `dict`, `set`, or `frozenset`. Python callables become native functions that
 keep a reference to the callable and receive keyword arguments; other engine
 values come back as `small_python.Object`, which forwards calls, attributes,
-items, iteration, `repr`, `str`, and truth to the engine and stops working once
-its runtime closes. Other Python objects are rejected with `TypeError`.
+items, `len`, `in`, iteration, comparisons, hashing, `repr`, `str`, `dir`, and
+truth to the engine and stops working once its runtime closes. Other Python
+objects are rejected with `TypeError`.
 
 An engine exception reaches Python as `small_python.Error` with `type`,
 `message`, `exception` (the engine object), `filename`, and `lineno`. A Python
 exception raised by a host function becomes the engine builtin exception with
-the nearest class name in its MRO (else `RuntimeError`) and the same `args`;
-an `Error` passing back through a host function re-raises its original
-exception. Host functions cannot call `eval`, `exec`, or `close` on their own
-runtime; they may call engine functions they receive. One runtime must not be
-used from two threads at once.
+the nearest builtin class name in its MRO (else `RuntimeError`) and the same
+`args`, and is the `__cause__` of the `Error` if nothing handles it; an `Error`
+passing back through a host function re-raises its original exception. Host
+functions cannot call `eval`, `exec`, or `close` on their own runtime; they may
+call engine functions they receive. One runtime must not be used from two
+threads at once; while a host function runs, other threads are refused.
 
 ## 4 Internals
 

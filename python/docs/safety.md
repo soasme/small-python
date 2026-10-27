@@ -56,5 +56,14 @@ time, and a timeout enforced by the parent.
 
 ## Threads
 
-A runtime must not be used from two threads at once. Separate runtimes are
+A runtime must not be used from two threads at once. While a host function
+runs, the binding refuses calls into its runtime from other threads with
+`RuntimeError`; other overlapping use is not detected. Separate runtimes are
 independent and may be used from different threads, one thread each.
+
+## Interrupting
+
+The engine does not check for signals, so Ctrl-C does not stop a running
+`eval` until it calls a host function or finishes. Use `step_limit` to bound
+code that may not finish. A `KeyboardInterrupt` raised in a host function
+propagates to your code.
