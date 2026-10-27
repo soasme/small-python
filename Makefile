@@ -100,7 +100,7 @@ $(TLA_JAR):
 	mv $@.tmp $@
 
 test-tla: spy $(TLA_JAR) tla-coverage
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(TLA_JAR)
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(abspath $(TLA_JAR))
 
 # Every section of docs/standards/3_15.md is mapped to the models covering it
 # (tests/tla/coverage.txt) or to a stated exclusion; a TODO entry fails.

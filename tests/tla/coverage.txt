@@ -59,7 +59,7 @@ Contents | - navigation
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.5 GenericGetAttr ( *o*, *name* ) | Attributes, Descriptors
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.6 TypeGetAttr ( *C*, *name* ) | ClassObjects, Descriptors
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.7 SetAttribute ( *o*, *name*, *value* ) | Attributes
-7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.8 GenericSetAttr ( *o*, *name*, *value* ) | Attributes, Descriptors, Slots
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.8 GenericSetAttr ( *o*, *name*, *value* ) | Attributes, Descriptors, ReadOnlyAttributes, Slots
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.9 DeleteAttribute ( *o*, *name* ) | Attributes
 7 Abstract Operations > 7.4 Call operations | = sections
 7 Abstract Operations > 7.4 Call operations > 7.4.1 Call ( *f*, *args* [ , *kwargs* ] ) | Callables, Calls, Methods

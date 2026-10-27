@@ -108,3 +108,44 @@ p.__class__ = P2
 assert_eq(p.who(), 2)
 assert_raises(TypeError, setattr, p, "__class__", int)
 assert_raises(TypeError, setattr, 1, "__class__", bool)
+# SetAttr on objects without a namespace: a member descriptor is a
+# "readonly attribute", a getset is "not writable", and another class
+# attribute, __doc__ included, is read-only.
+def set_error(obj, name, delete=False):
+    with_value = (lambda: delattr(obj, name)) if delete else (lambda: setattr(obj, name, 1))
+    return str(assert_raises(AttributeError, with_value))
+code = (lambda: 0).__code__
+for obj, name, message in (
+        (1j, "real", "readonly attribute"), (slice(1), "stop", "readonly attribute"),
+        (code, "co_name", "readonly attribute"), (code, "co_varnames", "attribute 'co_varnames' of 'code' objects is not writable"),
+        (True, "real", "attribute 'real' of 'int' objects is not writable"),
+        (memoryview(b"a"), "nbytes", "attribute 'nbytes' of 'memoryview' objects is not writable"),
+        (t"a{1}".interpolations[0], "value", "readonly attribute"), (t"a", "strings", "readonly attribute"),
+        ((1).__add__, "__self__", "readonly attribute"), (list.append, "__name__", "readonly attribute"),
+        (list.append, "__qualname__", "attribute '__qualname__' of 'method_descriptor' objects is not writable"),
+        (len, "__name__", "attribute '__name__' of 'builtin_function_or_method' objects is not writable"),
+        (5, "__doc__", "'int' object attribute '__doc__' is read-only"),
+        (object(), "__doc__", "'object' object attribute '__doc__' is read-only"),
+        ([], "append", "'list' object attribute 'append' is read-only")):
+    assert_eq(set_error(obj, name), message)
+    assert_eq(set_error(obj, name, True), message)
+# Function attributes refuse deletion as they refuse a wrong type.
+def function(): pass
+for name, message in (("__name__", "__name__ must be set to a string object"),
+                      ("__qualname__", "__qualname__ must be set to a string object"),
+                      ("__code__", "__code__ must be set to a code object"),
+                      ("__type_params__", "__type_params__ must be set to a tuple"),
+                      ("__dict__", "cannot delete __dict__")):
+    assert_eq(str(assert_raises(TypeError, delattr, function, name)), message)
+assert_eq(str(assert_raises(TypeError, setattr, function, "__name__", 1)), "__name__ must be set to a string object")
+class Text(str): pass
+function.__name__ = Text("renamed")
+assert_eq(function.__name__, "renamed")
+assert_eq(str(assert_raises(TypeError, setattr, function, "__dict__", 1)), "__dict__ must be set to a dictionary, not a 'int'")
+assert_eq(str(assert_raises(TypeError, setattr, function, "__class__", 1)), "__class__ must be set to a class, not 'int' object")
+assert_eq(str(assert_raises(TypeError, delattr, staticmethod(len), "__dict__")), "cannot delete __dict__")
+assert_eq(str(assert_raises(TypeError, delattr, ValueError(), "__dict__")), "cannot delete __dict__")
+error = UnicodeDecodeError("utf-8", b"", 0, 1, "reason")
+assert_eq(str(assert_raises(TypeError, delattr, error, "start")), "can't delete numeric/char attribute")
+error.end = True
+assert_eq((type(error.end), error.end), (int, 1))

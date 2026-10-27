@@ -14,6 +14,7 @@ and tied to real implementations by replaying them.
 | `MRO.tla` | C3 linearization of class hierarchies, duplicate bases, and inconsistent orders | yes |
 | `Operators.tla` | dispatch of `+`, `+=`, `==`, `!=`, `<` to special methods: reflected methods, subclass priority, NotImplemented, in-place fallback, default comparisons | yes |
 | `Attributes.tla` | getting, setting, and deleting an attribute through data and non-data descriptors, properties, slots, the instance dict, class attributes, and `__getattr__` | yes |
+| `ReadOnlyAttributes.tla` | setting and deleting an attribute of a builtin object without a namespace: member and getset descriptors, methods, `__doc__`, and absent names, with their messages | yes |
 | `Match.tla` | `match` statements of two cases over literal, singleton, capture, wildcard, sequence, star, mapping, class, or, and as patterns | yes |
 | `Evaluation.tla` | evaluation order of operands, short-circuiting, chained comparisons, call arguments, displays, and assignment targets | yes |
 | `ClassCreation.tla` | the order of `__prepare__`, the class body, metaclass `__new__`/`__init__`, `__set_name__`, `__init_subclass__`, and class decorators | yes |

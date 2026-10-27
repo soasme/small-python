@@ -574,3 +574,13 @@
   returned by __int__, __float__, __complex__, or __index__ is converted to
   its value; int(), float(), and complex() fall back to __index__ through
   ToIndex, which also turns a returned bool into an int.
+- Setting or deleting an attribute of a builtin object without a namespace
+  follows GenericSetAttr steps 3 and 4: a member descriptor answers
+  "readonly attribute", a getset "attribute 'a' of 'T' objects is not
+  writable", and any other class attribute, __doc__ included, is read-only.
+  code, method, memoryview, Template, and Interpolation gain their member
+  and getset descriptors. Function, staticmethod, exception, module, and
+  UnicodeError attributes refuse deletion with CPython's messages; a
+  module's __annotate__ and __annotations__ replace each other; function
+  names accept str subclasses. New model: ReadOnlyAttributes.tla.
+  make test-tla passes the TLC jar by absolute path.

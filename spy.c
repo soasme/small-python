@@ -8016,7 +8016,9 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
         if (!strcmp(name, "args") || !strcmp(name, "__traceback__") || !strcmp(name, "__context__") || !strcmp(name, "__cause__")) {
             errorf(c, "TypeError", "%s may not be deleted", name); return -1;
         }
-        if (!strcmp(name, "__suppress_context__")) { spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1; }
+        if (!strcmp(name, "__suppress_context__") || !strcmp(name, "start") || !strcmp(name, "end")) {
+            spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1;
+        }
         return set_hidden_field(c, object, name, c->none);
     }
     if (!slot) {
@@ -8037,7 +8039,7 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
     }
     SPYValue *stored = slot ? spy_retain(value) : !strcmp(name, "args") ?
         (value->type == SPY_TUPLE ? spy_retain(value) : builtin(c, 1, &value, (void *)(intptr_t)B_TUPLE)) :
-        !strcmp(name, "characters_written") ? index_object(c, value) : spy_retain(value);
+        !strcmp(name, "characters_written") || !strcmp(name, "start") || !strcmp(name, "end") ? index_object(c, value) : spy_retain(value);
     int status = stored ? set_hidden_field(c, object, name, stored) : -1;
     spy_release(stored);
     if (!status && !slot && !strcmp(name, "__cause__")) status = set_hidden_field(c, object, "__suppress_context__", c->booleans[1]);
@@ -10183,7 +10185,30 @@ static int descriptor_set(SPYContext *c, SPYValue *descriptor, SPYValue *object,
 }
 /* CPython's errors for setting or deleting an attribute of a builtin object
  * without a __dict__: methods are read-only, data descriptors not writable. */
-static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name) {
+static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
+    /* SetAttr steps 3 and 4: a data descriptor on the type decides, and any
+     * other class attribute is read-only. A class namespace holds the class's
+     * own __name__ and __qualname__, which are not attributes of instances. */
+    int naming = !strcmp(name, "__name__") || !strcmp(name, "__qualname__");
+    SPYValue *descriptor = naming ? NULL : class_lookup(value_class(c, object), name);
+    if (is_member(descriptor)) return member_set(c, descriptor, object, value) ? -1 : 0;
+    /* Builtin callables: the descriptors' __objclass__ and __name__ and a
+     * method-wrapper's __self__ are members; their other fields, getsets. */
+    int kind = native_kind(object);
+    if (kind || object->type == SPY_NATIVE || object->type == SPY_BOUND_METHOD) {
+        int descriptor_kind = kind == NATIVE_METHOD_DESCRIPTOR || kind == NATIVE_WRAPPER_DESCRIPTOR;
+        if ((descriptor_kind && (!strcmp(name, "__objclass__") || !strcmp(name, "__name__"))) ||
+            (kind == NATIVE_METHOD_WRAPPER && !strcmp(name, "__self__"))) {
+            spy_error(c, "AttributeError", "readonly attribute"); return -1;
+        }
+        static const char *const getsets[] = {"__doc__", "__name__", "__qualname__", "__text_signature__", "__self__", "__objclass__"};
+        for (size_t i = 0; i < sizeof(getsets) / sizeof(*getsets); i++)
+            if (!strcmp(name, getsets[i])) {
+                errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object)); return -1;
+            }
+    }
+    /* Every type's namespace has a __doc__. */
+    if (descriptor || !strcmp(name, "__doc__")) { errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name); return -1; }
     char filename[sizeof(c->filename)];
     size_t line = c->line;
     memcpy(filename, c->filename, sizeof(filename));
@@ -10317,9 +10342,29 @@ static int immutable_type(SPYContext *c, SPYValue *cls, const char *name) {
     errorf(c, "TypeError", "cannot set '%s' attribute of immutable type '%s'", name, name_local(cls, "__name__")->as.string.data);
     return 1;
 }
+/* A module's __annotate__ and __annotations__ (value NULL deletes): each
+ * assignment drops the other, as 16.6.2 says; __annotate__ is not deletable. */
+static int module_set_annotations(SPYContext *c, SPYValue *module, const char *name, SPYValue *value) {
+    if (!strcmp(name, "__annotate__")) {
+        if (!value) { spy_error(c, "TypeError", "cannot delete __annotate__ attribute"); return -1; }
+        if (value->type != SPY_NONE && !callable_value(c, value)) { spy_error(c, "TypeError", "__annotate__ must be callable or None"); return -1; }
+        if (name_set(c, module, name, value)) return -1;
+        if (value->type != SPY_NONE && name_local(module, "__annotations__")) delete_name(module, "__annotations__");
+        return 0;
+    }
+    if (value && name_set(c, module, name, value)) return -1;
+    if (!value) {
+        if (!name_local(module, name)) { spy_error(c, "AttributeError", "__annotations__"); return -1; }
+        delete_name(module, name);
+    }
+    if (name_local(module, "__annotate__")) delete_name(module, "__annotate__");
+    return 0;
+}
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
+    if (object->type == SPY_MODULE && (!strcmp(name, "__annotate__") || !strcmp(name, "__annotations__")))
+        return module_set_annotations(c, object, name, value);
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
     if ((object->type == SPY_SLICE || object->type == SPY_RANGE) && (!strcmp(name, "start") || !strcmp(name, "stop") || !strcmp(name, "step"))) {
         spy_error(c, "AttributeError", "readonly attribute"); return -1;
@@ -10345,6 +10390,8 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         if ((!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) && !object->as.map.native && object->as.map.flags != 2)
             return class_set_annotations(c, object, name, value);
     }
+    if ((object->type == SPY_FUNCTION || object->type == SPY_STATICMETHOD || object->type == SPY_CLASSMETHOD) &&
+        !strcmp(name, "__class__")) return set_class(c, object, value);
     if (object->type == SPY_FUNCTION || object->type == SPY_STATICMETHOD || object->type == SPY_CLASSMETHOD) {
         if (object->type == SPY_FUNCTION && (!strcmp(name, "__globals__") ||
             !strcmp(name, "__builtins__") || !strcmp(name, "__closure__"))) {
@@ -10353,7 +10400,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         if (object->type == SPY_FUNCTION && !strcmp(name, "__code__")) return function_set_code(c, object, value);
         SPYValue **attributes = object->type == SPY_FUNCTION ? &object->as.function.attributes : &object->as.wrapper.attributes;
         if (!strcmp(name, "__dict__")) {
-            if (value->type != SPY_DICT) { spy_error(c, "TypeError", "__dict__ must be set to a dictionary"); return -1; }
+            if (value->type != SPY_DICT) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
             spy_retain(value); spy_release(*attributes); *attributes = value; return 0;
         }
         /* __annotations__ and __annotate__ replace each other. */
@@ -10366,8 +10413,8 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             name_set(c, object->as.function.metadata, "__annotate__", c->none)) return -1;
         if (object->type == SPY_FUNCTION && (name_local(object->as.function.metadata, name) ||
             !strcmp(name, "__annotations__") || !strcmp(name, "__type_params__"))) {
-            if ((!strcmp(name, "__name__") || !strcmp(name, "__qualname__")) && value->type != SPY_STRING) {
-                spy_error(c, "TypeError", "function name must be a string"); return -1;
+            if ((!strcmp(name, "__name__") || !strcmp(name, "__qualname__")) && !builtin_value(c, value, SPY_STRING)) {
+                errorf(c, "TypeError", "%s must be set to a string object", name); return -1;
             }
             if (!strcmp(name, "__annotations__") && value->type != SPY_NONE && value->type != SPY_DICT) {
                 spy_error(c, "TypeError", "__annotations__ must be set to a dict object"); return -1;
@@ -10394,7 +10441,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, value);
         /* __class__ is object's to assign, dictionary or not. */
         if (!instance_has_dict(object) && strcmp(name, "__class__")) {
-            if (descriptor && !c->error_type[0]) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
+            if ((descriptor || !strcmp(name, "__doc__")) && !c->error_type[0]) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
             else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
             return -1;
         }
@@ -10414,7 +10461,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         spy_retain(value); spy_release(*field); *field = value; return 0;
     }
     if (!strcmp(name, "__class__")) return set_class(c, object, value);
-    if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name);
+    if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name, value);
     if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__")) && value->type != SPY_STRING) {
         spy_error(c, "TypeError", "class name and module attributes must be strings"); return -1;
     }
@@ -14546,9 +14593,15 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (object->type == SPY_CLASS && (!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) &&
         !object->as.map.native && object->as.map.flags != 2)
         return class_set_annotations(c, object, name, NULL);
+    if (object->type == SPY_MODULE && (!strcmp(name, "__annotate__") || !strcmp(name, "__annotations__")))
+        return module_set_annotations(c, object, name, NULL);
     if (object->type == SPY_PROPERTY && !strcmp(name, "__name__")) {
         spy_release(object->as.property.name); object->as.property.name = NULL; return 0;
     }
+    if (object->type == SPY_PROPERTY && !strcmp(name, "__doc__")) {
+        spy_release(object->as.property.doc); object->as.property.doc = spy_retain(c->none); return 0;
+    }
+    if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_SENTINEL && (!strcmp(name, "__name__") || !strcmp(name, "__module__"))) return sentinel_set(c, object, name, NULL);
     if (object->type == SPY_FUNCTION) {
         if (!strcmp(name, "__annotate__")) { spy_error(c, "TypeError", "__annotate__ cannot be deleted"); return -1; }
@@ -14557,28 +14610,35 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         if (!strcmp(name, "__defaults__") || !strcmp(name, "__kwdefaults__") ||
             !strcmp(name, "__annotations__") || !strcmp(name, "__doc__") || !strcmp(name, "__module__"))
             return name_set(c, object->as.function.metadata, name, c->none);
-        if (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__code__") ||
-            !strcmp(name, "__dict__") || !strcmp(name, "__type_params__")) {
-            errorf(c, "TypeError", "cannot delete %s", name); return -1;
-        }
+        /* Deletion fails as setting a value of the wrong type does. */
+        if (!strcmp(name, "__name__") || !strcmp(name, "__qualname__")) { errorf(c, "TypeError", "%s must be set to a string object", name); return -1; }
+        if (!strcmp(name, "__code__")) { spy_error(c, "TypeError", "__code__ must be set to a code object"); return -1; }
+        if (!strcmp(name, "__type_params__")) { spy_error(c, "TypeError", "__type_params__ must be set to a tuple"); return -1; }
+        if (!strcmp(name, "__dict__")) { spy_error(c, "TypeError", "cannot delete __dict__"); return -1; }
         if (!strcmp(name, "__globals__") || !strcmp(name, "__builtins__") || !strcmp(name, "__closure__")) {
             spy_error(c, "AttributeError", "readonly attribute"); return -1;
         }
         object = object->as.function.attributes;
     } else if (object->type == SPY_STATICMETHOD || object->type == SPY_CLASSMETHOD) {
-        if (!strcmp(name, "__func__") || !strcmp(name, "__wrapped__") || !strcmp(name, "__dict__")) {
+        if (!strcmp(name, "__func__") || !strcmp(name, "__wrapped__")) {
             spy_error(c, "AttributeError", "readonly attribute"); return -1;
         }
+        if (!strcmp(name, "__dict__")) { spy_error(c, "TypeError", "cannot delete __dict__"); return -1; }
         object = object->as.wrapper.attributes;
     } else {
         SPYValue *descriptor = object->type == SPY_INSTANCE ? class_lookup(object->as.map.parent, name) : NULL;
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, NULL);
+        /* BaseException's __dict__ getset refuses deletion. */
+        if (object->type == SPY_INSTANCE && !descriptor && !strcmp(name, "__dict__") &&
+            subclass(object->as.map.parent, name_local(c->classes, "BaseException"))) {
+            spy_error(c, "TypeError", "cannot delete __dict__"); return -1;
+        }
         if (object->type == SPY_INSTANCE && !instance_has_dict(object)) {
-            if (descriptor) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
+            if (descriptor || !strcmp(name, "__doc__")) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
             else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
             return -1;
         }
-        if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name);
+        if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name, NULL);
         if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__"))) {
             spy_error(c, "TypeError", "cannot delete class name or module attributes"); return -1;
         }
@@ -22221,6 +22281,16 @@ static int register_value_fields(SPYContext *c) {
          "cr_await cr_code cr_frame cr_origin cr_running cr_state cr_suspended"},
         {SPY_ASYNC_GENERATOR, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
          "ag_await ag_code ag_frame ag_running ag_state ag_suspended"},
+        {SPY_CODE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY,
+         "co_argcount co_posonlyargcount co_kwonlyargcount co_stacksize co_flags co_nlocals co_consts co_names "
+         "co_filename co_name co_qualname co_firstlineno co_linetable co_exceptiontable"},
+        {SPY_CODE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "co_varnames co_cellvars co_freevars co_code"},
+        {SPY_METHOD, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__func__ __self__"},
+        {SPY_MEMORYVIEW, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
+         "obj nbytes readonly itemsize format ndim shape strides suboffsets c_contiguous f_contiguous contiguous"},
+        {SPY_TEMPLATE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "strings interpolations"},
+        {SPY_TEMPLATE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "values"},
+        {SPY_INTERPOLATION, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "value expression conversion format_spec"},
     };
     for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
         for (const char *name = fields[i].names; *name; ) {
