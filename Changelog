@@ -437,6 +437,10 @@
 - async for, aiter(), with, and async with report CPython 3.15's protocol
   errors, including the hint to use the other kind of with. TLA+ models of
   awaitables, async for, and async with.
+- An annotated name declared global or nonlocal (in either order) is a
+  SyntaxError, and a name declared both global and nonlocal is reported at
+  the first declaration. TLA+ models of scope errors, builtins lookup, and
+  dynamic scopes.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

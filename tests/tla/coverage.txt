@@ -146,12 +146,12 @@ Reference chapter contents | - table of contents
 4. Execution model > Execution model | = sections
 4. Execution model > Execution model > Structure of a program | TODO: CompileModes
 4. Execution model > Execution model > Naming and binding | = sections
-4. Execution model > Execution model > Naming and binding > Binding of names | TODO: Scopes, ScopeErrors
+4. Execution model > Execution model > Naming and binding > Binding of names | Scopes, ScopeErrors
 4. Execution model > Execution model > Naming and binding > Resolution of names | Scopes
 4. Execution model > Execution model > Naming and binding > Annotation scopes | Annotations, Generics
 4. Execution model > Execution model > Naming and binding > Lazy evaluation | Annotations, TypeAliases
-4. Execution model > Execution model > Naming and binding > Builtins and restricted execution | TODO: BuiltinsScope
-4. Execution model > Execution model > Naming and binding > Interaction with dynamic features | TODO: DynamicScopes
+4. Execution model > Execution model > Naming and binding > Builtins and restricted execution | BuiltinsScope
+4. Execution model > Execution model > Naming and binding > Interaction with dynamic features | DynamicScopes
 4. Execution model > Execution model > Exceptions | TODO: Exceptions, Raise
 4. Execution model > Execution model > Runtime Components | = sections
 4. Execution model > Execution model > Runtime Components > General Computing Model | - informative: describes processes, threads, and the host computer
@@ -254,8 +254,8 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `import` statement > Lazy imports | TODO: LazyImports
 7. Simple statements > Simple statements > The `import` statement > Lazy imports > Compatibility via `__lazy_modules__` | TODO: LazyImports
 7. Simple statements > Simple statements > The `import` statement > Future statements | TODO: Future
-7. Simple statements > Simple statements > The `global` statement | TODO: Scopes, ScopeErrors
-7. Simple statements > Simple statements > The `nonlocal` statement | TODO: Scopes, ScopeErrors
+7. Simple statements > Simple statements > The `global` statement | Scopes, ScopeErrors
+7. Simple statements > Simple statements > The `nonlocal` statement | Scopes, ScopeErrors
 7. Simple statements > Simple statements > The `type` statement | TypeAliases
 8. Compound statements | = sections
 8. Compound statements > Compound statements | TODO: Grammar

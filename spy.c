@@ -40,7 +40,7 @@ typedef struct Machine Machine;
 typedef struct Scope Scope;
 typedef struct { size_t len; int sign; uint32_t digits[]; } BigInt;
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
-enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16 };
+enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32 };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 typedef struct { const char *name; unsigned flags; size_t line; } Symbol;
 struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap; int kind, tries; };
@@ -5575,9 +5575,11 @@ static int scope_record(SPYContext *c, Scope *scope, Node *n, unsigned flags) {
         c->line = n->line;
         if (symbol->flags & S_PARAM) errorf(c, "SyntaxError", "name '%s' is parameter and %s", n->text, kind);
         else if (symbol->flags & S_USE) errorf(c, "SyntaxError", "name '%s' is used prior to %s declaration", n->text, kind);
+        else if (symbol->flags & S_ANNOT) errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->text, kind);
         else if (symbol->flags & S_LOCAL) errorf(c, "SyntaxError", "name '%s' is assigned to before %s declaration", n->text, kind);
         if (c->error_type[0]) return -1;
-        symbol->line = n->line;
+        /* Conflicting declarations are reported at the first one. */
+        if (!(symbol->flags & (S_GLOBAL | S_NONLOCAL))) symbol->line = n->line;
     }
     symbol->flags |= flags;
     if ((flags & S_GLOBAL) && scope->parent) {
@@ -5720,8 +5722,17 @@ static int scope_mapping_keys(SPYContext *c, Node *n) {
 static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     if (!n || c->error_type[0]) return c->error_type[0] ? -1 : 0;
     switch (n->kind) {
-    case N_ANNASSIGN:
-        return scope_node(c, scope, n->c) || scope_target(c, scope, n->a, n->c ? 1 : -1) ? -1 : 0;
+    case N_ANNASSIGN: {
+        Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->text) : NULL;
+        if (symbol && scope->kind != S_MODULE && (symbol->flags & (S_GLOBAL | S_NONLOCAL))) {
+            c->line = n->a->line;
+            errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
+            return -1;
+        }
+        if (scope_node(c, scope, n->c) || scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
+        if ((n->flags & F_SIMPLE) && n->a->kind == N_NAME && (symbol = scope_symbol(scope, n->a->text))) symbol->flags |= S_ANNOT;
+        return 0;
+    }
     case N_AWAIT:
         return scope_await(c, scope, n) || scope_node(c, scope, n->a) ? -1 : 0;
     case N_YIELD:

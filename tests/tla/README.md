@@ -66,6 +66,9 @@ and tied to real implementations by replaying them.
 | `Awaitables.tla` | `await` on coroutines, `__await__` iterators and generators, and non-awaitables; reusing an awaited coroutine; and coroutine `send`, `close`, and `throw` | yes |
 | `AsyncFor.tla` | `async for` over async generators and `__aiter__`/`__anext__` classes with `else`, `break`, and exceptions; protocol errors; asynchronous comprehensions; and async constructs outside async functions | yes |
 | `AsyncWith.tla` | `async with`: awaited `__aenter__` and `__aexit__`, suppression, raising methods, and protocol errors with their hints | yes |
+| `ScopeErrors.tla` | `global` and `nonlocal` after a use, assignment, annotation, or parameter, annotated declared names, both declarations, module and class placement, and missing bindings, with their lines | yes |
+| `BuiltinsScope.tla` | builtins lookup through `__builtins__` as a module or a dictionary, shadowing globals, an extended builtins module, restricted `__import__`, and `__builtins__` insertion | yes |
+| `DynamicScopes.tla` | `exec()` and `eval()` with default and given namespaces, free variables, `locals()` snapshots, `f_locals` write-through, and class-body `eval()` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -157,9 +160,11 @@ a `__buffer__` exporter's `__release_buffer__` was never called; setting
 `__annotations__` kept the old `__annotate__`, and `__annotate__` could be
 set to a non-callable or deleted; `TypeVarTuple` lacked `__bound__` and the
 variance attributes, type parameters from `*Ts` did not infer variance,
-`ParamSpec` had an `evaluate_bound` that CPython 3.15 no longer has; and
+`ParamSpec` had an `evaluate_bound` that CPython 3.15 no longer has;
 `async for`, `aiter()`, `with`, and `async with` reported protocol errors
-with older messages and no hints.
+with older messages and no hints; and an annotated name could be declared
+global or nonlocal, and global with nonlocal was reported at the second
+declaration.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

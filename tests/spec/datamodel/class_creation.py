@@ -138,3 +138,14 @@ def dropped():
             return super()
 e = assert_raises(RuntimeError, dropped)
 assert_true(str(e).startswith("__class__ not set defining 'Dropped' as <class '"))
+
+# Annotated names cannot be declared global or nonlocal.
+for source, message in [("def f():\n    global x\n    x: int = 1", "annotated name 'x' can't be global"),
+                        ("def f():\n    x: int\n    global x", "annotated name 'x' can't be global"),
+                        ("def g():\n    x = 1\n    def f():\n        nonlocal x\n        x: int", "annotated name 'x' can't be nonlocal"),
+                        ("def g():\n    x = 1\n    def f():\n        nonlocal x\n        global x", "name 'x' is nonlocal and global")]:
+    e = assert_raises(SyntaxError, compile, source, "<scope>", "exec")
+    assert_eq(e.msg, message)
+e = assert_raises(SyntaxError, compile, "def g():\n    x = 1\n    def f():\n        nonlocal x\n        global x", "<scope>", "exec")
+assert_eq(e.lineno, 4)
+compile("global x\nx: int = 1", "<scope>", "exec")
