@@ -330,7 +330,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) | FStrings
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Debug specifier | FStrings
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Conversion specifier | FStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Format specifier | TODO: FStrings, FormatSpec
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Format specifier | FStrings, FormatSpec
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Template String Literals (t-strings) | TStrings
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > `printf`-style String Formatting | TODO: PercentFormat
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` | = sections
@@ -384,9 +384,9 @@ Reference chapter contents | - table of contents
 15. Formatting protocols and optional string helpers > `string` --- Common string operations | = sections
 15. Formatting protocols and optional string helpers > `string` --- Common string operations > String constants | - Host profile: the importable string module facade (SLP315-CORE)
 15. Formatting protocols and optional string helpers > `string` --- Common string operations > Custom string formatting | - Host profile: string.Formatter in the string module facade (SLP315-CORE)
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax | TODO: StrFormat, FormatSpec
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format specification mini-language | TODO: FormatSpec
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format examples | TODO: StrFormat, FormatSpec
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax | FormatSpec
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format specification mini-language | FormatSpec
+15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format examples | FormatSpec
 15. Formatting protocols and optional string helpers > `string` --- Common string operations > Template strings (\$-strings) | - Host profile: string.Template in the string module facade (SLP315-CORE)
 15. Formatting protocols and optional string helpers > `string` --- Common string operations > Helper functions | - Host profile: string.capwords in the string module facade (SLP315-CORE)
 16. Template string objects | = sections
