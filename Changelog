@@ -466,6 +466,10 @@
   and three-argument pow() raise CPython's TypeErrors; complex division
   by zero and overflowing complex powers report as CPython does. TLA+
   model of binary arithmetic.
+- A subscript index too large for a Py_ssize_t raises "cannot fit 'int'
+  into an index-sized integer"; deleting an item without __delitem__
+  says "doesn't support item deletion" only for an index into a type with
+  sequence methods, as CPython does. TLA+ model of subscriptions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

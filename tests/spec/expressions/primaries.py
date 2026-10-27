@@ -163,3 +163,20 @@ order.clear()
 # Conditional: condition first, then one branch.
 mark("yes") if mark("cond", 1) else mark("no")
 assert_eq(order, ["cond", "yes"])
+# An index must fit a Py_ssize_t; deleting an item from a type without
+# __delitem__ is worded by whether the type has sequence methods and the key
+# is an index.
+e = assert_raises(IndexError, lambda: [1][2 ** 100])
+assert_eq(str(e), "cannot fit 'int' into an index-sized integer")
+def delete(obj, key):
+    del obj[key]
+class NoDelete:
+    def __getitem__(self, key): return key
+e = assert_raises(TypeError, delete, NoDelete(), 0)
+assert_eq(str(e), "'NoDelete' object doesn't support item deletion")
+e = assert_raises(TypeError, delete, NoDelete(), "k")
+assert_eq(str(e), "'NoDelete' object does not support item deletion")
+e = assert_raises(TypeError, delete, "abc", 0)
+assert_eq(str(e), "'str' object doesn't support item deletion")
+e = assert_raises(TypeError, delete, 1, 0)
+assert_eq(str(e), "'int' object does not support item deletion")

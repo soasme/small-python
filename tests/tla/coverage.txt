@@ -212,11 +212,11 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Atoms > Yield expressions > Asynchronous generator-iterator methods | AsyncGenerators
 6. Expressions > Expressions > Primaries | = sections
 6. Expressions > Expressions > Primaries > Attribute references | Attributes
-6. Expressions > Expressions > Primaries > Subscriptions and slicings | TODO: Subscripts, Slices
+6. Expressions > Expressions > Primaries > Subscriptions and slicings | Subscripts, Slices
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > Slicings | Slices
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > Comma-separated subscripts | TODO: Subscripts
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > "Starred" subscriptions | TODO: Subscripts
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | TODO: Subscripts
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > Comma-separated subscripts | Subscripts
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > "Starred" subscriptions | Subscripts
+6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | Subscripts
 6. Expressions > Expressions > Primaries > Calls | Calls
 6. Expressions > Expressions > Await expression | Awaitables
 6. Expressions > Expressions > The power operator | BinaryArith

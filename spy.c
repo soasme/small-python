@@ -6673,7 +6673,13 @@ static int subscript_index(SPYContext *c, SPYValue *v, SPYValue *key, int64_t *r
                     type == SPY_BYTEARRAY ? "bytearray" : type == SPY_RANGE ? "range" : type_name(v), type_name(key));
         return -1;
     }
-    return slice_index(c, key, result);
+    /* An index, unlike a slice bound, must fit a Py_ssize_t. */
+    SPYValue *index = index_object(c, key);
+    if (!index) return -1;
+    int status = 0;
+    if (index->as.integer_data.big) { errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key)); status = -1; }
+    else *result = index->as.integer_data.small;
+    spy_release(index); return status;
 }
 typedef struct { int64_t start, stop, step; size_t count; } Slice;
 typedef struct { int64_t start, stop, step; int has_start, has_stop; } SliceBounds;
@@ -14527,6 +14533,25 @@ static int delete_target(SPYContext *c, Frame *f, Node *n) {
     spy_release(object);
     return c->error_type[0] ? -1 : 0;
 }
+/* PyObject_DelItem's error: a type with sequence methods hands an index key
+ * to PySequence_DelItem, which words it differently. */
+static void deletion_error(SPYContext *c, SPYValue *object, SPYValue *key) {
+    int sequence = 0;
+    switch (object->type) {
+    case SPY_INSTANCE: sequence = !meta_class(object); break;
+    case SPY_STRING: case SPY_BYTES: case SPY_TUPLE: case SPY_RANGE: case SPY_SET: case SPY_FROZENSET: case SPY_FROZENDICT:
+    case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: case SPY_MAPPINGPROXY: case SPY_MEMORYVIEW: sequence = 1; break;
+    default: break;
+    }
+    if (sequence && !is_int(key)) {
+        SPYValue *method = special_dispatch(key) ? special_method(c, key, "__index__") : NULL;
+        sequence = method != NULL;
+        spy_release(method);
+        if (c->error_type[0]) return;
+    }
+    errorf(c, "TypeError", sequence ? "'%s' object doesn't support item deletion" : "'%s' object does not support item deletion",
+           type_name(object));
+}
 static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
     SPYValue *base = builtin_base(c, object, "__delitem__", NULL);
     if (base) return delete_index(c, base, key);
@@ -14534,8 +14559,10 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
     {
         {
             if (object->type == SPY_INSTANCE || object->type == SPY_FRAME_LOCALS || object->type == SPY_MEMORYVIEW || meta_class(object)) {
-                SPYValue *result = call_special(c, object, "__delitem__", 1, &key);
-                spy_release(result);
+                SPYValue *method = special_method(c, object, "__delitem__");
+                if (method) spy_release(spy_call(c, method, 1, &key));
+                else if (!c->error_type[0]) deletion_error(c, object, key);
+                spy_release(method);
             } else if (object->type == SPY_DICT) {
                 ptrdiff_t index = map_find(object, key);
                 if (index < 0) missing_key(c, key);
@@ -14557,7 +14584,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
                         memmove(&object->as.seq.items[index], &object->as.seq.items[index + 1], (object->as.seq.len - (size_t)index) * sizeof(SPYValue *));
                     }
                 }
-            } else errorf(c, "TypeError", "'%s' object does not support item deletion", type_name(object));
+            } else deletion_error(c, object, key);
         }
     }
     return c->error_type[0] ? -1 : 0;
