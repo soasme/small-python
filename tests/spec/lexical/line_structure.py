@@ -49,3 +49,9 @@ assert_syntax_error(";\n")
 # A form feed at the start of a line is ignored for indentation.
 assert_eq(run("if 1:\n\f    a = 7\n")["a"], 7)
 assert_eq(run("\fa = 8\n")["a"], 8)
+
+# A backslash continuation must join with a line.
+error = assert_syntax_error("x = 1\\\n")
+assert_eq((error.msg, error.lineno, error.offset, error.end_offset), ("unexpected EOF while parsing", 1, 7, -1))
+assert_eq(assert_syntax_error("if 1:\\\n").msg, "unexpected EOF while parsing")
+assert_eq(run("x = 1\\\n\n")["x"], 1)

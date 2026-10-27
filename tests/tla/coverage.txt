@@ -19,44 +19,44 @@ Reference chapter contents | - table of contents
 2. Lexical analysis | = sections
 2. Lexical analysis > Lexical analysis | TODO: Tokens
 2. Lexical analysis > Lexical analysis > Line structure | = sections
-2. Lexical analysis > Lexical analysis > Line structure > Logical lines | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Physical lines | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Comments | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Encoding declarations | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Explicit line joining | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Implicit line joining | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Blank lines | TODO: LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Indentation | TODO: Indentation
+2. Lexical analysis > Lexical analysis > Line structure > Logical lines | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Physical lines | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Comments | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Encoding declarations | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Explicit line joining | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Implicit line joining | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Blank lines | LineStructure
+2. Lexical analysis > Lexical analysis > Line structure > Indentation | Indentation
 2. Lexical analysis > Lexical analysis > Line structure > Whitespace between tokens | TODO: Tokens
-2. Lexical analysis > Lexical analysis > Line structure > End marker | TODO: Indentation
+2. Lexical analysis > Lexical analysis > Line structure > End marker | Indentation
 2. Lexical analysis > Lexical analysis > Other tokens | TODO: Tokens
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) | TODO: Identifiers
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Keywords | TODO: Identifiers
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Soft Keywords | TODO: Identifiers, Match
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Reserved classes of identifiers | TODO: Identifiers, Mangling
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Non-ASCII characters in names | TODO: Identifiers
-2. Lexical analysis > Lexical analysis > Literals | TODO: StringLiterals, NumericLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Triple-quoted strings | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > String prefixes | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Ignored end of line | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Escaped characters | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Octal character | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal character | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Named Unicode character | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal Unicode characters | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Unrecognized escape sequences | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Bytes literals | TODO: StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Raw string literals | TODO: StringLiterals
+2. Lexical analysis > Lexical analysis > Literals | StringLiterals, NumericLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Triple-quoted strings | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > String prefixes | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Ignored end of line | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Escaped characters | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Octal character | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal character | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Named Unicode character | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal Unicode characters | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Unrecognized escape sequences | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Bytes literals | StringLiterals
+2. Lexical analysis > Lexical analysis > String and Bytes literals > Raw string literals | StringLiterals
 2. Lexical analysis > Lexical analysis > String and Bytes literals > f-strings | TODO: FStrings
 2. Lexical analysis > Lexical analysis > String and Bytes literals > t-strings | TODO: TStrings
 2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar for f-strings | TODO: FStrings
 2. Lexical analysis > Lexical analysis > Numeric literals | = sections
-2. Lexical analysis > Lexical analysis > Numeric literals > Integer literals | TODO: NumericLiterals
-2. Lexical analysis > Lexical analysis > Numeric literals > Floating-point literals | TODO: NumericLiterals
-2. Lexical analysis > Lexical analysis > Numeric literals > Imaginary literals | TODO: NumericLiterals
+2. Lexical analysis > Lexical analysis > Numeric literals > Integer literals | NumericLiterals
+2. Lexical analysis > Lexical analysis > Numeric literals > Floating-point literals | NumericLiterals
+2. Lexical analysis > Lexical analysis > Numeric literals > Imaginary literals | NumericLiterals
 2. Lexical analysis > Lexical analysis > Operators and delimiters | TODO: Tokens
 3. Data model | = sections
 3. Data model > Data model | = sections
@@ -191,7 +191,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | TODO: Mangling
 6. Expressions > Expressions > Atoms > Literals | TODO: LiteralIdentity
 6. Expressions > Expressions > Atoms > Literals > Literals and object identity | TODO: LiteralIdentity
-6. Expressions > Expressions > Atoms > Literals > String literal concatenation | TODO: StringLiterals
+6. Expressions > Expressions > Atoms > Literals > String literal concatenation | StringLiterals
 6. Expressions > Expressions > Atoms > Parenthesized groups | TODO: Displays
 6. Expressions > Expressions > Atoms > Container displays | TODO: Displays
 6. Expressions > Expressions > Atoms > Container displays > List displays | TODO: Displays

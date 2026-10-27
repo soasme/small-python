@@ -362,6 +362,13 @@
   resolution order, operator dispatch, attribute access, pattern matching,
   evaluation order, class creation, yield from delegation, async
   generators, except*, the iteration protocol, super(), and dict order.
+- tests/tla/coverage.txt maps every section of the 3.15 standard to the
+  TLA+ models covering it (make tla-coverage); TLA+ models of numeric and
+  string literals, indentation, and line structure.
+- A syntax error before a lexer error is reported first, as CPython's
+  lexer only reads as far as the parser asks; an indentation error comes
+  before its line's DEDENTs; a backslash continuation at the end of the
+  source is "unexpected EOF while parsing".
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

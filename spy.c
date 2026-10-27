@@ -2357,7 +2357,8 @@ enum {
     T_ADDEQ, T_SUBEQ, T_MULEQ, T_DIVEQ, T_MODEQ, T_MATEQ,
     T_POWEQ, T_FLOOREQ, T_LSHIFTEQ, T_RSHIFTEQ, T_ANDEQ, T_OREQ, T_XOREQ,
     T_WALRUS, T_ELLIPSIS, T_ARROW,
-    O_AND, O_OR, O_NOT, O_IN, O_NOTIN, O_IS, O_ISNOT
+    O_AND, O_OR, O_NOT, O_IN, O_NOTIN, O_IS, O_ISNOT,
+    T_LEXERROR /* where the lexer failed; see parse_normalized */
 };
 enum {
     N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NAME, N_NONE, N_BOOL, N_LIST, N_TUPLE, N_DICT,
@@ -2386,7 +2387,7 @@ typedef struct {
     const char *annotation_scope; /* Set while parsing a type-parameter value or alias, e.g. "a TypeVar bound". */
     const char *private_name;
     const char *error_start, *error_end;
-    int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1. */
+    int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1). */
     SPYValue *unit;
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
@@ -2404,6 +2405,7 @@ typedef struct {
     size_t error_pos; /* The token a syntax() error points at. */
     const char *unclosed; /* The innermost bracket still open at the end. */
     size_t unclosed_line;
+    int tokenizing; /* The source decoded, the lexer is reading tokens. */
     /* Future statements: nesting of statement(), top-level statements seen,
      * whether one may still appear, and barry_as_FLUFL. */
     int statement_level, future_closed, barry, future_annotations;
@@ -2696,14 +2698,17 @@ static int lex(Parser *p, const char *s) {
         ch += width;
     }
     line = 1;
+    p->tokenizing = 1;
     char closing[200]; /* CPython's MAXLEVEL */
     size_t opened_line[200];
     const char *opened_at[200];
     int bol = 1;
+    size_t line_tokens = 0; /* An indentation error comes before the line's DEDENTs. */
     while (*s) {
         if (bol && !brackets) {
             /* CPython checks both eight-column and one-column tab stops. */
             size_t indent = 0, alternate = 0;
+            line_tokens = p->len;
             while (*s == ' ' || *s == '\t' || *s == '\f') {
                 if (*s == '\t') { indent = (indent / 8 + 1) * 8; alternate++; }
                 else if (*s == '\f') indent = alternate = 0;
@@ -2723,6 +2728,7 @@ static int lex(Parser *p, const char *s) {
                         if (token_add(p, T_DEDENT, s, 0, line)) return -1;
                     }
                     if (indent != indents[level]) {
+                        p->len = line_tokens;
                         p->ctx->line = line;
                         spy_error(p->ctx, "IndentationError", "unindent does not match any outer indentation level");
                         return -1;
@@ -2736,6 +2742,12 @@ static int lex(Parser *p, const char *s) {
         if (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\f') { s++; continue; }
         if (*s == '#') { while (*s && *s != '\n') s++; continue; }
         if (*s == '\\' && (s[1] == '\n' || (s[1] == '\r' && s[2] == '\n'))) {
+            if (!s[s[1] == '\r' ? 3 : 2] && !brackets) {
+                /* A continuation must join with a line. */
+                p->ctx->line = line; p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2;
+                spy_error(p->ctx, "SyntaxError", "unexpected EOF while parsing");
+                return -1;
+            }
             s += s[1] == '\r' ? 3 : 2;
             line++;
             continue;
@@ -2820,6 +2832,7 @@ nesting:
     p->ctx->line = line;
     spy_error(p->ctx, "SyntaxError", "too many nested blocks or delimiters"); return -1;
 tab_error:
+    p->len = line_tokens;
     p->ctx->line = line;
     spy_error(p->ctx, "TabError", "inconsistent use of tabs and spaces in indentation");
     return -1;
@@ -5916,8 +5929,31 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     Parser p = { .ctx = c, .unit = unit, .barry = (c->compile_flags & 0x400000) != 0,
                 .future_annotations = (c->compile_flags & 0x1000000) != 0 };
     int parsing = 1, at_end = 0;
-    if (unit->as.unit.filename && !lex(&p, source)) {
+    /* CPython's lexer runs as the parser asks for tokens, so a syntax error
+     * in what comes before a lexer error is reported instead: parse up to a
+     * T_LEXERROR token, and lex again for the lexer's error if the parser
+     * reaches it. */
+    size_t lexed = SIZE_MAX;
+    int failed = unit->as.unit.filename ? lex(&p, source) : 0;
+    if (failed && p.tokenizing && (!strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
+                                   !strcmp(c->error_type, "TabError"))) {
+        spy_clear_error(c);
+        const char *at_error = p.len ? p.tokens[p.len - 1].start + p.tokens[p.len - 1].len : source;
+        size_t line = p.len ? p.tokens[p.len - 1].line : 1;
+        lexed = p.len;
+        failed = token_add(&p, T_LEXERROR, at_error, 0, line) || token_add(&p, T_END, at_error, 0, line) ||
+                 token_add(&p, T_END, at_error, 0, line);
+    }
+    if (unit->as.unit.filename && !failed) {
         unit->as.unit.body = statements(&p);
+        if (lexed != SIZE_MAX && (!c->error_type[0] || p.far >= lexed)) {
+            spy_clear_error(c);
+            p.len = p.pos = p.far = 0; p.tokenizing = 0;
+            p.error_start = p.error_end = NULL; p.error_trim_line = p.error_end_zero = p.incomplete = 0;
+            p.unclosed = NULL;
+            lex(&p, source);
+            goto lexer_error;
+        }
         if (!c->error_type[0] && !at(&p, T_END)) syntax(&p, "unexpected indentation");
         if (c->error_type[0] && p.pos < p.len && (at(&p, T_END) || at(&p, T_DEDENT)) &&
             (!p.error_start || p.error_start == peek(&p)->start)) {
@@ -5969,13 +6005,14 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             }
         }
     }
+lexer_error:
     free(p.tokens);
     if (c->error_type[0]) {
         snprintf(c->filename, sizeof(c->filename), "%s", filename);
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
         /* The compiler's errors read the line from the file, which a string has not. */
-        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | c->eval_input | (p.error_end_zero ? 2 : 0) |
+        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | c->eval_input | (p.error_end_zero ? 2 : 0) | (p.error_end_zero == 2 ? 8 : 0) |
                                               (!parsing && c->string_source ? 4 : 0));
         if (incomplete) *incomplete = syntax_error && parsing && (p.incomplete || at_end);
         if (syntax_error && parsing && c->exception) {
@@ -11143,7 +11180,7 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
 }
 static void attach_syntax_error(SPYContext *c, const char *filename, const char *source,
                                 const char *position, const char *finish, int trim_line) {
-    int end_zero = trim_line & 2, textless = trim_line & 4;
+    int end_zero = trim_line & 2, textless = trim_line & 4, end_minus = trim_line & 8;
     trim_line &= 1;
     char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
     memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
@@ -11174,7 +11211,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         position ? spy_int(c, (int64_t)offset) : spy_none(c),
         textless ? spy_none(c) : spy_string(c, text.data ? text.data : "", text.len),
         position ? spy_int(c, (int64_t)line) : spy_none(c),
-        position ? spy_int(c, (int64_t)end_offset) : spy_none(c)
+        position ? spy_int(c, end_minus ? -1 : (int64_t)end_offset) : spy_none(c)
     };
     free(text.data);
     for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {

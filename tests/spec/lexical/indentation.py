@@ -42,3 +42,11 @@ assert_syntax_error("if 1: if 1: pass\n")
 # Deep nesting works.
 source = "".join("    " * i + "if True:\n" for i in range(50)) + "    " * 50 + "x = 1\n"
 assert_eq(run(source)["x"], 1)
+
+# The lexer runs as the parser asks for tokens: an indentation error on a
+# later line does not hide a syntax error on an earlier one, but comes
+# before the DEDENTs of its own line.
+error = assert_syntax_error("\tif 0:\nif 0:\n if 0:\n\tif 0:\n", exception=IndentationError)
+assert_eq((type(error), error.lineno, error.msg), (IndentationError, 1, "unexpected indent"))
+error = assert_syntax_error("if True:\n  if True:\n print(2)\n", exception=IndentationError)
+assert_eq((error.lineno, error.msg), (3, "unindent does not match any outer indentation level"))

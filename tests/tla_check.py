@@ -48,6 +48,26 @@ def states(walk):
         end = len(walk) if end < 0 else end
         yield eval(walk[start:end])
         start = end + 1
+
+
+def check_programs(outcome, field="outcome"):
+    """Replays a model whose one step computes a program's outcome: compares
+    outcome(program) with the model's for every program, and reports."""
+    failures = count = 0
+    for walk in walks():
+        count += 1
+        steps = states(walk)
+        program = next(steps)["program"]
+        for state in steps:
+            actual = outcome(program)
+            if actual != state[field]:
+                failures += 1
+                if failures <= 20:
+                    print("MISMATCH", program, "expected", state[field], "got", actual)
+    if failures:
+        print(failures, "mismatches")
+    else:
+        print("replayed", count, "cases")
 '''
 
 
@@ -55,6 +75,7 @@ def states(walk):
 class Values:
     """A parser for the TLA+ values TLC prints in its state dumps."""
 
+    ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "f": "\f"}
     TOKEN = re.compile(r'\s*(?:(<<|>>|\|->|:>|@@|[\[\]{}(),])|("(?:[^"\\]|\\.)*")|(-?\d+)|(TRUE|FALSE)|([A-Za-z_]\w*))')
 
     def __init__(self, text):
@@ -82,7 +103,7 @@ class Values:
     def value(self):
         symbol, string, number, boolean, name = self.take()
         if string is not None:
-            return string[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            return re.sub(r"\\(.)", lambda m: self.ESCAPES.get(m.group(1), m.group(1)), string[1:-1])
         if number is not None:
             return int(number)
         if boolean is not None:
@@ -144,7 +165,8 @@ def parse_graph(path):
     for line in path.read_text(encoding="utf-8").splitlines():
         match = node.match(line)
         if match:
-            label = match.group(2).replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+            # Dot escapes each backslash and quote, and breaks lines with \n.
+            label = re.sub(r"\\(.)", lambda m: "\n" if m.group(1) == "n" else m.group(1), match.group(2))
             nodes[match.group(1)] = parse_state(label)
             if match.group(3):
                 initial.append(match.group(1))

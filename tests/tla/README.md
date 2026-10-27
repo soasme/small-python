@@ -23,6 +23,10 @@ and tied to real implementations by replaying them.
 | `Iteration.tla` | `for` loops with `break`, `continue`, and `else` over the iterator and sequence protocols, and objects that are not iterable | yes |
 | `Super.tla` | cooperative `super()` calls in a diamond hierarchy | yes |
 | `Dicts.tla` | dict insertion order under setting, updating, deleting, popping, and re-inserting keys | yes |
+| `NumericLiterals.tla` | integer, floating-point, and imaginary literals: prefixes, underscores, leading zeros, and literals running into names | yes |
+| `StringLiterals.tla` | string and bytes literals: quotes, prefixes, every escape sequence, raw strings, and adjacent literals | yes |
+| `Indentation.tla` | the indentation stack: INDENT/DEDENT, tab stops, TabError, IndentationError, and blank lines | yes |
+| `LineStructure.tla` | physical and logical lines, comments, explicit and implicit line joining, and encoding declarations | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -85,7 +89,11 @@ object's slots in the other order. Depth-first finalization order (a
 grandchild's `__del__` before its parent's sibling's) takes four objects and
 is outside these bounds.
 
-The models found three bugs in spy, since fixed: comprehensions reported an
+The models found these bugs in spy, since fixed: the lexer reported an
+error on a later line before a syntax error on an earlier one (CPython's
+lexer runs only as far as the parser reads), and accepted a backslash
+continuation at the end of the source.
+Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
 length, slicing, and `find()` rescanned the whole string on every call
