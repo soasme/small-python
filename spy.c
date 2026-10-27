@@ -254,6 +254,7 @@ static int set_subset(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
 static SPYValue *memory_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
+static int length_result(SPYContext *, SPYValue *, int64_t *);
 static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
@@ -1051,16 +1052,18 @@ int spy_truth(SPYValue *v) {
         int boolean = method != NULL;
         if (!method && !c->error_type[0]) method = special_method(c, v, "__len__");
         if (!method) return !c->error_type[0];
+        if (boolean && method->type == SPY_NONE) {
+            spy_release(method);
+            errorf(c, "TypeError", "'%s' cannot be interpreted as a boolean", type_name(v)); return 0;
+        }
         SPYValue *result = spy_call(c, method, 0, NULL);
         spy_release(method);
         if (!result) return 0;
-        int truth = 0;
+        int64_t length = 0;
         if (boolean && result->type != SPY_BOOL) errorf(c, "TypeError", "%s.__bool__() must return a bool, not %s", type_name(v), type_name(result));
-        else if (!boolean && !is_int(result)) spy_error(c, "TypeError", "__len__ should return an integer");
-        else if (integer_sign(result) < 0) spy_error(c, "ValueError", "__len__() should return >= 0");
-        else if (result->as.integer_data.big) spy_error(c, "OverflowError", "__len__() result is too large");
-        else truth = integer_sign(result) != 0;
-        spy_release(result); return truth;
+        else if (!boolean) length_result(c, result, &length);
+        else length = result == c->booleans[1];
+        spy_release(result); return !c->error_type[0] && length != 0;
     }
     default: return 1;
     }
@@ -6562,6 +6565,17 @@ static SPYValue *index_object(SPYContext *c, SPYValue *value) {
     }
     return index;
 }
+/* The length a __len__ returned, as slot_sq_length: an index, not negative,
+ * that fits a Py_ssize_t. */
+static int length_result(SPYContext *c, SPYValue *result, int64_t *length) {
+    SPYValue *index = index_object(c, result);
+    if (!index) return -1;
+    int status = -1;
+    if (integer_sign(index) < 0) spy_error(c, "ValueError", "__len__() should return >= 0");
+    else if (index->as.integer_data.big) spy_error(c, "OverflowError", "cannot fit 'int' into an index-sized integer");
+    else { *length = index->as.integer_data.small; status = 0; }
+    spy_release(index); return status;
+}
 static int index_value(SPYContext *c, SPYValue *value, int64_t *result) {
     SPYValue *index = index_object(c, value);
     if (!index) return -1;
@@ -7523,6 +7537,10 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         if (base) return comparison(c, op, a, base);
         if (special_dispatch(b)) {
             SPYValue *method = special_method(c, b, "__contains__");
+            if (method && method->type == SPY_NONE) {
+                spy_release(method);
+                return errorf(c, "TypeError", "'%s' object is not a container", type_name(b));
+            }
             if (method) {
                 SPYValue *value = spy_call(c, method, 1, &a);
                 spy_release(method);
@@ -7571,9 +7589,9 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             for (size_t i = 0; i <= b->as.string.len; i++)
                 if (a->as.string.len <= b->as.string.len - i && !memcmp(b->as.string.data + i, a->as.string.data, a->as.string.len)) { result = 1; break; }
         } else if (b->type == SPY_BYTES) {
-            return spy_error(c, "TypeError", "bytes membership requires an integer or bytes");
+            return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
         } else if (b->type == SPY_STRING) {
-            if (a->type != SPY_STRING) return spy_error(c, "TypeError", "string membership requires a string");
+            if (a->type != SPY_STRING) return errorf(c, "TypeError", "'in <string>' requires string as left operand, not %s", type_name(a));
             if (a->as.string.len <= b->as.string.len)
                 for (size_t i = 0; i <= b->as.string.len - a->as.string.len; i++)
                     if (!memcmp(b->as.string.data + i, a->as.string.data, a->as.string.len)) { result = 1; break; }
@@ -20695,11 +20713,9 @@ execution_fail:
             SPYValue *length = call_special(c, a, "__len__", 0, NULL);
             if (!length) return NULL;
             int64_t value;
-            int status = spy_as_int(c, length, &value);
+            int status = length_result(c, length, &value);
             spy_release(length);
-            if (status) return NULL;
-            if (value < 0) return spy_error(c, "ValueError", "__len__() should return >= 0");
-            return spy_int(c, value);
+            return status ? NULL : spy_int(c, value);
         }
         else if (a->type == SPY_RANGE) {
             int64_t length;

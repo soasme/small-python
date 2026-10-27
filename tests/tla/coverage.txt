@@ -224,11 +224,11 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Binary arithmetic operations | TODO: BinaryArith, ArithConversions
 6. Expressions > Expressions > Shifting operations | IntArith
 6. Expressions > Expressions > Binary bitwise operations | IntArith
-6. Expressions > Expressions > Comparisons | TODO: Comparisons
-6. Expressions > Expressions > Comparisons > Value comparisons | TODO: Comparisons
-6. Expressions > Expressions > Comparisons > Membership test operations | TODO: Membership
-6. Expressions > Expressions > Comparisons > Identity comparisons | TODO: Comparisons
-6. Expressions > Expressions > Boolean operations | TODO: Evaluation, Truth
+6. Expressions > Expressions > Comparisons | Comparisons
+6. Expressions > Expressions > Comparisons > Value comparisons | Comparisons
+6. Expressions > Expressions > Comparisons > Membership test operations | Comparisons
+6. Expressions > Expressions > Comparisons > Identity comparisons | Comparisons
+6. Expressions > Expressions > Boolean operations | Evaluation, Truth
 6. Expressions > Expressions > Assignment expressions | TODO: AssignExpr
 6. Expressions > Expressions > Conditional expressions | Evaluation
 6. Expressions > Expressions > Lambdas | TODO: Lambdas
@@ -305,16 +305,16 @@ Reference chapter contents | - table of contents
 10. Complete grammar > Full Grammar specification | TODO: Grammar, Precedence
 11. Built-in types | = sections
 11. Built-in types > Built-in Types | = sections
-11. Built-in types > Built-in Types > Truth Value Testing | TODO: Truth
-11. Built-in types > Built-in Types > Boolean Operations --- `and`, `or`, `not` | TODO: Truth, Evaluation
-11. Built-in types > Built-in Types > Comparisons | TODO: Comparisons
+11. Built-in types > Built-in Types > Truth Value Testing | Truth
+11. Built-in types > Built-in Types > Boolean Operations --- `and`, `or`, `not` | Truth, Evaluation
+11. Built-in types > Built-in Types > Comparisons | Comparisons
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` | TODO: NumericTypes, BinaryArith, ArithConversions
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Bitwise Operations on Integer Types | IntArith
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Integer Types | TODO: IntMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Float | TODO: FloatMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | NumericTypes
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | TODO: NumericHash
-11. Built-in types > Built-in Types > Boolean Type - `bool` | TODO: Truth, NumericTypes
+11. Built-in types > Built-in Types > Boolean Type - `bool` | Truth, NumericTypes
 11. Built-in types > Built-in Types > Iterator Types | TODO: Iteration, Iterators
 11. Built-in types > Built-in Types > Iterator Types > Generator Types | Generators
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` | = sections

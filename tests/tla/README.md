@@ -76,6 +76,8 @@ and tied to real implementations by replaying them.
 | `Future.tla` | future statements: placement, known and historical features, stringized annotations, inheritance by `exec()` and `compile()`, and relative imports of `__future__` | yes |
 | `Displays.tla` | list, tuple, set, and dict displays of plain, starred, and double-starred items: evaluation order, first-kept equal elements and keys, last-kept values, and failing items; parenthesized forms and display syntax errors | yes |
 | `Comprehensions.tla` | comprehensions and generator expressions of up to three for and if clauses with plain and unpacking elements (PEP 798): nesting, filtering, evaluation order, the eager first iterable, scoping, assignment expressions, and syntax errors | yes |
+| `Truth.tla` | truth testing of instances with every kind of `__bool__` and `__len__` (including bad results and `None`), `bool()` of built-in values, and `not`, `and`, and `or` with short-circuiting | yes |
+| `Comparisons.tla` | rich comparison dispatch for every operator over classes with all, no, declining, or only `__eq__` methods, unrelated or subclassed (reflected first); chains, identity, built-in sequence, mapping, set, and numeric comparisons, and membership through `__contains__`, iteration, and `__getitem__` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -180,9 +182,12 @@ package had no `__file__`; `lazy import a.b` imported `a.b` when `a`
 was first used (rather than when `a.b` was looked up), and
 `__lazy_modules__` was ignored; a relative import from globals without
 `__name__` raised ImportError instead of KeyError, with other messages for
-a non-string `__name__` or `__package__`; and a `**` mapping whose `keys()`
+a non-string `__name__` or `__package__`; a `**` mapping whose `keys()`
 returned a non-iterable was reported with the module of a class defined in
-`__main__` or `builtins`.
+`__main__` or `builtins`; `len()` and truth testing rejected a `__len__`
+result with `__index__` and reported other results with other messages;
+a `__bool__` or `__contains__` of None was called; and `in` with a string
+or bytes reported a wrong left operand with other messages.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

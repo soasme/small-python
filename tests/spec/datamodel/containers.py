@@ -84,3 +84,32 @@ assert_eq(l, ["a", 3])
 assert_eq(len(range(0, 10, 3)), 4)
 assert_eq(range(10)[-1], 9)
 assert_eq(hash(slice(1, 2)), hash(slice(1, 2)))
+# __len__ returns an index that is not negative and fits a Py_ssize_t.
+class Index:
+    def __index__(self): return 2
+def sized(value):
+    return type("Sized", (), {"__len__": lambda self: value})()
+assert_eq(len(sized(Index())), 2)
+assert_true(bool(sized(Index())))
+for f in (len, bool):
+    e = assert_raises(TypeError, f, sized("3"))
+    assert_eq(str(e), "'str' object cannot be interpreted as an integer")
+    e = assert_raises(OverflowError, f, sized(2 ** 64))
+    assert_eq(str(e), "cannot fit 'int' into an index-sized integer")
+    e = assert_raises(ValueError, f, sized(-2 ** 64))
+    assert_eq(str(e), "__len__() should return >= 0")
+# A __bool__ or __contains__ of None disables truth testing or membership.
+class NoBool:
+    __bool__ = None
+    def __len__(self): return 1
+e = assert_raises(TypeError, bool, NoBool())
+assert_eq(str(e), "'NoBool' cannot be interpreted as a boolean")
+class NoContains:
+    __contains__ = None
+    def __iter__(self): return iter([1])
+e = assert_raises(TypeError, lambda: 1 in NoContains())
+assert_eq(str(e), "'NoContains' object is not a container")
+e = assert_raises(TypeError, lambda: 1 in "abc")
+assert_eq(str(e), "'in <string>' requires string as left operand, not int")
+e = assert_raises(TypeError, lambda: "a" in b"abc")
+assert_eq(str(e), "a bytes-like object is required, not 'str'")

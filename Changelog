@@ -458,6 +458,10 @@
 - The error for a ** mapping whose keys() returns a non-iterable omits
   the module builtins or __main__ from the class name. TLA+ models of
   displays and of comprehensions and generator expressions.
+- len() and truth testing take a __len__ result through __index__ and
+  report it as CPython does; a __bool__ or __contains__ of None raises
+  TypeError; `in` on str and bytes reports a wrong left operand with
+  CPython's messages. TLA+ models of truth testing and comparisons.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
