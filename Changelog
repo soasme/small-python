@@ -736,3 +736,17 @@
   the fill even with an explicit alignment, and gives the exception
   type of a missing printf mapping key. The harness host gains
   collect(), warnings() and recursion_limit().
+- spy treats a mappingproxy as a mapping in match patterns (26.5);
+  assigning an attribute a method only reads through from __func__
+  reports the missing __dict__, as CPython does (28.4); code.replace()
+  can set the iterable coroutine flag 0x100, which makes the function's
+  generators awaitable and able to yield from a coroutine (27.4.5), and
+  a generator's gi_code is its function's current __code__; and
+  function(code, globals, closure=...) accepts cells made by cell(),
+  which then share the new function's free variables (28.1, 28.6).
+- Spec tests for frozendict, set and frozenset with the frozenset hash,
+  dict views, mappingproxy, mappings in match, coroutine objects, the
+  function type, code, frame, method, cell, and traceback objects, and
+  the method, slot-wrapper, getset and member descriptors. PLS-315 now
+  gives CPython's messages for clearing a suspended frame, a non-tuple
+  closure, a bad tb_next, and deleting a mappingproxy item.

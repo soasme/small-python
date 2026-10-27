@@ -10323,6 +10323,20 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
         const char *name = entry->key->as.string.data;
         size_t known = 0;
         while (known < sizeof(names) / sizeof(*names) && strcmp(names[known], name)) known++;
+        if (known == sizeof(names) / sizeof(*names) && !strcmp(name, "co_flags") && is_int(entry->value) &&
+            entry->value->type != SPY_BOOL) {
+            /* Only CO_ITERABLE_COROUTINE (0x100, 27.4.5) can change: the
+             * other flags follow from the definition. */
+            SPYValue *flags = attribute(c, code, "co_flags");
+            int64_t old = 0, new = 0;
+            int same = flags && !spy_as_int(c, flags, &old) && !spy_as_int(c, entry->value, &new) && ((old ^ new) & ~(int64_t)0x100) == 0;
+            spy_release(flags);
+            if (c->error_type[0]) { spy_release(replaced); return NULL; }
+            if (same) {
+                if (name_set(c, replaced, name, entry->value)) { spy_release(replaced); return NULL; }
+                continue;
+            }
+        }
         if (known == sizeof(names) / sizeof(*names)) {
             spy_release(replaced);
             if (!strncmp(name, "co_", 3)) return errorf(c, "NotImplementedError", "replace() cannot change %s in spy", name);
@@ -10736,6 +10750,13 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name,
             if (!strcmp(name, getsets[i])) {
                 errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object)); return -1;
             }
+    }
+    /* 28.4: a method's own attributes are __func__, __self__ and __doc__;
+     * the rest only read through to __func__. */
+    if (object->type == SPY_METHOD && strcmp(name, "__func__") && strcmp(name, "__self__")) {
+        if (!strcmp(name, "__doc__")) errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object));
+        else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+        return -1;
     }
     /* Every type's namespace has a __doc__. */
     if (descriptor || !strcmp(name, "__doc__")) { errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name); return -1; }
@@ -16446,8 +16467,9 @@ static int match_sequence_subject(SPYContext *c, SPYValue *subject) {
     if (subject->type != SPY_INSTANCE) return 0;
     return subclass(subject->as.map.parent, c->types[SPY_LIST]) || subclass(subject->as.map.parent, c->types[SPY_TUPLE]);
 }
+/* 26.5: dict, frozendict, mappingproxy, and their subclasses. */
 static int match_mapping_subject(SPYContext *c, SPYValue *subject) {
-    if (is_dict(subject)) return 1;
+    if (is_dict(subject) || subject->type == SPY_MAPPINGPROXY) return 1;
     return subject->type == SPY_INSTANCE && (subclass(subject->as.map.parent, c->types[SPY_DICT]) ||
         subclass(subject->as.map.parent, c->types[SPY_FROZENDICT]));
 }
@@ -16850,7 +16872,8 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     v->as.generator.node = n;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
     v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
-    v->as.generator.code = definition_code(c, f->unit, n);
+    SPYValue *code = name_local(function->as.function.metadata, "__code__");
+    v->as.generator.code = code ? spy_retain(code) : definition_code(c, f->unit, n);
     if (!v->as.generator.name || !v->as.generator.qualname || !v->as.generator.code) { spy_release(v); return NULL; }
     v->as.generator.env = spy_retain(f->env);
     v->as.generator.unit = spy_retain(f->unit);
@@ -16992,7 +17015,15 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
     if (!result && !c->error_type[0]) spy_error(c, "StopIteration", "");
     return result;
 }
+/* A generator whose code carries CO_ITERABLE_COROUTINE (27.4.5). */
+static int iterable_coroutine(SPYValue *v) {
+    if (v->type != SPY_GENERATOR || !v->as.generator.code || !v->as.generator.code->as.unit.replaced) return 0;
+    SPYValue *flags = name_local(v->as.generator.code->as.unit.replaced, "co_flags");
+    int64_t value = 0;
+    return flags && !spy_as_int(v->ctx, flags, &value) && (value & 0x100);
+}
 static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *method_name) {
+    if (iterable_coroutine(value)) return spy_retain(value);
     if (value->type == SPY_COROUTINE) {
         Machine *m = value->as.generator.machine;
         if (!value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate)
@@ -17206,7 +17237,8 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_DELEGATE:
             a = machine_pop(m);
             m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
-                                                  ins->arg == DELEGATE_AEXIT ? "__aexit__" : NULL) : get_iterator(c, a);
+                                                  ins->arg == DELEGATE_AEXIT ? "__aexit__" : NULL) :
+                a->type == SPY_COROUTINE && iterable_coroutine(generator) ? await_iterator(c, a, NULL) : get_iterator(c, a);
             if (m->delegate) {
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
                 value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL);
@@ -22048,13 +22080,52 @@ static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *ar
  * PyFunction_New. spy closures share their defining environment rather than
  * holding cells, so free variables need cells bound in one defining
  * environment, which the function then extends. */
+static SPYValue *globals_env(SPYContext *c, SPYValue *globals) {
+    SPYValue *builtins = name_local(globals, "__builtins__");
+    if (builtins && builtins->type == SPY_MODULE) builtins = namespace_map(builtins);
+    if (!builtins || !is_dict(builtins)) builtins = c->builtins;
+    SPYValue *env = value_new(c, V_ENV);
+    if (!env) return NULL;
+    env->as.map.flags = 3;
+    env->as.map.namespace = spy_retain(globals);
+    env->as.map.parent = spy_retain(builtins);
+    return env;
+}
+/* Cells made by cell() hold their own value: give them one new scope of
+ * the code's free variables, under the globals, and make each cell a view
+ * of its variable there, so the function and the cell share it (28.6). */
+static int bind_free_cells(SPYContext *c, Node *def, SPYValue *globals, SPYValue *closure) {
+    for (size_t i = 0; i < closure->as.seq.len; i++)
+        if (closure->as.seq.items[i]->as.cell.env) return 0;
+    SPYValue *names = closure_names(c, def, 0), *outer = names ? globals_env(c, globals) : NULL;
+    SPYValue *env = outer ? value_new(c, V_ENV) : NULL;
+    int status = !env;
+    if (env) {
+        env->as.map.parent = outer; outer = NULL;
+        env->as.map.scope = def->scope ? def->scope->parent : NULL;
+    }
+    for (size_t i = 0; !status && i < closure->as.seq.len && i < names->as.seq.len; i++) {
+        SPYValue *cell = closure->as.seq.items[i], *name = names->as.seq.items[i];
+        SPYValue *unbound = cell->as.cell.value ? NULL : value_new(c, V_UNBOUND);
+        status = (!cell->as.cell.value && !unbound) || name_set(c, env, name->as.string.data, cell->as.cell.value ? cell->as.cell.value : unbound) ||
+            weak_push(&c->cells, &c->cells_len, &c->cells_cap, cell);
+        spy_release(unbound);
+        if (status) break;
+        spy_release(cell->as.cell.value); cell->as.cell.value = NULL;
+        cell->as.cell.env = spy_retain(env);
+        cell->as.cell.name = spy_retain(name);
+    }
+    spy_release(outer); spy_release(env); spy_release(names);
+    return status ? -1 : 0;
+}
 static SPYValue *function_from_code(SPYContext *c, SPYValue *code, SPYValue *globals, SPYValue *closure) {
     Node *def = code->as.unit.definition;
     if (!def) return spy_error(c, "NotImplementedError", "a function of module code is not implemented");
     SPYValue *env = NULL;
+    if (closure && closure->type == SPY_TUPLE && closure->as.seq.len && bind_free_cells(c, def, globals, closure)) return NULL;
     for (size_t i = 0; closure && closure->type == SPY_TUPLE && i < closure->as.seq.len; i++) {
         SPYValue *cell = closure->as.seq.items[i];
-        if (!cell->as.cell.env) return spy_error(c, "NotImplementedError", "a closure of cells not bound to a defining scope is not implemented");
+        if (!cell->as.cell.env) return spy_error(c, "NotImplementedError", "a closure mixing new cells and cells of a defining scope is not implemented");
         /* Keep the innermost environment: every other cell's must enclose it. */
         if (!env) { env = cell->as.cell.env; continue; }
         SPYValue *scan = cell->as.cell.env;
@@ -22069,16 +22140,7 @@ static SPYValue *function_from_code(SPYContext *c, SPYValue *code, SPYValue *glo
     if (env && namespace_map(module_env(c, env)) != globals)
         return spy_error(c, "NotImplementedError", "a closure with different globals is not implemented");
     if (env) spy_retain(env);
-    else {
-        SPYValue *builtins = name_local(globals, "__builtins__");
-        if (builtins && builtins->type == SPY_MODULE) builtins = namespace_map(builtins);
-        if (!builtins || !is_dict(builtins)) builtins = c->builtins;
-        env = value_new(c, V_ENV);
-        if (!env) return NULL;
-        env->as.map.flags = 3;
-        env->as.map.namespace = spy_retain(globals);
-        env->as.map.parent = spy_retain(builtins);
-    }
+    else if (!(env = globals_env(c, globals))) return NULL;
     Frame frame = {env, code->as.unit.owner, 0};
     SPYValue *fn = function_new(c, &frame, def);
     spy_release(env);

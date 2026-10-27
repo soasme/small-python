@@ -1,0 +1,40 @@
+# spec: PLS-315 26.2, 26.3.4
+# description: frozendict: an immutable, ordered, hashable mapping.
+from harness import *
+
+f = frozendict(a=1, b=2)
+assert_eq(f["a"], 1)
+assert_eq(list(f), ["a", "b"])
+assert_eq(list(f.items()), [("a", 1), ("b", 2)])
+assert_eq(frozendict([("x", 1)], y=2), frozendict(x=1, y=2))
+assert_eq(frozendict.fromkeys("ab", 0), frozendict(a=0, b=0))
+assert_type(frozendict.fromkeys("ab"), frozendict)
+assert_eq(f.get("z", 9), 9)
+assert_eq(f, {"a": 1, "b": 2})
+assert_eq(f, frozendict(b=2, a=1))
+assert_false(issubclass(frozendict, dict))
+assert_false(isinstance(f, dict))
+for name in ("__setitem__", "__delitem__", "pop", "popitem", "update", "setdefault", "clear"):
+    assert_false(hasattr(frozendict, name), name)
+e = assert_raises(TypeError, exec, "f['a'] = 3", {"f": f})
+assert_eq(str(e), "'frozendict' object does not support item assignment")
+e = assert_raises(TypeError, exec, "del f['a']", {"f": f})
+assert_eq(str(e), "'frozendict' object does not support item deletion")
+assert_eq(f | {"c": 3}, frozendict(a=1, b=2, c=3))
+assert_type(f | {"c": 3}, frozendict)
+assert_type({"c": 3} | f, dict)
+g = f
+g |= {"c": 3}
+assert_type(g, frozendict)
+assert_eq(f, frozendict(a=1, b=2))
+assert_true(g is not f)
+assert_eq(hash(f), hash(frozenset(f.items())))
+assert_eq(hash(frozendict()), hash(frozenset()))
+assert_raises(TypeError, hash, frozendict(a=[]))
+assert_eq(repr(f), "frozendict({'a': 1, 'b': 2})")
+assert_eq(repr(frozendict()), "frozendict()")
+assert_eq(f.copy(), f)
+assert_type(f.copy(), frozendict)
+assert_eq({f: 1}[frozendict(b=2, a=1)], 1)
+assert_eq(list(f.keys()), ["a", "b"])
+assert_eq(list(reversed(f)), ["b", "a"])
