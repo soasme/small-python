@@ -376,6 +376,9 @@
   deep are "f-string: expressions nested too deeply"; Interpolation.expression
   leaves out comments. TLA+ models of tokens, f-strings, t-strings, and
   private name mangling complete the lexical analysis chapter.
+- TLA+ models of the standard type hierarchy: singletons, object identity,
+  numeric types and reprs, sequence operations, mutable sequences, sets,
+  and frozendict.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

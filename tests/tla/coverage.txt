@@ -60,22 +60,22 @@ Reference chapter contents | - table of contents
 2. Lexical analysis > Lexical analysis > Operators and delimiters | Tokens
 3. Data model | = sections
 3. Data model > Data model | = sections
-3. Data model > Data model > Objects, values and types | TODO: Objects
+3. Data model > Data model > Objects, values and types | Objects
 3. Data model > Data model > The standard type hierarchy | = sections
-3. Data model > Data model > The standard type hierarchy > None | TODO: Singletons
-3. Data model > Data model > The standard type hierarchy > NotImplemented | TODO: Singletons, Operators
-3. Data model > Data model > The standard type hierarchy > Ellipsis | TODO: Singletons
+3. Data model > Data model > The standard type hierarchy > None | Singletons
+3. Data model > Data model > The standard type hierarchy > NotImplemented | Singletons, Operators
+3. Data model > Data model > The standard type hierarchy > Ellipsis | Singletons
 3. Data model > Data model > The standard type hierarchy > `numbers.Number` | = sections
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Integral` | TODO: NumericTypes, IntArith
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Real` (`float`) | TODO: NumericTypes
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Complex` (`complex`) | TODO: NumericTypes
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Integral` | NumericTypes, IntArith
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Real` (`float`) | NumericTypes
+3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Complex` (`complex`) | NumericTypes
 3. Data model > Data model > The standard type hierarchy > Sequences | = sections
-3. Data model > Data model > The standard type hierarchy > Sequences > Immutable sequences | TODO: SeqOps
-3. Data model > Data model > The standard type hierarchy > Sequences > Mutable sequences | TODO: Lists
-3. Data model > Data model > The standard type hierarchy > Set types | TODO: Sets
+3. Data model > Data model > The standard type hierarchy > Sequences > Immutable sequences | SeqOps
+3. Data model > Data model > The standard type hierarchy > Sequences > Mutable sequences | Lists
+3. Data model > Data model > The standard type hierarchy > Set types | Sets
 3. Data model > Data model > The standard type hierarchy > Mappings | = sections
 3. Data model > Data model > The standard type hierarchy > Mappings > Dictionaries | Dicts
-3. Data model > Data model > The standard type hierarchy > Mappings > Frozen dictionaries | TODO: FrozenDicts
+3. Data model > Data model > The standard type hierarchy > Mappings > Frozen dictionaries | FrozenDicts
 3. Data model > Data model > The standard type hierarchy > Callable types | = sections
 3. Data model > Data model > The standard type hierarchy > Callable types > User-defined functions | TODO: FunctionObjects
 3. Data model > Data model > The standard type hierarchy > Callable types > Special read-only attributes | TODO: FunctionObjects
@@ -186,7 +186,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions | = sections
 6. Expressions > Expressions > Arithmetic conversions | TODO: ArithConversions
 6. Expressions > Expressions > Atoms | TODO: Atoms
-6. Expressions > Expressions > Atoms > Built-in constants | TODO: Singletons
+6. Expressions > Expressions > Atoms > Built-in constants | Singletons
 6. Expressions > Expressions > Atoms > Identifiers (Names) | = sections
 6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | Mangling
 6. Expressions > Expressions > Atoms > Literals | TODO: LiteralIdentity
@@ -312,17 +312,17 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Bitwise Operations on Integer Types | IntArith
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Integer Types | TODO: IntMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Float | TODO: FloatMethods
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | TODO: NumericTypes
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | NumericTypes
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | TODO: NumericHash
 11. Built-in types > Built-in Types > Boolean Type - `bool` | TODO: Truth, NumericTypes
 11. Built-in types > Built-in Types > Iterator Types | TODO: Iteration, Iterators
 11. Built-in types > Built-in Types > Iterator Types > Generator Types | Generators
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` | = sections
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Common Sequence Operations | TODO: SeqOps
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Immutable Sequence Types | TODO: SeqOps
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Mutable Sequence Types | TODO: Lists
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Lists | TODO: Lists
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Tuples | TODO: SeqOps
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Common Sequence Operations | SeqOps
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Immutable Sequence Types | SeqOps
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Mutable Sequence Types | Lists
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Lists | Lists
+11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Tuples | SeqOps
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Ranges | TODO: Ranges
 11. Built-in types > Built-in Types > Text and Binary Sequence Type Methods Summary | - informative: an index of the methods specified in the sections that follow
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` | TODO: StrBasics
@@ -339,10 +339,10 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes and Bytearray Operations | TODO: Bytes, Bytearray
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | TODO: PercentFormat
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | TODO: Buffers
-11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | TODO: Sets
+11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | Sets
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | TODO: Dicts, DictMethods
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Dictionary view objects | TODO: DictViews
-11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | TODO: FrozenDicts
+11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | FrozenDicts
 11. Built-in types > Built-in Types > Context Manager Types | TODO: With
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) | = sections
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type | TODO: GenericAlias
@@ -356,9 +356,9 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Other Built-in Types > Methods | TODO: Methods
 11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | TODO: CodeObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | TODO: ClassObjects
-11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | TODO: Singletons
-11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | TODO: Singletons
-11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | TODO: Singletons
+11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | Singletons
+11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | Singletons
+11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | TODO: Frames, CodeObjects
 11. Built-in types > Built-in Types > Special Attributes | TODO: ClassObjects
 11. Built-in types > Built-in Types > Integer string conversion length limitation | TODO: IntStrLimit

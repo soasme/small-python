@@ -32,6 +32,13 @@ and tied to real implementations by replaying them.
 | `FStrings.tla` | f-strings: doubled braces, fields, `=`, conversions, nested format specifications and their depth limit, and comments | yes |
 | `TStrings.tla` | t-strings: the Template's strings and each interpolation's value, expression text, conversion, and format specification | yes |
 | `Mangling.tla` | private name mangling in class bodies, methods, parameters, and `global`, and keyword arguments that are not mangled | yes |
+| `Singletons.tla` | `None`, `NotImplemented`, and `Ellipsis`: one object each, their truth values, and their types | yes |
+| `Objects.tla` | identity, `id()`, aliasing, mutation, unchangeable types, and immutable containers of mutable objects | yes |
+| `NumericTypes.tla` | int and bool as infinite two's complement under masks and shifts, numeric reprs (no leading or trailing zeros, exponent form), and read-only complex parts | yes |
+| `SeqOps.tla` | sequence indexing, slicing with steps, `in`, `count`, `index`, `+`, `*`, and hashing, over str, tuple, bytes, list, and bytearray | yes |
+| `Lists.tla` | item and slice assignment and deletion, `+=`, `*=`, and the mutable sequence methods, over list and bytearray | yes |
+| `Sets.tla` | set and frozenset operators, comparisons, mutation, hashing, and equal numbers as one element | yes |
+| `FrozenDicts.tla` | `frozendict` construction, order, `|` and `|=`, equality with dict, hashing, and the absent mutating methods | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
