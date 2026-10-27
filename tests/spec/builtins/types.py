@@ -318,3 +318,12 @@ class BadDir:
     def __dir__(self):
         return 1
 assert_eq(type_error(lambda: dir(BadDir())), "'int' object is not iterable")
+
+# chr() takes any __index__ value; one too big for a C long is out of range.
+assert_eq(type_error(lambda: chr(65.0)), "'float' object cannot be interpreted as an integer")
+try:
+    chr(2 ** 64)
+except ValueError as error:
+    assert_eq(str(error), "chr() arg not in range(0x110000)")
+else:
+    raise AssertionError("chr(2 ** 64)")

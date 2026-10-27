@@ -527,6 +527,8 @@
 - type() with three arguments names the argument of the wrong type, and
   dir() reports a non-iterable __dir__ result as list() would. TLA+ model
   of the object built-in functions.
+- chr() takes __index__ values and reports one too big for a C long as
+  out of range. TLA+ model of the text built-in functions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

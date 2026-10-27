@@ -20576,9 +20576,12 @@ execution_fail:
         return spy_int(c, n);
     }
     if (id == B_CHR) {
-        int64_t n;
         if (argc != 1) goto arity;
-        if (spy_as_int(c, a, &n)) return NULL;
+        /* An __index__ value too big for a C long is out of range too. */
+        SPYValue *index = index_object(c, a);
+        if (!index) return NULL;
+        int64_t n = index->as.integer_data.big ? -1 : index->as.integer_data.small;
+        spy_release(index);
         if (n < 0 || n > 0x10ffff) return spy_error(c, "ValueError", "chr() arg not in range(0x110000)");
         char s[4]; size_t len;
         if (n < 128) { s[0] = (char)n; len = 1; }

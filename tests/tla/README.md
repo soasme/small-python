@@ -103,6 +103,7 @@ and tied to real implementations by replaying them.
 | `BuiltinsNumeric.tla` | divmod's floor convention, pow with modular inverses, round's ties to even at negative ndigits, bin/oct/hex digits, min/max with key and default, and sum, over a grid of signed integers; the numeric constructors and their errors | yes |
 | `BuiltinsIter.tla` | sorted's stability with key and reverse, reversed, enumerate, strict zip, filter, map, any/all with what they leave unconsumed, iter with a sentinel, and max with key, over every list of up to four items; iter/next/len protocols and sort errors | yes |
 | `BuiltinsObjects.tla` | isinstance and issubclass against classes, nested tuples, and unions over a small hierarchy; getattr, hasattr, setattr, and delattr against class attributes, instance dicts, `__getattr__`, and dictless objects; vars, dir, callable, hash, and type | yes |
+| `BuiltinsText.tla` | repr's quote choice and ascii's escapes (\\x, \\u, \\U) over every string of up to two characters from a mix of quotes, controls, and non-ASCII points; chr/ord, format hooks, and print's sep, end, file, and flush | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -235,7 +236,8 @@ element, `int()` and `float()` refused bytearray and memoryview, and
 `float()` refused strings over 4096 characters, and the singletons'
 types worded their refusal of arguments differently, and `complex()`
 accepted a string by keyword, and `type()` and `dir()` worded argument
-errors their own way.
+errors their own way, and `chr()` refused `__index__` values and
+overflowed on huge ones.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
