@@ -157,3 +157,44 @@ for source, message, offset, end in (
         ("f(a=1, b for b in c)", "Generator expression must be parenthesized", 8, 20)):
     error = assert_syntax_error(source)
     assert_eq((error.msg, error.offset, error.end_offset), (message, offset, end))
+# Compile-time errors cover the source of the node that causes them.
+for source, message, position in (
+        ("__debug__ = 1", "cannot assign to __debug__", (1, 1, 1, 10)),
+        ("x.__debug__ = 1", "cannot assign to __debug__", (1, 1, 1, 12)),
+        ("f(__debug__=1)", "cannot assign to __debug__", (1, 3, 1, 14)),
+        ("def __debug__(): pass", "cannot assign to __debug__", (1, 1, 1, 22)),
+        ("import a as __debug__", "cannot assign to __debug__", (1, 8, 1, 22)),
+        ("def f(__debug__): pass", "cannot assign to __debug__", (1, 7, 1, 16)),
+        ("def f(x):\n  global x", "name 'x' is parameter and global", (2, 3, 2, 11)),
+        ("def f():\n  global x\n  nonlocal x", "name 'x' is nonlocal and global", (2, 3, 2, 11)),
+        ("return 1", "'return' outside function", (1, 1, 1, 9)),
+        ("x = yield 2", "'yield' outside function", (1, 5, 1, 12)),
+        ("await x", "'await' outside function", (1, 1, 1, 8)),
+        ("f(a=1, a=2)", "keyword argument repeated: a", (1, 8, 1, 11)),
+        ("[x async for x in y]", "asynchronous comprehension outside of an asynchronous function", (1, 1, 1, 21)),
+        ("async def f(): yield from x", "'yield from' inside async function", (1, 16, 1, 28)),
+        ("[i := 0 for i in x]", "assignment expression cannot rebind comprehension iteration variable 'i'", (1, 2, 1, 3)),
+        ("[x for x in (y := 1)]", "assignment expression cannot be used in a comprehension iterable expression", (1, 14, 1, 20))):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, (error.lineno, error.offset, error.end_lineno, error.end_offset)), (message, position))
+# Parser errors that name a construct cover it.
+for source, message, position in (
+        ("(): int", "only single target (not tuple) can be annotated", (1, 1, 1, 3)),
+        ("-x: int = 1", "illegal target for annotation", (1, 1, 1, 3)),
+        ("a, *b, c, *d, e = x", "multiple starred expressions in assignment", (1, 1, 1, 16)),
+        ("*a = x", "starred assignment target must be in a list or tuple", (1, 1, 1, 3)),
+        ("x = *a", "can't use starred expression here", (1, 5, 1, 7)),
+        ("[**x for x in y]", "cannot use dict unpacking in list comprehension", (1, 2, 1, 5)),
+        ("(**a)", "cannot use dict unpacking here", (1, 2, 1, 4)),
+        ("[*x if x else y for x in z]", "invalid starred expression. Did you forget to wrap the conditional expression in parentheses?", (1, 2, 1, 16)),
+        ("A[*(1:2)]", "Invalid star expression", (1, 6, 1, 7)),
+        ("f((x)=2)", "expression cannot contain assignment, perhaps you meant \"==\"?", (1, 4, 1, 7)),
+        ("dict(a = i for i in y)", "invalid syntax. Maybe you meant '==' or ':=' instead of '='?", (1, 6, 1, 9)),
+        ("type A = (x := 3)", "named expression cannot be used within a type alias", (1, 11, 1, 17)),
+        ("try:\n   x = 34\n", "expected 'except' or 'finally' block", (2, 10, 2, -1))):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, (error.lineno, error.offset, error.end_lineno, error.end_offset)), (message, position))
+error = assert_syntax_error("match x:\n    case []:\npass\n", exception=IndentationError)
+assert_eq((error.lineno, error.offset, error.end_offset), (3, 0, -1))
+error = assert_syntax_error("class C:\n", exception=IndentationError)
+assert_eq((error.lineno, error.offset, error.end_offset), (1, 9, -1))

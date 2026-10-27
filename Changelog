@@ -666,3 +666,15 @@
   the name of an attribute), set again after its operands run, as
   SLP-315 9.2.1 now states. sentinel's __repr__ is a slot wrapper and its
   methods check their arguments with CPython's messages.
+- Syntax errors cover the source CPython reports. Expression, statement,
+  parameter, keyword and import-alias nodes record their extent. Errors
+  raised after parsing (__debug__ bindings, global and nonlocal
+  declarations, return, yield and await outside a function, a repeated
+  keyword argument, assignment expressions in comprehensions and
+  asynchronous comprehensions) cover the offending construct, as SLP-315
+  18.2.1 now states. Walrus targets, an incomplete conditional
+  expression and a comprehension missing its parentheses give CPython's
+  ranges as well, as do annotation targets, starred and dict-unpacking
+  misuse, invalid star expressions, keyword-argument mistakes and
+  assignment expressions in annotation scopes. Errors at a dedent or at
+  the end of input report the tokenizer's column and no end column.
