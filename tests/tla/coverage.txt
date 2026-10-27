@@ -345,10 +345,10 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | FrozenDicts
 11. Built-in types > Built-in Types > Context Manager Types | With
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) | = sections
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type | TODO: GenericAlias
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Standard Generic Classes | TODO: GenericAlias
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Special Attributes of `GenericAlias` objects | TODO: GenericAlias
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Union Type | TODO: UnionType
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type | TypeAnnotations, ClassGetitem, Generics
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Standard Generic Classes | TypeAnnotations, ClassGetitem, Generics
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Special Attributes of `GenericAlias` objects | TypeAnnotations, ClassGetitem, Generics
+11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Union Type | TypeAnnotations
 11. Built-in types > Built-in Types > Other Built-in Types | = sections
 11. Built-in types > Built-in Types > Other Built-in Types > Modules | ModuleObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | ClassObjects

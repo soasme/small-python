@@ -97,6 +97,7 @@ and tied to real implementations by replaying them.
 | `PercentFormat.tla` | printf-style formatting derived for ints and floats under every flag combination, width, precision, and numeric type, into str and bytes; %s, %r, %a, %c, mapping keys, `*` widths, and argument mismatches | yes |
 | `Bytes.tla` | the str search, split, replace, affix, strip, and pad functions derived again for bytes and bytearray receivers; constructors, fromhex and hex, ASCII-only case mappings and predicates, bytearray mutation, and argument errors | yes |
 | `DictMethods.tla` | dict construction forms, merge and update order with the right operand's values, live keys, values, and items views with their set operators, get, setdefault, pop, popitem, fromkeys, copy, `__missing__`, and key errors | yes |
+| `TypeAnnotations.tla` | GenericAlias origin, arguments, parameters, substitution, unpacking, and refusals; X \| Y unions over every two- and three-term chain, flattened and deduplicated in order, with isinstance() over them | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 

@@ -511,6 +511,8 @@
   iterable, and a dict items view & a set, report an unhashable item as
   CPython does, without naming it a set element. TLA+ model of dict
   methods and views.
+- TLA+ model of GenericAlias and Union: alias attributes, substitution,
+  and union flattening, deduplication, and isinstance().
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
