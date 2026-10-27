@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#implementing-descriptors
+# spec: PLS-315 10.3
 # description: __get__/__set__/__delete__/__set_name__, binding, and the property/classmethod/staticmethod descriptors.
 from harness import *
 

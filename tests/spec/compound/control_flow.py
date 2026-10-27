@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-if-statement
+# spec: PLS-315 15.1, 15.2
 # description: if/elif/else, while and for with else, break/continue, try/except/else/finally, except*, and with statements.
 from harness import *
 

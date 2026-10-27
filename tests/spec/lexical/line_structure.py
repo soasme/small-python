@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#line-structure
+# spec: PLS-315 12.2
 # description: Logical lines, explicit and implicit joining, blank lines, comments.
 from harness import *
 

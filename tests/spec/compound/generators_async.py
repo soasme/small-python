@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#generator-iterator-methods
+# spec: PLS-315 27.2, 27.5
 # description: send/throw/close, yield from delegation, StopIteration conversion, coroutines and async generators driven manually.
 from harness import *
 

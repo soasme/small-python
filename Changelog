@@ -557,7 +557,7 @@
   resetting the step count, re-entry refused from output and loader and from
   other threads, and close() releasing host callables. Tests in python/tests
   (98 cases, also run under ASan and UBSan) and a type stub.
-- SLP-315 revision 2 (SLP-315:2026-draft2) replaces the consolidated
+- PLS-315 revision 2 (PLS-315:2026-draft2) replaces the consolidated
   reference text with an original specification in the style of ECMA-262:
   abstract operations and numbered algorithms, normative messages checked
   against CPython 3.15, intrinsic objects in place of the types, typing,
@@ -566,10 +566,10 @@
   standard and check-standard targets are retired; tests/tla/coverage.txt
   maps the 574 new sections to the 108 models.
 - A compound statement after ';' (class, def, if, match, decorators, ...)
-  is a SyntaxError, as SLP-315 Annex A's simple_stmts requires.
+  is a SyntaxError, as PLS-315 Annex A's simple_stmts requires.
 - Conversion hooks (__int__, __float__, __complex__, __index__, __bool__,
   __str__, __repr__, __format__, __bytes__, __iter__, __await__, __buffer__)
-  report a wrong result with the type's fully qualified name (SLP-315 5.2),
+  report a wrong result with the type's fully qualified name (PLS-315 5.2),
   as do complex()'s argument errors. A strict int, float, or complex subclass
   returned by __int__, __float__, __complex__, or __index__ is converted to
   its value; int(), float(), and complex() fall back to __index__ through
@@ -584,7 +584,7 @@
   module's __annotate__ and __annotations__ replace each other; function
   names accept str subclasses. New model: ReadOnlyAttributes.tla.
   make test-tla passes the TLC jar by absolute path.
-- tname of an intrinsic type outside builtins carries its module, as SLP-315
+- tname of an intrinsic type outside builtins carries its module, as PLS-315
   5.2 defines it: string.templatelib.Template and Interpolation,
   typing.TypeVar and its kin, types.GenericAlias and SimpleNamespace, and
   the library classes that stand in for CPython's C types, in every message
@@ -596,7 +596,7 @@
   non-exception class as CPython does. SyntaxError details are converted
   like tuple() and take four to seven items, with CPython's messages.
   bytes() and bytearray() with errors but no encoding no longer assume
-  UTF-8. SLP-315 19.2 states the T.__new__ checks.
+  UTF-8. PLS-315 19.2 states the T.__new__ checks.
 - List slice assignment of a non-iterable, sort() with an unknown keyword,
   and list/tuple index() with non-integer bounds give CPython's messages.
   Reading an empty slot names the type by its qualified name. round() of a
@@ -620,7 +620,7 @@
   errors carry the unicodeescape codec message with CPython's positions
   (a non-ASCII code point counts ten, f-string text counts from the last
   replacement field) and the line where the literal begins; bytes literals
-  report "invalid \x escape at position i". SLP-315 12.5.3 states this.
+  report "invalid \x escape at position i". PLS-315 12.5.3 states this.
 - An inconsistent MRO names the heads left in the merge ("for bases A, B");
   without a metaclass keyword, the metaclass starts from the first base's
   type, so class A(1) calls int. Deleting an empty free variable is the
@@ -664,14 +664,14 @@
 - An operation is reported at the line where its expression begins (the
   leftmost operand of a binary operation, comparison, call or subscript;
   the name of an attribute), set again after its operands run, as
-  SLP-315 9.2.1 now states. sentinel's __repr__ is a slot wrapper and its
+  PLS-315 9.2.1 now states. sentinel's __repr__ is a slot wrapper and its
   methods check their arguments with CPython's messages.
 - Syntax errors cover the source CPython reports. Expression, statement,
   parameter, keyword and import-alias nodes record their extent. Errors
   raised after parsing (__debug__ bindings, global and nonlocal
   declarations, return, yield and await outside a function, a repeated
   keyword argument, assignment expressions in comprehensions and
-  asynchronous comprehensions) cover the offending construct, as SLP-315
+  asynchronous comprehensions) cover the offending construct, as PLS-315
   18.2.1 now states. Walrus targets, an incomplete conditional
   expression and a comprehension missing its parentheses give CPython's
   ranges as well, as do annotation targets, starred and dict-unpacking
@@ -688,9 +688,26 @@
   leaves None. The builtin types keep their own __module__ out of
   their namespace for instances and super(), so those see no
   __module__ and assigning one without a __dict__ reports a missing
-  attribute, as SLP-315 10.4.2 and 28.5 now state.
+  attribute, as PLS-315 10.4.2 and 28.5 now state.
 - type.__dict__ holds getset descriptors for __name__, __qualname__,
   __module__, __bases__, __mro__, __dict__, __doc__, __type_params__,
   __annotations__, __annotate__ and __abstractmethods__, and a member
   descriptor for __base__, which read and write through the class. Every
   builtin type's namespace has a __doc__ (None).
+- PLS-315 is library-free: the home module of an intrinsic type, the
+  module cache, standard input and the int string limit are named in
+  messages through *tname* and *host*(f), which Annex D leaves to the
+  implementation; sys, typing and string.templatelib are informative
+  facades in Annex C. 20.1.4 specifies object.__reduce__, __reduce_ex__
+  and __getstate__ with the %NewObj%, %NewObjEx% and %Reconstructor%
+  intrinsics, which no longer import copyreg, and 29.3 defines %Unpack%.
+  The spec harness reaches host facilities through `host` and names
+  intrinsic types through `qualified()`. check_docs verifies that every
+  cross-reference in the standard names an existing clause.
+- The standard is renamed PLS-315, the Python Language Specification
+  (formerly SLP-315); spec tests name its clauses on their "# spec:
+  PLS-315 X.Y" line, and tests/spec_coverage.py (part of make test-spec)
+  checks them and reports the clauses covered. make test-spec and
+  make test-tla no longer need the CPython oracle; make test-spec-oracle
+  and make test-tla-oracle validate the tests and models against it.
+  Reduction.tla models the reduction protocol of 20.1.4.

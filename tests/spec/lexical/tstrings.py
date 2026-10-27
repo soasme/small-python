@@ -1,5 +1,5 @@
-# spec: reference/lexical_analysis.html#t-strings
-# description: Template string literals evaluate to string.templatelib.Template objects.
+# spec: PLS-315 12.5.7, 23.7
+# description: Template string literals evaluate to %Template% objects.
 from harness import *
 
 name = "World"

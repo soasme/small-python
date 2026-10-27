@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-match-statement
+# spec: PLS-315 15.6
 # description: All pattern kinds, guards, binding rules, __match_args__, and match-time errors.
 from harness import *
 

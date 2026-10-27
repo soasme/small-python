@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#conditional-expressions
+# spec: PLS-315 13.13
 # description: Conditional expressions evaluate only the chosen branch.
 from harness import *
 def ret(expression):

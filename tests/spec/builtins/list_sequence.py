@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#lists
+# spec: PLS-315 25.1, 25.5
 # description: Lists as sequences: indexing, slicing, concatenation, and mutation.
 from harness import *
 squares = [1, 4, 9, 16, 25]

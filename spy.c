@@ -1575,7 +1575,7 @@ static int native_kind(SPYValue *v) {
     return wrapper ? NATIVE_WRAPPER_DESCRIPTOR : NATIVE_METHOD_DESCRIPTOR;
 }
 /* The classes, intrinsic or of the library modules, that stand in for
- * CPython's C types outside builtins; tname (SLP-315 5.2) prefixes their
+ * CPython's C types outside builtins; tname (PLS-315 5.2) prefixes their
  * module. */
 static const char *class_tname(SPYValue *cls) {
     static const char *const dotted[][2] = {
@@ -13223,7 +13223,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (path) name_set(c, module, "__path__", path);
         spy_release(path);
     }
-    /* The host supplies no loader or spec (SLP-315 17.2). */
+    /* The host supplies no loader or spec (PLS-315 17.2). */
     if (name_set(c, module, "__name__", module_name) || name_set(c, module, "__doc__", c->none) ||
         name_set(c, module, "__loader__", c->none) || name_set(c, module, "__spec__", c->none) || name_set(c, c->modules, name, module)) {
         spy_release(module_name); spy_release(module); spy_release(unit); spy_release(parent); return NULL;
@@ -21165,18 +21165,24 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (expected == 1) return errorf(c, "TypeError", "object.%s() takes no arguments (%zu given)", method, argc - 1);
             return errorf(c, "TypeError", "object.__reduce_ex__() takes exactly one argument (%zu given)", argc - 1);
         }
+        /* Protocols 0 and 1 reconstruct from the first class of the
+         * Standard in the MRO (CPython: the first non-heap type). */
+        SPYValue *base = name_local(c->classes, "object"), *mro = value_class(c, argv[0])->as.map.mro;
+        for (size_t i = 0; mro && i < mro->as.seq.len; i++)
+            if (static_type(c, mro->as.seq.items[i])) { base = mro->as.seq.items[i]; break; }
         if (id == B_OBJECT_REDUCE_EX) {
             int64_t protocol;
             if (!is_int(argv[1])) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(argv[1]));
             if (spy_as_int(c, argv[1], &protocol)) return NULL;
-            return call_intrinsic(c, "_object_reduce_ex", 2, argv);
+            SPYValue *args[] = {argv[0], argv[1], base};
+            return call_intrinsic(c, "_object_reduce_ex", 3, args);
         }
-        SPYValue *args[] = {argv[0], id == B_OBJECT_REDUCE ? NULL : c->booleans[0]};
+        SPYValue *args[] = {argv[0], id == B_OBJECT_REDUCE ? NULL : c->booleans[0], base};
         if (id == B_OBJECT_REDUCE) {
             SPYValue *protocol = spy_int(c, 0);
             if (!protocol) return NULL;
             args[1] = protocol;
-            SPYValue *result = call_intrinsic(c, "_object_common_reduce", 2, args);
+            SPYValue *result = call_intrinsic(c, "_object_common_reduce", 3, args);
             spy_release(protocol); return result;
         }
         return call_intrinsic(c, "_object_getstate_default", 2, args);

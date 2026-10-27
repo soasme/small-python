@@ -1,4 +1,4 @@
-# spec: library/functions.html#ord
+# spec: PLS-315 19.3.29
 # description: ord() of str, bytes, and bytearray, and its length errors.
 from harness import *
 

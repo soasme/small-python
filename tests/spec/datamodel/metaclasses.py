@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#metaclasses
+# spec: PLS-315 16.4.2
 # description: Metaclass selection and __prepare__.
 from harness import *
 class MC(type):

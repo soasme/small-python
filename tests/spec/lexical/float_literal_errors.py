@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#floating-point-literals
+# spec: PLS-315 12.6
 # description: Malformed exponents are syntax errors.
 from harness import *
 try:

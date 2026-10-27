@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#function-definitions
+# spec: PLS-315 16.5
 # description: Decorators with and without arguments.
 from harness import *
 

@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#boolean-operations
+# spec: PLS-315 13.11
 # description: and/or call __bool__ once per operand and return an operand.
 from harness import *
 # Python carefully avoids evaluating bools more than once in a variety of situations.

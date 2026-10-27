@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#common-sequence-operations
+# spec: PLS-315 23.1.2, 13.3.3
 # description: Indexing and slicing strings with non-ASCII characters.
 from harness import *
 def test_slice_bounds(s):

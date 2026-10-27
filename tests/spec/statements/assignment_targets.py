@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html#assignment-statements
+# spec: PLS-315 14.2.2
 # description: Tuple, list, starred, and chained assignment targets.
 x = 1
 assert x == 1

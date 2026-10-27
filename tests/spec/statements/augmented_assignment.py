@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html#augmented-assignment-statements
+# spec: PLS-315 14.3, 7.6.3
 # description: Augmented assignment with __iadd__ and friends and their fallbacks.
 from harness import *
 class InPlace:

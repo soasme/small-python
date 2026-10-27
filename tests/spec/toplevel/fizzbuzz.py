@@ -1,4 +1,4 @@
-# spec: reference/toplevel_components.html
+# spec: PLS-315 17.6
 # description: A complete program: fizzbuzz with loops and conditionals.
 from harness import *
 def fizzbuzz(n):

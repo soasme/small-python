@@ -1,4 +1,4 @@
-# spec: library/functions.html#exec
+# spec: PLS-315 19.3.15
 # description: exec() with given globals and locals, assignment, and deletion.
 from harness import *
 

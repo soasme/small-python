@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#integer-literals
+# spec: PLS-315 12.6
 # description: Binary, octal, and hexadecimal integer literals.
 from harness import *
 # Integer literals

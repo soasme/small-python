@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#yield-expressions
+# spec: PLS-315 13.16, 27.2
 # description: Generator functions, send/throw/close, yield from, and return values.
 from harness import *
 

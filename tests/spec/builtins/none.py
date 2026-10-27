@@ -1,4 +1,4 @@
-# spec: library/constants.html#None
+# spec: PLS-315 20.4.1
 # description: None, its type, and the comparison slots of NoneType.
 from harness import *
 assert None is None

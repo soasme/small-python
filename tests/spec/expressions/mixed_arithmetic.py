@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#arithmetic-conversions
+# spec: PLS-315 7.6.2, 22.3.2
 # description: int and float operands convert to float.
 from harness import *
 x = 1

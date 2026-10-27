@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#function-definitions
+# spec: PLS-315 16.1, 7.4.3
 # description: Parameters, defaults, decorators, annotations, function attributes, and call-time binding errors.
 from harness import *
 

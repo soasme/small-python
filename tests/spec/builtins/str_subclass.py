@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#str
+# spec: PLS-315 23.1
 # description: str() of exact strings and subclasses.
 from harness import *
 

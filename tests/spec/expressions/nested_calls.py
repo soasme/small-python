@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#calls
+# spec: PLS-315 13.3.4
 # description: Calls nested inside call arguments.
 from harness import *
 # Blocked on LOAD_GLOBAL

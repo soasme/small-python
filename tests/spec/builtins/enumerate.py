@@ -1,4 +1,4 @@
-# spec: library/functions.html#enumerate
+# spec: PLS-315 27.1.4
 # description: enumerate() with start values and argument errors checked before iter().
 from harness import *
 

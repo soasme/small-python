@@ -8,9 +8,9 @@ gets conformance-tested: TLC's state graph is dumped, and for every
 transition a case is built from the shortest path that reaches its source
 state followed by the transition itself. The cases are inserted into the
 replay script, which performs each step on real Python objects and compares
-what happens with the model's state. The pinned CPython oracle must pass
-every case, which validates the model against the reference implementation;
-the engine must pass them to conform to it. Modules and packages a replay
+what happens with the model's state. The engine must pass every case to
+conform to the model. With --oracle, a second implementation (such as the
+pinned CPython 3.15 build) must pass them too, which validates the model. Modules and packages a replay
 imports go in a NAME.files directory, copied next to the script for each run.
 """
 import argparse
@@ -25,7 +25,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TLA = ROOT / "tests/tla"
-ORACLE = ROOT / "tests/upstream/cpython-build/python.exe"
 JAR = ROOT / ".obj/tla/tla2tools.jar"
 MARKER = "CASES = \"\"  # filled in by tests/tla_check.py, with walks() and states()\n"
 # Inserted after the cases: the walks and their states, decoded as needed.
@@ -274,8 +273,8 @@ def replay(name, all_cases, engine, oracle, directory):
     # PEP 765's warnings about return, break, and continue in finally go to
     # stderr; the programs use those on purpose.
     fixtures = TLA / f"{name}.files"
-    for label, command in (("oracle", [str(oracle), "-E", "-s", "-B", "-W", "ignore::SyntaxWarning", script.name]),
-                           ("engine", [str(engine), script.name])):
+    runs = [("oracle", [str(oracle), "-E", "-s", "-B", "-W", "ignore::SyntaxWarning", script.name])] if oracle else []
+    for label, command in runs + [("engine", [str(engine), script.name])]:
         # A NAME.files directory (modules and packages to import) is copied
         # fresh next to the script for each run.
         for item in sorted(fixtures.iterdir()) if fixtures.is_dir() else ():
@@ -298,12 +297,13 @@ def replay(name, all_cases, engine, oracle, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("engine", type=Path)
-    parser.add_argument("--oracle", type=Path, default=ORACLE)
+    parser.add_argument("--oracle", type=Path)
     parser.add_argument("--java", default=os.environ.get("JAVA", shutil.which("java") or "java"))
     parser.add_argument("--jar", type=Path, default=JAR)
     parser.add_argument("--only", default="")
     args = parser.parse_args()
     args.engine = args.engine.resolve()
+    args.oracle = args.oracle and args.oracle.resolve()
     if not args.jar.exists():
         raise SystemExit(f"{args.jar} not found; run `make tla-tools`")
     failures = 0
@@ -324,8 +324,9 @@ def main():
                 all_cases = cases(nodes, edges, initial)
                 edge_list = [(source, target) for source in edges for target in edges[source]]
                 outcomes = replay(name, all_cases, args.engine, args.oracle, directory)
-                line += f"; {len(edge_list)} transitions replayed in {len(all_cases)} walks: oracle {'passed' if outcomes['oracle'][0] else 'FAILED'}, " \
-                        f"{args.engine.name} {'passed' if outcomes['engine'][0] else 'FAILED'}"
+                line += f"; {len(edge_list)} transitions replayed in {len(all_cases)} walks: " + ", ".join(
+                    f"{label if label == 'oracle' else args.engine.name} {'passed' if ok else 'FAILED'}"
+                    for label, (ok, _) in outcomes.items())
                 for label, (ok, text) in outcomes.items():
                     if not ok:
                         failures += 1

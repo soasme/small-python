@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#comprehensions
+# spec: PLS-315 13.2.6
 # description: Comprehension scoping, clause order, filtering, unpacking, and errors.
 from harness import *
 

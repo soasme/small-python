@@ -1,4 +1,4 @@
-# spec: library/functions.html#reversed
+# spec: PLS-315 27.1.7
 # description: reversed() of sequences and __reversed__.
 from harness import *
 assert list(reversed(range(5))) == [4, 3, 2, 1, 0]

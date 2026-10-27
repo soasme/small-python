@@ -1375,18 +1375,74 @@ def _object_newargs(obj):
     return None, None
 
 
+# PLS-315 20.1.4: the reconstruction functions that __reduce_ex__ results
+# name. CPython's library publishes them in copyreg, their home module name.
+def __newobj__(cls, *args):
+    return cls.__new__(cls, *args)
+
+
+def __newobj_ex__(cls, args, kwargs):
+    return cls.__new__(cls, *args, **kwargs)
+
+
+def _reconstructor(cls, base, state):
+    if base is object:
+        obj = object.__new__(cls)
+    else:
+        obj = base.__new__(cls, state)
+        if base.__init__ != object.__init__:
+            base.__init__(obj, state)
+    return obj
+
+
+for _function in (__newobj__, __newobj_ex__, _reconstructor):
+    _function.__module__ = 'copyreg'
+del _function
+
+
+def _object_reduce_old(obj, protocol, base):
+    # Protocols 0 and 1; base is the first class of the Standard in the MRO.
+    cls = type(obj)
+    if base is object:
+        state = None
+    else:
+        if base is cls:
+            raise TypeError(f"cannot pickle {cls.__name__!r} object")
+        state = base(obj)
+    args = (cls, base, state)
+    try:
+        getstate = obj.__getstate__
+    except AttributeError:
+        if getattr(obj, "__slots__", None):
+            raise TypeError(f"cannot pickle {cls.__name__!r} object: "
+                            f"a class that defines __slots__ without "
+                            f"defining __getstate__ cannot be pickled "
+                            f"with protocol {protocol}") from None
+        try:
+            state = obj.__dict__
+        except AttributeError:
+            state = None
+    else:
+        if type(obj).__getstate__ is object.__getstate__ and getattr(obj, "__slots__", None):
+            raise TypeError("a class that defines __slots__ without "
+                            "defining __getstate__ cannot be pickled")
+        state = getstate()
+    if state:
+        return _reconstructor, args, state
+    return _reconstructor, args
+
+
 def _object_reduce_newobj(obj):
-    import copyreg
     cls = type(obj)
     if getattr(cls, '__new__', None) is None:
         raise TypeError(f"cannot pickle {cls.__name__!r} object")
     args, kwargs = _object_newargs(obj)
     hasargs = args is not None
     if not kwargs:
-        newobj = copyreg.__newobj__
+        newobj = __newobj__
         newargs = (cls,) + (args or ())
     else:
-        newobj = copyreg.__newobj_ex__
+        newobj = __newobj_ex__
         newargs = (cls, args, kwargs)
     state = _object_getstate(obj, not (hasargs or isinstance(obj, (list, dict))))
     listitems = iter(obj) if isinstance(obj, list) else None
@@ -1394,17 +1450,16 @@ def _object_reduce_newobj(obj):
     return newobj, newargs, state, listitems, dictitems
 
 
-def _object_common_reduce(obj, protocol):
+def _object_common_reduce(obj, protocol, base):
     if protocol >= 2:
         return _object_reduce_newobj(obj)
-    import copyreg
-    return copyreg._reduce_ex(obj, protocol)
+    return _object_reduce_old(obj, protocol, base)
 
 
-def _object_reduce_ex(obj, protocol):
+def _object_reduce_ex(obj, protocol, base):
     if getattr(type(obj), '__reduce__', None) is not object.__reduce__:
         return obj.__reduce__()
-    return _object_common_reduce(obj, protocol)
+    return _object_common_reduce(obj, protocol, base)
 
 
 # File objects for the open() builtin, following CPython's _io classes over

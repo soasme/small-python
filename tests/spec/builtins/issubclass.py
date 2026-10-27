@@ -1,4 +1,4 @@
-# spec: library/functions.html#issubclass
+# spec: PLS-315 19.3.22, 7.1.2
 # description: issubclass() with tuples, unions, and __subclasscheck__.
 from harness import *
 class A:

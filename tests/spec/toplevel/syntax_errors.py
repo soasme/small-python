@@ -1,4 +1,4 @@
-# spec: reference/toplevel_components.html
+# spec: PLS-315 18.2
 # description: Invalid programs raise SyntaxError with the right message and position.
 from harness import *
 

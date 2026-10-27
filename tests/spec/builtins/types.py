@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html
+# spec: PLS-315 28.5, 20.2.3, 10.4.2
 # description: Methods and operations of the built-in types: numbers, str, bytes, list, tuple, dict, set, range.
 from harness import *
 

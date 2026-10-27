@@ -1,4 +1,4 @@
-# spec: SLP-315 16.6.2, 17.2
+# spec: PLS-315 16.6.2, 17.2
 # description: a module's __annotate__ and __annotations__ replace each other; __annotate__ cannot be deleted.
 from harness import *
 import annotated
@@ -26,8 +26,7 @@ assert_eq(str(assert_raises(TypeError, getattr, bad, "__annotations__")), "__ann
 class Plain:
     __annotate__ = 5
 assert_eq(Plain.__annotations__, {})
-import sys
-M = type(sys)
+M = type(__import__("builtins"))
 named = M("it's")
 named.__file__ = 5
 assert_eq(repr(named), "<module \"it's\" from 5>")

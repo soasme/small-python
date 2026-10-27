@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#special-method-lookup
+# spec: PLS-315 7.3.2
 # description: Implicit special method calls look up the type, bypassing the instance and __getattribute__.
 from harness import *
 

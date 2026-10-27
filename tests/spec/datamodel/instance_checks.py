@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#customizing-instance-and-subclass-checks
+# spec: PLS-315 7.1.2, 7.1.3
 # description: __instancecheck__, __subclasscheck__, callables, __len__/__bool__, __hash__ rules.
 from harness import *
 

@@ -36,7 +36,7 @@ is `spy`, the standalone-program generator is `spyc`, and the embedding API uses
 the `spy_*` prefix. The core consists of `spy.c` and `spy.h` and depends only on
 the C runtime and math library. It does not link or invoke CPython.
 
-The language target is [SLP-315:2026-draft2](standards/3_15.md), the project's
+The language target is [PLS-315:2026-draft2](standards/3_15.md), the project's
 versioned specification of the Python 3.15 core language. The current
 engine implements a subset of that target. It does **not** claim full Python
 3.15 compatibility or a passing CPython/Cython suite.
@@ -221,16 +221,18 @@ An older host can differ in diagnostics and representations and is not the
 language compatibility target.
 
 `make test-spec` runs the language specification suite in `tests/spec`. Each
-test follows one section of the Python 3.15 Language Reference, imports only
-`tests/spec/harness.py`, and must pass on the pinned oracle before its result on
-spy counts, so the tests depend on the specification rather than on any library.
-The `doctests` chapter runs CPython's doctest-based tests through a core-only
-runner in the harness, with library-dependent examples rewritten to use only
-the language. All 50 tests currently pass.
+test follows a clause of PLS-315 (`docs/standards/3_15.md`), imports only
+`tests/spec/harness.py`, and states its expectations directly, so the suite
+needs neither a library nor another implementation. `make test-spec-oracle`
+also runs every test on the pinned CPython oracle, which must pass it, to
+validate the tests. The `doctests` chapter runs CPython's doctest-based tests
+through a core-only runner in the harness, with library-dependent examples
+rewritten to use only the language. All 136 tests currently pass.
 
 `make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
 (fetched by `make tla-tools`; it needs a Java runtime) and replays every
-transition of the bounded models on the oracle and on spy. They cover
+transition of the bounded models on spy (`make test-tla-oracle` replays them
+on the oracle too). They cover
 generator and coroutine methods, try/with control flow and exception context,
 name resolution, integer arithmetic, argument binding, unpacking, method
 resolution order, operator dispatch, attribute access, pattern matching,
@@ -338,7 +340,7 @@ worst-case latency bound, or the few-kilobyte size goal.
 
 ### 3.1 Python language support
 
-The target is [SLP-315:2026-draft2](standards/3_15.md). It distinguishes Core
+The target is [PLS-315:2026-draft2](standards/3_15.md). It distinguishes Core
 language, Host services (its Annex B host hooks), and CPython Extension
 compatibility. The language
 edition, engine release, and upstream test revisions are separate identifiers.

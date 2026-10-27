@@ -1,4 +1,4 @@
-# spec: library/functions.html#locals
+# spec: PLS-315 19.3.25
 # description: locals() at module and function scope.
 from harness import *
 a = 5

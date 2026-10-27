@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#membership-test-operations
+# spec: PLS-315 13.10, 7.8.3
 # description: in and not in with __contains__, __iter__, and __getitem__.
 from harness import *
 

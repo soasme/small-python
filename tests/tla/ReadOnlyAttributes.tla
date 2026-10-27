@@ -1,7 +1,7 @@
 ------------------------- MODULE ReadOnlyAttributes -------------------------
 (***************************************************************************)
 (* Setting and deleting an attribute of an object that has no instance     *)
-(* namespace (SLP-315 7.3.8 GenericSetAttr, steps 3 and 4), for a name a   *)
+(* namespace (PLS-315 7.3.8 GenericSetAttr, steps 3 and 4), for a name a   *)
 (* that the object's type defines as                                       *)
 (*                                                                         *)
 (*     member     a read-only member descriptor (complex.real)             *)

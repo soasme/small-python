@@ -1,4 +1,4 @@
-# spec: library/functions.html#property
+# spec: PLS-315 20.5
 # description: property getters, setters, deleters, and docstrings.
 from harness import *
 

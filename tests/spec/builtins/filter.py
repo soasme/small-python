@@ -1,4 +1,4 @@
-# spec: library/functions.html#filter
+# spec: PLS-315 27.1.5
 # description: filter() with predicates and None, and StopIteration raised by a predicate.
 from harness import *
 assert list(filter(lambda x: (x % 2) == 0, [0, 1, 2])) == [0, 2]

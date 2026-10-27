@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#customizing-class-creation
+# spec: PLS-315 16.4.2, 16.4.3
 # description: __init_subclass__, __set_name__, metaclasses, __prepare__, __class_getitem__, __mro_entries__.
 from harness import *
 

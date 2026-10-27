@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#f-strings
+# spec: PLS-315 12.5.6
 # description: Replacement fields, conversions, format specs, nesting, debugging '='.
 from harness import *
 

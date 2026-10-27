@@ -1,4 +1,4 @@
-# spec: SLP-315 10.1.2, 22.4, 23.3.2, 25.1, 26.1.4, 29.9.1
+# spec: PLS-315 10.1.2, 22.4, 23.3.2, 25.1, 26.1.4, 29.9.1
 # description: list method arguments, empty slots, complex powers, dict mutation during iteration, and lazy error handlers.
 from harness import *
 

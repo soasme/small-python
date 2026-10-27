@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#arithmetic-conversions
+# spec: PLS-315 7.6.2, 22.3.2
 # description: Mixed int/float/complex operands are converted to the wider type.
 from harness import *
 

@@ -1,4 +1,4 @@
-# spec: library/functions.html#abs
+# spec: PLS-315 19.3.1
 # description: abs() of ints, floats, bools, and objects with __abs__.
 from harness import *
 assert abs(-3) == 3

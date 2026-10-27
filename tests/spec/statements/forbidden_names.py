@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html#assignment-statements
+# spec: PLS-315 14.2, 18.2
 # description: Assignment to __debug__ and keywords is a syntax error.
 from harness import *
 

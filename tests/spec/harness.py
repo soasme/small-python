@@ -128,6 +128,51 @@ def run(source, namespace=None):
     return namespace
 
 
+# Host facilities (PLS-315 Annex B and C), like test262's $262. The Standard
+# names no module through which a program reaches the module cache, the lazy
+# module set, or the display hook, so a test reaches them only through this
+# object. An implementation adapts this class to wherever its host exposes
+# them; the definitions below use CPython's names (Annex C.5).
+class Host:
+    # The text by which messages name each facility: *host*(f) in 5.2.6.
+    names = {
+        "the module cache": "sys.modules",
+        "standard input": "sys.stdin",
+        "the int string limit": "sys.set_int_max_str_digits()",
+    }
+
+    def _sys(self):
+        return __import__("sys")
+
+    def name(self, facility):
+        return self.names[facility]
+
+    def module_cache(self):
+        """The %ModuleCache% dict (17.3)."""
+        return self._sys().modules
+
+    def lazy_modules(self):
+        """The %LazyModules% set of pending lazy submodule names (17.5)."""
+        return self._sys().lazy_modules
+
+    def display_hook(self):
+        """The function HostDisplay calls for interactive expression statements."""
+        return self._sys().displayhook
+
+    def set_display_hook(self, hook):
+        self._sys().displayhook = hook
+
+
+host = Host()
+
+
+def qualified(cls):
+    """*tname* of an intrinsic type (PLS-315 5.2.6): its home module name,
+    a dot, and its name, or the bare name for a type in builtins."""
+    module = cls.__module__
+    return cls.__name__ if module == "builtins" else f"{module}.{cls.__name__}"
+
+
 # Doctests: CPython's interactive examples, run without the doctest module.
 # Each example is compiled as interactive input; an expression's value is
 # displayed with repr(), print() output is captured through the example

@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#basic-customization
+# spec: PLS-315 10.5, 20.1.3
 # description: __new__/__init__, __repr__/__str__, __format__, __bytes__, __bool__, __hash__, rich comparisons.
 from harness import *
 

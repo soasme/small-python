@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#object.__call__
+# spec: PLS-315 7.4.1
 # description: __call__ makes instances callable.
 from harness import *
 class Callable:

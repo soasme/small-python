@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla tla-coverage libfuzzer
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -82,9 +82,14 @@ test-cpython-unittest: run-cython
 cpython-unittest-report: run-cython
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/cpython.py unittest --report-only
 
-# Language reference tests: each must pass on the oracle, then on spy.
+# Language reference tests (PLS-315) on spy; they need no other implementation.
 test-spec: spy
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/spec_runner.py ./spy --strict
+	python3 tests/spec_coverage.py
+	python3 tests/spec_runner.py ./spy --strict
+
+# The same tests validated against the pinned CPython oracle as well.
+test-spec-oracle: spy
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/spec_runner.py ./spy --strict --oracle $(CPYTHON)
 
 # TLA+ tools 1.7.4 (TLC 2.19), pinned by checksum; TLC needs a Java runtime.
 TLA_JAR = $(OBJDIR)/tla/tla2tools.jar
@@ -100,7 +105,11 @@ $(TLA_JAR):
 	mv $@.tmp $@
 
 test-tla: spy $(TLA_JAR) tla-coverage
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(abspath $(TLA_JAR))
+	python3 tests/tla_check.py ./spy --java $(JAVA) --jar $(abspath $(TLA_JAR))
+
+# The replays validated against the pinned CPython oracle as well.
+test-tla-oracle: spy $(TLA_JAR) tla-coverage
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(abspath $(TLA_JAR)) --oracle $(CPYTHON)
 
 # Every section of docs/standards/3_15.md is mapped to the models covering it
 # (tests/tla/coverage.txt) or to a stated exclusion; a TODO entry fails.

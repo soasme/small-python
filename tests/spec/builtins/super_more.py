@@ -1,4 +1,4 @@
-# spec: library/functions.html#super
+# spec: PLS-315 20.3
 # description: super() in methods and class methods.
 from harness import *
 test_super_list = super(list)

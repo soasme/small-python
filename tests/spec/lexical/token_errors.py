@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#explicit-line-joining
+# spec: PLS-315 12.2
 # description: Stray backslashes and non-printable characters are reported as CPython's tokenizer does.
 from harness import *
 assert_eq(assert_syntax_error("x = 1 \\ 2").msg, "unexpected character after line continuation character")

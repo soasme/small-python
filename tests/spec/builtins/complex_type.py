@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#numeric-types-int-float-complex
+# spec: PLS-315 22.4
 # description: complex construction, arithmetic, comparisons, hashing, and repr.
 from harness import *
 

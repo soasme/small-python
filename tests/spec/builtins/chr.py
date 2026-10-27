@@ -1,4 +1,4 @@
-# spec: library/functions.html#chr
+# spec: PLS-315 19.3.9
 # description: chr() and its range and argument errors.
 from harness import *
 

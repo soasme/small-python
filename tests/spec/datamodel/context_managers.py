@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#with-statement-context-managers
+# spec: PLS-315 7.9, 15.5
 # description: __enter__/__exit__ protocol and the with statement expansion.
 from harness import *
 

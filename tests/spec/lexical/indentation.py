@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#indentation
+# spec: PLS-315 12.3
 # description: INDENT/DEDENT generation, tabs, and inconsistent indentation errors.
 from harness import *
 

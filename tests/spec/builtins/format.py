@@ -1,4 +1,4 @@
-# spec: library/functions.html#format
+# spec: PLS-315 19.3.16, 7.5.8
 # description: format() and format specifications of ints, floats, and strings.
 from harness import *
 

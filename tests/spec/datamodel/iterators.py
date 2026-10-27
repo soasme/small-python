@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#iterator-types
+# spec: PLS-315 27.1.1, 7.7
 # description: next() with defaults and builtin iterators' __setstate__.
 from harness import *
 ls = [1, 2, 3]

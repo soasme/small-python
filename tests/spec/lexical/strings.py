@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#string-and-bytes-literals
+# spec: PLS-315 12.5
 # description: Quoting, prefixes, triple quotes, escapes, raw strings, concatenation.
 from harness import *
 

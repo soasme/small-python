@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-with-statement
+# spec: PLS-315 15.5, 7.9
 # description: with statements and their __enter__/__exit__ calls.
 from harness import *
 

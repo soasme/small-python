@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#truth-value-testing
+# spec: PLS-315 22.2, 7.5.1
 # description: bool construction, truth testing, and __bool__/__len__ results.
 from harness import *
 

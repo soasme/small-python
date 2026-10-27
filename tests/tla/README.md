@@ -127,8 +127,10 @@ set `JAVA` to choose one) runs `tests/tla_check.py`, which:
    replay script performs each step on real Python objects (calling the
    generator, running the program, assigning the variable) and compares the
    result with the model's next state.
-3. Runs the replay on the pinned CPython 3.15 oracle, which must pass and so
-   validates the model, then on spy, which must pass to conform to it.
+3. Runs the replay on spy, which must pass to conform to the model.
+   `make test-tla-oracle` runs it on the pinned CPython 3.15 oracle first,
+   which must pass and so validates the model; the models themselves restate
+   PLS-315 and need no other implementation.
 
 ## Coverage of the standard
 
@@ -142,8 +144,9 @@ hooks of Annex B, which the standard's profile clauses place outside Core).
 standard's headings.
 
 A section mapped to a model means the model formalizes that section's
-behavior for the cases its bounds enumerate, and that the oracle and spy
-agree with it on every one of them. It does not mean every sentence of the
+behavior for the cases its bounds enumerate, and that spy (and, under
+`make test-tla-oracle`, the oracle) agrees with it on every one of them. It
+does not mean every sentence of the
 section is in the model, and it is not a proof about spy.c.
 
 ## What this does and does not show

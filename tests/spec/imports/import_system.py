@@ -1,4 +1,4 @@
-# spec: reference/import.html
+# spec: PLS-315 14.12, 17.1, 17.2, 17.3, 17.4, 17.5
 # description: import, from-import, packages, relative imports, namespace packages, caching, errors, __all__, PEP 562 and PEP 810.
 from harness import *
 
@@ -110,13 +110,12 @@ assert_syntax_error("class C:\n    lazy import x\n")
 assert_syntax_error("try:\n    lazy import x\nexcept: pass\n")
 assert_syntax_error("lazy from x import *\n")
 assert_syntax_error("lazy from __future__ import annotations\n")
-# The submodule of a lazy dotted import waits in sys.lazy_modules until
-# it is first looked up as an attribute.
-import sys
+# The submodule of a lazy dotted import waits in %LazyModules% until it is
+# first looked up as an attribute.
 lazy import spec_lazy_pkg.part
-assert_true("spec_lazy_pkg.part" in sys.lazy_modules)
+assert_true("spec_lazy_pkg.part" in host.lazy_modules())
 assert_eq(spec_lazy_pkg.part.value, "part")
-assert_false("spec_lazy_pkg.part" in sys.lazy_modules)
+assert_false("spec_lazy_pkg.part" in host.lazy_modules())
 # __lazy_modules__ makes the module-level imports it lists lazy, but not
 # those inside try statements.
 write("spec_lazy_compat.py", "value = 'compat'\n")
@@ -125,10 +124,10 @@ assert_eq(type(ns["spec_lazy_compat"]).__name__, "lazy_import")
 assert_eq(type(ns["spec_mod"]).__name__, "module")
 ns = run("__lazy_modules__ = ['spec_lazy_compat']\ntry:\n    import spec_lazy_compat\nfinally:\n    pass\n")
 assert_eq(type(ns["spec_lazy_compat"]).__name__, "module")
-# None in sys.modules halts an import.
-sys.modules["spec_halted"] = None
+# None in the module cache halts an import.
+host.module_cache()["spec_halted"] = None
 e = assert_raises(ModuleNotFoundError, run, "import spec_halted\n")
-assert_eq(str(e), "import of spec_halted halted; None in sys.modules")
-del sys.modules["spec_halted"]
+assert_eq(str(e), "import of spec_halted halted; None in " + host.name("the module cache"))
+del host.module_cache()["spec_halted"]
 lazy = "soft keyword"
 assert_eq(lazy, "soft keyword")

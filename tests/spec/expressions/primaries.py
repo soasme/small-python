@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#primaries
+# spec: PLS-315 13.3
 # description: Attribute references, subscriptions, slicings, await, the power operator, and evaluation order.
 from harness import *
 

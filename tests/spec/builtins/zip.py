@@ -1,4 +1,4 @@
-# spec: library/functions.html#zip
+# spec: PLS-315 27.1.8
 # description: zip() of iterables of different lengths and strict mode.
 from harness import *
 assert list(zip(["a", "b", "c"], range(3), [9, 8, 7, 99])) == [

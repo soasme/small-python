@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#operators-and-delimiters
+# spec: PLS-315 12.7
 # description: The operator and delimiter tokens, and characters that are not tokens.
 from harness import *
 

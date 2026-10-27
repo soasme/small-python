@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#dict.__or__
+# spec: PLS-315 26.1.2
 # description: dict | and |= with dicts, other mappings, and wrong operand types.
 from harness import *
 

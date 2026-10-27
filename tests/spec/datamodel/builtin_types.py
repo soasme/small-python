@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#the-standard-type-hierarchy
+# spec: PLS-315 6.1, 20.2.3
 # description: Builtin type objects: immutable, with methods and descriptors in their __dict__, visible to dir().
 from harness import *
 
@@ -283,23 +283,23 @@ assert_true(generic.__type_params__[1].__bound__ is None)
 assert_false(hasattr(generic.__type_params__[2], "evaluate_bound"))
 type Alias = int
 e = assert_raises(AttributeError, setattr, Alias, "__value__", 1)
-assert_eq(str(e), "attribute '__value__' of 'typing.TypeAliasType' objects is not writable")
+assert_eq(str(e), f"attribute '__value__' of '{qualified(type(Alias))}' objects is not writable")
 e = assert_raises(AttributeError, setattr, Alias, "other", 1)
-assert_eq(str(e), "'typing.TypeAliasType' object has no attribute 'other' and no __dict__ for setting new attributes")
+assert_eq(str(e), f"'{qualified(type(Alias))}' object has no attribute 'other' and no __dict__ for setting new attributes")
 Alias.__module__ = "elsewhere"
 assert_eq(Alias.__module__, "elsewhere")
-# tname of an intrinsic type outside builtins carries its module (SLP-315 5.2).
-import types
+# tname of an intrinsic type outside builtins carries its home module name
+# (PLS-315 4.3, 5.2.6), which is implementation-defined but not "builtins".
 def generic[T, **P, *Ts](): pass
 type Alias = int
-for value, name in ((t"a", "string.templatelib.Template"), (t"{1}".interpolations[0], "string.templatelib.Interpolation"),
-                    (iter(t"a"), "string.templatelib.TemplateIter"), (types.SimpleNamespace(), "types.SimpleNamespace"),
-                    (generic.__type_params__[0], "typing.TypeVar"), (generic.__type_params__[1], "typing.ParamSpec"),
-                    (generic.__type_params__[2], "typing.TypeVarTuple"), (Alias, "typing.TypeAliasType"),
-                    (list[int], "types.GenericAlias"), (int | str, "typing.Union")):
+values = (t"a", t"{1}".interpolations[0], iter(t"a"), generic.__type_params__[0], generic.__type_params__[1],
+          generic.__type_params__[2], Alias, list[int], int | str)
+for value in values:
+    name = qualified(type(value))
+    assert_ne(type(value).__module__, "builtins")
     assert_eq(str(assert_raises(TypeError, len, value)), f"object of type '{name}' has no len()")
-    if name != "types.GenericAlias":  # it looks attributes up on its origin
+    if type(value) is not type(list[int]):  # a generic alias looks attributes up on its origin
         assert_eq(str(assert_raises(AttributeError, getattr, value, "zzz")), f"'{name}' object has no attribute 'zzz'")
-for cls, name in ((type(t""), "string.templatelib.Template"), (type(generic.__type_params__[0]), "typing.TypeVar")):
+for cls in (type(t""), type(generic.__type_params__[0])):
     e = assert_raises(TypeError, type, "X", (cls,), {})
-    assert_eq(str(e), f"type '{name}' is not an acceptable base type")
+    assert_eq(str(e), f"type '{qualified(cls)}' is not an acceptable base type")

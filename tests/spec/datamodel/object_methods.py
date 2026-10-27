@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#basic-customization
+# spec: PLS-315 20.1.3
 # description: object's default methods and attribute hooks replaced after class creation.
 class MyObject:
     pass

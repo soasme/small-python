@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html
+# spec: PLS-315 A.3, A.4
 # description: Simple statements separated by semicolons.
 from harness import *
 

@@ -1,4 +1,4 @@
-# spec: reference/executionmodel.html#naming-and-binding
+# spec: PLS-315 8.1, 8.2, 8.4
 # description: Local/global/nonlocal binding, class scope rules, free variables, UnboundLocalError.
 from harness import *
 

@@ -1,14 +1,14 @@
 # Language specification tests
 
-A test262-style suite for the Python 3.15 language: one small, self-checking
-script per topic, organized by the chapters of The Python Language Reference
-and the built-in types, functions, and exceptions it relies on. Tests use no
+A test262-style suite for PLS-315, the Python Language Specification for 3.15
+(`docs/standards/3_15.md`): one small, self-checking script per topic,
+organized by chapter. Tests use no
 standard library module, only `harness.py`, and assert behavior the
 specification states.
 
 Each file starts with a metadata comment block:
 
-    # spec: reference/expressions.html#comparisons
+    # spec: PLS-315 13.10
     # description: Chained comparisons evaluate each operand once.
 
 An optional `# negative: SyntaxError` line marks a test whose whole source
@@ -29,6 +29,21 @@ Examples that relied on a library (collections, itertools, random, weakref,
 warnings, test.support) were rewritten to use only the core language; each
 rewrite is explained by a "(Ported ...)" note inside the docstring.
 
+Tests name no library module. A host facility that PLS-315 leaves to the
+implementation (the module cache, the lazy module set, the display hook, and
+the texts *host*(f) by which messages name them) is reached through
+`harness.host`, as test262 reaches its host through `$262`; an implementation
+adapts the `Host` class to wherever it exposes them. `harness.qualified(cls)`
+gives *tname* of an intrinsic type, its home module name and name, so a test
+checks a message without assuming the module an implementation chose.
+
 `tests/spec_runner.py ENGINE` stages each test beside `harness.py` and runs
-it with the pinned CPython 3.15 oracle (which must pass, validating the test)
-and with the engine. `make test-spec` runs it against ./spy.
+it with the engine; `make test-spec` runs it against ./spy. With
+`--oracle PYTHON` each test must also pass on that implementation, which
+validates the test; `make test-spec-oracle` uses the pinned CPython 3.15 build.
+
+The first line of every test, `# spec: PLS-315 X.Y[.Z], ...`, names the
+clauses of `docs/standards/3_15.md` it exercises. `tests/spec_coverage.py`
+(run by `make test-spec`) checks that each named clause exists and counts the
+clauses of the normative chapters some test reaches; `--missing` lists the
+rest.

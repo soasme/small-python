@@ -1,6 +1,6 @@
 ------------------------------ MODULE Sentinels -----------------------------
 (***************************************************************************)
-(* Sentinel objects, as the 3.15 edition requires them (SLP-315 20.8,     *)
+(* Sentinel objects, as the 3.15 edition requires them (PLS-315 20.8,     *)
 (* and the sentinel() built-in of library/functions.html#sentinel):        *)
 (* sentinel(name, /, *, repr=None) checks that name is a str and repr a    *)
 (* str or None and returns a new object, unique, truthy, hashable, equal   *)

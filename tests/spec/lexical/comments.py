@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#comments
+# spec: PLS-315 12.2
 # description: Comments anywhere a line may end.
 from harness import *
 

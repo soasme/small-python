@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#function-definitions
+# spec: PLS-315 16.1
 # description: Function definitions, defaults, keyword arguments, and docstrings.
 from harness import *
 

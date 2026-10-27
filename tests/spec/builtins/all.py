@@ -1,4 +1,4 @@
-# spec: library/functions.html#all
+# spec: PLS-315 19.3.3
 # description: all() short-circuits and propagates errors from truth tests and iteration.
 from harness import *
 

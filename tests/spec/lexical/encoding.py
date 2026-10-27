@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#encoding-declarations
+# spec: PLS-315 11.2
 # description: Source encodings: UTF-8 default, coding cookies, and BOMs, via compile() of bytes.
 from harness import *
 

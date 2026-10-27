@@ -1,4 +1,4 @@
-# spec: CPython Lib/test/test_extcall.py doctests
+# spec: PLS-315 7.4.3, 13.3.4
 # description: The interactive examples of CPython's test_extcall, run through harness.run_doctests.
 from harness import *
 

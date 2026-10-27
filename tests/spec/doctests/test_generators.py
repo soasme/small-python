@@ -1,4 +1,4 @@
-# spec: CPython Lib/test/test_generators.py doctests
+# spec: PLS-315 13.16, 27.2
 # description: The interactive examples of CPython's test_generators, run through harness.run_doctests.
 from harness import *
 

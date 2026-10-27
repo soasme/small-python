@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html#assignment-statements
+# spec: PLS-315 14.2
 # description: Target lists, starred unpacking, chained, augmented and annotated assignment, evaluation order.
 from harness import *
 

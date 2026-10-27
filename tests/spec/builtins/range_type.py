@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#ranges
+# spec: PLS-315 25.3
 # description: range indexing, slicing, containment, comparison, reversal, and reduction.
 from harness import *
 

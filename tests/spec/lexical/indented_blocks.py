@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#indentation
+# spec: PLS-315 12.3
 # description: Nested indented blocks.
 from harness import *
 # WARNING! This file contains mixed tabs and spaces

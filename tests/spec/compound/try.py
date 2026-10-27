@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-try-statement
+# spec: PLS-315 15.4
 # description: try, except, else, finally, and exception context.
 from harness import *
 

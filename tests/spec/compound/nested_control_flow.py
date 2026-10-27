@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-for-statement
+# spec: PLS-315 15.3, 14.10, 14.11
 # description: break and continue inside nested loops and try.
 from harness import *
 # break from a nested for loop

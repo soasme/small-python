@@ -21,7 +21,7 @@ make test
 - [Python binding](python/docs/README.md): `pip install ./python` (or
   `pip install small-python`) provides `small_python`, which runs Small Python
   from CPython and injects Python functions as host functions.
-- [SLP-315 language standard](docs/standards/3_15.md): a single-file, versioned
+- [PLS-315, the Python Language Specification](docs/standards/3_15.md): a single-file, versioned
   specification of the Python 3.15 core language in the style of ECMA-262, with
   algorithms, intrinsic objects in place of library modules, host hooks, and
   Core, Host, and Extension profiles. Project draft, not an official PSF standard.

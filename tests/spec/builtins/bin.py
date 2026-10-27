@@ -1,4 +1,4 @@
-# spec: library/functions.html#bin
+# spec: PLS-315 19.3.6
 # description: bin() of ints and __index__ objects, with the 0b prefix and sign.
 from harness import *
 assert bin(0) == "0b0"

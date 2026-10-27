@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#unary-arithmetic-and-bitwise-operations
+# spec: PLS-315 13.6
 # description: Unary -, +, ~ on numbers, instances, and classes with metaclass slots.
 from harness import *
 

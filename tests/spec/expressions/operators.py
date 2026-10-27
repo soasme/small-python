@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#operator-precedence
+# spec: PLS-315 13.18
 # description: Precedence, associativity, comparisons, boolean operations, conditional expressions, lambda, walrus.
 from harness import *
 

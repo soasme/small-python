@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html
+# spec: PLS-315 14.1, 14.5, 14.6, 14.7, 14.8, 14.9, 14.10, 14.11, 14.14, 14.15, 18.1.2, 29.6
 # description: assert, pass, del, return, yield, raise, break, continue, global, type statement.
 from harness import *
 
@@ -110,16 +110,15 @@ for function, kind in [(fails_in_handler, ZeroDivisionError), (fails_in_finally,
     e = assert_raises(kind, function)
     assert_type(e.__context__, KeyError)
 
-# Interactive expression statements go through sys.displayhook.
-import sys
+# Interactive expression statements go through the host's display hook.
 shown = []
-saved_hook = sys.displayhook
-sys.displayhook = shown.append
+saved_hook = host.display_hook()
+host.set_display_hook(shown.append)
 try:
     exec(compile("1 + 1\n", "<input>", "single"), {})
     exec(compile("None\n", "<input>", "single"), {})
 finally:
-    sys.displayhook = saved_hook
+    host.set_display_hook(saved_hook)
 assert_eq(shown, [2, None])
 # A deleted global is gone, not unbound, also in exec()'s namespace.
 e = assert_raises(NameError, run, "a = 1\ndel a\na\n")

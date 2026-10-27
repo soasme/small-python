@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#binary-arithmetic-operations
+# spec: PLS-315 13.7
 # description: True and floor division, modulo, and division by zero.
 from harness import *
 

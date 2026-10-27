@@ -1,4 +1,4 @@
-# spec: library/functions.html#isinstance
+# spec: PLS-315 19.3.21, 7.1.3
 # description: isinstance() with tuples, unions, and __instancecheck__.
 from harness import *
 class Regular:

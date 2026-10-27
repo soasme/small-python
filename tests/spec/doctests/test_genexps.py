@@ -1,4 +1,4 @@
-# spec: CPython Lib/test/test_genexps.py doctests
+# spec: PLS-315 13.2.6, 8.6
 # description: The interactive examples of CPython's test_genexps, run through harness.run_doctests.
 from harness import *
 

@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#customizing-attribute-access
+# spec: PLS-315 7.3.4, 7.3.7, 7.3.9
 # description: __getattr__, __getattribute__, __setattr__, __delattr__, __dir__, module __getattr__.
 from harness import *
 

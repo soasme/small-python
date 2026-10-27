@@ -1,4 +1,4 @@
-# spec: library/functions.html#min
+# spec: PLS-315 19.3.26
 # description: min() with iterables, arguments, key, and default.
 from harness import *
 

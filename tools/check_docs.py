@@ -63,15 +63,24 @@ def main():
         if duplicates:
             raise ValueError(f"duplicate footnotes in {path.relative_to(ROOT)}: {duplicates}")
     standard = (ROOT / "docs/standards/3_15.md").read_text()
-    for required in ("SLP-315:2026-draft2", "file: [statements] ENDMARKER", "## 26 Mappings and Sets",
+    for required in ("PLS-315:2026-draft2", "file: [statements] ENDMARKER", "## 26 Mappings and Sets",
                      "#### 20.8.1 sentinel ( *name*, /, *, *repr*=None )", "### 17.5 Lazy imports", "## Annex B (normative) Host Hooks"):
         if required not in standard:
             raise ValueError(f"standard missing required content: {required}")
+    # Cross-references such as (13.10) or 16.4.3 name an existing clause.
+    sections = set(re.findall(r"^#{2,5} ((?:\d+|[A-E])(?:\.\d+)*)\b", standard, flags=re.M))
+    for number, line in enumerate(without_code(standard).splitlines(), 1):
+        if line.startswith("#"):
+            continue
+        prose = re.sub(r"`+[^`]+`+", "", line)
+        for ref in re.findall(r"(?<![\w.])((?:[1-9]\d?|[A-E])\.\d+(?:\.\d+)*)(?![\w.]*\d)", prose):
+            if ref not in sections and not re.fullmatch(r"\d+\.\d+\.0|3\.15|1\.0|2\.675?", ref):
+                raise ValueError(f"standard line {number}: no clause {ref}")
     version = (ROOT / "VERSION").read_text().strip()
     header = (ROOT / "spy.h").read_text()
     if f'#define SPY_VERSION "{version}"' not in header:
         raise ValueError("VERSION and spy.h differ")
-    print(f"Documentation: {len(files)} files, links, anchors, footnotes, standard contents, and version checked")
+    print(f"Documentation: {len(files)} files, links, anchors, footnotes, standard contents and cross-references, and version checked")
 
 
 if __name__ == "__main__":

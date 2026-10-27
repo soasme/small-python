@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#boolean-operations
+# spec: PLS-315 13.11
 # description: and/or skip evaluating the right operand.
 from harness import *
 

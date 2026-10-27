@@ -1,4 +1,4 @@
-# spec: reference/toplevel_components.html
+# spec: PLS-315 17.6
 # description: Complete programs, file input, interactive input, and expression input through compile, exec, and eval.
 from harness import *
 
@@ -78,9 +78,8 @@ assert_raises(SyntaxError, compile, "a\0", "<x>", "exec")
 ns = {}
 exec(b"# -*- coding: latin-1 -*-\ns = '\xe9'\n", ns)
 assert_eq(ns["s"], "\xe9")
-# The main module is in sys.modules under "__main__", with globals as its namespace.
-import sys
-assert_is(sys.modules["__main__"].__dict__, globals())
+# The main module is in the module cache under "__main__", with globals as its namespace.
+assert_is(host.module_cache()["__main__"].__dict__, globals())
 # The main module has the standard module attributes.
 for name in ("__spec__", "__loader__", "__package__", "__doc__"):
     assert_true(name in globals())

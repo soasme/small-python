@@ -1,4 +1,4 @@
-# spec: library/constants.html#Ellipsis
+# spec: PLS-315 20.4.3
 # description: Ellipsis is the singleton ... with its repr and reduce.
 from harness import *
 a = ...

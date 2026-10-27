@@ -1,4 +1,4 @@
-# spec: library/functions.html#getattr
+# spec: PLS-315 19.3.11
 # description: getattr() and hasattr() with defaults and missing attributes.
 from harness import *
 def assert_raises(exc_type, func, *args):

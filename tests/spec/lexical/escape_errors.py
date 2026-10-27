@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#escape-sequences
+# spec: PLS-315 12.5.3
 # description: A faulty escape names its codec, position and reason; positions count non-ASCII code points as ten.
 from harness import *
 for source, message in (

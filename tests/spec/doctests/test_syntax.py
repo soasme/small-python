@@ -1,4 +1,4 @@
-# spec: CPython Lib/test/test_syntax.py doctests
+# spec: PLS-315 18.2, A.3, A.4, A.6
 # description: The interactive examples of CPython's test_syntax, run through harness.run_doctests.
 from harness import *
 

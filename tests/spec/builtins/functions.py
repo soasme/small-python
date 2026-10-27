@@ -1,4 +1,4 @@
-# spec: library/functions.html
+# spec: PLS-315 19.3
 # description: The built-in functions: numeric, conversion, iteration, introspection, and object helpers.
 from harness import *
 

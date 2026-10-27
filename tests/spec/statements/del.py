@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html#the-del-statement
+# spec: PLS-315 14.7
 # description: del of names, subscripts, attributes, and in loops.
 from harness import *
 

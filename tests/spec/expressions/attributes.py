@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#attribute-references
+# spec: PLS-315 13.3.1
 # description: Attribute assignment, lookup, and deletion on instances and classes.
 from harness import *
 

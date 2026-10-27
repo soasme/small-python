@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-if-statement
+# spec: PLS-315 15.1
 # description: if, elif, and else.
 from harness import *
 x = 0

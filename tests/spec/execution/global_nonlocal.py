@@ -1,4 +1,4 @@
-# spec: reference/simple_stmts.html#the-global-statement
+# spec: PLS-315 14.14
 # description: global and nonlocal declarations and their syntax errors.
 from harness import *
 

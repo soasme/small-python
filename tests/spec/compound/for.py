@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-for-statement
+# spec: PLS-315 15.3
 # description: for loops with else, break, and continue.
 from harness import *
 x = 0

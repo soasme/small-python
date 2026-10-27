@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#private-name-mangling
+# spec: PLS-315 8.8
 # description: __names in class bodies are mangled with the class name; edge cases.
 from harness import *
 

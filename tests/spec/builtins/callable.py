@@ -1,4 +1,4 @@
-# spec: library/functions.html#callable
+# spec: PLS-315 19.3.8, 7.2.1
 # description: callable() of functions, classes, methods, and instances with __call__.
 from harness import *
 assert not callable(1)

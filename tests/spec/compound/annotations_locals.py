@@ -1,4 +1,4 @@
-# spec: reference/executionmodel.html#annotation-scopes
+# spec: PLS-315 8.7, 16.6.3
 # description: Conditional annotations never leak into class or module locals().
 from harness import *
 """Module/class-scope locals() must not corrupt or leak __conditional_annotations__.

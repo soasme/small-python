@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#function-definitions
+# spec: PLS-315 16.2.1
 # description: Function __doc__, __name__, and __qualname__.
 from harness import *
 

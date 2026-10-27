@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#type.__bases__
+# spec: PLS-315 20.2.3
 # description: Assigning __bases__ changes attribute lookup and its compatibility checks.
 from harness import *
 

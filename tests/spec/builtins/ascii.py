@@ -1,4 +1,4 @@
-# spec: library/functions.html#ascii
+# spec: PLS-315 19.3.5
 # description: ascii() escapes non-ASCII characters of repr() and keeps the type __repr__ returns.
 from harness import *
 assert ascii("hello world") == "'hello world'"

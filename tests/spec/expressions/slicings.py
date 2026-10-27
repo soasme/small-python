@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#slicings
+# spec: PLS-315 13.3.3
 # description: Slices with omitted, negative, and stepped bounds.
 from harness import *
 

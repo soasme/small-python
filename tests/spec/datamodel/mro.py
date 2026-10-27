@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#type.__mro__
+# spec: PLS-315 7.1.4
 # description: __mro__ and mro() of single and multiple inheritance.
 from harness import *
 class X:

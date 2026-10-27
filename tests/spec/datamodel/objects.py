@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#objects-values-and-types
+# spec: PLS-315 6.1
 # description: Identity, type, value; None, NotImplemented, Ellipsis; default equality and hashing; __hash__ rules.
 from harness import *
 

@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#object.__iter__
+# spec: PLS-315 7.7.1
 # description: __iter__ and the __getitem__ sequence protocol in for loops.
 from harness import *
 

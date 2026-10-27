@@ -1,4 +1,4 @@
-# spec: reference/executionmodel.html#exceptions
+# spec: PLS-315 18.1
 # description: Raising, chaining (__cause__, __context__, __suppress_context__), tracebacks, groups.
 from harness import *
 

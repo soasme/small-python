@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#identifiers
+# spec: PLS-315 12.4
 # description: Identifier characters, NFKC normalization, keywords, soft keywords, reserved names.
 from harness import *
 

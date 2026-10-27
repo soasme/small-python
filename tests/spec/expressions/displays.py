@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#container-displays
+# spec: PLS-315 13.2
 # description: List, set, tuple, and dictionary displays including unpacking.
 from harness import *
 

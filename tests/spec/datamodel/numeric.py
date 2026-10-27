@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#emulating-numeric-types
+# spec: PLS-315 7.6
 # description: Binary, reflected and in-place operator dispatch, NotImplemented, unary and conversion methods.
 from harness import *
 

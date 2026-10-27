@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#emulating-container-types
+# spec: PLS-315 7.8, 10.5
 # description: __getitem__/__setitem__/__delitem__, __missing__, __iter__, __reversed__, __contains__, slices.
 from harness import *
 

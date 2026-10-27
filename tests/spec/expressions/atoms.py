@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#atoms
+# spec: PLS-315 13.1
 # description: Built-in constants, names, literals, parenthesized forms, and displays.
 from harness import *
 

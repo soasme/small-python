@@ -1,4 +1,4 @@
-# spec: reference/expressions.html#calls
+# spec: PLS-315 13.3.4
 # description: Argument unpacking, evaluation order, keyword rules, and callable objects.
 from harness import *
 

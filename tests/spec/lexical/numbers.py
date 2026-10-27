@@ -1,4 +1,4 @@
-# spec: reference/lexical_analysis.html#numeric-literals
+# spec: PLS-315 12.6
 # description: Integer, floating-point, and imaginary literals with underscores and prefixes.
 from harness import *
 

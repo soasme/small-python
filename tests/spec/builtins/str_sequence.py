@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#common-sequence-operations
+# spec: PLS-315 23.1.2, 25.5
 # description: Strings as sequences: indexing, slicing, and concatenation.
 from harness import *
 word = "Python"

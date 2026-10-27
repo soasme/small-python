@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#class-definitions
+# spec: PLS-315 16.4
 # description: Class bodies, docstrings, __class__, methods, and nesting.
 from harness import *
 __name__ = "class"

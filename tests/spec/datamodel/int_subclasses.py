@@ -1,4 +1,4 @@
-# spec: reference/datamodel.html#emulating-numeric-types
+# spec: PLS-315 7.6.2, 22.1
 # description: int subclasses: construction, arithmetic, and __init__ of ints.
 from harness import *
 

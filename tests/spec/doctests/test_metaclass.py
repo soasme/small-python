@@ -1,4 +1,4 @@
-# spec: CPython Lib/test/test_metaclass.py doctests
+# spec: PLS-315 16.4.2, 16.4.3, 19.3.38
 # description: The interactive examples of CPython's test_metaclass, run through harness.run_doctests.
 from harness import *
 

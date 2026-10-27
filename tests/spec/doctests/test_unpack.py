@@ -1,4 +1,4 @@
-# spec: CPython Lib/test/test_unpack.py doctests
+# spec: PLS-315 14.2.2
 # description: The interactive examples of CPython's test_unpack, run through harness.run_doctests.
 from harness import *
 

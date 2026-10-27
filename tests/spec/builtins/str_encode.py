@@ -1,4 +1,4 @@
-# spec: library/stdtypes.html#str.encode
+# spec: PLS-315 23.3
 # description: str.encode, bytes.decode, and bytes case predicates.
 from harness import *
 

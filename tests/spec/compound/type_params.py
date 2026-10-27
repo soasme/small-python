@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#type-parameter-lists
+# spec: PLS-315 16.7, 29.2, 29.3, 29.4
 # description: PEP 695/696 generic functions, classes and aliases; annotation scopes; lazy bounds and defaults.
 from harness import *
 
@@ -66,8 +66,13 @@ def lazy[T: Undefined](): pass
 assert_raises(NameError, lambda: lazy.__type_params__[0].__bound__)
 # Generic alias with a starred tuple and Unpack.
 def star[*Ts](*args: *Ts): pass
-assert_eq(star.__annotations__["args"].__class__.__name__, "Unpack") if False else None
-assert_eq(repr(T), "~T") if False else None
+# A starred annotation is %Unpack% applied to the tuple (PLS-315 29.3).
+unpacked = star.__annotations__["args"]
+home = qualified(type(star.__type_params__[0])).rpartition(".")[0]
+assert_eq(repr(unpacked.__origin__), (home + "." if home else "") + "Unpack")
+assert_eq(unpacked.__args__, star.__type_params__)
+assert_eq(repr(unpacked), (home + "." if home else "") + "Unpack[Ts]")
+assert_eq(unpacked, next(iter(star.__type_params__[0])))
 assert_eq(repr(ident.__type_params__[0]), "T")
 assert_eq(repr(Box.__type_params__[1]), "Ts")
 assert_eq(repr(Box.__type_params__[2]), "P")
@@ -75,17 +80,17 @@ assert_eq(repr(Box.__type_params__[2]), "P")
 def generic[T: int, *Ts, **P](): pass
 T, Ts, P = generic.__type_params__
 for param, name, message in ((T, "__name__", "readonly attribute"),
-                             (T, "__bound__", "attribute '__bound__' of 'typing.TypeVar' objects is not writable"),
+                             (T, "__bound__", f"attribute '__bound__' of '{qualified(type(T))}' objects is not writable"),
                              (P, "__bound__", "readonly attribute"),
-                             (Ts, "__default__", "attribute '__default__' of 'typing.TypeVarTuple' objects is not writable"),
+                             (Ts, "__default__", f"attribute '__default__' of '{qualified(type(Ts))}' objects is not writable"),
                              (P.args, "__origin__", "readonly attribute"),
-                             (P.args, "x", "'typing.ParamSpecArgs' object has no attribute 'x' and no __dict__ for setting new attributes")):
+                             (P.args, "x", f"'{qualified(type(P.args))}' object has no attribute 'x' and no __dict__ for setting new attributes")):
     assert_eq(str(assert_raises(AttributeError, setattr, param, name, 1)), message)
     assert_eq(str(assert_raises(AttributeError, delattr, param, name)), message)
 union = int | str
 assert_eq(str(assert_raises(AttributeError, delattr, union, "__args__")), "readonly attribute")
 assert_eq(str(assert_raises(AttributeError, setattr, union, "__origin__", 1)),
-          "attribute '__origin__' of 'typing.Union' objects is not writable")
+          f"attribute '__origin__' of '{qualified(type(union))}' objects is not writable")
 # Lazily evaluated values are named in the scope of their definition.
 class Holder:
     type Alias[W: int = str] = list[W]
@@ -99,4 +104,4 @@ assert_eq(Holder().make().__qualname__, "Holder.make.<locals>.Local")
 TypeAliasType = type(Holder.Alias)
 assert_eq(str(assert_raises(TypeError, TypeAliasType, "B")), "typealias() missing required argument 'value' (pos 2)")
 assert_eq(TypeAliasType("B", int, qualname="Q.B").__qualname__, "Q.B")
-assert_eq(repr(type(t"")[int]), "string.templatelib.Template[int]")
+assert_eq(repr(type(t"")[int]), f"{qualified(type(t''))}[int]")

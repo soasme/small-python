@@ -1,12 +1,14 @@
-"""Run the language specification tests (tests/spec) on the oracle and an engine.
+"""Run the language specification tests (tests/spec) on an engine.
 
 usage: spec_runner.py ENGINE [--oracle PYTHON] [--report FILE] [--only SUBSTRING] [--strict]
 
 Each test is staged in a temporary directory beside harness.py, with the
-contents of a sibling NAME.fixtures directory, and run as a script. The
-pinned CPython 3.15 oracle must pass every test, which validates the test
-itself; the engine's results are reported per chapter. With
---strict the exit status is nonzero when the engine fails any test.
+contents of a sibling NAME.fixtures directory, and run as a script; the
+engine's results are reported per chapter. The tests encode PLS-315 and need
+no other implementation. With --oracle, a second implementation (such as the
+pinned CPython 3.15 build) must also pass every test, which validates the
+tests themselves. With --strict the exit status is nonzero when the engine
+fails any test.
 """
 import argparse
 import json
@@ -20,7 +22,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "tests/spec"
-ORACLE = ROOT / "tests/upstream/cpython-build/python.exe"
 TIMEOUT = 60
 
 
@@ -62,37 +63,39 @@ def check(path, engine, oracle):
         if fixtures.is_dir():
             shutil.copytree(fixtures, directory, dirs_exist_ok=True)
         shutil.copy(path, Path(directory) / "test_spec.py")
-        oracle_ok, oracle_output = outcome(*run([str(oracle), "-E", "-s", "test_spec.py"], directory), negative)
+        oracle_ok, oracle_output = (outcome(*run([str(oracle), "-E", "-s", "test_spec.py"], directory), negative)
+                                    if oracle else (None, ""))
         engine_ok, engine_output = outcome(*run([str(engine), "test_spec.py"], directory), negative)
     return {"test": str(path.relative_to(SPEC)), "spec": fields.get("spec", ""),
-            "oracle": "passed" if oracle_ok else "failed", "engine": "passed" if engine_ok else "failed",
-            "oracle_output": "" if oracle_ok else oracle_output[-2000:],
+            "oracle": {None: "skipped", True: "passed", False: "failed"}[oracle_ok], "engine": "passed" if engine_ok else "failed",
+            "oracle_output": "" if oracle_ok is not False else oracle_output[-2000:],
             "engine_output": "" if engine_ok else engine_output[-2000:]}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("engine", type=Path)
-    parser.add_argument("--oracle", type=Path, default=ORACLE)
+    parser.add_argument("--oracle", type=Path)
     parser.add_argument("--report", type=Path, default=ROOT / "tests/results/spec.json")
     parser.add_argument("--only", default="")
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
-    if not args.oracle.is_file():
-        raise SystemExit("missing the pinned CPython oracle; run make oracle")
+    if args.oracle and not args.oracle.is_file():
+        raise SystemExit(f"missing oracle {args.oracle}")
     engine = args.engine.resolve()
     tests = sorted(path for path in SPEC.rglob("*.py") if path.name != "harness.py" and ".fixtures" not in str(path.parent) and args.only in str(path))
     with ThreadPoolExecutor(os.cpu_count() or 4) as pool:
-        results = list(pool.map(lambda path: check(path, engine, args.oracle), tests))
+        oracle = args.oracle and args.oracle.resolve()
+        results = list(pool.map(lambda path: check(path, engine, oracle), tests))
     chapters = {}
     for result in results:
         chapter = result["test"].split("/")[0]
         counts = chapters.setdefault(chapter, {"tests": 0, "passed": 0})
         counts["tests"] += 1
         counts["passed"] += result["engine"] == "passed"
-    invalid = [result for result in results if result["oracle"] != "passed"]
-    failed = [result for result in results if result["oracle"] == "passed" and result["engine"] != "passed"]
+    invalid = [result for result in results if result["oracle"] == "failed"]
+    failed = [result for result in results if result["oracle"] != "failed" and result["engine"] != "passed"]
     for result in invalid:
         print(f"INVALID {result['test']} (the oracle fails it)\n    " + result["oracle_output"].replace("\n", "\n    "))
     for result in failed:
@@ -101,8 +104,9 @@ def main():
             print("    " + result["engine_output"].replace("\n", "\n    "))
     for chapter, counts in sorted(chapters.items()):
         print(f"{chapter}: {counts['passed']}/{counts['tests']}")
-    passed = sum(result["engine"] == "passed" for result in results if result["oracle"] == "passed")
-    print(f"Spec: {passed}/{len(results) - len(invalid)} tests pass on {engine.name}; {len(invalid)} invalid")
+    passed = sum(result["engine"] == "passed" for result in results if result["oracle"] != "failed")
+    validated = f"; {len(invalid)} invalid on {args.oracle.name}" if args.oracle else ""
+    print(f"Spec: {passed}/{len(results) - len(invalid)} tests pass on {engine.name}{validated}")
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps({"chapters": chapters, "results": results}, indent=2) + "\n")
     if invalid or (args.strict and failed):

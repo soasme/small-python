@@ -1,4 +1,4 @@
-# spec: SLP-315 19.2, 21.1.1, 21.3.5, 24.1.1
+# spec: PLS-315 19.2, 21.1.1, 21.3.5, 24.1.1
 # description: T.__new__(S) argument checks, SyntaxError details, and bytes() encoding/errors pairing.
 from harness import *
 

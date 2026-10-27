@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#function-definitions
+# spec: PLS-315 16.1
 # description: Small functions with arithmetic, annotations, and calls.
 from harness import *
 def foo():

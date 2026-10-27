@@ -1,4 +1,4 @@
-# spec: reference/compound_stmts.html#the-while-statement
+# spec: PLS-315 15.2
 # description: while loops with else and break.
 from harness import *
 # i = 0

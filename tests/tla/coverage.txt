@@ -331,6 +331,7 @@ Contents | - navigation
 20 Fundamental Objects > 20.1 The `object` class > 20.1.1 object ( ) | Callables
 20 Fundamental Objects > 20.1 The `object` class > 20.1.2 Instance namespace | Attributes, Slots
 20 Fundamental Objects > 20.1 The `object` class > 20.1.3 Methods of `object` | BasicCustomization, Objects
+20 Fundamental Objects > 20.1 The `object` class > 20.1.4 The reduction protocol | Reduction
 20 Fundamental Objects > 20.2 The `type` class | = sections
 20 Fundamental Objects > 20.2 The `type` class > 20.2.1 Type objects | ClassObjects
 20 Fundamental Objects > 20.2 The `type` class > 20.2.2 type ( *object* ) and type ( *name*, *bases*, *dict*, **kwds* ) | Metaclasses, ClassObjects
@@ -361,8 +362,8 @@ Contents | - navigation
 21 Exception Objects > 21.1 The `BaseException` class > 21.1.1 BaseException.\_\_new\_\_ ( *cls*, ...*args*, ...*kwargs* ) | ExceptionObjects
 21 Exception Objects > 21.1 The `BaseException` class > 21.1.2 BaseException.\_\_init\_\_ ( *self*, ...*args*, ...*kwargs* ) | ExceptionObjects
 21 Exception Objects > 21.1 The `BaseException` class > 21.1.3 Attributes | ExceptionObjects, Raise
-21 Exception Objects > 21.1 The `BaseException` class > 21.1.4 BaseException.prototype.add\_note ( *note* ) | ExceptionObjects
-21 Exception Objects > 21.1 The `BaseException` class > 21.1.5 BaseException.prototype.with\_traceback ( *tb* ) | ExceptionObjects, Tracebacks
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.4 BaseException.add\_note ( *note* ) | ExceptionObjects
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.5 BaseException.with\_traceback ( *tb* ) | ExceptionObjects, Tracebacks
 21 Exception Objects > 21.1 The `BaseException` class > 21.1.6 String conversion | ExceptionObjects
 21 Exception Objects > 21.1 The `BaseException` class > 21.1.7 Other methods | ExceptionObjects
 21 Exception Objects > 21.2 The exception hierarchy | ExceptionHierarchy
@@ -375,7 +376,7 @@ Contents | - navigation
 21 Exception Objects > 21.3 Concrete exceptions > 21.3.6 Unicode errors | ConcreteExceptions
 21 Exception Objects > 21.4 Exception groups | = sections
 21 Exception Objects > 21.4 Exception groups > 21.4.1 BaseExceptionGroup ( *message*, *exceptions* ) | ExceptionGroups
-21 Exception Objects > 21.4 Exception groups > 21.4.2 BaseExceptionGroup.prototype.derive ( *excs* ) | ExceptionGroups
+21 Exception Objects > 21.4 Exception groups > 21.4.2 BaseExceptionGroup.derive ( *excs* ) | ExceptionGroups
 21 Exception Objects > 21.4 Exception groups > 21.4.3 split, subgroup, and DeriveAndCopy | ExceptionGroups, ExceptStar
 21 Exception Objects > 21.5 OS exceptions | OSErrors
 21 Exception Objects > 21.6 Warning categories | ExceptionHierarchy
