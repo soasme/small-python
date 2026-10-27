@@ -27,6 +27,7 @@ and tied to real implementations by replaying them.
 | `StringLiterals.tla` | string and bytes literals: quotes, prefixes, every escape sequence, raw strings, and adjacent literals | yes |
 | `Indentation.tla` | the indentation stack: INDENT/DEDENT, tab stops, TabError, IndentationError, and blank lines | yes |
 | `LineStructure.tla` | physical and logical lines, comments, explicit and implicit line joining, and encoding declarations | yes |
+| `Identifiers.tla` | names: XID start and continue characters, NFKC normalization, keywords and soft keywords, and `__debug__` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -91,8 +92,9 @@ is outside these bounds.
 
 The models found these bugs in spy, since fixed: the lexer reported an
 error on a later line before a syntax error on an earlier one (CPython's
-lexer runs only as far as the parser reads), and accepted a backslash
-continuation at the end of the source.
+lexer runs only as far as the parser reads), accepted a backslash
+continuation at the end of the source, and bound a name such as `Ｔrue`
+(full-width T) that normalizes to `True`, which CPython cannot compile.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

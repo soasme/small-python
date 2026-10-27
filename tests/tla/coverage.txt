@@ -30,11 +30,11 @@ Reference chapter contents | - table of contents
 2. Lexical analysis > Lexical analysis > Line structure > Whitespace between tokens | TODO: Tokens
 2. Lexical analysis > Lexical analysis > Line structure > End marker | Indentation
 2. Lexical analysis > Lexical analysis > Other tokens | TODO: Tokens
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) | TODO: Identifiers
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Keywords | TODO: Identifiers
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Soft Keywords | TODO: Identifiers, Match
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) | Identifiers
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Keywords | Identifiers
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Soft Keywords | Identifiers, Match
 2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Reserved classes of identifiers | TODO: Identifiers, Mangling
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Non-ASCII characters in names | TODO: Identifiers
+2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Non-ASCII characters in names | Identifiers
 2. Lexical analysis > Lexical analysis > Literals | StringLiterals, NumericLiterals
 2. Lexical analysis > Lexical analysis > String and Bytes literals | StringLiterals
 2. Lexical analysis > Lexical analysis > String and Bytes literals > Triple-quoted strings | StringLiterals

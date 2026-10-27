@@ -15,6 +15,12 @@ assert_eq(ns["file"], 1)
 assert_eq(ns["H"], 2)
 assert_true("ﬁle" not in ns)
 assert_eq(run("x = 1\nｘ = 2\n")["x"], 2)  # fullwidth x normalizes to x
+# Keywords are matched as spelled, so ｉｆ is the name if; a name that
+# normalizes to None, True, or False cannot be compiled, wherever it is.
+assert_eq(run("ｉｆ = 1\n")["if"], 1)
+for source in ["Ｔrue = 1\n", "x.Ｎone\n", "def f(Ｆalse): pass\n", "Ｔrue = 1\n)\n"]:
+    assert_raises(ValueError, compile, source, "<s>", "exec")
+assert_syntax_error(")\nＴrue = 1\n")
 
 # Hard keywords cannot be used as identifiers.
 for word in ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",

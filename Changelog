@@ -369,6 +369,9 @@
   lexer only reads as far as the parser asks; an indentation error comes
   before its line's DEDENTs; a backslash continuation at the end of the
   source is "unexpected EOF while parsing".
+- A name that normalizes to None, True, or False (such as one with a
+  full-width letter) raises ValueError at compile time, as in CPython;
+  TLA+ model of identifiers.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

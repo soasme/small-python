@@ -2391,6 +2391,7 @@ typedef struct {
     SPYValue *unit;
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
+    const char *constant_name; /* a name spelled to normalize to None, True, or False */
     char deferred_text[256];
     size_t deferred_line;
     /* CPython's last_stmt_location: the start of the last compound statement
@@ -2910,6 +2911,9 @@ static Node *identifier(Parser *p) {
     Token *t = peek(p);
     n->text = normalize_identifier(p->ctx, t->start, t->len);
     size_t length = n->text ? strlen(n->text) : 0;
+    /* CPython's parser fails as it reads such a name, before any later error. */
+    if (n->text && !p->constant_name && (!strcmp(n->text, "None") || !strcmp(n->text, "True") || !strcmp(n->text, "False")))
+        p->constant_name = !strcmp(n->text, "None") ? "None" : !strcmp(n->text, "True") ? "True" : "False";
     if (n->text && p->private_name && length > 2 && n->text[0] == '_' && n->text[1] == '_' &&
         !(n->text[length - 1] == '_' && n->text[length - 2] == '_')) {
         const char *cls = p->private_name;
@@ -5946,6 +5950,11 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     }
     if (unit->as.unit.filename && !failed) {
         unit->as.unit.body = statements(&p);
+        if (p.constant_name) {
+            spy_clear_error(c);
+            errorf(c, "ValueError", "identifier field can't represent '%s' constant", p.constant_name);
+            goto lexer_error;
+        }
         if (lexed != SIZE_MAX && (!c->error_type[0] || p.far >= lexed)) {
             spy_clear_error(c);
             p.len = p.pos = p.far = 0; p.tokenizing = 0;
