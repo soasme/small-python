@@ -309,3 +309,12 @@ assert_eq(type_error(lambda: complex("1", 2)), "complex() argument 'real' must b
 assert_eq(type_error(lambda: complex(real="1")), "complex() argument 'real' must be a real number, not str")
 assert_eq(type_error(lambda: complex(1, None)), "complex() argument 'imag' must be a real number, not NoneType")
 assert_eq(type_error(lambda: complex([])), "complex() argument must be a string or a number, not list")
+
+# type() names the bad argument; dir() lists __dir__'s result as list() would.
+assert_eq(type_error(lambda: type("T", 1, {})), "type.__new__() argument 2 must be tuple, not int")
+assert_eq(type_error(lambda: type("T", (), [])), "type.__new__() argument 3 must be dict or frozendict, not list")
+assert_eq(type_error(lambda: type(1, (), {})), "type.__new__() argument 1 must be str, not int")
+class BadDir:
+    def __dir__(self):
+        return 1
+assert_eq(type_error(lambda: dir(BadDir())), "'int' object is not iterable")

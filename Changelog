@@ -524,6 +524,9 @@
   names the offending argument and type in its errors, as CPython does.
   TLA+ model of the numeric built-in functions.
 - TLA+ model of the iteration and sorting built-in functions.
+- type() with three arguments names the argument of the wrong type, and
+  dir() reports a non-iterable __dir__ result as list() would. TLA+ model
+  of the object built-in functions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

@@ -13466,8 +13466,9 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
 /* type.__new__(meta, name, bases, namespace, **keywords). */
 static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *bases, SPYValue *namespace, SPYValue *keywords) {
     SPYValue *storage = dictionary_value(c, namespace);
-    if (name->type != SPY_STRING || bases->type != SPY_TUPLE || !storage)
-        return spy_error(c, "TypeError", "type() requires a string, a tuple of bases, and a dictionary");
+    if (name->type != SPY_STRING) return errorf(c, "TypeError", "type.__new__() argument 1 must be str, not %s", type_name(name));
+    if (bases->type != SPY_TUPLE) return errorf(c, "TypeError", "type.__new__() argument 2 must be tuple, not %s", type_name(bases));
+    if (!storage) return errorf(c, "TypeError", "type.__new__() argument 3 must be dict or frozendict, not %s", type_name(namespace));
     if (strlen(name->as.string.data) != name->as.string.len)
         return spy_error(c, "ValueError", "type name must not contain null characters");
     SPYValue *winner = derived_metaclass(c, meta, bases);
@@ -17231,9 +17232,11 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
         class_lookup(object->as.map.meta, "__dir__") != name_local(c->types[SPY_CLASS], "__dir__"))
         method = special_method(c, object, "__dir__");
     if (method) {
+        /* dir() lists what __dir__ returns, as list() would. */
         SPYValue *items = spy_call(c, method, 0, NULL);
-        if (items) extend_display(c, result, items);
-        spy_release(items); spy_release(method);
+        SPYValue *listed = items ? builtin(c, 1, &items, (void *)(intptr_t)B_LIST) : NULL;
+        if (listed) extend_display(c, result, listed);
+        spy_release(listed); spy_release(items); spy_release(method);
     } else {
         SPYValue *source = object ? object : c->eval_env ? c->eval_env : c->globals;
         if (source->type != SPY_INSTANCE && source->type != SPY_CLASS && source->type != SPY_MODULE && source->type != V_ENV &&
