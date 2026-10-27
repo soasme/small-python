@@ -711,3 +711,12 @@
   make test-tla no longer need the CPython oracle; make test-spec-oracle
   and make test-tla-oracle validate the tests and models against it.
   Reduction.tla models the reduction protocol of 20.1.4.
+- Spec tests for await, the power, shift and bitwise operators,
+  assignment expressions, lambdas, evaluation order, annotated
+  assignment, future statements, qualified names, global and nonlocal
+  declarations, and the __class__ cell. PLS-315 now states that
+  positional and * arguments are evaluated before keyword and **
+  arguments, that an await in a comprehension of a non-async function is
+  reported as an asynchronous comprehension, that only unparenthesized
+  names have their annotations recorded, and the message for an
+  __await__ that returns a coroutine. The harness gains fqname().

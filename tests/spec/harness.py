@@ -173,6 +173,15 @@ def qualified(cls):
     return cls.__name__ if module == "builtins" else f"{module}.{cls.__name__}"
 
 
+def fqname(cls):
+    """*fqname* (PLS-315 5.2.6): the qualified name, prefixed by the module
+    unless that is builtins or __main__ (or not a str)."""
+    module = cls.__module__
+    if not isinstance(module, str) or module in ("builtins", "__main__"):
+        return cls.__qualname__
+    return f"{module}.{cls.__qualname__}"
+
+
 # Doctests: CPython's interactive examples, run without the doctest module.
 # Each example is compiled as interactive input; an expression's value is
 # displayed with repr(), print() output is captured through the example
