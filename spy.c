@@ -2012,8 +2012,7 @@ static int set_hidden_field(SPYContext *c, SPYValue *v, const char *name, SPYVal
 /* Whether OSError_str uses its errno form: a filename, or both errno and strerror. */
 static int oserror_text(SPYValue *v) {
     SPYValue *code = hidden_field(v, "errno"), *text = hidden_field(v, "strerror"), *file = hidden_field(v, "filename");
-    if (!code || !text) return 0;
-    return (file && file->type != SPY_NONE) || (code->type != SPY_NONE && text->type != SPY_NONE);
+    return file || (code && text);
 }
 static int unicode_error_kind(SPYContext *, SPYValue *);
 static int unicode_error_text(Buffer *, SPYValue *, int);
@@ -2290,11 +2289,12 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             } else if (subclass(v->as.map.parent, name_local(b->ctx->classes, "OSError")) && oserror_text(v)) {
                 /* OSError_str: [Errno N] strerror, then the filenames. */
                 SPYValue *file = hidden_field(v, "filename"), *file2 = hidden_field(v, "filename2");
-                status = puts_buffer(b, "[Errno ") || format_value(b, hidden_field(v, "errno"), 0) || puts_buffer(b, "] ") ||
-                    format_value(b, hidden_field(v, "strerror"), 0);
-                if (!status && file && file->type != SPY_NONE) {
+                SPYValue *code = hidden_field(v, "errno"), *text = hidden_field(v, "strerror");
+                status = puts_buffer(b, "[Errno ") || format_value(b, code ? code : b->ctx->none, 0) || puts_buffer(b, "] ") ||
+                    format_value(b, text ? text : b->ctx->none, 0);
+                if (!status && file) {
                     status = puts_buffer(b, ": ") || format_value(b, file, 1);
-                    if (!status && file2 && file2->type != SPY_NONE) status = puts_buffer(b, " -> ") || format_value(b, file2, 1);
+                    if (!status && file2) status = puts_buffer(b, " -> ") || format_value(b, file2, 1);
                 }
             } else if (subclass(v->as.map.parent, name_local(b->ctx->classes, "ImportError")) && hidden_field(v, "msg") &&
                        hidden_field(v, "msg")->type == SPY_STRING) {
@@ -11592,10 +11592,10 @@ static const char *oserror_subclass(int64_t code) {
 }
 /* oserror_init: two to five arguments are errno, strerror, filename,
  * winerror, and filename2; a filename shortens args to the first two. A
- * BlockingIOError's third integer argument is characters_written instead. */
+ * BlockingIOError's third integer argument is characters_written instead.
+ * Fields left unset read as None but, unlike a None that was set, do not
+ * count for str(). */
 static int oserror_fields(SPYContext *c, SPYValue *v, size_t argc, SPYValue *const *argv) {
-    static const char *const fields[] = {"errno", "strerror", "filename", "filename2"};
-    for (size_t i = 0; i < 4; i++) if (set_hidden_field(c, v, fields[i], c->none)) return -1;
     if (argc < 2 || argc > 5) return 0;
     if (set_hidden_field(c, v, "errno", argv[0]) || set_hidden_field(c, v, "strerror", argv[1])) return -1;
     if (argc < 3 || argv[2]->type == SPY_NONE) return 0;
@@ -20183,8 +20183,8 @@ static SPYValue *exception_reduce(SPYContext *c, int id, size_t argc, SPYValue *
     SPYValue *args = hidden_field(self, "args"), *file = hidden_field(self, "filename"), *file2 = hidden_field(self, "filename2");
     args = args ? spy_retain(args) : value_new(c, SPY_TUPLE);
     /* OSError's args drop a filename, which its reduction puts back. */
-    if (args && id == B_OSERROR_REDUCE && args->as.seq.len == 2 && file && file->type != SPY_NONE) {
-        int both = file2 && file2->type != SPY_NONE;
+    if (args && id == B_OSERROR_REDUCE && args->as.seq.len == 2 && file) {
+        int both = file2 != NULL;
         SPYValue *items[] = {args->as.seq.items[0], args->as.seq.items[1], file, c->none, file2};
         SPYValue *full = spy_tuple(c, both ? 5 : 3, items);
         spy_release(args); args = full;

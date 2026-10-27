@@ -534,6 +534,9 @@
   model of compile(), eval(), exec(), and their namespaces.
 - TLA+ models of the built-in exception hierarchy, exception objects, and
   the concrete exceptions.
+- OSError's str() counts errno, strerror, and filename that were set,
+  even to None, and only those, as CPython does: OSError(None, 'm') is
+  "[Errno None] m". TLA+ model of the OS exceptions.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

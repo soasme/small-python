@@ -333,3 +333,14 @@ assert_eq(type_error(lambda: exec("1", [])), "exec() globals must be a dict or a
 assert_eq(type_error(lambda: exec("1", {}, 1)), "locals must be a mapping or None, not int")
 assert_eq(type_error(lambda: eval("1", [])), "globals must be a real dict or a frozendict; try eval(expr, {}, mapping)")
 assert_eq(type_error(lambda: eval("1", 1)), "globals must be a dict or a frozendict")
+
+# OSError's str() counts a field that was set, even to None.
+error = OSError(None, "m")
+assert_eq(str(error), "[Errno None] m")
+error = OSError(1, "m", "f")
+error.filename = None
+assert_eq(str(error), "[Errno 1] m: None")
+error = OSError("x")
+error.filename = "f"
+assert_eq(str(error), "[Errno None] None: 'f'")
+assert_eq(str(OSError("x")), "x")

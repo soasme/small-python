@@ -108,6 +108,7 @@ and tied to real implementations by replaying them.
 | `ExceptionHierarchy.tla` | the MRO and module of every built-in exception class and alias, derived from a parent table (ExceptionGroup by C3), with the classes that escape `except Exception` | yes |
 | `ExceptionObjects.tla` | str, repr, and args of exceptions built from up to two arguments, KeyError's repr-of-one rule included; args, tracebacks, notes, cause and context, pickling state, SystemExit.code, and StopIteration.value | yes |
 | `ConcreteExceptions.tla` | str() of the three Unicode errors for every start and end from -1 to 5 (one byte or character, else a range); attributes of AttributeError, NameError, ImportError, OSError, SyntaxError, and the rest | yes |
+| `OSErrors.tla` | the subclass OSError picks for each errno shared by Linux and macOS, for one to five arguments and for subclass calls, with the fields and str() each gets | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -242,7 +243,7 @@ types worded their refusal of arguments differently, and `complex()`
 accepted a string by keyword, and `type()` and `dir()` worded argument
 errors their own way, and `chr()` refused `__index__` values and
 overflowed on huge ones, and `exec()` and `eval()` worded namespace
-errors differently.
+errors differently, and `OSError`'s `str()` ignored fields set to None.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

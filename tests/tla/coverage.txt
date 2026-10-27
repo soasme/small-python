@@ -376,7 +376,7 @@ Reference chapter contents | - table of contents
 14. Built-in exceptions > Built-in Exceptions > Inheriting from built-in exceptions | ExceptionObjects
 14. Built-in exceptions > Built-in Exceptions > Base classes | ExceptionObjects
 14. Built-in exceptions > Built-in Exceptions > Concrete exceptions | ConcreteExceptions
-14. Built-in exceptions > Built-in Exceptions > Concrete exceptions > OS exceptions | TODO: OSErrors
+14. Built-in exceptions > Built-in Exceptions > Concrete exceptions > OS exceptions | OSErrors
 14. Built-in exceptions > Built-in Exceptions > Warnings | ExceptionHierarchy
 14. Built-in exceptions > Built-in Exceptions > Exception groups | TODO: ExceptionGroups
 14. Built-in exceptions > Built-in Exceptions > Exception hierarchy | ExceptionHierarchy
