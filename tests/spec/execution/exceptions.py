@@ -116,3 +116,22 @@ assert_raises(RecursionError, deep)
 # add_note requires a str.
 e = assert_raises(TypeError, ValueError().add_note, 1)
 assert_eq(str(e), "add_note() argument must be str, not int")
+# An operation reports the line where its expression begins, after its
+# operands have been evaluated on later lines.
+def failing_line(function):
+    try:
+        function()
+    except Exception as error:
+        tb = error.__traceback__
+        while tb.tb_next: tb = tb.tb_next
+        return tb.tb_lineno - function.__code__.co_firstlineno
+def spans_lines():
+    return (1 +
+        "s")
+def attribute_line():
+    return (None
+        .missing)
+def subscript_line():
+    return [1,
+        2][5]
+assert_eq([failing_line(f) for f in (spans_lines, attribute_line, subscript_line)], [1, 2, 1])

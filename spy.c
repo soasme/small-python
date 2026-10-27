@@ -4069,6 +4069,8 @@ static Node *expression_inner(Parser *p, int min, int named) {
             int kind = peek(p)->kind;
             Node *n = node(p, kind == '(' ? N_CALL : kind == '[' ? N_INDEX : N_ATTR);
             if (!n) return NULL;
+            /* A call or subscript begins with its primary; an attribute is at its name. */
+            if (kind != '.') n->line = left->line;
             n->a = left; p->pos++;
             if (kind == '.') {
                 n->b = identifier(p);
@@ -4106,7 +4108,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         if (prec < min) break;
         Node *n = node(p, prec == 3 ? N_COMPARE : N_BINARY);
         if (!n) return NULL;
-        n->a = left;
+        n->a = left; n->line = left->line; /* the expression begins with its left operand */
         if (prec == 3) {
             Node **tail = &n->args;
             do {
@@ -11815,6 +11817,12 @@ static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *ca
     }
     return c->error_type[0] ? -1 : 0;
 }
+/* An operation is reported at its own line once its operands, which may
+ * span later lines, are evaluated. */
+static void relocate(SPYContext *c, Node *n) {
+    c->line = n->line;
+    if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
+}
 static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     if (tick(c, f, n)) return NULL;
     SPYValue *a = NULL, *b = NULL, *result = NULL;
@@ -11901,7 +11909,7 @@ container_fail:
         spy_release(result); result = NULL; break;
     case N_UNARY:
         a = eval(c, f, n->a);
-        if (a) result = unary(c, n->op, a);
+        if (a) { relocate(c, n); result = unary(c, n->op, a); }
         break;
     case N_BINARY:
         if (n->op == O_AND || n->op == O_OR) {
@@ -11913,7 +11921,7 @@ container_fail:
         if (!a) break;
         {
             b = eval(c, f, n->b);
-            if (b) result = binary(c, n->op, a, b);
+            if (b) { relocate(c, n); result = binary(c, n->op, a, b); }
         }
         break;
     case N_COMPARE:
@@ -11922,6 +11930,7 @@ container_fail:
         for (Node *cmp = n->args; cmp; cmp = cmp->next) {
             b = eval(c, f, cmp->a);
             if (!b) break;
+            relocate(c, n);
             result = comparison(c, cmp->op, a, b);
             spy_release(a); a = b; b = NULL;
             if (!result || !cmp->next) break;
@@ -11940,11 +11949,11 @@ container_fail:
     case N_INDEX:
         a = eval(c, f, n->a);
         if (a) b = eval(c, f, n->b);
-        if (b) result = get_index(c, a, b);
+        if (b) { relocate(c, n); result = get_index(c, a, b); }
         break;
     case N_ATTR:
         a = eval(c, f, n->a);
-        if (a) result = attribute(c, a, n->b->text);
+        if (a) { relocate(c, n); result = attribute(c, a, n->b->text); }
         break;
     case N_CALL: {
         a = eval(c, f, n->a);
@@ -11952,7 +11961,7 @@ container_fail:
         SPYValue *args = spy_list(c), *keywords = value_new(c, SPY_DICT);
         if (!args || !keywords) { spy_release(args); spy_release(keywords); break; }
         eval_arguments(c, f, n->args, a, args, keywords);
-        if (!c->error_type[0]) result = call_keywords(c, a, args->as.seq.len, args->as.seq.items, keywords);
+        if (!c->error_type[0]) { relocate(c, n); result = call_keywords(c, a, args->as.seq.len, args->as.seq.items, keywords); }
         spy_release(args); spy_release(keywords); break;
     }
     default: spy_error(c, "RuntimeError", "invalid expression node"); break;
@@ -20445,15 +20454,29 @@ static SPYValue *cell_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
     int result = op == R_LT ? x < y : op == R_LE ? x <= y : op == R_EQ ? x == y : op == R_NE ? x != y : op == R_GT ? x > y : x >= y;
     return spy_bool(c, result);
 }
-enum { SENTINEL_COPY, SENTINEL_DEEPCOPY, SENTINEL_REDUCE, SENTINEL_OR, SENTINEL_ROR };
-static const char *const sentinel_methods[] = {"__copy__", "__deepcopy__", "__reduce__", "__or__", "__ror__"};
+enum { SENTINEL_COPY, SENTINEL_DEEPCOPY, SENTINEL_REDUCE, SENTINEL_OR, SENTINEL_ROR, SENTINEL_REPR };
+static const char *const sentinel_methods[] = {"__copy__", "__deepcopy__", "__reduce__", "__or__", "__ror__", "__repr__"};
 static SPYValue *sentinel_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
-    if (!argc || argv[0]->type != SPY_SENTINEL)
-        return errorf(c, "TypeError", "descriptor '%s' for 'sentinel' objects doesn't apply to a '%s' object", sentinel_methods[op], argc ? type_name(argv[0]) : "nothing");
-    SPYValue *arg = NULL;
-    if (parse_arguments(c, sentinel_methods[op], argc - 1, argv + 1, keywords, NULL, op == SENTINEL_COPY || op == SENTINEL_REDUCE ? 0 : 1,
-                        op == SENTINEL_COPY || op == SENTINEL_REDUCE ? 0 : 1, 0, &arg)) return NULL;
+    const char *name = sentinel_methods[op];
+    /* __or__, __ror__ and __repr__ are slot wrappers; the others are
+     * METH_NOARGS or METH_O method descriptors. */
+    int wrapper = op == SENTINEL_OR || op == SENTINEL_ROR || op == SENTINEL_REPR;
+    int unary = op == SENTINEL_COPY || op == SENTINEL_REDUCE || op == SENTINEL_REPR;
+    if (!argc) return errorf(c, "TypeError", wrapper ? "descriptor '%s' of 'sentinel' object needs an argument" :
+                             "unbound method sentinel.%s() needs an argument", name);
+    if (argv[0]->type != SPY_SENTINEL)
+        return errorf(c, "TypeError", wrapper ? "descriptor '%s' requires a 'sentinel' object but received a '%s'" :
+                      "descriptor '%s' for 'sentinel' objects doesn't apply to a '%s' object", name, type_name(argv[0]));
+    if (keywords && keywords->as.map.len)
+        return errorf(c, "TypeError", wrapper ? "wrapper %s() takes no keyword arguments" : "sentinel.%s() takes no keyword arguments", name);
+    if (argc - 1 != (size_t)!unary) {
+        if (wrapper) return errorf(c, "TypeError", "expected %d argument%s, got %zu", !unary, unary ? "s" : "", argc - 1);
+        return errorf(c, "TypeError", unary ? "sentinel.%s() takes no arguments (%zu given)" : "sentinel.%s() takes exactly one argument (%zu given)",
+                      name, argc - 1);
+    }
+    SPYValue *arg = unary ? NULL : argv[1];
+    if (op == SENTINEL_REPR) return stringify(c, argv[0], 1);
     if (op == SENTINEL_REDUCE) return spy_retain(argv[0]->as.sentinel.name);
     if (op == SENTINEL_COPY || op == SENTINEL_DEEPCOPY) return spy_retain(argv[0]);
     SPYValue *args[] = {op == SENTINEL_OR ? argv[0] : arg, op == SENTINEL_OR ? arg : argv[0]};

@@ -358,3 +358,9 @@ assert_eq(type(int.__dict__["real"]).__name__, "getset_descriptor")
 class Slotted:
     __slots__ = ("a",)
 assert_eq(type(Slotted.a).__name__, "member_descriptor")
+# sentinel's __repr__ is a slot wrapper; its other methods are descriptors.
+marker = sentinel("MARKER")
+assert_eq(type(marker).__repr__(marker), "MARKER")
+assert_eq(str(assert_raises(TypeError, type(marker).__repr__, 1)),
+          "descriptor '__repr__' requires a 'sentinel' object but received a 'int'")
+assert_eq(str(assert_raises(TypeError, marker.__copy__, 1)), "sentinel.__copy__() takes no arguments (1 given)")

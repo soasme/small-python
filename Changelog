@@ -661,3 +661,8 @@
   members. Type aliases and lazily evaluated bounds, defaults and values
   carry their qualified names, and TypeAliasType() parses its arguments
   as typealias() does. Template and Interpolation are subscriptable.
+- An operation is reported at the line where its expression begins (the
+  leftmost operand of a binary operation, comparison, call or subscript;
+  the name of an attribute), set again after its operands run, as
+  SLP-315 9.2.1 now states. sentinel's __repr__ is a slot wrapper and its
+  methods check their arguments with CPython's messages.
