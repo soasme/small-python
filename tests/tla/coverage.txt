@@ -361,9 +361,9 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | Frames, CodeObjects
 11. Built-in types > Built-in Types > Special Attributes | ClassObjects
-11. Built-in types > Built-in Types > Integer string conversion length limitation | TODO: IntStrLimit
-11. Built-in types > Built-in Types > Integer string conversion length limitation > Affected APIs | TODO: IntStrLimit
-11. Built-in types > Built-in Types > Integer string conversion length limitation > Configuring the limit | TODO: IntStrLimit
+11. Built-in types > Built-in Types > Integer string conversion length limitation | IntStrLimit
+11. Built-in types > Built-in Types > Integer string conversion length limitation > Affected APIs | IntStrLimit
+11. Built-in types > Built-in Types > Integer string conversion length limitation > Configuring the limit | IntStrLimit
 11. Built-in types > Built-in Types > Integer string conversion length limitation > Recommended configuration | - informative: advice on choosing the limit
 12. Built-in constants | = sections
 12. Built-in constants > Built-in Constants | TODO: Singletons, Constants

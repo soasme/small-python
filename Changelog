@@ -513,6 +513,10 @@
   methods and views.
 - TLA+ model of GenericAlias and Union: alias attributes, substitution,
   and union flattening, deduplication, and isinstance().
+- int() and float() accept bytearray, memoryview, and other buffers, as
+  CPython does, and word other argument types' errors as CPython does;
+  float() parses strings longer than 4096 characters. TLA+ model of the
+  integer string conversion length limit.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

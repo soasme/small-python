@@ -281,3 +281,20 @@ assert_eq(type_error(lambda: {1}.issubset([[]])), "unhashable type: 'list'")
 assert_eq(type_error(lambda: {1: []}.items() & {(1, 2)}), "unhashable type: 'list'")
 assert_eq(type_error(lambda: {1}.union([[]])), "cannot use 'list' as a set element (unhashable type: 'list')")
 assert_eq({1, 2, 3}.intersection([3, 2, 9]), {2, 3})
+
+# int() and float() parse bytearray and other buffers; float() takes any length.
+assert_eq(int(bytearray(b"12")), 12)
+assert_eq(int(bytearray(b"12"), 8), 10)
+assert_eq(int(memoryview(b"123")[1:]), 23)
+assert_eq(float(bytearray(b"1.5")), 1.5)
+assert_eq(float(memoryview(b"2")), 2.0)
+assert_eq(float("1" * 5000), float("inf"))
+assert_eq(type_error(lambda: int(memoryview(b"1"), 10)), "int() can't convert non-string with explicit base")
+assert_eq(type_error(lambda: int([])), "int() argument must be a string, a bytes-like object or a real number, not 'list'")
+assert_eq(type_error(lambda: float(None)), "float() argument must be a string or a real number, not 'NoneType'")
+try:
+    int(bytearray(b"x"))
+except ValueError as error:
+    assert_eq(str(error), "invalid literal for int() with base 10: b'x'")
+else:
+    raise AssertionError("int(bytearray(b'x'))")

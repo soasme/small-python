@@ -17670,8 +17670,9 @@ static int float_text(const char *text, size_t len, double *result) {
     size_t start = 0, end = len;
     while (start < end && isspace((unsigned char)text[start])) start++;
     while (end > start && isspace((unsigned char)text[end - 1])) end--;
-    if (start == end || end - start > 4096) return -1;
-    char clean[4100];
+    if (start == end) return -1;
+    char *clean = malloc(end - start + 2);
+    if (!clean) return -1;
     size_t n = 0, i = start;
     int negative = 0;
     if (text[i] == '+' || text[i] == '-') negative = text[i++] == '-';
@@ -17681,7 +17682,7 @@ static int float_text(const char *text, size_t len, double *result) {
         if (word != strlen(words[w])) continue;
         size_t k = 0;
         while (k < word && tolower((unsigned char)text[i + k]) == words[w][k]) k++;
-        if (k == word) { *result = w == 2 ? (negative ? -NAN : NAN) : negative ? -INFINITY : INFINITY; return 0; }
+        if (k == word) { free(clean); *result = w == 2 ? (negative ? -NAN : NAN) : negative ? -INFINITY : INFINITY; return 0; }
     }
     if (negative) clean[n++] = '-';
     int digits = 0, section = 0; /* 0 integer, 1 fraction, 2 exponent */
@@ -17692,18 +17693,19 @@ static int float_text(const char *text, size_t len, double *result) {
             clean[n++] = ch; previous_digit = 1;
             if (section == 2) exponent_digits = 1; else digits = 1;
         } else if (ch == '_') {
-            if (!previous_digit || i + 1 == end || text[i + 1] < '0' || text[i + 1] > '9') return -1;
+            if (!previous_digit || i + 1 == end || text[i + 1] < '0' || text[i + 1] > '9') { free(clean); return -1; }
             previous_digit = 0;
         } else if (ch == '.' && section == 0) {
             clean[n++] = ch; section = 1; previous_digit = 0;
         } else if ((ch == 'e' || ch == 'E') && section < 2 && digits) {
             clean[n++] = 'e'; section = 2; previous_digit = 0;
             if (i + 1 < end && (text[i + 1] == '+' || text[i + 1] == '-')) clean[n++] = text[++i];
-        } else return -1;
+        } else { free(clean); return -1; }
     }
-    if (!digits || (section == 2 && !exponent_digits)) return -1;
+    if (!digits || (section == 2 && !exponent_digits)) { free(clean); return -1; }
     clean[n] = 0;
     *result = strtod(clean, NULL);
+    free(clean);
     return 0;
 }
 /* The repr of a rejected numeric string, truncated to 200 characters. */
@@ -17720,6 +17722,31 @@ static SPYValue *numeric_error(SPYContext *c, SPYValue *text, const char *format
     else errorf(c, "ValueError", format, quoted);
     free(quoted);
     return NULL;
+}
+/* int() of a str, bytes, or bytearray; a rejected bytearray shows as bytes. */
+static SPYValue *int_from_text(SPYContext *c, SPYValue *value, int base) {
+    size_t len;
+    char *text = numeric_ascii(c, value, &len);
+    SPYValue *result = text ? integer_parse(c, text, len, (unsigned)base, "ValueError") : NULL;
+    free(text);
+    if (!result && error_is(c, "ValueError") && !strcmp(c->error_message, "invalid integer string")) {
+        spy_clear_error(c);
+        SPYValue *shown = value->type == SPY_BYTEARRAY ? spy_bytes(c, value->as.string.data, value->as.string.len) : spy_retain(value);
+        if (shown) numeric_error(c, shown, "invalid literal for int() with base %d: %s", base);
+        spy_release(shown);
+    }
+    return result;
+}
+/* float() of the text of a str or bytes-like value; an error shows shown. */
+static SPYValue *float_from_text(SPYContext *c, SPYValue *value, SPYValue *shown) {
+    size_t len;
+    char *text = numeric_ascii(c, value, &len);
+    if (!text) return NULL;
+    double d;
+    int status = float_text(text, len, &d);
+    free(text);
+    if (status) return numeric_error(c, shown, "could not convert string to float: %s", -1);
+    return spy_float(c, d);
 }
 enum { CASE_LOWER, CASE_UPPER, CASE_TITLE, CASE_FOLD };
 /* Full case mapping of one character into out (at most three characters). */
@@ -20831,21 +20858,14 @@ execution_fail:
         if (argc > (id == B_INT ? 2u : 1u)) goto arity;
         if (!argc) return id == B_INT ? spy_int(c, 0) : spy_float(c, 0);
         SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", NULL);
-        if (base && (base->type == SPY_STRING || base->type == SPY_BYTES || is_number(base))) a = base;
-        if (id == B_INT && (a->type == SPY_STRING || a->type == SPY_BYTES || argc == 2)) {
-            if (a->type != SPY_STRING && a->type != SPY_BYTES) return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
+        if (base && (base->type == SPY_STRING || base->type == SPY_BYTES || base->type == SPY_BYTEARRAY || is_number(base))) a = base;
+        if (id == B_INT && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY || argc == 2)) {
+            if (a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY)
+                return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
             int64_t base = 10;
             if (argc == 2 && index_value(c, argv[1], &base)) return NULL;
             if (base != 0 && (base < 2 || base > 36)) return spy_error(c, "ValueError", "int() base must be >= 2 and <= 36, or 0");
-            size_t len;
-            char *text = numeric_ascii(c, a, &len);
-            SPYValue *result = text ? integer_parse(c, text, len, (unsigned)base, "ValueError") : NULL;
-            free(text);
-            if (!result && error_is(c, "ValueError") && !strcmp(c->error_message, "invalid integer string")) {
-                spy_clear_error(c);
-                return numeric_error(c, a, "invalid literal for int() with base %d: %s", (int)base);
-            }
-            return result;
+            return int_from_text(c, a, (int)base);
         }
         if (is_number(a)) {
             if (id == B_FLOAT) {
@@ -20873,15 +20893,18 @@ execution_fail:
             }
             if (c->error_type[0]) return NULL;
         }
-        if (a->type != SPY_STRING && a->type != SPY_BYTES) return spy_error(c, "TypeError", "expected number or string");
-        size_t len;
-        char *text = numeric_ascii(c, a, &len);
-        if (!text) return NULL;
-        double d;
-        int status = float_text(text, len, &d);
-        free(text);
-        if (status) return numeric_error(c, a, "could not convert string to float: %s", -1);
-        return spy_float(c, d);
+        if (a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY) {
+            /* Any other buffer is parsed as a copy of its bytes. */
+            SPYValue *owned, *bytes = buffer_bytes(c, a, &owned);
+            if (!bytes) return c->error_type[0] ? NULL : id == B_INT
+                ? errorf(c, "TypeError", "int() argument must be a string, a bytes-like object or a real number, not '%s'", type_name(a))
+                : errorf(c, "TypeError", "float() argument must be a string or a real number, not '%s'", type_name(a));
+            SPYValue *result = id == B_INT ? int_from_text(c, bytes, 10) : float_from_text(c, bytes, a);
+            spy_release(owned);
+            return result;
+        }
+        if (id == B_INT) return int_from_text(c, a, 10);
+        return float_from_text(c, a, a);
     }
     if (argc != 1) goto arity;
     if (id == B_REPR) return spy_repr(c, a);

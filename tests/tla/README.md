@@ -98,6 +98,7 @@ and tied to real implementations by replaying them.
 | `Bytes.tla` | the str search, split, replace, affix, strip, and pad functions derived again for bytes and bytearray receivers; constructors, fromhex and hex, ASCII-only case mappings and predicates, bytearray mutation, and argument errors | yes |
 | `DictMethods.tla` | dict construction forms, merge and update order with the right operand's values, live keys, values, and items views with their set operators, get, setdefault, pop, popitem, fromkeys, copy, `__missing__`, and key errors | yes |
 | `TypeAnnotations.tla` | GenericAlias origin, arguments, parameters, substitution, unpacking, and refusals; X \| Y unions over every two- and three-term chain, flattened and deduplicated in order, with isinstance() over them | yes |
+| `IntStrLimit.tla` | the integer string conversion limit over limits 0, 640, and 1000 and digit counts around them: which conversions it governs, its two messages, and the settings API | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -226,7 +227,8 @@ their own way, bytes `%s` refused a memoryview, `bytes.isupper()` was
 always false, `bytearray` padding refused a bytes fill byte, and `hex()`
 and `fromhex()` worded separator and odd-digit errors differently, and
 `set.intersection()` with an iterable named an unhashable item a set
-element.
+element, `int()` and `float()` refused bytearray and memoryview, and
+`float()` refused strings over 4096 characters.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
