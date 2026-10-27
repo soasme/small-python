@@ -792,3 +792,9 @@
   stacked like call arguments and the defaults are evaluated before the
   type parameter scope, so a suspension no longer raises
   NotImplementedError. compound/suspending_definitions covers them.
+- memoryview.tobytes() gives Fortran ('F') and Fortran-contiguous 'A'
+  order for multi-dimensional views, and count() on such a view raises
+  the sub-view error CPython raises. PLS-315 24.4.2 now states the byte
+  orders and which multi-dimensional operations raise
+  NotImplementedError, as CPython 3.15 does; builtins/memoryview_dimensions
+  tests them.

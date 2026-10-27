@@ -20474,12 +20474,21 @@ static SPYValue *memory_items(SPYContext *c, SPYValue *m, int how) {
     if (list && memory_walk(c, m, 0, m->as.memory.offset, how, list, NULL)) { spy_release(list); return NULL; }
     return list;
 }
-static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) {
+/* Fortran order: the first index varies fastest. */
+static int memory_walk_fortran(SPYValue *m, int dim, ptrdiff_t at, Buffer *bytes) {
+    if (dim < 0) return append(bytes, (const char *)memory_data(m) + at, m->as.memory.itemsize);
+    for (ptrdiff_t i = 0; i < memory_shape(m)[dim]; i++)
+        if (memory_walk_fortran(m, dim - 1, at + i * memory_strides(m)[dim], bytes)) return -1;
+    return 0;
+}
+static SPYValue *memory_bytes_order(SPYContext *c, SPYValue *m, int fortran) {
     Buffer out = {.ctx = c};
-    if (memory_walk(c, m, 0, m->as.memory.offset, WALK_BYTES, NULL, &out)) { free(out.data); return NULL; }
+    if (fortran ? memory_walk_fortran(m, m->as.memory.ndim - 1, m->as.memory.offset, &out)
+                : memory_walk(c, m, 0, m->as.memory.offset, WALK_BYTES, NULL, &out)) { free(out.data); return NULL; }
     SPYValue *result = spy_bytes(c, out.data ? out.data : "", out.len);
     free(out.data); return result;
 }
+static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) { return memory_bytes_order(c, m, 0); }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
 static int buffer_exporter(SPYContext *, SPYValue *);
 /* The bytes of a bytes-like object: a borrowed bytes or bytearray value, or
@@ -20907,11 +20916,9 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
         if (args[0] && args[0]->type != SPY_NONE && !order) return errorf(c, "TypeError", "tobytes() argument 'order' must be str or None, not %s", type_name(args[0]));
         if (order && (order->as.string.len != 1 || !strchr("CFA", order->as.string.data[0])))
             return spy_error(c, "ValueError", "order must be 'C', 'F' or 'A'");
-        if (order && order->as.string.data[0] != 'C' && m->as.memory.ndim > 1 && !memory_c_contiguous(m))
-            return spy_error(c, "NotImplementedError", "memoryview: Fortran order is not implemented");
-        if (order && order->as.string.data[0] == 'F' && m->as.memory.ndim > 1)
-            return spy_error(c, "NotImplementedError", "memoryview: Fortran order is not implemented");
-        return memory_bytes(c, m);
+        /* 'A' keeps the layout of a Fortran-contiguous view. */
+        char how = order ? order->as.string.data[0] : 'C';
+        return memory_bytes_order(c, m, how == 'F' || (how == 'A' && !memory_c_contiguous(m) && memory_f_contiguous(m)));
     }
     case MV_TOLIST: return memory_items(c, m, WALK_LIST);
     case MV_HEX: {
@@ -20930,7 +20937,8 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
     case MV_CAST: return memory_cast(c, m, args[0], args[1]);
     default: {
         if (!m->as.memory.ndim) return spy_error(c, "TypeError", "invalid lookup on 0-dim memory");
-        if (m->as.memory.ndim > 1) return spy_error(c, "NotImplementedError", "multi-dimensional lookup is not implemented");
+        /* count() iterates the view, index() looks items up. */
+        if (m->as.memory.ndim > 1) return spy_error(c, "NotImplementedError", op == MV_COUNT ? "multi-dimensional sub-views are not implemented" : "multi-dimensional lookup is not implemented");
         ptrdiff_t start = 0, stop = memory_shape(m)[0];
         for (int k = 1; op == MV_INDEX && k < 3; k++) {
             if (!args[k] || args[k]->type == SPY_NONE) continue;
