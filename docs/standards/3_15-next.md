@@ -1778,3 +1778,411 @@ by LookupSpecial (7.3.2) and the clause that uses each.
 
 A program shall not depend on any other method name being looked up
 implicitly.
+
+## 11 Source Text
+
+### 11.1 Source code
+
+*Source text* is a sequence of Unicode code points. It is obtained from the
+bytes of a source file by decoding them (11.2), or given directly as a `str`
+to `compile`, `exec`, or `eval` (19.3). The code point U+0000 shall not occur in
+source text; if it does, a `SyntaxError` exception ("source code string cannot
+contain null bytes") is raised.
+
+### 11.2 Source encoding
+
+Source given as bytes (a module file, or a `bytes` argument to `compile`,
+`exec`, or `eval`) is decoded as follows.
+
+1. If the bytes begin with the UTF-8 byte order mark EF BB BF, remove it and
+   let *bom* be **true**.
+2. If the first line, or the second line when the first line is a line
+   containing only a comment or only whitespace, contains a comment that matches
+   the pattern `coding[=:]\s*([-\w.]+)` (an *encoding declaration*), let *name*
+   be the captured name. Otherwise let *name* be `"utf-8"`.
+3. Normalize *name*: lowercase it and replace `_` by `-`. If the result is
+   `utf-8` or `utf8` or starts with `utf-8-`, the encoding is UTF-8; if it is
+   `latin-1`, `latin1`, `iso-8859-1`, `iso8859-1`, `iso-latin-1`, or starts with
+   `latin-1-` or `iso-8859-1-`, the encoding is ISO 8859-1; if it is `ascii` or
+   `us-ascii`, the encoding is US-ASCII.
+4. If *bom* is **true** and the encoding is not UTF-8, raise a `SyntaxError`
+   exception ("encoding problem: *canonical* with BOM"), where *canonical* is
+   `iso-8859-1` or `ascii`, or the host's canonical name of the encoding.
+5. If the encoding is none of these, call the host hook HostDecodeSource
+   (Annex B). If the host does not supply the encoding, raise a `SyntaxError`
+   exception ("unknown encoding: *name*").
+6. Decode the bytes. If they are not valid in the encoding, raise a
+   `SyntaxError` exception. When the encoding was not declared, the message is
+   "Non-UTF-8 code starting with '\x*hh*' in file *filename* on line *n*, but
+   no encoding declared; see https://peps.python.org/pep-0263/ for details",
+   where *hh* is the first invalid byte in hexadecimal.
+
+Core implementations shall support the three encodings named in step 3.
+Source given as a `str` is not decoded; an encoding declaration in it is a
+comment.
+
+### 11.3 Lines
+
+The sequences CR LF, CR, and LF each terminate a *physical line*. When source
+text is read from a `str`, these are the only line terminators; other Unicode
+line separators are ordinary characters. A *logical line* is a sequence of one
+or more physical lines joined by the rules of 12.2; it is terminated by a
+`NEWLINE` token.
+
+## 12 Lexical Grammar
+
+The source text is converted into a sequence of tokens. At every point the
+longest sequence of code points that forms a token is taken (the "maximal
+munch" rule), with the exceptions of 12.6.3 and 12.7.
+
+### 12.1 Tokens
+
+The token kinds are `NAME` (identifiers, keywords, and soft keywords),
+`NUMBER`, `STRING` (with the f-string and t-string parts of 12.5.6), the
+operators and delimiters of 12.7, `NEWLINE`, `INDENT`, `DEDENT`, and
+`ENDMARKER`. Whitespace (U+0020 SPACE, U+0009 TAB, U+000C FORM FEED) separates
+tokens and is otherwise ignored, except at the start of a logical line (12.3)
+and inside string literals. Whitespace is required between two tokens only if
+their concatenation would otherwise be read as a different token.
+
+A code point that cannot begin any token, outside a string literal or comment,
+is an error:
+
+- U+0024 `$`, U+003F `?`, and U+0060 `` ` ``: `SyntaxError` ("invalid syntax");
+- a printable character that is not part of an operator, identifier, or
+  literal: `SyntaxError` ("invalid character '*c*' (U+*XXXX*)");
+- a non-printable character (Unicode general categories Cc, Cf, Cs, Co, Cn, Zl,
+  Zp, and Zs other than U+0020): `SyntaxError` ("invalid non-printable
+  character U+*XXXX*"),
+
+where *XXXX* is the code point in at least four uppercase hexadecimal digits.
+
+### 12.2 Line structure
+
+#### 12.2.1 Comments
+
+A comment starts with a `#` that is not part of a string literal and ends at
+the end of the physical line. Comments are ignored, except that an encoding
+declaration (11.2) is a comment and that a comment on a line by itself makes the
+line blank.
+
+#### 12.2.2 Explicit line joining
+
+A backslash `\` that is not part of a string literal or comment and is followed
+by a line terminator joins the physical line with the next one, deleting the
+backslash and the terminator. A backslash followed by any other character
+outside a string literal raises a `SyntaxError` exception ("unexpected
+character after line continuation character"). A backslash at the end of the
+source text raises a `SyntaxError` exception ("unexpected EOF while parsing").
+A line ending in a backslash cannot carry a comment.
+
+#### 12.2.3 Implicit line joining
+
+Between an opening bracket (`(`, `[`, `{`) and its matching closing bracket,
+line terminators, comments, and indentation are ignored: no `NEWLINE`,
+`INDENT`, or `DEDENT` token is produced. A closing bracket that does not match
+the innermost opening bracket raises a `SyntaxError` exception ("closing
+parenthesis '*c*' does not match opening parenthesis '*o*'", with " on line
+*n*" appended when the opening bracket is on an earlier line); one with no
+opening bracket raises ("unmatched '*c*'"); an opening bracket unmatched at the
+end of the source raises ("'*o*' was never closed").
+
+#### 12.2.4 Blank lines
+
+A logical line that contains only whitespace and possibly a comment is blank and
+produces no tokens. In interactive input (17.6.2), an entirely blank line
+terminates a multi-line statement.
+
+#### 12.2.5 NEWLINE and ENDMARKER
+
+The end of each non-blank logical line produces a `NEWLINE` token. At the end
+of the source text, a `NEWLINE` is produced if the last logical line did not
+end with one, then the `DEDENT` tokens of 12.3, then `ENDMARKER`.
+
+### 12.3 Indentation
+
+The whitespace at the start of a logical line determines its *indentation*.
+Indentation is measured twice:
+
+- *col* counts each space as 1 and advances each tab to the next multiple of 8;
+- *altcol* counts each space and each tab as 1.
+
+A form feed resets both to 0. The algorithm keeps a stack of (*col*,
+*altcol*) pairs, initially «(0, 0)». At the start of each non-blank logical line,
+outside brackets, with measures (*c*, *a*) and stack top (*tc*, *ta*):
+
+1. If *c* = *tc*: if *a* ≠ *ta*, raise a `TabError` exception ("inconsistent use
+   of tabs and spaces in indentation"). Produce nothing.
+2. If *c* > *tc*: if *a* ≤ *ta*, raise the same `TabError`. Push (*c*, *a*) and
+   produce an `INDENT` token.
+3. If *c* < *tc*: pop pairs while the top *col* exceeds *c*, producing one
+   `DEDENT` token for each. If the new top *col* is not *c*, raise an
+   `IndentationError` exception ("unindent does not match any outer indentation
+   level"); if it is *c* but its *altcol* is not *a*, raise the `TabError`.
+
+At the end of the source text, one `DEDENT` is produced for each pair on the
+stack other than the bottom one.
+
+The parser (not the tokenizer) raises an `IndentationError` exception for an
+`INDENT` where no block may begin ("unexpected indent"), for a missing `INDENT`
+after a line ending in `:` that begins a block ("expected an indented block
+after *construct* on line *n*", where *construct* is, for example,
+`'if' statement`, `function definition`, or `class definition`).
+
+### 12.4 Names
+
+#### 12.4.1 Identifiers
+
+```text
+identifier:   id_start id_continue*
+id_start:     <"_" or a code point with the Unicode property XID_Start>
+id_continue:  <id_start, or a code point with the property XID_Continue>
+```
+
+The properties are those of the Unicode Character Database of the Unicode
+baseline. Every identifier is converted to Normalization Form KC (NFKC) when the
+source is parsed; two identifiers are the same if their NFKC forms are equal. A
+non-ASCII identifier that is not valid after normalization raises a
+`SyntaxError` exception ("invalid character '*c*' (U+*XXXX*)").
+
+#### 12.4.2 Keywords and soft keywords
+
+The following identifiers are *keywords*; they cannot be used as ordinary
+names:
+
+```text
+False      await      else       import     pass
+None       break      except     in         raise
+True       class      finally    is         return
+and        continue   for        lambda     try
+as         def        from       nonlocal   while
+assert     del        global     not        with
+async      elif       if         or         yield
+```
+
+The following are *soft keywords*: `match`, `case`, `_`, `type`, and `lazy`.
+They are keywords only in the grammatical contexts of clauses 14.14 (`type`),
+14.12 (`lazy`), and 15.6 (`match`, `case`, `_`), and ordinary names elsewhere.
+An assignment to a keyword raises a `SyntaxError` exception ("cannot assign to
+*keyword*"), and its use as an identifier elsewhere raises ("invalid syntax").
+
+#### 12.4.3 Reserved classes of identifiers
+
+Identifiers of the form `__*__` are reserved for names defined by this Standard
+and by implementations. Identifiers beginning with `_` are not imported by
+`from module import *` (17.4.3). Identifiers of the form `__*` (not ending in
+two underscores) in a class are mangled (8.8).
+
+### 12.5 String and bytes literals
+
+#### 12.5.1 Syntax
+
+```text
+stringliteral:   [stringprefix] (shortstring | longstring)
+stringprefix:    "r" | "u" | "b" | "br" | "rb" | "f" | "fr" | "rf" | "t" | "tr" | "rt"
+                 (any letter may be uppercase)
+shortstring:     "'" shortchar* "'" | '"' shortchar* '"'
+longstring:      "'''" longchar* "'''" | '"""' longchar* '"""'
+shortchar:       <any code point except "\", the line terminators, and the quote>
+                 | escapeseq
+longchar:        <any code point except "\"> | escapeseq
+escapeseq:       "\" <any code point>
+```
+
+No whitespace is allowed between the prefix and the quote. A prefix that
+combines `u` with any other letter raises a `SyntaxError` exception ("'u' and
+'*x*' prefixes are incompatible"), and one that combines two of `b`, `f`, `t`
+raises ("'*x*' and '*y*' prefixes are incompatible"), naming the letters in the
+order `u`, `r`, `b`, `f`, `t`.
+
+A short string literal that reaches the end of its line raises a `SyntaxError`
+exception ("unterminated string literal (detected at line *n*)"); a long string
+literal that reaches the end of the source raises ("unterminated triple-quoted
+string literal (detected at line *n*)"), where *n* is the line where the
+tokenizer stopped. The exception's `lineno` is the line where the literal
+starts.
+
+A literal with prefix `b` (in either case, alone or with `r`) is a *bytes
+literal* and produces a `bytes` object; it may contain only ASCII code points,
+else a `SyntaxError` exception ("bytes can only contain ASCII literal
+characters") is raised. A literal with prefix `f` is an *f-string* (12.5.6) and
+one with prefix `t` a *t-string* (12.5.7). Any other literal produces a `str`.
+
+#### 12.5.2 Raw literals
+
+In a literal with prefix `r`, a backslash and the code point after it are both
+kept; no escape sequence is recognized. A backslash still prevents the
+following quote from ending the literal, and a raw literal cannot end with an
+odd number of backslashes.
+
+#### 12.5.3 Escape sequences
+
+In a literal without prefix `r`, the following escape sequences are recognized.
+Sequences marked *str* are recognized only in `str` literals, not in bytes
+literals.
+
+| Sequence | Meaning |
+| --- | --- |
+| `\` *line terminator* | nothing (the backslash and terminator are removed) |
+| `\\`, `\'`, `\"` | the backslash, apostrophe, or quotation mark |
+| `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v` | U+0007, U+0008, U+000C, U+000A, U+000D, U+0009, U+000B |
+| `\` *ooo* | the code point (or byte) with octal value *ooo*, one to three octal digits |
+| `\x` *hh* | the code point (or byte) with hexadecimal value *hh*, exactly two digits |
+| `\N{` *name* `}` (*str*) | the code point with that Unicode name or name alias |
+| `\u` *xxxx* (*str*) | the code point with hexadecimal value *xxxx*, exactly four digits |
+| `\U` *xxxxxxxx* (*str*) | the code point with hexadecimal value *xxxxxxxx*, exactly eight digits, at most 10FFFF |
+
+Errors in escape sequences raise a `SyntaxError` exception whose message is
+"(unicode error) '*codec*' codec can't decode bytes in position *i*-*j*:
+*reason*", where *codec* is `unicodeescape` for a `str` literal, *i* and *j*
+are the positions of the first and last code point of the faulty escape within
+the literal's contents, and *reason* is `truncated \xXX escape`, `truncated
+\uXXXX escape`, `truncated \UXXXXXXXX escape`, `illegal Unicode character`, or
+`unknown Unicode character name`; for a bytes literal the message is "(value
+error) invalid \x escape at position *i*".
+
+An octal escape whose value exceeds 0o377 in a `str` literal produces the code
+point and issues a `SyntaxWarning` ("\"\\*ooo*\" is an invalid octal escape
+sequence. Such sequences will not work in the future. Did you mean \"\\\\*ooo*\"?
+A raw string is also an option."). Any other backslash followed by a code
+point is kept unchanged (both the backslash and the code point) and issues a
+`SyntaxWarning` ("\"\\*c*\" is an invalid escape sequence. Such sequences will
+not work in the future. Did you mean \"\\\\*c*\"? A raw string is also an
+option."). A compile-time warning is issued through HostWarn (Annex B) with the
+file name and line of the literal.
+
+#### 12.5.4 Literal concatenation
+
+Adjacent string literals, separated only by whitespace, comments, or (within
+brackets) line terminators, are concatenated at compile time into one literal,
+which may combine any prefixes except that bytes literals can be concatenated
+only with bytes literals ("cannot mix bytes and nonbytes literals"). A
+concatenation that contains an f-string is an f-string; one that contains a
+t-string is a t-string, and a t-string may be concatenated only with t-strings
+("cannot mix t-string literals with string or bytes literals").
+
+#### 12.5.5 Static Semantics: StringValue
+
+The StringValue of a string literal is the `str` (or `bytes`) whose code points
+(or bytes) are those of its contents after escape processing, with the
+concatenation of 12.5.4 applied. Equal literals in one code object may evaluate
+to the same object.
+
+#### 12.5.6 f-strings
+
+An f-string is a sequence of literal parts and *replacement fields*:
+
+```text
+fstring:            fstring_start fstring_part* fstring_end
+fstring_part:       fstring_middle | "{{" | "}}" | replacement_field
+replacement_field:  "{" annotated_expr ["="] ["!" conversion] [":" format_spec] "}"
+annotated_expr:     star_expressions | yield_expr
+conversion:         "s" | "r" | "a"
+format_spec:        (fstring_middle | "{{" | "}}" | replacement_field)*
+```
+
+In the literal parts, `{{` and `}}` denote `{` and `}`, and escape sequences are
+processed as in 12.5.3 unless the prefix includes `r`. The expression of a
+replacement field is tokenized as ordinary Python source: it may contain
+nested string literals using any quote, including the f-string's own quote,
+comments when the f-string is triple-quoted or the expression spans lines
+within brackets, and backslashes. A `!` or `:` at bracket depth zero within the
+expression ends it; `!=` does not. An `=` directly before `!`, `:`, or `}`
+(after optional whitespace) makes the field *self-documenting* (13.2.4.3).
+
+A format spec may contain replacement fields, nested at most two levels deep
+counting the outer one ("f-string: expressions nested too deeply"). Other
+static errors raise a `SyntaxError` exception with these messages:
+
+| Condition | Message |
+| --- | --- |
+| a `}` in a literal part that is not doubled | f-string: single '}' is not allowed |
+| a replacement field not closed by `}` | f-string: expecting '}' |
+| a replacement field with no expression | f-string: valid expression required before '}' (or before '!', ':', '=') |
+| a conversion other than `s`, `r`, `a` | f-string: invalid conversion character '*c*': expected 's', 'r', or 'a' |
+| a `!` with nothing after it | f-string: missing conversion character |
+| a lambda or assignment expression not in parentheses | f-string: lambda expressions are not allowed without parentheses (or: invalid syntax) |
+
+#### 12.5.7 t-strings
+
+A t-string has the syntax of an f-string with the prefix `t` and evaluates to a
+%Template% object (23.7) instead of a `str`.
+
+### 12.6 Numeric literals
+
+#### 12.6.1 Integer literals
+
+```text
+integer:      decinteger | bininteger | octinteger | hexinteger
+decinteger:   nonzerodigit (["_"] digit)* | "0"+ (["_"] "0")*
+bininteger:   "0" ("b" | "B") (["_"] bindigit)+
+octinteger:   "0" ("o" | "O") (["_"] octdigit)+
+hexinteger:   "0" ("x" | "X") (["_"] hexdigit)+
+nonzerodigit: "1"..."9"
+digit:        "0"..."9"
+bindigit:     "0" | "1"
+octdigit:     "0"..."7"
+hexdigit:     digit | "a"..."f" | "A"..."F"
+```
+
+The value of an integer literal is the integer it denotes in its base, of
+unbounded size; underscores are ignored. There are no negative literals: `-1`
+is the unary minus applied to `1`. A decimal integer literal other than zero
+with a leading zero raises a `SyntaxError` exception ("leading zeros in decimal
+integer literals are not permitted; use an 0o prefix for octal integers").
+
+#### 12.6.2 Floating-point and imaginary literals
+
+```text
+floatnumber:   pointfloat | exponentfloat
+pointfloat:    [digitpart] fraction | digitpart "."
+exponentfloat: (digitpart | pointfloat) exponent
+digitpart:     digit (["_"] digit)*
+fraction:      "." digitpart
+exponent:      ("e" | "E") ["+" | "-"] digitpart
+imagnumber:    (floatnumber | digitpart) ("j" | "J")
+```
+
+The value of a floating-point literal is the mathematical value it denotes in
+decimal, converted to a `float` by rounding to nearest, ties to even, and
+yielding an infinity if it overflows (no exception is raised). Leading zeros in
+the integer part are permitted. An imaginary literal produces a `complex` with
+real part 0.0 and imaginary part the value of the float or digit part.
+
+#### 12.6.3 Literal boundaries
+
+A numeric literal immediately followed by a code point that could continue an
+identifier raises a `SyntaxError` exception: "invalid decimal literal", "invalid
+hexadecimal literal", "invalid octal literal", or "invalid binary literal"
+according to its base; a digit not valid in the base raises "invalid digit '*d*'
+in binary literal" (or "… octal literal"); a literal that ends in `_`, or an `_`
+not followed by a digit, raises "invalid decimal literal" (or the base's form).
+As an exception, when the following identifier is one of the keywords `and`,
+`else`, `for`, `if`, `in`, `is`, `not`, or `or`, the literal ends before it and a
+`SyntaxWarning` ("invalid decimal literal", or the base's form) is issued
+instead.
+
+### 12.7 Operators and delimiters
+
+The following are operator tokens:
+
+```text
++       -       *       **      /       //      %       @
+<<      >>      &       |       ^       ~       :=
+<       >       <=      >=      ==      !=
+```
+
+The following are delimiter tokens:
+
+```text
+(       )       [       ]       {       }
+,       :       !       .       ;       =       ->
++=      -=      *=      /=      //=     %=      @=
+&=      |=      ^=      >>=     <<=     **=
+...
+```
+
+A sequence of three dots is the `...` token unless it is part of a longer
+sequence of dots, which is read three at a time. The `!` token occurs only in
+f-strings and t-strings. A `.` followed by a digit begins a floating-point
+literal.
