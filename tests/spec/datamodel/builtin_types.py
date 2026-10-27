@@ -288,3 +288,18 @@ e = assert_raises(AttributeError, setattr, Alias, "other", 1)
 assert_eq(str(e), "'typing.TypeAliasType' object has no attribute 'other' and no __dict__ for setting new attributes")
 Alias.__module__ = "elsewhere"
 assert_eq(Alias.__module__, "elsewhere")
+# tname of an intrinsic type outside builtins carries its module (SLP-315 5.2).
+import types
+def generic[T, **P, *Ts](): pass
+type Alias = int
+for value, name in ((t"a", "string.templatelib.Template"), (t"{1}".interpolations[0], "string.templatelib.Interpolation"),
+                    (iter(t"a"), "string.templatelib.TemplateIter"), (types.SimpleNamespace(), "types.SimpleNamespace"),
+                    (generic.__type_params__[0], "typing.TypeVar"), (generic.__type_params__[1], "typing.ParamSpec"),
+                    (generic.__type_params__[2], "typing.TypeVarTuple"), (Alias, "typing.TypeAliasType"),
+                    (list[int], "types.GenericAlias"), (int | str, "typing.Union")):
+    assert_eq(str(assert_raises(TypeError, len, value)), f"object of type '{name}' has no len()")
+    if name != "types.GenericAlias":  # it looks attributes up on its origin
+        assert_eq(str(assert_raises(AttributeError, getattr, value, "zzz")), f"'{name}' object has no attribute 'zzz'")
+for cls, name in ((type(t""), "string.templatelib.Template"), (type(generic.__type_params__[0]), "typing.TypeVar")):
+    e = assert_raises(TypeError, type, "X", (cls,), {})
+    assert_eq(str(e), f"type '{name}' is not an acceptable base type")

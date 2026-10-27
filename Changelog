@@ -584,3 +584,9 @@
   module's __annotate__ and __annotations__ replace each other; function
   names accept str subclasses. New model: ReadOnlyAttributes.tla.
   make test-tla passes the TLC jar by absolute path.
+- tname of an intrinsic type outside builtins carries its module, as SLP-315
+  5.2 defines it: string.templatelib.Template and Interpolation,
+  typing.TypeVar and its kin, types.GenericAlias and SimpleNamespace, and
+  the library classes that stand in for CPython's C types, in every message
+  that names a type (operands, attributes, len, subscripts, bases,
+  descriptors). One table, class_tname, replaces the per-message prefixes.

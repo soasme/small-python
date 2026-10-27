@@ -1247,7 +1247,6 @@ static int64_t hash_double(SPYValue *owner, double value) {
 }
 static int hash_value(SPYContext *, SPYValue *, int64_t *);
 static int memory_hash(SPYContext *, SPYValue *, int64_t *);
-static const char *builtin_module_of(SPYContext *, SPYValue *);
 static uint64_t hash_lane(uint64_t hash, int64_t part) {
     hash += (uint64_t)part * UINT64_C(14029467366897019727);
     hash = (hash << 31) | (hash >> 33);
@@ -1361,9 +1360,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     case SPY_LIST: case SPY_DICT: case SPY_SET: case SPY_BYTEARRAY: case SPY_DICT_KEYS: case SPY_DICT_ITEMS: case SPY_CELL: break;
     default: *result = hash_pointer(value); return 0;
     }
-    const char *module = builtin_module_of(c, value);
-    if (module) errorf(c, "TypeError", "unhashable type: '%s.%s'", module, type_name(value));
-    else errorf(c, "TypeError", "unhashable type: '%s'", type_name(value));
+    errorf(c, "TypeError", "unhashable type: '%s'", type_name(value));
     return -1;
 }
 static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
@@ -1557,12 +1554,40 @@ static int native_kind(SPYValue *v) {
     if (v->type == SPY_METHOD) return wrapper ? NATIVE_METHOD_WRAPPER : NATIVE_BOUND;
     return wrapper ? NATIVE_WRAPPER_DESCRIPTOR : NATIVE_METHOD_DESCRIPTOR;
 }
+/* The classes, intrinsic or of the library modules, that stand in for
+ * CPython's C types outside builtins; tname (SLP-315 5.2) prefixes their
+ * module. */
+static const char *class_tname(SPYValue *cls) {
+    static const char *const dotted[][2] = {
+        {"string.templatelib", "Template"}, {"string.templatelib", "Interpolation"}, {"string.templatelib", "TemplateIter"},
+        {"typing", "TypeVar"}, {"typing", "ParamSpec"}, {"typing", "TypeVarTuple"}, {"typing", "ParamSpecArgs"},
+        {"typing", "ParamSpecKwargs"}, {"typing", "TypeAliasType"}, {"typing", "Generic"}, {"typing", "Union"},
+        {"types", "GenericAlias"}, {"types", "SimpleNamespace"}, {"collections", "deque"}, {"collections", "_deque_iterator"},
+        {"collections", "_tuplegetter"}, {"collections", "defaultdict"}, {"collections", "OrderedDict"},
+        {"weakref", "ReferenceType"}, {"weakref", "ProxyType"}, {"weakref", "CallableProxyType"},
+        {"itertools", "chain"}, {"itertools", "repeat"}, {"itertools", "starmap"}, {"operator", "itemgetter"},
+        {"_io", "_IOBase"}, {"_io", "_RawIOBase"}, {"_io", "_BufferedIOBase"}, {"_io", "_TextIOBase"}, {"_io", "FileIO"},
+        {"_io", "BytesIO"}, {"_io", "StringIO"}, {"_io", "BufferedReader"}, {"_io", "BufferedWriter"},
+        {"_io", "BufferedRandom"}, {"_io", "BufferedRWPair"}, {"_io", "TextIOWrapper"}, {"_io", "IncrementalNewlineDecoder"}};
+    SPYValue *name = name_local(cls, "__name__"), *qualname = name_local(cls, "__qualname__"), *module = name_local(cls, "__module__");
+    if (!name || name->type != SPY_STRING) return NULL;
+    if (!module || module->type != SPY_STRING || !qualname || qualname->type != SPY_STRING) return name->as.string.data;
+    for (size_t i = 0; i < sizeof(dotted) / sizeof(*dotted); i++)
+        if (!strcmp(dotted[i][0], module->as.string.data) && !strcmp(dotted[i][1], qualname->as.string.data)) {
+            static _Thread_local char buffers[8][128];
+            static _Thread_local unsigned next;
+            char *buffer = buffers[next++ % 8];
+            snprintf(buffer, sizeof(buffers[0]), "%s.%s", dotted[i][0], name->as.string.data);
+            return buffer;
+        }
+    return name->as.string.data;
+}
 static const char *type_name(SPYValue *value) {
     static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "Template", "Interpolation", "TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell", "traceback", "member_descriptor", "getset_descriptor"};
+        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "string.templatelib.Template", "string.templatelib.Interpolation", "string.templatelib.TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell", "traceback", "member_descriptor", "getset_descriptor"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
-        SPYValue *name = name_local(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent, "__name__");
-        if (name && name->type == SPY_STRING) return name->as.string.data;
+        const char *name = class_tname(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent);
+        if (name) return name;
     }
     if (value->type == SPY_ITERATOR) return iterator_names[iterator_class_id(value)];
     int kind = native_kind(value);
@@ -7014,7 +7039,7 @@ static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
         if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
         if (!method || method->type == SPY_NONE) {
             spy_release(method);
-            return errorf(c, "TypeError", "type '%s' is not subscriptable", name_local(v, "__name__")->as.string.data);
+            return errorf(c, "TypeError", "type '%s' is not subscriptable", class_tname(v));
         }
         SPYValue *result = spy_call(c, method, 1, &key);
         spy_release(method); return result;
@@ -8067,7 +8092,7 @@ static SPYValue *member_new(SPYContext *c, int type, const char *name, SPYValue 
 static int member_applies(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (subclass(value_class(c, object), d->as.member.owner)) return 1;
     errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", d->as.member.name->as.string.data,
-           name_local(d->as.member.owner, "__name__")->as.string.data, type_name(object));
+           class_tname(d->as.member.owner), type_name(object));
     return 0;
 }
 static SPYValue *instance_dict(SPYContext *, SPYValue *);
@@ -8099,7 +8124,7 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
         SPYValue *base = object->type == SPY_INSTANCE ? object->as.map.base : object;
         if (!(d->as.member.flags & DESC_READONLY) && base) return value ? set_attribute(c, base, name, value) : delete_attribute(c, base, name);
         if (d->type == SPY_MEMBER_DESCRIPTOR) spy_error(c, "AttributeError", "readonly attribute");
-        else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, name_local(d->as.member.owner, "__name__")->as.string.data);
+        else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, class_tname(d->as.member.owner));
         return -1;
     }
     if (d->as.member.flags & DESC_GENERIC) {
@@ -8951,7 +8976,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             value = class_lookup(c->types[SPY_CLASS], name);
             if (value) return descriptor_get(c, value, v, c->types[SPY_CLASS]);
         }
-        if (v->type == SPY_CLASS) return errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", name_local(v, "__name__")->as.string.data, name);
+        if (v->type == SPY_CLASS) return errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", class_tname(v), name);
         return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
     }
     if (v->type == SPY_MODULE) {
@@ -10494,7 +10519,7 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
 /* Builtin classes, the builtin exceptions included, refuse attribute changes. */
 static int immutable_type(SPYContext *c, SPYValue *cls, const char *name) {
     if (!static_type(c, cls)) return 0;
-    errorf(c, "TypeError", "cannot set '%s' attribute of immutable type '%s'", name, name_local(cls, "__name__")->as.string.data);
+    errorf(c, "TypeError", "cannot set '%s' attribute of immutable type '%s'", name, class_tname(cls));
     return 1;
 }
 /* A module's __annotate__ and __annotations__ (value NULL deletes): each
@@ -12267,16 +12292,8 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     if (!result && !c->error_type[0]) spy_error(c, "RuntimeError", "native function returned NULL without an error");
     return result;
 }
-/* CPython names its C types with their module, as intrinsic classes do here. */
 static void not_callable(SPYContext *c, SPYValue *fn) {
-    SPYValue *cls = value_class(c, fn);
-    SPYValue *module = fn->type == SPY_INSTANCE && c->intrinsics && name_local(c->intrinsics, type_name(fn)) == cls ?
-        name_local(cls, "__module__") : NULL;
-    const char *builtin = builtin_module_of(c, fn);
-    if (module && module->type == SPY_STRING)
-        errorf(c, "TypeError", "'%s.%s' object is not callable", module->as.string.data, type_name(fn));
-    else if (builtin) errorf(c, "TypeError", "'%s.%s' object is not callable", builtin, type_name(fn));
-    else errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
+    errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
 }
 static SPYValue *template_construct(SPYContext *, int, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *mappingproxy_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -12387,21 +12404,6 @@ static int weak_referenceable(SPYContext *c, SPYValue *v) {
     }
     return 0;
 }
-/* These classes of the built-in modules stand in for CPython C types, whose
- * names in messages carry their module. */
-static const char *builtin_module_of(SPYContext *c, SPYValue *v) {
-    static const char *const types[][2] = {
-        {"collections", "deque"}, {"collections", "_deque_iterator"}, {"collections", "defaultdict"},
-        {"collections", "OrderedDict"}, {"types", "SimpleNamespace"}, {"weakref", "ReferenceType"},
-        {"weakref", "ProxyType"}, {"weakref", "CallableProxyType"}};
-    (void)c;
-    if (v->type != SPY_INSTANCE) return NULL;
-    SPYValue *module = name_local(v->as.map.parent, "__module__"), *name = name_local(v->as.map.parent, "__qualname__");
-    if (!module || module->type != SPY_STRING || !name || name->type != SPY_STRING) return NULL;
-    for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++)
-        if (!strcmp(types[i][0], module->as.string.data) && !strcmp(types[i][1], name->as.string.data)) return types[i][0];
-    return NULL;
-}
 static struct WeakEntry *weak_entry(SPYContext *c, SPYValue *ref) {
     for (size_t i = 0; i < c->weak_len; i++) if (c->weak[i].ref == ref) return &c->weak[i];
     return NULL;
@@ -12411,8 +12413,6 @@ static SPYValue *weak_bind(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     if (argc != 3) return spy_error(c, "TypeError", "_weak_bind expects 3 arguments");
     SPYValue *target = argv[0], *ref = argv[1], *callback = argv[2];
     if (!weak_referenceable(c, target)) {
-        const char *module = builtin_module_of(c, target);
-        if (module) return errorf(c, "TypeError", "cannot create weak reference to '%s.%s' object", module, type_name(target));
         return errorf(c, "TypeError", "cannot create weak reference to '%s' object", type_name(target));
     }
     if (weak_entry(c, ref)) return spy_error(c, "SystemError", "reference object is already bound");
@@ -13570,7 +13570,7 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
                               base == c->iterator_types[IT_MAP] || base == c->iterator_types[IT_ZIP] || base == c->iterator_types[IT_ENUMERATE] ||
                               base == c->iterator_types[IT_FILTER] || base == c->iterator_types[IT_REVERSED]))
                 return errorf(c, "NotImplementedError", "subclassing '%s' is not implemented", name_local(base, "__name__")->as.string.data);
-            if (!accepted) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", name_local(base, "__name__")->as.string.data);
+            if (!accepted) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base));
         }
         /* Exceptions and each builtin value type have their own layout. */
         int kind = builtin_layout(c, base);
@@ -14896,7 +14896,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     }
     if (!object || !name_local(object, name)) {
         if (target->type == SPY_CLASS)
-            errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", name_local(target, "__name__")->as.string.data, name);
+            errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", class_tname(target), name);
         else errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(target), name);
         return -1;
     }
