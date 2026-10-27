@@ -237,6 +237,7 @@ where each alternative is a sequence of items. The items are:
 | `e*`, `e+` | zero or more, one or more repetitions, matched greedily |
 | `s.e+` | one or more *e* separated by *s*; same as `e (s e)*` |
 | `&e`, `!e` | positive and negative lookahead: succeed if *e* would (would not) match, consuming nothing |
+| `&&'t'` | the token *t* is required here: if it is not next, a `SyntaxError` exception ("expected '*t*'") is raised |
 | `~` | commit: if the remaining items of this alternative fail, the rule fails without trying later alternatives |
 | `"a"..."z"` | (lexical grammar) any code point from *a* through *z* inclusive |
 
@@ -2186,3 +2187,529 @@ A sequence of three dots is the `...` token unless it is part of a longer
 sequence of dots, which is read three at a time. The `!` token occurs only in
 f-strings and t-strings. A `.` followed by a digit begins a floating-point
 literal.
+
+## 13 Expressions
+
+The grammar of expressions is given in Annex A.6. This clause gives each form
+and its evaluation. Unless stated otherwise, the operands of an expression are
+evaluated from left to right, each completely before the next, and an abrupt
+completion of an operand is the completion of the expression.
+
+### 13.1 Atoms
+
+```text
+atom:   NAME | 'True' | 'False' | 'None' | strings | NUMBER
+      | (tuple | group | genexp) | (list | listcomp) | (dict | set | dictcomp | setcomp)
+      | '...'
+group:  '(' (yield_expr | named_expression) ')'
+```
+
+#### 13.1.1 Runtime Semantics: Evaluation
+
+- *atom* : NAME — return ? LoadName(the identifier, after mangling) (9.3.1).
+- `True`, `False`, `None`, `...` — return the object `True`, `False`, `None`, or
+  `Ellipsis`.
+- NUMBER — return the value of the literal (12.6): an `int`, a `float`, or a
+  `complex`.
+- *strings* — 13.2.4.
+- *group* — return the result of evaluating the enclosed expression. A
+  parenthesized expression is not a tuple unless it contains a comma.
+
+### 13.2 Displays
+
+#### 13.2.1 Tuple and list displays
+
+```text
+tuple:  '(' [star_named_expression ',' [star_named_expressions]] ')'
+list:   '[' [star_named_expressions] ']'
+```
+
+1. Let *items* be an empty List.
+2. For each element *e*, in order:
+   1. If *e* is `*` *expr*: let *v* be the result of evaluating *expr*; if
+      GetIterator(*v*) would raise a `TypeError` because *v* is not iterable,
+      raise a `TypeError` exception ("Value after * must be an iterable, not
+      *tname*(*v*)"); otherwise append the elements of ? IterateToList(*v*) to
+      *items*.
+   2. Else, append the result of evaluating *e* to *items*.
+3. Return a new tuple (or list) whose elements are *items*.
+
+The display `()` evaluates to the empty tuple. A tuple can also be written
+without parentheses where an expression list is allowed (13.15).
+
+#### 13.2.2 Set displays
+
+```text
+set:  '{' star_named_expressions '}'
+```
+
+1. Let *s* be a new empty `set`.
+2. For each element *e*, in order: if *e* is `*` *expr*, for each element *x* of
+   ? IterateToList(the result of evaluating *expr*), perform ? SetAdd(*s*, *x*);
+   otherwise perform ? SetAdd(*s*, the result of evaluating *e*).
+3. Return *s*.
+
+`{}` is an empty dictionary, not a set. SetAdd (26.3) keeps an element already
+present and does not replace it with an equal one.
+
+#### 13.2.3 Dictionary displays
+
+```text
+dict:  '{' [double_starred_kvpairs] '}'
+double_starred_kvpair:  '**' bitwise_or | kvpair
+kvpair:  expression ':' expression
+```
+
+1. Let *d* be a new empty `dict`.
+2. For each item, in order:
+   1. If the item is *k* `:` *v*: let *key* be the result of evaluating *k*,
+      then let *value* be the result of evaluating *v*, and perform
+      ? DictSetItem(*d*, *key*, *value*).
+   2. If the item is `**` *expr*: let *m* be the result of evaluating *expr*,
+      and perform ? DictMerge(*d*, *m*, **false**).
+3. Return *d*.
+
+DictSetItem keeps the first key object and replaces the value when an equal key
+is already present (26.1). DictMerge(*d*, *m*, *forCall*):
+
+1. If *m* is a `dict` (or `frozendict`), for each (*key*, *value*) of *m* in
+   order, perform the step 4 action.
+2. Let *keys* be ? GetAttribute(*m*, `"keys"`), treating an `AttributeError`
+   as **absent**. If it is **absent**, raise a `TypeError` exception
+   ("'*tname*(*m*)' object is not a mapping"), or for a call ("Value after **
+   must be a mapping, not *tname*(*m*)" — 13.3.4).
+3. For each *key* of ? IterateToList(? Call(*keys*, «»)): let *value* be
+   ? GetItem(*m*, *key*) and perform the step 4 action.
+4. Action: if *forCall* is **true** and *key* is not a `str`, raise a
+   `TypeError` exception ("keywords must be strings"); if *forCall* is **true**
+   and *d* already has *key*, raise the duplicate-keyword error of 13.3.4;
+   otherwise perform ? DictSetItem(*d*, *key*, *value*).
+
+#### 13.2.4 String literals and f-strings
+
+##### 13.2.4.1 Plain literals
+
+A concatenation of string literals without an f-string or t-string evaluates to
+its StringValue (12.5.5).
+
+##### 13.2.4.2 f-strings
+
+An f-string evaluates to a new `str`:
+
+1. Let *parts* be an empty List of strings.
+2. For each part, in order:
+   1. A literal part appends its text.
+   2. A replacement field with expression *e*, conversion *c*, and format spec
+      *fs*:
+      1. Let *v* be the result of evaluating *e*. (A field whose expression is a
+         `yield` expression or a starred expression list evaluates it as in
+         13.15.)
+      2. If the field is self-documenting (13.2.4.3), append its text.
+      3. If *c* is `s`, set *v* to ? ToStr(*v*); if `r`, to ? ToRepr(*v*); if
+         `a`, to ? ASCII(*v*) (19.3).
+      4. If the field has a format spec, let *spec* be the string formed by
+         evaluating the parts of *fs* in the same way (including its nested
+         replacement fields); otherwise let *spec* be `""`.
+      5. Append ? Format(*v*, *spec*) (7.5.8).
+3. Return the concatenation of *parts*.
+
+##### 13.2.4.3 Self-documenting fields
+
+In a replacement field `{`*expr*`=`…`}`, the text of *expr* and the `=`, with
+the whitespace around them exactly as written, is inserted before the value. If
+the field has neither a conversion nor a format spec, the conversion `r` is
+used.
+
+#### 13.2.5 t-strings
+
+A t-string evaluates to a new %Template% object (23.7): its `strings` are the
+literal parts (with `""` between adjacent replacement fields and at the ends),
+and its `interpolations` are new %Interpolation% objects, one per replacement
+field, in order, with `value` the result of evaluating the expression,
+`expression` the text of the expression, `conversion` the conversion letter or
+`None`, and `format_spec` the evaluated format spec string (or `""`). The
+value is not converted or formatted. A self-documenting field adds its text to
+the preceding literal part and uses the conversion `r` when it has neither a
+conversion nor a format spec.
+
+#### 13.2.6 Comprehensions and generator expressions
+
+```text
+listcomp: '[' named_expression for_if_clauses ']'
+setcomp:  '{' named_expression for_if_clauses '}'
+dictcomp: '{' kvpair for_if_clauses '}' | '{' '**' bitwise_or for_if_clauses '}'
+genexp:   '(' (assignment_expression | expression !':=') for_if_clauses ')'
+for_if_clauses: for_if_clause+
+for_if_clause:  ['async'] 'for' star_targets 'in' ~ disjunction ('if' disjunction)*
+```
+
+The element of a list or set comprehension or generator expression may be a
+starred expression `*e`, and the element of a dictionary comprehension may be
+`**e`; each contributes all items of its value (PEP 798 semantics, as in
+13.2.1–13.2.3).
+
+A comprehension is evaluated as follows:
+
+1. Evaluate the iterable of the first `for` clause in the enclosing scope; let
+   *it* be ? GetIterator of its value (or ? GetAsyncIterator for `async for`).
+2. Create the comprehension's scope (8.6), with its own bindings for its
+   targets.
+3. For a generator expression, return a new generator object (27.2) whose body
+   runs steps 4–5 with *it*, yielding each element instead of collecting it.
+4. Run the clauses as nested loops: a `for` clause iterates (7.7.2) over its
+   iterator (the clauses after the first evaluate their iterable each time they
+   are reached), assigning each item to its targets (14.2); an `if` clause
+   continues with the next clause only if ToBoolean of its condition is
+   **true**.
+5. At the innermost point, evaluate the element and add it to the result: append
+   to a list, SetAdd to a set, DictSetItem (key evaluated before value) to a
+   dict, or yield it.
+6. Return the new list, set, or dict.
+
+A comprehension in an `async def` function that contains `async for` or
+`await` is an *asynchronous comprehension*; it is awaited where it occurs. An
+asynchronous comprehension outside an asynchronous function raises a
+`SyntaxError` exception ("asynchronous comprehension outside of an
+asynchronous function"). A generator expression containing `async for` or
+`await` creates an asynchronous generator (27.5).
+
+Static Semantics: Early Errors.
+
+- A `yield` or `yield from` expression in a comprehension: "'yield' inside list
+  comprehension" (or "set comprehension", "dict comprehension", "generator
+  expression").
+- A generator expression that is not the sole argument of a call and is not
+  parenthesized: "Generator expression must be parenthesized".
+- An element `**e` in a list comprehension or generator expression: "cannot
+  use dict unpacking in list comprehension" (or "… in generator expression").
+  (`{**e for …}` is a dictionary comprehension.)
+- An unparenthesized tuple as the element: "did you forget parentheses around
+  the comprehension target?".
+
+### 13.3 Primaries
+
+```text
+primary:
+    | primary '.' NAME
+    | primary genexp
+    | primary '(' [arguments] ')'
+    | primary '[' slices ']'
+    | atom
+```
+
+#### 13.3.1 Attribute references
+
+`primary.name` evaluates *primary* to *o* and returns ? GetAttribute(*o*,
+*name*), with *name* mangled (8.8).
+
+#### 13.3.2 Subscriptions
+
+`primary[slices]` evaluates *primary* to *o*, then the subscript to *key*, and
+returns ? GetItem(*o*, *key*). The subscript is:
+
+- a single expression: its value;
+- a slice `[lower] ':' [upper] [':' [step]]`: a new `slice` object (25.4)
+  whose omitted parts are `None`;
+- a comma-separated list, possibly containing slices and starred expressions:
+  a new tuple of the values, with starred items expanded as in 13.2.1.
+
+#### 13.3.3 Slicings
+
+A slice is a subscript whose key is a `slice` object; there is no separate
+slicing protocol. A sequence's `__getitem__` interprets the slice by the
+algorithm SliceIndices (25.4.2).
+
+#### 13.3.4 Calls
+
+```text
+arguments:  args [','] &')'
+args:  ','.(starred_expression | (assignment_expression | expression !':=') !'=')+ [',' kwargs] | kwargs
+kwargs: ','.kwarg_or_starred+ ',' ','.kwarg_or_double_starred+ | ','.kwarg_or_starred+ | ','.kwarg_or_double_starred+
+kwarg_or_starred: NAME '=' expression | starred_expression
+kwarg_or_double_starred: NAME '=' expression | '**' expression
+```
+
+1. Let *f* be the result of evaluating *primary*.
+2. Let *args* be an empty List and *kw* a new empty `dict`.
+3. For each argument, in source order:
+   1. A positional argument *e*: append its value to *args*.
+   2. `*e`: let *v* be its value; if *v* is not iterable, raise a `TypeError`
+      exception ("Value after * must be an iterable, not *tname*(*v*)");
+      append the elements of ? IterateToList(*v*) to *args*.
+   3. `name=e`: let *v* be its value; if *kw* has *name*, raise the
+      duplicate-keyword error; set *kw*[*name*] to *v*.
+   4. `**e`: let *m* be its value; if *m* is not a mapping (has no `keys`),
+      raise a `TypeError` exception ("Value after ** must be a mapping, not
+      *tname*(*m*)"); otherwise perform ? DictMerge(*kw*, *m*, **true**).
+4. Return ? Call(*f*, *args*, the pairs of *kw* in order).
+
+The duplicate-keyword error is a `TypeError` exception ("*FunctionStr*(*f*) got
+multiple values for keyword argument '*name*'"). FunctionStr(*f*) is the
+function's `__qualname__` (for a bound method, that of its `__func__`), prefixed
+by its `__module__` and `"."` when `__module__` is a `str` other than
+`"builtins"`, followed by `"()"`; for a built-in function it is its `__name__`
+followed by `"()"`; for any other callable it is *repr*(*f*).
+
+Static Semantics: Early Errors. "keyword argument repeated: *name*" if two
+`name=` arguments of one call have the same name; "positional argument follows
+keyword argument" and "positional argument follows keyword argument unpacking"
+and "iterable argument unpacking follows keyword argument unpacking" for the
+corresponding orderings; "expression cannot contain assignment, perhaps you
+meant \"==\"?" for `f(a.b=1)`.
+
+### 13.4 The `await` expression
+
+```text
+await_primary: 'await' primary | primary
+```
+
+`await e` is permitted only in the body of an `async def` function (and in
+asynchronous comprehensions there): elsewhere it raises a `SyntaxError`
+exception ("'await' outside function" at module level, and "'await' outside
+async function" in a non-async function).
+
+1. Let *v* be the result of evaluating *e*.
+2. Let *it* be ? GetAwaitable(*v*) (7.7.5).
+3. Return ? YieldFrom(*it*) (13.16.3), delegating suspension to the awaiting
+   coroutine's caller.
+
+### 13.5 The power operator
+
+```text
+power: await_primary '**' factor | await_primary
+```
+
+The power operator binds more tightly than unary operators on its left and less
+tightly than unary operators on its right: `-2 ** 2` is `-(2 ** 2)` and
+`2 ** -1` is `2 ** (-1)`. It groups from right to left. `x ** y` returns
+? BinaryOp(*x*, *y*, `**`).
+
+### 13.6 Unary arithmetic and bitwise operations
+
+```text
+factor: '+' factor | '-' factor | '~' factor | power
+```
+
+`-x`, `+x`, and `~x` return ? UnaryOp(*x*, *op*) (7.6.4).
+
+### 13.7 Binary arithmetic operations
+
+```text
+term: term '*' factor | term '/' factor | term '//' factor | term '%' factor | term '@' factor | factor
+sum:  sum '+' term | sum '-' term | term
+```
+
+Each form evaluates its left operand, then its right operand, and returns
+? BinaryOp(*left*, *right*, *op*) (7.6.2). Clause 22 specifies the numeric
+results, clause 25 sequence concatenation and repetition, and clause 23 the
+`%` formatting of strings.
+
+### 13.8 Shifting operations
+
+```text
+shift_expr: shift_expr '<<' sum | shift_expr '>>' sum | sum
+```
+
+As 13.7, with the operators `<<` and `>>`.
+
+### 13.9 Binary bitwise operations
+
+```text
+bitwise_and: bitwise_and '&' shift_expr | shift_expr
+bitwise_xor: bitwise_xor '^' bitwise_and | bitwise_and
+bitwise_or:  bitwise_or '|' bitwise_xor | bitwise_xor
+```
+
+As 13.7, with the operators `&`, `^`, and `|`.
+
+### 13.10 Comparisons
+
+```text
+comparison: bitwise_or compare_op_bitwise_or_pair+ | bitwise_or
+comp_op: '==' | '!=' | '<' | '<=' | '>' | '>=' | 'in' | 'not' 'in' | 'is' | 'is' 'not'
+```
+
+#### 13.10.1 Runtime Semantics: Evaluation
+
+A comparison `a op₁ b op₂ c … opₙ z` is evaluated as follows; each operand is
+evaluated at most once.
+
+1. Let *left* be the result of evaluating *a*.
+2. For each *opᵢ* and right operand *r*, in order:
+   1. Let *right* be the result of evaluating *r*.
+   2. Let *result* be ? CompareOp(*left*, *right*, *opᵢ*).
+   3. If *i* < *n* and ? ToBoolean(*result*) is **false**, return *result*.
+   4. Set *left* to *right*.
+3. Return *result*.
+
+CompareOp(*x*, *y*, *op*):
+
+- for `<`, `<=`, `==`, `!=`, `>`, `>=`: ? RichCompare(*x*, *y*, *op*);
+- for `in`: `True` if ? Contains(*y*, *x*) (7.8.3) is **true**, else `False`;
+- for `not in`: the negation of `in`;
+- for `is`: `True` if SameObject(*x*, *y*), else `False`; `is not` negates it.
+
+A comparison with `is` or `is not` where an operand is a literal other than
+`None`, `True`, `False`, or `...` issues a `SyntaxWarning` at compile time
+("\"is\" with '*type*' literal. Did you mean \"==\"?", or "\"is not\" with
+'*type*' literal. Did you mean \"!=\"?").
+
+### 13.11 Boolean operations
+
+```text
+disjunction: conjunction ('or' conjunction)+ | conjunction
+conjunction: inversion ('and' inversion)+ | inversion
+inversion:   'not' inversion | comparison
+```
+
+- `not x`: return `False` if ? ToBoolean(*x*) is **true**, and `True` otherwise.
+- `x and y`: let *v* be the value of *x*; if ? ToBoolean(*v*) is **false**,
+  return *v*; otherwise return the value of *y*.
+- `x or y`: let *v* be the value of *x*; if ? ToBoolean(*v*) is **true**,
+  return *v*; otherwise return the value of *y*.
+
+### 13.12 Assignment expressions
+
+```text
+assignment_expression: NAME ':=' ~ expression
+named_expression: assignment_expression | expression !':='
+```
+
+`name := e` evaluates *e* to *v*, performs StoreName(*name*, *v*) in the scope
+determined by 8.6, and returns *v*. Static Semantics: an unparenthesized
+assignment expression is not allowed as an expression statement, as the value
+of an assignment or annotated assignment, as a keyword argument value, or as a
+default value ("invalid syntax"); its target must be a name ("cannot use
+assignment expressions with *what*").
+
+### 13.13 Conditional expressions
+
+```text
+expression: disjunction 'if' disjunction 'else' expression | disjunction | lambdef
+```
+
+`x if c else y` evaluates *c* first; if ? ToBoolean of its value is **true**, it
+returns the value of *x*, and otherwise the value of *y*. The other operand is
+not evaluated. A conditional expression without `else` raises a `SyntaxError`
+exception ("expected 'else' after 'if' expression").
+
+### 13.14 Lambdas
+
+```text
+lambdef: 'lambda' [lambda_params] ':' expression
+```
+
+A lambda expression creates a function object (16.2) whose name is
+`"<lambda>"`, whose parameters are *lambda_params* (as 16.1 specifies for
+`def`, without annotations), and whose body returns the value of
+*expression*. It is evaluated as a `def` statement (16.1.2) except that no name
+is bound and the function is returned.
+
+### 13.15 Expression lists
+
+```text
+star_expressions: star_expression (',' star_expression)+ [','] | star_expression ',' | star_expression
+star_expression:  '*' bitwise_or | expression
+```
+
+An expression list containing at least one comma, or a starred item, evaluates
+to a new tuple as 13.2.1 specifies. A single expression without a comma
+evaluates to its value. A starred expression is allowed only in an expression
+list, a display, a subscript, or an argument list ("can't use starred
+expression here"), and a bare `*e` alone is not an expression list ("can't use
+starred expression here").
+
+### 13.16 Yield expressions
+
+```text
+yield_expr: 'yield' 'from' expression | 'yield' [star_expressions]
+```
+
+A `yield` expression is allowed only in the body of a function (making it a
+generator function, or an asynchronous generator function in an `async def`),
+or as the sole content of a parenthesized expression in such a body; elsewhere
+it raises a `SyntaxError` exception ("'yield' outside function"). In an
+`async def` function, `yield from` raises ("'yield from' inside async
+function"). In a class body or a function's annotations it raises the errors
+of 8.7.
+
+#### 13.16.1 `yield` *expression*
+
+1. Let *v* be the value of the expression list, or `None` if it is omitted.
+2. Suspend the running generator frame (9.4), delivering *v* to the code that
+   resumed it.
+3. When the generator is resumed:
+   1. by `__next__` or `send(x)`: return `None` or *x*;
+   2. by `throw(e)`: return a raise completion with *e*;
+   3. by `close()`: return a raise completion with a new `GeneratorExit`
+      exception.
+
+#### 13.16.2 Asynchronous generators
+
+In an asynchronous generator, `yield v` delivers *v* through the awaitable
+returned by `__anext__` or `asend` (27.5).
+
+#### 13.16.3 YieldFrom ( *it* )
+
+`yield from e` evaluates *e*, lets *it* be ? GetIterator of its value, and
+returns ? YieldFrom(*it*); `await` uses YieldFrom with an awaitable's
+iterator.
+
+1. Let *received* be `None` and *mode* be **send**.
+2. Repeat:
+   1. If *mode* is **send**: if *received* is `None`, let *r* be IteratorStep-like
+      Call of `__next__` of *it*; otherwise let *r* be ? CallSpecial(*it*,
+      `"send"`, «*received*»), calling the method by ordinary attribute lookup.
+   2. If *mode* is **throw** with exception *e*:
+      1. If *e* is a `GeneratorExit`: let *close* be the `close` attribute of
+         *it*, if any; call it; then return a raise completion with *e*.
+      2. Let *throw* be the `throw` attribute of *it*; if there is none, return
+         a raise completion with *e*.
+      3. Let *r* be Call(*throw*, «*e*»).
+   3. If *r* is a raise completion with a `StopIteration` exception *s*, return
+      *s*.`value`.
+   4. If *r* is any other raise completion, return *r*.
+   5. Suspend, delivering the value of *r* to the resumer. When resumed with
+      *x* by `send`, set *received* to *x* and *mode* to **send**; when resumed
+      by `throw(e)`, set *mode* to **throw** with *e*; when resumed by
+      `close()`, set *mode* to **throw** with a new `GeneratorExit`.
+
+### 13.17 Evaluation order
+
+Expressions are evaluated from left to right. In an assignment, the right-hand
+side is evaluated before the targets. The following lists the order of
+evaluation for some forms, where the numbers give the order:
+
+```text
+expr1, expr2, expr3, expr4
+(expr1, expr2, expr3, expr4)
+{expr1: expr2, expr3: expr4}
+expr1 + expr2 * (expr3 - expr4)
+expr1(expr2, expr3, *expr4, **expr5)
+expr3, expr4 = expr1, expr2
+```
+
+### 13.18 Operator precedence
+
+From lowest to highest binding:
+
+| Operators | Description |
+| --- | --- |
+| `:=` | assignment expression |
+| `lambda` | lambda expression |
+| `if` – `else` | conditional expression |
+| `or` | Boolean OR |
+| `and` | Boolean AND |
+| `not x` | Boolean NOT |
+| `in`, `not in`, `is`, `is not`, `<`, `<=`, `>`, `>=`, `!=`, `==` | comparisons |
+| `\|` | bitwise OR |
+| `^` | bitwise XOR |
+| `&` | bitwise AND |
+| `<<`, `>>` | shifts |
+| `+`, `-` | addition and subtraction |
+| `*`, `@`, `/`, `//`, `%` | multiplication, matrix multiplication, divisions, remainder |
+| `+x`, `-x`, `~x` | positive, negative, bitwise NOT |
+| `**` | exponentiation (groups right to left; see 13.5) |
+| `await x` | await expression |
+| `x[…]`, `x(…)`, `x.attr` | subscription, slicing, call, attribute reference |
+| `(…)`, `[…]`, `{…}`, literals | binding or parenthesized expression, displays |
