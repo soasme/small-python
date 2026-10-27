@@ -15,6 +15,18 @@ assert_raises(UnboundLocalError, shadow)
 e = assert_raises(UnboundLocalError, shadow)
 assert_true("x" in str(e))
 
+# List, set, and dict comprehensions run inlined in their function (PEP 709):
+# its unbound local is theirs too. A generator expression's x stays free.
+def comprehension():
+    r = [x for _ in (1,)]
+    x = 1
+assert_raises(UnboundLocalError, comprehension)
+def generator():
+    r = list(x for _ in (1,))
+    x = 1
+e = assert_raises(NameError, generator)
+assert_true(type(e) is NameError)
+
 def make():
     count = 0
     def inc():

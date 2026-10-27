@@ -73,7 +73,9 @@ struct SPYValue {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
         double complex number;
-        struct { char *data; size_t len, exports; } string; /* exports: live memoryviews of a bytearray */
+        /* exports: live memoryviews of a bytearray; chars: a str's code
+         * point count plus one, once counted (str values are immutable). */
+        struct { char *data; size_t len, exports, chars; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         struct { Entry *items; size_t len, cap; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner; size_t statements; int expression, setup_annotations, future_flags; } unit;
@@ -1551,6 +1553,7 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
     return spy_retain(name_local(env, name));
 }
 static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
+static int inlined_comprehension(SPYValue *);
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
     int annotation = 1;
     for (SPYValue *e = env; e; e = e->as.map.parent) {
@@ -1577,7 +1580,11 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
                      * to globals, not a same-named enclosing function cell. */
                     return name_get(c, module_env(c, e), name);
                 }
-                if (e != env) return name_error(c, name, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
+                /* List, set, and dict comprehensions are inlined into their
+                 * function (PEP 709), so its locals are theirs too. */
+                SPYValue *inner = env;
+                while (inner != e && inlined_comprehension(inner)) inner = inner->as.map.parent;
+                if (inner != e) return name_error(c, name, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
                 return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", name);
             }
             /* Global and class namespaces resolve lazy imports; function locals do not. */
@@ -2361,6 +2368,12 @@ enum {
     N_GLOBAL, N_NONLOCAL, N_JOINED, N_FORMAT, N_ELLIPSIS, N_AWAIT, N_ANNASSIGN, N_ANNOTATIONS, N_MATCH, N_PATTERN,
     N_TYPEALIAS, N_TYPEPARAM, N_GENERIC, N_TEMPLATE, N_INTERPOLATION
 };
+/* The environment of a list, set, or dict comprehension, which runs
+ * inlined in its enclosing function (PEP 709); generator expressions don't. */
+static int inlined_comprehension(SPYValue *env) {
+    Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
+    return scope && scope->kind == S_COMPREHENSION && scope->owner && scope->owner->op != N_TUPLE;
+}
 enum { P_POSITIONAL, P_POSONLY, P_VARARGS, P_KWONLY, P_KWARGS };
 typedef struct { int kind; const char *start; size_t len, line, level; } Token;
 typedef struct {
@@ -6024,9 +6037,11 @@ static SPYValue *parse(SPYContext *c, const char *source, const char *filename) 
 
 static size_t string_length(SPYValue *v) {
     if (v->type != SPY_STRING) return v->as.string.len;
+    if (v->as.string.chars) return v->as.string.chars - 1;
     size_t n = 0;
     for (size_t i = 0; i < v->as.string.len; i++)
         if (((unsigned char)v->as.string.data[i] & 192) != 128) n++;
+    v->as.string.chars = n + 1;
     return n;
 }
 static SPYValue *range_new(SPYContext *c, SPYValue *start, SPYValue *stop, SPYValue *step) {
@@ -6561,6 +6576,23 @@ static SPYValue *get_slice(SPYContext *c, SPYValue *v, SPYValue *key) {
     size_t len = text ? string_length(v) : v->as.seq.len;
     Slice s;
     if (slice_adjust(c, &bounds, len, &s)) return NULL;
+    if (text && len == v->as.string.len) {
+        /* Bytes and ASCII text slice their bytes directly. */
+        Buffer out = {.ctx = c};
+        if (s.step == 1 && s.count) {
+            if (append(&out, v->as.string.data + s.start, s.count)) return NULL;
+        } else {
+            int64_t index = s.start;
+            for (size_t i = 0; i < s.count; i++) {
+                if (append(&out, v->as.string.data + index, 1)) break;
+                if (i + 1 < s.count) index += s.step;
+            }
+        }
+        SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
+        if (result) result->type = v->type;
+        if (result && result->type == SPY_STRING) result->as.string.chars = out.len + 1;
+        free(out.data); return result;
+    }
     if (text) {
         if (len >= SIZE_MAX / sizeof(size_t)) return spy_error(c, "MemoryError", "string is too large");
         size_t *offsets = allocate(c, (len + 1) * sizeof(*offsets));
@@ -9241,7 +9273,8 @@ search:;
     int valid = start <= end;
     size_t first = 0, last = 0;
     if (valid) {
-        if (self->type == SPY_BYTES) { first = (size_t)start; last = (size_t)end; }
+        /* Bytes and ASCII text index their bytes directly. */
+        if (self->type == SPY_BYTES || length == self->as.string.len) { first = (size_t)start; last = (size_t)end; }
         else for (size_t offset = 0, index = 0; index <= (size_t)end; index++) {
             if (index == (size_t)start) first = offset;
             if (index == (size_t)end) { last = offset; break; }
@@ -9291,7 +9324,7 @@ search:;
             if (method == M_STRING_INDEX || method == M_RINDEX) return spy_error(c, "ValueError", self->type == SPY_STRING ? "substring not found" : "subsection not found");
             return spy_int(c, -1);
         }
-        if (self->type == SPY_BYTES) return spy_int(c, start + (int64_t)found);
+        if (self->type == SPY_BYTES || length == self->as.string.len) return spy_int(c, start + (int64_t)found);
         for (size_t offset = 0; offset < found; offset++)
             if (((unsigned char)self->as.string.data[first + offset] & 192) != 128) start++;
         return spy_int(c, start);
@@ -11554,11 +11587,24 @@ static void weak_callbacks(SPYContext *c) {
     while (c->finalize_calls_len) {
         SPYValue *self = c->finalize_calls[0];
         memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+        size_t waiting = c->finalize_calls_len;
         SPYValue *method = self->type == SPY_INSTANCE ? special_method(c, self, "__del__") : NULL;
         if (method) spy_release(spy_call(c, method, 0, NULL));
         else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
+        /* CPython finalizes what an object's destruction frees before moving
+         * on, depth first: what this one queued goes ahead of the rest. */
+        size_t queued = c->finalize_calls_len - waiting;
+        if (queued && waiting) {
+            SPYValue **rotated = malloc(c->finalize_calls_len * sizeof(*rotated));
+            if (rotated) {
+                memcpy(rotated, c->finalize_calls + waiting, queued * sizeof(*rotated));
+                memcpy(rotated + queued, c->finalize_calls, waiting * sizeof(*rotated));
+                memcpy(c->finalize_calls, rotated, c->finalize_calls_len * sizeof(*rotated));
+                free(rotated);
+            }
+        }
     }
     while (c->weak_calls_len) {
         SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
