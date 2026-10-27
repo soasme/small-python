@@ -344,3 +344,13 @@
 - Pattern-matching and import * syntax errors carry the offending line;
   unknown \N{...} names use the codec's message; add_note() names the
   argument type.
+- CPython's doctest-based tests run as spec tests through a core-only
+  doctest runner, with library-dependent examples rewritten to core code.
+- Suspended generators and coroutines are closed when they die; a throw()
+  into a generator adds its frame to the traceback at the right line;
+  gi_frame of a suspended generator reports the suspension line.
+- dir() of generators, coroutines, and async generators lists their methods
+  and attributes; builtin slot methods carry CPython's docstrings; code
+  objects have CPython's repr.
+- spy_collect() runs pending finalizers and frees the rest of the garbage in
+  the same call.

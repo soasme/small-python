@@ -116,6 +116,7 @@ struct SPYValue {
             Node *node;
             Machine *machine;
             int running, done, started, returned, async_running, async_closed;
+            size_t line; /* where a suspended generator resumes, 0 before it starts */
         } generator;
     } as;
 };
@@ -602,9 +603,13 @@ static void release_edge(SPYValue *v, void *data) {
     if (--v->refs == 0) { v->pending = *pending; *pending = v; }
 }
 static void memory_unexport(SPYValue *);
-/* Keep a dying instance alive for its __del__, once per object. */
+/* Keep a dying instance alive for its __del__, or a suspended generator or
+ * coroutine for its close(), once per object. */
 static int finalize_later(SPYValue *v) {
-    if (v->type != SPY_INSTANCE || v->finalized || !class_lookup(v->as.map.parent, "__del__")) return 0;
+    if (v->finalized) return 0;
+    if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) {
+        if (!v->as.generator.started || v->as.generator.running || v->as.generator.done) return 0;
+    } else if (v->type != SPY_INSTANCE || !class_lookup(v->as.map.parent, "__del__")) return 0;
     SPYContext *c = v->ctx;
     if (weak_push(&c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
     v->finalized = 1;
@@ -631,7 +636,7 @@ static void release_live_edge(SPYValue *v, void *unused) {
     (void)unused;
     if (v->marked) v->refs--;
 }
-size_t spy_collect(SPYContext *c) {
+static size_t collect_once(SPYContext *c) {
     if (!c->live) return 0;
     Work work = { malloc(c->live * sizeof(SPYValue *)), 0 };
     if (!work.items) return 0;
@@ -639,13 +644,15 @@ size_t spy_collect(SPYContext *c) {
     for (SPYValue *v = c->values; v; v = v->next) edges(v, subtract_edge, NULL);
     for (SPYValue *v = c->values; v; v = v->next) if (v->trial) mark_edge(v, &work);
     for (size_t i = 0; i < work.len; i++) edges(work.items[i], mark_edge, &work);
-    free(work.items);
-    /* Unreachable instances with __del__ are finalized first; the garbage is
-     * freed by a later collection unless a finalizer resurrected it. */
-    int finalizing = 0;
+    /* Unreachable values awaiting a finalizer (__del__, or close() of a
+     * suspended generator) survive with everything they reach; a later
+     * collection frees them unless the finalizer resurrected them. The rest
+     * of the garbage is freed now. */
+    size_t finalizing = work.len;
     for (SPYValue *v = c->values; v; v = v->next)
-        if (!v->marked && finalize_later(v)) { v->refs++; finalizing = 1; }
-    if (finalizing) return 0;
+        if (!v->marked && finalize_later(v)) { v->refs++; v->marked = 1; work.items[work.len++] = v; }
+    for (size_t i = finalizing; i < work.len; i++) edges(work.items[i], mark_edge, &work);
+    free(work.items);
     /* Inspect edges while every dead object still exists, then free storage. */
     for (SPYValue *v = c->values; v; v = v->next) {
         if (!v->marked && v->weak) weak_dead(c, v, 1);
@@ -657,6 +664,17 @@ size_t spy_collect(SPYContext *c) {
     for (SPYValue *v = c->values, *next; v; v = next) {
         next = v->next;
         if (!v->marked) { free_value(v); count++; }
+    }
+    return count;
+}
+static void weak_callbacks(SPYContext *);
+/* A pass that finds garbage awaiting finalizers only finalizes it; collect
+ * again to free what the finalizers left unreachable. */
+size_t spy_collect(SPYContext *c) {
+    size_t count = collect_once(c);
+    while (c->finalize_calls_len && !c->weak_running) {
+        weak_callbacks(c);
+        count += collect_once(c);
     }
     return count;
 }
@@ -1984,6 +2002,7 @@ static int repr_enter(SPYContext *c, SPYValue *v) {
     return 0;
 }
 static void repr_leave(SPYContext *c) { c->repr_len--; }
+static SPYValue *attribute_value(SPYContext *, SPYValue *, const char *);
 static int format_value(Buffer *b, SPYValue *v, int repr) {
     char num[96];
     switch (v->type) {
@@ -2283,9 +2302,22 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         int status = !copy || format_value(b, copy, 1);
         repr_leave(b->ctx); spy_release(copy); return status ? -1 : 0;
     }
-    case SPY_CODE:
-        snprintf(num, sizeof(num), "<code object <module> at %p>", (void *)v);
-        return puts_buffer(b, num);
+    case SPY_CODE: {
+        /* code_repr: <code object NAME at ADDRESS, file "FILE", line N>. */
+        SPYValue *name = attribute_value(b->ctx, v, "co_name"), *file = name ? attribute_value(b->ctx, v, "co_filename") : NULL;
+        SPYValue *line = file ? attribute_value(b->ctx, v, "co_firstlineno") : NULL;
+        int64_t number = 0;
+        int status = !line || name->type != SPY_STRING || file->type != SPY_STRING || spy_as_int(b->ctx, line, &number);
+        if (!status) {
+            snprintf(num, sizeof(num), " at %p, file \"", (void *)v);
+            status = puts_buffer(b, "<code object ") || puts_buffer(b, name->as.string.data) || puts_buffer(b, num) ||
+                puts_buffer(b, file->as.string.data);
+            snprintf(num, sizeof(num), "\", line %lld>", (long long)number);
+            status = status || puts_buffer(b, num);
+        }
+        spy_release(name); spy_release(file); spy_release(line);
+        return status ? -1 : 0;
+    }
     case SPY_SLICE:
         return puts_buffer(b, "slice(") || format_value(b, v->as.slice.start, 1) || puts_buffer(b, ", ") ||
             format_value(b, v->as.slice.stop, 1) || puts_buffer(b, ", ") || format_value(b, v->as.slice.step, 1) || puts_buffer(b, ")");
@@ -7947,6 +7979,80 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
 static SPYValue *builtin_descriptor_lookup(SPYContext *, SPYValue *, const char *);
 static SPYValue *builtin_descriptor(SPYContext *, SPYValue *, const char *);
 static SPYValue *class_namespace(SPYContext *, SPYValue *);
+/* The docstring CPython's slot wrapper of this name carries, or NULL. */
+static const char *slot_doc(const char *name) {
+    static const char *const docs[][2] = {
+        {"__add__", "Return self+value."},
+        {"__radd__", "Return value+self."},
+        {"__sub__", "Return self-value."},
+        {"__rsub__", "Return value-self."},
+        {"__mul__", "Return self*value."},
+        {"__rmul__", "Return value*self."},
+        {"__truediv__", "Return self/value."},
+        {"__rtruediv__", "Return value/self."},
+        {"__floordiv__", "Return self//value."},
+        {"__rfloordiv__", "Return value//self."},
+        {"__mod__", "Return self%value."},
+        {"__rmod__", "Return value%self."},
+        {"__divmod__", "Return divmod(self, value)."},
+        {"__rdivmod__", "Return divmod(value, self)."},
+        {"__pow__", "Return pow(self, value, mod)."},
+        {"__rpow__", "Return pow(value, self, mod)."},
+        {"__and__", "Return self&value."},
+        {"__rand__", "Return value&self."},
+        {"__or__", "Return self|value."},
+        {"__ror__", "Return value|self."},
+        {"__xor__", "Return self^value."},
+        {"__rxor__", "Return value^self."},
+        {"__lshift__", "Return self<<value."},
+        {"__rlshift__", "Return value<<self."},
+        {"__rshift__", "Return self>>value."},
+        {"__rrshift__", "Return value>>self."},
+        {"__iadd__", "Implement self+=value."},
+        {"__imul__", "Implement self*=value."},
+        {"__ior__", "Return self|=value."},
+        {"__iand__", "Return self&=value."},
+        {"__ixor__", "Return self^=value."},
+        {"__isub__", "Return self-=value."},
+        {"__lt__", "Return self<value."},
+        {"__le__", "Return self<=value."},
+        {"__eq__", "Return self==value."},
+        {"__ne__", "Return self!=value."},
+        {"__gt__", "Return self>value."},
+        {"__ge__", "Return self>=value."},
+        {"__neg__", "-self"},
+        {"__pos__", "+self"},
+        {"__invert__", "~self"},
+        {"__abs__", "abs(self)"},
+        {"__bool__", "True if self else False"},
+        {"__int__", "int(self)"},
+        {"__float__", "float(self)"},
+        {"__len__", "Return len(self)."},
+        {"__iter__", "Implement iter(self)."},
+        {"__next__", "Implement next(self)."},
+        {"__aiter__", "Return an awaitable, that resolves in asynchronous iterator."},
+        {"__anext__", "Return a value or raise StopAsyncIteration."},
+        {"__await__", "Return an iterator to be used in await expression."},
+        {"__contains__", "Return bool(key in self)."},
+        {"__getitem__", "Return self[key]."},
+        {"__setitem__", "Set self[key] to value."},
+        {"__delitem__", "Delete self[key]."},
+        {"__repr__", "Return repr(self)."},
+        {"__str__", "Return str(self)."},
+        {"__hash__", "Return hash(self)."},
+        {"__call__", "Call self as a function."},
+        {"__getattribute__", "Return getattr(self, name)."},
+        {"__setattr__", "Implement setattr(self, name, value)."},
+        {"__delattr__", "Implement delattr(self, name)."},
+        {"__init__", "Initialize self.  See help(type(self)) for accurate signature."},
+        {"__del__", "Called when the instance is about to be destroyed."},
+        {"__get__", "Return an attribute of instance, which is of type owner."},
+        {"__set__", "Set an attribute of instance to value."},
+        {"__delete__", "Delete an attribute of instance."}
+    };
+    for (size_t i = 0; i < sizeof(docs) / sizeof(*docs); i++) if (!strcmp(docs[i][0], name)) return docs[i][1];
+    return NULL;
+}
 static SPYValue *frame_attribute(SPYContext *, SPYValue *, const char *);
 static SPYValue *memory_attribute(SPYContext *, SPYValue *, const char *);
 static SPYValue *load_source_module(SPYContext *, const char *);
@@ -8079,9 +8185,21 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if ((v->type == SPY_GENERATOR && !strcmp(name, "gi_code")) ||
         (v->type == SPY_COROUTINE && !strcmp(name, "cr_code")) ||
         (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_code"))) return spy_retain(v->as.generator.code);
-    if (((v->type == SPY_GENERATOR && !strcmp(name, "gi_frame")) ||
-         (v->type == SPY_COROUTINE && !strcmp(name, "cr_frame")) ||
-         (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_frame"))) && v->as.generator.done) return spy_none(c);
+    if ((v->type == SPY_GENERATOR && !strcmp(name, "gi_frame")) ||
+        (v->type == SPY_COROUTINE && !strcmp(name, "cr_frame")) ||
+        (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_frame"))) {
+        if (v->as.generator.done) return spy_none(c);
+        /* A running generator's frame is on the stack; a suspended one gets
+         * a detached frame over its environment. */
+        for (size_t i = c->py_depth; v->as.generator.running && i; i--)
+            if (c->frames[i - 1].owner == v) return frame_object(c, i - 1);
+        SPYValue *frame = value_new(c, SPY_FRAME);
+        if (!frame) return NULL;
+        frame->as.frame.env = spy_retain(v->as.generator.env);
+        frame->as.frame.owner = spy_retain(v);
+        frame->as.frame.line = v->as.generator.line ? v->as.generator.line : v->as.generator.node ? v->as.generator.node->line : 0;
+        return frame;
+    }
     if (v->type == SPY_RANGE) {
         if (!strcmp(name, "start")) return spy_retain(v->as.range.start);
         if (!strcmp(name, "stop")) return spy_retain(v->as.range.stop);
@@ -8109,6 +8227,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     }
     if (v->type == SPY_COROUTINE && !strcmp(name, "cr_suspended"))
         return spy_bool(c, v->as.generator.started && !v->as.generator.running && !v->as.generator.done);
+    /* Origin tracking is off unless sys.set_coroutine_origin_tracking_depth enables it. */
+    if (v->type == SPY_COROUTINE && !strcmp(name, "cr_origin")) return spy_none(c);
     if ((v->type == SPY_COROUTINE && !strcmp(name, "cr_await")) ||
         (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_await")) ||
         (v->type == SPY_GENERATOR && !strcmp(name, "gi_yieldfrom"))) return suspended_delegate(c, v);
@@ -8126,6 +8246,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         SPYValue *text = v->type == SPY_NATIVE ? v->as.native.name : v->as.bound.name;
         SPYValue *owner = v->type == SPY_NATIVE ? v->as.native.owner : value_class(c, v->as.bound.self);
         if (!strcmp(name, "__name__")) return spy_retain(text);
+        if (!strcmp(name, "__doc__")) {
+            const char *doc = slot_doc(text->as.string.data);
+            return doc ? spy_string(c, doc, strlen(doc)) : spy_none(c);
+        }
         if (!strcmp(name, "__qualname__")) {
             if (!owner) return spy_retain(text);
             SPYValue *qualname = name_local(owner, "__qualname__");
@@ -10290,7 +10414,6 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
     }
     return dict;
 }
-static void weak_callbacks(SPYContext *);
 static int tick(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
@@ -11420,8 +11543,9 @@ static SPYValue *weak_refs(SPYContext *c, size_t argc, SPYValue *const *argv, vo
             if (c->weak[i].target == argv[0] && spy_list_append(c, list, c->weak[i].ref)) { spy_release(list); list = NULL; }
     return list;
 }
-/* Run __del__ of dead instances, then callbacks of references whose targets
- * died, at a statement boundary. CPython reports their exceptions as
+static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+/* Run __del__ of dead instances and close dead suspended generators, then
+ * callbacks of references whose targets died, at a statement boundary. CPython reports their exceptions as
  * unraisable; spy has no error stream, so they are discarded without
  * disturbing the interrupted code. */
 static void weak_callbacks(SPYContext *c) {
@@ -11430,8 +11554,9 @@ static void weak_callbacks(SPYContext *c) {
     while (c->finalize_calls_len) {
         SPYValue *self = c->finalize_calls[0];
         memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
-        SPYValue *method = special_method(c, self, "__del__");
+        SPYValue *method = self->type == SPY_INSTANCE ? special_method(c, self, "__del__") : NULL;
         if (method) spy_release(spy_call(c, method, 0, NULL));
+        else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
     }
@@ -11499,14 +11624,7 @@ static void gc_referent(SPYValue *v, void *data) {
 static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     if (id == GC_COLLECT) {
-        /* A pass that finds garbage with __del__ only finalizes it; collect
-         * again to free what the finalizers left unreachable. */
-        size_t count = spy_collect(c);
-        while (c->finalize_calls_len && !c->weak_running) {
-            weak_callbacks(c);
-            count += spy_collect(c);
-        }
-        return spy_int(c, (int64_t)count);
+        return spy_int(c, (int64_t)spy_collect(c));
     }
     if (id == GC_TRACKED) {
         if (argc != 1) return errorf(c, "TypeError", "is_tracked() takes exactly one argument (%zu given)", argc);
@@ -15555,10 +15673,19 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     if (!g->as.generator.started && !thrown && sent && sent->type != SPY_NONE)
         return errorf(c, "TypeError", "can't send non-None value to a just-started %s",
                       g->type == SPY_COROUTINE ? "coroutine" : g->type == SPY_ASYNC_GENERATOR ? "async generator" : "generator");
-    if (!g->as.generator.started && thrown) { generator_close(g); return raise_value(c, thrown); }
+    /* A throw into a just-started generator raises in its frame, at the
+     * definition line, before the body runs. */
+    if (!g->as.generator.started && thrown) {
+        size_t line = c->line;
+        if (enter_frame(c, g->as.generator.env, g)) return NULL;
+        c->frames[c->py_depth - 1].line = g->as.generator.node ? g->as.generator.node->line : line;
+        raise_value(c, thrown); leave_frame(c); c->line = line;
+        generator_close(g); return NULL;
+    }
     g->as.generator.started = 1;
     if (deeper(c, "")) return NULL;
     if (enter_frame(c, g->as.generator.env, g)) { c->depth--; return NULL; }
+    if (g->as.generator.line) c->frames[c->py_depth - 1].line = g->as.generator.line;
     g->as.generator.running = 1;
     Machine *m = g->as.generator.machine;
     SPYValue *outer = c->handled;
@@ -15568,6 +15695,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     Result result = run_machine(c, g, sent, thrown, argc, argv);
     spy_release(m->handled); m->handled = c->handled; c->handled = outer;
     c->inherited_exception = inherited;
+    g->as.generator.line = c->frames[c->py_depth - 1].line;
     g->as.generator.running = 0; c->depth--; leave_frame(c);
     if (result.flow == FLOW_YIELD) return result.value;
     g->as.generator.returned = result.flow == FLOW_RETURN;
@@ -20434,8 +20562,8 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__complex__", SLOT_OTHER, SLOT_COMPLEX, T(SPY_COMPLEX)}, {"__trunc__", SLOT_OTHER, SLOT_TRUNC, T(SPY_INT) | T(SPY_FLOAT)},
     {"__floor__", SLOT_OTHER, SLOT_FLOOR, T(SPY_INT) | T(SPY_FLOAT)}, {"__ceil__", SLOT_OTHER, SLOT_CEIL, T(SPY_INT) | T(SPY_FLOAT)},
     {"__len__", SLOT_BUILTIN, B_LEN, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
-    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR)},
-    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR)},
+    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR) | T(SPY_GENERATOR)},
+    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR)},
     {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
     {"__getitem__", SLOT_OTHER, SLOT_GETITEM, T_SEQUENCES | T_DICTS | T(SPY_RANGE)},
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
@@ -20597,6 +20725,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         }
     case SLOT_ITER: return get_iterator(c, value);
     case SLOT_NEXT: {
+        if (value->type == SPY_GENERATOR) return generator_send(c, value, NULL, NULL);
         SPYValue *result = iterator_next(c, value);
         return result || c->error_type[0] ? result : spy_error(c, "StopIteration", "");
     }
@@ -20645,7 +20774,15 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
     SPYValue *cached = name_local(c->slots, key);
     if (cached) return cached->type == SPY_NONE ? NULL : cached;
     int exists = index >= 0;
-    if (!exists && strncmp(name, "__", 2)) {
+    /* Generators have no sample value to probe; their methods are known. */
+    static const char *const generator_methods[][2] = {
+        {"send", " throw close "}, {"send", " throw close __await__ "}, {"asend", " athrow aclose __aiter__ __anext__ "}};
+    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR)) {
+        const char *const *known = generator_methods[type == SPY_GENERATOR ? 0 : type == SPY_COROUTINE ? 1 : 2];
+        char padded[136];
+        snprintf(padded, sizeof(padded), " %s ", name);
+        exists = !strcmp(known[0], name) || strstr(known[1], padded);
+    } else if (!exists && strncmp(name, "__", 2)) {
         /* Probing finds the value's own methods; mark the name absent first
          * so the probe cannot reach this lookup again. */
         if (name_set(c, c->slots, key, c->none)) return NULL;
@@ -20687,7 +20824,8 @@ static SPYValue *class_namespace(SPYContext *c, SPYValue *cls) {
     static const char *const methods[] = {"append", "clear", "copy", "count", "extend", "index", "insert", "pop", "remove",
         "reverse", "sort", "get", "items", "keys", "popitem", "setdefault", "update", "values", "format", "isidentifier",
         "isprintable", "join", "splitlines", "bit_count", "bit_length", "conjugate", "indices", "startswith", "endswith",
-        "find", "rfind", "rindex", "isdisjoint"};
+        "find", "rfind", "rindex", "isdisjoint", "send", "throw", "close", "asend", "athrow", "aclose", "__await__",
+        "__aiter__", "__anext__"};
     size_t count = sizeof(slots) / sizeof(*slots) + sizeof(methods) / sizeof(*methods);
     for (size_t i = 0; builtin_type_id(c, cls) >= 0 && i < count && !c->error_type[0]; i++) {
         const char *name = i < sizeof(slots) / sizeof(*slots) ? slots[i].name : methods[i - sizeof(slots) / sizeof(*slots)];
@@ -20978,6 +21116,12 @@ static int register_value_fields(SPYContext *c) {
         {SPY_STATICMETHOD, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__func__ __wrapped__"},
         {SPY_STATICMETHOD, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__isabstractmethod__"},
         {SPY_SUPER, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__thisclass__ __self__ __self_class__"},
+        {SPY_GENERATOR, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
+         "gi_code gi_frame gi_running gi_state gi_suspended gi_yieldfrom"},
+        {SPY_COROUTINE, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
+         "cr_await cr_code cr_frame cr_origin cr_running cr_state cr_suspended"},
+        {SPY_ASYNC_GENERATOR, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
+         "ag_await ag_code ag_frame ag_running ag_state ag_suspended"},
     };
     for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
         for (const char *name = fields[i].names; *name; ) {
@@ -21009,6 +21153,9 @@ static int register_core_methods(SPYContext *c) {
         SPYValue *cls = name_local(c->builtins, generic[i]);
         if (cls && cls->type == SPY_CLASS && class_method_set(c, cls, "__class_getitem__", class_getitem, 0, METHOD_CLASS)) return -1;
     }
+    static const int generators[] = {SPY_GENERATOR, SPY_COROUTINE, SPY_ASYNC_GENERATOR};
+    for (size_t i = 0; i < 3; i++)
+        if (class_method_set(c, c->types[generators[i]], "__class_getitem__", class_getitem, 0, METHOD_CLASS)) return -1;
     return register_method(c, SPY_BYTES, "splitlines", bytes_splitlines, SPY_BYTES, METHOD_INSTANCE) ||
         register_method(c, SPY_BYTEARRAY, "splitlines", bytes_splitlines, SPY_BYTEARRAY, METHOD_INSTANCE) ||
         register_method(c, SPY_BYTES, "maketrans", bytes_maketrans, 0, METHOD_STATIC) ||

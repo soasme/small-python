@@ -224,7 +224,9 @@ language compatibility target.
 test follows one section of the Python 3.15 Language Reference, imports only
 `tests/spec/harness.py`, and must pass on the pinned oracle before its result on
 spy counts, so the tests depend on the specification rather than on any library.
-All 42 tests currently pass.
+The `doctests` chapter runs CPython's doctest-based tests through a core-only
+runner in the harness, with library-dependent examples rewritten to use only
+the language. All 50 tests currently pass.
 
 For CPython coverage, run `make oracle`, `make cpython-discover`, and
 `make cpython-report`. The [CPython coverage report](testing/cpython.md) explains
