@@ -274,3 +274,10 @@ for call, message in ((lambda: b"ab".hex("--"), "sep must be length 1."),
         assert_eq(str(error), message)
     else:
         raise AssertionError(message)
+
+# Intersecting with an iterable hashes its items as they are; adding names the set role.
+assert_eq(type_error(lambda: {1}.intersection([[]])), "unhashable type: 'list'")
+assert_eq(type_error(lambda: {1}.issubset([[]])), "unhashable type: 'list'")
+assert_eq(type_error(lambda: {1: []}.items() & {(1, 2)}), "unhashable type: 'list'")
+assert_eq(type_error(lambda: {1}.union([[]])), "cannot use 'list' as a set element (unhashable type: 'list')")
+assert_eq({1, 2, 3}.intersection([3, 2, 9]), {2, 3})

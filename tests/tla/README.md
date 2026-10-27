@@ -96,6 +96,7 @@ and tied to real implementations by replaying them.
 | `FormatSpec.tla` | the format specification mini-language derived for ints (every alignment, sign, alternate form, zero padding, width, grouping, and integer type) and for floats (f, %, and e at each precision, with half-even rounding and z), including grouping that extends into zero padding; str, complex, and object specs, and the format string syntax of str.format | yes |
 | `PercentFormat.tla` | printf-style formatting derived for ints and floats under every flag combination, width, precision, and numeric type, into str and bytes; %s, %r, %a, %c, mapping keys, `*` widths, and argument mismatches | yes |
 | `Bytes.tla` | the str search, split, replace, affix, strip, and pad functions derived again for bytes and bytearray receivers; constructors, fromhex and hex, ASCII-only case mappings and predicates, bytearray mutation, and argument errors | yes |
+| `DictMethods.tla` | dict construction forms, merge and update order with the right operand's values, live keys, values, and items views with their set operators, get, setdefault, pop, popitem, fromkeys, copy, `__missing__`, and key errors | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -222,7 +223,9 @@ returning a non-iterator, and `range` attributes were writable in message,
 reported a 64-bit limit, str methods worded many argument errors
 their own way, bytes `%s` refused a memoryview, `bytes.isupper()` was
 always false, `bytearray` padding refused a bytes fill byte, and `hex()`
-and `fromhex()` worded separator and odd-digit errors differently.
+and `fromhex()` worded separator and odd-digit errors differently, and
+`set.intersection()` with an iterable named an unhashable item a set
+element.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

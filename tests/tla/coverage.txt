@@ -340,8 +340,8 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | PercentFormat
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | Buffers
 11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | Sets
-11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | TODO: Dicts, DictMethods
-11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Dictionary view objects | TODO: DictViews
+11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | Dicts, FrozenDicts, DictMethods
+11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Dictionary view objects | DictMethods
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | FrozenDicts
 11. Built-in types > Built-in Types > Context Manager Types | With
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) | = sections

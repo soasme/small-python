@@ -507,6 +507,10 @@
   separator's length before its ASCII-ness and a non-str one as having
   no len(); fromhex() reports a final lone digit as an odd count. TLA+
   model of bytes and bytearray.
+- set.intersection(), intersection_update(), and issubset() with an
+  iterable, and a dict items view & a set, report an unhashable item as
+  CPython does, without naming it a set element. TLA+ model of dict
+  methods and views.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

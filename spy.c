@@ -7423,6 +7423,7 @@ static const Operator operators[] = {
 _Static_assert(sizeof(operators) / sizeof(*operators) == T_XOREQ - T_ADDEQ + 1, "operator table");
 static SPYValue *binary_special(SPYContext *, const Operator *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *view_binary(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *set_intersect_iterable(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* str/bytes % never defers, except to a reflected method of a subclass on the right. */
@@ -18953,6 +18954,7 @@ static SPYValue *view_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         SPYValue *self = set_view(a) ? a : b, *other = self == a ? b : a, *source = other, *container = self;
         if (other->type == SPY_SET && sized_length(self) <= other->as.map.len) { source = self; container = other; }
         else if (set_view(other) && sized_length(other) > sized_length(self)) { source = self; container = other; }
+        if (container->type == SPY_SET) { spy_release(result); return set_intersect_iterable(c, container, source); }
         SPYValue *iterator = get_iterator(c, source), *item;
         if (!iterator) { spy_release(result); return NULL; }
         while ((item = iterator_next(c, iterator))) {
@@ -18973,6 +18975,23 @@ static SPYValue *view_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     return result;
 }
 /* 1 when every item of a is in b. */
+/* set_intersection with an iterable: each item is hashed as is, so an
+ * unhashable one is not named as a set element, and the walk stops once
+ * every element of set is found. */
+static SPYValue *set_intersect_iterable(SPYContext *c, SPYValue *set, SPYValue *iterable) {
+    SPYValue *result = value_new(c, SPY_SET), *iterator = result ? get_iterator(c, iterable) : NULL, *item;
+    if (!iterator) { spy_release(result); return NULL; }
+    while ((item = iterator_next(c, iterator))) {
+        int64_t hash;
+        int found = hash_value(c, item, &hash) ? -1 : set_contains(c, set, item, hash);
+        if (found > 0 && !set_contains(c, result, item, hash)) found = map_append(c, result, item, c->none, hash) ? -1 : 1;
+        spy_release(item);
+        if (found < 0 || (found && result->as.map.len >= set->as.map.len)) break;
+    }
+    spy_release(iterator);
+    if (c->error_type[0]) { spy_release(result); return NULL; }
+    return result;
+}
 static int set_subset(SPYContext *c, SPYValue *a, SPYValue *b) {
     if (a->as.map.len > b->as.map.len) return 0;
     for (size_t i = 0; i < a->as.map.len; i++) {
@@ -18992,6 +19011,12 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (keywords && keywords->as.map.len) return errorf(c, "TypeError", "%s() takes no keyword arguments", set_names[which]);
     if (which >= 8) {
         if (argc != 2) return errorf(c, "TypeError", "%s() takes exactly one argument (%zu given)", set_names[which], argc - 1);
+        if (which == 8 && !set_operand(c, argv[1], 0)) {
+            SPYValue *common = set_intersect_iterable(c, self, argv[1]);
+            int subset = common && common->as.map.len == self->as.map.len;
+            spy_release(common);
+            return c->error_type[0] ? NULL : spy_bool(c, subset);
+        }
         SPYValue *other = set_operand(c, argv[1], 1);
         if (!other) return NULL;
         int result;
@@ -19013,6 +19038,15 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
         return errorf(c, "TypeError", "symmetric_difference_update() takes exactly one argument (%zu given)", argc - 1);
     SPYValue *result = which < 4 ? set_copy_type(c, self, self->type) : spy_retain(self);
     for (size_t i = 1; result && i < argc; i++) {
+        SPYValue *borrowed = (which & 3) == SET_INTERSECTION ? set_operand(c, argv[i], 0) : NULL;
+        spy_release(borrowed);
+        if ((which & 3) == SET_INTERSECTION && !borrowed) {
+            SPYValue *common = set_intersect_iterable(c, result, argv[i]);
+            if (!common) { spy_release(result); result = NULL; break; }
+            if (set_combine(c, result, SET_INTERSECTION, common)) { spy_release(result); result = NULL; }
+            spy_release(common);
+            continue;
+        }
         SPYValue *other = set_operand(c, argv[i], 1);
         if (!other || set_combine(c, result, which & 3, other)) { spy_release(result); result = NULL; }
         spy_release(other);
