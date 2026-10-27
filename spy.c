@@ -97,7 +97,8 @@ struct SPYValue {
          * unit. While running, index is its 1-based place on the context's
          * frame stack; afterwards line and back keep its final state. */
         struct { SPYValue *env, *owner, *back, *extra, *trace; size_t line, index; int trace_lines_off, trace_opcodes, cleared; } frame;
-        struct { SPYValue *obj, *source; ptrdiff_t *layout, offset; size_t itemsize; int64_t hash;
+        /* view: what obj's __buffer__ returned, handed to __release_buffer__. */
+        struct { SPYValue *obj, *source, *view; ptrdiff_t *layout, offset; size_t itemsize; int64_t hash;
                  int ndim, readonly, released, hashed; char format[4]; } memory;
         struct { SPYValue *strings, *interpolations; } template;
         struct { SPYValue *name, *module; } sentinel;
@@ -462,6 +463,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_MEMORYVIEW:
         if (v->as.memory.obj) visit(v->as.memory.obj, data);
         if (v->as.memory.source) visit(v->as.memory.source, data);
+        if (v->as.memory.view) visit(v->as.memory.view, data);
         break;
     case SPY_CELL:
         if (v->as.cell.env) visit(v->as.cell.env, data);
@@ -613,12 +615,15 @@ static void release_edge(SPYValue *v, void *data) {
     if (--v->refs == 0) { v->pending = *pending; *pending = v; }
 }
 static void memory_unexport(SPYValue *);
-/* Keep a dying instance alive for its __del__, or a suspended generator or
- * coroutine for its close(), once per object. */
+/* Keep a dying instance alive for its __del__, a suspended generator or
+ * coroutine for its close(), or an exporter's memoryview for its
+ * __release_buffer__, once per object. */
 static int finalize_later(SPYValue *v) {
     if (v->finalized) return 0;
     if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) {
         if (!v->as.generator.started || v->as.generator.running || v->as.generator.done) return 0;
+    } else if (v->type == SPY_MEMORYVIEW) {
+        if (!v->as.memory.view || v->as.memory.released) return 0;
     } else if (v->type != SPY_INSTANCE || !class_lookup(v->as.map.parent, "__del__")) return 0;
     SPYContext *c = v->ctx;
     if (weak_push(&c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
@@ -9463,6 +9468,7 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
     return SIZE_MAX;
 }
 static int memory_check(SPYContext *, SPYValue *);
+static int memory_release(SPYContext *, SPYValue *);
 static SPYValue *memory_bytes(SPYContext *, SPYValue *);
 static SPYValue *method_arity(SPYContext *, const char *, const char *, size_t, size_t, size_t);
 /* A memoryview or a Python object exporting a buffer through __buffer__. */
@@ -12020,6 +12026,7 @@ static void weak_callbacks(SPYContext *c) {
         size_t waiting = c->finalize_calls_len;
         SPYValue *method = self->type == SPY_INSTANCE ? special_method(c, self, "__del__") : NULL;
         if (method) spy_release(spy_call(c, method, 0, NULL));
+        else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
         else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
@@ -18718,6 +18725,17 @@ static void memory_unexport(SPYValue *m) {
     SPYValue *source = m->as.memory.source;
     if (source->type == SPY_BYTEARRAY && source->as.string.exports) source->as.string.exports--;
 }
+/* release(): an exporter's view goes back through its __release_buffer__. */
+static int memory_release(SPYContext *c, SPYValue *m) {
+    if (m->as.memory.released) return 0;
+    memory_unexport(m);
+    SPYValue *view = m->as.memory.view;
+    if (!view) return 0;
+    if (m->as.memory.obj->type == SPY_INSTANCE && class_lookup(m->as.memory.obj->as.map.parent, "__release_buffer__"))
+        spy_release(call_special(c, m->as.memory.obj, "__release_buffer__", 1, &view));
+    memory_unexport(view);
+    return c->error_type[0] ? -1 : 0;
+}
 static int memory_check(SPYContext *c, SPYValue *m) {
     if (!m->as.memory.released) return 0;
     spy_error(c, "ValueError", "operation forbidden on released memoryview object");
@@ -18959,6 +18977,7 @@ static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
     if (v->type == SPY_INSTANCE && class_lookup(v->as.map.parent, "__buffer__")) {
         SPYValue *view = memory_from(c, v);
         if (view) *owned = memory_check(c, view) ? NULL : memory_bytes(c, view);
+        if (view && memory_release(c, view)) { spy_release(*owned); *owned = NULL; }
         spy_release(view);
         return *owned;
     }
@@ -18975,9 +18994,17 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
         SPYValue *flags = spy_int(c, 284), *view = flags ? call_special(c, object, "__buffer__", 1, &flags) : NULL;
         spy_release(flags);
         if (view && view->type != SPY_MEMORYVIEW) {
-            spy_release(view); return spy_error(c, "TypeError", "__buffer__ returned non-memoryview object");
+            SPYValue *kind = value_class(c, object), *name = kind ? name_local(kind, "__name__") : NULL;
+            errorf(c, "TypeError", "%s.__buffer__() must return a memoryview, not %s",
+                   name && name->type == SPY_STRING ? name->as.string.data : type_name(object), type_name(view));
+            spy_release(view); return NULL;
         }
-        return view;
+        if (!view || memory_check(c, view)) { spy_release(view); return NULL; }
+        SPYValue *m = memory_copy(c, view, view->as.memory.ndim);
+        if (!m) { spy_release(view); return NULL; }
+        spy_release(m->as.memory.obj);
+        m->as.memory.obj = spy_retain(object); m->as.memory.view = view;
+        return m;
     }
     if (!source) return errorf(c, "TypeError", "memoryview: a bytes-like object is required, not '%s'", type_name(object));
     SPYValue *m = memory_new(c, object, source, "B", 1, 1, source->type == SPY_BYTES);
@@ -19300,10 +19327,10 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
     SPYValue *m = argv[0], *args[3] = {NULL, NULL, NULL};
     static const char *const hex_names[] = {"sep", "bytes_per_sep"}, *const cast_names[] = {"format", "shape"},
                       *const tobytes_names[] = {"order"};
-    if (op == MV_EXIT) { memory_unexport(m); return spy_none(c); }
+    if (op == MV_EXIT) return memory_release(c, m) ? NULL : spy_none(c);
     if (op == MV_RELEASE) {
         if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
-        memory_unexport(m); return spy_none(c);
+        return memory_release(c, m) ? NULL : spy_none(c);
     }
     if (op == MV_REPR) return spy_repr(c, m);
     size_t count = op == MV_SETITEM ? 2 : op == MV_GETITEM || op == MV_DELITEM || op == MV_EQ || op == MV_NE || op == MV_BUFFER ||

@@ -423,6 +423,10 @@
   metaclass selection.
 - TLA+ models of instance and subclass check hooks, __class_getitem__,
   container emulation, and numeric operator dispatch.
+- Releasing a memoryview of a __buffer__ exporter (by release(), a with
+  block, destruction, or bytes() finishing its copy) calls the exporter's
+  __release_buffer__; a non-memoryview __buffer__ result reports CPython's
+  message. TLA+ models of the with statement and buffer export.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

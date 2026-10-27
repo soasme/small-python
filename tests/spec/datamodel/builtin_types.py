@@ -236,3 +236,22 @@ wrapped = staticmethod(annotated)
 assert_eq(sorted(wrapped.__dict__), ["__doc__", "__module__", "__name__", "__qualname__"])
 assert_eq(wrapped.__annotations__, {"a": int})
 assert_true("__annotations__" in wrapped.__dict__)
+
+# A __buffer__ exporter gets its view back through __release_buffer__.
+buffer_log = []
+class Exporter:
+    def __buffer__(self, flags):
+        buffer_log.append("buffer")
+        return memoryview(b"abc")
+    def __release_buffer__(self, view):
+        buffer_log.append(type(view).__name__)
+with memoryview(Exporter()) as view:
+    assert_eq(bytes(view), b"abc")
+assert_eq(buffer_log, ["buffer", "memoryview"])
+assert_eq(bytes(Exporter()), b"abc")
+assert_eq(buffer_log, ["buffer", "memoryview", "buffer", "memoryview"])
+class BadExporter:
+    def __buffer__(self, flags):
+        return b"abc"
+e = assert_raises(TypeError, memoryview, BadExporter())
+assert_eq(str(e), "BadExporter.__buffer__() must return a memoryview, not bytes")

@@ -132,9 +132,9 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > Emulating callable objects | Callables
 3. Data model > Data model > Special method names > Emulating container types | Containers
 3. Data model > Data model > Special method names > Emulating numeric types | Operators, NumericProtocol
-3. Data model > Data model > Special method names > With Statement Context Managers | TODO: With
+3. Data model > Data model > Special method names > With Statement Context Managers | With
 3. Data model > Data model > Special method names > Customizing positional arguments in class pattern matching | Match
-3. Data model > Data model > Special method names > Emulating buffer types | TODO: Buffers
+3. Data model > Data model > Special method names > Emulating buffer types | Buffers
 3. Data model > Data model > Special method names > Annotations | TODO: Annotations
 3. Data model > Data model > Special method names > Special method lookup | SpecialLookup
 3. Data model > Data model > Coroutines | = sections
@@ -267,7 +267,7 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > The `try` statement > `except*` clause | ExceptStar
 8. Compound statements > Compound statements > The `try` statement > `else` clause | Exceptions
 8. Compound statements > Compound statements > The `try` statement > `finally` clause | Exceptions
-8. Compound statements > Compound statements > The `with` statement | TODO: With
+8. Compound statements > Compound statements > The `with` statement | With
 8. Compound statements > Compound statements > The `match` statement | Match
 8. Compound statements > Compound statements > The `match` statement > Overview | Match
 8. Compound statements > Compound statements > The `match` statement > Guards | TODO: MatchGuards
@@ -338,12 +338,12 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytearray Objects | TODO: Bytearray
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes and Bytearray Operations | TODO: Bytes, Bytearray
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | TODO: PercentFormat
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | TODO: Buffers
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | Buffers
 11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | Sets
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | TODO: Dicts, DictMethods
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Dictionary view objects | TODO: DictViews
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | FrozenDicts
-11. Built-in types > Built-in Types > Context Manager Types | TODO: With
+11. Built-in types > Built-in Types > Context Manager Types | With
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) | = sections
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type | TODO: GenericAlias
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Standard Generic Classes | TODO: GenericAlias

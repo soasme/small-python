@@ -58,6 +58,8 @@ and tied to real implementations by replaying them.
 | `ClassGetitem.tla` | `__class_getitem__` (plain or a classmethod) against a metaclass's and an instance's `__getitem__`, unsubscriptable classes, and builtin generic aliases | yes |
 | `Containers.tla` | `in` through `__contains__`, `__iter__`, or `__getitem__`; iteration and `__iter__ = None`; `reversed()` through `__reversed__` or `__len__` and `__getitem__`; `__missing__`; and storing without `__setitem__` | yes |
 | `NumericProtocol.tla` | binary operator dispatch with reflected methods (a subclass's override first), `NotImplemented`, in-place fallback, and `__index__` against `__int__` | yes |
+| `With.tla` | `__enter__` and `__exit__` lookup, a raising `__enter__`, `__exit__` arguments and suppression after a normal end, an exception, or a return, an exception from `__exit__`, and nested managers | yes |
+| `Buffers.tla` | `__buffer__` exporters through `memoryview()` and `bytes()`, `__release_buffer__` on release, `with`, and destruction, a non-memoryview result, and resizing an exported bytearray | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -143,8 +145,9 @@ descriptor without `__get__` hid a value in the instance dictionary;
 `__class__` could not be assigned on a slotted instance, nor between classes
 with the same slots; a `__str__`, `__bool__`, `__format__`, `__bytes__`, or
 `__init__` returning the wrong type was reported without naming the class,
-the method, or the returned type; and a metaclass that dropped
-`__classcell__` left `__class__` bound instead of raising RuntimeError.
+the method, or the returned type; a metaclass that dropped
+`__classcell__` left `__class__` bound instead of raising RuntimeError; and
+a `__buffer__` exporter's `__release_buffer__` was never called.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
