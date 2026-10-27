@@ -11078,7 +11078,8 @@ enum {
     BC_SAVE_TARGET, BC_INPLACE, BC_FUNCTION, BC_DEFAULT, BC_COMPREHENSION, BC_SLICE,
     BC_UNPACK, BC_ASSERT, BC_RAISE, BC_DECORATE, BC_CONVERT, BC_FORMAT, BC_JOIN, BC_TEMPLATE, BC_INTERPOLATION,
     BC_AENTER, BC_AWITH, BC_END_AWITH, BC_PATTERN,
-    BC_STAR_BEGIN, BC_STAR_MATCH, BC_STAR_DONE, BC_STAR_CAUGHT, BC_STAR_RERAISE, BC_DELETE
+    BC_STAR_BEGIN, BC_STAR_MATCH, BC_STAR_DONE, BC_STAR_CAUGHT, BC_STAR_RERAISE, BC_DELETE,
+    BC_BUILDER, BC_CLASS, BC_GENERIC_FUNCTION
 };
 typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
 struct Program { Instruction *items; size_t len, cap; };
@@ -11369,11 +11370,17 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
             for (Node *a = n->args; a; a = a->next) compile_target(c, p, a);
             emit(c, p, BC_POP, n, 0); break;
         case N_DEF:
-            if (n->params) { spy_error(c, "NotImplementedError", "suspending decorators or defaults of a generic function are not implemented"); break; }
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
-            emit(c, p, BC_FUNCTION, n, 0);
-            for (Node *a = n->args; a; a = a->next) if (a->a) {
-                compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
+            if (n->params) {
+                /* A generic function's defaults are evaluated before its type parameters. */
+                int count = 0;
+                for (Node *a = n->args; a; a = a->next) if (a->a) { compile_expr(c, p, a->a); count++; }
+                emit(c, p, BC_GENERIC_FUNCTION, n, count);
+            } else {
+                emit(c, p, BC_FUNCTION, n, 0);
+                for (Node *a = n->args; a; a = a->next) if (a->a) {
+                    compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
+                }
             }
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
             emit(c, p, BC_STORE, n->a, 0); emit(c, p, BC_POP, n, 0); break;
@@ -11480,6 +11487,23 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
         }
         case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
         case N_DELETE: compile_delete(c, p, n->a); break;
+        case N_CLASS: {
+            /* Decorators, then the bases and keywords as __build_class__'s
+             * arguments; a generic class's bases cannot suspend. */
+            int stacked = 0;
+            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
+            for (Node *a = n->args; a && !n->params; a = a->next) stacked |= suspends(a);
+            if (stacked) {
+                emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
+                for (Node *a = n->args; a; a = a->next) {
+                    compile_expr(c, p, a->kind == N_KEYWORD || a->kind == N_MAPPING || a->kind == N_STAR ? a->a : a);
+                    emit(c, p, BC_ARG, a, a->kind);
+                }
+            }
+            emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
+            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
+            emit(c, p, BC_STORE, n->a, 0); emit(c, p, BC_POP, n, 0); break;
+        }
         default: spy_error(c, "NotImplementedError", "yield in this statement is not implemented"); break;
         }
     }
@@ -14690,15 +14714,22 @@ static SPYValue *generic_env(SPYContext *c, Frame *f, Node *generic, SPYValue **
     return env;
 }
 /* Defaults are evaluated in the enclosing scope, before the type parameters. */
+static SPYValue *generic_function_with(SPYContext *, Frame *, Node *, SPYValue *);
 static SPYValue *generic_function(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *defaults = spy_list(c), *params = NULL, *env = NULL, *fn = NULL;
+    SPYValue *defaults = spy_list(c);
     for (Node *arg = n->args; defaults && arg && !c->error_type[0]; arg = arg->next) {
         if (!arg->a) continue;
         SPYValue *value = eval(c, f, arg->a);
         if (value) sequence_append(c, defaults, value);
         spy_release(value);
     }
-    if (defaults && !c->error_type[0]) env = generic_env(c, f, n->params, &params);
+    SPYValue *fn = defaults && !c->error_type[0] ? generic_function_with(c, f, n, defaults) : NULL;
+    spy_release(defaults);
+    return fn;
+}
+/* The generic function n with its defaults already evaluated, in order. */
+static SPYValue *generic_function_with(SPYContext *c, Frame *f, Node *n, SPYValue *defaults) {
+    SPYValue *params = NULL, *env = generic_env(c, f, n->params, &params), *fn = NULL;
     if (env) {
         Frame frame = {env, f->unit, 0};
         fn = function_new(c, &frame, n);
@@ -14707,7 +14738,7 @@ static SPYValue *generic_function(SPYContext *c, Frame *f, Node *n) {
             if (arg->a) function_default(c, fn, arg, defaults->as.seq.items[i++]);
         if (fn && !c->error_type[0]) name_set(c, fn->as.function.metadata, "__type_params__", params);
     }
-    spy_release(defaults); spy_release(params); spy_release(env);
+    spy_release(params); spy_release(env);
     if (c->error_type[0]) { spy_release(fn); return NULL; }
     return fn;
 }
@@ -17349,6 +17380,23 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             spy_release(c->handled); c->handled = spy_retain(outer->error->value);
             if (ins->op == BC_STAR_DONE) m->pc = ins->target;
             break;
+        }
+        case BC_BUILDER: machine_push(c, m, spy_string(c, "__build_class__", 15)); break;
+        case BC_CLASS:
+            if (ins->arg == 2) {
+                b = machine_pop(m); a = machine_pop(m); spy_release(machine_pop(m));
+                value = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
+                machine_push(c, m, value ? make_class(c, &f, n, NULL, value, a, b, NULL) : NULL);
+                spy_release(value);
+            } else machine_push(c, m, ins->arg ? generic_class(c, &f, n) : build_class(c, &f, n, NULL, NULL));
+            break;
+        case BC_GENERIC_FUNCTION: {
+            SPYValue *defaults = spy_list(c);
+            for (size_t i = m->len - (size_t)ins->arg; defaults && i < m->len; i++)
+                if (sequence_append(c, defaults, m->stack[i])) { spy_release(defaults); defaults = NULL; }
+            for (int i = 0; i < ins->arg; i++) spy_release(machine_pop(m));
+            machine_push(c, m, defaults ? generic_function_with(c, &f, n, defaults) : NULL);
+            spy_release(defaults); break;
         }
         case BC_DELETE:
             if (!ins->arg) { delete_target(c, &f, n); break; }

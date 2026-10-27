@@ -787,3 +787,8 @@
   is not between two digits as CPython does. PLS-315 now gives the future
   feature flags (Table 14-1), the builtins exec and eval insert, and the
   underscore rule of complex().
+- spy runs class definitions whose decorators, bases or keywords yield,
+  and generic functions whose defaults yield: the bases and keywords are
+  stacked like call arguments and the defaults are evaluated before the
+  type parameter scope, so a suspension no longer raises
+  NotImplementedError. compound/suspending_definitions covers them.
