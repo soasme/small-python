@@ -1238,11 +1238,18 @@ def _object_getstate_default(obj, required):
     slotnames = _slotnames(cls)
     if slotnames:
         slots = {}
-        for name in slotnames:
+        size = len(slotnames)
+        i = 0
+        while i < len(slotnames):
+            name = slotnames[i]
             try:
                 slots[name] = getattr(obj, name)
             except AttributeError:
                 pass
+            # The list lives on the class, so the lookups may change it.
+            if len(slotnames) != size:
+                raise RuntimeError('__slotsname__ changed size during iteration')
+            i += 1
         if slots:
             state = (state, slots)
     return state
