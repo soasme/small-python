@@ -4316,3 +4316,232 @@ Creates the lazy import object of 17.5 for the given import.
 The names `exit`, `quit`, `help`, `copyright`, `credits`, and `license` are not
 part of the Core built-in namespace. A host may add them (Annex C); `exit` and
 `quit` then raise `SystemExit` when called.
+
+## 20 Fundamental Objects
+
+### 20.1 The `object` class
+
+`object` is the root of the class hierarchy: it has no bases, and every class
+has it in its MRO. Its instances have no instance namespace and no slots.
+
+#### 20.1.1 object ( )
+
+Calling `object` creates a new instance as 10.2 specifies; `object()` takes no
+arguments ("object() takes no arguments").
+
+#### 20.1.2 Instance namespace
+
+See 10.1.1.
+
+#### 20.1.3 Methods of `object`
+
+| Method | Behaviour |
+| --- | --- |
+| `__new__(cls, …)`, `__init__(self, …)` | 10.2.2 |
+| `__repr__(self)` | `<`*m*`.`*q*` object at 0x`*hex*`>`, where *m* and *q* are the `__module__` and `__qualname__` of Type(*self*) (*m*`.` omitted when *m* is `"builtins"` or not a `str`), and *hex* is an implementation-defined identity in lowercase hexadecimal |
+| `__str__(self)` | ? ToRepr(*self*) |
+| `__format__(self, spec)` | if *spec* is `""`, ? ToStr(*self*); otherwise raise a `TypeError` exception ("unsupported format string passed to *tname*(*self*).`__format__`") |
+| `__eq__(self, other)` | `True` if SameObject(*self*, *other*), otherwise `NotImplemented` |
+| `__ne__(self, other)` | let *r* be ? CallSpecial(*self*, `"__eq__"`, «*other*»); `NotImplemented` if *r* is `NotImplemented`, otherwise `True` if ? ToBoolean(*r*) is **false** and `False` otherwise |
+| `__lt__`, `__le__`, `__gt__`, `__ge__` | `NotImplemented` |
+| `__hash__(self)` | an `int` derived from the identity of *self*, constant for its lifetime |
+| `__getattribute__(self, name)` | ? GenericGetAttr(*self*, *name*) (7.3.5) |
+| `__setattr__(self, name, value)` | ? GenericSetAttr(*self*, *name*, *value*) (7.3.8) |
+| `__delattr__(self, name)` | ? GenericSetAttr(*self*, *name*, **absent**) |
+| `__dir__(self)` | a list of the keys of the instance namespace, if any, and of the namespaces of the classes in Type(*self*).`__mro__`, without duplicates |
+| `__init_subclass__(cls)` | a class method that does nothing; with keyword arguments it raises a `TypeError` exception ("*cls*.`__name__`.`__init_subclass__`() takes no keyword arguments") |
+| `__subclasshook__(cls, sub)` | a class method that returns `NotImplemented` |
+| `__sizeof__(self)` | an implementation-defined positive `int` |
+| `__reduce__`, `__reduce_ex__`, `__getstate__` | the pickling protocol; their results refer to host library functions (Annex C) |
+
+`__class__` is a data descriptor (10.1.3); `__doc__` is `None` for classes
+without a docstring.
+
+### 20.2 The `type` class
+
+#### 20.2.1 Type objects
+
+`type` is the class of every class, including itself (Type(`type`) is `type`),
+and the default metaclass. A class created by a `class` statement is an
+instance of its metaclass, a subclass of `type`.
+
+#### 20.2.2 type ( *object* ) and type ( *name*, *bases*, *dict*, **kwds* )
+
+Calling `type` runs 10.2.1: with one argument it returns Type(*object*); with
+three it creates a class as 16.4.3 specifies. Calling a subclass of `type`
+with one argument does not have this special case.
+
+#### 20.2.3 Attributes of classes
+
+10.4.2.
+
+#### 20.2.4 `type.__repr__` ( )
+
+`<class '`*m*`.`*q*`'>`, with *m* and *q* as for `object.__repr__`.
+
+#### 20.2.5 `type.__call__` ( *args, **kwds* )
+
+10.2.1.
+
+#### 20.2.6 `type.mro` ( )
+
+Returns a new list: ComputeMRO(*self*) (7.1.4). A metaclass may override it;
+the result shall be a sequence of classes ("*fqname*(*C*).mro() returned a
+non-class ('*tname*')") whose layouts are compatible with the class
+("*fqname*(*C*).mro() returned base with unsuitable layout ('*name*')").
+
+#### 20.2.7 Other methods of `type`
+
+| Method | Behaviour |
+| --- | --- |
+| `__subclasses__()` | a new list of the classes whose `__bases__` contain *self* and that are still alive, in creation order |
+| `__prepare__(name, bases, **kwds)` | a class method returning a new empty `dict` |
+| `__instancecheck__(obj)` | `True` if IsInstance(*obj*, *self*) (7.1.3) |
+| `__subclasscheck__(sub)` | `True` if IsSubclass(*sub*, *self*), with the `__bases__` rule of 19.3.22 for non-classes |
+| `__or__(other)`, `__ror__(other)` | ? MakeUnion(*self*, *other*) (29.5), or `NotImplemented` if *other* is not a valid union member |
+| `__dir__()` | the keys of the namespaces of *self*'s MRO and of its metaclass's MRO |
+| `__sizeof__()` | an implementation-defined `int` |
+
+#### 20.2.8 Abstract classes
+
+A class is *abstract* when its `__abstractmethods__` attribute has been set to a
+non-empty iterable. `object.__new__` refuses to instantiate an abstract class
+(10.2.2). Setting `__abstractmethods__` to an empty iterable makes the class
+concrete again. The host's `abc` facade (Annex C) computes this attribute;
+Core defines only the attribute and its effect.
+
+### 20.3 The `super` class
+
+#### 20.3.1 super ( [ *type* [, *object_or_type*] ] )
+
+1. If no argument is given:
+   1. If the calling frame is not a function frame, or its code has no
+      positional parameters, raise a `RuntimeError` exception ("super(): no
+      arguments").
+   2. Let *obj* be the current value of the first parameter (from its cell if it
+      is a cell variable); if it is unbound, raise a `RuntimeError` exception
+      ("super(): arg[0] deleted").
+   3. Let *cell* be the frame's `__class__` cell; if there is none, raise a
+      `RuntimeError` exception ("super(): `__class__` cell not found"); if it is
+      empty, raise a `RuntimeError` exception ("super(): empty `__class__`
+      cell"); if its content is not a class, raise a `RuntimeError` exception
+      ("super(): `__class__` is not a type (*tname*)").
+   4. Let *type* be its content and *object_or_type* be *obj*.
+2. *type* shall be a class ("super() argument 1 must be a type, not *tname*").
+3. If *object_or_type* is given, let *selfClass* be:
+   1. *object_or_type* itself, if it is a class that is a subclass of *type*;
+   2. otherwise Type(*object_or_type*), if it is a subclass of *type*;
+   3. otherwise the `__class__` attribute of *object_or_type*, if that is a class
+      that is a subclass of *type*;
+   4. otherwise raise a `TypeError` exception ("super(type, obj): obj (instance
+      of *tname*) is not an instance or subtype of type (*type*.`__name__`).").
+4. Return a new `super` object with `__thisclass__` *type*, `__self__`
+   *object_or_type* (or `None`), and `__self_class__` *selfClass* (or `None`).
+
+#### 20.3.2 Attribute lookup on `super` objects
+
+`super.__getattribute__(name)`:
+
+1. If `__self_class__` is `None`, or *name* is `"__class__"`, return
+   ? GenericGetAttr of the `super` object.
+2. Let *mro* be `__self_class__`.`__mro__`; skip the classes up to and including
+   `__thisclass__`.
+3. For each remaining class *B*: if *B*'s namespace has *name*, let *v* be the
+   value; if Type(*v*) has `__get__`, return ? Call(that `__get__`, «*v*,
+   *obj*, `__self_class__`») where *obj* is `None` if `__self__` is
+   `__self_class__` and `__self__` otherwise; else return *v*.
+4. Return ? GenericGetAttr of the `super` object.
+
+`super` objects have no instance namespace; setting an attribute raises the
+`AttributeError` of 7.3.8 step 4. Their repr is `<super: <class '`*T*`'>,
+<`*S*` object>>`, where *T* is `__thisclass__`.`__name__` and *S* is
+`__self_class__`.`__name__`, or `<super: <class '`*T*`'>, NULL>` when unbound.
+A `super` object is a non-data descriptor: binding an unbound `super` object to
+an instance gives a bound one.
+
+### 20.4 Singletons
+
+#### 20.4.1 `None`
+
+`None` is the only instance of %NoneType%. `type(None)()` returns `None`; with
+arguments it raises a `TypeError` exception ("NoneType takes no arguments").
+`repr(None)` is `"None"`; ToBoolean(`None`) is **false**; `hash(None)` is a
+constant `int`.
+
+#### 20.4.2 `NotImplemented`
+
+`NotImplemented` is the only instance of %NotImplementedType%. It is returned
+by binary special methods to request the reflected operation (7.6). Its repr
+is `"NotImplemented"`. ToBoolean(`NotImplemented`) raises a `TypeError`
+exception ("NotImplemented should not be used in a boolean context").
+
+#### 20.4.3 `Ellipsis`
+
+`Ellipsis`, also written `...`, is the only instance of `ellipsis`
+(%EllipsisType%). Its repr is `"Ellipsis"`.
+
+The types of the singletons are not acceptable base classes, and calling them
+with arguments raises "*T* takes no arguments".
+
+### 20.5 The `property` class
+
+#### 20.5.1 property ( *fget*=None, *fset*=None, *fdel*=None, *doc*=None )
+
+Creates a data descriptor holding the three functions. If *doc* is `None` and
+*fget* has a `__doc__`, the property's `__doc__` is that docstring. The
+property's `__name__` is set by `__set_name__` (16.4.3), or taken from *fget*.
+
+#### 20.5.2 Descriptor methods
+
+- `__get__(instance, owner)`: if *instance* is `None`, return the property;
+  if *fget* is `None`, raise an `AttributeError` exception ("property '*n*' of
+  '*tname*(*instance*)' object has no getter"); else return ? Call(*fget*,
+  «*instance*»).
+- `__set__(instance, value)`: without *fset*, raise an `AttributeError`
+  exception ("property '*n*' of '*tname*' object has no setter"); else call
+  *fset*(*instance*, *value*).
+- `__delete__(instance)`: without *fdel*, raise ("… has no deleter"); else call
+  *fdel*(*instance*).
+
+When the property has no name, the messages read "property of '*tname*' object
+has no getter" (and likewise).
+
+#### 20.5.3 Other members
+
+`getter(f)`, `setter(f)`, and `deleter(f)` return a copy of the property with
+that function replaced (a subclass of `property` is called to make the copy).
+`fget`, `fset`, `fdel` are read-only attributes. `__isabstractmethod__` is
+`True` if any of the functions has a true `__isabstractmethod__`.
+
+### 20.6 The `staticmethod` class
+
+`staticmethod(f)` creates a descriptor whose `__get__(instance, owner)` returns
+*f* unchanged. A `staticmethod` object is itself callable: calling it calls *f*.
+It copies `__name__`, `__qualname__`, `__doc__`, `__module__`, and
+`__annotations__` from *f* when present, and exposes *f* as `__func__` and
+`__wrapped__`. `__isabstractmethod__` reflects *f*'s.
+
+### 20.7 The `classmethod` class
+
+`classmethod(f)` creates a descriptor whose `__get__(instance, owner)` returns
+a method (28.4) binding *f* to *owner*, or to Type(*instance*) when *owner* is
+`None`. It does not call `__get__` of *f*. It copies the same attributes as
+`staticmethod` and exposes `__func__` and `__wrapped__`.
+
+### 20.8 The `sentinel` class
+
+#### 20.8.1 sentinel ( *name*, / )
+
+Creates a new *sentinel* object: a unique marker value. *name* shall be a `str`
+("sentinel() argument 1 must be str, not *tname*"). Exactly one argument is
+accepted ("sentinel() takes exactly 1 positional argument (*n* given)").
+
+#### 20.8.2 Properties of sentinel objects
+
+A sentinel's `__name__` is *name*; its `__module__` is the `__name__` of the
+globals of the calling frame (`"builtins"` when called from the built-in
+namespace); `repr(s)` and `s.__repr__()` return *name*; it is true in a Boolean
+context; it is equal only to itself and hashable by identity; it has no
+instance namespace; `copy` and `deepcopy` return it unchanged; and
+`s.__reduce__()` returns *name*, so that it pickles by reference to its module.
+`sentinel` is not an acceptable base type.
