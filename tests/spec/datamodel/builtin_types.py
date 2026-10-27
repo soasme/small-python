@@ -143,3 +143,10 @@ for value, absent in [(items.append, "__func__"), (items.__len__, "__func__"), (
                       (list.append, "__module__"), (object.__new__, "__objclass__")]:
     assert_false(hasattr(value, absent))
 assert_true(items.__len__.__objclass__ is list)
+
+# __base__ is the base that decides the instance layout.
+class Plain: pass
+class Slotted: __slots__ = ("x",)
+assert_true(type("X", (Plain, int), {}).__base__ is int)
+assert_true(type("Y", (Plain, Slotted), {}).__base__ is Slotted)
+assert_true(type("Z", (Plain, object), {}).__base__ is Plain)

@@ -385,6 +385,9 @@
   __module__; a module's __dict__ is read-only and __annotate__ defaults to
   None; deleting a missing attribute reports the object's type. TLA+ models
   of function objects, methods, callables, and module objects.
+- A class with several bases reports its layout base as __base__; code
+  objects have CPython's co_flags, and co_varnames leaves out cell-only
+  locals. TLA+ model of custom classes and instances.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

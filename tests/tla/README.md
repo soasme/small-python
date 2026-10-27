@@ -43,6 +43,7 @@ and tied to real implementations by replaying them.
 | `Methods.tla` | method binding (instance, classmethod, staticmethod, instance attribute), method attributes, and built-in functions and methods | yes |
 | `Callables.tla` | calling classes (`__new__`, `__init__`, extra arguments) and instances (`__call__` looked up on the type) | yes |
 | `ModuleObjects.tla` | module attributes and namespace, read-only `__dict__`, annotations, and attributes of modules made by the module type | yes |
+| `ClassObjects.tla` | class special attributes (bases, layout base, MRO, docs not inherited, annotations, type parameters, static attributes), the read-only namespace view, and class versus instance assignment | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -114,7 +115,8 @@ f-string format specifications nested more than two deep were accepted,
 a t-string interpolation's expression text kept its comments; assigning
 a function's `__code__` and reading its `__builtins__` were missing; bound
 built-in methods had `__func__` and the wrong `__module__`; a module's
-`__dict__` could be replaced and it had no `__annotate__`.
+`__dict__` could be replaced and it had no `__annotate__`; a class with
+several bases reported the first as `__base__`, not the one with the layout.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

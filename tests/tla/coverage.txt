@@ -93,10 +93,10 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Modules > Other writable attributes on module objects | ModuleObjects
 3. Data model > Data model > The standard type hierarchy > Modules > Module dictionaries | ModuleObjects
 3. Data model > Data model > The standard type hierarchy > Custom classes | = sections
-3. Data model > Data model > The standard type hierarchy > Custom classes > Special attributes | TODO: ClassObjects
+3. Data model > Data model > The standard type hierarchy > Custom classes > Special attributes | ClassObjects
 3. Data model > Data model > The standard type hierarchy > Custom classes > Special methods | TODO: SpecialLookup
 3. Data model > Data model > The standard type hierarchy > Class instances | = sections
-3. Data model > Data model > The standard type hierarchy > Class instances > Special attributes | TODO: ClassObjects
+3. Data model > Data model > The standard type hierarchy > Class instances > Special attributes | ClassObjects
 3. Data model > Data model > The standard type hierarchy > I/O objects (also known as file objects) | - Host profile: file objects come from the Files service (SLP315-HOST)
 3. Data model > Data model > The standard type hierarchy > Internal types | = sections
 3. Data model > Data model > The standard type hierarchy > Internal types > Code objects | TODO: CodeObjects
@@ -351,16 +351,16 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Union Type | TODO: UnionType
 11. Built-in types > Built-in Types > Other Built-in Types | = sections
 11. Built-in types > Built-in Types > Other Built-in Types > Modules | ModuleObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | TODO: ClassObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | ClassObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Functions | FunctionObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Methods | Methods
 11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | TODO: CodeObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | TODO: ClassObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | ClassObjects
 11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | Singletons
 11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | TODO: Frames, CodeObjects
-11. Built-in types > Built-in Types > Special Attributes | TODO: ClassObjects
+11. Built-in types > Built-in Types > Special Attributes | ClassObjects
 11. Built-in types > Built-in Types > Integer string conversion length limitation | TODO: IntStrLimit
 11. Built-in types > Built-in Types > Integer string conversion length limitation > Affected APIs | TODO: IntStrLimit
 11. Built-in types > Built-in Types > Integer string conversion length limitation > Configuring the limit | TODO: IntStrLimit

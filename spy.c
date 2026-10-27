@@ -7775,6 +7775,8 @@ enum { DESC_READONLY = 1, DESC_SLOT = 2, DESC_GENERIC = 4, DESC_VALUE = 8 };
 static int instance_has_dict(SPYValue *);
 static SPYValue *attribute_value(SPYContext *, SPYValue *, const char *);
 static int delete_attribute(SPYContext *, SPYValue *, const char *);
+static int class_layout(SPYContext *, SPYValue *);
+static SPYValue *slots_base(SPYValue *);
 static int builtin_class(SPYContext *, SPYValue *);
 static int static_type(SPYContext *, SPYValue *);
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
@@ -8249,6 +8251,25 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "co_freevars") || !strcmp(name, "co_cellvars"))
             return def && def->kind != N_CLASS ? closure_names(c, def, name[3] == 'c') : value_new(c, SPY_TUPLE);
         if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->line : 1);
+        if (!strcmp(name, "co_flags")) {
+            /* CO_OPTIMIZED | CO_NEWLOCALS, CO_VARARGS, CO_VARKEYWORDS, CO_NESTED,
+             * CO_GENERATOR, CO_COROUTINE, CO_ASYNC_GENERATOR, CO_HAS_DOCSTRING,
+             * CO_METHOD, and the compiler's __future__ flags. */
+            int64_t flags = unit->as.unit.future_flags;
+            if (def && def->kind != N_CLASS) {
+                flags |= 0x3;
+                for (Node *arg = def->kind != N_COMPREHENSION ? def->args : NULL; arg; arg = arg->next)
+                    flags |= arg->op == P_VARARGS ? 0x4 : arg->op == P_KWARGS ? 0x8 : 0;
+                Scope *parent = def->scope ? def->scope->parent : NULL;
+                while (parent && parent->owner && parent->owner->kind == N_GENERIC) parent = parent->parent;
+                if (parent && (parent->kind == S_FUNCTION || parent->kind == S_COMPREHENSION)) flags |= 0x10;
+                if (parent && parent->kind == S_CLASS) flags |= 0x8000000;
+                if (def->kind == N_COMPREHENSION) flags |= def->op != N_TUPLE ? 0 : def->asynchronous ? 0x200 : 0x20;
+                else if (def->code) flags |= def->op == 2 ? 0x200 : def->op ? 0x80 : 0x20;
+                if (def->kind == N_DEF && def->b && def->b->kind == N_EXPR && def->b->a->kind == N_STRING) flags |= 0x4000000;
+            }
+            return spy_int(c, flags);
+        }
         if (!strcmp(name, "co_varnames") || !strcmp(name, "co_nlocals")) {
             /* Named parameters, then *args and **kwargs, then other local
              * bindings in first-use order. A class body has no fast locals. */
@@ -8261,13 +8282,20 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
                 spy_release(text);
             }
-            for (size_t i = 0; names && scope && i < scope->len; i++) {
+            /* Locals that are cells are co_cellvars, not co_varnames (unless parameters). */
+            SPYValue *cells = names && scope ? closure_names(c, def, 1) : NULL;
+            for (size_t i = 0; names && scope && cells && i < scope->len; i++) {
                 Symbol *symbol = &scope->symbols[i];
                 if (!(symbol->flags & S_LOCAL) || (symbol->flags & (S_PARAM | S_GLOBAL | S_NONLOCAL))) continue;
+                int cell = 0;
+                for (size_t j = 0; j < cells->as.seq.len && !cell; j++) cell = !strcmp(cells->as.seq.items[j]->as.string.data, symbol->name);
+                if (cell) continue;
                 SPYValue *text = spy_string(c, symbol->name, strlen(symbol->name));
                 if (!text || sequence_append(c, names, text)) { spy_release(text); spy_release(names); return NULL; }
                 spy_release(text);
             }
+            if (names && scope && !cells) { spy_release(names); return NULL; }
+            spy_release(cells);
             if (!names || !strcmp(name, "co_varnames")) return names;
             SPYValue *count = spy_int(c, (int64_t)names->as.seq.len);
             spy_release(names); return count;
@@ -8464,7 +8492,19 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 return class_annotations(c, v, name);
             if (!strcmp(name, "__bases__")) return spy_retain(v->as.map.bases);
             if (!strcmp(name, "__mro__")) return v->as.map.mro ? spy_retain(v->as.map.mro) : spy_none(c);
-            if (!strcmp(name, "__base__")) return spy_retain(v->as.map.parent ? v->as.map.parent : c->none);
+            if (!strcmp(name, "__base__")) {
+                /* The base that decides the instance layout: one with a builtin
+                 * layout, else one with __slots__, else the first. */
+                SPYValue *bases = v->as.map.bases, *best = NULL;
+                int rank = -1;
+                for (size_t i = 0; !v->as.map.native && bases && bases->type == SPY_TUPLE && i < bases->as.seq.len; i++) {
+                    SPYValue *base = bases->as.seq.items[i];
+                    int r = base->type != SPY_CLASS ? 0 : class_layout(c, base) >= 0 ? 2 : slots_base(base) ? 1 : 0;
+                    if (r > rank) { rank = r; best = base; }
+                }
+                if (bases && bases->type == SPY_TUPLE && bases->as.seq.len > 1 && best) return spy_retain(best);
+                return spy_retain(v->as.map.parent ? v->as.map.parent : c->none);
+            }
             /* type.__type_params__ reads the class's own dictionary, not its bases. */
             if (!strcmp(name, "__type_params__") && !(v->as.map.meta && class_lookup(v->as.map.meta, name))) {
                 SPYValue *params = name_local(v, name);
