@@ -235,7 +235,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Expression lists | Unpacking, Displays
 6. Expressions > Expressions > Expression lists > Iterable unpacking | Unpacking, Displays
 6. Expressions > Expressions > Evaluation order | Evaluation
-6. Expressions > Expressions > Operator precedence | TODO: Precedence
+6. Expressions > Expressions > Operator precedence | Precedence
 7. Simple statements | = sections
 7. Simple statements > Simple statements | SimpleStatements
 7. Simple statements > Simple statements > Expression statements | CompileModes
