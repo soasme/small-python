@@ -6238,19 +6238,26 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     if (base) return get_iterator(c, base);
     if (special_dispatch(source)) {
         SPYValue *method = special_method(c, source, "__iter__");
+        /* __iter__ = None blocks iteration, the sequence protocol included. */
+        if (method && method->type == SPY_NONE) {
+            spy_release(method); return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
+        }
         if (method) {
             SPYValue *iterator = spy_call(c, method, 0, NULL);
             spy_release(method);
             if (!iterator) return NULL;
             if (iterator->type == SPY_TEMPLATE_ITERATOR || iterator->type == SPY_ITERATOR || iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(iterator)) return iterator;
             method = special_method(c, iterator, "__next__");
-            if (!method) { spy_release(iterator); return spy_error(c, "TypeError", "iter() returned a non-iterator"); }
+            if (!method) {
+                errorf(c, "TypeError", "%s.__iter__() must return an iterator, not %s", type_name(source), type_name(iterator));
+                spy_release(iterator); return NULL;
+            }
             spy_release(method);
             return iterator;
         }
         if (c->error_type[0]) return NULL;
         method = special_method(c, source, "__getitem__");
-        if (!method) return spy_error(c, "TypeError", "object is not iterable");
+        if (!method) return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
         spy_release(method);
     }
     if (!iterable_type(source)) return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));

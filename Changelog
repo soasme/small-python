@@ -482,6 +482,10 @@
   bytearray() ignores __bytes__. to_bytes() and from_bytes() name a
   non-str byteorder's type, and float.fromhex() rejects a non-str with
   CPython's message. TLA+ models of atoms, grammar, and number methods.
+- iter() and for treat __iter__ = None as not iterable, name the type of
+  a non-iterable instance, and report an __iter__ that returns a
+  non-iterator as "T.__iter__() must return an iterator, not U". TLA+
+  models of numeric hashing and iterators.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

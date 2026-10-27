@@ -315,7 +315,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | NumericTypes, NumberMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | NumericHash
 11. Built-in types > Built-in Types > Boolean Type - `bool` | Truth, NumericTypes
-11. Built-in types > Built-in Types > Iterator Types | TODO: Iteration, Iterators
+11. Built-in types > Built-in Types > Iterator Types | Iteration, Iterators
 11. Built-in types > Built-in Types > Iterator Types > Generator Types | Generators
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` | = sections
 11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Common Sequence Operations | SeqOps

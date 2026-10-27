@@ -292,3 +292,19 @@ for i in range(1):
     with Manager("loop", log):
         break
 assert_eq(log, [("enter", "r"), ("exit", "r", None), ("enter", "loop"), ("exit", "loop", None)])
+
+# for and iter() name the type that cannot be iterated, and __iter__ = None blocks iteration.
+class NotAnIterator:
+    def __iter__(self): return 5
+class Blocked:
+    __iter__ = None
+    def __getitem__(self, index): return index
+for source, message in ((NotAnIterator(), "NotAnIterator.__iter__() must return an iterator, not int"),
+                        (Blocked(), "'Blocked' object is not iterable"), (object(), "'object' object is not iterable")):
+    try:
+        for item in source:
+            pass
+    except TypeError as error:
+        assert_eq(str(error), message)
+    else:
+        raise AssertionError("iterated " + message)
