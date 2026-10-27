@@ -51,10 +51,33 @@ def assert_same(actual, expected, message=""):
              f"{expected!r} ({type(expected).__name__})")
 
 
-def assert_raises(exception, function, *args, message=None, **kwargs):
+class Raises:
+    """The with-statement form of assert_raises; .exception holds what was caught."""
+
+    def __init__(self, exception, message):
+        self.expected, self.message, self.exception = exception, message, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        if kind is None:
+            fail(f"expected {self.expected!r}, nothing was raised")
+        if not issubclass(kind, self.expected):
+            fail(f"expected {self.expected!r}, got {kind.__name__}: {value}")
+        if self.message is not None and str(value) != self.message:
+            fail(f"{kind.__name__} message {str(value)!r} != {self.message!r}")
+        self.exception = value
+        return True
+
+
+def assert_raises(exception, function=None, *args, message=None, **kwargs):
     """Call function and require it to raise exception (a type or tuple).
 
-    With message, str() of the exception must equal it. Returns the exception."""
+    With message, str() of the exception must equal it. Returns the exception.
+    Without function, return a context manager that checks its block."""
+    if function is None:
+        return Raises(exception, message)
     try:
         function(*args, **kwargs)
     except exception as caught:
@@ -64,6 +87,20 @@ def assert_raises(exception, function, *args, message=None, **kwargs):
     except BaseException as other:
         fail(f"expected {exception!r}, got {type(other).__name__}: {other}")
     fail(f"expected {exception!r}, nothing was raised")
+
+
+class TestFailingBool:
+    """An object whose truth test raises RuntimeError."""
+
+    def __bool__(self):
+        raise RuntimeError
+
+
+class TestFailingIter:
+    """An iterable whose iter() raises RuntimeError."""
+
+    def __iter__(self):
+        raise RuntimeError
 
 
 def assert_syntax_error(source, mode="exec", exception=SyntaxError):
