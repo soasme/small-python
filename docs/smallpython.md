@@ -233,8 +233,8 @@ the language. All 50 tests currently pass.
 transition of the bounded models on the oracle and on spy. They cover
 generator and coroutine methods, try/with control flow and exception context,
 name resolution, integer arithmetic, argument binding, unpacking, method
-resolution order, operator dispatch, attribute access, and object
-finalization and cycle collection; `SpyGC.tla`
+resolution order, operator dispatch, attribute access, pattern matching,
+evaluation order, class creation, and object finalization and cycle collection; `SpyGC.tla`
 also checks spy's own memory-management algorithm against the language
 model step for step. The [README](../tests/tla/README.md) states what these
 checks do and do not establish.

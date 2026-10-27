@@ -14,6 +14,9 @@ and tied to real implementations by replaying them.
 | `MRO.tla` | C3 linearization of class hierarchies, duplicate bases, and inconsistent orders | yes |
 | `Operators.tla` | dispatch of `+`, `+=`, `==`, `!=`, `<` to special methods: reflected methods, subclass priority, NotImplemented, in-place fallback, default comparisons | yes |
 | `Attributes.tla` | getting, setting, and deleting an attribute through data and non-data descriptors, properties, slots, the instance dict, class attributes, and `__getattr__` | yes |
+| `Match.tla` | `match` statements of two cases over literal, singleton, capture, wildcard, sequence, star, mapping, class, or, and as patterns | yes |
+| `Evaluation.tla` | evaluation order of operands, short-circuiting, chained comparisons, call arguments, displays, and assignment targets | yes |
+| `ClassCreation.tla` | the order of `__prepare__`, the class body, metaclass `__new__`/`__init__`, `__set_name__`, `__init_subclass__`, and class decorators | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
