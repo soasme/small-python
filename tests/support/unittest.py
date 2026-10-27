@@ -560,6 +560,17 @@ class TestCase:
             self.fail(self._formatMessage(msg, f'Second {seq_type_name} has no length.    Non-sequence?'))
         if seq1 == seq2:
             return
+        # As CPython: equal items in equal numbers make different sequence types equal.
+        for i in range(min(len(seq1), len(seq2))):
+            try:
+                item1, item2 = seq1[i], seq2[i]
+            except (TypeError, IndexError, NotImplementedError):
+                break
+            if item1 != item2:
+                break
+        else:
+            if len(seq1) == len(seq2) and seq_type is None and type(seq1) != type(seq2):
+                return
         self.fail(self._formatMessage(msg, f'{seq_type_name.capitalize()}s differ: {_safe_repr(seq1)} != {_safe_repr(seq2)}'))
 
     def assertListEqual(self, list1, list2, msg=None):

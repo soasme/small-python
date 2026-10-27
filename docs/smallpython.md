@@ -390,7 +390,16 @@ default), `latin-1`, or `ascii`, the codecs `str.encode` supports; integer
 descriptors and `opener` are refused. `OSError(errno, strerror, filename,
 winerror, filename2)` follows CPython: the errno selects the subclass, the
 attributes are set, a filename shortens `args`, and `str` gives
-`[Errno N] message: 'name'`. `exit` and `quit`
+`[Errno N] message: 'name'`. Exception fields (`args`, the chaining
+attributes, and each class's members such as `errno`, `msg`, `value`, or
+`name`) are kept outside the instance `__dict__`, as CPython's C members are:
+deleting one follows CPython, and `BaseExceptionGroup`'s `message` and
+`exceptions` are read-only. A group accepts any sequence and keeps the repr of
+a custom one. `__reduce__` and `__setstate__` follow `BaseException`,
+`OSError`, `ImportError`, and `AttributeError`. Unicode errors take and expose
+`encoding`, `object`, `start`, `end`, and `reason`, and codec failures raise
+them with those fields, covering a run of unencodable characters. The class
+attributes are not yet `member_descriptor` objects. `exit` and `quit`
 raise `SystemExit` with their code, and `SystemExit.code` follows CPython.
 `__build_class__` creates a class as a class statement does, calling an
 ordinary function for the body; `__lazy_import__` returns a lazy import object

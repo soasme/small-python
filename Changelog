@@ -269,3 +269,9 @@
 - Built-in iterators' __length_hint__ (sequence, dict, set, range, reversed),
   and PyObject_LengthHint error propagation in list(), list.extend, and
   bytearray.extend.
+- Exception fields live outside the instance __dict__ as C members do, with
+  CPython's deletion rules; read-only group message/exceptions; groups over
+  any sequence with the saved repr; BaseException/OSError/ImportError/
+  AttributeError __reduce__, __setstate__, and __getstate__; Unicode error
+  fields, constructor checks, and str; codec errors carry their fields.
+- __repr__/__str__ returning a non-str raise CPython 3.15's message.
