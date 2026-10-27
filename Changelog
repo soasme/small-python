@@ -336,3 +336,8 @@
   a bad __await__ result names the awaited type.
 - Spec tests for built-in type methods, primaries and evaluation order,
   top-level components, and object identity, equality, and hashing.
+- The buffer protocol (PEP 688): objects with __buffer__ work in bytes(),
+  bytearray(), concatenation, join, and bytes searches; str and bytes
+  subclasses are accepted as search needles.
+- object.__repr__ uses the qualified name and omits the builtins module;
+  type() arity and __classcell__ validation follow CPython.

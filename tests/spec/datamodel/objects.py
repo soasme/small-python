@@ -95,3 +95,22 @@ a.__class__ = Other
 assert_is(type(a), Other)
 assert_raises(TypeError, setattr, a, "__class__", int)
 assert_raises(TypeError, setattr, 1, "__class__", bool)
+
+# object.__repr__ names the module (omitting builtins) and qualified name.
+class Outer:
+    class Inner: pass
+assert_true(repr(Outer.Inner()).startswith("<__main__.Outer.Inner object at "))
+assert_true(repr(object()).startswith("<object object at "))
+
+# Emulating buffer types (PEP 688): __buffer__ returns a memoryview.
+class Exporter:
+    def __buffer__(self, flags): return memoryview(b"hi")
+assert_eq((bytes(Exporter()), bytearray(Exporter()), memoryview(Exporter()).tobytes()), (b"hi", bytearray(b"hi"), b"hi"))
+assert_eq((b"x" + Exporter(), b"-".join([Exporter(), b"!"]), b"ahi".find(Exporter()), b"hi!".startswith(Exporter())), (b"xhi", b"hi-!", 1, True))
+class BadExporter:
+    def __buffer__(self, flags): return b"not a view"
+assert_raises(TypeError, memoryview, BadExporter())
+# Subclasses of str and bytes are accepted wherever their base is.
+class Text(str): pass
+class Data(bytes): pass
+assert_eq(("abc".find(Text("c")), b"abc".find(Data(b"b")), "ab".endswith((Text("b"),))), (2, 1, True))

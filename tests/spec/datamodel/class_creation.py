@@ -89,3 +89,8 @@ def outer():
     class Inner: pass
     return Inner
 assert_eq(outer().__qualname__, "outer.<locals>.Inner")
+
+# type() takes one or three arguments; __classcell__ must be a cell.
+assert_raises(TypeError, type, 1, 2, message="type() takes 1 or 3 arguments")
+e = assert_raises(TypeError, type, "X", (), {"__classcell__": 1})
+assert_eq(str(e), "__classcell__ must be a nonlocal cell, not <class 'int'>")

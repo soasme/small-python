@@ -2235,9 +2235,13 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             } else if (args->as.seq.len) status = format_value(b, args->as.seq.len == 1 ? args->as.seq.items[0] : args,
                 args->as.seq.len == 1 && subclass(v->as.map.parent, name_local(b->ctx->classes, "KeyError")));
         } else {
-            SPYValue *module = name_local(v->as.map.parent, "__module__");
+            /* object.__repr__: the class's module (unless builtins) and qualified name. */
+            SPYValue *module = name_local(v->as.map.parent, "__module__"), *name = name_local(v->as.map.parent, "__qualname__");
             snprintf(num, sizeof(num), " object at %p>", (void *)v);
-            status = puts_buffer(b, "<") || puts_buffer(b, module->as.string.data) || puts_buffer(b, ".") || puts_buffer(b, type_name(v)) || puts_buffer(b, num);
+            status = puts_buffer(b, "<") ||
+                (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins") &&
+                 (puts_buffer(b, module->as.string.data) || puts_buffer(b, "."))) ||
+                puts_buffer(b, name && name->type == SPY_STRING ? name->as.string.data : type_name(v)) || puts_buffer(b, num);
         }
         b->ctx->depth--; return status ? -1 : 0;
     }
@@ -6978,7 +6982,8 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
     if (is_set(a) && is_set(b) && (op == '|' || op == '&' || op == '-' || op == '^')) return set_binary(c, op, a, b);
     if (op == '|' && is_dict(a) && is_dict(b)) return dict_union(c, a, b);
     if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
-        (b->type == SPY_BYTES || b->type == SPY_BYTEARRAY || b->type == SPY_MEMORYVIEW)) {
+        (b->type == SPY_BYTES || b->type == SPY_BYTEARRAY || b->type == SPY_MEMORYVIEW ||
+         (b->type == SPY_INSTANCE && class_lookup(b->as.map.parent, "__buffer__")))) {
         SPYValue *copy, *right = buffer_bytes(c, b, &copy);
         if (!right) return NULL;
         Buffer out = {.ctx = c};
@@ -9059,6 +9064,11 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
 static int memory_check(SPYContext *, SPYValue *);
 static SPYValue *memory_bytes(SPYContext *, SPYValue *);
 static SPYValue *method_arity(SPYContext *, const char *, const char *, size_t, size_t, size_t);
+/* A memoryview or a Python object exporting a buffer through __buffer__. */
+static int buffer_exporter(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_MEMORYVIEW || (v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) &&
+        !builtin_value(c, v, SPY_BYTEARRAY) && class_lookup(v->as.map.parent, "__buffer__"));
+}
 static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t argc, SPYValue *const *argv) {
     if (argc < 1 || argc > 3) {
         const char *name = method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
@@ -9066,18 +9076,19 @@ static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t
         return method_arity(c, type_name(self), name, 1, 3, argc);
     }
     int tail = method == M_STARTSWITH || method == M_ENDSWITH;
-    if (self->type == SPY_BYTES && (argv[0]->type == SPY_MEMORYVIEW || (tail && argv[0]->type == SPY_TUPLE))) {
+    if (self->type == SPY_BYTES && (buffer_exporter(c, argv[0]) || (tail && argv[0]->type == SPY_TUPLE))) {
         // Buffer needles search as their bytes.
         SPYValue *needle;
-        if (argv[0]->type == SPY_MEMORYVIEW) needle = memory_check(c, argv[0]) ? NULL : memory_bytes(c, argv[0]);
+        if (argv[0]->type != SPY_TUPLE) buffer_bytes(c, argv[0], &needle);
         else {
             size_t n = argv[0]->as.seq.len, i = 0;
-            for (; i < n && argv[0]->as.seq.items[i]->type != SPY_MEMORYVIEW; i++) {}
+            for (; i < n && !buffer_exporter(c, argv[0]->as.seq.items[i]); i++) {}
             if (i == n) goto search;
             if (!(needle = value_new(c, SPY_TUPLE))) return NULL;
             for (i = 0; i < n; i++) {
                 SPYValue *item = argv[0]->as.seq.items[i];
-                item = item->type != SPY_MEMORYVIEW ? spy_retain(item) : memory_check(c, item) ? NULL : memory_bytes(c, item);
+                if (!buffer_exporter(c, item)) spy_retain(item);
+                else buffer_bytes(c, item, &item);
                 int status = !item || sequence_append(c, needle, item);
                 spy_release(item);
                 if (status) { spy_release(needle); return NULL; }
@@ -9122,9 +9133,11 @@ search:;
             if (code < 0 || code > 255) return spy_error(c, "ValueError", "byte must be in range(0, 256)");
             byte = (char)(unsigned char)code; needle = &byte; size = 1;
         } else {
-            if (part->type != self->type && !(self->type == SPY_BYTES && part->type == SPY_BYTEARRAY))
+            SPYValue *text = builtin_value(c, part, self->type);
+            if (!text && self->type == SPY_BYTES) text = builtin_value(c, part, SPY_BYTEARRAY);
+            if (!text)
                 return spy_error(c, "TypeError", self->type == SPY_STRING ? "substring must be str" : "substring must be bytes or an integer");
-            needle = part->as.string.data; size = part->as.string.len;
+            needle = text->as.string.data; size = text->as.string.len;
         }
         if (tail) {
             if (valid && size <= last - first && !memcmp(self->as.string.data +
@@ -12664,7 +12677,14 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
         Entry *entry = &namespace->as.map.items[i];
         if (entry->value->type == V_UNBOUND) continue;
         if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__qualname__")) name_set(c, cls, "__qualname__", entry->value);
-        else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
+        else if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__classcell__")) {
+            /* spy binds __class__ itself; the cell is validated, not stored. */
+            if (entry->value->type != SPY_CELL) {
+                SPYValue *kind = value_class(c, entry->value), *text = kind ? stringify(c, kind, 1) : NULL;
+                if (text) errorf(c, "TypeError", "__classcell__ must be a nonlocal cell, not %s", text->as.string.data);
+                spy_release(text);
+            }
+        } else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (qualname->type != SPY_STRING) spy_error(c, "TypeError", "type __qualname__ must be a str");
@@ -18229,13 +18249,23 @@ static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) {
     SPYValue *result = spy_bytes(c, out.data ? out.data : "", out.len);
     free(out.data); return result;
 }
+static SPYValue *memory_from(SPYContext *, SPYValue *);
+static int buffer_exporter(SPYContext *, SPYValue *);
 /* The bytes of a bytes-like object: a borrowed bytes or bytearray value, or
- * for a memoryview a contiguous copy returned in *owned. NULL otherwise. */
+ * for a memoryview or a __buffer__ exporter a contiguous copy returned in
+ * *owned. NULL otherwise. */
 static SPYValue *buffer_bytes(SPYContext *c, SPYValue *v, SPYValue **owned) {
     *owned = NULL;
     SPYValue *bytes = builtin_value(c, v, SPY_BYTES);
     if (!bytes) bytes = builtin_value(c, v, SPY_BYTEARRAY);
-    if (bytes || v->type != SPY_MEMORYVIEW || memory_check(c, v)) return bytes;
+    if (bytes) return bytes;
+    if (v->type == SPY_INSTANCE && class_lookup(v->as.map.parent, "__buffer__")) {
+        SPYValue *view = memory_from(c, v);
+        if (view) *owned = memory_check(c, view) ? NULL : memory_bytes(c, view);
+        spy_release(view);
+        return *owned;
+    }
+    if (v->type != SPY_MEMORYVIEW || memory_check(c, v)) return NULL;
     return *owned = memory_bytes(c, v);
 }
 /* memoryview(object): bytes and bytearray export their buffers, a view
@@ -19120,6 +19150,11 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (!result->as.string.data) { spy_release(result); return NULL; }
             return result;
         }
+        if (buffer_exporter(c, a)) {
+            SPYValue *copy;
+            buffer_bytes(c, a, &copy);
+            return copy;
+        }
         SPYValue *iterator = get_iterator(c, a);
         if (!iterator) return NULL;
         Buffer out = {.ctx = c};
@@ -19292,7 +19327,7 @@ execution_fail:
         spy_release(env); spy_release(unit); return NULL;
     }
     if (id == B_TYPE) {
-        if (argc != 1) goto arity;
+        if (argc != 1) return spy_error(c, "TypeError", "type() takes 1 or 3 arguments");
         return spy_retain(value_class(c, a));
     }
     if (id == B_ISINSTANCE || id == B_ISSUBCLASS) {
@@ -20334,7 +20369,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
     switch ((int)(intptr_t)data) {
     case 0: /* __new__ */
         if (argc == 2 && argv[0] == type && (!keywords || !keywords->as.map.len)) return spy_retain(value_class(c, argv[1]));
-        if (argc != 4) return spy_error(c, "TypeError", "type.__new__() takes exactly 3 arguments");
+        if (argc != 4) return errorf(c, "TypeError", "type.__new__() takes exactly 3 arguments (%zu given)", argc ? argc - 1 : 0);
         if (argv[0]->type != SPY_CLASS || !subclass(argv[0], type))
             return errorf(c, "TypeError", "type.__new__(X): X is not a type object (%s)", type_name(argv[0]));
         return create_class(c, argv[0], argv[1], argv[2], argv[3], keywords);
