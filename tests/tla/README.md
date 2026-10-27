@@ -85,6 +85,7 @@ and tied to real implementations by replaying them.
 | `MatchGuards.tla` | match statements of up to two guarded or unguarded case blocks over literal, capture, value, and group patterns: evaluation order, bindings left by failed guards, and unreachable irrefutable cases | yes |
 | `FunctionDefs.tla` | the evaluation order of decorators, defaults, bases, and bodies for every def, lambda, and class of up to three decorators and two defaults or bases; parameter list rules, docstrings and names, lambdas, and assignment expressions | yes |
 | `Precedence.tla` | the grouping of every pair of binary arithmetic and bitwise operators and of each unary operator on either side of one, over symbolic operands; boolean operators, comparisons, conditional expressions, lambda, await, and primaries | yes |
+| `Sentinels.tla` | `sentinel()` construction and its argument errors, representation, identity and equality, attributes, copying, pickling reduction, `\|` in type expressions, and the type's restrictions | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -202,7 +203,8 @@ needing integers, and `(1+1j) ** 1000000` returned an infinity; an
 index too large for a Py_ssize_t was reported as out of range, and
 deleting an item from a type without `__delitem__` was worded without
 regard to whether the type has sequence methods and the key is an index;
-and a global deleted in `exec()`'s namespace read as an unbound local.
+a global deleted in `exec()`'s namespace read as an unbound local,
+and `sentinel()` refused `repr=` and a new `__module__`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

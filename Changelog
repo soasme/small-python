@@ -472,6 +472,10 @@
   sequence methods, as CPython does. TLA+ model of subscriptions.
 - A global deleted at module level of exec()'s namespace raises NameError
   when read, not UnboundLocalError. TLA+ model of simple statements.
+- sentinel() accepts repr= for the object's representation; its
+  __module__ can be set and deleted, and setting __name__ raises
+  "readonly attribute", as in CPython. TLA+ models of operator
+  precedence and sentinels.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

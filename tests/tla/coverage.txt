@@ -6,7 +6,7 @@
 0. Scope and conformance > 0.3 Core profile [SLP315-CORE] | - profile definition: its requirements are the chapters it lists, mapped below
 0. Scope and conformance > 0.4 Host profile [SLP315-HOST] | - profile definition: host services are outside Core
 0. Scope and conformance > 0.5 Extension profile [SLP315-EXT] | - Extension profile: CPython C API compatibility, separate from Core
-0. Scope and conformance > 0.6 Required 3.15 distinctions [SLP315-EDITION] | TODO: LazyImports, FrozenDicts, Sentinels, Comprehensions, Identifiers
+0. Scope and conformance > 0.6 Required 3.15 distinctions [SLP315-EDITION] | LazyImports, FrozenDicts, Sentinels, Comprehensions, Identifiers
 0. Scope and conformance > 0.7 Abstract operations and observable behavior [SLP315-OBS] | Evaluation, Operators, GC, SpyGC, IntArith
 0. Scope and conformance > 0.8 Evidence and conformance claims [SLP315-TEST] | - requirements on test reports, not language behavior
 0. Scope and conformance > 0.9 Edition stability and regeneration [SLP315-VERSION] | - the edition's revision process

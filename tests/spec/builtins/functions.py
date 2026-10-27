@@ -210,3 +210,20 @@ assert_is(type(NotImplemented)(), NotImplemented)
 assert_is(type(...)(), Ellipsis)
 assert_is(type(None)(), None)
 assert_raises(TypeError, bool, NotImplemented)
+
+# sentinel: an optional repr, a writable and deletable __module__, a read-only __name__.
+marker = sentinel("MARKER", repr="<MARKER>")
+assert_eq((repr(marker), str(marker), marker.__name__), ("<MARKER>", "<MARKER>", "MARKER"))
+assert_eq(repr(sentinel("PLAIN", repr=None)), "PLAIN")
+assert_raises(TypeError, sentinel, "X", repr=1)
+assert_raises(TypeError, sentinel, "X", other=1)
+marker.__module__ = "elsewhere"
+assert_eq(marker.__module__, "elsewhere")
+del marker.__module__
+assert_true(not hasattr(marker, "__module__"))
+try:
+    marker.__name__ = "OTHER"
+except AttributeError as error:
+    assert_eq(str(error), "readonly attribute")
+else:
+    raise AssertionError("sentinel __name__ is writable")

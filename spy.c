@@ -101,7 +101,7 @@ struct SPYValue {
         struct { SPYValue *obj, *source, *view; ptrdiff_t *layout, offset; size_t itemsize; int64_t hash;
                  int ndim, readonly, released, hashed; char format[4]; } memory;
         struct { SPYValue *strings, *interpolations; } template;
-        struct { SPYValue *name, *module; } sentinel;
+        struct { SPYValue *name, *module, *repr; } sentinel;
         /* A closure cell: the variable name in its defining environment, or
          * its own value when env is NULL (types.CellType). */
         struct { SPYValue *env, *name, *value; } cell;
@@ -476,7 +476,8 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         break;
     case SPY_SENTINEL:
         visit(v->as.sentinel.name, data);
-        visit(v->as.sentinel.module, data);
+        if (v->as.sentinel.module) visit(v->as.sentinel.module, data);
+        if (v->as.sentinel.repr) visit(v->as.sentinel.repr, data);
         break;
     case SPY_TRACEBACK:
         if (v->as.traceback.next) visit(v->as.traceback.next, data);
@@ -2335,7 +2336,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     case SPY_MEMORYVIEW:
         snprintf(num, sizeof(num), "<%smemory at %p>", v->as.memory.released ? "released " : "", (void *)v);
         return puts_buffer(b, num);
-    case SPY_SENTINEL: return format_value(b, v->as.sentinel.name, 0);
+    case SPY_SENTINEL: return format_value(b, v->as.sentinel.repr ? v->as.sentinel.repr : v->as.sentinel.name, 0);
     case SPY_CELL: {
         SPYValue *value = cell_contents(v);
         if (value) snprintf(num, sizeof(num), "<cell at %p: %.80s object at %p>", (void *)v, type_name(value), (void *)value);
@@ -8348,8 +8349,11 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         SPYValue *value = cell_contents(v);
         return value ? spy_retain(value) : spy_error(c, "ValueError", "Cell is empty");
     }
-    if (v->type == SPY_SENTINEL && (!strcmp(name, "__name__") || !strcmp(name, "__module__")))
-        return spy_retain(name[2] == 'n' ? v->as.sentinel.name : v->as.sentinel.module);
+    if (v->type == SPY_SENTINEL && !strcmp(name, "__name__")) return spy_retain(v->as.sentinel.name);
+    if (v->type == SPY_SENTINEL && !strcmp(name, "__module__")) {
+        if (v->as.sentinel.module) return spy_retain(v->as.sentinel.module);
+        return errorf(c, "AttributeError", "'sentinel' object has no attribute '__module__'");
+    }
     if (v->type == SPY_TEMPLATE) {
         if (!strcmp(name, "strings")) return spy_retain(v->as.template.strings);
         if (!strcmp(name, "interpolations")) return spy_retain(v->as.template.interpolations);
@@ -10114,6 +10118,12 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name)
     else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object));
     spy_release(existing); return -1;
 }
+/* A sentinel's __module__ is a writable member (value NULL deletes); __name__ is read-only. */
+static int sentinel_set(SPYContext *c, SPYValue *sentinel, const char *name, SPYValue *value) {
+    if (name[2] == 'n') { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
+    if (!value && !sentinel->as.sentinel.module) { spy_error(c, "AttributeError", "__module__"); return -1; }
+    spy_retain(value); spy_release(sentinel->as.sentinel.module); sentinel->as.sentinel.module = value; return 0;
+}
 /* tb_next accepts a traceback or None that does not lead back to this one. */
 /* A frame's writable attributes (value NULL deletes); 1 if name is none of them. */
 static int frame_set(SPYContext *c, SPYValue *frame, const char *name, SPYValue *value) {
@@ -10240,6 +10250,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     }
     if (object->type == SPY_FRAME) { int status = frame_set(c, object, name, value); if (status <= 0) return status; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
+    if (object->type == SPY_SENTINEL && (!strcmp(name, "__name__") || !strcmp(name, "__module__"))) return sentinel_set(c, object, name, value);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_PROPERTY && (!strcmp(name, "__name__") || !strcmp(name, "__doc__"))) {
         SPYValue **field = !strcmp(name, "__name__") ? &object->as.property.name : &object->as.property.doc;
@@ -14448,6 +14459,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (object->type == SPY_PROPERTY && !strcmp(name, "__name__")) {
         spy_release(object->as.property.name); object->as.property.name = NULL; return 0;
     }
+    if (object->type == SPY_SENTINEL && (!strcmp(name, "__name__") || !strcmp(name, "__module__"))) return sentinel_set(c, object, name, NULL);
     if (object->type == SPY_FUNCTION) {
         if (!strcmp(name, "__annotate__")) { spy_error(c, "TypeError", "__annotate__ cannot be deleted"); return -1; }
         /* Deleting __annotations__ forgets __annotate__ too. */
@@ -19483,16 +19495,24 @@ enum { MV_GETITEM, MV_SETITEM, MV_DELITEM, MV_LEN, MV_ITER, MV_EQ, MV_NE, MV_HAS
        MV_BUFFER, MV_RELEASE_BUFFER, MV_RELEASE, MV_TOBYTES, MV_TOLIST, MV_HEX, MV_TOREADONLY, MV_CAST, MV_COUNT, MV_INDEX, MV_NEW };
 /* PEP 661 sentinels: unique named objects whose module is the creating frame's. */
 static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    if (argc > 2) return errorf(c, "TypeError", "sentinel() takes at most 2 arguments (%zu given)", argc);
+    size_t given = argc + (keywords ? keywords->as.map.len : 0);
+    if (given > 2) return errorf(c, "TypeError", "sentinel() takes at most 2 arguments (%zu given)", given);
     if (argc != 1) return errorf(c, "TypeError", "sentinel() takes exactly 1 positional argument (%zu given)", argc);
-    if (keywords && keywords->as.map.len)
-        return errorf(c, "TypeError", "sentinel() got an unexpected keyword argument '%s'", keywords->as.map.items[0].key->as.string.data);
+    SPYValue *repr = NULL;
+    if (keywords && keywords->as.map.len) {
+        const char *keyword = keywords->as.map.items[0].key->as.string.data;
+        if (strcmp(keyword, "repr")) return errorf(c, "TypeError", "sentinel() got an unexpected keyword argument '%s'", keyword);
+        repr = keywords->as.map.items[0].value;
+        if (repr->type == SPY_NONE) repr = NULL;
+        else if (!builtin_value(c, repr, SPY_STRING))
+            return errorf(c, "TypeError", "sentinel() argument 'repr' must be str or None, not %s", type_name(repr));
+    }
     if (!builtin_value(c, argv[0], SPY_STRING)) return errorf(c, "TypeError", "sentinel() argument 1 must be str, not %s", type_name(argv[0]));
     SPYValue *module = frame_module_name(c, 0);
     if (!module) return NULL;
     SPYValue *v = value_new(c, SPY_SENTINEL);
     if (!v) { spy_release(module); return NULL; }
-    v->as.sentinel.name = spy_retain(argv[0]); v->as.sentinel.module = module;
+    v->as.sentinel.name = spy_retain(argv[0]); v->as.sentinel.module = module; v->as.sentinel.repr = spy_retain(repr);
     return v;
 }
 /* types.CellType([contents]) */
