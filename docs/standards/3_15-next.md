@@ -3828,3 +3828,110 @@ eval: expressions NEWLINE* ENDMARKER
 ```
 
 `eval` and `compile` with mode `'eval'` parse an expression list.
+
+## 18 Error Handling
+
+### 18.1 Exceptions
+
+#### 18.1.1 Raising
+
+An exception is *raised* when an algorithm returns a raise completion carrying an
+exception object *e* (an instance of `BaseException`). The completion
+propagates outward through enclosing statements, each of which may handle it
+(15.4, 15.5), and through frames: when a frame's evaluation ends with a raise
+completion, the call that ran it returns the same completion to its caller
+(9.2.3).
+
+#### 18.1.2 Implicit chaining
+
+When an exception *e* is raised (by `raise`, or by an operation that fails)
+while there is a current handled exception *h* (9.5) that is not `None`:
+
+1. If *h* is *e*, do nothing.
+2. Walk the context chain from *h*: let *o* be *h*; repeat while
+   *o*.`__context__` is not `None`: if *o*.`__context__` is *e*, set
+   *o*.`__context__` to `None` and stop; otherwise set *o* to *o*.`__context__`,
+   stopping if a cycle already present in the chain is detected.
+3. Set *e*.`__context__` to *h*.
+
+Explicit chaining with `raise … from` is specified in 14.8. A traceback
+display shows `__cause__` when it is not `None`, and otherwise `__context__`
+unless `__suppress_context__` is `True`.
+
+#### 18.1.3 Tracebacks
+
+When an exception is raised, and each time it propagates out of a frame, a new
+traceback object (28.9) for that frame, recording its current position, is
+prepended to the exception's `__traceback__`: its `tb_next` is the previous
+value of `__traceback__`. The traceback of an exception that reaches a handler
+therefore lists the frames from the handler's frame down to the frame where it
+was raised. A bare `raise` (14.8) re-raises the exception with its traceback,
+to which the current frame is prepended again.
+
+#### 18.1.4 Uncaught exceptions
+
+An exception that propagates out of the main module, or out of code the host
+runs, is passed to HostReportException (Annex B), except that `SystemExit` is
+handled as Annex B specifies. An exception that cannot propagate (from
+`__del__`, or from a callback the implementation invokes without a caller) is
+passed to HostReportUnraisable.
+
+### 18.2 Syntax errors
+
+#### 18.2.1 SyntaxError objects
+
+An early error (5.1.2) is reported by raising a `SyntaxError` exception, or an
+instance of its subclasses `IndentationError` and `TabError` where this
+Standard says so, before any part of the module, `exec` source, or `eval`
+expression is evaluated. Its attributes are:
+
+| Attribute | Value |
+| --- | --- |
+| `msg` | the message given by the rule; `str(e)` is *msg* followed by " (*filename*, line *lineno*)" |
+| `filename` | the file name given to `compile`, or the host's name for the module |
+| `lineno`, `end_lineno` | the 1-based lines where the offending construct starts and ends |
+| `offset`, `end_offset` | the 1-based columns, in code points, where it starts and ends, or `None` |
+| `text` | the source line, or `None` |
+
+The `lineno` given in this Standard is normative. The column offsets should
+identify the offending token as CPython does; an implementation that cannot
+should report `None` (Annex D).
+
+#### 18.2.2 Default message
+
+When the source does not match the grammar and no more specific rule of this
+Standard applies, the message is "invalid syntax" and the location is that of
+the first token the parser could not consume. An unexpected end of input inside
+brackets raises "'*o*' was never closed" (12.2.3).
+
+#### 18.2.3 Limits
+
+An implementation may reject source text whose nesting exceeds a limit (Annex
+D), raising a `SyntaxError` exception ("too many nested parentheses", "too many
+statically nested blocks", or "too many nested f-strings") or a
+`RecursionError` exception ("maximum recursion depth exceeded during
+compilation"); it shall not crash.
+
+### 18.3 Warnings
+
+A *warning* is issued by calling the host hook HostWarn (Annex B) with a
+warning category (a subclass of `Warning`, 21.6), a message, and a location.
+The host decides whether to display, ignore, or raise it; if HostWarn raises the
+warning as an exception, it propagates from the point where the warning was
+issued. Compile-time warnings (`SyntaxWarning`) are issued while compiling, with
+the file and line of the construct, and at most once per location per
+compilation.
+
+### 18.4 Forbidden extensions
+
+An implementation shall not extend this Standard by:
+
+1. accepting source text that this Standard rejects with an early error, except
+   when a host option explicitly enables the extension and the default is to
+   reject;
+2. giving a keyword, operator, or built-in name a different meaning;
+3. changing the result, exception, or observable calls of any operation this
+   Standard specifies, including the message texts of 5.2.6;
+4. adding names to the built-in namespace that a conforming program could
+   observe through `dir(builtins)`, other than through a documented host
+   option.
