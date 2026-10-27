@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla tla-coverage libfuzzer
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla tla-coverage libfuzzer
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -129,12 +129,6 @@ install: all
 
 docs:
 	$(PYTHON) tools/check_docs.py
-
-standard:
-	uv run --no-project --with pypandoc-binary==1.17 --with Pygments==2.19.2 python tools/build_standard.py
-
-check-standard:
-	uv run --no-project --with pypandoc-binary==1.17 --with Pygments==2.19.2 python tools/build_standard.py --check
 
 .PHONY: unicode-data check-unicode test-unicode test-async test-stringsearch intrinsics check-intrinsics
 # The intrinsics header is checked in; regenerate it after editing intrinsics.py.

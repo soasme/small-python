@@ -36,8 +36,8 @@ is `spy`, the standalone-program generator is `spyc`, and the embedding API uses
 the `spy_*` prefix. The core consists of `spy.c` and `spy.h` and depends only on
 the C runtime and math library. It does not link or invoke CPython.
 
-The language target is [SLP-315:2026-draft1](standards/3_15.md), the project's
-versioned consolidation of the Python 3.15.0 core-language reference. The current
+The language target is [SLP-315:2026-draft2](standards/3_15.md), the project's
+versioned specification of the Python 3.15 core language. The current
 engine implements a subset of that target. It does **not** claim full Python
 3.15 compatibility or a passing CPython/Cython suite.
 
@@ -338,8 +338,9 @@ worst-case latency bound, or the few-kilobyte size goal.
 
 ### 3.1 Python language support
 
-The target is [SLP-315:2026-draft1](standards/3_15.md). It distinguishes Core
-language, Host services, and CPython Extension compatibility. The language
+The target is [SLP-315:2026-draft2](standards/3_15.md). It distinguishes Core
+language, Host services (its Annex B host hooks), and CPython Extension
+compatibility. The language
 edition, engine release, and upstream test revisions are separate identifiers.
 
 | Area | Implemented subset |
@@ -1014,7 +1015,6 @@ Annotation scopes and complete introspection remain work.
 | `docs/smallpython.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
-| `tools/build_standard.py` | Reproducible consolidation of pinned Python reference sources |
 | `AGENTS.md` | Architecture, naming, evidence, and code-taste requirements |
 
 The build remains a direct C toolchain with an ordinary Makefile. There is no
@@ -1023,11 +1023,9 @@ host Python interpreter. Documentation regeneration is an optional development
 task; the checked-in Markdown can be read without installing its conversion
 tools.
 
-Validate the checked-in documentation with `make docs`. After `make upstream`,
-`make standard` regenerates the language reference and `make check-standard`
-checks that regeneration is identical. These two optional targets use `uv`
-with pinned Pandoc and Pygments packages. They are not part of `make all` or
-required for an embedding build.
+Validate the checked-in documentation with `make docs`. The standard is
+edited by hand; `make tla-coverage` checks that each of its sections is mapped
+to the TLA+ models that cover it.
 
 `make unicode-data` regenerates the checked-in Unicode property table with the
 pinned oracle; `make check-unicode` verifies it. Ordinary C builds need neither

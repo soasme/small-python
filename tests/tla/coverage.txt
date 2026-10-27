@@ -1,454 +1,577 @@
 # Sections of docs/standards/3_15.md and the TLA+ models that cover them;
 # checked by tests/tla_coverage.py.
-0. Scope and conformance | = sections
-0. Scope and conformance > 0.1 Purpose [SLP315-SCOPE] | - informative: the document's purpose and status
-0. Scope and conformance > 0.2 Normative language [SLP315-NORM] | - defines this document's terms, not language behavior
-0. Scope and conformance > 0.3 Core profile [SLP315-CORE] | - profile definition: its requirements are the chapters it lists, mapped below
-0. Scope and conformance > 0.4 Host profile [SLP315-HOST] | - profile definition: host services are outside Core
-0. Scope and conformance > 0.5 Extension profile [SLP315-EXT] | - Extension profile: CPython C API compatibility, separate from Core
-0. Scope and conformance > 0.6 Required 3.15 distinctions [SLP315-EDITION] | LazyImports, FrozenDicts, Sentinels, Comprehensions, Identifiers
-0. Scope and conformance > 0.7 Abstract operations and observable behavior [SLP315-OBS] | Evaluation, Operators, GC, SpyGC, IntArith
-0. Scope and conformance > 0.8 Evidence and conformance claims [SLP315-TEST] | - requirements on test reports, not language behavior
-0. Scope and conformance > 0.9 Edition stability and regeneration [SLP315-VERSION] | - the edition's revision process
-Reference chapter contents | - table of contents
-1. Language reference introduction and notation | = sections
-1. Language reference introduction and notation > Introduction | - informative: introduction
-1. Language reference introduction and notation > Introduction > Alternate Implementations | - informative: survey of implementations
-1. Language reference introduction and notation > Introduction > Notation | - informative: the notation this document uses
-1. Language reference introduction and notation > Introduction > Notation > Lexical and Syntactic definitions | - informative: the notation this document uses
-2. Lexical analysis | = sections
-2. Lexical analysis > Lexical analysis | Tokens
-2. Lexical analysis > Lexical analysis > Line structure | = sections
-2. Lexical analysis > Lexical analysis > Line structure > Logical lines | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Physical lines | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Comments | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Encoding declarations | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Explicit line joining | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Implicit line joining | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Blank lines | LineStructure
-2. Lexical analysis > Lexical analysis > Line structure > Indentation | Indentation
-2. Lexical analysis > Lexical analysis > Line structure > Whitespace between tokens | Tokens
-2. Lexical analysis > Lexical analysis > Line structure > End marker | Indentation
-2. Lexical analysis > Lexical analysis > Other tokens | Tokens
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) | Identifiers
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Keywords | Identifiers
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Soft Keywords | Identifiers, Match
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Reserved classes of identifiers | Identifiers, Mangling
-2. Lexical analysis > Lexical analysis > Names (identifiers and keywords) > Non-ASCII characters in names | Identifiers
-2. Lexical analysis > Lexical analysis > Literals | StringLiterals, NumericLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Triple-quoted strings | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > String prefixes | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Ignored end of line | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Escaped characters | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Octal character | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal character | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Named Unicode character | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Hexadecimal Unicode characters | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Escape sequences > Unrecognized escape sequences | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Bytes literals | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Raw string literals | StringLiterals
-2. Lexical analysis > Lexical analysis > String and Bytes literals > f-strings | FStrings
-2. Lexical analysis > Lexical analysis > String and Bytes literals > t-strings | TStrings
-2. Lexical analysis > Lexical analysis > String and Bytes literals > Formal grammar for f-strings | FStrings
-2. Lexical analysis > Lexical analysis > Numeric literals | = sections
-2. Lexical analysis > Lexical analysis > Numeric literals > Integer literals | NumericLiterals
-2. Lexical analysis > Lexical analysis > Numeric literals > Floating-point literals | NumericLiterals
-2. Lexical analysis > Lexical analysis > Numeric literals > Imaginary literals | NumericLiterals
-2. Lexical analysis > Lexical analysis > Operators and delimiters | Tokens
-3. Data model | = sections
-3. Data model > Data model | = sections
-3. Data model > Data model > Objects, values and types | Objects
-3. Data model > Data model > The standard type hierarchy | = sections
-3. Data model > Data model > The standard type hierarchy > None | Singletons
-3. Data model > Data model > The standard type hierarchy > NotImplemented | Singletons, Operators
-3. Data model > Data model > The standard type hierarchy > Ellipsis | Singletons
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` | = sections
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Integral` | NumericTypes, IntArith
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Real` (`float`) | NumericTypes
-3. Data model > Data model > The standard type hierarchy > `numbers.Number` > `numbers.Complex` (`complex`) | NumericTypes
-3. Data model > Data model > The standard type hierarchy > Sequences | = sections
-3. Data model > Data model > The standard type hierarchy > Sequences > Immutable sequences | SeqOps
-3. Data model > Data model > The standard type hierarchy > Sequences > Mutable sequences | Lists
-3. Data model > Data model > The standard type hierarchy > Set types | Sets
-3. Data model > Data model > The standard type hierarchy > Mappings | = sections
-3. Data model > Data model > The standard type hierarchy > Mappings > Dictionaries | Dicts
-3. Data model > Data model > The standard type hierarchy > Mappings > Frozen dictionaries | FrozenDicts
-3. Data model > Data model > The standard type hierarchy > Callable types | = sections
-3. Data model > Data model > The standard type hierarchy > Callable types > User-defined functions | FunctionObjects
-3. Data model > Data model > The standard type hierarchy > Callable types > Special read-only attributes | FunctionObjects
-3. Data model > Data model > The standard type hierarchy > Callable types > Special writable attributes | FunctionObjects
-3. Data model > Data model > The standard type hierarchy > Callable types > Instance methods | Methods
-3. Data model > Data model > The standard type hierarchy > Callable types > Generator functions | Generators
-3. Data model > Data model > The standard type hierarchy > Callable types > Coroutine functions | Generators, Awaitables
-3. Data model > Data model > The standard type hierarchy > Callable types > Asynchronous generator functions | AsyncGenerators
-3. Data model > Data model > The standard type hierarchy > Callable types > Built-in functions | Methods
-3. Data model > Data model > The standard type hierarchy > Callable types > Built-in methods | Methods
-3. Data model > Data model > The standard type hierarchy > Callable types > Classes | Callables
-3. Data model > Data model > The standard type hierarchy > Callable types > Class Instances | Callables
-3. Data model > Data model > The standard type hierarchy > Modules | = sections
-3. Data model > Data model > The standard type hierarchy > Modules > Import-related attributes on module objects | Imports
-3. Data model > Data model > The standard type hierarchy > Modules > Other writable attributes on module objects | ModuleObjects
-3. Data model > Data model > The standard type hierarchy > Modules > Module dictionaries | ModuleObjects
-3. Data model > Data model > The standard type hierarchy > Custom classes | = sections
-3. Data model > Data model > The standard type hierarchy > Custom classes > Special attributes | ClassObjects
-3. Data model > Data model > The standard type hierarchy > Custom classes > Special methods | SpecialLookup
-3. Data model > Data model > The standard type hierarchy > Class instances | = sections
-3. Data model > Data model > The standard type hierarchy > Class instances > Special attributes | ClassObjects
-3. Data model > Data model > The standard type hierarchy > I/O objects (also known as file objects) | - Host profile: file objects come from the Files service (SLP315-HOST)
-3. Data model > Data model > The standard type hierarchy > Internal types | = sections
-3. Data model > Data model > The standard type hierarchy > Internal types > Code objects | CodeObjects
-3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes | CodeObjects
-3. Data model > Data model > The standard type hierarchy > Internal types > Methods on code objects | CodeObjects
-3. Data model > Data model > The standard type hierarchy > Internal types > Frame objects | Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Special read-only attributes (2) | Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Special writable attributes | Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Frame object methods | Frames
-3. Data model > Data model > The standard type hierarchy > Internal types > Traceback objects | Tracebacks
-3. Data model > Data model > The standard type hierarchy > Internal types > Slice objects | Slices
-3. Data model > Data model > The standard type hierarchy > Internal types > Static method objects | MethodDescriptors
-3. Data model > Data model > The standard type hierarchy > Internal types > Class method objects | MethodDescriptors
-3. Data model > Data model > Special method names | = sections
-3. Data model > Data model > Special method names > Basic customization | BasicCustomization
-3. Data model > Data model > Special method names > Customizing attribute access | Attributes, Descriptors
-3. Data model > Data model > Special method names > Customizing attribute access > Customizing module attribute access | ModuleObjects
-3. Data model > Data model > Special method names > Customizing attribute access > Implementing Descriptors | Attributes, Descriptors
-3. Data model > Data model > Special method names > Customizing attribute access > Invoking Descriptors | Descriptors
-3. Data model > Data model > Special method names > Customizing attribute access > \_\_slots\_\_ | Slots
-3. Data model > Data model > Special method names > Customizing class creation | ClassCreation, Metaclasses
-3. Data model > Data model > Special method names > Customizing class creation > Metaclasses | Metaclasses
-3. Data model > Data model > Special method names > Customizing class creation > Resolving MRO entries | Metaclasses
-3. Data model > Data model > Special method names > Customizing class creation > Determining the appropriate metaclass | Metaclasses
-3. Data model > Data model > Special method names > Customizing class creation > Preparing the class namespace | ClassCreation
-3. Data model > Data model > Special method names > Customizing class creation > Executing the class body | ClassCreation, Scopes
-3. Data model > Data model > Special method names > Customizing class creation > Creating the class object | ClassCreation, Metaclasses
-3. Data model > Data model > Special method names > Customizing class creation > Uses for metaclasses | - informative: suggests uses for metaclasses
-3. Data model > Data model > Special method names > Customizing instance and subclass checks | InstanceChecks
-3. Data model > Data model > Special method names > Emulating generic types | ClassGetitem
-3. Data model > Data model > Special method names > Emulating generic types > The purpose of *\_\_class_getitem\_\_* | ClassGetitem
-3. Data model > Data model > Special method names > Emulating generic types > *\_\_class_getitem\_\_* versus *\_\_getitem\_\_* | ClassGetitem
-3. Data model > Data model > Special method names > Emulating callable objects | Callables
-3. Data model > Data model > Special method names > Emulating container types | Containers
-3. Data model > Data model > Special method names > Emulating numeric types | Operators, NumericProtocol
-3. Data model > Data model > Special method names > With Statement Context Managers | With
-3. Data model > Data model > Special method names > Customizing positional arguments in class pattern matching | Match
-3. Data model > Data model > Special method names > Emulating buffer types | Buffers
-3. Data model > Data model > Special method names > Annotations | Annotations
-3. Data model > Data model > Special method names > Special method lookup | SpecialLookup
-3. Data model > Data model > Coroutines | = sections
-3. Data model > Data model > Coroutines > Awaitable Objects | Awaitables
-3. Data model > Data model > Coroutines > Coroutine Objects | Generators, Awaitables
-3. Data model > Data model > Coroutines > Asynchronous Iterators | AsyncFor
-3. Data model > Data model > Coroutines > Asynchronous Context Managers | AsyncWith
-4. Execution model | = sections
-4. Execution model > Execution model | = sections
-4. Execution model > Execution model > Structure of a program | CompileModes
-4. Execution model > Execution model > Naming and binding | = sections
-4. Execution model > Execution model > Naming and binding > Binding of names | Scopes, ScopeErrors
-4. Execution model > Execution model > Naming and binding > Resolution of names | Scopes
-4. Execution model > Execution model > Naming and binding > Annotation scopes | Annotations, Generics
-4. Execution model > Execution model > Naming and binding > Lazy evaluation | Annotations, TypeAliases
-4. Execution model > Execution model > Naming and binding > Builtins and restricted execution | BuiltinsScope
-4. Execution model > Execution model > Naming and binding > Interaction with dynamic features | DynamicScopes
-4. Execution model > Execution model > Exceptions | Exceptions, Raise
-4. Execution model > Execution model > Runtime Components | = sections
-4. Execution model > Execution model > Runtime Components > General Computing Model | - informative: describes processes, threads, and the host computer
-4. Execution model > Execution model > Runtime Components > Python Runtime Model | - informative: describes interpreters and threads; Core does not require threads (SLP315-HOST)
-5. Import system | = sections
-5. Import system > The import system | = sections
-5. Import system > The import system > `importlib` | - Host profile: importable compatibility facade (SLP315-CORE)
-5. Import system > The import system > Packages | = sections
-5. Import system > The import system > Packages > Regular packages | Imports
-5. Import system > The import system > Packages > Namespace packages | Imports
-5. Import system > The import system > Searching | = sections
-5. Import system > The import system > Searching > The module cache | Imports
-5. Import system > The import system > Searching > Finders and loaders | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Searching > Import hooks | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Searching > The meta path | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Loading | Imports
-5. Import system > The import system > Loading > Loaders | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Loading > Submodules | Imports
-5. Import system > The import system > Loading > Module specs | - Host profile: module discovery metadata (SLP315-HOST)
-5. Import system > The import system > Loading > \_\_path\_\_ attributes on modules | Imports
-5. Import system > The import system > Loading > Module reprs | ModuleObjects
-5. Import system > The import system > Loading > Cached bytecode invalidation | - Host profile: module discovery service; bytecode is not prescribed (SLP315-NORM)
-5. Import system > The import system > The Path Based Finder | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > The Path Based Finder > Path entry finders | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > The Path Based Finder > Path entry finder protocol | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Replacing the standard import system | - Host profile: module discovery service (SLP315-HOST)
-5. Import system > The import system > Package Relative Imports | Imports
-5. Import system > The import system > Special considerations for \_\_main\_\_ | - Host profile: the entry module is chosen by the host (SLP315-HOST)
-5. Import system > The import system > Special considerations for \_\_main\_\_ > \_\_main\_\_.\_\_spec\_\_ | - Host profile: the entry module is chosen by the host (SLP315-HOST)
-5. Import system > The import system > References | - informative: bibliography
-6. Expressions | = sections
-6. Expressions > Expressions | = sections
-6. Expressions > Expressions > Arithmetic conversions | BinaryArith
-6. Expressions > Expressions > Atoms | Atoms
-6. Expressions > Expressions > Atoms > Built-in constants | Singletons
-6. Expressions > Expressions > Atoms > Identifiers (Names) | = sections
-6. Expressions > Expressions > Atoms > Identifiers (Names) > Private name mangling | Mangling
-6. Expressions > Expressions > Atoms > Literals | Atoms
-6. Expressions > Expressions > Atoms > Literals > Literals and object identity | Atoms
-6. Expressions > Expressions > Atoms > Literals > String literal concatenation | StringLiterals
-6. Expressions > Expressions > Atoms > Parenthesized groups | Displays
-6. Expressions > Expressions > Atoms > Container displays | Displays
-6. Expressions > Expressions > Atoms > Container displays > List displays | Displays
-6. Expressions > Expressions > Atoms > Container displays > Set displays | Displays
-6. Expressions > Expressions > Atoms > Container displays > Tuple displays | Displays
-6. Expressions > Expressions > Atoms > Container displays > Dictionary displays | Displays
-6. Expressions > Expressions > Atoms > Comprehensions | Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Filtering in comprehensions | Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Complex comprehensions | Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Unpacking in comprehensions | Comprehensions
-6. Expressions > Expressions > Atoms > Comprehensions > Asynchronous comprehensions | AsyncFor
-6. Expressions > Expressions > Atoms > Comprehensions > Formal grammar for comprehensions | Comprehensions
-6. Expressions > Expressions > Atoms > Generator expressions | Comprehensions
-6. Expressions > Expressions > Atoms > Yield expressions | Generators, YieldFrom
-6. Expressions > Expressions > Atoms > Yield expressions > Generator-iterator methods | Generators
-6. Expressions > Expressions > Atoms > Yield expressions > Examples | Generators
-6. Expressions > Expressions > Atoms > Yield expressions > Asynchronous generator functions | AsyncGenerators
-6. Expressions > Expressions > Atoms > Yield expressions > Asynchronous generator-iterator methods | AsyncGenerators
-6. Expressions > Expressions > Primaries | = sections
-6. Expressions > Expressions > Primaries > Attribute references | Attributes
-6. Expressions > Expressions > Primaries > Subscriptions and slicings | Subscripts, Slices
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > Slicings | Slices
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > Comma-separated subscripts | Subscripts
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > "Starred" subscriptions | Subscripts
-6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | Subscripts
-6. Expressions > Expressions > Primaries > Calls | Calls
-6. Expressions > Expressions > Await expression | Awaitables
-6. Expressions > Expressions > The power operator | BinaryArith
-6. Expressions > Expressions > Unary arithmetic and bitwise operations | IntArith, BinaryArith
-6. Expressions > Expressions > Binary arithmetic operations | BinaryArith
-6. Expressions > Expressions > Shifting operations | IntArith
-6. Expressions > Expressions > Binary bitwise operations | IntArith
-6. Expressions > Expressions > Comparisons | Comparisons
-6. Expressions > Expressions > Comparisons > Value comparisons | Comparisons
-6. Expressions > Expressions > Comparisons > Membership test operations | Comparisons
-6. Expressions > Expressions > Comparisons > Identity comparisons | Comparisons
-6. Expressions > Expressions > Boolean operations | Evaluation, Truth
-6. Expressions > Expressions > Assignment expressions | FunctionDefs
-6. Expressions > Expressions > Conditional expressions | Evaluation
-6. Expressions > Expressions > Lambdas | FunctionDefs
-6. Expressions > Expressions > Expression lists | Unpacking, Displays
-6. Expressions > Expressions > Expression lists > Iterable unpacking | Unpacking, Displays
-6. Expressions > Expressions > Evaluation order | Evaluation
-6. Expressions > Expressions > Operator precedence | Precedence
-7. Simple statements | = sections
-7. Simple statements > Simple statements | SimpleStatements
-7. Simple statements > Simple statements > Expression statements | CompileModes
-7. Simple statements > Simple statements > Assignment statements | Unpacking, Evaluation, SimpleStatements
-7. Simple statements > Simple statements > Assignment statements > Augmented assignment statements | Operators, Evaluation, SimpleStatements
-7. Simple statements > Simple statements > Assignment statements > Annotated assignment statements | Annotations
-7. Simple statements > Simple statements > The `assert` statement | SimpleStatements
-7. Simple statements > Simple statements > The `pass` statement | SimpleStatements
-7. Simple statements > Simple statements > The `del` statement | SimpleStatements
-7. Simple statements > Simple statements > The `return` statement | Exceptions, Generators
-7. Simple statements > Simple statements > The `yield` statement | Generators
-7. Simple statements > Simple statements > The `raise` statement | Raise
-7. Simple statements > Simple statements > The `break` statement | Iteration, Exceptions
-7. Simple statements > Simple statements > The `continue` statement | Iteration, Exceptions
-7. Simple statements > Simple statements > The `import` statement | Imports
-7. Simple statements > Simple statements > The `import` statement > Lazy imports | LazyImports
-7. Simple statements > Simple statements > The `import` statement > Lazy imports > Compatibility via `__lazy_modules__` | LazyImports
-7. Simple statements > Simple statements > The `import` statement > Future statements | Future
-7. Simple statements > Simple statements > The `global` statement | Scopes, ScopeErrors
-7. Simple statements > Simple statements > The `nonlocal` statement | Scopes, ScopeErrors
-7. Simple statements > Simple statements > The `type` statement | TypeAliases
-8. Compound statements | = sections
-8. Compound statements > Compound statements | Grammar
-8. Compound statements > Compound statements > The `if` statement | Conditionals
-8. Compound statements > Compound statements > The `while` statement | Conditionals
-8. Compound statements > Compound statements > The `for` statement | Iteration
-8. Compound statements > Compound statements > The `try` statement | Exceptions
-8. Compound statements > Compound statements > The `try` statement > `except` clause | Exceptions
-8. Compound statements > Compound statements > The `try` statement > `except*` clause | ExceptStar
-8. Compound statements > Compound statements > The `try` statement > `else` clause | Exceptions
-8. Compound statements > Compound statements > The `try` statement > `finally` clause | Exceptions
-8. Compound statements > Compound statements > The `with` statement | With
-8. Compound statements > Compound statements > The `match` statement | Match
-8. Compound statements > Compound statements > The `match` statement > Overview | Match
-8. Compound statements > Compound statements > The `match` statement > Guards | MatchGuards
-8. Compound statements > Compound statements > The `match` statement > Irrefutable Case Blocks | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > OR Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > AS Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Literal Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Capture Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Wildcard Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Value Patterns | MatchGuards
-8. Compound statements > Compound statements > The `match` statement > Patterns > Group Patterns | MatchGuards
-8. Compound statements > Compound statements > The `match` statement > Patterns > Sequence Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Mapping Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Class Patterns | Match
-8. Compound statements > Compound statements > Function definitions | FunctionDefs, Calls
-8. Compound statements > Compound statements > Class definitions | ClassCreation, MRO
-8. Compound statements > Compound statements > Class definitions > Multiple inheritance | MRO, Super
-8. Compound statements > Compound statements > Coroutines | = sections
-8. Compound statements > Compound statements > Coroutines > Coroutine function definition | Awaitables
-8. Compound statements > Compound statements > Coroutines > The `async for` statement | AsyncFor
-8. Compound statements > Compound statements > Coroutines > The `async with` statement | AsyncWith
-8. Compound statements > Compound statements > Type parameter lists | Generics
-8. Compound statements > Compound statements > Type parameter lists > Generic functions | Generics
-8. Compound statements > Compound statements > Type parameter lists > Generic classes | Generics
-8. Compound statements > Compound statements > Type parameter lists > Generic type aliases | Generics, TypeAliases
-8. Compound statements > Compound statements > Annotations | Annotations
-9. Top-level components | = sections
-9. Top-level components > Top-level components | = sections
-9. Top-level components > Top-level components > Complete Python programs | CompileModes
-9. Top-level components > Top-level components > File input | CompileModes
-9. Top-level components > Top-level components > Interactive input | CompileModes
-9. Top-level components > Top-level components > Expression input | CompileModes
-10. Complete grammar | = sections
-10. Complete grammar > Full Grammar specification | Grammar, Precedence
-11. Built-in types | = sections
-11. Built-in types > Built-in Types | = sections
-11. Built-in types > Built-in Types > Truth Value Testing | Truth
-11. Built-in types > Built-in Types > Boolean Operations --- `and`, `or`, `not` | Truth, Evaluation
-11. Built-in types > Built-in Types > Comparisons | Comparisons
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` | NumericTypes, BinaryArith
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Bitwise Operations on Integer Types | IntArith
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Integer Types | NumberMethods
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Float | NumberMethods
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Complex | NumericTypes, NumberMethods
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Hashing of numeric types | NumericHash
-11. Built-in types > Built-in Types > Boolean Type - `bool` | Truth, NumericTypes
-11. Built-in types > Built-in Types > Iterator Types | Iteration, Iterators
-11. Built-in types > Built-in Types > Iterator Types > Generator Types | Generators
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` | = sections
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Common Sequence Operations | SeqOps
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Immutable Sequence Types | SeqOps
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Mutable Sequence Types | Lists
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Lists | Lists
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Tuples | SeqOps
-11. Built-in types > Built-in Types > Sequence Types --- `list`, `tuple`, `range` > Ranges | Ranges
-11. Built-in types > Built-in Types > Text and Binary Sequence Type Methods Summary | - informative: an index of the methods specified in the sections that follow
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` | Strings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > String Methods | Strings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) | FStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Debug specifier | FStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Conversion specifier | FStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Format specifier | FStrings, FormatSpec
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Template String Literals (t-strings) | TStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > `printf`-style String Formatting | PercentFormat
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` | = sections
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes Objects | Bytes
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytearray Objects | Bytes
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes and Bytearray Operations | Bytes
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | PercentFormat
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | Buffers
-11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | Sets
-11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | Dicts, FrozenDicts, DictMethods
-11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Dictionary view objects | DictMethods
-11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` > Frozen dictionaries | FrozenDicts
-11. Built-in types > Built-in Types > Context Manager Types | With
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) | = sections
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type | TypeAnnotations, ClassGetitem, Generics
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Standard Generic Classes | TypeAnnotations, ClassGetitem, Generics
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Special Attributes of `GenericAlias` objects | TypeAnnotations, ClassGetitem, Generics
-11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Union Type | TypeAnnotations
-11. Built-in types > Built-in Types > Other Built-in Types | = sections
-11. Built-in types > Built-in Types > Other Built-in Types > Modules | ModuleObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | ClassObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Functions | FunctionObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Methods | Methods
-11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | CodeObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | ClassObjects
-11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | Singletons
-11. Built-in types > Built-in Types > Other Built-in Types > The Ellipsis Object | Singletons
-11. Built-in types > Built-in Types > Other Built-in Types > The NotImplemented Object | Singletons
-11. Built-in types > Built-in Types > Other Built-in Types > Internal Objects | Frames, CodeObjects
-11. Built-in types > Built-in Types > Special Attributes | ClassObjects
-11. Built-in types > Built-in Types > Integer string conversion length limitation | IntStrLimit
-11. Built-in types > Built-in Types > Integer string conversion length limitation > Affected APIs | IntStrLimit
-11. Built-in types > Built-in Types > Integer string conversion length limitation > Configuring the limit | IntStrLimit
-11. Built-in types > Built-in Types > Integer string conversion length limitation > Recommended configuration | - informative: advice on choosing the limit
-12. Built-in constants | = sections
-12. Built-in constants > Built-in Constants | Singletons, Constants
-12. Built-in constants > Built-in Constants > Constants added by the `site` module | - Host profile: added by the site module for interactive use (SLP315-HOST)
-13. Built-in functions | = sections
-13. Built-in functions > Built-in functions | BuiltinsNumeric, BuiltinsIter, BuiltinsObjects, BuiltinsText, BuiltinsCompile
-14. Built-in exceptions | = sections
-14. Built-in exceptions > Built-in Exceptions | = sections
-14. Built-in exceptions > Built-in Exceptions > Exception context | Raise
-14. Built-in exceptions > Built-in Exceptions > Inheriting from built-in exceptions | ExceptionObjects
-14. Built-in exceptions > Built-in Exceptions > Base classes | ExceptionObjects
-14. Built-in exceptions > Built-in Exceptions > Concrete exceptions | ConcreteExceptions
-14. Built-in exceptions > Built-in Exceptions > Concrete exceptions > OS exceptions | OSErrors
-14. Built-in exceptions > Built-in Exceptions > Warnings | ExceptionHierarchy
-14. Built-in exceptions > Built-in Exceptions > Exception groups | ExceptionGroups
-14. Built-in exceptions > Built-in Exceptions > Exception hierarchy | ExceptionHierarchy
-15. Formatting protocols and optional string helpers | = sections
-15. Formatting protocols and optional string helpers > `string` --- Common string operations | = sections
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > String constants | - Host profile: the importable string module facade (SLP315-CORE)
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Custom string formatting | - Host profile: string.Formatter in the string module facade (SLP315-CORE)
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax | FormatSpec
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format specification mini-language | FormatSpec
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Format string syntax > Format examples | FormatSpec
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Template strings (\$-strings) | - Host profile: string.Template in the string module facade (SLP315-CORE)
-15. Formatting protocols and optional string helpers > `string` --- Common string operations > Helper functions | - Host profile: string.capwords in the string module facade (SLP315-CORE)
-16. Template string objects | = sections
-16. Template string objects > `string.templatelib` --- Support for template string literals | = sections
-16. Template string objects > `string.templatelib` --- Support for template string literals > Template strings | TStrings
-16. Template string objects > `string.templatelib` --- Support for template string literals > Types | TStrings
-16. Template string objects > `string.templatelib` --- Support for template string literals > Helper functions | - Host profile: string.templatelib.convert in the module facade (SLP315-CORE)
-17. Annotation objects and evaluation | = sections
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations | Annotations
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Annotation semantics | Annotations
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Classes | - Host profile: annotationlib's classes are the module facade (SLP315-CORE)
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Functions | - Host profile: annotationlib's functions are the module facade (SLP315-CORE)
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes | = sections
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes > Using annotations in a metaclass | - informative: a recipe
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Recipes > Creating a custom callable annotate function | - informative: a recipe
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Limitations of the `STRING` format | - informative: limitations of the annotationlib facade
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Limitations of the `FORWARDREF` format | - informative: limitations of the annotationlib facade
-17. Annotation objects and evaluation > `annotationlib` --- Functionality for introspecting annotations > Security implications of introspecting annotations | - informative: security advice
-18. Intrinsic types and optional type helpers | = sections
-18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types | = sections
-18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Dynamic Type Creation | - Host profile: types.new_class and friends are the module facade; type() itself is in ClassCreation
-18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Standard Interpreter Types | IntrinsicTypes
-18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Additional Utility Classes and Functions | - Host profile: library classes of the types module facade (SLP315-CORE)
-18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Coroutine Utility Functions | - Host profile: types.coroutine in the module facade (SLP315-CORE)
-19. Glossary | = sections
-19. Glossary > Glossary | - informative: glossary
-20. Copyright | = sections
-20. Copyright > Copyright | - informative: copyright notice
-21. History and licenses | = sections
-21. History and licenses > History and License | - informative: history and licenses
-21. History and licenses > History and License > History of the software | - informative: history and licenses
-21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python | - informative: history and licenses
-21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2 | - informative: history and licenses
-21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0 | - informative: history and licenses
-21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1 | - informative: history and licenses
-21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2 | - informative: history and licenses
-21. History and licenses > History and License > Terms and conditions for accessing or otherwise using Python > ZERO-CLAUSE BSD LICENSE FOR CODE IN THE PYTHON DOCUMENTATION | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Mersenne Twister | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Sockets | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Asynchronous socket services | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Cookie management | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Execution tracing | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > UUencode and UUdecode functions | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > XML Remote Procedure Calls | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > test_epoll | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Select kqueue | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > SipHash24 | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > strtod and dtoa | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > OpenSSL | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > expat | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > libffi | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > zlib | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > cfuhash | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > libmpdec | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > W3C C14N test suite | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > mimalloc | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > asyncio | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Global Unbounded Sequences (GUS) | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Zstandard bindings | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Profiling module | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Pixi packages | - informative: history and licenses
-21. History and licenses > History and License > Licenses and Acknowledgements for Incorporated Software > Unicode Character Database | - informative: history and licenses
-A. Complete upstream license notice | - informative: license
-B. Source integrity manifest | - informative: source manifest
+
+Contents | - navigation
+1 Scope | - defines the scope of this Standard, not language behavior
+2 Conformance | = sections
+2 Conformance > 2.1 Profiles | - profile definitions; their requirements are the clauses mapped below
+2 Conformance > 2.2 Requirements | - conformance requirements on implementations, checked by the suites as a whole
+2 Conformance > 2.3 Normative language | - defines this Standard's normative terms
+2 Conformance > 2.4 Conformance evidence | - requirements on conformance reports, not language behavior
+3 Normative References | - lists the referenced documents
+4 Overview | = sections
+4 Overview > 4.1 Python overview | - informative: an overview of the language
+4 Overview > 4.2 Organization of this Standard | - informative: the organization of this Standard
+4 Overview > 4.3 Terms and definitions | - definitions of terms used by the clauses mapped below
+5 Notational Conventions | = sections
+5 Notational Conventions > 5.1 Syntactic and lexical grammars | = sections
+5 Notational Conventions > 5.1 Syntactic and lexical grammars > 5.1.1 Grammar notation | Grammar
+5 Notational Conventions > 5.1 Syntactic and lexical grammars > 5.1.2 Static semantic rules | ScopeErrors, Constants
+5 Notational Conventions > 5.2 Algorithm conventions | = sections
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.1 Algorithm steps | - notation for algorithm steps
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.2 Abstract operations | - notation for abstract operations
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.3 Completion records and shorthands | Evaluation, Exceptions
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.4 Calls to user code | Evaluation
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.5 Mathematical values | - notation for mathematical values
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.6 Exception messages | ConcreteExceptions, BuiltinsObjects
+5 Notational Conventions > 5.2 Algorithm conventions > 5.2.7 Value notation | - notation for values
+6 Python Data Types and Values | = sections
+6 Python Data Types and Values > 6.1 Python language values | = sections
+6 Python Data Types and Values > 6.1 Python language values > 6.1.1 Objects | Objects
+6 Python Data Types and Values > 6.1 Python language values > 6.1.2 Immutable value types and identity | Objects, Atoms
+6 Python Data Types and Values > 6.1 Python language values > 6.1.3 The standard type hierarchy | IntrinsicTypes, NumericTypes
+6 Python Data Types and Values > 6.2 Specification types | - specification types used only by the algorithms; the algorithms are mapped where they are defined
+6 Python Data Types and Values > 6.2 Specification types > 6.2.1 Boolean | - specification type
+6 Python Data Types and Values > 6.2 Specification types > 6.2.2 List and Record | - specification type
+6 Python Data Types and Values > 6.2 Specification types > 6.2.3 Completion Record | Evaluation, Exceptions
+6 Python Data Types and Values > 6.2 Specification types > 6.2.4 Argument List | Calls
+6 Python Data Types and Values > 6.2 Specification types > 6.2.5 Signature | Calls, FunctionDefs
+6 Python Data Types and Values > 6.2 Specification types > 6.2.6 Scope Record | Scopes
+6 Python Data Types and Values > 6.2 Specification types > 6.2.7 Code Record | CodeObjects
+6 Python Data Types and Values > 6.2 Specification types > 6.2.8 Frame Record | Frames
+7 Abstract Operations | = sections
+7 Abstract Operations > 7.1 Type operations | = sections
+7 Abstract Operations > 7.1 Type operations > 7.1.1 Type ( *o* ) | Objects
+7 Abstract Operations > 7.1 Type operations > 7.1.2 IsSubclass ( *A*, *B* ) | InstanceChecks, BuiltinsObjects
+7 Abstract Operations > 7.1 Type operations > 7.1.3 IsInstance ( *o*, *C* ) | InstanceChecks, BuiltinsObjects
+7 Abstract Operations > 7.1 Type operations > 7.1.4 ComputeMRO ( *C* ) | MRO
+7 Abstract Operations > 7.2 Testing and comparison operations | = sections
+7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.1 IsCallable ( *o* ) | Callables, BuiltinsObjects
+7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.2 SameObject ( *a*, *b* ) | Objects
+7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.3 ReflectedComparison ( *op* ) | BasicCustomization, Operators
+7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.4 RichCompare ( *v*, *w*, *op* ) | BasicCustomization, Operators, Comparisons
+7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.5 RichCompareBool ( *v*, *w*, *op* ) | Comparisons, Containers
+7 Abstract Operations > 7.3 Attribute and special method operations | = sections
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.1 LookupInMRO ( *T*, *name* ) | MRO, Attributes
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.2 LookupSpecial ( *o*, *name* ) | SpecialLookup
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.3 CallSpecial ( *o*, *name*, *args* ) | SpecialLookup
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.4 GetAttribute ( *o*, *name* ) | Attributes
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.5 GenericGetAttr ( *o*, *name* ) | Attributes, Descriptors
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.6 TypeGetAttr ( *C*, *name* ) | ClassObjects, Descriptors
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.7 SetAttribute ( *o*, *name*, *value* ) | Attributes
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.8 GenericSetAttr ( *o*, *name*, *value* ) | Attributes, Descriptors, Slots
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.9 DeleteAttribute ( *o*, *name* ) | Attributes
+7 Abstract Operations > 7.4 Call operations | = sections
+7 Abstract Operations > 7.4 Call operations > 7.4.1 Call ( *f*, *args* [ , *kwargs* ] ) | Callables, Calls, Methods
+7 Abstract Operations > 7.4 Call operations > 7.4.2 CallFunction ( *f*, *args*, *kwargs* ) | Calls, FunctionObjects
+7 Abstract Operations > 7.4 Call operations > 7.4.3 BindArguments ( *f*, *frame*, *args*, *kwargs* ) | Calls
+7 Abstract Operations > 7.4 Call operations > 7.4.4 Argument binding of built-in functions | BuiltinsObjects, BuiltinsIter
+7 Abstract Operations > 7.5 Type conversion | = sections
+7 Abstract Operations > 7.5 Type conversion > 7.5.1 ToBoolean ( *o* ) | Truth
+7 Abstract Operations > 7.5 Type conversion > 7.5.2 Length ( *o* ) | BuiltinsObjects, Containers
+7 Abstract Operations > 7.5 Type conversion > 7.5.3 ToIndex ( *o* ) | NumericProtocol, Subscripts
+7 Abstract Operations > 7.5 Type conversion > 7.5.4 ToIndexSize ( *o* ) | Subscripts, SeqOps
+7 Abstract Operations > 7.5 Type conversion > 7.5.5 ToStr ( *o* ) | BuiltinsText
+7 Abstract Operations > 7.5 Type conversion > 7.5.6 ToRepr ( *o* ) | BuiltinsText
+7 Abstract Operations > 7.5 Type conversion > 7.5.7 Hash ( *o* ) | NumericHash, BuiltinsObjects
+7 Abstract Operations > 7.5 Type conversion > 7.5.8 Format ( *o*, *spec* ) | FormatSpec, BuiltinsText
+7 Abstract Operations > 7.6 Operator dispatch | = sections
+7 Abstract Operations > 7.6 Operator dispatch > 7.6.1 Binary operator method names | BinaryArith, NumericProtocol
+7 Abstract Operations > 7.6 Operator dispatch > 7.6.2 BinaryOp ( *x*, *y*, *op* [ , *z* ] ) | BinaryArith, NumericProtocol, Operators
+7 Abstract Operations > 7.6 Operator dispatch > 7.6.3 InPlaceOp ( *x*, *y*, *op* ) | BinaryArith, SimpleStatements
+7 Abstract Operations > 7.6 Operator dispatch > 7.6.4 UnaryOp ( *x*, *op* ) | BinaryArith, NumericTypes
+7 Abstract Operations > 7.7 Iteration | = sections
+7 Abstract Operations > 7.7 Iteration > 7.7.1 GetIterator ( *o* ) | Iterators, Containers
+7 Abstract Operations > 7.7 Iteration > 7.7.2 IteratorStep ( *it* ) | Iterators, Iteration
+7 Abstract Operations > 7.7 Iteration > 7.7.3 IterateToList ( *o* ) | Iterators, Unpacking
+7 Abstract Operations > 7.7 Iteration > 7.7.4 GetAsyncIterator ( *o* ) | AsyncFor
+7 Abstract Operations > 7.7 Iteration > 7.7.5 GetAwaitable ( *o* ) | Awaitables
+7 Abstract Operations > 7.8 Container operations | = sections
+7 Abstract Operations > 7.8 Container operations > 7.8.1 GetItem ( *o*, *key* ) | Subscripts, ClassGetitem
+7 Abstract Operations > 7.8 Container operations > 7.8.2 SetItem ( *o*, *key*, *value* ) and DeleteItem ( *o*, *key* ) | Subscripts, Containers
+7 Abstract Operations > 7.8 Container operations > 7.8.3 Contains ( *container*, *item* ) | Containers
+7 Abstract Operations > 7.9 Context management | = sections
+7 Abstract Operations > 7.9 Context management > 7.9.1 EnterContext ( *manager* ) | With, AsyncWith
+8 Static Semantics of Scopes | = sections
+8 Static Semantics of Scopes > 8.1 Scopes | Scopes
+8 Static Semantics of Scopes > 8.2 Binding occurrences | Scopes
+8 Static Semantics of Scopes > 8.3 Declarations | ScopeErrors
+8 Static Semantics of Scopes > 8.3 Declarations > 8.3.1 Static Semantics: Early Errors | ScopeErrors
+8 Static Semantics of Scopes > 8.4 Name classification | Scopes
+8 Static Semantics of Scopes > 8.5 The implicit `__class__` cell | Super, ClassCreation
+8 Static Semantics of Scopes > 8.6 Comprehension scopes | Comprehensions
+8 Static Semantics of Scopes > 8.7 Restrictions in annotation scopes | Annotations, Generics
+8 Static Semantics of Scopes > 8.8 Private name mangling | Mangling
+9 Executable Code and Execution Contexts | = sections
+9 Executable Code and Execution Contexts > 9.1 Namespaces | Scopes, DynamicScopes
+9 Executable Code and Execution Contexts > 9.2 Execution contexts | = sections
+9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.1 Frames | Frames
+9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.2 The execution context stack | Frames, Tracebacks
+9 Executable Code and Execution Contexts > 9.2 Execution contexts > 9.2.3 RunFrame ( *frame* ) | Evaluation, Frames
+9 Executable Code and Execution Contexts > 9.3 Name resolution | = sections
+9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.1 LoadName ( *n* ) | Scopes, DynamicScopes
+9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.2 LoadGlobal ( *n* ) | Scopes, BuiltinsScope
+9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.3 LoadClassFree ( *n* ) | Scopes
+9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.4 BuiltinsOf ( *globals* ) | BuiltinsScope
+9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.5 StoreName ( *n*, *v* ) and DeleteName ( *n* ) | Scopes, SimpleStatements
+9 Executable Code and Execution Contexts > 9.4 Suspension and resumption | Generators, Awaitables
+9 Executable Code and Execution Contexts > 9.5 The handled exception | Exceptions, Raise
+9 Executable Code and Execution Contexts > 9.6 Recursion limit | Exceptions, BuiltinsText
+9 Executable Code and Execution Contexts > 9.7 Object lifetime and finalization | GC, SpyGC
+9 Executable Code and Execution Contexts > 9.8 Program execution | CompileModes
+10 Object Behaviours | = sections
+10 Object Behaviours > 10.1 Instances | = sections
+10 Object Behaviours > 10.1 Instances > 10.1.1 Instance namespaces | Attributes, ClassObjects
+10 Object Behaviours > 10.1 Instances > 10.1.2 `__slots__` | Slots
+10 Object Behaviours > 10.1 Instances > 10.1.3 `__class__` assignment | ClassObjects
+10 Object Behaviours > 10.2 Instance creation | = sections
+10 Object Behaviours > 10.2 Instance creation > 10.2.1 Calling a class | Callables
+10 Object Behaviours > 10.2 Instance creation > 10.2.2 `object.__new__` and `object.__init__` | Callables, BuiltinsObjects
+10 Object Behaviours > 10.3 Descriptors | Descriptors, MethodDescriptors
+10 Object Behaviours > 10.4 Class objects | = sections
+10 Object Behaviours > 10.4 Class objects > 10.4.1 Attribute access on classes | ClassObjects, Descriptors
+10 Object Behaviours > 10.4 Class objects > 10.4.2 Type attributes | ClassObjects
+10 Object Behaviours > 10.5 Special method names | SpecialLookup, BasicCustomization, NumericProtocol, Containers
+11 Source Text | = sections
+11 Source Text > 11.1 Source code | LineStructure
+11 Source Text > 11.2 Source encoding | LineStructure
+11 Source Text > 11.3 Lines | LineStructure
+12 Lexical Grammar | = sections
+12 Lexical Grammar > 12.1 Tokens | Tokens
+12 Lexical Grammar > 12.2 Line structure | = sections
+12 Lexical Grammar > 12.2 Line structure > 12.2.1 Comments | LineStructure
+12 Lexical Grammar > 12.2 Line structure > 12.2.2 Explicit line joining | LineStructure
+12 Lexical Grammar > 12.2 Line structure > 12.2.3 Implicit line joining | LineStructure
+12 Lexical Grammar > 12.2 Line structure > 12.2.4 Blank lines | LineStructure
+12 Lexical Grammar > 12.2 Line structure > 12.2.5 NEWLINE and ENDMARKER | LineStructure
+12 Lexical Grammar > 12.3 Indentation | Indentation
+12 Lexical Grammar > 12.4 Names | = sections
+12 Lexical Grammar > 12.4 Names > 12.4.1 Identifiers | Identifiers
+12 Lexical Grammar > 12.4 Names > 12.4.2 Keywords and soft keywords | Constants, Identifiers
+12 Lexical Grammar > 12.4 Names > 12.4.3 Reserved classes of identifiers | Identifiers, Mangling
+12 Lexical Grammar > 12.5 String and bytes literals | = sections
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.1 Syntax | StringLiterals
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.2 Raw literals | StringLiterals
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.3 Escape sequences | StringLiterals
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.4 Literal concatenation | StringLiterals
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.5 Static Semantics: StringValue | StringLiterals
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.6 f-strings | FStrings
+12 Lexical Grammar > 12.5 String and bytes literals > 12.5.7 t-strings | TStrings
+12 Lexical Grammar > 12.6 Numeric literals | = sections
+12 Lexical Grammar > 12.6 Numeric literals > 12.6.1 Integer literals | NumericLiterals
+12 Lexical Grammar > 12.6 Numeric literals > 12.6.2 Floating-point and imaginary literals | NumericLiterals
+12 Lexical Grammar > 12.6 Numeric literals > 12.6.3 Literal boundaries | NumericLiterals, Tokens
+12 Lexical Grammar > 12.7 Operators and delimiters | Tokens
+13 Expressions | = sections
+13 Expressions > 13.1 Atoms | Atoms
+13 Expressions > 13.1 Atoms > 13.1.1 Runtime Semantics: Evaluation | Atoms, Scopes
+13 Expressions > 13.2 Displays | = sections
+13 Expressions > 13.2 Displays > 13.2.1 Tuple and list displays | Displays
+13 Expressions > 13.2 Displays > 13.2.2 Set displays | Displays, Sets
+13 Expressions > 13.2 Displays > 13.2.3 Dictionary displays | Displays, Dicts
+13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings | = sections
+13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.1 Plain literals | StringLiterals
+13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.2 f-strings | FStrings
+13 Expressions > 13.2 Displays > 13.2.4 String literals and f-strings > 13.2.4.3 Self-documenting fields | FStrings
+13 Expressions > 13.2 Displays > 13.2.5 t-strings | TStrings
+13 Expressions > 13.2 Displays > 13.2.6 Comprehensions and generator expressions | Comprehensions
+13 Expressions > 13.3 Primaries | = sections
+13 Expressions > 13.3 Primaries > 13.3.1 Attribute references | Attributes
+13 Expressions > 13.3 Primaries > 13.3.2 Subscriptions | Subscripts
+13 Expressions > 13.3 Primaries > 13.3.3 Slicings | Subscripts, Slices
+13 Expressions > 13.3 Primaries > 13.3.4 Calls | Calls
+13 Expressions > 13.4 The `await` expression | Awaitables
+13 Expressions > 13.5 The power operator | BinaryArith, Precedence
+13 Expressions > 13.6 Unary arithmetic and bitwise operations | BinaryArith, NumericTypes
+13 Expressions > 13.7 Binary arithmetic operations | BinaryArith, IntArith
+13 Expressions > 13.8 Shifting operations | IntArith
+13 Expressions > 13.9 Binary bitwise operations | IntArith
+13 Expressions > 13.10 Comparisons | Comparisons
+13 Expressions > 13.10 Comparisons > 13.10.1 Runtime Semantics: Evaluation | Comparisons, Evaluation
+13 Expressions > 13.11 Boolean operations | Truth, Evaluation
+13 Expressions > 13.12 Assignment expressions | Comprehensions, SimpleStatements
+13 Expressions > 13.13 Conditional expressions | Conditionals
+13 Expressions > 13.14 Lambdas | FunctionDefs
+13 Expressions > 13.15 Expression lists | Displays, Unpacking
+13 Expressions > 13.16 Yield expressions | Generators
+13 Expressions > 13.16 Yield expressions > 13.16.1 `yield` *expression* | Generators
+13 Expressions > 13.16 Yield expressions > 13.16.2 Asynchronous generators | AsyncGenerators
+13 Expressions > 13.16 Yield expressions > 13.16.3 YieldFrom ( *it* ) | YieldFrom, Awaitables
+13 Expressions > 13.17 Evaluation order | Evaluation
+13 Expressions > 13.18 Operator precedence | Precedence
+14 Simple Statements | = sections
+14 Simple Statements > 14.1 Expression statements | CompileModes
+14 Simple Statements > 14.2 Assignment statements | = sections
+14 Simple Statements > 14.2 Assignment statements > 14.2.1 Runtime Semantics: Evaluation | SimpleStatements, Evaluation
+14 Simple Statements > 14.2 Assignment statements > 14.2.2 AssignTarget ( *target*, *v* ) | Unpacking, Subscripts, Attributes
+14 Simple Statements > 14.3 Augmented assignment statements | SimpleStatements, BinaryArith
+14 Simple Statements > 14.4 Annotated assignment statements | Annotations
+14 Simple Statements > 14.5 The `assert` statement | SimpleStatements
+14 Simple Statements > 14.6 The `pass` statement | SimpleStatements
+14 Simple Statements > 14.7 The `del` statement | SimpleStatements, Subscripts
+14 Simple Statements > 14.8 The `raise` statement | Raise
+14 Simple Statements > 14.9 The `return` statement | FunctionDefs, Exceptions
+14 Simple Statements > 14.10 The `break` statement | Conditionals, Exceptions
+14 Simple Statements > 14.11 The `continue` statement | Conditionals, Exceptions
+14 Simple Statements > 14.12 The `import` statement | Imports, LazyImports
+14 Simple Statements > 14.13 Future statements | Future
+14 Simple Statements > 14.14 The `global` and `nonlocal` statements | ScopeErrors, Scopes
+14 Simple Statements > 14.15 The `type` statement | TypeAliases
+15 Compound Statements | = sections
+15 Compound Statements > 15.1 The `if` statement | Conditionals
+15 Compound Statements > 15.2 The `while` statement | Conditionals
+15 Compound Statements > 15.3 The `for` statement | = sections
+15 Compound Statements > 15.3 The `for` statement > 15.3.1 Runtime Semantics: Evaluation | Iteration
+15 Compound Statements > 15.3 The `for` statement > 15.3.2 The `async for` statement | AsyncFor
+15 Compound Statements > 15.4 The `try` statement | Exceptions
+15 Compound Statements > 15.4 The `try` statement > 15.4.1 Runtime Semantics: Evaluation of `try` … `except` | Exceptions
+15 Compound Statements > 15.4 The `try` statement > 15.4.2 FinallyBlock ( *r* ) | Exceptions
+15 Compound Statements > 15.4 The `try` statement > 15.4.3 `except*` | ExceptStar
+15 Compound Statements > 15.5 The `with` statement | = sections
+15 Compound Statements > 15.5 The `with` statement > 15.5.1 Runtime Semantics: Evaluation | With
+15 Compound Statements > 15.5 The `with` statement > 15.5.2 The `async with` statement | AsyncWith
+15 Compound Statements > 15.6 The `match` statement | = sections
+15 Compound Statements > 15.6 The `match` statement > 15.6.1 Runtime Semantics: Evaluation | Match, MatchGuards
+15 Compound Statements > 15.6 The `match` statement > 15.6.2 Patterns | Match
+15 Compound Statements > 15.6 The `match` statement > 15.6.3 Sequence patterns | Match
+15 Compound Statements > 15.6 The `match` statement > 15.6.4 Mapping patterns | Match
+15 Compound Statements > 15.6 The `match` statement > 15.6.5 Class patterns | Match
+16 Functions and Classes | = sections
+16 Functions and Classes > 16.1 Function definitions | = sections
+16 Functions and Classes > 16.1 Function definitions > 16.1.1 Parameters | Calls, FunctionDefs
+16 Functions and Classes > 16.1 Function definitions > 16.1.2 Runtime Semantics: Evaluation | FunctionDefs
+16 Functions and Classes > 16.2 Function objects | = sections
+16 Functions and Classes > 16.2 Function objects > 16.2.1 Attributes | FunctionObjects
+16 Functions and Classes > 16.2 Function objects > 16.2.2 Calling | Calls
+16 Functions and Classes > 16.2 Function objects > 16.2.3 Method binding | Methods
+16 Functions and Classes > 16.3 Qualified names | FunctionObjects, ClassObjects
+16 Functions and Classes > 16.4 Class definitions | = sections
+16 Functions and Classes > 16.4 Class definitions > 16.4.1 Runtime Semantics: Evaluation | ClassCreation
+16 Functions and Classes > 16.4 Class definitions > 16.4.2 BuildClass ( *body*, *name*, *bases*, *kwds* ) | ClassCreation, Metaclasses
+16 Functions and Classes > 16.4 Class definitions > 16.4.3 `type.__new__` ( *meta*, *name*, *bases*, *ns*, **kwds* ) | ClassCreation, Metaclasses, MRO
+16 Functions and Classes > 16.5 Decorators | FunctionDefs, ClassCreation
+16 Functions and Classes > 16.6 Annotations | = sections
+16 Functions and Classes > 16.6 Annotations > 16.6.1 Annotate functions | Annotations
+16 Functions and Classes > 16.6 Annotations > 16.6.2 `__annotations__` | Annotations
+16 Functions and Classes > 16.6 Annotations > 16.6.3 Evaluation of annotation scopes | Annotations
+16 Functions and Classes > 16.6 Annotations > 16.6.4 Stringified annotations | Annotations, Future
+16 Functions and Classes > 16.7 Type parameters | Generics
+17 Modules and Imports | = sections
+17 Modules and Imports > 17.1 Modules | Imports
+17 Modules and Imports > 17.2 Module objects | ModuleObjects
+17 Modules and Imports > 17.3 The module cache | Imports
+17 Modules and Imports > 17.4 Importing | = sections
+17 Modules and Imports > 17.4 Importing > 17.4.1 ResolveName ( *name*, *package*, *level* ) | Imports
+17 Modules and Imports > 17.4 Importing > 17.4.2 ImportModule ( *name* ) | Imports
+17 Modules and Imports > 17.4 Importing > 17.4.3 The `import` statement | Imports
+17 Modules and Imports > 17.4 Importing > 17.4.4 The `__import__` function | Imports
+17 Modules and Imports > 17.5 Lazy imports | LazyImports
+17 Modules and Imports > 17.6 Top-level components | = sections
+17 Modules and Imports > 17.6 Top-level components > 17.6.1 Complete modules | CompileModes
+17 Modules and Imports > 17.6 Top-level components > 17.6.2 Interactive input | CompileModes
+17 Modules and Imports > 17.6 Top-level components > 17.6.3 Expression input | CompileModes
+18 Error Handling | = sections
+18 Error Handling > 18.1 Exceptions | = sections
+18 Error Handling > 18.1 Exceptions > 18.1.1 Raising | Exceptions, Raise
+18 Error Handling > 18.1 Exceptions > 18.1.2 Implicit chaining | Raise
+18 Error Handling > 18.1 Exceptions > 18.1.3 Tracebacks | Tracebacks
+18 Error Handling > 18.1 Exceptions > 18.1.4 Uncaught exceptions | Exceptions
+18 Error Handling > 18.2 Syntax errors | = sections
+18 Error Handling > 18.2 Syntax errors > 18.2.1 SyntaxError objects | ConcreteExceptions, Grammar
+18 Error Handling > 18.2 Syntax errors > 18.2.2 Default message | Grammar
+18 Error Handling > 18.2 Syntax errors > 18.2.3 Limits | Grammar
+18 Error Handling > 18.3 Warnings | - the warning machinery is the host hook HostWarn (Annex B)
+18 Error Handling > 18.4 Forbidden extensions | - a constraint on implementations, not a behavior a program can observe
+19 The Built-in Namespace | BuiltinsScope, IntrinsicTypes
+19 The Built-in Namespace > 19.1 Value properties | Constants, Singletons
+19 The Built-in Namespace > 19.2 Constructor properties | IntrinsicTypes
+19 The Built-in Namespace > 19.3 Function properties | = sections
+19 The Built-in Namespace > 19.3 Function properties > 19.3.1 abs ( *x*, / ) | BuiltinsNumeric
+19 The Built-in Namespace > 19.3 Function properties > 19.3.2 aiter ( *async_iterable*, / ) | AsyncFor
+19 The Built-in Namespace > 19.3 Function properties > 19.3.3 all ( *iterable*, / ) and any ( *iterable*, / ) | BuiltinsIter
+19 The Built-in Namespace > 19.3 Function properties > 19.3.4 anext ( *async_iterator*, *default*, / ) | AsyncFor
+19 The Built-in Namespace > 19.3 Function properties > 19.3.5 ascii ( *obj*, / ) | BuiltinsText
+19 The Built-in Namespace > 19.3 Function properties > 19.3.6 bin ( *integer*, / ), oct ( *integer*, / ), hex ( *integer*, / ) | BuiltinsNumeric
+19 The Built-in Namespace > 19.3 Function properties > 19.3.7 breakpoint ( *args, **kws ) | - host hook HostBreakpoint (Annex B)
+19 The Built-in Namespace > 19.3 Function properties > 19.3.8 callable ( *obj*, / ) | Callables, BuiltinsObjects
+19 The Built-in Namespace > 19.3 Function properties > 19.3.9 chr ( *i*, / ) | BuiltinsText
+19 The Built-in Namespace > 19.3 Function properties > 19.3.10 compile ( *source*, *filename*, *mode*, *flags*=0, *dont_inherit*=False, *optimize*=-1, *, *module*=None ) | BuiltinsCompile, CompileModes
+19 The Built-in Namespace > 19.3 Function properties > 19.3.11 delattr ( *obj*, *name*, / ), getattr ( *obj*, *name* [, *default*] ), hasattr ( *obj*, *name*, / ), setattr ( *obj*, *name*, *value*, / ) | BuiltinsObjects
+19 The Built-in Namespace > 19.3 Function properties > 19.3.12 dir ( [ *object* ] ) | BuiltinsObjects
+19 The Built-in Namespace > 19.3 Function properties > 19.3.13 divmod ( *x*, *y*, / ) | BuiltinsNumeric
+19 The Built-in Namespace > 19.3 Function properties > 19.3.14 eval ( *source*, /, *globals*=None, *locals*=None ) | BuiltinsCompile, DynamicScopes
+19 The Built-in Namespace > 19.3 Function properties > 19.3.15 exec ( *source*, /, *globals*=None, *locals*=None, *, *closure*=None ) | BuiltinsCompile, DynamicScopes
+19 The Built-in Namespace > 19.3 Function properties > 19.3.16 format ( *value*, *format_spec*=`''`, / ) | BuiltinsText, FormatSpec
+19 The Built-in Namespace > 19.3 Function properties > 19.3.17 globals ( ) | DynamicScopes
+19 The Built-in Namespace > 19.3 Function properties > 19.3.18 hash ( *obj*, / ) | NumericHash, BuiltinsObjects
+19 The Built-in Namespace > 19.3 Function properties > 19.3.19 id ( *obj*, / ) | Objects
+19 The Built-in Namespace > 19.3 Function properties > 19.3.20 input ( *prompt*=`''`, / ) | - host hook HostInput (Annex B)
+19 The Built-in Namespace > 19.3 Function properties > 19.3.21 isinstance ( *obj*, *class_or_tuple*, / ) | BuiltinsObjects, InstanceChecks
+19 The Built-in Namespace > 19.3 Function properties > 19.3.22 issubclass ( *cls*, *class_or_tuple*, / ) | BuiltinsObjects, InstanceChecks
+19 The Built-in Namespace > 19.3 Function properties > 19.3.23 iter ( *object* [, *sentinel*] ) | BuiltinsIter, Iterators
+19 The Built-in Namespace > 19.3 Function properties > 19.3.24 len ( *obj*, / ) | BuiltinsIter
+19 The Built-in Namespace > 19.3 Function properties > 19.3.25 locals ( ) | DynamicScopes
+19 The Built-in Namespace > 19.3 Function properties > 19.3.26 max ( *iterable*, *, *key*=None, *default* ) and max ( *a*, *b*, *args, *key*=None ) | BuiltinsNumeric
+19 The Built-in Namespace > 19.3 Function properties > 19.3.27 next ( *iterator* [, *default*] ) | BuiltinsIter
+19 The Built-in Namespace > 19.3 Function properties > 19.3.28 open ( *file*, *mode*=`'r'`, … ) | - host hook HostOpen (Annex B)
+19 The Built-in Namespace > 19.3 Function properties > 19.3.29 ord ( *character*, / ) | BuiltinsText
+19 The Built-in Namespace > 19.3 Function properties > 19.3.30 pow ( *base*, *exp*, *mod*=None ) | BuiltinsNumeric, BinaryArith
+19 The Built-in Namespace > 19.3 Function properties > 19.3.31 print ( *objects, *sep*=`' '`, *end*=`'\n'`, *file*=None, *flush*=False ) | BuiltinsText
+19 The Built-in Namespace > 19.3 Function properties > 19.3.32 repr ( *obj*, / ) | BuiltinsText
+19 The Built-in Namespace > 19.3 Function properties > 19.3.33 round ( *number*, *ndigits*=None ) | BuiltinsNumeric
+19 The Built-in Namespace > 19.3 Function properties > 19.3.34 sorted ( *iterable*, /, *, *key*=None, *reverse*=False ) | BuiltinsIter
+19 The Built-in Namespace > 19.3 Function properties > 19.3.35 sum ( *iterable*, /, *start*=0 ) | BuiltinsNumeric
+19 The Built-in Namespace > 19.3 Function properties > 19.3.36 vars ( [ *object* ] ) | BuiltinsObjects, DynamicScopes
+19 The Built-in Namespace > 19.3 Function properties > 19.3.37 `__import__` ( *name*, *globals*=None, *locals*=None, *fromlist*=(), *level*=0 ) | Imports
+19 The Built-in Namespace > 19.3 Function properties > 19.3.38 `__build_class__` ( *func*, *name*, /, *bases, *metaclass*, **kwds* ) | ClassCreation
+19 The Built-in Namespace > 19.3 Function properties > 19.3.39 `__lazy_import__` ( *name*, *globals*=None, *locals*=None, *fromlist*=(), *level*=0 ) | LazyImports
+19 The Built-in Namespace > 19.4 Host-provided names | - host-provided names (Annex C), not part of Core
+20 Fundamental Objects | = sections
+20 Fundamental Objects > 20.1 The `object` class | = sections
+20 Fundamental Objects > 20.1 The `object` class > 20.1.1 object ( ) | Callables
+20 Fundamental Objects > 20.1 The `object` class > 20.1.2 Instance namespace | Attributes, Slots
+20 Fundamental Objects > 20.1 The `object` class > 20.1.3 Methods of `object` | BasicCustomization, Objects
+20 Fundamental Objects > 20.2 The `type` class | = sections
+20 Fundamental Objects > 20.2 The `type` class > 20.2.1 Type objects | ClassObjects
+20 Fundamental Objects > 20.2 The `type` class > 20.2.2 type ( *object* ) and type ( *name*, *bases*, *dict*, **kwds* ) | Metaclasses, ClassObjects
+20 Fundamental Objects > 20.2 The `type` class > 20.2.3 Attributes of classes | ClassObjects
+20 Fundamental Objects > 20.2 The `type` class > 20.2.4 `type.__repr__` ( ) | ClassObjects
+20 Fundamental Objects > 20.2 The `type` class > 20.2.5 `type.__call__` ( *args, **kwds* ) | Callables
+20 Fundamental Objects > 20.2 The `type` class > 20.2.6 `type.mro` ( ) | MRO
+20 Fundamental Objects > 20.2 The `type` class > 20.2.7 Other methods of `type` | ClassObjects, InstanceChecks
+20 Fundamental Objects > 20.2 The `type` class > 20.2.8 Abstract classes | Callables
+20 Fundamental Objects > 20.3 The `super` class | = sections
+20 Fundamental Objects > 20.3 The `super` class > 20.3.1 super ( [ *type* [, *object_or_type*] ] ) | Super
+20 Fundamental Objects > 20.3 The `super` class > 20.3.2 Attribute lookup on `super` objects | Super
+20 Fundamental Objects > 20.4 Singletons | = sections
+20 Fundamental Objects > 20.4 Singletons > 20.4.1 `None` | Singletons
+20 Fundamental Objects > 20.4 Singletons > 20.4.2 `NotImplemented` | Singletons, Operators
+20 Fundamental Objects > 20.4 Singletons > 20.4.3 `Ellipsis` | Singletons
+20 Fundamental Objects > 20.5 The `property` class | = sections
+20 Fundamental Objects > 20.5 The `property` class > 20.5.1 property ( *fget*=None, *fset*=None, *fdel*=None, *doc*=None ) | Descriptors
+20 Fundamental Objects > 20.5 The `property` class > 20.5.2 Descriptor methods | Descriptors
+20 Fundamental Objects > 20.5 The `property` class > 20.5.3 Other members | Descriptors
+20 Fundamental Objects > 20.6 The `staticmethod` class | MethodDescriptors
+20 Fundamental Objects > 20.7 The `classmethod` class | MethodDescriptors
+20 Fundamental Objects > 20.8 The `sentinel` class | = sections
+20 Fundamental Objects > 20.8 The `sentinel` class > 20.8.1 sentinel ( *name*, /, *, *repr*=None ) | Sentinels
+20 Fundamental Objects > 20.8 The `sentinel` class > 20.8.2 Properties of sentinel objects | Sentinels
+21 Exception Objects | = sections
+21 Exception Objects > 21.1 The `BaseException` class | = sections
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.1 BaseException.\_\_new\_\_ ( *cls*, ...*args*, ...*kwargs* ) | ExceptionObjects
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.2 BaseException.\_\_init\_\_ ( *self*, ...*args*, ...*kwargs* ) | ExceptionObjects
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.3 Attributes | ExceptionObjects, Raise
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.4 BaseException.prototype.add\_note ( *note* ) | ExceptionObjects
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.5 BaseException.prototype.with\_traceback ( *tb* ) | ExceptionObjects, Tracebacks
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.6 String conversion | ExceptionObjects
+21 Exception Objects > 21.1 The `BaseException` class > 21.1.7 Other methods | ExceptionObjects
+21 Exception Objects > 21.2 The exception hierarchy | ExceptionHierarchy
+21 Exception Objects > 21.3 Concrete exceptions | = sections
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.1 SystemExit and StopIteration | ExceptionObjects, Generators
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.2 AttributeError and NameError | ConcreteExceptions
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.3 ImportError | ConcreteExceptions
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.4 OSError | OSErrors
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.5 SyntaxError | ConcreteExceptions
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.6 Unicode errors | ConcreteExceptions
+21 Exception Objects > 21.4 Exception groups | = sections
+21 Exception Objects > 21.4 Exception groups > 21.4.1 BaseExceptionGroup ( *message*, *exceptions* ) | ExceptionGroups
+21 Exception Objects > 21.4 Exception groups > 21.4.2 BaseExceptionGroup.prototype.derive ( *excs* ) | ExceptionGroups
+21 Exception Objects > 21.4 Exception groups > 21.4.3 split, subgroup, and DeriveAndCopy | ExceptionGroups, ExceptStar
+21 Exception Objects > 21.5 OS exceptions | OSErrors
+21 Exception Objects > 21.6 Warning categories | ExceptionHierarchy
+22 Numbers | NumericTypes, BinaryArith
+22 Numbers > 22.1 The `int` type | = sections
+22 Numbers > 22.1 The `int` type > 22.1.1 int ( [ *x* ], /, *base*=10 ) | BuiltinsNumeric
+22 Numbers > 22.1 The `int` type > 22.1.2 StringToInt ( *s*, *base* ) | BuiltinsNumeric, IntStrLimit
+22 Numbers > 22.1 The `int` type > 22.1.3 Arithmetic | IntArith, BinaryArith
+22 Numbers > 22.1 The `int` type > 22.1.4 Comparison | Comparisons
+22 Numbers > 22.1 The `int` type > 22.1.5 Methods | NumberMethods
+22 Numbers > 22.1 The `int` type > 22.1.6 Rounding | BuiltinsNumeric
+22 Numbers > 22.1 The `int` type > 22.1.7 IntToFloat ( *x* ) | BinaryArith
+22 Numbers > 22.1 The `int` type > 22.1.8 The integer string conversion limit | IntStrLimit
+22 Numbers > 22.1 The `int` type > 22.1.9 Hashing of numbers | NumericHash
+22 Numbers > 22.2 The `bool` type | Truth, NumericTypes
+22 Numbers > 22.3 The `float` type | = sections
+22 Numbers > 22.3 The `float` type > 22.3.1 float ( *x*=0.0, / ) | BuiltinsNumeric, NumberMethods
+22 Numbers > 22.3 The `float` type > 22.3.2 Arithmetic | BinaryArith
+22 Numbers > 22.3 The `float` type > 22.3.3 Comparison | Comparisons
+22 Numbers > 22.3 The `float` type > 22.3.4 FloatRepr ( *x* ) | NumericTypes, NumericLiterals
+22 Numbers > 22.3 The `float` type > 22.3.5 Methods | NumberMethods
+22 Numbers > 22.3 The `float` type > 22.3.6 Rounding | BuiltinsNumeric
+22 Numbers > 22.4 The `complex` type | = sections
+22 Numbers > 22.4 The `complex` type > 22.4.1 complex ( *real*=0, *imag*=0 ) | BuiltinsNumeric, NumberMethods
+22 Numbers > 22.4 The `complex` type > 22.4.2 Arithmetic | BinaryArith
+22 Numbers > 22.4 The `complex` type > 22.4.3 ComplexRepr ( *z* ) | NumericTypes
+23 Text Processing | = sections
+23 Text Processing > 23.1 The `str` type | = sections
+23 Text Processing > 23.1 The `str` type > 23.1.1 str ( *object*=`''` ) and str ( *object*=`b''`, *encoding*=`'utf-8'`, *errors*=`'strict'` ) | Strings
+23 Text Processing > 23.1 The `str` type > 23.1.2 Sequence operations | Strings, SeqOps
+23 Text Processing > 23.1 The `str` type > 23.1.3 StrRepr ( *s* ) | BuiltinsText
+23 Text Processing > 23.1 The `str` type > 23.1.4 Searching and testing | Strings
+23 Text Processing > 23.1 The `str` type > 23.1.5 Splitting and joining | Strings
+23 Text Processing > 23.1 The `str` type > 23.1.6 Transforming | Strings
+23 Text Processing > 23.1 The `str` type > 23.1.7 Classification | Strings
+23 Text Processing > 23.1 The `str` type > 23.1.8 Other members | Strings
+23 Text Processing > 23.2 Character properties | Strings, Identifiers
+23 Text Processing > 23.3 Encodings | = sections
+23 Text Processing > 23.3 Encodings > 23.3.1 Codecs | Strings, Bytes
+23 Text Processing > 23.3 Encodings > 23.3.2 Error handlers | Strings, Bytes
+23 Text Processing > 23.4 Format string syntax | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language | = sections
+23 Text Processing > 23.5 The format specification mini-language > 23.5.1 Syntax | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language > 23.5.2 Padding and alignment | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language > 23.5.3 Strings | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language > 23.5.4 Integers | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language > 23.5.5 Floating-point numbers | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language > 23.5.6 Complex numbers | FormatSpec
+23 Text Processing > 23.5 The format specification mini-language > 23.5.7 Other objects | FormatSpec, BuiltinsText
+23 Text Processing > 23.6 printf-style formatting | PercentFormat
+23 Text Processing > 23.7 Templates and interpolations | = sections
+23 Text Processing > 23.7 Templates and interpolations > 23.7.1 Template ( *args* ) | TStrings
+23 Text Processing > 23.7 Templates and interpolations > 23.7.2 Interpolation ( *value*, *expression*=`''`, *conversion*=None, *format_spec*=`''` ) | TStrings
+24 Binary Data | = sections
+24 Binary Data > 24.1 The `bytes` type | = sections
+24 Binary Data > 24.1 The `bytes` type > 24.1.1 bytes ( [ *source* [ , *encoding* [ , *errors* ] ] ] ) | Bytes
+24 Binary Data > 24.1 The `bytes` type > 24.1.2 BytesRepr ( *b* ) | Bytes
+24 Binary Data > 24.1 The `bytes` type > 24.1.3 fromhex and hex | Bytes
+24 Binary Data > 24.2 The `bytearray` type | Bytes, Lists
+24 Binary Data > 24.3 Bytes and bytearray operations | Bytes, PercentFormat
+24 Binary Data > 24.4 The buffer protocol and `memoryview` | = sections
+24 Binary Data > 24.4 The buffer protocol and `memoryview` > 24.4.1 Buffers | Buffers
+24 Binary Data > 24.4 The buffer protocol and `memoryview` > 24.4.2 memoryview ( *object* ) | Buffers
+25 Sequences | = sections
+25 Sequences > 25.1 The `list` type | = sections
+25 Sequences > 25.1 The `list` type > 25.1.1 list ( [ *iterable* ] ) | Lists
+25 Sequences > 25.1 The `list` type > 25.1.2 Representation | Lists
+25 Sequences > 25.1 The `list` type > 25.1.3 Methods | Lists
+25 Sequences > 25.1 The `list` type > 25.1.4 sort ( *, *key*=None, *reverse*=False ) | BuiltinsIter
+25 Sequences > 25.1 The `list` type > 25.1.5 List iteration | Iterators
+25 Sequences > 25.2 The `tuple` type | SeqOps
+25 Sequences > 25.3 The `range` type | = sections
+25 Sequences > 25.3 The `range` type > 25.3.1 range ( *stop* ) and range ( *start*, *stop*, *step*=1 ) | Ranges
+25 Sequences > 25.3 The `range` type > 25.3.2 Operations | Ranges
+25 Sequences > 25.4 The `slice` type | = sections
+25 Sequences > 25.4 The `slice` type > 25.4.1 slice ( *stop* ) and slice ( *start*, *stop*, *step*=None ) | Slices
+25 Sequences > 25.4 The `slice` type > 25.4.2 SliceIndices ( *slice*, *length* ) | Slices
+25 Sequences > 25.5 Common sequence operations | = sections
+25 Sequences > 25.5 Common sequence operations > 25.5.1 NormalizeIndex ( *s*, *i* ) | SeqOps, Subscripts
+25 Sequences > 25.5 Common sequence operations > 25.5.2 Common operations | SeqOps
+25 Sequences > 25.5 Common sequence operations > 25.5.3 SequenceCompare ( *s*, *t*, *op* ) | Comparisons, SeqOps
+25 Sequences > 25.5 Common sequence operations > 25.5.4 Mutable sequence operations | Lists
+26 Mappings and Sets | Dicts, Sets
+26 Mappings and Sets > 26.1 The `dict` type | = sections
+26 Mappings and Sets > 26.1 The `dict` type > 26.1.1 dict ( [ *source* ], **kwargs ) | DictMethods
+26 Mappings and Sets > 26.1 The `dict` type > 26.1.2 Operations | DictMethods, Dicts, Containers
+26 Mappings and Sets > 26.1 The `dict` type > 26.1.3 Methods | DictMethods, Dicts
+26 Mappings and Sets > 26.1 The `dict` type > 26.1.4 Mutation during iteration | Iterators
+26 Mappings and Sets > 26.2 The `frozendict` type | FrozenDicts
+26 Mappings and Sets > 26.3 The `set` and `frozenset` types | = sections
+26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.1 set ( [ *iterable* ] ) and frozenset ( [ *iterable* ] ) | Sets
+26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.2 Operations | Sets
+26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.3 Mutation during iteration | Iterators
+26 Mappings and Sets > 26.3 The `set` and `frozenset` types > 26.3.4 FrozenSetHash ( *s* ) | NumericHash, Sets
+26 Mappings and Sets > 26.4 Dictionary views | DictMethods
+26 Mappings and Sets > 26.5 Mappings | Match, Displays
+26 Mappings and Sets > 26.6 The %MappingProxyType% intrinsic | IntrinsicTypes, ClassObjects
+27 Control Abstraction Objects | = sections
+27 Control Abstraction Objects > 27.1 Iteration | = sections
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.1 Iterators | Iterators, IntrinsicTypes
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.2 Sequence iterators | Iterators
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.3 Callable iterators | BuiltinsIter
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.4 enumerate ( *iterable*, *start*=0 ) | BuiltinsIter
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.5 filter ( *function*, *iterable* ) | BuiltinsIter
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.6 map ( *function*, *iterable*, ...*iterables*, *strict*=False ) | BuiltinsIter
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.7 reversed ( *seq* ) | BuiltinsIter, Containers
+27 Control Abstraction Objects > 27.1 Iteration > 27.1.8 zip ( ...*iterables*, *strict*=False ) | BuiltinsIter
+27 Control Abstraction Objects > 27.2 Generator objects | = sections
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.1 GeneratorResume ( *g*, *mode*, *value* ) | Generators
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.2 Methods | Generators
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.3 Attributes | Generators, Frames
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.4 Finalization | GC, Generators
+27 Control Abstraction Objects > 27.3 Awaitables | Awaitables
+27 Control Abstraction Objects > 27.4 Coroutine objects | = sections
+27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.1 Coroutines | Awaitables
+27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.2 Methods | Generators, Awaitables
+27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.3 Awaiting once | Awaitables
+27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.4 Attributes | Awaitables
+27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.5 Iterable coroutines | Awaitables, IntrinsicTypes
+27 Control Abstraction Objects > 27.5 Asynchronous generator objects | = sections
+27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.1 Asynchronous generator awaitables | AsyncGenerators
+27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.2 athrow and aclose | AsyncGenerators
+27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.3 Attributes | AsyncGenerators
+27 Control Abstraction Objects > 27.5 Asynchronous generator objects > 27.5.4 Host hooks | - host hook HostAsyncGenHooks (Annex B)
+28 Reflection Objects | = sections
+28 Reflection Objects > 28.1 Function type | FunctionObjects, IntrinsicTypes
+28 Reflection Objects > 28.2 Code objects | CodeObjects
+28 Reflection Objects > 28.3 Frame objects | Frames
+28 Reflection Objects > 28.4 Method objects | Methods
+28 Reflection Objects > 28.5 Built-in functions and methods | Methods, IntrinsicTypes
+28 Reflection Objects > 28.6 Cell objects | FunctionObjects, Scopes
+28 Reflection Objects > 28.7 Method descriptors | MethodDescriptors, IntrinsicTypes
+28 Reflection Objects > 28.8 Getset and member descriptors | Slots, IntrinsicTypes
+28 Reflection Objects > 28.9 Traceback objects | Tracebacks
+29 Typing Objects | = sections
+29 Typing Objects > 29.1 Overview | Generics, IntrinsicTypes
+29 Typing Objects > 29.2 TypeVar | = sections
+29 Typing Objects > 29.2 TypeVar > 29.2.1 TypeVar ( *name*, ...*constraints*, *bound*=None, *covariant*=False, *contravariant*=False, *infer_variance*=False, *default*=%NoDefault% ) | Generics
+29 Typing Objects > 29.2 TypeVar > 29.2.2 Attributes and methods | Generics
+29 Typing Objects > 29.3 TypeVarTuple | Generics
+29 Typing Objects > 29.4 ParamSpec | Generics
+29 Typing Objects > 29.5 Union types | = sections
+29 Typing Objects > 29.5 Union types > 29.5.1 MakeUnion ( *x*, *y* ) | TypeAnnotations
+29 Typing Objects > 29.5 Union types > 29.5.2 Operations | TypeAnnotations
+29 Typing Objects > 29.6 TypeAliasType | TypeAliases
+29 Typing Objects > 29.7 Generic | Generics, ClassObjects
+29 Typing Objects > 29.8 LazyImportType | LazyImports
+29 Typing Objects > 29.9 Generic aliases | = sections
+29 Typing Objects > 29.9 Generic aliases > 29.9.1 GenericAlias objects | TypeAnnotations, ClassGetitem
+29 Typing Objects > 29.9 Generic aliases > 29.9.2 Substitution | TypeAnnotations
+29 Typing Objects > 29.9 Generic aliases > 29.9.3 Representation | TypeAnnotations, ClassGetitem
+29 Typing Objects > 29.9 Generic aliases > 29.9.4 `__class_getitem__` | ClassGetitem
+Annex A (normative) Grammar Summary | Grammar
+Annex A (normative) Grammar Summary > A.1 Lexical grammar | Tokens, Identifiers, StringLiterals, NumericLiterals
+Annex A (normative) Grammar Summary > A.2 Top-level components | CompileModes, Grammar
+Annex A (normative) Grammar Summary > A.3 Simple statements | Grammar, SimpleStatements
+Annex A (normative) Grammar Summary > A.4 Compound statements | Grammar
+Annex A (normative) Grammar Summary > A.5 Function and class definitions | FunctionDefs, ClassCreation, Generics
+Annex A (normative) Grammar Summary > A.6 Expressions | Precedence, Grammar
+Annex A (normative) Grammar Summary > A.7 f-strings and t-strings | FStrings, TStrings
+Annex A (normative) Grammar Summary > A.8 Targets | Unpacking, Subscripts
+Annex A (normative) Grammar Summary > A.9 Patterns | Match
+Annex B (normative) Host Hooks | - host hooks: facilities outside the Core language
+Annex B (normative) Host Hooks > B.1 Modules | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.1 Modules > B.1.1 HostFindModule ( *name*, *path* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.1 Modules > B.1.2 HostExecuteModule ( *spec*, *module* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.1 Modules > B.1.3 Initial modules | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.2 Source text | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.2 Source text > B.2.1 HostDecodeSource ( *bytes*, *encoding* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.2 Source text > B.2.2 HostLookupCodec ( *name* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.3 Program interaction | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.3 Program interaction > B.3.1 HostStandardOutput ( ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.3 Program interaction > B.3.2 HostInput ( *prompt* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.3 Program interaction > B.3.3 HostOpen ( *arguments* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.3 Program interaction > B.3.4 HostDisplay ( *value* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.3 Program interaction > B.3.5 HostBreakpoint ( *args*, *kws* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.4 Diagnostics | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.4 Diagnostics > B.4.1 HostWarn ( *category*, *message*, *location* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.4 Diagnostics > B.4.2 HostReportException ( *e* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.4 Diagnostics > B.4.3 HostReportUnraisable ( *e*, *context* ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.4 Diagnostics > B.4.4 SystemExit | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.5 Asynchronous generators | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.5 Asynchronous generators > B.5.1 HostAsyncGenHooks ( ) | - host hook (Annex B)
+Annex B (normative) Host Hooks > B.6 Execution parameters | - host hook (Annex B)
+Annex C (informative) Library Facades | - informative: library facades
+Annex C (informative) Library Facades > C.1 `types` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.2 `typing` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.3 `annotationlib` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.4 `string.templatelib` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.5 `sys` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.6 `abc` and `collections.abc` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.7 `copyreg` and `pickle` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.8 Abstract syntax trees | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.9 `__future__` | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.10 `site` and `builtins` additions | - informative library facade (Annex C)
+Annex C (informative) Library Facades > C.11 `warnings` | - informative library facade (Annex C)
+Annex D (normative) Implementation-Defined Behaviour | - lists implementation-defined choices, not behavior
+Annex E (informative) Changes from Revision 1 | - informative: revision history
+Bibliography | - informative: references

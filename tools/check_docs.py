@@ -63,15 +63,15 @@ def main():
         if duplicates:
             raise ValueError(f"duplicate footnotes in {path.relative_to(ROOT)}: {duplicates}")
     standard = (ROOT / "docs/standards/3_15.md").read_text()
-    for required in ("SLP-315:2026-draft1", "file: [statements] ENDMARKER", "frozendict(**kwargs)",
-                     "sentinel(name", "lazy", "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2"):
+    for required in ("SLP-315:2026-draft2", "file: [statements] ENDMARKER", "## 26 Mappings and Sets",
+                     "#### 20.8.1 sentinel ( *name*, /, *, *repr*=None )", "### 17.5 Lazy imports", "## Annex B (normative) Host Hooks"):
         if required not in standard:
             raise ValueError(f"standard missing required content: {required}")
     version = (ROOT / "VERSION").read_text().strip()
     header = (ROOT / "spy.h").read_text()
     if f'#define SPY_VERSION "{version}"' not in header:
         raise ValueError("VERSION and spy.h differ")
-    print(f"Documentation: {len(files)} files, links, anchors, footnotes, grammar, signatures, license, and version checked")
+    print(f"Documentation: {len(files)} files, links, anchors, footnotes, standard contents, and version checked")
 
 
 if __name__ == "__main__":

@@ -45,8 +45,6 @@ jobs:
         with:
           python-version: '3.15'
       - run: python3 tests/fetch_upstream.py cpython
-      - run: python3 -m pip install pypandoc-binary==1.17 Pygments==2.19.2
-      - run: python3 tools/build_standard.py --check
       - run: make docs
 
   cpython-baseline:

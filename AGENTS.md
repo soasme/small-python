@@ -185,9 +185,13 @@
 
 - `docs/smallpython.md` is the engine manual, with the same broad organization as
   QuickJS's manual: introduction, usage, specifications, internals, references.
-- `docs/standards/3_15.md` is the single-file, versioned language target. Give
-  clauses stable identifiers. Pin source revisions and state document status.
-  Distinguish normative requirements, host choices, and implementation status.
+- `docs/standards/3_15.md` is the single-file, versioned language target,
+  written in the style of ECMA-262: numbered clauses, abstract operations, and
+  algorithm steps. It depends on no library module; library facilities are
+  intrinsics or host hooks (Annex B), and library facades are informative
+  (Annex C). Verify every message and behaviour it states against the pinned
+  CPython. Distinguish normative requirements, host choices, and
+  implementation status.
 - Implement the standard faithfully. Never weaken its semantics to make a
   failing test disappear. Arbitrary integers, Unicode, exception behavior,
   scope rules, and evaluation order are requirements, not optional optimizations.

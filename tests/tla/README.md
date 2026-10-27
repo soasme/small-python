@@ -134,8 +134,8 @@ set `JAVA` to choose one) runs `tests/tla_check.py`, which:
 `coverage.txt` maps every section of `docs/standards/3_15.md` to the models
 that cover it, to `= sections` when its own text is a short introduction to
 subsections that are covered, or to `- reason` when it states no behavior of
-the Core profile (licenses, history, the glossary, and host services such as
-module discovery, which the standard's profile clauses place outside Core).
+the Core profile (front matter, notation, informative annexes, and the host
+hooks of Annex B, which the standard's profile clauses place outside Core).
 `TODO: models` marks a section whose planned models are not written yet.
 `make tla-coverage` (part of `make test-tla`) checks the map against the
 standard's headings.

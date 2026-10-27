@@ -22,7 +22,8 @@ make test
   `pip install small-python`) provides `small_python`, which runs Small Python
   from CPython and injects Python functions as host functions.
 - [SLP-315 language standard](docs/standards/3_15.md): a single-file, versioned
-  consolidation of the pinned Python 3.15.0 reference and core builtins, with
+  specification of the Python 3.15 core language in the style of ECMA-262, with
+  algorithms, intrinsic objects in place of library modules, host hooks, and
   Core, Host, and Extension profiles. Project draft, not an official PSF standard.
 - [Upstream Cython baseline](docs/testing/cython.md): 343 passing and 11,107 failing
   discovered examples; 13 files need another adapter. Reproduce with

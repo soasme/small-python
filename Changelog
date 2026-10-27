@@ -557,3 +557,11 @@
   resetting the step count, re-entry refused from output and loader and from
   other threads, and close() releasing host callables. Tests in python/tests
   (98 cases, also run under ASan and UBSan) and a type stub.
+- SLP-315 revision 2 (SLP-315:2026-draft2) replaces the consolidated
+  reference text with an original specification in the style of ECMA-262:
+  abstract operations and numbered algorithms, normative messages checked
+  against CPython 3.15, intrinsic objects in place of the types, typing,
+  annotationlib, string.templatelib, and sys modules, host hooks (Annex B),
+  and informative library facades (Annex C). tools/build_standard.py and the
+  standard and check-standard targets are retired; tests/tla/coverage.txt
+  maps the 574 new sections to the 108 models.
