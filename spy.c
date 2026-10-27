@@ -146,7 +146,7 @@ struct SPYContext {
     /* Containers whose repr is being built, across nested repr() calls (Py_ReprEnter); borrowed. */
     SPYValue **repr_stack;
     size_t repr_len, repr_cap;
-    SPYValue *native_types[3]; /* method_descriptor, wrapper_descriptor, method-wrapper */
+    SPYValue *native_types[4]; /* method_descriptor, wrapper_descriptor, method-wrapper, classmethod_descriptor */
     SPYValue *iterator_types[24]; /* Indexed by the IT_ iterator classes. */
     int intrinsics_loading;
     SPYValue *types[SPY_LAST_TYPE + 1];
@@ -1504,6 +1504,35 @@ static int iterator_class_id(SPYValue *v) {
     }
 }
 enum { NATIVE_FUNCTION, NATIVE_METHOD_DESCRIPTOR, NATIVE_WRAPPER_DESCRIPTOR, NATIVE_METHOD_WRAPPER, NATIVE_BOUND };
+static SPYValue *bind_method(SPYContext *, SPYValue *, SPYValue *);
+static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+/* A builtin type's class method, such as dict.fromkeys, is a
+ * classmethod_descriptor rather than a classmethod. */
+static int builtin_classmethod(SPYValue *v) {
+    return v->type == SPY_CLASSMETHOD && !v->as.wrapper.user && v->as.wrapper.function->type == SPY_NATIVE &&
+        v->as.wrapper.function->as.native.owner && v->as.wrapper.function->as.native.name;
+}
+/* classmethod_get: a builtin class method binds only to a subtype of its
+ * class; NULL with an error otherwise. */
+static SPYValue *classmethod_descriptor_get(SPYContext *c, SPYValue *descriptor, SPYValue *type) {
+    SPYValue *function = descriptor->as.wrapper.function, *owner = function->as.native.owner;
+    const char *name = function->as.native.name->as.string.data, *owner_name = name_local(owner, "__name__")->as.string.data;
+    if (type->type != SPY_CLASS)
+        return errorf(c, "TypeError", "descriptor '%s' for type '%s' needs a type, not a '%s' as arg 2", name, owner_name, type_name(type));
+    if (!subclass(type, owner))
+        return errorf(c, "TypeError", "descriptor '%s' requires a subtype of '%s' but received '%s'", name, owner_name,
+                      name_local(type, "__name__")->as.string.data);
+    return bind_method(c, type, function);
+}
+/* classmethoddescr_call: the first argument is the class to bind. */
+static SPYValue *classmethod_descriptor_call(SPYContext *c, SPYValue *descriptor, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *function = descriptor->as.wrapper.function;
+    if (!argc) return errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", function->as.native.name->as.string.data,
+                             name_local(function->as.native.owner, "__name__")->as.string.data);
+    SPYValue *bound = classmethod_descriptor_get(c, descriptor, argv[0]);
+    SPYValue *result = bound ? call_keywords(c, bound, argc - 1, argv + 1, keywords) : NULL;
+    spy_release(bound); return result;
+}
 static int native_kind(SPYValue *v) {
     if (v->type == SPY_METHOD && v->as.method.plain) return NATIVE_FUNCTION;
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
@@ -2206,6 +2235,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             puts_buffer(b, type_name(self)) || puts_buffer(b, num);
     }
     case SPY_STATICMETHOD: case SPY_CLASSMETHOD:
+        if (builtin_classmethod(v)) return format_value(b, v->as.wrapper.function, 1);
         return puts_buffer(b, v->type == SPY_STATICMETHOD ? "<staticmethod(" : "<classmethod(") ||
             format_value(b, v->as.wrapper.function, 1) || puts_buffer(b, ")>");
     case SPY_MODULE: {
@@ -8565,6 +8595,15 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "__name__")) return spy_retain(v->as.generator.name);
         if (!strcmp(name, "__qualname__")) return spy_retain(v->as.generator.qualname);
     }
+    if (builtin_classmethod(v)) {
+        /* A classmethod_descriptor describes its method and wraps nothing. */
+        static const char *const described[] = {"__name__", "__qualname__", "__doc__"};
+        if (!strcmp(name, "__objclass__")) return spy_retain(v->as.wrapper.function->as.native.owner);
+        for (size_t i = 0; i < sizeof(described) / sizeof(*described); i++)
+            if (!strcmp(name, described[i])) return attribute(c, v->as.wrapper.function, name);
+        if (!strcmp(name, "__func__") || !strcmp(name, "__wrapped__") || !strcmp(name, "__isabstractmethod__") || !strcmp(name, "__dict__"))
+            return errorf(c, "AttributeError", "'classmethod_descriptor' object has no attribute '%s'", name);
+    }
     if ((v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) &&
         (!strcmp(name, "__func__") || !strcmp(name, "__wrapped__"))) return spy_retain(v->as.wrapper.function);
     if ((v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) && !strcmp(name, "__isabstractmethod__"))
@@ -11926,6 +11965,8 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         else result = fn->type == SPY_NATIVE ? fn->as.native.call(c, argc, argv, fn->as.native.data) : bound_call(c, fn, argc, argv);
     } else if (fn->type == SPY_STATICMETHOD) {
         result = call_keywords(c, fn->as.wrapper.function, argc, argv, keywords);
+    } else if (builtin_classmethod(fn)) {
+        result = classmethod_descriptor_call(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_METHOD) {
         if (argc >= SIZE_MAX / sizeof(SPYValue *) - 1) spy_error(c, "MemoryError", "too many arguments");
         else {
@@ -14691,7 +14732,7 @@ static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
 static int callable_value(SPYContext *c, SPYValue *v) {
     SPYValue *method = special_dispatch(v) ? special_method(c, v, "__call__") : NULL;
     int result = method || v->type == SPY_CLASS || v->type == SPY_STATICMETHOD || v->type == SPY_FUNCTION ||
-        v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD;
+        v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD || builtin_classmethod(v);
     spy_release(method);
     return result;
 }
@@ -16672,6 +16713,7 @@ static SPYValue *value_class(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_CLASS && value->as.map.meta) return value->as.map.meta;
     if (value->type == SPY_INSTANCE) return value->as.map.parent;
     if (value->type == SPY_ITERATOR) return c->iterator_types[iterator_class_id(value)];
+    if (builtin_classmethod(value)) return c->native_types[3];
     int kind = native_kind(value);
     return kind == NATIVE_BOUND ? c->types[SPY_NATIVE] : kind ? c->native_types[kind - 1] : c->types[value->type];
 }
@@ -21431,6 +21473,7 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
         spy_retain(argv[1]); spy_release(storage->as.wrapper.function); storage->as.wrapper.function = argv[1];
         return wrapper_wraps(c, self, storage) ? NULL : spy_none(c);
     }
+    if (op == DESCR_CALL && builtin_classmethod(storage)) return classmethod_descriptor_call(c, storage, n, argv + 1, keywords);
     if (op == DESCR_CALL) return call_keywords(c, storage->as.wrapper.function, n, argv + 1, keywords);
     if (op == DESCR_GET || op == DESCR_SET) {
         if (has_keywords) return errorf(c, "TypeError", "wrapper %s() takes no keyword arguments", name);
@@ -21453,13 +21496,14 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
         if (!object && !owner) return spy_error(c, "TypeError", "__get__(None, None) is invalid");
         if (type == SPY_PROPERTY) return property_get(c, self, storage, object);
         if (type == SPY_STATICMETHOD) return spy_retain(storage->as.wrapper.function);
+        if (builtin_classmethod(storage)) return classmethod_descriptor_get(c, storage, owner ? owner : value_class(c, object));
         return (storage->as.wrapper.user ? plain_method : bind_method)(c, owner ? owner : value_class(c, object), storage->as.wrapper.function);
     }
     case DESCR_SET: return property_set(c, storage, argv[1], argv[2]) ? NULL : spy_none(c);
     case DESCR_DELETE: return property_set(c, storage, argv[1], NULL) ? NULL : spy_none(c);
     case DESCR_REPR: {
         SPYValue *inner = spy_repr(c, storage->as.wrapper.function);
-        if (!inner) return NULL;
+        if (!inner || builtin_classmethod(storage)) return inner;
         Buffer out = {.ctx = c};
         SPYValue *result = puts_buffer(&out, type == SPY_CLASSMETHOD ? "<classmethod(" : "<staticmethod(") ||
             puts_buffer(&out, inner->as.string.data) || puts_buffer(&out, ")>") ? NULL : spy_string(c, out.data, out.len);
@@ -21881,6 +21925,7 @@ static SPYValue *builtin_descriptor_lookup(SPYContext *c, SPYValue *cls, const c
     return NULL;
 }
 static int register_method(SPYContext *, int, const char *, NativeMethod, intptr_t, int);
+static int class_method_set(SPYContext *, SPYValue *, const char *, NativeMethod, intptr_t, int);
 /* T.__class_getitem__(item) for builtin generic classes (PEP 585). */
 static SPYValue *class_getitem(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
@@ -21906,6 +21951,12 @@ static SPYValue *callable_get(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 static int register_descriptor_methods(SPYContext *c) {
     static const int types[] = {SPY_PROPERTY, SPY_CLASSMETHOD, SPY_STATICMETHOD};
+    static const int classmethod_descriptor_ops[] = {DESCR_GET, DESCR_REPR, DESCR_CALL};
+    for (size_t i = 0; i < 3; i++) {
+        int op = classmethod_descriptor_ops[i];
+        if (class_method_set(c, c->native_types[3], descriptor_methods[op], descriptor_method,
+                             (intptr_t)SPY_CLASSMETHOD << 8 | op, METHOD_INSTANCE)) return -1;
+    }
     for (size_t t = 0; t < 3; t++)
         for (int op = 0; op <= DESCR_SET_NAME; op++) {
             int property = types[t] == SPY_PROPERTY;
@@ -22427,8 +22478,8 @@ SPYContext *spy_context_new(void) {
             spy_release(method);
             if (status) { spy_release(module); goto fail; }
         }
-    static const char *const native_names[] = {"method_descriptor", "wrapper_descriptor", "method-wrapper"};
-    for (size_t i = 0; i < 3; i++) {
+    static const char *const native_names[] = {"method_descriptor", "wrapper_descriptor", "method-wrapper", "classmethod_descriptor"};
+    for (size_t i = 0; i < 4; i++) {
         SPYValue *cls = new_class(c, native_names[i], name_local(c->classes, "object"), module);
         if (!cls) { spy_release(module); goto fail; }
         cls->as.map.flags = 2;

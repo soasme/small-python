@@ -2,9 +2,8 @@
 Define names for built-in types that aren't directly accessible as a builtin.
 
 Small Python's standard layer (spy-std.c) provides this module, following CPython 3.15's types
-module. Names for objects the engine does not have (tracebacks,
-member and getset descriptors, and capsules) are not defined, nor is
-coroutine(), which needs code object flags.
+module. CapsuleType, for C API capsules the engine does not have, is
+not defined, nor is coroutine(), which needs code object flags.
 """
 
 
@@ -51,6 +50,9 @@ WrapperDescriptorType = type(object.__init__)
 MethodWrapperType = type(object().__str__)
 MethodDescriptorType = type(str.join)
 ClassMethodDescriptorType = type(dict.__dict__['fromkeys'])
+# CPython takes these from FunctionType.__code__ and __globals__.
+GetSetDescriptorType = type(int.__dict__['real'])
+MemberDescriptorType = type(slice.__dict__['start'])
 
 import builtins as _builtins
 ModuleType = type(_builtins)

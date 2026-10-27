@@ -408,7 +408,7 @@ Reference chapter contents | - table of contents
 18. Intrinsic types and optional type helpers | = sections
 18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types | = sections
 18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Dynamic Type Creation | - Host profile: types.new_class and friends are the module facade; type() itself is in ClassCreation
-18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Standard Interpreter Types | TODO: IntrinsicTypes
+18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Standard Interpreter Types | IntrinsicTypes
 18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Additional Utility Classes and Functions | - Host profile: library classes of the types module facade (SLP315-CORE)
 18. Intrinsic types and optional type helpers > `types` --- Dynamic type creation and names for built-in types > Coroutine Utility Functions | - Host profile: types.coroutine in the module facade (SLP315-CORE)
 19. Glossary | = sections

@@ -344,3 +344,17 @@ error = OSError("x")
 error.filename = "f"
 assert_eq(str(error), "[Errno None] None: 'f'")
 assert_eq(str(OSError("x")), "x")
+
+# A builtin class method is a classmethod_descriptor bound to its class.
+fromkeys = dict.__dict__["fromkeys"]
+assert_eq(type(fromkeys).__name__, "classmethod_descriptor")
+assert_eq(repr(fromkeys), "<method 'fromkeys' of 'dict' objects>")
+assert_eq(fromkeys(dict, "ab"), {"a": None, "b": None})
+assert_eq(fromkeys.__get__({})("x"), {"x": None})
+assert_eq((fromkeys.__objclass__ is dict, callable(fromkeys)), (True, True))
+assert_eq(type_error(lambda: fromkeys()), "descriptor 'fromkeys' of 'dict' object needs an argument")
+assert_eq(type_error(lambda: fromkeys(int, "a")), "descriptor 'fromkeys' requires a subtype of 'dict' but received 'int'")
+assert_eq(type(int.__dict__["real"]).__name__, "getset_descriptor")
+class Slotted:
+    __slots__ = ("a",)
+assert_eq(type(Slotted.a).__name__, "member_descriptor")

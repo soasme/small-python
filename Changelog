@@ -538,6 +538,9 @@
   even to None, and only those, as CPython does: OSError(None, 'm') is
   "[Errno None] m". TLA+ model of the OS exceptions.
 - TLA+ model of exception groups.
+- Builtin class methods such as dict.fromkeys are classmethod_descriptor
+  objects, and types defines GetSetDescriptorType and
+  MemberDescriptorType. TLA+ model of the standard interpreter types.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

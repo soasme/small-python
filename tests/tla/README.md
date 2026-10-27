@@ -110,6 +110,7 @@ and tied to real implementations by replaying them.
 | `ConcreteExceptions.tla` | str() of the three Unicode errors for every start and end from -1 to 5 (one byte or character, else a range); attributes of AttributeError, NameError, ImportError, OSError, SyntaxError, and the rest | yes |
 | `OSErrors.tla` | the subclass OSError picks for each errno shared by Linux and macOS, for one to five arguments and for subclass calls, with the fields and str() each gets | yes |
 | `ExceptionGroups.tla` | split and subgroup by type and by predicate over every group of up to three leaves and nested groups, keeping nesting and dropping emptied groups; construction checks, derive, copied metadata, and str | yes |
+| `IntrinsicTypes.tla` | every name of the standard interpreter types against the type of a sample object; constructors of methods, modules, cells, functions, and mapping proxies; singleton types; method, class-method, getset, and member descriptors; tracebacks and frames | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -244,7 +245,9 @@ types worded their refusal of arguments differently, and `complex()`
 accepted a string by keyword, and `type()` and `dir()` worded argument
 errors their own way, and `chr()` refused `__index__` values and
 overflowed on huge ones, and `exec()` and `eval()` worded namespace
-errors differently, and `OSError`'s `str()` ignored fields set to None.
+errors differently, and `OSError`'s `str()` ignored fields set to None, and builtin class
+methods such as `dict.fromkeys` were plain classmethods rather than
+`classmethod_descriptor`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
