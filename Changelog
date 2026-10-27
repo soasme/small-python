@@ -332,3 +332,7 @@
   missing context manager method.
 - Spec tests for compound control flow (loops with else, try/finally,
   except*, with) and the built-in functions.
+- compile(optimize>=1) drops assert statements and makes __debug__ False;
+  a bad __await__ result names the awaited type.
+- Spec tests for built-in type methods, primaries and evaluation order,
+  top-level components, and object identity, equality, and hashing.

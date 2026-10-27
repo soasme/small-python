@@ -124,6 +124,7 @@ struct SPYContext {
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     int compile_flags; /* compile()'s future flags while it parses. */
+    int optimize; /* compile(optimize>=1) while it parses: no asserts, __debug__ is False. */
     int string_source; /* compile(), exec(), or eval() is parsing a string. */
     int eval_input; /* The source is eval input: one expression list. */
     /* Modules a host registered with spy_new_module, created on first import. */
@@ -3523,7 +3524,11 @@ static Node *atom(Parser *p) {
         if (!n) return NULL;
         n->op = keyword(p, "True"); p->pos++; return n;
     }
-    if (at(p, T_NAME)) return identifier(p);
+    if (at(p, T_NAME)) {
+        n = identifier(p);
+        if (n && p->ctx->optimize && !strcmp(n->text, "__debug__")) { n->kind = N_BOOL; n->op = 0; }
+        return n;
+    }
     int open = peek(p)->kind;
     if (open != '(' && open != '[' && open != '{') return syntax(p, "invalid syntax");
     n = node(p, open == '[' ? N_LIST : open == '{' ? N_DICT : N_TUPLE);
@@ -5150,6 +5155,7 @@ static Node *statement_body(Parser *p) {
             n->b = plain_expression(p, 0);
             if (!n->b || assert_equals_error(p, n->b)) return NULL;
         }
+        if (p->ctx->optimize) { n->kind = N_PASS; n->a = n->b = NULL; }
         return n;
     }
     /* PEP 810: the soft keyword lazy before an import statement. */
@@ -15194,7 +15200,7 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
         return iterator;
     method = special_method(c, iterator, "__next__");
     if (method) { spy_release(method); return iterator; }
-    errorf(c, "TypeError", "__await__() must return an iterator, not %s", type_name(iterator));
+    errorf(c, "TypeError", "%s.__await__() must return an iterator, not %s", type_name(value), type_name(iterator));
     spy_release(iterator);
     return NULL;
 }
@@ -19833,7 +19839,8 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 /* compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1, *,
  * module=None, _feature_version=-1), validated as builtin_compile_impl. Future
- * flags and optimization levels do not change the code spy produces. */
+ * flags do not change the code spy produces; optimize>=1 drops asserts and
+ * makes __debug__ False. */
 enum { CF_ONLY_AST = 0x400, CF_FUTURE_MASK = 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000 | 0x1000000,
        CF_ALLOWED = CF_FUTURE_MASK | 0x10 | CF_ONLY_AST | 0x2000 | 0x1000 | 0x200 | 0x4000 | 0x8000 };
 static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -19861,8 +19868,10 @@ static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *ar
     if (flags & CF_ONLY_AST) return spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
     int saved = c->compile_flags, inherit = !args[4] || !spy_truth(args[4]);
     c->compile_flags = (int)(flags & CF_FUTURE_MASK) | (inherit ? caller_future_flags(c) : 0);
+    int optimized = c->optimize;
+    c->optimize = optimize > 0;
     SPYValue *code = builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
-    c->compile_flags = saved;
+    c->compile_flags = saved; c->optimize = optimized;
     return code;
 }
 /* The function a definition's code object makes in a globals dict, as
