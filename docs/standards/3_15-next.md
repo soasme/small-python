@@ -3310,3 +3310,314 @@ ClassAttr(*name*): if *seen* is not **absent** and contains *name*, raise a
 attribute *repr*(*name*)"); add *name* to *seen*; let *v* be ? GetAttribute(*subject*,
 *name*), and if it raises `AttributeError`, return **false** from the class
 pattern. All attributes are obtained before any sub-pattern is matched.
+
+## 16 Functions and Classes
+
+### 16.1 Function definitions
+
+```text
+function_def: decorators function_def_raw | function_def_raw
+function_def_raw: 'def' NAME [type_params] &&'(' [params] ')' ['->' expression] &&':' block
+                | 'async' 'def' NAME [type_params] &&'(' [params] ')' ['->' expression] &&':' block
+decorators: ('@' named_expression NEWLINE)+
+```
+
+#### 16.1.1 Parameters
+
+```text
+params: parameters
+parameters: slash_no_default param_no_default* param_with_default* [star_etc]
+          | slash_with_default param_with_default* [star_etc]
+          | param_no_default+ param_with_default* [star_etc]
+          | param_with_default+ [star_etc]
+          | star_etc
+star_etc: '*' param_no_default param_maybe_default* [kwds]
+        | '*' param_no_default_star_annotation param_maybe_default* [kwds]
+        | '*' ',' param_maybe_default+ [kwds]
+        | kwds
+kwds: '**' param_no_default
+```
+
+Parameters before `/` are positional-only; parameters after `*` or `*args` are
+keyword-only; the others are positional-or-keyword. They form the Signature
+(6.2.5) of the function. Static Semantics: "parameter without a default follows
+parameter with a default"; "named parameters must follow bare *"; "/ may appear
+only once"; "/ must be ahead of *"; "* may appear only once"; "var-positional
+parameter cannot have default value"; "var-keyword parameter cannot have
+default value"; "parameters cannot follow var-keyword parameter"; and the
+duplicate-parameter error of 8.3.1. A `/` with no parameter before it is
+"invalid syntax".
+
+#### 16.1.2 Runtime Semantics: Evaluation
+
+1. Evaluate the decorator expressions, in source order, to *d₁*, …, *dₙ*.
+2. If there are type parameters, the remaining steps run in the type parameters
+   scope (16.7), which first creates the type parameter objects.
+3. Evaluate the default values of positional parameters, in order, to the tuple
+   *defaults*, then the defaults of keyword-only parameters to the `dict`
+   *kwdefaults*, in order.
+4. Create the function's `__annotate__` function (16.6.1) if any parameter or the
+   return has an annotation; annotations are not evaluated now.
+5. Let *f* be a new function object (16.2) for the body's Code Record, with
+   the globals of the running frame, the closure cells for the body's **free**
+   names, *defaults*, *kwdefaults*, the annotate function, and the type
+   parameters.
+6. Apply the decorators from the last to the first: set *f* to ? Call(*dᵢ*,
+   «*f*»).
+7. Perform StoreName(NAME, *f*).
+
+`async def` makes a coroutine function (27.4); a `def` whose body contains
+`yield` makes a generator function (27.2); an `async def` whose body contains
+`yield` makes an asynchronous generator function (27.5).
+
+### 16.2 Function objects
+
+#### 16.2.1 Attributes
+
+A function object (%FunctionType%) has the following attributes.
+
+| Attribute | Meaning | Writable |
+| --- | --- | --- |
+| `__name__` | the function name | a `str` only ("`__name__` must be set to a string object") |
+| `__qualname__` | the qualified name (16.3) | a `str` only ("`__qualname__` must be set to a string object") |
+| `__module__` | the value of `__name__` in its globals when created, or `None` | any object |
+| `__doc__` | the docstring: the value of a string literal that is the first statement of the body, or `None` | any object |
+| `__code__` | the code object (28.2) | a code object ("`__code__` must be set to a code object") with as many free variables as the closure has cells (a `ValueError` exception: "*name*() requires a code object with *n* free vars, not *m*") |
+| `__defaults__` | a tuple, or `None` | a tuple or `None` ("`__defaults__` must be set to a tuple object") |
+| `__kwdefaults__` | a `dict`, or `None` | a `dict` or `None` ("`__kwdefaults__` must be set to a dict object") |
+| `__globals__` | the globals `dict` | read-only |
+| `__builtins__` | the builtins namespace (9.3.4) | read-only |
+| `__closure__` | a tuple of cells (28.6), or `None` | read-only |
+| `__dict__` | the function's namespace for arbitrary attributes | a `dict` |
+| `__annotations__`, `__annotate__` | 16.6 | 16.6 |
+| `__type_params__` | the tuple of type parameters (16.7) | a tuple |
+
+#### 16.2.2 Calling
+
+Calling a function object performs CallFunction (7.4.2).
+
+#### 16.2.3 Method binding
+
+A function object is a non-data descriptor. `f.__get__(instance, owner)`:
+
+1. If *instance* is `None` and *owner* is `None` or absent, raise a `TypeError`
+   exception ("`__get__`(None, None) is invalid").
+2. If *instance* is `None`, return *f*.
+3. Return a new method object (28.4) with `__func__` *f* and `__self__`
+   *instance*.
+
+### 16.3 Qualified names
+
+The qualified name of a function or class defined at the top level of a module
+is its name. For a definition nested in a class *C*, it is
+*C*.`__qualname__` + `"."` + name. For a definition nested in a function *f*, it
+is *f*.`__qualname__` + `".<locals>."` + name. A lambda's name is `<lambda>`; a
+generator expression's is `<genexpr>`. A name declared `global` in the enclosing
+function or class gives the definition a top-level qualified name.
+
+### 16.4 Class definitions
+
+```text
+class_def: decorators class_def_raw | class_def_raw
+class_def_raw: 'class' NAME [type_params] ['(' [arguments] ')'] &&':' block
+```
+
+#### 16.4.1 Runtime Semantics: Evaluation
+
+1. Evaluate the decorator expressions, in order.
+2. If there are type parameters, the remaining steps run in the type parameters
+   scope (16.7), and the bases are followed by `%Generic%[`*params*`]` unless a
+   base already is a parameterized `%Generic%` or `%Protocol%`.
+3. Evaluate the arguments as for a call (13.3.4): the positional arguments are
+   *bases* and the keyword arguments *kwds*.
+4. Let *cls* be ? BuildClass(*body*, NAME, *bases*, *kwds*).
+5. Apply the decorators from the last to the first.
+6. Perform StoreName(NAME, *cls*).
+
+#### 16.4.2 BuildClass ( *body*, *name*, *bases*, *kwds* )
+
+1. Let *origBases* be *bases*. ResolveBases: for each element *b* of *bases*
+   that is not a class and has a `__mro_entries__` attribute, let *r* be
+   ? Call(that attribute, «*origBases*»); if *r* is not a tuple, raise a
+   `TypeError` exception ("`__mro_entries__` must return a tuple"); replace *b*
+   by the elements of *r*.
+2. Determine the metaclass:
+   1. If *kwds* has `metaclass`, remove it and let *meta* be its value.
+   2. Else, if *bases* is empty, let *meta* be `type`; otherwise let *meta* be
+      Type(*bases*[0]).
+   3. If *meta* is a class, set *meta* to ? CalculateMetaclass(*meta*, *bases*).
+3. If *meta* has an attribute `__prepare__`, let *ns* be ? Call(it, «*name*,
+   *bases*», *kwds*); otherwise let *ns* be a new `dict`. If *ns* is not a
+   mapping, raise a `TypeError` exception ("*meta*.`__name__`.`__prepare__`()
+   must return a mapping, not *tname*(*ns*)").
+4. Evaluate the class body in a new frame whose locals are *ns* and whose
+   globals are those of the running frame. Before the body's statements, the
+   body stores `__module__` (the globals' `__name__`), `__qualname__` (16.3), and
+   `__firstlineno__` (the line of the `class` keyword, or of the first
+   decorator). After them, it stores `__static_attributes__`, a tuple of the
+   names `n`, sorted, for which some function in the body assigns `self.n` to
+   its first parameter `self`; `__annotate_func__` if the body has annotations
+   (16.6); and `__classcell__`, the cell of 8.5, if the body needs one. An
+   implementation may store other names beginning and ending with two
+   underscores (Annex D).
+5. If *bases* differs from *origBases*, set *ns*[`"__orig_bases__"`] to
+   *origBases*.
+6. Let *cls* be ? Call(*meta*, «*name*, *bases*, *ns*», *kwds*).
+7. If the body created a `__class__` cell and *cls* is a class: if the cell is
+   empty, raise a `RuntimeError` exception ("`__class__` not set defining
+   *repr*(*name*) as *repr*(*cls*). Was `__classcell__` propagated to
+   type.`__new__`?"); if it holds an object other than *cls*, raise a
+   `RuntimeError` exception ("`__class__` set to *repr*(*v*) defining
+   *repr*(*name*) as *repr*(*cls*)").
+8. Return *cls*.
+
+CalculateMetaclass(*meta*, *bases*): let *winner* be *meta*; for each base *b*,
+let *t* be Type(*b*); if IsSubclass(*winner*, *t*), continue; if
+IsSubclass(*t*, *winner*), set *winner* to *t*; otherwise raise a `TypeError`
+exception ("metaclass conflict: the metaclass of a derived class must be a
+(non-strict) subclass of the metaclasses of all its bases"). Return *winner*.
+
+#### 16.4.3 `type.__new__` ( *meta*, *name*, *bases*, *ns*, **kwds* )
+
+1. Check the arguments: *name* a `str` ("type.`__new__`() argument 1 must be
+   str, not *tname*"), *bases* a tuple ("… argument 2 must be tuple, not
+   *tname*"), *ns* a `dict` or `frozendict` ("… argument 3 must be dict or
+   frozendict, not *tname*").
+2. Let *winner* be ? CalculateMetaclass(*meta*, *bases*). If *winner* is not
+   *meta* and *winner*.`__new__` is not `type.__new__`, return ? Call(*winner*.`__new__`,
+   «*winner*, *name*, *bases*, *ns*», *kwds*). Set *meta* to *winner*.
+3. If *bases* is empty, set *bases* to «`object`». If a base is not a class, or
+   is a class that does not allow subclassing, raise a `TypeError` exception
+   ("type '*b*.`__name__`' is not an acceptable base type"). If a class occurs
+   twice, raise a `TypeError` exception ("duplicate base class *b*.`__name__`").
+4. Determine the most-derived layout among the bases (10.1.2), raising a
+   `TypeError` exception ("multiple bases have instance lay-out conflict") if
+   there is none.
+5. Let *dict* be a new `dict` copy of *ns*.
+6. If *dict* has no `__module__`, set it from the `__name__` of the calling
+   frame's globals, if any.
+7. If *dict* has `__qualname__`, it shall be a `str` ("type `__qualname__` must
+   be a str, not *tname*"); remove it and use it as the qualified name; otherwise
+   the qualified name is *name*.
+8. If *dict* has `__classcell__`, it shall be a cell ("`__classcell__` must be a
+   nonlocal cell, not *repr*(Type(*v*))"); remove it and remember it.
+9. Process `__slots__` (10.1.2).
+10. If *dict*[`"__new__"`] is a function, wrap it in a `staticmethod`; if
+    `__init_subclass__` or `__class_getitem__` is a function, wrap it in a
+    `classmethod`.
+11. If *dict* has `__eq__` and has no `__hash__`, set *dict*[`"__hash__"`] to
+    `None`.
+12. Create the class *cls* with Type *meta*, the name, qualified name, bases,
+    namespace *dict*, and layout; compute `__mro__` by calling
+    `meta.mro(cls)` (7.1.4).
+13. If the class cell was remembered, set its contents to *cls*.
+14. For each (*key*, *value*) of *dict*, in order: if LookupInMRO(Type(*value*),
+    `"__set_name__"`) exists, call it with «*cls*, *key*»; if it raises, add
+    the note "Error calling `__set_name__` on '*tname*(*value*)' instance
+    *repr*(*key*) in '*name*'" to the exception (21.1.4) and propagate it.
+15. Call ? Call(the `__init_subclass__` attribute of `super(cls, cls)`, «»,
+    *kwds*).
+16. Return *cls*.
+
+`object.__init_subclass__` (20.1) takes no keyword arguments ("*cls*.`__name__`.`__init_subclass__`()
+takes no keyword arguments"). `type.__init__` accepts the same arguments as
+`type.__new__` and does nothing else.
+
+### 16.5 Decorators
+
+A decorator expression is any `named_expression`. Decorators are evaluated
+before the definition and applied after it, innermost (last) first, as 16.1.2
+and 16.4.1 specify. The name is bound only to the final result.
+
+### 16.6 Annotations
+
+#### 16.6.1 Annotate functions
+
+Annotations are evaluated lazily. A function, class, or module whose source
+has annotations gets an *annotate function*: a function object, named
+`__annotate__`, created in an annotation scope (8.1) whose body evaluates the
+annotations when called. The annotate function takes one positional argument
+*format*, an `int`:
+
+| Format | Value | Meaning |
+| --- | --- | --- |
+| VALUE | 1 | evaluate the annotations and return a new `dict` of their values |
+| VALUE_WITH_FAKE_GLOBALS | 2 | as VALUE; the caller may run it with substituted globals |
+| FORWARDREF | 3 | not supported by compiler-generated annotate functions |
+| STRING | 4 | not supported by compiler-generated annotate functions |
+
+A compiler-generated annotate function called with *format* 1 or 2 evaluates
+the annotations in source order and returns a new `dict` mapping each annotated
+name (for a function: each parameter name, and `"return"`) to its value; with
+any other format, it raises a `NotImplementedError` exception with no
+arguments. The other formats are provided by the host's annotation library
+(Annex C).
+
+For a function, the annotations are the parameter and return annotations. For a
+class or module, they are the annotated simple names of the class or module
+body, in the order of the annotated assignment statements executed so far;
+annotated names inside conditional blocks are included only if their statement
+was executed.
+
+#### 16.6.2 `__annotations__`
+
+Reading `__annotations__` of a function, class, or module:
+
+1. If a cached annotations `dict` exists, return it.
+2. If the object has no annotate function (it is `None`), cache and return a new
+   empty `dict` (for a class, `__annotations__` of a class without
+   annotations does not inherit its base's).
+3. Let *d* be ? Call(*annotate*, «1»). If *d* is not a `dict`, raise a
+   `TypeError` exception ("`__annotate__`() must return a dict, not
+   *tname*(*d*)").
+4. Cache *d* and return it.
+
+Assigning `__annotations__` sets the cached `dict` and sets `__annotate__` to
+`None`. Assigning `__annotate__` (a callable or `None`, otherwise "`__annotate__`
+must be callable or None") clears the cache. In a module, the names
+`__annotations__` and `__annotate__` are attributes of the module object
+(17.2), not variables of the module's globals.
+
+#### 16.6.3 Evaluation of annotation scopes
+
+An annotation scope behaves as a function scope nested in the scope that defines
+the annotations, except that when its parent is a class scope it can see the
+class's names (8.4 step 4). Its names are resolved when the annotate function
+is called, not when the definition is executed.
+
+#### 16.6.4 Stringified annotations
+
+Under `from __future__ import annotations` (14.13), each annotation is replaced,
+at compile time, by a string: the source text of the annotation expression
+normalized as the unparsing of its syntax tree. The annotate function then
+returns those strings.
+
+### 16.7 Type parameters
+
+```text
+type_params: '[' type_param_seq ']'
+type_param: NAME [type_param_bound] [type_param_default]
+          | '*' NAME [type_param_starred_default]
+          | '**' NAME [type_param_default]
+type_param_bound: ':' expression
+type_param_default: '=' expression
+```
+
+A generic function, class, or type alias has a type parameters scope (8.1),
+nested between the enclosing scope and the definition's own scope. When the
+definition is evaluated:
+
+1. A new type parameters scope frame is entered.
+2. For each type parameter, in order, a new %TypeVar% (`NAME`), %TypeVarTuple%
+   (`*NAME`), or %ParamSpec% (`**NAME`) object (29.2–29.4) is created and bound
+   to its name in that scope. A bound, constraint tuple (a bound written as a
+   parenthesized tuple), or default is not evaluated now: it is evaluated in its
+   own annotation scope the first time the corresponding attribute
+   (`__bound__`, `__constraints__`, `__default__`) is read.
+3. The definition is evaluated in this scope, and its `__type_params__` is the
+   tuple of the parameter objects.
+
+Static Semantics: a type parameter with a default may not be followed by one
+without a default ("non-default type parameter '*n*' follows default type
+parameter"); a `TypeVarTuple` default must be starred; and the duplicate
+error of 8.3.1.
