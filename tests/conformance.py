@@ -1367,6 +1367,61 @@ class R:
     def __reduce__(self): return "custom"
 print(R().__reduce_ex__(2))
 """,    r"""
+from types import DynamicClassAttribute
+def am(f): f.__isabstractmethod__ = True; return f
+@am
+def color(): pass
+d = DynamicClassAttribute(color)
+print(d.__isabstractmethod__, getattr(d, "__isabstractmethod__", False))
+class M(type):
+    def __new__(m, name, bases, ns):
+        cls = super().__new__(m, name, bases, ns)
+        print({k for k, v in ns.items() if getattr(v, "__isabstractmethod__", False)})
+        cls.__abstractmethods__ = frozenset({k for k, v in ns.items() if getattr(v, "__isabstractmethod__", False)})
+        return cls
+class A(metaclass=M):
+    color = d
+try: A(); print("no error")
+except TypeError as e: print(e)
+class B:
+    pass
+B.__abstractmethods__ = frozenset({"x"})
+try: B(); print("no error")
+except TypeError as e: print(e)
+""",    r"""
+class B: pass
+B.__abstractmethods__ = frozenset({"z", "a"})
+try: B()
+except TypeError as e: print(e)
+B.__abstractmethods__ = ()
+print(type(B()).__name__)
+class C(B): pass
+B.__abstractmethods__ = {"q"}
+print(type(C()).__name__)
+""",    r"""
+def t(src):
+    try: r = compile(src, "<s>", "eval"); print("ok")
+    except (SyntaxError, RecursionError, MemoryError) as e: print(type(e).__name__, e.msg if isinstance(e, SyntaxError) else e)
+for n in (100, 199, 200, 201):
+    t("[" * n + "]" * n)
+    t("(" * n + "1" + ")" * n)
+for n in (100, 1000, 3000):
+    t("-" * n + "1")
+    t("not " * n + "1")
+    t("2" + "**2" * n)
+    t("lambda: " * n + "1")
+    t("x" + ".y" * n)
+    t("x" + "[0]" * n)
+    t("x" + "()" * n)
+""",    r"""
+print(eval("-" * 3001 + "1"), eval("not " * 3000 + "1"))
+f = eval("lambda: " * 1000 + "1")
+for i in range(1000): f = f()
+print(f)
+print(len(eval("[" * 199 + "]" * 199)))
+x = eval("[" * 199 + "]" * 199)
+print(repr(x)[:10])
+""",    r"""
 class A: pass
 class B(A): pass
 class E(Exception): pass

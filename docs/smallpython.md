@@ -575,6 +575,13 @@ exec(), and eval() inherit the running code's future statements unless
 SyntaxErrors from compile(), exec(), and eval() strings have no `text`, as in
 CPython.
 
+Instantiating a class whose own `__abstractmethods__` is true raises CPython's
+TypeError naming the sorted methods. Source nesting follows CPython's limits:
+200 levels of brackets ("too many nested parentheses"), and expressions too
+deep for the parser raise MemoryError ("Parser stack overflowed"); prefix
+operator runs and long operator chains do not count against the C stack per
+operator, and the compiler's checks are bounded by stack use.
+
 Lazy annotations, structural matching, exception groups, generic parameters,
 and type aliases have implementations and local checks; their complete upstream
 modules have not passed. Memoryview, complete introspection,

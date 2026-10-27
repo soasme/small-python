@@ -295,3 +295,7 @@
   as they run. compile/exec/eval inherit the caller's future flags.
 - Class __name__/__qualname__ live outside the class __dict__; classes get
   CPython's __dict__ and __weakref__ getset descriptors.
+- object.__new__ refuses classes with __abstractmethods__.
+- CPython's nesting limits: 200 brackets, MemoryError for parser stack
+  overflow, iterative prefix-operator runs, and stack-bounded compiler checks
+  (long expressions such as 400 additions compile).

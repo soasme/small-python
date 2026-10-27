@@ -2621,9 +2621,9 @@ static int lex(Parser *p, const char *s) {
         ch += width;
     }
     line = 1;
-    char closing[128];
-    size_t opened_line[128];
-    const char *opened_at[128];
+    char closing[200]; /* CPython's MAXLEVEL */
+    size_t opened_line[200];
+    const char *opened_at[200];
     int bol = 1;
     while (*s) {
         if (bol && !brackets) {
@@ -2708,7 +2708,10 @@ static int lex(Parser *p, const char *s) {
             }
             if (kind == '.' && s[0] == '.' && s[1] == '.') { kind = T_ELLIPSIS; s += 2; }
             if (kind == '(' || kind == '[' || kind == '{') {
-                if (brackets == 128) goto nesting;
+                if (brackets == 200) {
+                    p->ctx->line = line; p->error_start = start; p->error_end = s;
+                    spy_error(p->ctx, "SyntaxError", "too many nested parentheses"); return -1;
+                }
                 opened_line[brackets] = line; opened_at[brackets] = start;
                 closing[brackets++] = kind == '(' ? ')' : kind == '[' ? ']' : '}';
             } else if (kind == ')' || kind == ']' || kind == '}') {
@@ -3736,12 +3739,20 @@ static Node *expression_inner(Parser *p, int min, int named) {
         goto assignment_expression;
     } else if (at(p, '+') || at(p, '-') || at(p, '~') || keyword(p, "not")) {
         if (keyword(p, "not") && min > 3) return not_operand_error(p);
-        left = node(p, N_UNARY);
-        if (!left) return NULL;
-        left->op = keyword(p, "not") ? O_NOT : peek(p)->kind;
-        p->pos++;
-        left->a = expression(p, left->op == O_NOT ? 3 : 10);
-        if (!left->a) return NULL;
+        /* A run of prefix operators of one precedence nests without recursion. */
+        int negation = keyword(p, "not");
+        Node *outer = NULL, *inner = NULL;
+        do {
+            Node *n = node(p, N_UNARY);
+            if (!n) return NULL;
+            n->op = negation ? O_NOT : peek(p)->kind;
+            p->pos++;
+            if (inner) inner->a = n; else outer = n;
+            inner = n;
+        } while (negation ? keyword(p, "not") : at(p, '+') || at(p, '-') || at(p, '~'));
+        inner->a = expression(p, negation ? 3 : 10);
+        if (!inner->a) return NULL;
+        left = outer;
     } else {
         if (p->annotation_scope && keyword(p, "await")) return syntax_within(p, "await");
         size_t await_line = peek(p)->line;
@@ -3848,10 +3859,16 @@ assignment_expression:
     return left;
 }
 static Node *expression_mode(Parser *p, int min, int named) {
-    if (++p->depth > 128) { p->depth--; return syntax(p, "expression is too deeply nested"); }
+    /* CPython's parser fails past MAXSTACK rule invocations. */
+    if (p->depth >= 2000 || deeper(p->ctx, "")) {
+        spy_clear_error(p->ctx);
+        spy_error(p->ctx, "MemoryError", "Parser stack overflowed - Python source too complex to parse");
+        return NULL;
+    }
+    p->depth++;
     size_t start = p->pos;
     Node *n = expression_inner(p, min, named);
-    p->depth--;
+    p->depth--; p->ctx->depth--;
     if (n && !min && n->kind != N_COND && n->kind != N_LAMBDA && n->kind != N_NAMED &&
         (p->pos > p->expr_end || (p->pos == p->expr_end && start < p->expr_start))) {
         p->expr_start = start; p->expr_end = p->pos;
@@ -5295,9 +5312,17 @@ static int target_contains(Node *n, const char *name) {
     return 0;
 }
 typedef struct { Node *expression, *clause; } NamedScope;
-static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t count, int iterable, int class_scope, size_t depth) {
-    if (depth > 256) { spy_error(c, "SyntaxError", "syntax tree is too deeply nested"); return -1; }
-    for (; n; n = n->next) {
+static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
+/* A function or class body starts without enclosing comprehensions; its
+ * scope array stays out of the frames of ordinary nesting. */
+static int validate_named_body(SPYContext *c, Node *body, int iterable, int class_scope) {
+    NamedScope nested[128];
+    return validate_named(c, body, nested, 0, iterable, class_scope);
+}
+static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t count, int iterable, int class_scope) {
+    if (deeper(c, " during compilation")) return -1;
+    int status = 0;
+    for (; n && !status; n = n->next) {
         if (n->kind == N_NAMED) {
             c->line = n->line;
             if (iterable) spy_error(c, "SyntaxError", "assignment expression cannot be used in a comprehension iterable expression");
@@ -5311,31 +5336,31 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
                                "assignment expression cannot rebind comprehension iteration variable '%s'", source_name(n->a));
                 }
             }
-            if (c->error_type[0]) return -1;
+            if (c->error_type[0]) { status = -1; break; }
         }
         if (n->kind == N_COMPREHENSION) {
-            if (count == 128) { spy_error(c, "SyntaxError", "too many nested comprehensions"); return -1; }
+            if (count == 128) { spy_error(c, "SyntaxError", "too many nested comprehensions"); status = -1; break; }
             comps[count] = (NamedScope){n, NULL};
-            if (validate_named(c, n->args, comps, count + 1, iterable, class_scope, depth + 1)) return -1;
-            for (Node *clause = n->a; clause; clause = clause->b) {
+            status = validate_named(c, n->args, comps, count + 1, iterable, class_scope);
+            for (Node *clause = n->a; clause && !status; clause = clause->b) {
                 comps[count].clause = clause;
-                if (validate_named(c, clause->a, comps, count + 1, iterable || clause->kind == N_FOR, class_scope, depth + 1)) return -1;
+                status = validate_named(c, clause->a, comps, count + 1, iterable || clause->kind == N_FOR, class_scope);
             }
             continue;
         }
         if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) {
-            if (validate_named(c, n->decorators, comps, count, iterable, class_scope, depth + 1)) return -1;
-            if (validate_named(c, n->args, comps, count, iterable, class_scope, depth + 1)) return -1;
-            NamedScope nested[128];
-            if (validate_named(c, n->b, nested, 0, iterable, n->kind == N_CLASS, depth + 1)) return -1;
+            status = validate_named(c, n->decorators, comps, count, iterable, class_scope) ||
+                     validate_named(c, n->args, comps, count, iterable, class_scope) ||
+                     validate_named_body(c, n->b, iterable, n->kind == N_CLASS);
             continue;
         }
-        if (validate_named(c, n->a, comps, count, iterable, class_scope, depth + 1) ||
-            validate_named(c, n->b, comps, count, iterable, class_scope, depth + 1) ||
-            validate_named(c, n->c, comps, count, iterable, class_scope, depth + 1) ||
-            validate_named(c, n->args, comps, count, iterable, class_scope, depth + 1)) return -1;
+        status = validate_named(c, n->a, comps, count, iterable, class_scope) ||
+                 validate_named(c, n->b, comps, count, iterable, class_scope) ||
+                 validate_named(c, n->c, comps, count, iterable, class_scope) ||
+                 validate_named(c, n->args, comps, count, iterable, class_scope);
     }
-    return 0;
+    c->depth--;
+    return status ? -1 : 0;
 }
 static int compile_generator(SPYContext *, Node *);
 static int compile_comprehension(SPYContext *, Node *);
@@ -5812,7 +5837,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         if (!c->error_type[0]) body_annotations(&p, NULL, unit->as.unit.body, &unit->as.unit.annotate);
         NamedScope comps[128];
-        if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0, 0);
+        if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0);
         if (!c->error_type[0]) validate_yields(c, unit->as.unit.body, 0);
         if (!c->error_type[0]) {
             unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
@@ -10526,6 +10551,26 @@ static int declare_locals(SPYContext *c, SPYValue *env) {
     for (size_t i = 0; i < scope->len; i++)
         if ((scope->symbols[i].flags & S_LOCAL) && declare_name(c, env, scope->symbols[i].name)) return -1;
     return 0;
+}
+static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
+/* object_new refuses a class whose own __abstractmethods__ is true
+ * (Py_TPFLAGS_IS_ABSTRACT), naming the sorted methods. */
+static int abstract_instance_error(SPYContext *c, SPYValue *cls) {
+    SPYValue *methods = name_local(cls, "__abstractmethods__");
+    if (!methods) return 0;
+    int abstract = spy_truth(methods);
+    if (c->error_type[0]) return -1;
+    if (!abstract) return 0;
+    SPYValue *sorted = builtin(c, 1, &methods, (void *)(intptr_t)B_LIST);
+    if (!sorted || sort_list(c, sorted, NULL, 0)) { spy_release(sorted); return -1; }
+    Buffer joined = {.ctx = c};
+    for (size_t i = 0; i < sorted->as.seq.len; i++)
+        if ((i && puts_buffer(&joined, ", ")) || format_value(&joined, sorted->as.seq.items[i], 1)) break;
+    if (!c->error_type[0])
+        errorf(c, "TypeError", "Can't instantiate abstract class %s without an implementation for abstract method%s %.*s",
+               name_local(cls, "__name__")->as.string.data, sorted->as.seq.len == 1 ? "" : "s", (int)joined.len, joined.data ? joined.data : "");
+    free(joined.data); spy_release(sorted);
+    return -1;
 }
 static SPYValue *new_instance(SPYContext *c, SPYValue *cls) {
     SPYValue *v = value_new(c, SPY_INSTANCE);
@@ -19690,6 +19735,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
                 if (default_new) return errorf(c, "TypeError", "%s.__init__() takes exactly one argument (the instance to initialize)", name_local(cls, "__name__")->as.string.data);
             }
         }
+        if (id == B_OBJECT_NEW && abstract_instance_error(c, cls)) return NULL;
         return id == B_OBJECT_NEW ? new_instance(c, cls) : spy_none(c);
     }
     if (id == B_PRINT) return print_values(c, argc, argv, keywords);
