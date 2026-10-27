@@ -1169,3 +1169,612 @@ looks up `__aexit__` and then `__aenter__`, and its messages read "does not
 support the asynchronous context manager protocol (missed *name* method)",
 continuing with " but it supports the context manager protocol. Did you mean
 to use 'with'?" when the type has both `__enter__` and `__exit__`.
+
+## 8 Static Semantics of Scopes
+
+Before a module is evaluated, its parse tree is analysed into a tree of Scope
+Records (6.2.6). The analysis determines, for every name in every scope, how
+the name is resolved at run time (9.3). It calls no user code and depends only
+on the source text.
+
+### 8.1 Scopes
+
+A **scope** is created by each of the following:
+
+| Construct | Scope kind |
+| --- | --- |
+| a module (17.1), or the source of `exec` or `eval` | **module** |
+| a `class` definition body | **class** |
+| a `def` or `async def` body, or a `lambda` | **function** |
+| a comprehension or generator expression (13.2.6) | **comprehension** |
+| the annotations of a function, class, or module (16.6) | **annotation** |
+| the type parameter list of a generic function, class, or type alias (16.7) | **type parameters** |
+| the value of a `type` statement, the bound, constraints, or default of a type parameter | **annotation** |
+
+The scopes form a tree: the *parent* of a scope is the scope whose source text
+immediately contains the construct. The scope created by a type parameter list
+is the parent of the scope of the function, class, or alias it parameterizes.
+
+A function, comprehension, annotation, or type parameters scope is a
+*function-like* scope. A comprehension scope does not create a separate frame
+when it is evaluated (13.2.6), but its names are classified as for a function.
+
+### 8.2 Binding occurrences
+
+A name is **bound** in a scope when it occurs in that scope in one of the
+following positions, which are its *binding occurrences*:
+
+1. a target of an assignment, augmented assignment, or annotated assignment
+   statement (14.2–14.4), including names within target lists, starred
+   targets, and parenthesized or bracketed target lists, but not names
+   appearing in an attribute reference or subscription target;
+2. the target of a `for` loop or `async for` loop, or of a `for` clause of a
+   comprehension (only in that comprehension's scope);
+3. the name after `as` in a `with` item, an `except` clause, an `import`, or a
+   pattern; the capture names of a `match` pattern (15.6);
+4. a name defined by `def`, `async def`, or `class`;
+5. a name imported by `import` (the first component of a dotted name when there
+   is no `as`) or by `from … import`; a `from … import *` binds every public
+   name of the module and is permitted only in a module scope;
+6. a parameter of a function or lambda; a type parameter (in its type parameters
+   scope);
+7. the target of a `del` statement;
+8. a name declared by a `type` statement;
+9. the target of an assignment expression `name := value` (13.12), which binds
+   in the nearest enclosing scope that is not a comprehension scope;
+10. an annotated name without a value (`x: int`) in a function or class scope.
+
+An *annotated name* is a name that is the target of an annotated assignment
+statement in which the target is a single name not enclosed in parentheses.
+
+### 8.3 Declarations
+
+`global` *names* declares each name **global explicit** in the scope that
+contains the statement. `nonlocal` *names* declares each name to refer to a
+binding in an enclosing function-like scope (8.4 step 2).
+
+#### 8.3.1 Static Semantics: Early Errors
+
+It is a `SyntaxError`, with the stated message, if:
+
+- a name is both a parameter and declared `global` in the same scope: "name
+  '*n*' is parameter and global"; or declared `nonlocal`: "name '*n*' is
+  parameter and nonlocal";
+- a name is bound in a scope before a `global` or `nonlocal` declaration of it
+  in that scope, in source order: "name '*n*' is assigned to before global
+  declaration" (or "… before nonlocal declaration");
+- a name is used (other than bound) before such a declaration: "name '*n*' is
+  used prior to global declaration" (or "… prior to nonlocal declaration");
+- an annotated name is declared `global` or `nonlocal` in the same scope:
+  "annotated name '*n*' can't be global" (or "… can't be nonlocal");
+- a name is declared both `global` and `nonlocal` in the same scope: "name '*n*'
+  is nonlocal and global";
+- a `nonlocal` statement appears in a module scope: "nonlocal declaration not
+  allowed at module level";
+- a function has two parameters with the same name: "duplicate parameter '*n*'
+  in function definition";
+- a type parameter list has two parameters with the same name: "duplicate type
+  parameter '*n*'".
+
+A `global` declaration in a class scope applies to the class body only; a
+`nonlocal` declaration in a class scope refers to an enclosing function scope.
+
+### 8.4 Name classification
+
+For each scope *S* and each name *n* that occurs in *S*, the classification of
+*n* in *S* is determined as follows, visiting scopes from the root downward and
+then completing the **cell** classification on the way back up.
+
+1. If *n* is declared `global` in *S*, then *n* is **global explicit** in *S*.
+2. Else, if *n* is declared `nonlocal` in *S*, then
+   1. If no enclosing function-like scope of *S* (stopping at the module scope,
+      and skipping class scopes) binds *n* or declares it `nonlocal`, it is a
+      `SyntaxError` ("no binding for nonlocal '*n*' found").
+   2. If the nearest such binding is a type parameter, it is a `SyntaxError`
+      ("nonlocal binding not allowed for type parameter '*n*'").
+   3. *n* is **free** in *S*.
+3. Else, if *n* is bound in *S*, then *n* is **local** in *S*.
+4. Else, if *S* is an annotation or type parameters scope whose parent is a
+   class scope *C* (it *can see the class scope*), and *n* is bound in *C* and
+   not declared `nonlocal` there, or declared `global` there, then *n* is
+   **global implicit** in *S* and is first looked up in the namespace of *C*
+   (9.3.3).
+5. Else, if an enclosing function-like scope of *S* (skipping class scopes)
+   binds *n* and does not declare it `global`, *n* is **free** in *S*.
+6. Else, *n* is **global implicit** in *S*. (If the nearest enclosing scope that
+   mentions *n* declares it `global`, the effect is the same.)
+
+Then, for every scope *F* in which *n* is **local** and some scope nested in *F*
+classifies *n* as **free** with *F* the scope providing the binding, the
+classification of *n* in *F* becomes **cell**. In a class scope, a name that is
+**free** in the class scope itself is resolved by 9.3.3.
+
+In a module scope every name is **global implicit** or **global explicit**,
+and in a class scope a bound name is **local** to the class namespace. Names
+in module and class scopes, and in scopes run by `exec` or `eval` with a
+separate locals mapping, are looked up through a namespace mapping rather than
+through fixed slots (9.3).
+
+### 8.5 The implicit `__class__` cell
+
+If a function scope nested directly in a class scope *C* (possibly through
+other function scopes) uses the name `super` or the name `__class__`, then the
+class scope *C* has [[NeedsClassCell]] set, `__class__` is a **cell** of *C*,
+and it is **free** in each such function and in the scopes between. When the
+class object is created (16.4.3), the cell is set to the new class.
+
+### 8.6 Comprehension scopes
+
+Each comprehension or generator expression has its own scope. Its first `for`
+clause's iterable expression is evaluated in the enclosing scope and is not part
+of the comprehension scope; every other part is. The targets of its `for`
+clauses are **local** to the comprehension scope and are never visible outside
+it.
+
+An assignment expression in a comprehension binds its target in the nearest
+enclosing scope that is not a comprehension; the target is then **free** in the
+comprehension (or **global explicit** if that scope is the module scope or
+declares it `global`). It is a `SyntaxError` if:
+
+- the target is also an iteration variable of the comprehension: "assignment
+  expression cannot rebind comprehension iteration variable '*n*'";
+- an inner `for` clause rebinds a name that is an assignment expression target:
+  "comprehension inner loop cannot rebind assignment expression target '*n*'";
+- the assignment expression occurs in an iterable expression of the
+  comprehension: "assignment expression cannot be used in a comprehension
+  iterable expression";
+- the nearest enclosing non-comprehension scope is a class scope:
+  "assignment expression within a comprehension cannot be used in a class
+  body"; or a type parameters or annotation scope, with the corresponding
+  message ("… in a TypeVar bound", "… in a type alias", "… within the
+  definition of a generic").
+
+A comprehension in a class scope cannot see the names bound in the class body,
+except in its first iterable, which is evaluated in the class scope.
+
+### 8.7 Restrictions in annotation scopes
+
+It is a `SyntaxError` for a `yield` expression, `yield from` expression,
+`await` expression, or assignment expression to appear in an annotation scope or
+type parameters scope. The messages are "*what* cannot be used within an
+annotation", "*what* cannot be used within a TypeVar bound", "*what* cannot be
+used within a type alias", and "*what* cannot be used within the definition of
+a generic", where *what* is "yield expression", "await expression", or "named
+expression".
+
+### 8.8 Private name mangling
+
+Within a class definition whose name, after removing leading underscores, is
+not empty, every identifier *n* that occurs in the class body or in any scope
+nested in it — as a name, an attribute name in an attribute reference, a
+parameter name, an imported name, or a keyword argument name — and that begins
+with two or more underscores and does not end with two or more underscores is
+replaced, before any other processing, by MangledName(*class*, *n*): one
+underscore, the class name with its leading underscores removed, and *n*. The
+names of modules in `import` statements are mangled only in their first
+component; names in `from … import` lists are not mangled when they are module
+names but are mangled when they are bound names. Mangling does not apply to
+string arguments of `getattr`, `setattr`, or `delattr`. Within a type
+parameters scope, mangling uses the class that encloses the generic
+definition, if any.
+
+## 9 Executable Code and Execution Contexts
+
+### 9.1 Namespaces
+
+A **namespace** maps names to objects. The language uses four kinds:
+
+- the **globals** of a module: the module's `__dict__`, a `dict`;
+- the **builtins**: the namespace of the built-in names (clause 19), reached
+  from the globals as 9.3.4 specifies;
+- the **locals** of a module, class body, or `exec`/`eval` execution: a mapping
+  that is not necessarily a `dict` (a class body's locals is the object
+  returned by `__prepare__`, 16.4.2);
+- the **fast locals** of a function-like scope: fixed slots, one for each name
+  classified **local** or **cell**, each either holding an object or unbound,
+  and one cell for each name classified **cell** or **free**.
+
+A **cell** is an object (28.6) holding at most one object. A name classified
+**cell** or **free** is read and written through its cell. Cells are created
+when a frame starts (for **cell** names) and shared with nested functions
+through their closures (for **free** names).
+
+### 9.2 Execution contexts
+
+#### 9.2.1 Frames
+
+An **execution context** is a Frame Record (6.2.8), referred to as a *frame*. A
+frame has:
+
+| Field | Meaning |
+| --- | --- |
+| [[Code]] | the Code Record being run |
+| [[Globals]] | the globals `dict` |
+| [[Builtins]] | the builtins namespace |
+| [[Locals]] | the locals mapping (module and class scopes), or the fast locals |
+| [[Cells]] | the cells of the **cell** and **free** names |
+| [[Back]] | the frame that was running when this frame started, or **null** |
+| [[Position]] | the current position within the code, for tracebacks |
+| [[HandledException]] | the exception being handled by an `except` clause (9.5), or **null** |
+| [[State]] | **created**, **running**, **suspended**, or **completed** |
+
+#### 9.2.2 The execution context stack
+
+The *execution context stack* holds the frames that have started and not
+completed and are not suspended. The *running execution context* is the top
+of the stack. A call to a function pushes a frame (7.4.2); completing the
+function pops it. Resuming a generator or coroutine (27.2) pushes its frame;
+suspending it at a `yield` or `await` pops it, preserving its state.
+
+#### 9.2.3 RunFrame ( *frame* )
+
+1. Set *frame*.[[Back]] to the running execution context, push *frame* onto the
+   execution context stack, and set *frame*.[[State]] to **running**.
+2. Let *result* be the result of evaluating the body of *frame*.[[Code]] in
+   *frame*.
+3. Pop *frame* from the stack and set *frame*.[[State]] to **completed**.
+4. If *result* is a raise completion, add an entry for *frame* to the
+   traceback of its exception (18.1.3).
+5. Return *result*.
+
+### 9.3 Name resolution
+
+The following operations implement reading, writing, and deleting a name *n*
+in the running execution context *frame*, according to the classification of
+*n* in the scope of *frame*.[[Code]].
+
+#### 9.3.1 LoadName ( *n* )
+
+| Classification | Behaviour |
+| --- | --- |
+| **local**, in a function-like scope | if the slot of *n* is unbound, raise an `UnboundLocalError` exception ("cannot access local variable '*n*' where it is not associated with a value"); otherwise return its value |
+| **cell** or **free**, in a function-like scope | if the cell is empty, raise an `UnboundLocalError` exception (as above) when *n* is **cell**, or a `NameError` exception ("cannot access free variable '*n*' where it is not associated with a value in enclosing scope") when it is **free**; otherwise return its contents |
+| **global explicit** or **global implicit**, in a function-like scope | return ? LoadGlobal(*n*) |
+| any, in a module scope, a class scope, or an `exec`/`eval` scope with a locals mapping | return ? LoadFromLocals(*n*) |
+
+LoadFromLocals(*n*):
+
+1. If *n* is **global explicit**, return ? LoadGlobal(*n*).
+2. If *n* is **free** in a class scope, return ? LoadClassFree(*n*) (9.3.3).
+3. Let *v* be ? GetItem(*frame*.[[Locals]], *n*), treating a `KeyError`
+   exception as **absent**. (If [[Locals]] is exactly a `dict`, it is read
+   directly.)
+4. If *v* is not **absent**, return *v*.
+5. Return ? LoadGlobal(*n*).
+
+#### 9.3.2 LoadGlobal ( *n* )
+
+1. If *frame*.[[Globals]] has the key *n*, return its value.
+2. Let *v* be the value of *n* in *frame*.[[Builtins]], looked up with GetItem
+   if [[Builtins]] is not exactly a `dict`, treating a `KeyError` exception as
+   **absent**.
+3. If *v* is not **absent**, return *v*.
+4. Raise a `NameError` exception ("name '*n*' is not defined", or a message
+   beginning with that text), whose `name` attribute is *n*.
+
+#### 9.3.3 LoadClassFree ( *n* )
+
+In a class scope a **free** name, and in an annotation or type parameters
+scope that can see a class scope a name that the class binds, is looked up
+first in the class namespace:
+
+1. Let *ns* be the class namespace (the locals of the class body, or for an
+   annotation scope the class's `__dict__` captured as `__classdict__`).
+2. If *ns* has the key *n*, return its value.
+3. If *n* is **free**, return the contents of its cell, raising a `NameError`
+   as 9.3.1 specifies when the cell is empty.
+4. Return ? LoadGlobal(*n*).
+
+#### 9.3.4 BuiltinsOf ( *globals* )
+
+1. If *globals* has the key `"__builtins__"`, let *b* be its value; if *b* is a
+   module object, return *b*.`__dict__`; otherwise return *b*.
+2. Return the built-in namespace (clause 19).
+
+A frame's builtins are fixed when the frame starts; a function's builtins are
+those of its globals at the time the function object was created (16.2).
+
+#### 9.3.5 StoreName ( *n*, *v* ) and DeleteName ( *n* )
+
+StoreName binds *n* to *v*: in the slot or cell of a **local**, **cell**, or
+**free** name; in [[Globals]] for a **global explicit** name or any global name
+of a function-like scope; and otherwise by ? SetItem(*frame*.[[Locals]], *n*,
+*v*).
+
+DeleteName unbinds *n* in the same place. Deleting an unbound slot raises the
+`UnboundLocalError` of 9.3.1; deleting an empty cell raises it for a **cell**
+name and the `NameError` of 9.3.1 for a **free** name; deleting a name absent
+from a namespace mapping raises a `NameError` exception ("name '*n*' is not
+defined").
+
+### 9.4 Suspension and resumption
+
+The frame of a generator, coroutine, or asynchronous generator can be
+*suspended*: evaluation stops at a `yield` or at an `await` whose awaitable has
+not completed, the frame is popped from the execution context stack with its
+state preserved, and a value is delivered to the code that resumed it. Resuming
+pushes the frame again and continues the evaluation from the point of
+suspension with a value, an exception to raise there, or a request to close.
+Clause 27 specifies the protocols. A frame is never resumed while it is
+running; an attempt raises a `ValueError` exception ("generator already
+executing", or "coroutine already executing").
+
+### 9.5 The handled exception
+
+While an `except` clause or `except*` clause runs (15.4), the exception it
+handles is the *handled exception* of the frame. The **current handled
+exception** is the [[HandledException]] of the nearest frame on the execution
+context stack, from the top down, whose value is not **null**; it is `None`
+when there is none. It is what a bare `raise` re-raises (14.8) and what an
+exception raised inside a handler gets as its `__context__` (18.1.2). When the
+`except` clause ends, the previous handled exception is restored. A suspended
+generator keeps its handled exception and restores it when resumed.
+
+### 9.6 Recursion limit
+
+Each running Call of a function object, each ToRepr, and each nested evaluation
+the implementation counts adds one to the *recursion depth*. When the depth
+would exceed the *recursion limit* (Annex D), the operation raises a
+`RecursionError` exception ("maximum recursion depth exceeded", or a message
+beginning with that text) instead of starting. The implementation shall also
+raise `RecursionError` before nesting would exhaust its own resources, so that
+deeply nested data structures and parse trees fail safely.
+
+### 9.7 Object lifetime and finalization
+
+An object that is no longer reachable from a root (6.1.1) may be reclaimed.
+Before an object whose type defines `__del__` is reclaimed, its `__del__` method
+is called, at most once for the object's lifetime, even if `__del__` makes it
+reachable again. Objects that are reachable only through reference cycles shall
+eventually be reclaimed, including their `__del__` methods. The time at which an
+unreachable object is reclaimed, and the order in which a group of unreachable
+objects is finalized, are implementation-approximated. An exception that
+escapes `__del__` is not propagated; it is reported through the host hook
+HostReportUnraisable (Annex B).
+
+### 9.8 Program execution
+
+A program starts when the host runs a module as the main module (17.1): it
+creates a module object named `"__main__"`, binds the standard module
+attributes (17.2), and evaluates the module's source in its namespace. An
+exception that escapes the main module is reported through HostReportException
+(Annex B); a `SystemExit` exception is handled as Annex B specifies.
+
+## 10 Object Behaviours
+
+### 10.1 Instances
+
+#### 10.1.1 Instance namespaces
+
+An instance of a class defined by a `class` statement has an *instance
+namespace*, a `dict` reachable as its `__dict__` attribute, unless every class
+in its MRO that is defined by a `class` statement declares `__slots__` (10.1.2)
+and none of them names `__dict__` there. Instances of built-in types have no
+instance namespace unless their clause says so; function objects, module
+objects, and class objects have one.
+
+The `__dict__` attribute of an instance is a data descriptor (a
+%GetSetDescriptorType% object, 28.8) found in the class. Assigning to it
+replaces the namespace:
+
+1. If the value is not an instance of `dict` (a subclass is accepted), raise a
+   `TypeError` exception ("`__dict__` must be set to a dictionary, not a
+   '*tname*(*value*)'").
+2. Otherwise the value becomes the instance namespace. GenericGetAttr and
+   GenericSetAttr read and write it as a `dict`, without calling methods that
+   a subclass overrides.
+
+#### 10.1.2 `__slots__`
+
+If a class body binds `__slots__`, class creation (16.4.3) reserves storage for
+the named attributes in each instance instead of (or in addition to) an
+instance namespace:
+
+1. If `__slots__` is a `str`, the class has one slot with that name; otherwise
+   it is iterated (7.7.3) and every element shall be a `str`, or a `TypeError`
+   exception ("`__slots__` items must be strings, not '*tname*(*item*)'") is
+   raised.
+2. Each name shall be an identifier (12.4), or a `TypeError` exception
+   ("`__slots__` must be identifiers") is raised. Names are mangled (8.8).
+3. The name `__dict__` requests an instance namespace; it is a `TypeError`
+   ("`__dict__` slot disallowed: we already got one") if a base already
+   provides one or if it is named twice. The name `__weakref__` requests weak
+   reference support and is subject to the corresponding rule ("`__weakref__`
+   slot disallowed: we already got one").
+4. If a slot name is also bound in the class namespace, raise a `ValueError`
+   exception ("'*name*' in `__slots__` conflicts with class variable").
+5. For each other name, the class namespace binds the name to a new member
+   descriptor (%MemberDescriptorType%, 28.8) that reads, writes, and deletes
+   that slot of an instance. Reading or deleting an empty slot raises an
+   `AttributeError` exception ("'*tname*(*o*)' object has no attribute
+   '*name*'").
+6. A class whose base is a built-in type with variable-sized instances (`int`,
+   `bytes`, `tuple`) may not declare non-empty slots other than `__dict__` and
+   `__weakref__`: "arbitrary `__slots__` not supported for subtype of
+   '*base*'" (or "nonempty `__slots__` not supported for subtype of
+   '*base*'").
+
+The classes whose instances have slots, or which derive from built-in types,
+have an *instance layout*. Two classes have *compatible layouts* when they have
+the same slots, in the same order, the same presence of an instance namespace,
+and the same built-in base layout. Class creation requires that the bases of a
+class have a single most-derived layout ("multiple bases have instance lay-out
+conflict").
+
+#### 10.1.3 `__class__` assignment
+
+Assigning to the `__class__` attribute of an object *o* changes Type(*o*):
+
+1. If the value *C* is not a class, raise a `TypeError` exception
+   ("`__class__` must be set to a class, not '*tname*(*C*)' object").
+2. If neither Type(*o*) nor *C* is a class defined by a `class` statement (or
+   a subclass of `%ModuleType%`), raise a `TypeError` exception ("`__class__`
+   assignment only supported for mutable types or ModuleType subclasses").
+3. If the layouts of Type(*o*) and *C* are not compatible, raise a `TypeError`
+   exception ("`__class__` assignment: '*C*.`__name__`' object layout differs
+   from '*tname*(*o*)'").
+4. Set Type(*o*) to *C*.
+
+### 10.2 Instance creation
+
+#### 10.2.1 Calling a class
+
+Calling a class *C* (that is, Call(*C*, *args*, *kwargs*) where `type.__call__`
+is found by 7.4.1 step 3) runs `type.__call__`:
+
+1. If *C* is `type` itself, *args* has one element, and *kwargs* is empty,
+   return Type(*args*[0]).
+2. If *C* is `type` itself and *args* does not have exactly three elements,
+   raise a `TypeError` exception ("type() takes 1 or 3 arguments").
+3. Let *new* be LookupInMRO(*C*, `"__new__"`). If *new* is **absent** (the
+   class's instances cannot be created by a call), raise a `TypeError`
+   exception ("cannot create '*C*.`__name__`' instances").
+4. Let *obj* be ? Call(*new*, «*C*» followed by *args*, *kwargs*). (`__new__`
+   is a static method; 20.1.5.)
+5. If IsSubclass(Type(*obj*), *C*) is **false**, return *obj*.
+6. Let *r* be ? CallSpecial(*obj*, `"__init__"`, *args*, *kwargs*).
+7. If *r* is not `None`, raise a `TypeError` exception ("`__init__`() should
+   return None, not '*tname*(*r*)'").
+8. Return *obj*.
+
+#### 10.2.2 `object.__new__` and `object.__init__`
+
+`object.__new__(cls, *args, **kwargs)`:
+
+1. If *cls* is not a class, raise a `TypeError` exception ("object.`__new__`(X):
+   X is not a type object (*tname*(*cls*))").
+2. If *cls* is not a subclass of `object` whose instances `object.__new__` can
+   create (its nearest built-in base is `object`), raise a `TypeError` exception
+   ("object.`__new__`(*cls*.`__name__`) is not safe, use
+   *base*.`__new__`()").
+3. If *args* or *kwargs* is not empty, then
+   1. If LookupInMRO(*cls*, `"__new__"`) is not `object.__new__`, raise a
+      `TypeError` exception ("object.`__new__`() takes exactly one argument (the
+      type to instantiate)").
+   2. If LookupInMRO(*cls*, `"__init__"`) is `object.__init__`, raise a
+      `TypeError` exception ("*cls*.`__name__`() takes no arguments").
+4. If *cls* is abstract (20.2.8), raise a `TypeError` exception ("Can't
+   instantiate abstract class *cls*.`__name__` without an implementation for
+   abstract method*s* *names*"), where *names* are the sorted names of
+   *cls*.`__abstractmethods__`, each quoted with `'` and joined with `", "`.
+5. Return a new instance of *cls* with an empty instance namespace (if the
+   layout has one) and empty slots.
+
+`object.__init__(self, *args, **kwargs)`:
+
+1. If *args* or *kwargs* is not empty, then
+   1. If LookupInMRO(Type(*self*), `"__init__"`) is not `object.__init__`, raise
+      a `TypeError` exception ("object.`__init__`() takes exactly one argument
+      (the instance to initialize)").
+   2. If LookupInMRO(Type(*self*), `"__new__"`) is `object.__new__`, raise a
+      `TypeError` exception ("*tname*(*self*).`__init__`() takes exactly one
+      argument (the instance to initialize)").
+2. Return `None`.
+
+### 10.3 Descriptors
+
+A **descriptor** is an object whose type defines one or more of `__get__`,
+`__set__`, and `__delete__`. When a descriptor is found in a class namespace by
+attribute lookup, the lookup calls its methods instead of returning it (7.3.5,
+7.3.6, 7.3.8). A **data descriptor** defines `__set__` or `__delete__`
+(IsDataDescriptor, 7.3.5); it takes precedence over the instance namespace. A
+**non-data descriptor** defines only `__get__`; the instance namespace takes
+precedence over it.
+
+The call `descr.__get__(instance, owner)` receives `None` as *instance* when
+the attribute is looked up on the class *owner*. `__set_name__(owner, name)` is
+called on each descriptor when its class is created (16.4.3).
+
+The built-in descriptors are: function objects (16.2.3), which bind to an
+instance and produce methods; `staticmethod` and `classmethod` objects (20.6,
+20.7); `property` objects (20.5); member and getset descriptors (28.8); and
+method, wrapper, and class-method descriptors of built-in types (28.7).
+
+### 10.4 Class objects
+
+#### 10.4.1 Attribute access on classes
+
+`type.__getattribute__` behaves as TypeGetAttr (7.3.6). `type.__setattr__` and
+`type.__delattr__` behave as GenericSetAttr on the class namespace, except:
+
+1. A built-in type or other immutable type rejects every assignment and
+   deletion: "cannot set '*name*' attribute of immutable type '*T*'" and
+   "cannot delete '*name*' attribute of immutable type '*T*'"
+   (`TypeError`).
+2. The class namespace is read-only through `__dict__`: `C.__dict__` is a
+   %MappingProxyType% view (26.6) of it.
+3. Setting or deleting an attribute whose name is a special method updates the
+   behaviour of the operation that looks it up; LookupInMRO always reads the
+   current class namespaces.
+
+#### 10.4.2 Type attributes
+
+A class *C* has the following attributes, defined as data descriptors on
+`type` (20.2):
+
+| Attribute | Read | Write |
+| --- | --- | --- |
+| `__name__` | the class name | a `str` only ("can only assign string to *C*.`__name__`, not '*tname*(*v*)'"), not containing a null character |
+| `__qualname__` | the qualified name (16.4.3) | a `str` only ("can only assign string to *C*.`__qualname__`, not '*tname*(*v*)'") |
+| `__module__` | `__module__` of the class namespace | any object |
+| `__bases__` | the tuple of bases | a non-empty tuple of classes with a compatible layout, creating no cycle; recomputes `__mro__` of *C* and its subclasses |
+| `__mro__` | the tuple from ComputeMRO | read-only |
+| `__dict__` | a %MappingProxyType% of the namespace | read-only |
+| `__doc__` | `__doc__` of the namespace, or `None` | any object |
+| `__type_params__` | the tuple of type parameters (16.7) | a tuple |
+| `__annotations__`, `__annotate__` | 16.6 | 16.6 |
+| `__abstractmethods__` | the set given (absent until set) | any iterable; sets abstractness (20.2.8) |
+
+Assigning `__mro__` or `__dict__`, or deleting them, raises an
+`AttributeError` exception ("attribute '*name*' of 'type' objects is not
+writable"). Deleting `__name__`, `__qualname__`, `__module__`, `__bases__`,
+`__doc__`, or `__type_params__` raises a `TypeError` exception ("cannot delete
+'*name*' attribute of type '*C*.`__name__`'"). Deleting `__abstractmethods__`
+when it was never set raises an `AttributeError` exception
+("`__abstractmethods__`"). A `__name__` containing U+0000 raises a `ValueError`
+exception ("type name must not contain null characters").
+
+Assigning `__bases__` performs these checks, in order:
+
+1. If the value is not a tuple, raise a `TypeError` exception ("can only assign
+   tuple to *C*.`__name__`.`__bases__`, not *tname*(*v*)").
+2. If it is empty, raise a `TypeError` exception ("can only assign non-empty
+   tuple to *C*.`__name__`.`__bases__`, not ()").
+3. If an element *b* is not a class, raise a `TypeError` exception
+   ("*C*.`__name__`.`__bases__` must be tuple of classes, not
+   '*tname*(*b*)'").
+4. If *C* is an element of the MRO of some element, raise a `TypeError`
+   exception ("a `__bases__` item causes an inheritance cycle").
+5. If the layout of the new most-derived base differs from the old one, raise a
+   `TypeError` exception ("`__bases__` assignment: '*B*' object layout differs
+   from '*A*'").
+6. Set the bases and recompute the MRO of *C* and of each of its subclasses.
+
+### 10.5 Special method names
+
+The following table lists the special methods that language operations look up
+by LookupSpecial (7.3.2) and the clause that uses each.
+
+| Methods | Used by |
+| --- | --- |
+| `__new__`, `__init__`, `__del__` | instance creation (10.2), finalization (9.7) |
+| `__repr__`, `__str__`, `__bytes__`, `__format__` | ToRepr, ToStr, `bytes()`, Format (7.5) |
+| `__lt__`, `__le__`, `__eq__`, `__ne__`, `__gt__`, `__ge__` | RichCompare (7.2.4) |
+| `__hash__`, `__bool__` | Hash (7.5.7), ToBoolean (7.5.1) |
+| `__getattribute__`, `__getattr__`, `__setattr__`, `__delattr__`, `__dir__` | attribute access (7.3), `dir()` |
+| `__get__`, `__set__`, `__delete__`, `__set_name__` | descriptors (10.3) |
+| `__init_subclass__`, `__prepare__`, `__mro_entries__`, `__class_getitem__` | class creation (16.4) |
+| `__instancecheck__`, `__subclasscheck__` | `isinstance`, `issubclass` (19.3) |
+| `__call__` | Call (7.4.1) |
+| `__len__`, `__length_hint__`, `__getitem__`, `__setitem__`, `__delitem__`, `__missing__`, `__iter__`, `__reversed__`, `__contains__` | containers (7.8), iteration (7.7) |
+| the methods of 7.6.1, their reflected and in-place forms | BinaryOp, InPlaceOp (7.6) |
+| `__neg__`, `__pos__`, `__abs__`, `__invert__` | UnaryOp (7.6.4) |
+| `__complex__`, `__int__`, `__float__`, `__index__` | `complex()`, `int()`, `float()`, ToIndex |
+| `__round__`, `__trunc__`, `__floor__`, `__ceil__` | `round()`, and the numeric clauses |
+| `__enter__`, `__exit__`, `__aenter__`, `__aexit__` | `with`, `async with` (15.5) |
+| `__await__`, `__aiter__`, `__anext__` | `await`, `async for` (13.6, 15.3.2) |
+| `__buffer__`, `__release_buffer__` | the buffer protocol (24.4) |
+| `__match_args__` (a class attribute) | class patterns (15.6.9) |
+
+A program shall not depend on any other method name being looked up
+implicitly.
