@@ -490,6 +490,15 @@
   attribute"; range.index() reports a miss as CPython does; len() of a
   range beyond sys.maxsize raises CPython's OverflowError. TLA+ model of
   ranges.
+- str methods word bad arguments as CPython does: split's "must be str
+  or None", strip's "strip arg must be None or str", startswith's
+  tuple messages, find's "find() argument 1 must be str", search bounds'
+  "slice indices must be integers...", the fill character's type,
+  removeprefix, join of a non-iterable, maketrans, and the encoding and
+  errors arguments of encode, decode, str(), bytes(), and bytearray().
+  splitlines() takes any object for keepends. A builtin method given
+  keywords it does not take names itself by qualified name
+  ("list.append() takes no keyword arguments"). TLA+ model of str.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

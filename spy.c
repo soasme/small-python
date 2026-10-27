@@ -9585,12 +9585,20 @@ static int buffer_exporter(SPYContext *c, SPYValue *v) {
     return v->type == SPY_MEMORYVIEW || (v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_BYTES) &&
         !builtin_value(c, v, SPY_BYTEARRAY) && class_lookup(v->as.map.parent, "__buffer__"));
 }
-static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t argc, SPYValue *const *argv) {
-    if (argc < 1 || argc > 3) {
-        const char *name = method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
-            method == M_RFIND ? "rfind" : method == M_STRING_INDEX ? "index" : method == M_RINDEX ? "rindex" : "count";
-        return method_arity(c, type_name(self), name, 1, 3, argc);
+/* _PyEval_SliceIndex: a search bound is an integer, None, or __index__. */
+static int search_bound(SPYContext *c, SPYValue *value, int64_t *result) {
+    SPYValue *method = is_int(value) || !special_dispatch(value) ? NULL : special_method(c, value, "__index__");
+    spy_release(method);
+    if (!is_int(value) && !method) {
+        if (!c->error_type[0]) spy_error(c, "TypeError", "slice indices must be integers or have an __index__ method");
+        return -1;
     }
+    return slice_index(c, value, result);
+}
+static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t argc, SPYValue *const *argv) {
+    const char *name = method == M_STARTSWITH ? "startswith" : method == M_ENDSWITH ? "endswith" : method == M_FIND ? "find" :
+        method == M_RFIND ? "rfind" : method == M_STRING_INDEX ? "index" : method == M_RINDEX ? "rindex" : "count";
+    if (argc < 1 || argc > 3) return method_arity(c, type_name(self), name, 1, 3, argc);
     int tail = method == M_STARTSWITH || method == M_ENDSWITH;
     if (self->type == SPY_BYTES && (buffer_exporter(c, argv[0]) || (tail && argv[0]->type == SPY_TUPLE))) {
         // Buffer needles search as their bytes.
@@ -9617,8 +9625,8 @@ static SPYValue *string_search(SPYContext *c, SPYValue *self, int method, size_t
     }
 search:;
     int64_t start = 0, end = INT64_MAX;
-    if (argc > 1 && argv[1]->type != SPY_NONE && slice_index(c, argv[1], &start)) return NULL;
-    if (argc > 2 && argv[2]->type != SPY_NONE && slice_index(c, argv[2], &end)) return NULL;
+    if (argc > 1 && argv[1]->type != SPY_NONE && search_bound(c, argv[1], &start)) return NULL;
+    if (argc > 2 && argv[2]->type != SPY_NONE && search_bound(c, argv[2], &end)) return NULL;
     size_t length = string_length(self);
     if (start < 0) start = start < -(int64_t)length ? 0 : start + (int64_t)length;
     if (end < 0) end = end < -(int64_t)length ? 0 : end + (int64_t)length;
@@ -9652,8 +9660,16 @@ search:;
         } else {
             SPYValue *text = builtin_value(c, part, self->type);
             if (!text && self->type == SPY_BYTES) text = builtin_value(c, part, SPY_BYTEARRAY);
-            if (!text)
-                return spy_error(c, "TypeError", self->type == SPY_STRING ? "substring must be str" : "substring must be bytes or an integer");
+            if (!text) {
+                const char *what = self->type == SPY_STRING ? "str" : "bytes";
+                if (tail && sub->type == SPY_TUPLE && self->type == SPY_STRING)
+                    return errorf(c, "TypeError", "tuple for %s must only contain str, not %s", name, type_name(part));
+                if (tail && sub->type == SPY_TUPLE) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(part));
+                if (tail) return errorf(c, "TypeError", "%s first arg must be %s or a tuple of %s, not %s", name, what, what, type_name(part));
+                if (self->type == SPY_STRING)
+                    return errorf(c, "TypeError", "%s() argument 1 must be str, not %s", name, part->type == SPY_NONE ? "None" : type_name(part));
+                return errorf(c, "TypeError", "argument should be integer or bytes-like object, not '%s'", type_name(part));
+            }
             needle = text->as.string.data; size = text->as.string.len;
         }
         if (tail) {
@@ -9910,6 +9926,8 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     case M_JOIN: {
         if (argc != 1) break;
         SPYValue *iterator = get_iterator(c, argv[0]);
+        /* PySequence_Fast(iterable, "can only join an iterable") */
+        if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
         if (!iterator) return NULL;
         Buffer out = {.ctx = c};
         for (size_t i = 0; !c->error_type[0]; i++) {
@@ -9939,8 +9957,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         return spy_bool(c, 1);
     case M_SPLITLINES: {
         if (argc > 1) break;
-        int64_t keepends = 0;
-        if (argc && index_value(c, argv[0], &keepends)) return NULL;
+        int keepends = argc && spy_truth(argv[0]);
         const unsigned char *text = (const unsigned char *)self->as.string.data;
         size_t start = 0, len = self->as.string.len;
         SPYValue *lines = spy_list(c);
@@ -11896,8 +11913,14 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
             else result = bound_call(c, fn, 1, &keepends);
         }
         else if (keywords && keywords->as.map.len) {
-            SPYValue *name = fn->type == SPY_NATIVE ? fn->as.native.name : fn->as.bound.name;
+            /* CPython names a method by its qualified name, list.append. */
+            SPYValue *name = attribute(c, fn, "__qualname__");
+            if (!name || name->type != SPY_STRING) {
+                spy_clear_error(c); spy_release(name);
+                name = spy_retain(fn->type == SPY_NATIVE ? fn->as.native.name : fn->as.bound.name);
+            }
             errorf(c, "TypeError", "%s() takes no keyword arguments", name ? name->as.string.data : "builtin");
+            spy_release(name);
         }
         else result = fn->type == SPY_NATIVE ? fn->as.native.call(c, argc, argv, fn->as.native.data) : bound_call(c, fn, argc, argv);
     } else if (fn->type == SPY_STATICMETHOD) {
@@ -17334,10 +17357,8 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
                            SPYValue *keywords, const char *const *names, size_t count, size_t required,
                            size_t keyword_start, SPYValue **out) {
     if (!names) keyword_start = count;
-    if (!count && (argc || (keywords && keywords->as.map.len))) {
-        errorf(c, "TypeError", "%s() takes no arguments (%zu given)", function, argc + (keywords ? keywords->as.map.len : 0));
-        return -1;
-    }
+    if (!count && argc) { errorf(c, "TypeError", "%s() takes no arguments (%zu given)", function, argc); return -1; }
+    if (!count && keywords && keywords->as.map.len) { errorf(c, "TypeError", "%s() takes no keyword arguments", function); return -1; }
     if (argc > count) {
         errorf(c, "TypeError", "%s() takes at most %zu argument%s (%zu given)", function, count, count == 1 ? "" : "s", argc);
         return -1;
@@ -17804,7 +17825,9 @@ static int text_argument(SPYContext *c, SPYValue *self, SPYValue *value, const c
     SPYValue *copy = NULL, *actual = self->type == SPY_STRING ? builtin_value(c, value, SPY_STRING) : buffer_bytes(c, value, &copy);
     if (!actual) {
         if (c->error_type[0]) return -1;
-        if (self->type == SPY_STRING) errorf(c, "TypeError", "%s must be str, not %s", what, type_name(value));
+        /* Argument Clinic shows None as None, not NoneType. */
+        if (self->type == SPY_STRING)
+            errorf(c, "TypeError", "%s, not %s", what, value->type == SPY_NONE && strstr(what, "() argument") ? "None" : type_name(value));
         else errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(value));
         return -1;
     }
@@ -17844,7 +17867,7 @@ static SPYValue *text_split(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (units_from(c, self, &text)) return NULL;
     SPYValue *list = spy_list(c);
     int whitespace = !args[0] || args[0]->type == SPY_NONE;
-    if (!whitespace && text_argument(c, self, args[0], "sep", &sep)) goto fail;
+    if (!whitespace && text_argument(c, self, args[0], "must be str or None", &sep)) goto fail;
     if (!whitespace && !sep.len) { spy_error(c, "ValueError", "empty separator"); goto fail; }
     if (!list) goto fail;
     size_t count = 0;
@@ -17919,6 +17942,9 @@ static SPYValue *text_strip(SPYContext *c, size_t argc, SPYValue *const *argv, S
     Units text, chars = {0};
     if (units_from(c, self, &text)) return NULL;
     int whitespace = !args[0] || args[0]->type == SPY_NONE;
+    if (!whitespace && type == SPY_STRING && !builtin_value(c, args[0], SPY_STRING)) {
+        free(text.items); return errorf(c, "TypeError", "%s arg must be None or str", strip_names[sides]);
+    }
     if (!whitespace && text_argument(c, self, args[0], "strip arg", &chars)) { free(text.items); return NULL; }
     size_t start = 0, end = text.len;
 #define STRIPPED(code) (whitespace ? character_is(type, C_SPACE, code) : \
@@ -17940,8 +17966,8 @@ static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv,
     Units text, old = {0}, replacement = {0}, out = {.ctx = c};
     if (units_from(c, self, &text)) return NULL;
     SPYValue *result = NULL;
-    if (text_argument(c, self, args[0], "replace() argument 1", &old) ||
-        text_argument(c, self, args[1], "replace() argument 2", &replacement)) goto done;
+    if (text_argument(c, self, args[0], "replace() argument 1 must be str", &old) ||
+        text_argument(c, self, args[1], "replace() argument 2 must be str", &replacement)) goto done;
     size_t start = 0, count = 0;
     if (!old.len) {
         for (size_t i = 0; i <= text.len; i++) {
@@ -17965,6 +17991,8 @@ static const char *const pad_names[] = {"center", "ljust", "rjust", "zfill"};
 static SPYValue *text_pad(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)((intptr_t)data >> 8), mode = (int)((intptr_t)data & 255);
     SPYValue *self = method_self(c, argc, argv, type, pad_names[mode]), *args[2] = {NULL, NULL};
+    if (self && (!keywords || !keywords->as.map.len) && (argc < 2 || argc > (mode == 3 ? 2u : 3u)))
+        return method_arity(c, type_name(self), pad_names[mode], 1, mode == 3 ? 1 : 2, argc - 1);
     if (!self || parse_arguments(c, pad_names[mode], argc - 1, argv + 1, keywords, NULL, mode == 3 ? 1 : 2, 1, 0, args)) return NULL;
     int64_t width;
     if (index_value(c, args[0], &width)) return NULL;
@@ -17972,6 +18000,8 @@ static SPYValue *text_pad(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     if (args[1]) {
         Units f;
         SPYValue *actual = builtin_value(c, args[1], type);
+        if (!actual && type == SPY_STRING)
+            return errorf(c, "TypeError", "The fill character must be a unicode character, not %s", type_name(args[1]));
         if (!actual || (type == SPY_STRING ? string_length(actual) : actual->as.string.len) != 1)
             return spy_error(c, "TypeError", type == SPY_STRING ? "The fill character must be exactly one character long" :
                              "argument 2 must be a byte string of length 1");
@@ -18000,7 +18030,7 @@ static SPYValue *text_partition(SPYContext *c, size_t argc, SPYValue *const *arg
     Units text, sep = {0};
     if (units_from(c, self, &text)) return NULL;
     SPYValue *tuple = NULL;
-    if (text_argument(c, self, args[0], "sep", &sep)) goto done;
+    if (text_argument(c, self, args[0], "must be str", &sep)) goto done;
     if (!sep.len) { spy_error(c, "ValueError", "empty separator"); goto done; }
     size_t found = units_find(&text, 0, text.len, &sep, reverse);
     tuple = value_new(c, SPY_TUPLE);
@@ -18025,7 +18055,9 @@ static SPYValue *text_affix(SPYContext *c, size_t argc, SPYValue *const *argv, S
     Units text, affix = {0};
     if (units_from(c, self, &text)) return NULL;
     SPYValue *result = NULL;
-    if (!text_argument(c, self, args[0], name, &affix)) {
+    char what[64];
+    snprintf(what, sizeof(what), "%s() argument must be str", name);
+    if (!text_argument(c, self, args[0], what, &affix)) {
         size_t start = 0, end = text.len;
         if (affix.len <= text.len && !memcmp(text.items + (suffix ? text.len - affix.len : 0), affix.items, affix.len * sizeof(uint32_t))) {
             if (suffix) end -= affix.len; else start = affix.len;
@@ -18067,6 +18099,7 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
     SPYValue *self = method_self(c, argc, argv, type, "join"), *args[1];
     if (!self || parse_arguments(c, "join", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
     SPYValue *iterator = get_iterator(c, args[0]), *item;
+    if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
     if (!iterator) return NULL;
     Buffer out = {.ctx = c};
     for (size_t i = 0; !c->error_type[0] && (item = iterator_next(c, iterator)); i++) {
@@ -18313,17 +18346,29 @@ static SPYValue *decode_source(SPYContext *c, const char *source, size_t len, co
     spy_release(encoding);
     return text;
 }
+/* Argument Clinic's check that encoding and errors are str, naming the function. */
+static int codec_argument_types(SPYContext *c, const char *function, SPYValue *encoding, SPYValue *errors) {
+    if (encoding && !builtin_value(c, encoding, SPY_STRING)) {
+        errorf(c, "TypeError", "%s() argument 'encoding' must be str, not %s", function, type_name(encoding)); return -1;
+    }
+    if (errors && !builtin_value(c, errors, SPY_STRING)) {
+        errorf(c, "TypeError", "%s() argument 'errors' must be str, not %s", function, type_name(errors)); return -1;
+    }
+    return 0;
+}
 static SPYValue *str_encode(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     static const char *const names[] = {"encoding", "errors"};
     SPYValue *self = method_self(c, argc, argv, SPY_STRING, "encode"), *args[2];
-    if (!self || parse_arguments(c, "encode", argc - 1, argv + 1, keywords, names, 2, 0, 0, args)) return NULL;
+    if (!self || parse_arguments(c, "encode", argc - 1, argv + 1, keywords, names, 2, 0, 0, args) ||
+        codec_argument_types(c, "encode", args[0], args[1])) return NULL;
     return text_encode(c, self, args[0], args[1]);
 }
 static SPYValue *bytes_decode_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     static const char *const names[] = {"encoding", "errors"};
     SPYValue *self = method_self(c, argc, argv, (int)(intptr_t)data, "decode"), *args[2];
-    if (!self || parse_arguments(c, "decode", argc - 1, argv + 1, keywords, names, 2, 0, 0, args)) return NULL;
+    if (!self || parse_arguments(c, "decode", argc - 1, argv + 1, keywords, names, 2, 0, 0, args) ||
+        codec_argument_types(c, "decode", args[0], args[1])) return NULL;
     return bytes_decode(c, self->as.string.data, self->as.string.len, args[0], args[1]);
 }
 static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -18398,18 +18443,18 @@ static SPYValue *str_maketrans(SPYContext *c, size_t argc, SPYValue *const *argv
             Entry *entry = &args[0]->as.map.items[i];
             SPYValue *key = NULL;
             if (entry->key->type == SPY_STRING) {
-                if (string_length(entry->key) != 1) { spy_error(c, "ValueError", "string keys in translate table must be of length 1"); break; }
+                if (string_length(entry->key) != 1) { spy_error(c, "ValueError", "string keys in translatetable must be of length 1"); break; }
                 size_t width;
                 key = spy_int(c, utf8_decode(entry->key->as.string.data, entry->key->as.string.len, &width));
             } else if (is_int(entry->key)) key = spy_retain(entry->key);
-            else { spy_error(c, "TypeError", "keys in translate table must be strings or integers"); break; }
+            else { spy_error(c, "TypeError", "keys in translate table mustbe strings or integers"); break; }
             if (key) map_set(c, table, key, entry->value);
             spy_release(key);
         }
     } else {
         Units from = {0}, to = {0}, drop = {0};
-        if (args[0]->type != SPY_STRING || args[1]->type != SPY_STRING || (args[2] && args[2]->type != SPY_STRING))
-            spy_error(c, "TypeError", "maketrans() arguments must be str");
+        int bad = args[0]->type != SPY_STRING ? 0 : args[1]->type != SPY_STRING ? 1 : args[2] && args[2]->type != SPY_STRING ? 2 : -1;
+        if (bad >= 0) errorf(c, "TypeError", "maketrans() argument %d must be str, not %s", bad + 1, type_name(args[bad]));
         else if (!units_from(c, args[0], &from) && !units_from(c, args[1], &to) && (!args[2] || !units_from(c, args[2], &drop))) {
             if (from.len != to.len) spy_error(c, "ValueError", "the first two maketrans arguments must have equal length");
             for (size_t i = 0; i < from.len && !c->error_type[0]; i++) {
@@ -20151,6 +20196,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     if (id == B_BYTEARRAY) {
         if (argc > 3) goto arity;
+        if (argc > 1 && codec_argument_types(c, "bytearray", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
         SPYValue *bytes = !argc ? spy_bytes(c, "", 0) :
             argc == 1 && a->type != SPY_STRING && !is_int(a) && !(a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))
             ? bytes_from_object(c, a, "bytearray") : builtin(c, argc, argv, (void *)(intptr_t)B_BYTES);
@@ -20163,6 +20209,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (!argc) return spy_bytes(c, "", 0);
         if (a->type == SPY_STRING) {
             if (argc == 1) return spy_error(c, "TypeError", "string argument without an encoding");
+            if (codec_argument_types(c, "bytes", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
             return text_encode(c, a, argv[1], argc > 2 ? argv[2] : NULL);
         }
         if (argc > 1) return spy_error(c, "TypeError", argv[1]->type == SPY_STRING ? "encoding without a string argument" : "errors without a string argument");
@@ -20723,6 +20770,8 @@ execution_fail:
     if (id == B_STR) {
         if (argc > 3) goto arity;
         if (argc > 1) {
+            if (codec_argument_types(c, "str", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
+            if (builtin_value(c, a, SPY_STRING)) return spy_error(c, "TypeError", "decoding str is not supported");
             SPYValue *copy, *bytes = buffer_bytes(c, a, &copy);
             if (!bytes) return c->error_type[0] ? NULL : errorf(c, "TypeError", "decoding to str: need a bytes-like object, %s found", type_name(a));
             SPYValue *text = bytes_decode(c, bytes->as.string.data, bytes->as.string.len, argv[1], argc > 2 ? argv[2] : NULL);

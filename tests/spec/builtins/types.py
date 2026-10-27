@@ -233,3 +233,28 @@ for missing, message in ((11, "range.index(x): x not in range"), ("a", "sequence
     else:
         raise AssertionError("found %r" % missing)
 assert_raises(OverflowError, len, range(2 ** 64))
+
+# str methods report bad arguments as CPython does.
+def type_error(call):
+    try:
+        call()
+    except TypeError as error:
+        return str(error)
+    raise AssertionError("no TypeError")
+assert_eq(type_error(lambda: "a".split(1)), "must be str or None, not int")
+assert_eq(type_error(lambda: "a".partition(None)), "must be str, not NoneType")
+assert_eq(type_error(lambda: "a".strip(1)), "strip arg must be None or str")
+assert_eq(type_error(lambda: "a".startswith(["a"])), "startswith first arg must be str or a tuple of str, not list")
+assert_eq(type_error(lambda: "a".endswith(("b", 1))), "tuple for endswith must only contain str, not int")
+assert_eq(type_error(lambda: "a".find(1)), "find() argument 1 must be str, not int")
+assert_eq(type_error(lambda: "a".find("a", "x")), "slice indices must be integers or have an __index__ method")
+assert_eq(type_error(lambda: "a".removesuffix(None)), "removesuffix() argument must be str, not None")
+assert_eq(type_error(lambda: "a".ljust(5, 1)), "The fill character must be a unicode character, not int")
+assert_eq(type_error(lambda: "a".ljust()), "ljust expected at least 1 argument, got 0")
+assert_eq(type_error(lambda: "a".join(1)), "can only join an iterable")
+assert_eq(type_error(lambda: "a".upper(x=1)), "str.upper() takes no keyword arguments")
+assert_eq(type_error(lambda: [].append(x=1)), "list.append() takes no keyword arguments")
+assert_eq(type_error(lambda: "a".encode(1)), "encode() argument 'encoding' must be str, not int")
+assert_eq(type_error(lambda: str("a", "utf-8")), "decoding str is not supported")
+assert_eq(type_error(lambda: str.maketrans("a", 1)), "maketrans() argument 2 must be str, not int")
+assert_eq("a\nb".splitlines("yes"), ["a\n", "b"])

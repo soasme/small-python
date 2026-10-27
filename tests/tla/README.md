@@ -92,6 +92,7 @@ and tied to real implementations by replaying them.
 | `NumericHash.tla` | the hash of m * 2^e as an int and as a float, positive and negative, from subnormal exponents past the modulus period, in the rotated form the prime 2^61 - 1 gives it; infinities, NaNs, the modulus itself, complex numbers, and equal numbers of different types | yes |
 | `Iterators.tla` | every built-in iterator kind over up to two items: `iter()` of an iterator is itself, items in order, StopIteration that stays raised even after the source grows; the protocol's errors, the sequence protocol, `iter(callable, sentinel)`, `next()` defaults, and size changes during iteration | yes |
 | `Ranges.tla` | the items, length, ends, reversal, tail slice, membership, and index of every range over small bounds and steps from -2 to 2, derived from r[i] = start + step * i; construction errors, equality and hashing by sequence, huge ranges, and unsupported operations | yes |
+| `Strings.tla` | find, rfind, index, count, startswith, endswith, split, rsplit, partition, rpartition, replace, removeprefix, removesuffix, and the strips derived over every string of up to three characters and argument of up to two; whitespace splitting; center, ljust, rjust, and zfill at every width; case mappings, predicates, splitlines, translate, encode, str(), and argument errors | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -214,8 +215,9 @@ a global deleted in `exec()`'s namespace read as an unbound local,
 `int.from_bytes()`, `bytes()`, and `bytearray()` misreported objects they
 cannot convert, and iteration misreported an `__iter__` of None or one
 returning a non-iterator, and `range` attributes were writable in message,
-`range.index()` worded its miss differently, and `len()` of a huge range
-reported a 64-bit limit.
+`range.index()` worded its miss differently, `len()` of a huge range
+reported a 64-bit limit, and str methods worded many argument errors
+their own way.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
