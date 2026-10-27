@@ -182,6 +182,8 @@ struct SPYContext {
     void *write_data;
     SPYModuleLoader loader;
     void *loader_data;
+    SPYReadLine read_line;
+    void *read_data;
     char error_type[64], error_message[256], filename[256];
     /* A pending AttributeError's name and object, attached when it is materialized. */
     char error_name[256];
@@ -6192,20 +6194,24 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         if (!source->as.seq.len) break;
         result = value_new(c, SPY_TUPLE);
         if (!result) break;
-        for (size_t i = v->as.iterator.kind == I_MAP ? 1 : 0; i < source->as.seq.len; i++) {
+        size_t first = v->as.iterator.kind == I_MAP;
+        const char *name = first ? "map" : "zip";
+        for (size_t i = first; i < source->as.seq.len; i++) {
             SPYValue *item = iterator_next(c, source->as.seq.items[i]);
             if (!item || sequence_append(c, result, item)) {
                 spy_release(item); spy_release(result); result = NULL;
-                /* zip(strict=True), as zip_next checks: a short argument after
-                 * the first, or a longer one once the first is exhausted. */
-                if (!item && !c->error_type[0] && v->as.iterator.kind == I_ZIP && v->as.iterator.size) {
-                    const char *plural = i == 1 ? " " : "s 1-";
-                    if (i) { errorf(c, "ValueError", "zip() argument %zu is shorter than argument%s%zu", i + 1, plural, i); break; }
-                    for (size_t j = 1; j < source->as.seq.len && !c->error_type[0]; j++) {
+                /* zip(strict=True) and map(strict=True), as zip_next checks: a
+                 * short argument after the first, or a longer one once the
+                 * first is exhausted. Arguments count from the first iterable. */
+                if (!item && !c->error_type[0] && v->as.iterator.size) {
+                    size_t k = i - first;
+                    if (k) { errorf(c, "ValueError", "%s() argument %zu is shorter than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k); break; }
+                    for (size_t j = first + 1; j < source->as.seq.len && !c->error_type[0]; j++) {
                         SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
                         if (extra) {
                             spy_release(extra);
-                            errorf(c, "ValueError", "zip() argument %zu is longer than argument%s%zu", j + 1, j == 1 ? " " : "s 1-", j);
+                            k = j - first;
+                            errorf(c, "ValueError", "%s() argument %zu is longer than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k);
                         }
                     }
                 }
@@ -11415,6 +11421,7 @@ static void weak_callbacks(SPYContext *c) {
 }
 static int file_natives(SPYContext *, SPYValue *);
 static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *input_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int define_native(SPYContext *c, SPYValue *module, const char *name, SPYNative call, void *data) {
     SPYValue *v = value_new(c, SPY_NATIVE);
     if (!v) return -1;
@@ -13726,13 +13733,21 @@ static SPYValue *exception_traceback(SPYContext *c, SPYValue *exception) {
     SPYValue *traceback = exception && exception->type == SPY_INSTANCE ? hidden_field(exception, "__traceback__") : NULL;
     return traceback && traceback->type == SPY_TRACEBACK ? traceback : c->none;
 }
+/* TypeError for a with (or async with) manager missing a protocol method. */
+static SPYValue *manager_error(SPYContext *c, SPYValue *manager, int async, int has_exit) {
+    return errorf(c, "TypeError", "'%s' object does not support the %scontext manager protocol (missed %s method)",
+                  type_name(manager), async ? "asynchronous " : "",
+                  has_exit ? (async ? "__aenter__" : "__enter__") : (async ? "__aexit__" : "__exit__"));
+}
 static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     if (!item) return execute(c, f, body);
     if (deeper(c, "")) return (Result){FLOW_ERROR, NULL};
     SPYValue *manager = eval(c, f, item->a);
     SPYValue *exit = manager ? special_method(c, manager, "__exit__") : NULL;
-    SPYValue *enter = exit ? call_special(c, manager, "__enter__", 0, NULL) : NULL;
-    if (!exit && manager && !c->error_type[0]) spy_error(c, "TypeError", "object does not support the context manager protocol");
+    SPYValue *method = exit ? special_method(c, manager, "__enter__") : NULL;
+    if (manager && !method && !c->error_type[0]) manager_error(c, manager, 0, exit != NULL);
+    SPYValue *enter = method ? spy_call(c, method, 0, NULL) : NULL;
+    spy_release(method);
     spy_release(manager);
     if (!enter) { spy_release(exit); c->depth--; return (Result){FLOW_ERROR, NULL}; }
     int status = item->b ? store_target(c, f, item->b, enter) : 0;
@@ -15449,7 +15464,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             a = machine_pop(m);
             b = special_method(c, a, "__aexit__");
             SPYValue *enter = b ? special_method(c, a, "__aenter__") : NULL;
-            if (!enter && !c->error_type[0]) errorf(c, "TypeError", "object does not support the asynchronous context manager protocol (missed %s method)", b ? "__aenter__" : "__aexit__");
+            if (!enter && !c->error_type[0]) manager_error(c, a, 1, b != NULL);
             value = enter ? spy_call(c, enter, 0, NULL) : NULL;
             spy_release(enter);
             if (value) {
@@ -15480,7 +15495,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             a = machine_pop(m);
             b = special_method(c, a, "__exit__");
             SPYValue *enter = b ? special_method(c, a, "__enter__") : NULL;
-            if (!b || !enter) spy_error(c, "TypeError", "object does not support the context manager protocol");
+            if (!enter && !c->error_type[0]) manager_error(c, a, 0, b != NULL);
             value = enter ? spy_call(c, enter, 0, NULL) : NULL;
             spy_release(enter);
             if (value) {
@@ -20048,15 +20063,15 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         spy_release(args[0]);
         return result;
     }
-    if (id == B_ZIP && keywords && keywords->as.map.len) {
+    if ((id == B_ZIP || id == B_MAP) && keywords && keywords->as.map.len) {
         int strict = 0;
         for (size_t i = 0; i < keywords->as.map.len; i++) {
             const char *key = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
-            if (strcmp(key, "strict")) return errorf(c, "TypeError", "zip() got an unexpected keyword argument '%s'", key);
+            if (strcmp(key, "strict")) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", id == B_MAP ? "map" : "zip", key);
             strict = spy_truth(keywords->as.map.items[i].value);
             if (c->error_type[0]) return NULL;
         }
-        SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)B_ZIP);
+        SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)id);
         if (result && strict) result->as.iterator.size = 1;
         return result;
     }
@@ -21121,6 +21136,8 @@ SPYContext *spy_context_new(void) {
     for (size_t i = 0; i < sizeof(classes) / sizeof(*classes); i++) {
         SPYValue *base = classes[i].base ? name_local(c->classes, classes[i].base) : NULL;
         SPYValue *cls = new_class(c, classes[i].name, base, module);
+        /* Plain object() instances have no __dict__. */
+        if (cls && !base) cls->as.map.flags |= CLASS_NO_DICT;
         int status = cls ? name_set(c, c->builtins, classes[i].name, cls) ||
                            name_set(c, c->classes, classes[i].name, cls) : -1;
         spy_release(cls);
@@ -21262,7 +21279,8 @@ SPYContext *spy_context_new(void) {
     } host_builtins[] = {
         {"__build_class__", build_class_builtin, NULL}, {"__lazy_import__", lazy_import_builtin, NULL},
         {"breakpoint", breakpoint_builtin, NULL},
-        {"exit", exit_builtin, NULL}, {"quit", exit_builtin, NULL}, {"open", open_builtin, NULL}
+        {"exit", exit_builtin, NULL}, {"quit", exit_builtin, NULL}, {"open", open_builtin, NULL},
+        {"input", input_builtin, NULL}
     };
     for (size_t i = 0; i < sizeof(host_builtins) / sizeof(*host_builtins); i++) {
         SPYValue *v = value_new(c, SPY_NATIVE);
@@ -21375,6 +21393,7 @@ void spy_context_free(SPYContext *c) {
 void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
 void spy_set_flush(SPYContext *c, SPYFlush flush) { c->flush = flush; }
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
+void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c); c->steps = 0;
@@ -21447,6 +21466,29 @@ SPYValue *spy_raise(SPYContext *c, SPYValue *exception) {
 }
 /* Host files. open() is the intrinsic io layer over these _spy primitives,
  * which reach only mounted directories and descriptors this context opened. */
+/* input([prompt]): flush, write str(prompt), and read a line from the host's
+ * reader without its line ending. No reader, or its end, is EOFError. */
+static SPYValue *input_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "input() takes no keyword arguments");
+    if (argc > 1) return errorf(c, "TypeError", "input expected at most 1 argument, got %zu", argc);
+    if (c->flush && c->flush(c->write_data)) return spy_error(c, "OSError", "output flush failed");
+    if (argc) {
+        SPYValue *text = stringify(c, argv[0], 0);
+        int status = text ? print_text(c, NULL, text) : -1;
+        spy_release(text);
+        if (status || c->error_type[0]) return NULL;
+        if (c->flush && c->flush(c->write_data)) return spy_error(c, "OSError", "output flush failed");
+    }
+    char *line = c->read_line ? c->read_line(c->read_data) : NULL;
+    if (!line) return c->error_type[0] ? NULL : spy_error(c, "EOFError", "EOF when reading a line");
+    size_t len = strlen(line);
+    if (len && line[len - 1] == '\n') len--;
+    if (len && line[len - 1] == '\r') len--;
+    SPYValue *result = spy_string(c, line, len);
+    free(line);
+    return result;
+}
 static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     if (!argc && !(keywords && name_local(keywords, "file")))

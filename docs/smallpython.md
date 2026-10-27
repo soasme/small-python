@@ -810,6 +810,10 @@ a package, whose submodules register under dotted names.
 data pointer. Otherwise output is treated as unbuffered. Replacing the output
 callback clears the flush callback. `print(file=...)` uses the Python object's
 `write` and `flush` methods.
+`spy_set_input` installs the line reader behind `input()`: it returns a
+malloc-allocated UTF-8 line, with or without its line ending, or NULL at the
+end of input. Without a reader, `input()` raises `EOFError`; the `spy` command
+reads standard input.
 
 `spy_set_step_limit` bounds evaluated nodes and iterator/loop work; zero means
 unlimited. It is not a memory or wall-time quota and cannot interrupt native

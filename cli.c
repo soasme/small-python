@@ -8,6 +8,24 @@ static int output(void *data, const char *s, size_t n) {
     return fwrite(s, 1, n, data) == n ? 0 : -1;
 }
 static int flush_output(void *data) { return fflush(data); }
+/* One line of standard input for input(), or NULL at its end. */
+static char *read_line(void *data) {
+    size_t len = 0, size = 128;
+    char *line = malloc(size);
+    int ch;
+    while (line && (ch = fgetc(data)) != EOF) {
+        if (len + 2 > size) {
+            char *next = realloc(line, size *= 2);
+            if (!next) { free(line); return NULL; }
+            line = next;
+        }
+        line[len++] = (char)ch;
+        if (ch == '\n') break;
+    }
+    if (line && !len) { free(line); return NULL; }
+    if (line) line[len] = 0;
+    return line;
+}
 static void report(SPYContext *c) {
     fprintf(stderr, "%s:%zu: %s: %s\n", spy_error_filename(c), spy_error_line(c),
             spy_error_type(c), spy_error_display(c));
@@ -79,6 +97,7 @@ int main(int argc, char **argv) {
     if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
     spy_set_output(c, output, stdout);
     spy_set_flush(c, flush_output);
+    spy_set_input(c, read_line, stdin);
     if (spy_std_init(c)) { report(c); spy_context_free(c); return 1; }
     if (!mount_count) mounts[mount_count++] = ".";
     for (int i = 0; i < mount_count; i++)

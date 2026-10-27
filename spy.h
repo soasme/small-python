@@ -51,6 +51,11 @@ void spy_set_output(SPYContext *, SPYWrite, void *);
  * Without it the output callback is treated as unbuffered. */
 void spy_set_flush(SPYContext *, SPYFlush);
 void spy_set_module_loader(SPYContext *, SPYModuleLoader, void *);
+/* Return a malloc-allocated, NUL-terminated UTF-8 line for input(), with or
+ * without its line ending, or NULL at the end of input (EOFError). Without a
+ * reader, input() raises EOFError. */
+typedef char *(*SPYReadLine)(void *);
+void spy_set_input(SPYContext *, SPYReadLine, void *);
 /* Register a module, as QuickJS's JS_NewCModule. It is found before the
  * loader; its first import creates the module object, with __name__,
  * __package__, and __builtins__ set, and calls init to fill it. Init returns 0,

@@ -327,3 +327,8 @@
   zero powers, float overflow, unhashable dict keys and set elements, empty
   set pop, division by zero, eval/exec/format/open argument errors, and
   dict.pop on an empty dict raises before hashing the key.
+- input() through a host line reader (spy_set_input); map(strict=True);
+  plain object() instances have no __dict__; with statements name the
+  missing context manager method.
+- Spec tests for compound control flow (loops with else, try/finally,
+  except*, with) and the built-in functions.

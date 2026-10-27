@@ -35,6 +35,14 @@ static char *loader(void *data, const char *name) {
     if (copy) strcpy(copy, source);
     return copy;
 }
+/* Lines for input(), from a NULL-terminated list. */
+static char *read_line(void *data) {
+    const char ***lines = data;
+    if (!**lines) return NULL;
+    char *copy = malloc(strlen(**lines) + 1);
+    if (copy) strcpy(copy, *(*lines)++);
+    return copy;
+}
 static int64_t integer(SPYContext *c, SPYValue *v) {
     int64_t n;
     assert(v && !spy_as_int(c, v, &n));
@@ -204,6 +212,15 @@ int main(void) {
     assert(!strcmp(spy_error_type(c), "OSError"));
     o.fail_flush = 0;
     spy_clear_error(c);
+    /* input() writes its prompt, flushes, and strips the line ending. */
+    assert(spy_exec(c, "input()", "input.py") == -1 && !strcmp(spy_error_type(c), "EOFError"));
+    const char *lines[] = {"first\n", "second", NULL}, **cursor = lines;
+    spy_set_input(c, read_line, &cursor);
+    o.len = 0; o.flushes = 0;
+    execute(c, "assert input('> ') == 'first'\nassert input() == 'second'\n");
+    assert(!strcmp(o.text, "> ") && o.flushes == 3);
+    assert(spy_exec(c, "input()", "input.py") == -1 && !strcmp(spy_error_type(c), "EOFError"));
+    spy_set_input(c, NULL, NULL);
     assert(!spy_define(c, "twice", twice, NULL));
     assert(integer(c, spy_eval(c, "twice(21)", "api.py")) == 42);
     execute(c, "x = 19");
