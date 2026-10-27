@@ -1366,6 +1366,59 @@ for bad in [lambda: object.__reduce_ex__(A()), lambda: object.__reduce__(A(), 1)
 class R:
     def __reduce__(self): return "custom"
 print(R().__reduce_ex__(2))
+""",    r"""
+class A: pass
+class B(A): pass
+class E(Exception): pass
+class S: __slots__=()
+class T(S): pass
+class D:
+    "doc"
+    x = 1
+class I(int): pass
+class L(list): pass
+for k in (A,B,E,S,T,D,I,L): print(k.__name__, list(k.__dict__))
+print(A.__dict__["__dict__"], A.__dict__["__weakref__"], A().__weakref__)
+a=A(); d=A.__dict__["__dict__"]; print(d.__get__(a), d.__name__, d.__objclass__)
+d.__set__(a, {"q": 1}); print(a.q)
+try: d.__get__(1)
+except (TypeError, AttributeError) as e: print(type(e).__name__, e)
+try: d.__set__(a, 1)
+except (TypeError, AttributeError) as e: print(type(e).__name__, e)
+try: d.__delete__(a)
+except (TypeError, AttributeError) as e: print(type(e).__name__, e)
+print(a.__dict__)
+print(vars(B()), "__dict__" in dir(A()), "__weakref__" in dir(A))
+w = A.__dict__["__weakref__"]
+print(type(A.__dict__["__dict__"]).__name__, w.__objclass__, w.__get__(A()), w.__name__)
+try: w.__set__(A(), 1)
+except Exception as e: print(type(e).__name__, e)
+class S2: __slots__ = ("__dict__",)
+class S3: __slots__ = ("__weakref__", "a")
+print(list(S2.__dict__), list(S3.__dict__), S3.__dict__["__weakref__"])
+class M(type): pass
+print(list(M.__dict__))
+a = A(); a.__dict__ = {"z": 2}; print(a.z)
+try: A.__dict__["__dict__"].__set__(a, None)
+except Exception as e: print(type(e).__name__, e)
+""",    r"""
+import sys
+for b in (int, bool if 0 else float, complex, str, bytes, tuple, list, dict, set, frozenset, bytearray, property, classmethod, staticmethod, BaseException, type, object):
+    class X(b): pass
+    print(b.__name__, [k for k in X.__dict__ if k in ("__dict__", "__weakref__")])
+class F(frozendict): pass
+print([k for k in F.__dict__ if k in ("__dict__", "__weakref__")])
+""",    r"""
+class A: pass
+print(list(A.__dict__))
+A.__name__="B"; print(A.__name__, A.__qualname__, "__name__" in A.__dict__)
+print(type("X",(),{"__qualname__":"Q.X"}).__qualname__, "__qualname__" in type("X",(),{"__qualname__":"Q"}).__dict__)
+""",    r"""
+class A:
+    __slots__ = ("x", "y")
+print(sorted(A.__dict__))
+class B: pass
+print(sorted(B.__dict__), "__name__" in dir(B), B().__weakref__)
 """,    r'''
 from __future__ import annotations
 def f(x: f(y for y in z), y: f((y for y in z), 1), z: 1 .real, w: f"a{b!r:>{w}}c{{'\"", v: lambda a, /, b=1, *, c, **k: 0,

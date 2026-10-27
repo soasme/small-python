@@ -363,7 +363,11 @@ or a mapping's keys) become sorted, name-mangled `member_descriptor` attributes;
 without a `__dict__` slot or a base with a dictionary, instances refuse new
 attributes with CPython's messages, and `__weakref__`/`__dict__` slots, class
 variable conflicts, `int`/`bytes` bases, and conflicting slotted bases are
-checked. Changing bases, complete class-cell propagation, and some builtin
+checked. A class's `__name__` and `__qualname__` live outside its `__dict__`;
+a class that introduces an instance dictionary or weak references gets the
+shared `<attribute '__dict__'>` and `<attribute '__weakref__'>` descriptors in
+its `__dict__`, following CPython's rules for builtin bases (`__weakref__` reads
+as None). Changing bases, complete class-cell propagation, and some builtin
 subclasses remain unsupported. Descriptor
 lookup honors data-descriptor precedence and supports `__get__`, `__set__`,
 and `__delete__`. Builtin types expose method descriptors and slot wrappers

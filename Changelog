@@ -293,3 +293,5 @@
 - PEP 563: from __future__ import annotations stores annotations as strings
   in CPython's unparsed form; module and class bodies fill __annotations__
   as they run. compile/exec/eval inherit the caller's future flags.
+- Class __name__/__qualname__ live outside the class __dict__; classes get
+  CPython's __dict__ and __weakref__ getset descriptors.

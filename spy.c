@@ -1359,7 +1359,14 @@ static int map_set(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value)
     int64_t hash;
     return map_hash(c, map, key, &hash) ? -1 : map_set_hash(c, map, key, value, hash);
 }
+/* A class keeps its __name__ and __qualname__ outside its __dict__, in the
+ * dict that class_cell holds for classes, as CPython's type slots do. */
+static int class_slot_name(const char *name) { return !strcmp(name, "__name__") || !strcmp(name, "__qualname__"); }
 static SPYValue *name_local(SPYValue *env, const char *name) {
+    if (env->type == SPY_CLASS && class_slot_name(name)) {
+        if (!env->as.map.class_cell) return NULL;
+        env = env->as.map.class_cell;
+    }
     if (env->as.map.namespace) {
         env = dictionary_value(env->ctx, env->as.map.namespace);
         if (!env) return NULL;
@@ -1541,6 +1548,10 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
     return name_error(c, name, "name '%s' is not defined");
 }
 static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v) {
+    if (env->type == SPY_CLASS && class_slot_name(name)) {
+        if (!env->as.map.class_cell && !(env->as.map.class_cell = value_new(c, SPY_DICT))) return -1;
+        env = env->as.map.class_cell;
+    }
     env = binding_env(c, env, name);
     SPYValue *key = spy_string(c, name, strlen(name));
     if (!key) return -1;
@@ -1964,6 +1975,7 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         repr_leave(b->ctx); return status ? -1 : 0;
     }
     case SPY_MEMBER_DESCRIPTOR: case SPY_GETSET_DESCRIPTOR:
+        if (v->as.member.flags & 4) return puts_buffer(b, "<attribute '") || puts_buffer(b, v->as.member.name->as.string.data) || puts_buffer(b, "'>");
         return puts_buffer(b, v->type == SPY_MEMBER_DESCRIPTOR ? "<member '" : "<attribute '") ||
             puts_buffer(b, v->as.member.name->as.string.data) || puts_buffer(b, "' of '") ||
             puts_buffer(b, name_local(v->as.member.owner, "__name__")->as.string.data) || puts_buffer(b, "' objects>");
@@ -7523,7 +7535,7 @@ static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, SPYType type)
  * and the fields of builtin exception classes. Values live in the
  * instance's hidden fields; an unset slot is missing, an unset exception
  * member reads as None. */
-enum { DESC_READONLY = 1, DESC_SLOT = 2 };
+enum { DESC_READONLY = 1, DESC_SLOT = 2, DESC_GENERIC = 4 }; /* GENERIC: object's shared __dict__ and __weakref__ */
 static int instance_has_dict(SPYValue *);
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
 static void delete_name(SPYValue *, const char *);
@@ -7543,9 +7555,15 @@ static int member_applies(SPYContext *c, SPYValue *d, SPYValue *object) {
            name_local(d->as.member.owner, "__name__")->as.string.data, type_name(object));
     return 0;
 }
+static SPYValue *instance_dict(SPYContext *, SPYValue *);
 static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (!member_applies(c, d, object)) return NULL;
     const char *name = d->as.member.name->as.string.data;
+    if (d->as.member.flags & DESC_GENERIC) {
+        if (name[2] == 'w') return spy_none(c);
+        if (object->type != SPY_INSTANCE || !instance_has_dict(object)) return spy_error(c, "AttributeError", "This object has no __dict__");
+        return instance_dict(c, object);
+    }
     SPYValue *value = hidden_field(object, name);
     if (value) return spy_retain(value);
     if (d->as.member.flags & DESC_SLOT) return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(object), name);
@@ -7557,6 +7575,16 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
 static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *value) {
     if (!member_applies(c, d, object)) return -1;
     const char *name = d->as.member.name->as.string.data;
+    if (d->as.member.flags & DESC_GENERIC) {
+        if (name[2] == 'w') { spy_error(c, "AttributeError", "attribute '__weakref__' of 'object' objects is not writable"); return -1; }
+        if (object->type != SPY_INSTANCE || !instance_has_dict(object)) { spy_error(c, "AttributeError", "This object has no __dict__"); return -1; }
+        if (value && value->type != SPY_DICT) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
+        SPYValue *fresh = value ? spy_retain(value) : value_new(c, SPY_DICT), *old = fresh ? instance_dict(c, object) : NULL;
+        if (!old) { spy_release(fresh); return -1; }
+        object->as.map.namespace = fresh;
+        spy_release(old); spy_release(old);
+        return 0;
+    }
     if ((d->as.member.flags & DESC_READONLY) || object->type != SPY_INSTANCE) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     int slot = d->as.member.flags & DESC_SLOT;
     if (!value) {
@@ -12138,10 +12166,18 @@ static int builtin_layout(SPYContext *c, SPYValue *cls) {
  * a class whose own nonempty __slots__ fix its instance layout, and slotted
  * instances with a __weakref__ slot. */
 enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32 };
+static int builtin_class(SPYContext *c, SPYValue *cls) {
+    return cls->as.map.native || cls->as.map.flags == 2 || cls == name_local(c->classes, "object");
+}
 static int class_has_dict(SPYContext *c, SPYValue *cls) {
-    if (subclass(cls, name_local(c->classes, "BaseException"))) return 1;
-    if (cls->as.map.native || cls->as.map.flags == 2 || cls == name_local(c->classes, "object")) return 0;
+    if (subclass(cls, name_local(c->classes, "BaseException")) || subclass(cls, c->types[SPY_CLASS]) ||
+        subclass(cls, c->types[SPY_CLASSMETHOD]) || subclass(cls, c->types[SPY_STATICMETHOD])) return 1;
+    if (builtin_class(c, cls)) return 0;
     return !(cls->as.map.flags & CLASS_NO_DICT);
+}
+static int class_has_weakref(SPYContext *c, SPYValue *cls) {
+    if (subclass(cls, c->types[SPY_CLASS]) || subclass(cls, c->types[SPY_SET]) || subclass(cls, c->types[SPY_FROZENSET])) return 1;
+    return !builtin_class(c, cls) && (cls->as.map.flags & CLASS_WEAKREF);
 }
 static int instance_has_dict(SPYValue *v) {
     return v->type != SPY_INSTANCE || !(v->as.map.parent->as.map.flags & CLASS_NO_DICT);
@@ -12272,17 +12308,19 @@ static int initialize_mro(SPYContext *c, SPYValue *cls) {
     return 0;
 }
 /* Turn the namespace's __slots__ into member descriptors on cls. */
+/* Turn the namespace's __slots__ into member descriptors on cls, and add
+ * the __dict__ and __weakref__ getsets a class introduces. */
 static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     SPYValue *slots = name_local(namespace, "__slots__");
-    if (!slots) return 0;
-    SPYValue *names = slots->type == SPY_STRING ? value_new(c, SPY_TUPLE) : builtin(c, 1, &slots, (void *)(intptr_t)B_TUPLE);
-    if (!names || (slots->type == SPY_STRING && sequence_append(c, names, slots))) { spy_release(names); return -1; }
+    SPYValue *names = !slots ? value_new(c, SPY_TUPLE) : slots->type == SPY_STRING ? value_new(c, SPY_TUPLE) :
+        builtin(c, 1, &slots, (void *)(intptr_t)B_TUPLE);
+    if (!names || (slots && slots->type == SPY_STRING && sequence_append(c, names, slots))) { spy_release(names); return -1; }
     SPYValue *list = spy_list(c);
-    int dict = 0, weakref = 0, inherited = 0, weakrefs = 0, status = list ? 0 : -1;
+    int dict = !slots, weakref = !slots, inherited = 0, weakrefs = 0, status = list ? 0 : -1;
     for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
         SPYValue *base = cls->as.map.bases->as.seq.items[i];
         inherited |= class_has_dict(c, base);
-        weakrefs |= class_has_dict(c, base) || (base->as.map.flags != 2 && base->as.map.flags & CLASS_WEAKREF);
+        weakrefs |= class_has_weakref(c, base);
     }
     const char *owner = name_local(cls, "__name__")->as.string.data;
     while (*owner == '_') owner++;
@@ -12303,7 +12341,7 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
         if (!valid) { spy_error(c, "TypeError", "__slots__ must be identifiers"); status = -1; break; }
         if (!strcmp(text, "__dict__") || !strcmp(text, "__weakref__")) {
             int *seen = text[2] == 'd' ? &dict : &weakref;
-            if ((text[2] == 'd' ? inherited : weakrefs) || *seen) { errorf(c, "TypeError", "%s slot disallowed: we already got one", text); status = -1; break; }
+            if ((text[2] == 'd' ? inherited : weakrefs) || (*seen && slots)) { errorf(c, "TypeError", "%s slot disallowed: we already got one", text); status = -1; break; }
             *seen = 1; continue;
         }
         size_t len = item->as.string.len;
@@ -12328,6 +12366,14 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
         errorf(c, "TypeError", "arbitrary __slots__ not supported for subtype of '%s'", layout == SPY_INT ? "int" : "bytes"); status = -1;
     }
     if (!status) status = sort_list(c, list, NULL, 0);
+    int weakrefs_allowed = layout != SPY_INT && layout != SPY_BYTES && layout != SPY_TUPLE;
+    static const char *const getsets[] = {"__dict__", "__weakref__"};
+    for (int i = 0; !status && i < 2; i++) {
+        if (!(i ? weakref && !weakrefs && weakrefs_allowed : dict && !inherited)) continue;
+        SPYValue *getset = member_new(c, SPY_GETSET_DESCRIPTOR, getsets[i], name_local(c->classes, "object"), DESC_GENERIC);
+        status = getset ? name_set(c, cls, getsets[i], getset) : -1;
+        spy_release(getset);
+    }
     for (size_t i = 0; !status && i < list->as.seq.len; i++) {
         SPYValue *member = member_new(c, SPY_MEMBER_DESCRIPTOR, list->as.seq.items[i]->as.string.data, cls, DESC_SLOT);
         status = member ? name_set(c, cls, list->as.seq.items[i]->as.string.data, member) : -1;
@@ -12335,7 +12381,7 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     }
     if (!status && !dict && !inherited) cls->as.map.flags |= CLASS_NO_DICT;
     if (!status && list->as.seq.len) cls->as.map.flags |= CLASS_SLOTS;
-    if (!status && (weakref || weakrefs)) cls->as.map.flags |= CLASS_WEAKREF;
+    if (!status && ((weakref && weakrefs_allowed) || weakrefs)) cls->as.map.flags |= CLASS_WEAKREF;
     spy_release(list); spy_release(names);
     return status;
 }
@@ -12368,7 +12414,9 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     if (!cls) return NULL;
     for (size_t i = 0; i < namespace->as.map.len && !c->error_type[0]; i++) {
         Entry *entry = &namespace->as.map.items[i];
-        if (entry->value->type != V_UNBOUND) map_set_hash(c, cls, entry->key, entry->value, entry->hash);
+        if (entry->value->type == V_UNBOUND) continue;
+        if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__qualname__")) name_set(c, cls, "__qualname__", entry->value);
+        else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (qualname->type != SPY_STRING) spy_error(c, "TypeError", "type __qualname__ must be a str");
