@@ -325,7 +325,9 @@ Where an algorithm raises an exception with a parenthesized *text*, that text is
 the exception's message: `str(e)` of the exception *e* is *text*. Within *text*,
 an italicized name stands for a value substituted as follows:
 
-- "*tname*(*o*)" is the `__name__` of Type(*o*);
+- "*tname*(*o*)" is the `__name__` of Type(*o*), except that for an intrinsic
+  type whose `__module__` is not `"builtins"` it is that module, `"."`, and the
+  `__name__` (so `string.templatelib.Template`, `typing.TypeVar`);
 - "*fqname*(*T*)" is the fully qualified name of a type *T*: its
   `__qualname__` if its `__module__` is not a `str` or is `"builtins"` or
   `"__main__"`, and otherwise its `__module__`, `"."`, and its `__qualname__`;
@@ -5271,3 +5273,444 @@ Let *fmt*(*v*) be FloatRepr(*v*) without the trailing `".0"` added by step 4.
 If *z*.real is +0.0, return *fmt*(*z*.imag) followed by `"j"`. Otherwise return
 `"("`, *fmt*(*z*.real), the sign of *z*.imag (`+` unless its sign bit is set;
 a NaN is written with `+`), *fmt*(|*z*.imag|), and `"j)"`.
+
+## 23 Text Processing
+
+### 23.1 The `str` type
+
+A `str` value is an immutable finite sequence of code points, each an integer
+in 0 through 0x10FFFF (lone surrogates included). Indexing a string yields a
+string of length 1; there is no separate character type. String comparison
+(`<`, `==`, …) is lexicographic by code point value. The hash of a string is
+implementation-defined but is the same for equal strings within one run.
+
+#### 23.1.1 str ( *object*=`''` ) and str ( *object*=`b''`, *encoding*=`'utf-8'`, *errors*=`'strict'` )
+
+1. If neither *encoding* nor *errors* is given, return ? ToStr(*object*)
+   (7.5.5), converted to an exact `str` when the class called is `str`.
+2. If *object* is a `str`, raise a `TypeError` exception ("decoding str is not
+   supported"). If it does not support the buffer protocol, raise a `TypeError`
+   exception ("decoding to str: need a bytes-like object, *tname*(*object*)
+   found").
+3. Return ? Decode(the bytes of *object*, *encoding*, *errors*) (23.3).
+
+At most three arguments are accepted ("str expected at most 3 arguments, got
+*n*"), with keywords `object`, `encoding`, and `errors`.
+
+When the class called is a strict subclass *C* of `str`, the result is a new
+instance of *C* with the code points computed above. `str.__new__(T)` for a
+*T* that is not a subtype of `str` raises a `TypeError` exception
+("str.\_\_new\_\_(*T*): *T* is not a subtype of str").
+
+#### 23.1.2 Sequence operations
+
+Strings support the common sequence operations (clause 25) with these specific
+messages: an index out of range raises `IndexError` ("string index out of
+range"); a non-integer index `TypeError` ("string indices must be integers,
+not '*tname*(*i*)'"); `s + t` with a non-string *t* `TypeError` ("can only
+concatenate str (not "*tname*(*t*)") to str"). `x in s` requires a string *x*
+("'in \<string\>' requires string as left operand, not *tname*(*x*)") and is
+true when *x* occurs in *s* as a contiguous substring (the empty string occurs
+in every string).
+
+#### 23.1.3 StrRepr ( *s* )
+
+1. Let *q* be `'` unless *s* contains `'` and no `"`, in which case let *q* be
+   `"`.
+2. Let *r* be *q*. For each code point *c* of *s*: append `\\` for a
+   backslash, `\` *q* for *q*, `\t`, `\n`, `\r` for those controls; otherwise
+   append *c* itself if it is printable (23.2), and otherwise its escape:
+   `\x`*hh* if *c* < 0x100, `\u`*hhhh* if *c* < 0x10000, and `\U`*hhhhhhhh*
+   otherwise, with lower-case hexadecimal digits.
+3. Append *q* and return *r*.
+
+ASCII(*o*) (used by `ascii()`, `!a`, and `%a`) is ToRepr(*o*) with every
+non-ASCII code point of the result replaced by its escape as in step 2.
+
+#### 23.1.4 Searching and testing
+
+In this subclause, *start* and *end* are optional slice bounds (ToIndex or
+`None`, interpreted as by SliceIndices, 25.4.2) restricting the part of *s*
+examined; the substring argument must be a `str` ("*m*() argument 1 must be
+str, not *tname*(*sub*)").
+
+| Method | Result |
+| --- | --- |
+| `find(sub[, start[, end]])` | the lowest index at which *sub* occurs within the range, or −1 |
+| `rfind(sub[, start[, end]])` | the highest such index, or −1 |
+| `index`, `rindex` | as `find` and `rfind`, raising `ValueError` ("substring not found") instead of returning −1 |
+| `count(sub[, start[, end]])` | the number of non-overlapping occurrences, scanning from the left; an empty *sub* occurs len + 1 times in the range |
+| `startswith(prefix[, start[, end]])`, `endswith(suffix[, …])` | whether the range begins (ends) with the argument or with any element of a tuple of strings; another argument raises `TypeError` ("startswith first arg must be str or a tuple of str, not *tname*"), a tuple element that is not a str ("tuple for startswith must only contain str, not *tname*") |
+
+An empty *sub* is found at *start* (for `find`) or at the end of the range (for
+`rfind`), provided *start* ≤ len(*s*).
+
+#### 23.1.5 Splitting and joining
+
+`split(sep=None, maxsplit=-1)`:
+
+1. If *sep* is `None`: discard leading white space (23.2); then repeatedly, while
+   fewer than *maxsplit* splits have been made (or without limit if *maxsplit*
+   is negative), take the maximal run of non-white-space characters as an item
+   and discard the run of white space after it. When the limit is reached, the
+   remainder, with leading white space discarded, is the last item if
+   non-empty. No item is empty.
+2. Otherwise *sep* shall be a non-empty `str` ("empty separator"). Cut *s* at
+   each non-overlapping occurrence of *sep* from the left, at most *maxsplit*
+   times; the items are the pieces between the cuts, empty ones included.
+
+`rsplit` is the same working from the right, the items still being returned in
+order. `splitlines(keepends=False)` cuts after each line boundary — `\n`, `\r`,
+`\r\n`, `\v`, `\f`, `\x1c`, `\x1d`, `\x1e`, `\x85`, ` `, ` ` — keeping
+the boundary in the items when *keepends* is true; a final boundary does not
+start an empty item. `partition(sep)` returns (*before*, *sep*, *after*) for
+the first occurrence of the non-empty *sep*, or (*s*, `''`, `''`);
+`rpartition` uses the last occurrence and returns (`''`, `''`, *s*) when there
+is none.
+
+`sep.join(iterable)`: let *items* be the elements of ? GetIterator(*iterable*)
+(a non-iterable raises `TypeError` "can only join an iterable"); each shall be a
+`str` ("sequence item *i*: expected str instance, *tname* found"); return them
+concatenated with *sep* between consecutive items.
+
+#### 23.1.6 Transforming
+
+| Method | Result |
+| --- | --- |
+| `replace(old, new, count=-1)` | *s* with the first *count* (all, when negative) non-overlapping occurrences of *old* replaced by *new*, scanning from the left; an empty *old* matches before each character and at the end |
+| `removeprefix(p)`, `removesuffix(p)` | *s* without *p* at its start (end) if it is there; otherwise a copy of *s* |
+| `strip(chars=None)`, `lstrip`, `rstrip` | *s* without the longest leading and/or trailing run of characters in *chars* (white space when `None`); *chars* shall be `None` or a `str` ("strip arg must be None or str") |
+| `center(width, fillchar=' ')` | *s* padded with *fillchar* to *width*: with *p* = *width* − len(*s*) > 0, ⌊*p*/2⌋ + (1 if *p* and *width* are both odd) characters on the left and the rest on the right |
+| `ljust`, `rjust` | padded on the right (left) |
+| `zfill(width)` | padded on the left with `0` to *width*, after a leading `+` or `-` |
+| `expandtabs(tabsize=8)` | each tab replaced by spaces to the next column that is a multiple of *tabsize* (none when *tabsize* ≤ 0), the column restarting after `\n` and `\r` |
+| `upper()`, `lower()`, `casefold()`, `swapcase()` | the full Unicode case mappings (including the special casings and, for `lower`, the final sigma rule) and full case folding |
+| `capitalize()` | the first character title-cased and the rest lower-cased |
+| `title()` | each character title-cased if the preceding character is not cased, and lower-cased otherwise |
+| `translate(table)` | each character *c* replaced by ? GetItem(*table*, ord(*c*)): an `int` code point, a `str`, or `None` to delete; a `LookupError` keeps *c*; any other result raises `TypeError` ("character mapping must return integer, None or str") |
+| `encode(encoding='utf-8', errors='strict')` | ? Encode(*s*, *encoding*, *errors*) (23.3) |
+| `format(*args, **kwargs)`, `format_map(mapping)` | 23.4 |
+
+`fillchar` shall be a string of length one ("The fill character must be exactly
+one character long"); widths and counts are converted by ToIndexSize.
+
+The static method `str.maketrans(x[, y[, z]])` with one argument requires a
+dict ("if you give only one argument to maketrans it must be a dict") whose
+keys are code points or strings of length 1 ("string keys in translatetable
+must be of length 1"), and returns a dict with each key converted to its code
+point. With two strings of equal length ("the first two maketrans arguments
+must have equal length") it maps each character of *x* to the one at the same
+position of *y*; a third string maps each of its characters to `None`.
+
+#### 23.1.7 Classification
+
+The predicates return `False` for the empty string except where noted, and
+otherwise whether every character satisfies the property (23.2):
+`isalpha`, `isdecimal`, `isdigit`, `isnumeric`, `isalnum` (each character is
+alphabetic or numeric), `isspace`, `isascii` (true also for the empty string),
+and `isprintable` (true also for the empty string). `islower` and `isupper`
+are true when the string has at least one cased character and no cased
+character of the other case (or title case); `istitle` when it has at least one
+cased character, every upper- or title-case character follows an uncased one,
+and every lower-case character follows a cased one. `isidentifier` is true
+when the string is an *identifier* of 12.3 (keywords included).
+
+#### 23.1.8 Other members
+
+`str.__format__(spec)` formats the string as 23.5 specifies. `str.__mod__` is
+printf-style formatting (23.6). `str.__getnewargs__()` returns a tuple of a
+copy of the string. `str.__len__` is the number of code points; `str.__iter__`
+yields each character in order (a sequence iterator, 27.1.2).
+
+### 23.2 Character properties
+
+The properties of a code point are those of the Unicode Character Database
+(clause 3):
+
+| Property | Definition |
+| --- | --- |
+| alphabetic | general category Lu, Ll, Lt, Lm, or Lo |
+| decimal | general category Nd |
+| digit | Numeric_Type Decimal or Digit |
+| numeric | Numeric_Type Decimal, Digit, or Numeric |
+| white space | bidirectional class WS, B, or S, or general category Zs |
+| printable | not of general category Cc, Cf, Cs, Co, Cn, Zl, Zp, or Zs, or U+0020 SPACE |
+| cased, upper, lower, title | the derived properties Cased, Uppercase, Lowercase, and general category Lt |
+
+The decimal value used by StringToInt and StringToFloat is the
+Numeric_Value of a decimal character.
+
+### 23.3 Encodings
+
+#### 23.3.1 Codecs
+
+A *codec* converts between strings and byte sequences. Every implementation
+provides the codecs of Table 23-1; HostLookupCodec (Annex B) may provide others.
+An encoding name is looked up after converting it to lower case and replacing
+each space and `-` with `_`; a name that neither the table nor the host knows
+raises a `LookupError` exception ("unknown encoding: *name*"). An encoding or
+errors argument that is not a `str` raises `TypeError` ("*m*() argument
+'encoding' must be str, not *tname*", and likewise for 'errors', *m* being the
+method or constructor called).
+
+Table 23-1: Core codecs
+
+| Codec | Names | Encodes | Reason for an unencodable character | Reasons for undecodable bytes |
+| --- | --- | --- | --- | --- |
+| `utf-8` | `utf_8`, `utf8`, `u8`, `cp65001` | RFC 3629 | "surrogates not allowed" | "invalid start byte", "invalid continuation byte", "unexpected end of data" |
+| `ascii` | `ascii`, `us_ascii`, `646` | code points below 0x80 | "ordinal not in range(128)" | "ordinal not in range(128)" |
+| `latin-1` | `latin_1`, `latin1`, `iso_8859_1`, `iso8859_1`, `l1`, `8859`, `cp819`, `latin` | code points below 0x100 | "ordinal not in range(256)" | (none) |
+
+#### 23.3.2 Error handlers
+
+Encode(*s*, *encoding*, *errors*) and Decode(*b*, *encoding*, *errors*) apply
+the codec, and on each unencodable run of characters or undecodable run of
+bytes construct the `UnicodeEncodeError` or `UnicodeDecodeError` (21.3.6)
+describing it and consult the handler named by *errors*. The handler name is
+looked up only when an error occurs; an unknown name raises `LookupError`
+("unknown error handler name '*errors*'").
+
+| Handler | On encoding | On decoding |
+| --- | --- | --- |
+| `strict` | raise the error | raise the error |
+| `ignore` | skip | skip |
+| `replace` | `?` | U+FFFD |
+| `backslashreplace` | `\x`*hh*, `\u`*hhhh*, or `\U`*hhhhhhhh* | `\x`*hh* for each byte |
+| `xmlcharrefreplace` | `&#`*decimal*`;` | raise `TypeError` ("don't know how to handle UnicodeDecodeError in error callback") |
+| `surrogateescape` | a code point U+DC80–U+DCFF becomes the byte *c* − 0xDC00; others raise | each byte *b* ≥ 0x80 becomes U+DC00 + *b* |
+| `surrogatepass` | (`utf-8`) surrogates are encoded as three bytes | (`utf-8`) three-byte surrogate sequences are decoded |
+
+### 23.4 Format string syntax
+
+`str.format(*args, **kwargs)` and `format_map(mapping)` (which uses *mapping*
+for keyword lookup and no positional arguments, "Format string contains
+positional fields") interpret the string by this grammar:
+
+```text
+format_string:     (literal_char | '{{' | '}}' | replacement_field)*
+replacement_field: '{' [field_name] ['!' conversion] [':' format_spec] '}'
+field_name:        arg_name ('.' attribute_name | '[' element_index ']')*
+arg_name:          [identifier | digit+]
+conversion:        'r' | 's' | 'a'
+element_index:     digit+ | index_string
+format_spec:       (literal_char | replacement_field)*
+```
+
+FormatString(*fmt*, *args*, *kwargs*, *depth*):
+
+1. If *depth* < 0, raise a `ValueError` exception ("Max string recursion
+   exceeded").
+2. Scan *fmt*: `{{` and `}}` produce `{` and `}`; a single `}` raises
+   `ValueError` ("Single '}' encountered in format string"); a `{` without its
+   matching `}` raises `ValueError` ("Single '{' encountered in format string"
+   at the end of the text, "expected '}' before end of string" inside a
+   field). Within a field, brackets `[`…`]` are not scanned for braces, and
+   braces nest.
+3. For each replacement field, in order:
+   1. Let *name* be the *arg_name*. If it is empty, use the next automatic
+      index (0 at the start); if fields were already numbered manually, raise
+      `ValueError` ("cannot switch from manual field specification to
+      automatic field numbering"). If it is all digits, it is a manual index
+      (the reverse switch raises "cannot switch from automatic field numbering
+      to manual field specification"). A numeric name selects *args*[*n*]
+      (`IndexError` "Replacement index *n* out of range for positional args
+      tuple"); another name selects ? GetItem(*kwargs*, *name*).
+   2. For each `.`*attr* apply ? GetAttr (an empty name raises `ValueError`
+      "Empty attribute in format string"), and for each `[`*i*`]` apply
+      ? GetItem with the integer *i* if it is all digits and the string *i*
+      otherwise. After `]` only `.` or `[` may follow ("Only '.' or '[' may
+      follow ']' in format field specifier").
+   3. Apply the conversion (`!r` ToRepr, `!s` ToStr, `!a` ASCII); another
+      letter raises `ValueError` ("Unknown conversion specifier *c*"), and a
+      conversion of other than one letter before `:` or `}` raises
+      `ValueError` ("expected ':' after conversion specifier").
+   4. Let *spec* be ? FormatString(*format_spec*, *args*, *kwargs*, *depth* −
+      1), sharing the automatic numbering state.
+   5. Append ? Format(*value*, *spec*).
+4. Return the concatenation. `str.format` calls FormatString with *depth* 2.
+
+### 23.5 The format specification mini-language
+
+#### 23.5.1 Syntax
+
+```text
+format_spec: [[fill] align] [sign] ['z'] ['#'] ['0'] [width] [grouping] ['.' precision [grouping]] [type]
+fill:        <any character>
+align:       '<' | '>' | '=' | '^'
+sign:        '+' | '-' | ' '
+width:       digit+
+grouping:    ',' | '_'
+precision:   digit+
+type:        'b' | 'c' | 'd' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'n' | 'o' | 's' | 'x' | 'X' | '%'
+```
+
+A specifier with characters left after *type* raises `ValueError` ("Invalid
+format specifier '*spec*' for object of type '*tname*'"); a width or precision
+too large for the index size raises `ValueError` ("Too many decimal digits in
+format string"). Both `,` and `_` raise "Cannot specify both ',' and '_'.".
+
+The `0` flag, when no *align* is given, selects `0` as the fill and `=` as the
+alignment for numbers (`<` for strings). A type a value does not support raises
+`ValueError` ("Unknown format code '*t*' for object of type '*tname*'").
+
+#### 23.5.2 Padding and alignment
+
+The formatted text is padded with *fill* (default space) to *width* code
+points: `<` pads on the right, `>` on the left, `^` puts ⌊*p*/2⌋ on the left
+and the rest on the right, and `=` pads between the sign (and base prefix) and
+the digits. Numbers default to `>`; strings to `<`. When padding with `=` and
+grouping, the padding zeros themselves are grouped, so that `format(1234,
+'010,')` is `'00,001,234'`.
+
+#### 23.5.3 Strings
+
+`str.__format__(spec)` accepts type `s` or none. *precision* truncates the
+string to that many code points. A sign raises `ValueError` ("Sign not allowed
+in string format specifier"), `=` ("'=' alignment not allowed in string format
+specifier"), `#` ("Alternate form (#) not allowed in string format
+specifier"), `z` ("Negative zero coercion (z) not allowed in string format
+specifier"), and a grouping ("Cannot specify ',' with 's'.").
+
+#### 23.5.4 Integers
+
+`int.__format__(spec)` accepts the types `b`, `o`, `x`, `X` (bases 2, 8, 16, 16
+with upper-case digits), `d` or none (base 10), `n` (base 10 with the host's
+locale grouping, none in the Core profile), `c` (the character with that code
+point, `OverflowError` "%c arg not in range(0x110000)"), and the float types,
+for which the value is first converted by IntToFloat. For an integer type:
+
+- *precision* raises `ValueError` ("Precision not allowed in integer format
+  specifier") and `z` ("Negative zero coercion (z) not allowed in integer
+  format specifier");
+- the sign is `-` for negatives only (default), `+` for all, or a space for
+  non-negatives;
+- `#` adds the prefix `0b`, `0o`, `0x`, or `0X`;
+- `,` groups decimal digits by three and is allowed only with `d` or none;
+  `_` groups decimal digits by three and binary, octal, and hexadecimal digits
+  by four; otherwise "Cannot specify '*g*' with '*t*'.";
+- `c` refuses a sign ("Sign not allowed with integer format specifier 'c'")
+  and `#` ("Alternate form (#) not allowed with integer format specifier
+  'c'").
+
+The integer string conversion limit (22.1.8) applies to base 10.
+
+#### 23.5.5 Floating-point numbers
+
+`float.__format__(spec)` accepts the types below. Rounding is to the nearest
+representable decimal, ties to even, applied to the exact binary value.
+*P* is *precision*, defaulting to 6.
+
+| Type | Presentation |
+| --- | --- |
+| `e`, `E` | one digit, a point (omitted when *P* is 0 unless `#`), *P* digits, `e` or `E`, the exponent's sign, and at least two exponent digits |
+| `f`, `F` | fixed point with *P* digits after the point (point omitted as for `e`) |
+| `g`, `G` | with *p* = max(*P*, 1) and *x* rounded to *p* significant digits having decimal exponent *E*: `e` with precision *p* − 1 if *E* < −4 or *E* ≥ *p*, else `f` with precision *p* − 1 − *E*; trailing zeros and a trailing point are removed unless `#` |
+| `n` | `g` with the host's locale (Core: as `g`) |
+| `%` | the value × 100 as `f`, followed by `%` |
+| none | without *precision*, FloatRepr (22.3.4); with it, as `g` but switching to exponent form when *E* ≥ *p* − 1, and keeping at least one digit after the point |
+
+Infinities and NaNs are written `inf` and `nan` (`INF`, `NAN` for `E`, `F`,
+`G`), with their sign. The `z` option turns a negative zero result, after
+rounding, into a positive one. `,` and `_` group the integer digits by three; a
+*grouping* after the precision groups the fractional digits by three. Types
+`b`, `c`, `d`, `o`, `x`, `X` raise the error for an unknown format code.
+
+#### 23.5.6 Complex numbers
+
+`complex.__format__(spec)` formats the real and imaginary parts as `float`
+values with the same options (the sign applying to the real part, the
+imaginary part always signed), joins them as *re* *im*`j`, and pads the result.
+With type none the result is as ComplexRepr (22.4.3) when there is no other
+option, and otherwise the parts follow the type-none float rules, the real
+part omitted when it is +0, and the result parenthesized. `=` alignment and
+the `0` flag raise `ValueError` ("'=' alignment flag is not allowed in complex
+format specifier", "Zero padding is not allowed in complex format
+specifier").
+
+#### 23.5.7 Other objects
+
+`object.__format__(spec)` returns ToStr(*self*) when *spec* is empty and
+otherwise raises `TypeError` ("unsupported format string passed to
+*tname*(*self*).\_\_format\_\_"). `bool` formats as `int` with a non-empty
+spec. Types whose `__format__` is not otherwise specified inherit
+`object.__format__`.
+
+### 23.6 printf-style formatting
+
+`s % values` (`str.__mod__`) produces a string from the template *s*. If
+*values* is a tuple, its elements are the arguments; if it is a mapping (and not
+a tuple or str) and *s* uses mapping keys, it supplies them; otherwise *values*
+is the single argument. Each `%` starts a conversion:
+
+```text
+conversion: '%' ['(' mapping_key ')'] flag* [width | '*'] ['.' (precision | '*')] [length_modifier] type
+flag:       '#' | '0' | '-' | ' ' | '+'
+length_modifier: 'h' | 'l' | 'L'
+type:       'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'c' | 'r' | 's' | 'a' | '%'
+```
+
+1. `%%` produces `%`. A `%` at the end raises `ValueError` ("stray % at
+   position *i*"), an unknown type ("unsupported format %*c* at position
+   *i*").
+2. A mapping key selects ? GetItem(*values*, *key*); it requires a mapping
+   ("format requires a mapping, not *tname*"), and once used every conversion
+   needs one ("format requires a parenthesised mapping key at position *i*").
+3. `*` takes the width or precision from the next argument, which shall be an
+   `int` ("format argument *n*: * requires int, not *tname*").
+4. Too few arguments raise `TypeError` ("not enough arguments for format
+   string (got *n*)"); arguments left over when *values* is a tuple (or a
+   single non-mapping argument not consumed) raise `TypeError` ("not all
+   arguments converted during string formatting (required *k*, got *n*)").
+5. `d`, `i`, `u` require a real number ("format argument: %*t* requires a real
+   number, not *tname*"), converted by `int`; `o`, `x`, `X` an integer
+   ("… requires an integer, not *tname*", via ToIndex). The precision is a
+   minimum number of digits; `#` adds `0o`, `0x`, or `0X`.
+6. `e`, `E`, `f`, `F`, `g`, `G` convert by `float` and format as 23.5.5 with
+   precision default 6 (`#` keeps the point and, for `g`, trailing zeros).
+7. `c` takes an integer in range(0x110000) (`OverflowError` "format argument:
+   %c argument not in range(0x110000)") or a string of length 1 (`TypeError`
+   "format argument: %c requires an integer or a unicode character, not a
+   string of length *n*").
+8. `s`, `r`, `a` convert by ToStr, ToRepr, ASCII; a precision truncates.
+9. The width pads on the left with spaces, on the right with `-`, and with
+   zeros after the sign and prefix with `0` (numbers only; `-` overrides `0`).
+   `+` signs non-negative numbers and a space prefixes them with a space.
+
+### 23.7 Templates and interpolations
+
+%Template% and %Interpolation% are intrinsic types whose `__module__` is
+`"string.templatelib"`; neither is an acceptable base type. A t-string (13.2.5)
+creates them. They are reachable from a program as `type(t'')` and
+`type(t'{x}'.interpolations[0])`; Annex C describes the library module that
+binds them by name.
+
+#### 23.7.1 Template ( *args* )
+
+Accepts only positional arguments ("Template.\_\_new\_\_ only accepts \*args
+arguments"), each a `str` or an %Interpolation% ("Template.\_\_new\_\_ \*args
+need to be of type 'str' or 'Interpolation', got *tname*"). Consecutive
+strings are concatenated, and an empty string is supplied between consecutive
+interpolations and at either end, so that `strings` has exactly one more
+element than `interpolations`.
+
+| Member | Value |
+| --- | --- |
+| `strings` | tuple of the literal parts |
+| `interpolations` | tuple of the interpolations |
+| `values` | tuple of the interpolations' values |
+| `__iter__()` | iterates over the parts in order, skipping empty strings |
+| `__add__(other)` | for a %Template% *other*, the template of the parts of both (the last string of the first joined to the first of the second); otherwise `TypeError` ("can only concatenate string.templatelib.Template (not "*tname*") to string.templatelib.Template") |
+| `__repr__()` | "Template(strings=*r1*, interpolations=*r2*)" with the reprs of the two tuples |
+
+`str + Template` raises the `TypeError` of 23.1.2. Templates compare by
+identity.
+
+#### 23.7.2 Interpolation ( *value*, *expression*=`''`, *conversion*=None, *format_spec*=`''` )
+
+*expression* and *format_spec* shall be `str` ("Interpolation() argument
+'*name*' must be str, not *tname*"); *conversion* shall be `None`, `'s'`,
+`'r'`, or `'a'` (`ValueError` "Interpolation() argument 'conversion' must be
+one of 's', 'a' or 'r'"). The four arguments are read-only attributes
+("readonly attribute"). `__match_args__` is (`'value'`, `'expression'`,
+`'conversion'`, `'format_spec'`). `repr` is "Interpolation(*r*, *r*, *r*,
+*r*)" with the reprs of the four attributes.
