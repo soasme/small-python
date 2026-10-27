@@ -198,3 +198,23 @@ error = assert_syntax_error("match x:\n    case []:\npass\n", exception=Indentat
 assert_eq((error.lineno, error.offset, error.end_offset), (3, 0, -1))
 error = assert_syntax_error("class C:\n", exception=IndentationError)
 assert_eq((error.lineno, error.offset, error.end_offset), (1, 9, -1))
+# Ranges of the remaining invalid_* rules.
+for source, message, position in (
+        ("f(True=1)", "cannot assign to True", (1, 3, 1, 8)),
+        ("f(a=)", "expected argument value expression", (1, 3, 1, 5)),
+        ("if x = 3:\n   pass", "invalid syntax. Maybe you meant '==' or ':=' instead of '='?", (1, 4, 1, 9)),
+        ("def f(x, (y, z), w):\n   pass", "Function parameters cannot be parenthesized", (1, 10, 1, 16)),
+        ("{1: *12+1}", "cannot use a starred expression in a dictionary value", (1, 5, 1, 10)),
+        ("import a from b as bar", "Did you mean to use 'from ... import ...' instead?", (1, 1, 1, 18)),
+        ("import\n", "Expected one or more names after 'import'", (1, 7, 1, 7)),
+        ("type A[] = int", "Type parameter list cannot be empty", (1, 8, 1, 10)),
+        ("class A[]: ...", "Type parameter list cannot be empty", (1, 9, 1, 9)),
+        ("type A = (yield from [])", "yield expression cannot be used within a type alias", (1, 11, 1, 24)),
+        ("class A[T]((await 3)): ...", "await expression cannot be used within the definition of a generic", (1, 13, 1, 20)),
+        ("assert 'a' = a", "cannot assign to literal here. Maybe you meant '==' instead of '='?", (1, 8, 1, 15)),
+        ("match ...:\n  case Foo(y=1, x=2, y=3):\n    ...", "attribute name repeated in class pattern: y", (2, 24, 2, 25)),
+        ("match x:\n case y as __debug__: pass", "cannot assign to __debug__", (2, 7, 2, 21)),
+        ("try:\n   pass\nexcept TypeError as __debug__:\n   pass", "cannot assign to __debug__", (3, 1, 4, 8)),
+        ("def f(a: int, __debug__: int = 3): pass", "cannot assign to __debug__", (1, 15, 1, 29))):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, (error.lineno, error.offset, error.end_lineno, error.end_offset)), (message, position))

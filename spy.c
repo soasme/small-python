@@ -3055,6 +3055,15 @@ static Node *node(Parser *p, int kind) {
 }
 /* A node matched by the tokens from 'first' up to the current one, unless
  * an inner rule already gave it a range (a parenthesized expression keeps its own). */
+/* A statement or clause covers its tokens up to the newline and dedents that close it. */
+static void span_block(Parser *p, Node *n, size_t first) {
+    size_t last = p->pos;
+    while (last > first && (p->tokens[last - 1].kind == T_NL || p->tokens[last - 1].kind == T_INDENT ||
+                            p->tokens[last - 1].kind == T_DEDENT || p->tokens[last - 1].kind == T_END)) last--;
+    if (last > first) {
+        n->start = p->tokens[first].start; n->end = p->tokens[last - 1].start + p->tokens[last - 1].len; n->spanned = 1;
+    }
+}
 static Node *span(Parser *p, Node *n, size_t first) {
     if (n && !n->spanned && p->pos > first) {
         Token *last = &p->tokens[p->pos - 1];
@@ -3205,7 +3214,8 @@ static int parameter_list(Parser *p, Node *n, int close) {
                 } else if (!(arg->b = plain_expression(p, 0))) return -1;
                 if (at(p, T_WALRUS)) { syntax(p, "invalid syntax"); return -1; }
             }
-            span(p, arg, name_at);
+            /* A parameter covers its name and annotation. */
+            arg->spanned = 0; span(p, arg, name_at);
             if (take(p, '=')) {
                 if (kind == P_VARARGS || kind == P_KWARGS) { syntax(p, "variadic parameter cannot have a default"); return -1; }
                 if (!(arg->a = plain_expression(p, 0))) return -1;
@@ -3389,7 +3399,7 @@ static int rules_parameters(ParamRules *r) {
             take(p, ',');
         }
         if (count && at(p, ')'))
-            return rules_raise(p, paren, r->lambda ? "Lambda expression parameters cannot be parenthesized" : "Function parameters cannot be parenthesized");
+            { syntax_span(p, paren, p->pos + 1, r->lambda ? "Lambda expression parameters cannot be parenthesized" : "Function parameters cannot be parenthesized"); return -1; }
     }
     p->pos = start;
     if (rules_any_slash(r) < 0 || rules_many(r, 2, 0) < 0) return -1;
@@ -3777,13 +3787,13 @@ static Node *string_node(Parser *p) {
     free(literal.data);
     return status ? NULL : n;
 }
-static Node *syntax_within(Parser *p, const char *what) {
+/* The error covers tokens [first, end): the whole offending expression. */
+static Node *syntax_within(Parser *p, const char *what, size_t first, size_t end) {
     char message[128];
     snprintf(message, sizeof(message), "%s expression cannot be used within %s", what, p->annotation_scope);
-    return syntax(p, message);
+    return syntax_span(p, first, end, message);
 }
 static Node *yield_expression(Parser *p) {
-    if (p->annotation_scope) return syntax_within(p, "yield");
     size_t start = p->pos++;
     int outside = !p->functions && !p->deferred;
     if (!p->functions) {
@@ -3796,11 +3806,13 @@ static Node *yield_expression(Parser *p) {
     if (take_word(p, "from")) {
         n->op = 1;
         if (!(n->a = expression(p, 0))) return NULL;
+        if (p->annotation_scope) return syntax_within(p, "yield", start, p->pos);
         if (p->async_function) return syntax_at(p, span(p, n, start), "'yield from' inside async function");
     } else if (!at(p, T_NL) && !at(p, ';') && !at(p, ')') && !at(p, T_END) && !at(p, '=')) {
         if (!(n->a = expression_list(p, 0))) return NULL;
         if (n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
     }
+    if (p->annotation_scope) return syntax_within(p, "yield", start, p->pos);
     return span(p, n, start);
 }
 static Node *atom(Parser *p) {
@@ -3881,8 +3893,13 @@ static Node *atom(Parser *p) {
                 if (!pair || !expect(p, ':', "invalid syntax")) return NULL;
                 pair->a = item;
                 if (at(p, '}') || at(p, ',')) { p->pos--; return syntax(p, "expression expected after dictionary key and ':'"); }
-                if (at(p, '*')) return syntax(p, "cannot use a starred expression in a dictionary value");
-                if (at(p, T_POW)) return syntax(p, "cannot use dict unpacking in a dictionary value");
+                if (at(p, '*') || at(p, T_POW)) {
+                    /* invalid_double_starred_kvpairs: the operator and its bitwise_or operand. */
+                    size_t star = p->pos++;
+                    if (!expression(p, 4)) return NULL;
+                    return syntax_span(p, star, p->pos, p->tokens[star].kind == '*' ? "cannot use a starred expression in a dictionary value" :
+                                                       "cannot use dict unpacking in a dictionary value");
+                }
                 pair->b = plain_expression(p, 0);
                 if (!pair->b) return NULL;
                 item = pair;
@@ -3985,6 +4002,7 @@ static int call_arguments(Parser *p, Node *n) {
                 if (!unpack_mapping) star_expression_error(p, star);
                 return -1;
             }
+            span(p, arg, star);
             /* invalid_starred_expression_unpacking and invalid_kwarg */
             if (at(p, '=')) {
                 p->pos++;
@@ -4025,7 +4043,7 @@ static int call_arguments(Parser *p, Node *n) {
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
                     char message[64];
                     snprintf(message, sizeof(message), "cannot assign to %s", expression_name(arg));
-                    p->pos = start; syntax(p, message); return -1;
+                    syntax_span(p, start, p->pos + 1, message); return -1;
                 }
                 if (name->kind != T_NAME || reserved(name) || start + 1 >= p->len || p->tokens[start + 1].kind != '=') {
                     /* invalid_kwarg: the range runs from the expression to its '='. */
@@ -4033,7 +4051,7 @@ static int call_arguments(Parser *p, Node *n) {
                     p->ctx->line = arg->line; p->error_start = arg->start; return -1;
                 }
                 p->pos++;
-                if (at(p, ',') || at(p, ')')) { p->pos = start; syntax(p, "expected argument value expression"); return -1; }
+                if (at(p, ',') || at(p, ')')) { syntax_span(p, start, p->pos, "expected argument value expression"); return -1; }
                 if (arg->original) { free(arg->text); arg->text = arg->original; arg->original = NULL; }
                 arg->kind = N_KEYWORD;
                 for (Node *a = n->args; a; a = a->next)
@@ -4123,8 +4141,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         for (Node *n = outer; n != inner->a; n = n->a) extend(p, n, n);
         left = outer;
     } else {
-        if (p->annotation_scope && keyword(p, "await")) return syntax_within(p, "await");
-        size_t await_line = peek(p)->line, atom_start;
+        size_t await_line = peek(p)->line, await_at = p->pos, atom_start;
         int awaiting = take_word(p, "await");
         atom_start = p->pos;
         left = span(p, atom(p), atom_start);
@@ -4165,6 +4182,8 @@ static Node *expression_inner(Parser *p, int min, int named) {
             Node *n = node(p, N_AWAIT);
             if (!n) return NULL;
             n->a = left; n->line = await_line; left = n;
+            /* The error covers the whole await expression. */
+            if (p->annotation_scope) return syntax_within(p, "await", await_at, p->pos);
         }
     }
     for (;;) {
@@ -4226,7 +4245,7 @@ assignment_expression:
         /* The error covers the whole assignment expression. */
         p->pos++;
         if (!expression(p, 0)) return NULL;
-        syntax_within(p, "named");
+        syntax_within(p, "named", p->pos, p->pos);
         p->ctx->line = left->line; p->error_start = left->start;
         p->error_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
         return NULL;
@@ -4416,7 +4435,7 @@ static int named_equals_error(Parser *p, size_t at) {
     Token *t = &p->tokens[at];
     if (t->kind == T_NAME && !reserved(t) && at + 1 < p->len && p->tokens[at + 1].kind == '=' &&
         probe_bitwise_or(p, at + 2, &after) && p->tokens[after].kind != '=' && p->tokens[after].kind != T_WALRUS) {
-        p->pos = at; syntax(p, "invalid syntax. Maybe you meant '==' or ':=' instead of '='?"); return 1;
+        syntax_span(p, at, after, "invalid syntax. Maybe you meant '==' or ':=' instead of '='?"); return 1;
     }
     if (probe_excluded(p, at)) return 0;
     Node *a = probe_bitwise_or(p, at, &end);
@@ -4445,11 +4464,12 @@ static int assert_equals_error(Parser *p, Node *a) {
     size_t saved = p->pos++;
     Node *b = plain_expression(p, 0);
     if (!b) { spy_clear_error(p->ctx); p->pos = saved; return 0; }
+    Token *last = &p->tokens[p->pos - 1];
     p->pos = saved;
     char message[112];
     if (walrus) snprintf(message, sizeof(message), "cannot use named expression without parentheses here");
     else snprintf(message, sizeof(message), "cannot assign to %s here. Maybe you meant '==' instead of '='?", expression_name(a));
-    syntax_at(p, a, message); return 1;
+    syntax_at(p, a, message); p->error_end = last->start + last->len; return 1;
 }
 static Node *assignment_error(Parser *p, size_t start) {
     p->pos = start;
@@ -4860,13 +4880,14 @@ static Node *literal_pattern(Parser *p) {
     return n;
 }
 static Node *star_or_pattern(Parser *p) {
+    size_t start = p->pos;
     if (!take(p, '*')) return pattern(p);
     Node *star = pattern_node(p, PT_STAR);
     if (!star) return NULL;
     Node *name = identifier(p);
     if (!name) return NULL;
     if (strcmp(name->text, "_")) star->a = name;
-    return star;
+    return span(p, star, start);
 }
 static int check_sequence_stars(Parser *p, Node *items) {
     int stars = 0;
@@ -4923,7 +4944,7 @@ static Node *closed_pattern_body(Parser *p) {
                 size_t name = p->pos;
                 Node *rest = identifier(p);
                 if (!rest) return NULL;
-                if (!strcmp(rest->text, "_")) return syntax(p, "invalid syntax");
+                if (!strcmp(rest->text, "_")) { p->pos = name; return syntax(p, "invalid syntax"); }
                 n->c = rest;
                 if (take(p, ',') && !at(p, '}')) {
                     if (at(p, T_POW)) return syntax(p, "invalid syntax");
@@ -4976,20 +4997,22 @@ static Node *closed_pattern_body(Parser *p) {
                     Node *entry = node(p, N_KEYWORD);
                     Node *key = entry ? identifier(p) : NULL;
                     if (!key) return NULL;
+                    Node *repeated = NULL;
                     for (Node *other = n->c; other; other = other->next)
-                        if (!strcmp(other->text, key->original ? key->original : key->text)) {
-                            char message[300];
-                            snprintf(message, sizeof(message), "attribute name repeated in class pattern: %s", other->text);
-                            return syntax(p, message);
-                        }
+                        if (!strcmp(other->text, key->original ? key->original : key->text)) repeated = other;
                     const char *attr = key->original ? key->original : key->text;
                     if (!(entry->text = copy_text(p->ctx, attr, strlen(attr)))) return NULL;
                     int debug = !strcmp(attr, "__debug__") && !p->deferred;
                     if (debug) { p->pos--; defer(p, "cannot assign to __debug__"); p->pos++; }
                     p->pos++;
                     if (!(entry->b = pattern(p))) return NULL;
-                    /* As CPython, the error covers the keyword's sub-pattern. */
+                    /* As CPython, these errors cover the keyword's sub-pattern. */
                     if (debug) p->deferred_node = entry->b;
+                    if (repeated) {
+                        char message[300];
+                        snprintf(message, sizeof(message), "attribute name repeated in class pattern: %s", repeated->text);
+                        return syntax_at(p, entry->b, message);
+                    }
                     *keywords = entry; keywords = &entry->next;
                 } else {
                     if (n->c) return syntax(p, "positional patterns follow keyword patterns");
@@ -5042,7 +5065,7 @@ static Node *pattern_body(Parser *p) {
             if (!bad) { spy_clear_error(p->ctx); p->pos = target; return syntax(p, "invalid syntax"); }
             char message[96];
             snprintf(message, sizeof(message), "cannot use %s as pattern target", expression_name(bad));
-            return syntax_span(p, target, p->pos, message);
+            return syntax_at(p, bad, message);
         }
         Node *n = pattern_node(p, PT_AS), *name = n ? identifier(p) : NULL;
         if (!name) return NULL;
@@ -5193,7 +5216,15 @@ static Node *lazy_function(Parser *p, const char *name, Node *value) {
 static Node *type_params(Parser *p) {
     Node *generic = node(p, N_GENERIC);
     if (!generic) return NULL;
-    if (at(p, ']')) return syntax(p, "Type parameter list cannot be empty");
+    if (at(p, ']')) {
+        /* RAISE_SYNTAX_ERROR_STARTING_FROM ends where the tokenizer stands, past the
+         * furthest token read: for a type alias, CPython has read the '='. */
+        syntax(p, "Type parameter list cannot be empty");
+        size_t furthest = p->pos >= 3 && token_is(&p->tokens[p->pos - 3], "type") ? p->pos + 1 : p->pos;
+        Token *far = &p->tokens[furthest];
+        p->error_end = far->start + far->len - 1;
+        return NULL;
+    }
     Node **tail = &generic->args;
     int defaults = 0;
     while (!at(p, ']')) {
@@ -5303,15 +5334,7 @@ static Node *statement(Parser *p) {
     Node *n = statement_body(p);
     p->statement_level--;
     if (n && misplaced) p->deferred_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
-    if (n && !n->spanned) {
-        /* A statement covers its tokens up to the newline and dedents that close it. */
-        size_t last = p->pos;
-        while (last > 0 && (p->tokens[last - 1].kind == T_NL || p->tokens[last - 1].kind == T_INDENT ||
-                            p->tokens[last - 1].kind == T_DEDENT || p->tokens[last - 1].kind == T_END)) last--;
-        if (last > 0 && p->tokens[last - 1].start >= first->start) {
-            n->start = first->start; n->end = p->tokens[last - 1].start + p->tokens[last - 1].len; n->spanned = 1;
-        }
-    }
+    if (n && !n->spanned) span_block(p, n, (size_t)(first - p->tokens));
     if (!p->statement_level) {
         if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING)) p->future_closed = 1;
         p->top_statements++;
@@ -5499,6 +5522,7 @@ static Node *statement_body(Parser *p) {
             handler->b = suite_after(p, is_star ? "'except*' statement" : "'except' statement", except_line);
             p->star = saved;
             if (!handler->b) return NULL;
+            span_block(p, handler, except_at);
             *tail = handler; tail = &handler->next;
         }
         if (star == 1) n->flags |= F_STAR;
@@ -5612,7 +5636,7 @@ static Node *statement_body(Parser *p) {
             if (take(p, '*')) { n->args = node(p, N_STAR); return n; }
         }
         int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
-        if (at(p, T_NL)) return syntax(p, "Expected one or more names after 'import'");
+        if (at(p, T_NL)) { syntax(p, "Expected one or more names after 'import'"); p->error_end = p->error_start; return NULL; }
         int grouped = from && take(p, '(');
         Node **tail = &n->args;
         do {
@@ -5645,7 +5669,9 @@ static Node *statement_body(Parser *p) {
         if (!from && !renamed && keyword(p, "from") && p->tokens[p->pos + 1].kind == T_NAME && !reserved(&p->tokens[p->pos + 1])) {
             size_t end = p->pos + 2;
             while (p->tokens[end].kind == '.' && p->tokens[end + 1].kind == T_NAME) end += 2;
-            return syntax_span(p, start, end, "Did you mean to use 'from ... import ...' instead?");
+            /* RAISE_SYNTAX_ERROR_STARTING_FROM: through the lookahead token the tokenizer has read. */
+            syntax_span(p, start, end + 1, "Did you mean to use 'from ... import ...' instead?");
+            p->error_end--; return NULL;
         }
         return n;
     }
@@ -6143,7 +6169,9 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             if (scope_node(c, scope, item->a) || scope_target(c, scope, item->b, 1)) return -1;
         return scope_walk(c, scope, n->b);
     case N_EXCEPT:
-        return scope_node(c, scope, n->a) || scope_target(c, scope, n->c, 1) || scope_walk(c, scope, n->b) ? -1 : 0;
+        if (scope_node(c, scope, n->a)) return -1;
+        if (n->c && n->c->kind == N_NAME ? scope_bind(c, scope, n->c, S_LOCAL, n) : scope_target(c, scope, n->c, 1)) return -1;
+        return scope_walk(c, scope, n->b);
     case N_TRY: {
         scope->tries++;
         int status = scope_walk(c, scope, n->a) || scope_walk(c, scope, n->args) ||
@@ -6162,7 +6190,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             if (n->a && n->a->kind == N_NAME) return scope_bind(c, scope, n->a, S_LOCAL, n);
             return n->a ? scope_target(c, scope, n->a, 1) : 0;
         case PT_VALUE: case PT_LITERAL: return scope_node(c, scope, n->a);
-        case PT_AS: return scope_node(c, scope, n->a) || scope_target(c, scope, n->b, 1) ? -1 : 0;
+        case PT_AS: return scope_node(c, scope, n->a) || scope_bind(c, scope, n->b, S_LOCAL, n) ? -1 : 0;
         case PT_MAPPING:
             if (scope_mapping_keys(c, n)) return -1;
             for (Node *entry = n->args; entry; entry = entry->next)

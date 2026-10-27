@@ -678,3 +678,9 @@
   misuse, invalid star expressions, keyword-argument mistakes and
   assignment expressions in annotation scopes. Errors at a dedent or at
   the end of input report the tokenizer's column and no end column.
+- More syntax errors carry CPython's ranges: keyword-argument mistakes,
+  parenthesized parameters, starred dictionary values, misplaced
+  'import ... from', empty type parameter lists, yield and await in
+  annotation scopes, assignments inside assert, class-pattern keywords,
+  as-patterns and except clauses that bind __debug__, and annotated
+  parameters.
