@@ -26,7 +26,30 @@ ROOT = Path(__file__).resolve().parent.parent
 TLA = ROOT / "tests/tla"
 ORACLE = ROOT / "tests/upstream/cpython-build/python.exe"
 JAR = ROOT / ".obj/tla/tla2tools.jar"
-MARKER = "CASES = \"\"  # filled in by tests/tla_check.py\n"
+MARKER = "CASES = \"\"  # filled in by tests/tla_check.py, with walks() and states()\n"
+# Inserted after the cases: the walks and their states, decoded as needed.
+PRELUDE = '''
+
+def walks():
+    """The walks, one at a time: CASES holds them all, a blank line apart."""
+    start = 0
+    while start < len(CASES):
+        end = CASES.find("\\n\\n", start)
+        end = len(CASES) if end < 0 else end
+        yield CASES[start:end]
+        start = end + 2
+
+
+def states(walk):
+    """The states of a walk, decoded one line at a time."""
+    start = 0
+    while start < len(walk):
+        end = walk.find("\\n", start)
+        end = len(walk) if end < 0 else end
+        yield eval(walk[start:end])
+        start = end + 1
+'''
+
 
 
 class Values:
@@ -223,7 +246,7 @@ def replay(name, all_cases, engine, oracle, directory):
     walks = ["\n".join(repr({k: v for k, v in state.items() if fields is None or k in fields}) for state in walk)
              for walk in all_cases]
     walks = [walk + "\n" for walk in walks[:-1]] + walks[-1:]
-    script.write_text(template.replace(MARKER, f"CASES = {chr(10).join(walks)!r}\n"), encoding="utf-8")
+    script.write_text(template.replace(MARKER, f"CASES = {chr(10).join(walks)!r}\n" + PRELUDE), encoding="utf-8")
     outcomes = {}
     # PEP 765's warnings about return, break, and continue in finally go to
     # stderr; the programs use those on purpose.

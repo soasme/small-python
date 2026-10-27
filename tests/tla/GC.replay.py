@@ -5,27 +5,8 @@
 import gc
 
 FIELDS = ("op", "out")
-CASES = ""  # filled in by tests/tla_check.py
+CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
-
-def walks():
-    """The walks, one at a time: CASES holds them all, a blank line apart."""
-    start = 0
-    while start < len(CASES):
-        end = CASES.find("\n\n", start)
-        end = len(CASES) if end < 0 else end
-        yield CASES[start:end]
-        start = end + 2
-
-
-def states(walk):
-    """The states of a walk, decoded one line at a time."""
-    start = 0
-    while start < len(walk):
-        end = walk.find("\n", start)
-        end = len(walk) if end < 0 else end
-        yield eval(walk[start:end])
-        start = end + 1
 
 gc.disable()
 log = []
