@@ -382,8 +382,7 @@ For values of the immutable types `int`, `float`, `complex`, `bool`, `str`,
 produces a value may return an existing object equal to the value it would
 otherwise create. Whether two such values computed separately are the same
 object is implementation-defined, except that `None`, `True`, `False`,
-`NotImplemented`, and `Ellipsis` are unique objects and that the empty tuple
-returned by `tuple()` is a single object. Programs shall not rely on any other
+`NotImplemented`, and `Ellipsis` are unique objects. Programs shall not rely on any other
 identity of immutable values.
 
 #### 6.1.3 The standard type hierarchy
@@ -7914,3 +7913,36 @@ to the built-in namespace by the host's `site` module.
 
 The `warnings` module implements HostWarn (B.4.1): its filters decide whether a
 warning is ignored, displayed once per location, or raised.
+
+## Annex D (normative) Implementation-Defined Behaviour
+
+A conforming implementation documents its choice for each item below. The
+values given for CPython are those of a 64-bit CPython 3.15 build, which an
+implementation is recommended to follow where it can.
+
+| Item | Clause | CPython |
+| --- | --- | --- |
+| The index-size range, the range of `int` values ToIndexSize accepts | 7.5.4 | −2<sup>63</sup> to 2<sup>63</sup> − 1 |
+| The recursion limit, and which evaluations count towards the recursion depth | 9.6, B.6 | 1000; calls of Python functions, `repr` |
+| When unreachable objects are reclaimed, and the order of finalization within a group (implementation-approximated) | 9.7 | reference counting with a cycle collector |
+| Identity of separately computed immutable values (including `tuple()`, `frozenset()`, and `tuple(t)`), and of `copy()` results that may return the object itself | 6.1.2, 25.2, 26.2, 26.3.1 | small integers, interned strings, and empty containers are shared |
+| The identity value `id` returns and `object.__repr__` prints | 19.3.19, 20.1.3 | the address |
+| Hash values of `str`, `bytes`, objects hashed by identity, and `None`; the hash width (64 or 32 bits) with the corresponding hash modulus and tuple constants | 22.1.9, 23.1, 25.2 | randomized per process for `str`/`bytes`; width 64 |
+| Iteration order of sets | 26.3 | by hash table position |
+| Column offsets (`offset`, `end_offset`) of syntax errors, when not `None` | 18.2.1 | the offending token |
+| Names bound by a match that partially succeeded | 15.6 | the bindings made before the failure are stored |
+| Extra names stored in a class namespace by class creation (beyond those of 16.4.2) | 16.4.2 | `__classdictcell__` |
+| The sorting algorithm, and so the order of comparisons and the order of the list when a comparison raises | 25.1.4 | Timsort (powersort merge policy) |
+| Whether assertions run by default (the optimization level) | 14.5, B.6 | enabled |
+| Code object internals (`co_code`, `co_stacksize`, `co_exceptiontable`, `co_linetable`), instruction indices (`f_lasti`, `tb_lasti`), and constructing code objects | 28.2, 28.3, 28.9 | CPython bytecode |
+| Documentation strings and `__text_signature__` of built-in objects | 28.5 | the CPython docstrings |
+| The `__name__` of string iterators | 27.1.1 | `str_ascii_iterator` for ASCII strings, `str_iterator` otherwise |
+| `__sizeof__` results | 20.1.3, 20.2 | memory size in bytes |
+| The numeric values of errno names, and ERANGE | 21.3.4, 22.3.2 | the host's `<errno.h>` |
+| memoryview native formats: sizes and byte order | 24.4.2 | the platform ABI |
+| The limits on source nesting (parentheses, blocks, f-strings) and on compilation recursion | 18.2.3 | 200 parentheses, 20 blocks, 150 f-string levels |
+| The size limit of integers (the point at which a shift raises "too many digits in integer") | 22.1.3 | 2<sup>63</sup> − 1 digits of 30 bits |
+| Additional dunder attributes of objects not listed in this Standard | throughout | CPython's |
+
+An implementation shall not use this annex to differ from a behaviour that the
+body of this Standard specifies.
