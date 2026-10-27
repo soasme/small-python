@@ -1,9 +1,5 @@
 # Small Python development instructions
 
-Read `/Users/soasme/.codex/RTK.md` when it exists. Prefix shell commands with
-`rtk`; use `rtk proxy` when raw output is required. On machines without RTK,
-run the equivalent command directly.
-
 ## Product and architecture
 
 - Build a small, embeddable Python engine in **C11 only**. The language target
@@ -243,18 +239,28 @@ run the equivalent command directly.
 
 ## Code taste
 
-Follow `/Users/soasme/github.com/soasme/polishing-code/skills/code-taste/SKILL.md`
-when available. The enduring requirements are:
+Before you finish, ask:
 
-- Solve the real problem. Prefer simple, direct code with few concepts.
-- Make code readable to a newcomer; hide complexity behind clear operations.
-- Avoid speculative frameworks, unnecessary dependencies, and abstractions
-  added only for hypothetical future features.
-- Keep ownership and failure paths symmetric. Match neighboring conventions.
-- Borrow established designs with attribution, then adapt them deliberately.
-- Rework awkward code instead of layering patches over it. Before finishing,
-  ask what can be deleted, whether the result solves the actual problem, and
-  whether it will still make sense years from now.
+- What can I delete until nothing cannot be deleted?
+- Would a newcomer read this without help?
+- Did I solve the real problem?
+- Did I followed YAGNI (You ain't gonna need it)?
+- Does it match its neighbours?
+
+Trust your discomfort. If something feels ugly, find out why and fix it. Check what means not ugly:
+
+* **Is simple.** Remove parts until nothing more can go. As few concepts and branches as possible.
+* **Solves the right problem.** Check the problem first. A neat answer to the wrong question is waste.
+* **Looks easy.** Hard work hides behind a clear result. Keep refining until it 
+* **Is timeless.** Prefer designs that will still make sense in ten years over fashion.
+* **Uses symmetry.** Make similar things look and behave alike. Break the pattern only for a reason.
+* **Fits its parts to the whole.** Follow how the system already works. Do not fight it.
+* **Is suggestive.** A good core makes the next feature obvious. Prefer general tools over special cases.
+* **Is strong, not fussy.** Skip needless ornament, config, comment and abstration.
+* **Is redesigned.** Expect the first draft/implementation to be wrong. Rewrite it when you see better.
+* **Can borrow.** Copy good designs, then adopt. Imitation teaches taste.
+* **May be odd.** A bold or unusual choice is fine when it is simpler or truer.
+* **Polishing.** Good code does not yield once at a time. They come after iterations until no extra can be simplified or trimmed.
 
 These preferences do not authorize sending messages, publishing, or pushing
 changes. Routine local implementation, testing, and documentation are authorized
