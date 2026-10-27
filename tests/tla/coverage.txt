@@ -332,12 +332,12 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Conversion specifier | FStrings
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Formatted String Literals (f-strings) > Format specifier | FStrings, FormatSpec
 11. Built-in types > Built-in Types > Text Sequence Type --- `str` > Template String Literals (t-strings) | TStrings
-11. Built-in types > Built-in Types > Text Sequence Type --- `str` > `printf`-style String Formatting | TODO: PercentFormat
+11. Built-in types > Built-in Types > Text Sequence Type --- `str` > `printf`-style String Formatting | PercentFormat
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` | = sections
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes Objects | TODO: Bytes
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytearray Objects | TODO: Bytearray
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Bytes and Bytearray Operations | TODO: Bytes, Bytearray
-11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | TODO: PercentFormat
+11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > `printf`-style Bytes Formatting | PercentFormat
 11. Built-in types > Built-in Types > Binary Sequence Types --- `bytes`, `bytearray`, `memoryview` > Memory Views | Buffers
 11. Built-in types > Built-in Types > Set Types --- `set`, `frozenset` | Sets
 11. Built-in types > Built-in Types > Mapping types --- `dict`, `frozendict` | TODO: Dicts, DictMethods

@@ -258,3 +258,6 @@ assert_eq(type_error(lambda: "a".encode(1)), "encode() argument 'encoding' must 
 assert_eq(type_error(lambda: str("a", "utf-8")), "decoding str is not supported")
 assert_eq(type_error(lambda: str.maketrans("a", 1)), "maketrans() argument 2 must be str, not int")
 assert_eq("a\nb".splitlines("yes"), ["a\n", "b"])
+
+# bytes %s and %b take any buffer, memoryview included.
+assert_eq(b"%s|%b" % (memoryview(b"m"), bytearray(b"x")), b"m|x")

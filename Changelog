@@ -499,6 +499,8 @@
   splitlines() takes any object for keepends. A builtin method given
   keywords it does not take names itself by qualified name
   ("list.append() takes no keyword arguments"). TLA+ model of str.
+- bytes %s and %b format any buffer, a memoryview included. TLA+ models
+  of format specifications and printf-style formatting.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

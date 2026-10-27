@@ -15344,6 +15344,11 @@ static SPYValue *percent_char(SPYContext *c, PercentArgs *p, SPYValue *key, SPYV
 static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v) {
     if (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY) return spy_bytes(c, v->as.string.data, v->as.string.len);
     SPYValue *method = special_dispatch(v) ? special_method(c, v, "__bytes__") : NULL;
+    if (!method && !c->error_type[0] && buffer_exporter(c, v)) {
+        SPYValue *copy;
+        buffer_bytes(c, v, &copy);
+        return copy;
+    }
     if (!method) return c->error_type[0] ? NULL :
         percent_fail(c, "TypeError", p, key, "%%b requires a bytes-like object, or an object that implements __bytes__, not %s", type_name(v));
     SPYValue *result = spy_call(c, method, 0, NULL);

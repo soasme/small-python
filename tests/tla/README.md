@@ -94,6 +94,7 @@ and tied to real implementations by replaying them.
 | `Ranges.tla` | the items, length, ends, reversal, tail slice, membership, and index of every range over small bounds and steps from -2 to 2, derived from r[i] = start + step * i; construction errors, equality and hashing by sequence, huge ranges, and unsupported operations | yes |
 | `Strings.tla` | find, rfind, index, count, startswith, endswith, split, rsplit, partition, rpartition, replace, removeprefix, removesuffix, and the strips derived over every string of up to three characters and argument of up to two; whitespace splitting; center, ljust, rjust, and zfill at every width; case mappings, predicates, splitlines, translate, encode, str(), and argument errors | yes |
 | `FormatSpec.tla` | the format specification mini-language derived for ints (every alignment, sign, alternate form, zero padding, width, grouping, and integer type) and for floats (f, %, and e at each precision, with half-even rounding and z), including grouping that extends into zero padding; str, complex, and object specs, and the format string syntax of str.format | yes |
+| `PercentFormat.tla` | printf-style formatting derived for ints and floats under every flag combination, width, precision, and numeric type, into str and bytes; %s, %r, %a, %c, mapping keys, `*` widths, and argument mismatches | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -217,8 +218,8 @@ a global deleted in `exec()`'s namespace read as an unbound local,
 cannot convert, and iteration misreported an `__iter__` of None or one
 returning a non-iterator, and `range` attributes were writable in message,
 `range.index()` worded its miss differently, `len()` of a huge range
-reported a 64-bit limit, and str methods worded many argument errors
-their own way.
+reported a 64-bit limit, str methods worded many argument errors
+their own way, and bytes `%s` refused a memoryview.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
