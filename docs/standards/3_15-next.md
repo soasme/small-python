@@ -6112,3 +6112,205 @@ For a mutable sequence *s*:
 | `s[i:j:k] = t` | for a step other than 1, *t* shall have exactly as many items as are selected ("attempt to assign sequence of size *m* to extended slice of size *n*") |
 | `del s[i:j:k]` | remove the selected items |
 | `s += t`, `s *= m` | extend by the items of *t*; repeat in place (clear for *m* ≤ 0); both return *s* |
+
+## 26 Mappings and Sets
+
+### 26.0 Hashed collections
+
+`dict`, `frozendict`, `set`, and `frozenset` store their keys (elements) by
+hash. Two keys *a* and *b* are *the same key* when Hash(*a*) = Hash(*b*) and
+either *a* is *b* or ? RichCompare(*a*, *b*, `==`) is true; equal numbers of
+different types (`1`, `1.0`, `True`) are therefore the same key. Every lookup,
+insertion, and deletion computes ? Hash(*key*) first; when that raises the
+`TypeError` of Hash for an unhashable key, the exception is replaced by a
+`TypeError` exception ("cannot use '*tname*(*key*)' as a dict key (unhashable
+type: '*tname*(*key*)')", or "as a set element" for sets). Other exceptions
+raised by `__hash__` or `__eq__` propagate.
+
+### 26.1 The `dict` type
+
+A `dict` is a mutable mapping that remembers the order in which keys were
+first inserted. Replacing the value of a present key keeps the key object
+already stored and its position; deleting a key and inserting it again puts it
+at the end.
+
+#### 26.1.1 dict ( [ *source* ], **kwargs )
+
+1. At most one positional argument is accepted ("dict expected at most 1
+   argument, got *n*").
+2. Let *d* be a new empty dict (an instance of the class called).
+3. If *source* is given, perform ? DictUpdate(*d*, *source*).
+4. For each keyword argument, in order, perform ? DictSetItem(*d*, *name*,
+   *value*).
+5. Return *d*.
+
+DictUpdate(*d*, *source*):
+
+1. If *source* is a `dict` or `frozendict` whose `keys` method is the
+   built-in one, or has an attribute `keys`, perform DictMerge(*d*, *source*,
+   **false**) (13.2.3).
+2. Otherwise, for each element *e* of ? GetIterator(*source*), at index *i*:
+   let *pair* be ? IterateToList(*e*) (a non-iterable *e* raises the
+   `TypeError` of GetIterator); if its length is not 2, raise a `ValueError`
+   exception ("dictionary update sequence element #*i* has length *m*; 2 is
+   required"); perform ? DictSetItem(*d*, *pair*[0], *pair*[1]).
+
+`dict.fromkeys(iterable, value=None)` (a class method) creates an instance of
+the class and sets each element of the iterable to *value*.
+
+#### 26.1.2 Operations
+
+| Operation | Result |
+| --- | --- |
+| `d[k]` | the value of the same key; if absent and Type(*d*) is a subclass of `dict` defining `__missing__`, ? Call of `__missing__` with *k*; otherwise `KeyError` with argument *k* |
+| `d[k] = v`, `del d[k]` | DictSetItem; remove the key (`KeyError` *k* when absent) |
+| `k in d`, `len(d)`, `iter(d)` | membership; the number of keys; an iterator over the keys in order |
+| `reversed(d)` | an iterator over the keys in reverse order |
+| `d == e` | for two mappings of these types: the same keys, each with equal values (compared by identity or `==`); order is ignored |
+| `d \| e`, `d \|= e` | a copy of *d* updated from the `dict` (or `frozendict`) *e*; `\|=` updates *d* in place by DictUpdate, so it also accepts pairs |
+| `repr(d)` | `{`, each key's repr, `": "`, and the value's repr, separated by `", "`, and `}`; a dict already being represented is written `{...}` |
+
+Ordering comparisons are not defined, and a `dict` is unhashable.
+
+#### 26.1.3 Methods
+
+| Method | Result |
+| --- | --- |
+| `get(k, default=None)` | the value, or *default* (`__missing__` is not consulted) |
+| `setdefault(k, default=None)` | the value, after inserting *default* if absent |
+| `pop(k[, default])` | remove and return the value; if absent, *default* or `KeyError` |
+| `popitem()` | remove and return the last inserted (key, value) pair (`KeyError` "popitem(): dictionary is empty") |
+| `update([source], **kwargs)` | DictUpdate then the keywords ("update expected at most 1 argument, got *n*") |
+| `keys()`, `values()`, `items()` | views (26.4) |
+| `copy()`, `clear()` | a shallow copy of type `dict`; remove all keys |
+
+#### 26.1.4 Mutation during iteration
+
+An iterator over a dict or one of its views records the dict's size and a
+version. If the dict's size differs from the recorded one when `__next__` is
+called, the iterator raises a `RuntimeError` exception ("dictionary changed
+size during iteration") and is exhausted afterwards; if keys were removed and
+added so that the size is unchanged, it raises a `RuntimeError` exception
+("dictionary keys changed during iteration"). Replacing values does not
+affect iteration.
+
+### 26.2 The `frozendict` type
+
+A `frozendict` is an immutable mapping with the ordering, construction
+(`frozendict(…)` as 26.1.1), reading operations, `fromkeys`, `copy` (which may
+return the object itself), views, and equality of `dict`. It is not a subclass
+of `dict`. It has no mutating methods; item assignment and deletion raise
+`TypeError` ("'frozendict' object does not support item assignment" / "…item
+deletion"). `x | y` returns an object of the type of the left operand, and
+`x |= y` for a `frozendict` *x* binds a new `frozendict`. A frozendict is
+hashable when its values are: its hash is that of a `frozenset` of its items
+(26.3.4). `repr` is "frozendict(*r*)" with *r* the dict repr of its items, or
+"frozendict()" when empty.
+
+### 26.3 The `set` and `frozenset` types
+
+A `set` is a mutable, unordered collection of distinct hashable elements; a
+`frozenset` is its immutable, hashable counterpart. The iteration order of
+a set is implementation-defined but is the same for repeated iterations of an
+unmodified set.
+
+#### 26.3.1 set ( [ *iterable* ] ) and frozenset ( [ *iterable* ] )
+
+Return a new set of the elements of the iterable, added in order by SetAdd.
+SetAdd(*s*, *x*) adds *x* unless the same element (26.0) is present, in which
+case the present element is kept. Neither takes keywords ("set() takes no
+keyword arguments") and each takes at most one argument ("set expected at most
+1 argument, got *n*"). Whether `frozenset()` or `frozenset(f)` for an exact
+frozenset *f* returns an existing object is implementation-defined (Annex D).
+
+#### 26.3.2 Operations
+
+For sets *a* and *b* (either type), the operators require both operands to be
+sets or frozensets (otherwise they return `NotImplemented`); the corresponding
+methods accept any iterables, several for the variadic ones:
+
+| Operator | Method | Result |
+| --- | --- | --- |
+| `a \| b` | `union(*others)` | the elements of either, in the type of *a* |
+| `a & b` | `intersection(*others)` | the elements of both |
+| `a - b` | `difference(*others)` | the elements of *a* not in *b* |
+| `a ^ b` | `symmetric_difference(other)` | the elements of exactly one |
+| `a <= b`, `a < b` | `issubset(other)` | every element of *a* is in *b* (and *a* ≠ *b*) |
+| `a >= b`, `a > b` | `issuperset(other)` | the reverse |
+| `a == b` | | the same elements, whatever the two types |
+| | `isdisjoint(other)` | no common element |
+
+For a `set` *a*, `|=`, `&=`, `-=`, `^=` update *a* in place (requiring a set
+operand), as do `update`, `intersection_update`, `difference_update`, and
+`symmetric_difference_update` (accepting iterables). `add(x)`, `remove(x)`
+(`KeyError` *x* when absent), `discard(x)`, `pop()` (`KeyError` "pop from an
+empty set"), `clear()`, and `copy()` complete the `set` methods. A `set` is
+unhashable.
+
+When an element argument of `in`, `remove`, or `discard` is a `set`, it is
+looked up as a `frozenset` of the same elements.
+
+`repr` of a set is "set()" when empty and otherwise `{`, the reprs of the
+elements in iteration order separated by `", "`, and `}`; of a frozenset,
+"frozenset()" or "frozenset(*r*)" with *r* the braces form; a subclass uses
+its own name in place of `set` and `frozenset`.
+
+#### 26.3.3 Mutation during iteration
+
+A set iterator raises a `RuntimeError` exception ("Set changed size during
+iteration") when the set's size changed since the iterator was created.
+
+#### 26.3.4 FrozenSetHash ( *s* )
+
+With unsigned 64-bit wrapping arithmetic and *shuffle*(*h*) = ((*h* XOR
+89869747) XOR (*h* << 16)) × 3644798167:
+
+1. Let *acc* be 0. For each element *x*, set *acc* to *acc* XOR
+   *shuffle*(? Hash(*x*)).
+2. Set *acc* to *acc* XOR ((len(*s*) + 1) × 1927868237).
+3. Set *acc* to *acc* XOR (*acc* >> 11) XOR (*acc* >> 25), then to *acc* ×
+   69069 + 907133923.
+4. If *acc*, as a signed value, is −1, return 590923713; otherwise return it
+   as a signed value.
+
+The result does not depend on the iteration order.
+
+### 26.4 Dictionary views
+
+`d.keys()`, `d.values()`, and `d.items()` return *views* of `dict` or
+`frozendict` *d*: they reflect later changes to *d*. Each has `len`, iteration
+(in the order of *d*, subject to 26.1.4), `reversed`, membership (`(k, v) in
+items` when *k* is present with a value equal to *v*), and a read-only
+`mapping` attribute, a %MappingProxyType% of *d*. `repr` is
+"dict_keys(*r*)", "dict_values(*r*)", "dict_items(*r*)" with *r* the list repr
+of the elements.
+
+Keys views and items views are *set-like*: `==`, `<`, `<=`, `>`, `>=` compare
+them with any set or set-like view as sets, `isdisjoint` takes any iterable,
+and `&`, `|`, `-`, `^` take any iterable operand and return a `set`. A values
+view supports none of these (its `==` is identity).
+
+### 26.5 Mappings
+
+A *mapping* is an object whose `keys` method returns an iterable of keys and
+whose `__getitem__` returns the value for each; DictMerge (13.2.3) and the
+`**` forms accept any mapping in this sense. For `match` patterns (15.6.3, 15.6.4) the
+built-in mappings are `dict`, `frozendict`, and %MappingProxyType%; another
+class is treated as a mapping or a sequence only when it inherits from one of
+the built-in ones or the host designates it (Annex C), a designation its
+subclasses inherit.
+
+### 26.6 The %MappingProxyType% intrinsic
+
+%MappingProxyType% (`__name__` `"mappingproxy"`, module `builtins`) is a
+read-only view of a mapping. `mappingproxy(mapping)` requires a mapping that is
+not a `list` or `tuple` ("mappingproxy() argument must be a mapping, not
+*tname*"). It provides `[]`, `in`, `len`, iteration, `reversed`, `get`,
+`keys`, `values`, `items`, `copy` (delegating to the mapping's `copy`), `|`
+(returning a new mapping from the underlying one), `==` and `hash` delegating
+to the mapping, and `repr` "mappingproxy(*r*)". Item assignment and deletion
+raise `TypeError` ("'mappingproxy' object does not support item assignment" /
+"'mappingproxy' object doesn't support item deletion"), and `|=` raises
+`TypeError` ("'|=' is not supported by mappingproxy; use '|' instead"). It is
+not an acceptable base type. A program reaches it as `type(type.__dict__)`;
+Annex C describes the library name `types.MappingProxyType`.
