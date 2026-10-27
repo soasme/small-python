@@ -565,3 +565,5 @@
   and informative library facades (Annex C). tools/build_standard.py and the
   standard and check-standard targets are retired; tests/tla/coverage.txt
   maps the 574 new sections to the 108 models.
+- A compound statement after ';' (class, def, if, match, decorators, ...)
+  is a SyntaxError, as SLP-315 Annex A's simple_stmts requires.

@@ -125,3 +125,9 @@ assert_eq(shown, [2, None])
 e = assert_raises(NameError, run, "a = 1\ndel a\na\n")
 assert_eq(type(e), NameError)
 assert_eq(str(e), "name 'a' is not defined")
+# Only simple statements follow ';' on a line.
+for source in ["x = 1; class X: pass\n", "x = 1; if x: pass\n", "x = 1; def f(): pass\n",
+               "x = 1; async def f(): pass\n", "x = 1; match x:\n    case 1: pass\n"]:
+    e = assert_raises(SyntaxError, compile, source, "<s>", "exec")
+    assert_eq((e.msg, e.lineno), ("invalid syntax", 1))
+compile("match = 1; match\n", "<s>", "exec")

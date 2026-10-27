@@ -5438,13 +5438,14 @@ static Node *line_statements(Parser *p) {
     size_t start;
     do {
         start = p->pos;
-        /* A suite on its header's line holds only simple statements. */
-        if (p->inline_suite && (at(p, '@') || keyword(p, "if") || keyword(p, "while") || keyword(p, "for") || keyword(p, "try") ||
+        /* A suite on its header's line, and a statement after ';', is simple. */
+        if ((p->inline_suite || head) && (at(p, '@') || keyword(p, "if") || keyword(p, "while") || keyword(p, "for") || keyword(p, "try") ||
                                 keyword(p, "with") || keyword(p, "def") || keyword(p, "class") || keyword(p, "async"))) {
             syntax(p, "invalid syntax"); goto failed;
         }
         Node *n = statement(p);
         if (!n) goto failed;
+        if (head && n->kind == N_MATCH) { p->pos = start + 1; syntax(p, "invalid syntax"); goto failed; }
         *tail = n; tail = &n->next;
         if (n->kind == N_IF || n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_DEF ||
             n->kind == N_CLASS || n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH) return head;
