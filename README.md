@@ -18,9 +18,9 @@ make test
 ```
 
 - [Engine manual](docs/smallpython.md): usage, embedding, implementation, benchmarks.
-- [Python binding](docs/smallpython.md#35-python-binding): `pip install .`
-  provides `smallpython`, which runs Small Python from CPython and injects
-  Python functions as host functions.
+- [Python binding](python/docs/README.md): `pip install ./python` (or
+  `pip install small-python`) provides `small_python`, which runs Small Python
+  from CPython and injects Python functions as host functions.
 - [SLP-315 language standard](docs/standards/3_15.md): a single-file, versioned
   consolidation of the pinned Python 3.15.0 reference and core builtins, with
   Core, Host, and Extension profiles. Project draft, not an official PSF standard.

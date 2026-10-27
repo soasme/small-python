@@ -1,0 +1,42 @@
+[project]
+name = "small-python"
+version = "0.0.1"
+description = "Run Small Python, a small embeddable Python runtime, from CPython."
+readme = "README.md"
+authors = [
+    { name = "Ju Lin", email = "soasme@gmail.com" }
+]
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE", "csrc/licenses/*.txt"]
+dependencies = []
+classifiers = [
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Repository = "https://github.com/soasme/small-python"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["small_python"]
+
+[tool.setuptools.package-data]
+small_python = ["py.typed"]
+
+[tool.setuptools.exclude-package-data]
+small_python = ["*.c"]
+
+# Wheels for Linux and macOS; open() needs a POSIX host and the engine C11.
+[tool.cibuildwheel]
+build = "cp3*-manylinux_* cp3*-musllinux_* cp3*-macosx_*"
+skip = "*t-*"
+test-command = "python {project}/tests/binding.py"

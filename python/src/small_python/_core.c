@@ -34,7 +34,7 @@ static PyObject *Error;
 static PyObject *to_python(Runtime *, SPYValue *, int);
 static SPYValue *to_spy(Runtime *, PyObject *, int);
 
-/* Errors from the engine become smallpython.Error with the exception's type
+/* Errors from the engine become small_python.Error with the exception's type
  * name, message, location, and the exception object itself. */
 static PyObject *raise_spy_error(Runtime *rt) {
     SPYContext *c = rt->ctx;
@@ -588,7 +588,7 @@ static PyGetSetDef Runtime_getset[] = {{"closed", (getter)Runtime_closed, NULL, 
 static PyMappingMethods Runtime_mapping = {0, (binaryfunc)Runtime_getitem, (objobjargproc)Runtime_setitem};
 static PyTypeObject RuntimeType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "smallpython._core.Runtime",
+    .tp_name = "small_python._core.Runtime",
     .tp_basicsize = sizeof(Runtime),
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     .tp_doc = "Runtime(*, std=True, step_limit=0, output=None, loader=None)\n\nAn independent Small Python engine context.",
@@ -694,7 +694,7 @@ static PyObject *Object_text(Object *self, int repr) {
     spy_release(text);
     return result;
 }
-static PyObject *Object_repr(Object *self) { return self->value && self->runtime->ctx ? Object_text(self, 1) : PyUnicode_FromString("<smallpython.Object (closed)>"); }
+static PyObject *Object_repr(Object *self) { return self->value && self->runtime->ctx ? Object_text(self, 1) : PyUnicode_FromString("<small_python.Object (closed)>"); }
 static PyObject *Object_str(Object *self) { return Object_text(self, 0); }
 static int Object_bool(Object *self) { return live_value(self) ? spy_truth(self->value) : -1; }
 static PyNumberMethods Object_number = {.nb_bool = (inquiry)Object_bool};
@@ -703,7 +703,7 @@ static PyObject *Object_runtime(Object *self, void *unused) { (void)unused; retu
 static PyGetSetDef Object_getset[] = {{"runtime", (getter)Object_runtime, NULL, "The runtime that owns this value.", NULL}, {0}};
 static PyTypeObject ObjectType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "smallpython._core.Object",
+    .tp_name = "small_python._core.Object",
     .tp_basicsize = sizeof(Object),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_doc = "A Small Python value that is not copied into a Python value.",
@@ -720,12 +720,12 @@ static PyTypeObject ObjectType = {
     .tp_getset = Object_getset,
 };
 
-static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "smallpython._core", "Small Python engine binding.", -1, NULL, NULL, NULL, NULL, NULL};
+static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "small_python._core", "Small Python engine binding.", -1, NULL, NULL, NULL, NULL, NULL};
 PyMODINIT_FUNC PyInit__core(void) {
     if (PyType_Ready(&RuntimeType) || PyType_Ready(&ObjectType)) return NULL;
     PyObject *m = PyModule_Create(&module);
     if (!m) return NULL;
-    Error = PyErr_NewExceptionWithDoc("smallpython._core.Error",
+    Error = PyErr_NewExceptionWithDoc("small_python._core.Error",
         "An exception raised inside Small Python: args are (type, message, exception).", NULL, NULL);
     if (!Error || PyModule_AddObjectRef(m, "Error", Error) || PyModule_AddObjectRef(m, "Runtime", (PyObject *)&RuntimeType) ||
         PyModule_AddObjectRef(m, "Object", (PyObject *)&ObjectType) || PyModule_AddStringConstant(m, "SPY_VERSION", SPY_VERSION)) {

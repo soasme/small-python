@@ -178,10 +178,10 @@ test: all tests/api run-cython check-intrinsics
 	$(PYTHON) tests/framework.py ./run-cython
 	$(PYTHON) tests/executable.py
 
-# The CPython binding (python/smallpython) builds with setuptools into .obj/binding.
+# The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.
 test-binding:
-	python3 setup.py -q build_ext --build-lib $(OBJDIR)/binding --build-temp $(OBJDIR)/binding-temp
-	cp python/smallpython/__init__.py $(OBJDIR)/binding/smallpython/
+	cd python && python3 setup.py -q build_ext --build-lib ../$(OBJDIR)/binding --build-temp ../$(OBJDIR)/binding-temp
+	cp python/src/small_python/__init__.py $(OBJDIR)/binding/small_python/
 	PYTHONPATH=$(OBJDIR)/binding python3 tests/binding.py
 
 bench: bench/lifecycle spy

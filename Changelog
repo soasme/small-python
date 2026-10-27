@@ -365,3 +365,8 @@
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
+- The Python binding is now the small-python package in python/ (import
+  small_python), merged with the small-python PyPI project: uv lockfile,
+  release script, PyPI publish workflow with cibuildwheel wheels for Linux and
+  macOS, a standalone sdist carrying the engine sources, and user
+  documentation in python/docs.

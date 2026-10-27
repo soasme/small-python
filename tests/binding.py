@@ -1,14 +1,14 @@
-"""Tests for the smallpython CPython binding (python/smallpython).
+"""Tests for the small_python CPython binding (python/src/small_python).
 
-Run with a Python that has the extension built, e.g.
-    python3 setup.py build_ext --inplace && PYTHONPATH=python python3 tests/binding.py
+Run with a Python that has the package installed or built, e.g.
+    make test-binding, or: cd python && uv run python ../tests/binding.py
 """
 import gc
 import sys
 import unittest
 
-import smallpython
-from smallpython import Error, Object, Runtime
+import small_python
+from small_python import Error, Object, Runtime
 
 
 class ValuesTest(unittest.TestCase):
@@ -202,7 +202,8 @@ class RuntimeTest(unittest.TestCase):
                 rt.mount(f"{directory}/missing")
 
     def test_version(self):
-        self.assertEqual(smallpython.__version__, smallpython.SPY_VERSION)
+        self.assertRegex(small_python.SPY_VERSION, r"^\d+\.\d+\.\d+")
+        self.assertIsInstance(small_python.__version__, str)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """Python binding for Small Python, an embeddable Python engine.
 
-    import smallpython
+    import small_python
 
-    rt = smallpython.Runtime()
+    rt = small_python.Runtime()
 
     @rt.function
     def greet(name):
@@ -10,10 +10,16 @@
 
     rt.eval("greet('spy')")  # 'hello spy'
 """
+from importlib import metadata as _metadata
+
 from ._core import SPY_VERSION, Error, Object, Runtime as _Runtime
 
 __all__ = ["Error", "Object", "Runtime", "SPY_VERSION"]
-__version__ = SPY_VERSION
+
+try:
+    __version__ = _metadata.version("small-python")
+except _metadata.PackageNotFoundError:  # imported from a build tree, not installed
+    __version__ = "0+unknown"
 
 
 def _error_property(index):

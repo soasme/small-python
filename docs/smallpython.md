@@ -844,20 +844,22 @@ count. Context teardown frees remaining cycles regardless of collection timing.
 
 ### 3.5 Python binding
 
-The `smallpython` package (`python/smallpython`) embeds the engine in CPython
-3.13 or later as the extension module `smallpython._core`, compiled from
-`spy.c`, `spy-std.c`, and the binding. It lets Python programs run Small
-Python code and inject Python functions as host functions.
+The `small-python` package (in `python/`, imported as `small_python`) embeds
+the engine in CPython 3.13 or later as the extension module
+`small_python._core`, compiled from `spy.c`, `spy-std.c`, and the binding
+(`python/src/small_python/_core.c`). It lets Python programs run Small Python
+code and inject Python functions as host functions. Its user documentation is
+[python/docs](../python/docs/README.md).
 
 ```sh
-pip install .            # or: python3 setup.py build_ext --inplace
+pip install ./python     # or: cd python && uv sync
 make test-binding
 ```
 
 ```python
-import smallpython
+import small_python
 
-with smallpython.Runtime(step_limit=1_000_000) as rt:
+with small_python.Runtime(step_limit=1_000_000) as rt:
     @rt.function
     def fetch(key, *, default=None):
         return {"answer": 42}.get(key, default)
@@ -881,11 +883,11 @@ Values cross the boundary by copy when they are `None`, `bool`, `int`
 (any size), `float`, `complex`, `str`, `bytes`, `bytearray`, `list`, `tuple`,
 `dict`, `set`, or `frozenset`. Python callables become native functions that
 keep a reference to the callable and receive keyword arguments; other engine
-values come back as `smallpython.Object`, which forwards calls, attributes,
+values come back as `small_python.Object`, which forwards calls, attributes,
 items, iteration, `repr`, `str`, and truth to the engine and stops working once
 its runtime closes. Other Python objects are rejected with `TypeError`.
 
-An engine exception reaches Python as `smallpython.Error` with `type`,
+An engine exception reaches Python as `small_python.Error` with `type`,
 `message`, `exception` (the engine object), `filename`, and `lineno`. A Python
 exception raised by a host function becomes the engine builtin exception with
 the nearest class name in its MRO (else `RuntimeError`) and the same `args`;
