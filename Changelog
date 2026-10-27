@@ -750,3 +750,8 @@
   the method, slot-wrapper, getset and member descriptors. PLS-315 now
   gives CPython's messages for clearing a suspended frame, a non-tuple
   closure, a bad tb_next, and deleting a mappingproxy item.
+- Spec tests for the typing intrinsics reached through syntax (NoDefault,
+  unions, Generic) and for lazy import placeholders. PLS-315 now says that
+  calling NoDefaultType returns NoDefault, that a union's isinstance tries
+  its members in order, that subclassing plain Generic fails, and gives
+  the exact messages for too few or too many arguments to a generic class.
