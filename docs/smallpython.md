@@ -220,6 +220,12 @@ available; set `PYTHON` to choose another development interpreter explicitly.
 An older host can differ in diagnostics and representations and is not the
 language compatibility target.
 
+`make test-spec` runs the language specification suite in `tests/spec`. Each
+test follows one section of the Python 3.15 Language Reference, imports only
+`tests/spec/harness.py`, and must pass on the pinned oracle before its result on
+spy counts, so the tests depend on the specification rather than on any library.
+All 19 tests currently pass.
+
 For CPython coverage, run `make oracle`, `make cpython-discover`, and
 `make cpython-report`. The [CPython coverage report](testing/cpython.md) explains
 the complete file inventory, dynamic discovery, framework adaptations, and

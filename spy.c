@@ -1135,6 +1135,13 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
             if (!matches) return (i >= comparison_length(a) || i >= comparison_length(b)) && comparison_length(a) == comparison_length(b);
         }
         return comparison_length(a) == comparison_length(b);
+    /* Bound methods are equal when bound to the same object and equal functions. */
+    case SPY_METHOD:
+        return a->as.method.self == b->as.method.self &&
+            (a->as.method.function == b->as.method.function || equal(a->as.method.function, b->as.method.function, depth + 1));
+    case SPY_BOUND_METHOD:
+        return a->as.bound.self == b->as.bound.self && a->as.bound.method == b->as.bound.method &&
+            (a->as.bound.name == b->as.bound.name || (a->as.bound.name && b->as.bound.name && equal(a->as.bound.name, b->as.bound.name, depth + 1)));
     default: return 0;
     }
 }
@@ -1206,6 +1213,15 @@ static int hash_items(SPYContext *c, size_t len, SPYValue *const *items, int tup
 }
 static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     switch (value->type) {
+    case SPY_METHOD: {
+        int64_t function;
+        if (hash_value(c, value->as.method.function, &function)) return -1;
+        *result = hash_signed((uint64_t)hash_pointer(value->as.method.self) ^ (uint64_t)function);
+        return 0;
+    }
+    case SPY_BOUND_METHOD:
+        *result = hash_signed((uint64_t)hash_pointer(value->as.bound.self) ^ (uint64_t)value->as.bound.method);
+        return 0;
     case SPY_MAPPINGPROXY: return hash_value(c, value->as.bound.self, result);
     case SPY_MEMORYVIEW: return memory_hash(c, value, result);
     case SPY_BOOL: case SPY_INT: *result = hash_integer(value); return 0;
@@ -2333,6 +2349,7 @@ typedef struct {
     /* Future statements: nesting of statement(), top-level statements seen,
      * whether one may still appear, and barry_as_FLUFL. */
     int statement_level, future_closed, barry, future_annotations;
+    int inline_suite; /* Parsing the simple statements after a header's ':' on its line. */
     size_t top_statements;
 } Parser;
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
@@ -4906,7 +4923,7 @@ static Node *statement_body(Parser *p) {
                         "'async for' outside async function" : "'async with' outside async function");
         p->pos++;
     }
-    if (!asynchronous && keyword(p, "match") && line_ends_block(p)) return match_statement(p);
+    if (!asynchronous && !p->inline_suite && keyword(p, "match") && line_ends_block(p)) return match_statement(p);
     if (!asynchronous && type_alias_start(p)) return type_alias(p);
     if (take_word(p, "with")) {
         n = node(p, N_WITH);
@@ -5242,6 +5259,11 @@ static Node *line_statements(Parser *p) {
     size_t start;
     do {
         start = p->pos;
+        /* A suite on its header's line holds only simple statements. */
+        if (p->inline_suite && (at(p, '@') || keyword(p, "if") || keyword(p, "while") || keyword(p, "for") || keyword(p, "try") ||
+                                keyword(p, "with") || keyword(p, "def") || keyword(p, "class") || keyword(p, "async"))) {
+            syntax(p, "invalid syntax"); goto failed;
+        }
         Node *n = statement(p);
         if (!n) goto failed;
         *tail = n; tail = &n->next;
@@ -5277,7 +5299,11 @@ static Node *suite_after(Parser *p, const char *what, size_t line) {
                  !strcmp(what, "'finally' statement") || !strcmp(what, "function definition");
     if (!expect(p, ':', forced || at(p, T_NL) ? "expected ':'" : "invalid syntax")) return NULL;
     Node *body;
-    if (!take(p, T_NL)) body = line_statements(p);
+    if (!take(p, T_NL)) {
+        p->inline_suite = 1;
+        body = line_statements(p);
+        p->inline_suite = 0;
+    }
     else {
         while (take(p, T_NL)) {}
         if (!take(p, T_INDENT)) return missing_block(p, what, line);
@@ -9420,6 +9446,28 @@ static int traceback_set_next(SPYContext *c, SPYValue *tb, SPYValue *next) {
     spy_release(old);
     return 0;
 }
+static int builtin_class(SPYContext *, SPYValue *);
+static int class_layout(SPYContext *, SPYValue *);
+static SPYValue *slots_base(SPYValue *);
+/* object.__class__ = value, as object_set_class: both classes are Python
+ * classes with the same instance layout. */
+static int set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
+    if (value->type != SPY_CLASS) { errorf(c, "TypeError", "__class__ must be set to a class, not '%s' object", type_name(value)); return -1; }
+    SPYValue *old = value_class(c, object);
+    if (object->type != SPY_INSTANCE || builtin_class(c, old) || builtin_class(c, value)) {
+        spy_error(c, "TypeError", "__class__ assignment only supported for mutable types or ModuleType subclasses"); return -1;
+    }
+    if (class_layout(c, old) != class_layout(c, value) || slots_base(old) != slots_base(value) ||
+        (old->as.map.flags & 8) != (value->as.map.flags & 8)) {
+        errorf(c, "TypeError", "__class__ assignment: '%s' object layout differs from '%s'",
+               name_local(value, "__name__")->as.string.data, name_local(old, "__name__")->as.string.data);
+        return -1;
+    }
+    SPYValue *previous = object->as.map.parent;
+    object->as.map.parent = spy_retain(value);
+    spy_release(previous);
+    return 0;
+}
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
@@ -9497,8 +9545,8 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         SPYValue **field = !strcmp(name, "__name__") ? &object->as.generator.name : &object->as.generator.qualname;
         spy_retain(value); spy_release(*field); *field = value; return 0;
     }
+    if (!strcmp(name, "__class__")) return set_class(c, object, value);
     if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name);
-    if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "changing an object's class is not implemented"); return -1; }
     if (object->type == SPY_CLASS && (!strcmp(name, "__name__") || !strcmp(name, "__qualname__") || !strcmp(name, "__module__")) && value->type != SPY_STRING) {
         spy_error(c, "TypeError", "class name and module attributes must be strings"); return -1;
     }
@@ -13393,6 +13441,7 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
     return env->type == V_ENV && env->as.map.scope ? declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
+    if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, NULL);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
@@ -15990,6 +16039,11 @@ static SPYValue *directory(SPYContext *c, SPYValue *object) {
     SPYValue *result = spy_list(c), *names = value_new(c, SPY_DICT);
     if (!result || !names) { spy_release(result); spy_release(names); return NULL; }
     SPYValue *method = object && object->type == SPY_INSTANCE ? special_method(c, object, "__dir__") : NULL;
+    /* A module's own __dir__ function (PEP 562), and a metaclass's __dir__. */
+    if (object && object->type == SPY_MODULE && name_local(object, "__dir__")) method = spy_retain(name_local(object, "__dir__"));
+    if (object && object->type == SPY_CLASS && object->as.map.meta && class_lookup(object->as.map.meta, "__dir__") &&
+        class_lookup(object->as.map.meta, "__dir__") != name_local(c->types[SPY_CLASS], "__dir__"))
+        method = special_method(c, object, "__dir__");
     if (method) {
         SPYValue *items = spy_call(c, method, 0, NULL);
         if (items) extend_display(c, result, items);

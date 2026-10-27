@@ -299,3 +299,10 @@
 - CPython's nesting limits: 200 brackets, MemoryError for parser stack
   overflow, iterative prefix-operator runs, and stack-bounded compiler checks
   (long expressions such as 400 additions compile).
+- Language specification tests (tests/spec, make test-spec): test262-style
+  files per Language Reference section, validated on the oracle.
+- Compound statements are refused in a suite on the same line as its header;
+  method objects compare and hash by self and function; dir() honours a
+  module's __dir__ and a metaclass __dir__.
+- __class__ assignment between Python classes with the same layout, with
+  CPython's errors.
