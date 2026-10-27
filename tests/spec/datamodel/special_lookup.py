@@ -76,3 +76,39 @@ class G:
     __bool__ = property(lambda self: lambda: False) if False else (lambda self: False)
 assert_eq(len(G()), 4)
 assert_false(G())
+
+# A metaclass supplies its classes' operators and attribute hooks: unary
+# operators, abs(), format(), item assignment and deletion, divmod(), pow()
+# with a modulus, next(), __getattribute__, and __getattr__.
+class OpsMeta(type):
+    store = {}
+    looked = []
+    def __neg__(cls): return "neg"
+    def __abs__(cls): return "abs"
+    def __format__(cls, spec): return "fmt" + spec
+    def __setitem__(cls, key, value): OpsMeta.store[key] = value
+    def __delitem__(cls, key): del OpsMeta.store[key]
+    def __divmod__(cls, other): return "divmod"
+    def __pow__(cls, other, modulus=None): return ("pow", modulus)
+    def __next__(cls): return "next"
+    def __getattr__(cls, name): return "missing " + name
+    def __getattribute__(cls, name):
+        OpsMeta.looked.append(name)
+        return type.__getattribute__(cls, name)
+class Ops(metaclass=OpsMeta):
+    pass
+assert_eq((-Ops, abs(Ops), format(Ops, "x"), divmod(Ops, 1), pow(Ops, 2, 5), next(Ops)),
+          ("neg", "abs", "fmtx", "divmod", ("pow", 5), "next"))
+Ops["k"] = 1
+assert_eq(OpsMeta.store, {"k": 1})
+del Ops["k"]
+assert_eq(OpsMeta.store, {})
+OpsMeta.looked.clear()
+assert_eq(Ops.nope, "missing nope")
+assert_eq(OpsMeta.looked, ["nope"])
+class Plain:
+    pass
+try:
+    del Plain[1]
+except TypeError as error:
+    assert_eq(str(error), "'type' object does not support item deletion")

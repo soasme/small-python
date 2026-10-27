@@ -49,6 +49,7 @@ and tied to real implementations by replaying them.
 | `Tracebacks.tla` | traceback chains as handlers unwind (through `finally`, re-raise, and `raise from`), line numbers, writable `tb_next`, and made tracebacks | yes |
 | `Slices.tla` | slice attributes, `indices()` against CPython's clamping, subscripts, a zero step or bad bound, equality and hashing, and `slice[float]` | yes |
 | `MethodDescriptors.tla` | static and class method objects over functions, builtins, and non-callables: retrieval through classes, instances, and subclasses, calling, and attributes | yes |
+| `SpecialLookup.tla` | implicit special method calls look up the type (not the instance, nor `__getattribute__`), metaclass methods apply to classes, and replacing or deleting takes effect | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -127,7 +128,9 @@ made a new frame object for each `gi_frame` read, and a finished one's frame
 reported its `def` line; frames lacked `f_lasti`, the trace attributes, and
 `clear()`, and a coroutine's frame had no `f_code`; a slice with a bad bound
 and a zero step reported the bound, not the step; `classmethod(abs)` bound
-to a builtin method instead of a method object.
+to a builtin method instead of a method object; `-C` ignored a metaclass's
+`__neg__` (and likewise `abs()`, `format()`, item assignment, `divmod()`,
+`next()`, and a metaclass's `__getattribute__` and `__getattr__`).
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

@@ -405,6 +405,10 @@
   method objects copy only the callable's naming attributes and read its
   annotations on demand; a method over a non-function callable has
   CPython's repr. TLA+ model of static and class method objects.
+- A metaclass supplies its classes' unary operators, abs(), format(),
+  item assignment and deletion, divmod(), three-argument pow(), next(),
+  __getattribute__, and __getattr__; the MRO hook is looked up on the
+  metaclass. TLA+ model of special method lookup.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

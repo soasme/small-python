@@ -212,6 +212,8 @@ static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static int special_dispatch(SPYValue *);
+/* A class with a metaclass, whose special methods the metaclass supplies. */
+static int meta_class(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 static int mapping_type(SPYContext *, SPYValue *);
 static SPYValue *super_new(SPYContext *, SPYValue *, SPYValue *);
 enum { R_LT, R_LE, R_EQ, R_NE, R_GT, R_GE };
@@ -6848,7 +6850,7 @@ static int bytearray_set(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) {
     SPYValue *base = builtin_base(c, v, "__setitem__", NULL);
     if (base) return set_index(c, base, key, item);
-    if (v->type == SPY_INSTANCE || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW) {
+    if (v->type == SPY_INSTANCE || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || meta_class(v)) {
         SPYValue *args[] = {key, item};
         SPYValue *result = call_special(c, v, "__setitem__", 2, args);
         int status = result ? 0 : -1;
@@ -8765,10 +8767,12 @@ static SPYValue *attribute(SPYContext *c, SPYValue *v, const char *name) {
     return NULL;
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
-    SPYValue *definition = v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__getattribute__") : NULL;
+    /* An instance's class, or a class's metaclass, may customize lookup. */
+    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : meta_class(v) ? v->as.map.meta : NULL;
+    SPYValue *definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
     SPYValue *result;
     if (definition && definition != name_local(name_local(c->classes, "object"), "__getattribute__")) {
-        SPYValue *method = descriptor_get(c, definition, v, v->as.map.parent);
+        SPYValue *method = descriptor_get(c, definition, v, owner);
         SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
         result = key ? spy_call(c, method, 1, &key) : NULL;
         spy_release(method); spy_release(key);
@@ -8779,11 +8783,11 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
         if (!lazy_name(&lazy, v)) errorf(c, "AttributeError", "cannot access attribute '%s' on unresolved lazy import '%s'", name, lazy.data);
         free(lazy.data);
     }
-    if (result || v->type != SPY_INSTANCE || !error_is(c, "AttributeError")) return result;
-    SPYValue *fallback = class_lookup(v->as.map.parent, "__getattr__");
+    if (result || !owner || !error_is(c, "AttributeError")) return result;
+    SPYValue *fallback = class_lookup(owner, "__getattr__");
     if (!fallback) return NULL;
     spy_clear_error(c);
-    SPYValue *method = descriptor_get(c, fallback, v, v->as.map.parent);
+    SPYValue *method = descriptor_get(c, fallback, v, owner);
     SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
     if (key) result = spy_call(c, method, 1, &key);
     spy_release(method); spy_release(key);
@@ -9228,7 +9232,7 @@ static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
     SPYValue *base = builtin_base(c, value, "__format__", NULL);
     if (base && (spec->type != SPY_STRING || spec->as.string.len)) return format_builtin(c, base, value, spec);
     if (base) return stringify(c, value, 0);
-    if (value->type == SPY_INSTANCE) {
+    if (value->type == SPY_INSTANCE || meta_class(value)) {
         SPYValue *method = special_method(c, value, "__format__");
         if (method) {
             SPYValue *result = spy_call(c, method, 1, &spec);
@@ -11084,6 +11088,12 @@ static SPYValue *unary(SPYContext *c, int op, SPYValue *a) {
     SPYValue *base = builtin_base(c, a, special, NULL);
     if (base) return unary(c, op, base);
     if (a->type == SPY_INSTANCE) return call_special(c, a, special, 0, NULL);
+    /* A class's operator comes from its metaclass. */
+    if (meta_class(a)) {
+        SPYValue *method = special_method(c, a, special);
+        if (method) { SPYValue *result = spy_call(c, method, 0, NULL); spy_release(method); return result; }
+        if (c->error_type[0]) return NULL;
+    }
     if (op == '~' && is_int(a)) {
         SPYValue minus_one = {.type = SPY_INT, .as.integer_data.small = -1};
         return integer_bitwise(c, '^', a, &minus_one);
@@ -13104,7 +13114,9 @@ static int initialize_mro(SPYContext *c, SPYValue *cls) {
         }
         /* A metaclass observes the bases and namespace, but no completed MRO. */
         spy_release(cls->as.map.mro); cls->as.map.mro = NULL;
-        SPYValue *method = attribute(c, cls, "mro");
+        /* Looked up on the metaclass, as a special method is. */
+        SPYValue *method = special_method(c, cls, "mro");
+        if (!method && !c->error_type[0]) method = attribute(c, cls, "mro");
         SPYValue *result = method ? spy_call(c, method, 0, NULL) : NULL;
         order = result ? value_new(c, SPY_TUPLE) : NULL;
         if (order) extend_display(c, order, result);
@@ -14294,7 +14306,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
     if (object->type == SPY_BYTEARRAY) return bytearray_set(c, object, key, NULL);
     {
         {
-            if (object->type == SPY_INSTANCE || object->type == SPY_FRAME_LOCALS || object->type == SPY_MEMORYVIEW) {
+            if (object->type == SPY_INSTANCE || object->type == SPY_FRAME_LOCALS || object->type == SPY_MEMORYVIEW || meta_class(object)) {
                 SPYValue *result = call_special(c, object, "__delitem__", 1, &key);
                 spy_release(result);
             } else if (object->type == SPY_DICT) {
@@ -14318,7 +14330,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
                         memmove(&object->as.seq.items[index], &object->as.seq.items[index + 1], (object->as.seq.len - (size_t)index) * sizeof(SPYValue *));
                     }
                 }
-            } else spy_error(c, "TypeError", "object does not support item deletion");
+            } else errorf(c, "TypeError", "'%s' object does not support item deletion", type_name(object));
         }
     }
     return c->error_type[0] ? -1 : 0;
@@ -19822,7 +19834,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc < 2 || argc > 3) goto arity;
         SPYValue *b = argv[1], *modulus = argc == 3 && argv[2]->type != SPY_NONE ? argv[2] : NULL;
         if (!modulus) return binary(c, T_POW, a, b);
-        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) {
+        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
             const Operator power = {T_POW, "__pow__", "__rpow__", "__ipow__"};
             SPYValue *result = binary_special(c, &power, a, b, modulus);
             if (result || c->error_type[0]) return result;
@@ -19836,7 +19848,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     if (id == B_DIVMOD) {
         if (argc != 2) goto arity;
         SPYValue *b = argv[1], *quotient = NULL, *remainder = NULL;
-        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) {
+        if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
             const Operator operation = {0, "__divmod__", "__rdivmod__", NULL};
             SPYValue *result = binary_special(c, &operation, a, b, NULL);
             if (result || c->error_type[0]) return result;
@@ -20072,8 +20084,8 @@ execution_fail:
     }
     if (id == B_NEXT) {
         if (argc < 1 || argc > 2) goto arity;
-        if (a->type == SPY_INSTANCE || a->type == SPY_GENERATOR || a->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(a)) {
-            SPYValue *value = a->type == SPY_INSTANCE || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
+        if (a->type == SPY_INSTANCE || meta_class(a) || a->type == SPY_GENERATOR || a->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(a)) {
+            SPYValue *value = a->type == SPY_INSTANCE || meta_class(a) || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
                 generator_send(c, a->type == SPY_COROUTINE_ITERATOR ? a->as.iterator.source : a, NULL, NULL);
             if (!value && argc == 2 && error_is(c, "StopIteration")) { spy_clear_error(c); return spy_retain(argv[1]); }
             return value;
@@ -20379,7 +20391,7 @@ execution_fail:
             if (is_int(a)) return a->type == SPY_BOOL ? spy_int(c, a->as.integer_data.small) : spy_retain(a);
             return integer_from_double(c, a->as.real);
         }
-        if (a->type == SPY_INSTANCE) {
+        if (a->type == SPY_INSTANCE || meta_class(a)) {
             SPYValue *method = special_method(c, a, id == B_INT ? "__int__" : "__float__");
             int index = !method;
             if (!method && !c->error_type[0]) method = special_method(c, a, "__index__");
@@ -20409,7 +20421,7 @@ execution_fail:
     }
     if (argc != 1) goto arity;
     if (id == B_REPR) return spy_repr(c, a);
-    if (id == B_ABS && argc == 1 && a->type == SPY_INSTANCE) {
+    if (id == B_ABS && argc == 1 && (a->type == SPY_INSTANCE || meta_class(a))) {
         SPYValue *base = builtin_base(c, a, "__abs__", NULL);
         if (!base) return call_special(c, a, "__abs__", 0, NULL);
         a = base;
