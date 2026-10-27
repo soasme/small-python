@@ -149,3 +149,16 @@ for source, message in [("def f():\n    global x\n    x: int = 1", "annotated na
 e = assert_raises(SyntaxError, compile, "def g():\n    x = 1\n    def f():\n        nonlocal x\n        global x", "<scope>", "exec")
 assert_eq(e.lineno, 4)
 compile("global x\nx: int = 1", "<scope>", "exec")
+# Without a metaclass keyword the metaclass starts from the first base's type.
+def build(source):
+    exec(source, {"__name__": "mod"})
+assert_eq(str(assert_raises(TypeError, build, "class A(1): pass")), "int expected at most 2 arguments, got 3")
+# object.__init_subclass__ names the class it is bound to.
+class Outer:
+    class Base: pass
+assert_eq(str(assert_raises(TypeError, build, "class B: pass\nclass C(B, k=1): pass")),
+          "C.__init_subclass__() takes no keyword arguments")
+assert_eq(str(assert_raises(TypeError, Outer.Base.__init_subclass__, 1)),
+          "Outer.Base.__init_subclass__() takes no arguments (1 given)")
+assert_eq(str(assert_raises(TypeError, object.__init_subclass__, k=1)),
+          "object.__init_subclass__() takes no keyword arguments")

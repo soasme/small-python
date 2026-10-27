@@ -122,3 +122,28 @@ for clause, start, end in except_as_ranges:
         (exc.end_lineno, exc.end_offset),
         end,
     )
+# Walrus targets: the first expression of a statement names the bad target,
+# a call argument does not.
+for source, message in (("x[1] := 2", "cannot use assignment expressions with subscript"),
+                        ("(x) := 1", "cannot use assignment expressions with name"),
+                        ("f() := 2", "cannot use assignment expressions with function call"),
+                        ("a, b := 2", "invalid syntax"),
+                        ("print(x.y := 1)", "invalid syntax"),
+                        ("[x[1] := 2]", "cannot use assignment expressions with subscript"),
+                        ("match 1:\n  case *x: pass", "invalid syntax")):
+    assert_eq(assert_syntax_error(source).msg, message)
+# A bare except that is not last is a compiler error: parse errors and symbol
+# table errors come first.
+error = assert_syntax_error("try: pass\nexcept: pass\nexcept ValueError: pass")
+assert_eq((error.msg, error.lineno), ("default 'except:' must be last", 2))
+assert_eq(assert_syntax_error("try: pass\nexcept: pass\nexcept E: pass\ndef f():\n  nonlocal x").msg,
+          "no binding for nonlocal 'x' found")
+error = assert_syntax_error("try: pass\nexcept* E: pass\nexcept E: pass")
+assert_eq((error.lineno, error.offset), (3, 1))
+# Indentation errors carry the tokenizer's columns.
+error = assert_syntax_error("x\n    y\n", exception=IndentationError)
+assert_eq((error.msg, error.offset, error.end_offset), ("unexpected indent", 4, -1))
+error = assert_syntax_error("if 1:\n    x\n  y = 1\n", exception=IndentationError)
+assert_eq((error.lineno, error.offset, error.end_offset), (3, 8, -1))
+error = assert_syntax_error("a) + 1\n")
+assert_eq((error.text, error.offset, error.end_offset), ("a) + 1", 2, 2))

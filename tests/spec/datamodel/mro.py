@@ -30,3 +30,13 @@ class C(A, B):
 assert (C, A, B, X, Y, object) == C.__mro__
 
 assert type.__mro__ == (type, object)
+
+# A failed merge names the distinct heads of the lists left to merge.
+class P: pass
+class Q(P): pass
+assert_eq(str(assert_raises(TypeError, type, "R", (P, Q), {})),
+          "Cannot create a consistent method resolution order (MRO) for bases P, Q")
+class XY(X, Y): pass
+class YX(Y, X): pass
+assert_eq(str(assert_raises(TypeError, type, "Z", (XY, YX), {})),
+          "Cannot create a consistent method resolution order (MRO) for bases X, Y")

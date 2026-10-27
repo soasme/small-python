@@ -621,3 +621,20 @@
   (a non-ASCII code point counts ten, f-string text counts from the last
   replacement field) and the line where the literal begins; bytes literals
   report "invalid \x escape at position i". SLP-315 12.5.3 states this.
+- An inconsistent MRO names the heads left in the merge ("for bases A, B");
+  without a metaclass keyword, the metaclass starts from the first base's
+  type, so class A(1) calls int. Deleting an empty free variable is the
+  free-variable NameError. object.__init_subclass__ names its bound class
+  by qualified name and counts positional arguments. __annotate__ may
+  return a dict subclass, says "__annotate__() must return a dict, not T"
+  otherwise, and a class's non-callable __annotate__ gives no annotations.
+- Syntax errors: "cannot use assignment expressions with T" for the first
+  expression of a statement and not for a call argument; "default
+  'except:' must be last" is a compiler error reported at the bare handler
+  after symbol table errors, as every deferred error now is; an except and
+  except* mix points at the offending clause; star patterns outside a
+  sequence are "invalid syntax". Unmatched and mismatched brackets,
+  unexpected indents, unmatched dedents and tab errors carry CPython's
+  text and columns.
+- The main module is sys.modules["__main__"], with __file__ when spy runs
+  a file, and a module's repr shows " from " and the repr of __file__.

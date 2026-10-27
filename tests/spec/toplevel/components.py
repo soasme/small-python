@@ -78,3 +78,6 @@ assert_raises(SyntaxError, compile, "a\0", "<x>", "exec")
 ns = {}
 exec(b"# -*- coding: latin-1 -*-\ns = '\xe9'\n", ns)
 assert_eq(ns["s"], "\xe9")
+# The main module is in sys.modules under "__main__", with globals as its namespace.
+import sys
+assert_is(sys.modules["__main__"].__dict__, globals())

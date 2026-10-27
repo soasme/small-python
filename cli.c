@@ -132,6 +132,10 @@ int main(int argc, char **argv) {
             if (!from_stdin) fclose(file);
             if (!source) { fputs("cannot read source (I/O error, NUL byte, or out of memory)\n", stderr); status = 1; }
             else {
+                /* The main module records the file it runs, as CPython's does. */
+                SPYValue *file_name = from_stdin ? NULL : spy_string(c, filename, strlen(filename));
+                if (file_name) spy_set_global(c, "__file__", file_name);
+                spy_release(file_name);
                 status = spy_exec(c, source, from_stdin ? "<stdin>" : filename) ? exit_status(c) : 0;
                 if (status < 0) status = 1;
                 free(source);

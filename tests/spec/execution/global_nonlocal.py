@@ -110,4 +110,13 @@ def a():
     b = locals()
     assert b['x'] == 0
 
-a()
+a()# Deleting an empty free variable is a NameError naming it as free.
+def outer():
+    x = 1
+    def inner():
+        nonlocal x
+        del x
+        del x
+    inner()
+assert_eq(str(assert_raises(NameError, outer)),
+          "cannot access free variable 'x' where it is not associated with a value in enclosing scope")

@@ -2279,9 +2279,11 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         return puts_buffer(b, v->type == SPY_STATICMETHOD ? "<staticmethod(" : "<classmethod(") ||
             format_value(b, v->as.wrapper.function, 1) || puts_buffer(b, ")>");
     case SPY_MODULE: {
-        SPYValue *module_name = name_local(v, "__name__");
+        SPYValue *module_name = name_local(v, "__name__"), *file = name_local(v, "__file__");
         if (!module_name || module_name->type != SPY_STRING) return puts_buffer(b, "<module '?'>");
-        return puts_buffer(b, "<module '") || puts_buffer(b, module_name->as.string.data) || puts_buffer(b, "'>");
+        if (puts_buffer(b, "<module ") || format_value(b, module_name, 1)) return -1;
+        if (file && (puts_buffer(b, " from ") || format_value(b, file, 1))) return -1;
+        return puts_buffer(b, ">");
     }
     case SPY_CLASS: {
         if (v->as.map.meta) {
@@ -2829,11 +2831,13 @@ static int lex(Parser *p, const char *s) {
     const char *opened_at[200];
     int bol = 1;
     size_t line_tokens = 0; /* An indentation error comes before the line's DEDENTs. */
+    const char *line_start = s;
     while (*s) {
         if (bol && !brackets) {
             /* CPython checks both eight-column and one-column tab stops. */
             size_t indent = 0, alternate = 0;
             line_tokens = p->len;
+            line_start = s;
             while (*s == ' ' || *s == '\t' || *s == '\f') {
                 if (*s == '\t') { indent = (indent / 8 + 1) * 8; alternate++; }
                 else if (*s == '\f') indent = alternate = 0;
@@ -2855,6 +2859,8 @@ static int lex(Parser *p, const char *s) {
                     if (indent != indents[level]) {
                         p->len = line_tokens;
                         p->ctx->line = line;
+                        /* E_DEDENT: the column is the end of the line, with no end. */
+                        p->error_start = p->error_end = s + strcspn(s, "\n"); p->error_end_zero = 2;
                         spy_error(p->ctx, "IndentationError", "unindent does not match any outer indentation level");
                         return -1;
                     }
@@ -2945,7 +2951,8 @@ static int lex(Parser *p, const char *s) {
                 closing[brackets++] = kind == '(' ? ')' : kind == '[' ? ']' : '}';
             } else if (kind == ')' || kind == ']' || kind == '}') {
                 /* CPython's lexer diagnostics for unbalanced brackets. */
-                p->ctx->line = line; p->error_start = start; p->error_end = s;
+                p->ctx->line = line; p->error_start = p->error_end = start;
+                if (!brackets || closing[brackets - 1] != kind) p->error_trim_line = 1;
                 if (!brackets) { errorf(p->ctx, "SyntaxError", "unmatched '%c'", kind); return -1; }
                 if (closing[--brackets] != kind) {
                     int opening = closing[brackets] == ')' ? '(' : closing[brackets] == ']' ? '[' : '{';
@@ -2978,6 +2985,7 @@ nesting:
 tab_error:
     p->len = line_tokens;
     p->ctx->line = line;
+    p->error_start = p->error_end = line_start; p->error_end_zero = 1;
     spy_error(p->ctx, "TabError", "inconsistent use of tabs and spaces in indentation");
     return -1;
 }
@@ -3090,6 +3098,7 @@ static Node *import_name(Parser *p) {
 }
 static Node *expression(Parser *, int);
 static Node *plain_expression(Parser *, int);
+static Node *expression_mode(Parser *, int, int);
 static Node *expression_list(Parser *, int);
 static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
@@ -3939,7 +3948,7 @@ static int call_arguments(Parser *p, Node *n) {
             if (unpack_mapping) { mapping = keywords = 1; }
         } else {
             size_t start = p->pos;
-            arg = expression(p, 0);
+            arg = expression_mode(p, 0, 2);
             if (arg && at(p, '=')) {
                 Token *name = &p->tokens[start];
                 if (arg->kind == N_BOOL || arg->kind == N_NONE) {
@@ -4121,6 +4130,8 @@ assignment_expression:
     if (min == 0 && named && at(p, T_WALRUS) && p->annotation_scope) return syntax_within(p, "named");
     if (min == 0 && named && take(p, T_WALRUS)) {
         if (left->kind != N_NAME) {
+            /* A call argument has no invalid_named_expression alternative. */
+            if (named == 2) { p->pos--; return syntax(p, "invalid syntax"); }
             char message[96];
             snprintf(message, sizeof(message), "cannot use assignment expressions with %s", expression_name(left));
             return syntax(p, message);
@@ -4276,6 +4287,17 @@ static int probe_excluded(Parser *p, size_t at) {
     if (!n) spy_clear_error(p->ctx);
     p->pos = saved;
     return n && (n->kind == N_LIST || n->kind == N_TUPLE || (n->kind == N_COMPREHENSION && n->op == N_TUPLE));
+}
+/* Whether tokens [first, end) are one bracketed group. */
+static int single_group(Parser *p, size_t first, size_t end) {
+    int depth = 0;
+    for (size_t i = first; i < end; i++) {
+        int kind = p->tokens[i].kind;
+        if (kind == '(' || kind == '[' || kind == '{') depth++;
+        else if (kind == ')' || kind == ']' || kind == '}') depth--;
+        if (depth == 0) return i + 1 == end;
+    }
+    return 0;
 }
 /* invalid_named_expression at token 'at'; returns 1 after raising. */
 static int named_equals_error(Parser *p, size_t at) {
@@ -4753,7 +4775,7 @@ static Node *closed_pattern(Parser *p) {
         Node *first = star_or_pattern(p);
         if (!first) return NULL;
         if (!at(p, ',')) {
-            if (first->op == PT_STAR) return syntax(p, "cannot use starred expression here");
+            if (first->op == PT_STAR) return syntax(p, "invalid syntax");
             return expect(p, ')', "invalid syntax") ? first : NULL;
         }
         Node *n = pattern_node(p, PT_SEQUENCE);
@@ -4979,7 +5001,7 @@ static Node *case_header(Parser *p) {
         }
         if (check_sequence_stars(p, sequence->args)) return NULL;
         first = sequence;
-    } else if (first->op == PT_STAR) return syntax(p, "cannot use starred expression here");
+    } else if (first->op == PT_STAR) return syntax(p, "invalid syntax");
     item->a = first;
     if (take_word(p, "if") && !(item->b = expression(p, 0))) return NULL;
     return item;
@@ -5275,11 +5297,21 @@ static Node *statement_body(Parser *p) {
         if (!n || !(n->a = suite_after(p, "'try' statement", line))) return NULL;
         Node **tail = &n->args;
         int bare = 0, star = -1;
+        size_t bare_at = 0;
         while (take_word(p, "except")) {
-            size_t except_line = keyword_line(p);
-            if (bare) return syntax(p, "default except must be last");
+            size_t except_line = keyword_line(p), except_at = p->pos - 1;
+            if (bare) {
+                /* The compiler reports this at the bare handler once the module parses. */
+                size_t here = p->pos;
+                p->pos = bare_at; defer(p, "default 'except:' must be last"); p->pos = here;
+                bare = 0;
+            }
+
             int is_star = take(p, '*');
-            if (star >= 0 && star != is_star) return syntax(p, "cannot have both 'except' and 'except*' on the same 'try'");
+            if (star >= 0 && star != is_star) {
+                const char *message = "cannot have both 'except' and 'except*' on the same 'try'";
+                return is_star ? syntax_span(p, except_at, p->pos, message) : (p->pos = except_at, syntax(p, message));
+            }
             star = is_star;
             Node *handler = node(p, N_EXCEPT);
             if (!handler) return NULL;
@@ -5321,7 +5353,7 @@ static Node *statement_body(Parser *p) {
                     }
                     if (!(handler->c = identifier(p))) return NULL;
                 }
-            } else bare = 1;
+            } else { bare = 1; bare_at = except_at; }
             int saved = p->star;
             if (is_star) p->star = p->loops + 1;
             handler->b = suite_after(p, is_star ? "'except*' statement" : "'except' statement", except_line);
@@ -5484,6 +5516,19 @@ static Node *statement_body(Parser *p) {
     size_t start = p->pos;
     if (!(n->a = expression_list(p, 0))) return NULL;
     int op = peek(p)->kind;
+    /* invalid_assignment reaches invalid_named_expression through its first
+     * star_named_expression: a single expression other than a name. */
+    if (op == T_WALRUS && (n->a->kind != N_NAME || parenthesized) && (n->a->kind != N_TUPLE || single_group(p, start, p->pos))) {
+        size_t walrus = p->pos++;
+        Node *value = plain_expression(p, 0);
+        p->pos = walrus;
+        if (!value) spy_clear_error(p->ctx);
+        else {
+            char message[96];
+            snprintf(message, sizeof(message), "cannot use assignment expressions with %s", expression_name(n->a));
+            return syntax_at(p, n->a, message);
+        }
+    }
     if (op == ':') {
         Node *target = n->a;
         if (target->kind == N_TUPLE) return syntax(p, "only single target (not tuple) can be annotated");
@@ -6052,6 +6097,8 @@ static void invalid_expression_error(Parser *p) {
         spy_clear_error(c);
         spy_error(c, "IndentationError", p->tokens[f].kind == T_INDENT ? "unexpected indent" : "unexpected unindent");
         c->line = line;
+        /* The column is the tokenizer's, just past the indentation; there is no end. */
+        p->error_start = p->error_end = p->tokens[f].start - (p->tokens[f].kind == T_INDENT); p->error_end_zero = 2;
         return;
     }
     size_t line = c->line;
@@ -6195,10 +6242,6 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (unit->as.unit.scope && !scope_walk(c, unit->as.unit.scope, unit->as.unit.body) &&
                 !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate)) scope_resolve(c, unit->as.unit.scope);
         }
-        if (!c->error_type[0] && p.deferred) {
-            c->line = p.deferred_line; p.error_start = p.deferred_start; p.error_end = p.deferred_end;
-            spy_error(c, "SyntaxError", p.deferred);
-        }
         for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated) {
             if (scope_resolve(c, n->scope)) break;
             if (n->kind == N_DEF || n->kind == N_LAMBDA) compile_generator(c, n);
@@ -6208,6 +6251,11 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 SPYValue *literal = number_literal(c, n);
                 spy_release(literal);
             }
+        }
+        /* The compiler's own errors follow every symbol table error. */
+        if (!c->error_type[0] && p.deferred) {
+            c->line = p.deferred_line; p.error_start = p.deferred_start; p.error_end = p.deferred_end;
+            spy_error(c, "SyntaxError", p.deferred);
         }
     }
 lexer_error:
@@ -8397,7 +8445,6 @@ static SPYValue *definition_code(SPYContext *c, SPYValue *unit, Node *definition
     }
     return spy_retain(definition->code_value);
 }
-/* Call an __annotate__ function with the VALUE format, or return {}. */
 /* A missing module attribute that a lazy import named as a submodule
  * (sys.lazy_modules holds "module.name" or a name below it) imports it. */
 static SPYValue *import_module(SPYContext *, const char *);
@@ -8421,13 +8468,15 @@ static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *nam
     }
     return NULL;
 }
+/* Call an __annotate__ function with the VALUE format, or return {} when it
+ * is not callable. */
 static SPYValue *annotation_dict(SPYContext *c, SPYValue *annotate) {
-    if (!annotate || annotate->type == SPY_NONE) return value_new(c, SPY_DICT);
+    if (!annotate || !callable_value(c, annotate)) return value_new(c, SPY_DICT);
     SPYValue *format = spy_int(c, 1);
     SPYValue *value = format ? spy_call(c, annotate, 1, &format) : NULL;
     spy_release(format);
-    if (value && value->type != SPY_DICT) {
-        errorf(c, "TypeError", "__annotate__ returned non-dict of type '%s'", type_name(value));
+    if (value && !builtin_value(c, value, SPY_DICT)) {
+        errorf(c, "TypeError", "__annotate__() must return a dict, not %s", type_name(value));
         spy_release(value); return NULL;
     }
     return value;
@@ -13507,6 +13556,38 @@ done:
     spy_release(container); spy_release(key); spy_release(old); spy_release(rhs); spy_release(value);
     return status;
 }
+/* The message names the distinct heads of the lists left to merge, in
+ * order of first appearance, as set_mro_error does. */
+static void mro_error(SPYContext *c, SPYValue *bases, const size_t *positions) {
+    size_t count = bases->as.seq.len, len = 0, cap = 128;
+    char *text = allocate(c, cap);
+    if (!text) return;
+    len = (size_t)snprintf(text, cap, "Cannot create a consistent method resolution order (MRO) for bases");
+    int first = 1;
+    for (size_t i = 0; i <= count; i++) {
+        SPYValue *sequence = i == count ? bases : bases->as.seq.items[i]->as.map.mro;
+        if (positions[i] == sequence->as.seq.len) continue;
+        SPYValue *head = sequence->as.seq.items[positions[i]];
+        int seen = 0;
+        for (size_t j = 0; j < i && !seen; j++) {
+            SPYValue *other = j == count ? bases : bases->as.seq.items[j]->as.map.mro;
+            seen = positions[j] < other->as.seq.len && other->as.seq.items[positions[j]] == head;
+        }
+        if (seen) continue;
+        SPYValue *named = name_local(head, "__name__");
+        const char *name = named && named->type == SPY_STRING ? named->as.string.data : "?";
+        size_t need = len + strlen(name) + 3;
+        if (need > cap) {
+            char *grown = realloc(text, cap = need * 2);
+            if (!grown) { free(text); spy_error(c, "MemoryError", ""); return; }
+            text = grown;
+        }
+        len += (size_t)snprintf(text + len, cap - len, "%s %s", first ? "" : ",", name);
+        first = 0;
+    }
+    spy_error(c, "TypeError", text);
+    free(text);
+}
 /* C3 merges each base's MRO with the declared base order. The explicit
  * type.mro method computes this order even when the metaclass overrides mro. */
 static SPYValue *default_mro(SPYContext *c, SPYValue *cls, SPYValue *bases) {
@@ -13535,7 +13616,7 @@ static SPYValue *default_mro(SPYContext *c, SPYValue *cls, SPYValue *bases) {
             candidate = NULL;
         }
         if (!remaining) break;
-        if (!candidate) { spy_error(c, "TypeError", "Cannot create a consistent method resolution order (MRO)"); goto fail; }
+        if (!candidate) { mro_error(c, bases, positions); goto fail; }
         if (sequence_append(c, order, candidate)) goto fail;
         for (size_t i = 0; i <= count; i++) {
             SPYValue *sequence = i == count ? bases : bases->as.seq.items[i]->as.map.mro;
@@ -13684,9 +13765,7 @@ static SPYValue *module_env(SPYContext *, SPYValue *);
 /* The most derived of a requested metaclass and those of the bases. */
 static SPYValue *derived_metaclass(SPYContext *c, SPYValue *meta, SPYValue *bases) {
     for (size_t i = 0; i < bases->as.seq.len; i++) {
-        SPYValue *base = bases->as.seq.items[i];
-        if (base->type != SPY_CLASS) continue;
-        SPYValue *candidate = value_class(c, base);
+        SPYValue *candidate = value_class(c, bases->as.seq.items[i]);
         if (subclass(meta, candidate)) continue;
         if (subclass(candidate, meta)) { meta = candidate; continue; }
         return spy_error(c, "TypeError", "metaclass conflict: the metaclass of a derived class must be a (non-strict) "
@@ -13998,7 +14077,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
     int resolved = update_bases(c, bases, original);
     if (resolved < 0) goto done;
     /* The metaclass keyword selects the metaclass; the rest go to it. */
-    SPYValue *meta = c->types[SPY_CLASS];
+    SPYValue *meta = NULL;
     for (size_t i = 0; i < arguments->as.map.len; i++) {
         Entry *entry = &arguments->as.map.items[i];
         SPYValue *key = builtin_value(c, entry->key, SPY_STRING);
@@ -14006,6 +14085,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
         if (!strcmp(key->as.string.data, "metaclass")) meta = entry->value;
         else if (map_append(c, keywords, entry->key, entry->value, entry->hash)) goto done;
     }
+    if (!meta) meta = bases->as.seq.len ? value_class(c, bases->as.seq.items[0]) : c->types[SPY_CLASS];
     if (meta->type == SPY_CLASS && !(meta = derived_metaclass(c, meta, bases))) goto done;
     tuple = value_new(c, SPY_TUPLE);
     if (!tuple || extend_display(c, tuple, bases)) goto done;
@@ -15004,6 +15084,8 @@ static int delete_target(SPYContext *c, Frame *f, Node *n) {
         SPYValue *value = name_local(owner, n->text);
         if (!value || value->type == V_UNBOUND) {
             if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->text);
+            else if (value && owner->type == V_ENV && owner->as.map.scope && owner->as.map.scope->kind != S_MODULE)
+                name_error(c, n->text, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
             else name_error(c, n->text, "name '%s' is not defined");
             return -1;
         }
@@ -21703,8 +21785,11 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_retain(c->not_implemented);
     }
     if (id == B_INIT_SUBCLASS) {
-        if (argc != 1 || argv[0]->type != SPY_CLASS || (keywords && keywords->as.map.len))
-            return spy_error(c, "TypeError", "__init_subclass__() takes no arguments");
+        /* A METH_NOARGS class method, named by the class it is bound to. */
+        SPYValue *qualname = argc && argv[0]->type == SPY_CLASS ? name_local(argv[0], "__qualname__") : NULL;
+        const char *owner = qualname && qualname->type == SPY_STRING ? qualname->as.string.data : "object";
+        if (keywords && keywords->as.map.len) return errorf(c, "TypeError", "%s.__init_subclass__() takes no keyword arguments", owner);
+        if (argc != 1) return errorf(c, "TypeError", "%s.__init_subclass__() takes no arguments (%zu given)", owner, argc ? argc - 1 : 0);
         return spy_none(c);
     }
     if (id == B_ROUND) {
@@ -23193,8 +23278,12 @@ SPYContext *spy_context_new(void) {
         if (name_natives(c, c->classes->as.map.items[i].value, c->classes->as.map.items[i].value)) goto fail;
     SPYValue *name = spy_string(c, "__main__", 8);
     if (!name) goto fail;
-    int status = name_set(c, c->globals, "__name__", name) || name_set(c, c->globals, "__doc__", c->none);
-    spy_release(name);
+    /* sys.modules["__main__"] is the module whose namespace is the globals. */
+    SPYValue *main_module = value_new(c, SPY_MODULE);
+    if (main_module) main_module->as.map.namespace = spy_retain(c->globals);
+    int status = !main_module || name_set(c, c->globals, "__name__", name) || name_set(c, c->globals, "__doc__", c->none) ||
+        name_set(c, c->modules, "__main__", main_module);
+    spy_release(name); spy_release(main_module);
     if (status) goto fail;
     return c;
 fail:
