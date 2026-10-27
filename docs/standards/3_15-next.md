@@ -4867,3 +4867,407 @@ and 21.3.4, are part of every profile.
 are ordinary exception classes: they can be raised and caught like any other.
 HostWarn (18.3) receives one of them, or a user-defined subclass of `Warning`,
 as the category.
+
+## 22 Numbers
+
+The numeric types are `int`, `bool`, `float`, and `complex`. Their values are
+immutable. Each implements the binary and unary operator methods that 7.6
+dispatches to; an operator method of a numeric type returns `NotImplemented`
+when the other operand is not a number it accepts (Table 22-1), so that the
+reflected method or the `TypeError` of BinaryOp applies.
+
+Table 22-1: Operands accepted by the numeric operator methods
+
+| Method of | Accepts as the other operand |
+| --- | --- |
+| `int` | `int` (including `bool`) |
+| `float` | `int`, `float` |
+| `complex` | `int`, `float`, `complex` |
+
+Before a built-in operation on operands of two of these types, the narrower
+operand is converted to the wider type: `int` to `float` by IntToFloat
+(22.1.7), and `int` or `float` to `complex` with an imaginary part of 0.0.
+
+### 22.1 The `int` type
+
+An `int` value is a mathematical integer; there is no upper limit on its
+magnitude other than available memory. The bitwise operators and shifts
+treat an integer as an infinite two's complement bit string: a negative *n*
+has infinitely many leading ones.
+
+#### 22.1.1 int ( [ *x* ], /, *base*=10 )
+
+1. If no argument is given, return 0.
+2. If *base* is not given:
+   1. If *x* is a `str`, `bytes`, or `bytearray`, return ? StringToInt(*x*, 10).
+   2. Let *m* be ? LookupSpecial(*x*, `"__int__"`). If *m* is not **absent**:
+      let *r* be ? Call(*m*, «»); if Type(*r*) is `int`, return *r*; if it is a
+      strict subclass of `int`, issue a `DeprecationWarning` and return an
+      `int` with the value of *r*; otherwise raise a `TypeError` exception
+      ("*fqname*(*x*).`__int__`() must return an int, not *tname*(*r*)").
+   3. If LookupSpecial(*x*, `"__index__"`) is not **absent**, return an `int`
+      with the value of ? ToIndex(*x*).
+   4. If *x* supports the buffer protocol (24.4), return ? StringToInt of its
+      bytes, base 10.
+   5. Raise a `TypeError` exception ("int() argument must be a string, a
+      bytes-like object or a real number, not '*tname*(*x*)'").
+3. Let *b* be ℝ(? ToIndex(*base*)). If *b* is not 0 and not in 2 through 36,
+   raise a `ValueError` exception ("int() base must be >= 2 and <= 36, or 0").
+4. If *x* is not a `str`, `bytes`, or `bytearray`, raise a `TypeError`
+   exception ("int() can't convert non-string with explicit base").
+5. Return ? StringToInt(*x*, *b*).
+
+`float.__int__` truncates toward zero; for an infinity it raises an
+`OverflowError` exception ("cannot convert float infinity to integer") and for
+a NaN a `ValueError` exception ("cannot convert float NaN to integer").
+
+When `int` is called with a subclass *C* of `int` as `cls`, the result is a new
+instance of *C* with the value computed as above. `int.__new__(bool)` raises a
+`TypeError` exception ("int.\_\_new\_\_(bool) is not safe, use
+bool.\_\_new\_\_()").
+
+#### 22.1.2 StringToInt ( *s*, *base* )
+
+The abstract operation StringToInt parses *s* (a `str`, or `bytes` decoded as
+Latin-1) as an integer in *base*:
+
+1. Strip leading and trailing white space (11.1).
+2. Accept an optional sign `+` or `-`.
+3. If *base* is 0, 2, 8, or 16, accept an optional prefix `0b`, `0o`, or `0x`
+   (either case) that agrees with *base*; when *base* is 0 the prefix selects
+   the base, and without a prefix the base is 10.
+4. Accept one or more digits whose values are less than the base, where the
+   digits are `0`–`9`, the letters `a`–`z` and `A`–`Z` with values 10–35, and
+   every character of general category Nd with its decimal value. A single
+   `_` may stand between two digits or between the prefix and the first
+   digit.
+5. When *base* is 0 and no prefix was given, a number with a leading `0`
+   shall consist only of zeros (and underscores).
+6. If any of the text is not accepted, raise a `ValueError` exception
+   ("invalid literal for int() with base *base*: *r*") where *r* is the repr of
+   the original argument (`str` or `bytes`), its text cut to 200 characters.
+7. If *base* is not a power of two and the number of digits exceeds the
+   current *int string limit* (22.1.8), raise the `ValueError` of 22.1.8.
+8. Return the integer.
+
+#### 22.1.3 Arithmetic
+
+For `int` operands *a* and *b* (with ℝ values *x* and *y*):
+
+| Operation | Result |
+| --- | --- |
+| `a + b`, `a - b`, `a * b` | the exact integer |
+| `a / b` | IntTrueDivide(*x*, *y*) |
+| `a // b` | ⌊*x* / *y*⌋ |
+| `a % b` | *x* − *y* × ⌊*x* / *y*⌋, which has the sign of *y* or is 0 |
+| `divmod(a, b)` | the tuple (`a // b`, `a % b`) |
+| `a ** b` | *x*<sup>*y*</sup> for *y* ≥ 0 (and 0 ** 0 is 1); for *y* < 0 the `float` power of IntToFloat(*x*) and IntToFloat(*y*) |
+| `-a`, `+a`, `abs(a)` | −*x*, *x*, \|*x*\| |
+| `~a` | −*x* − 1 |
+| `a & b`, `a \| b`, `a ^ b` | bitwise and, or, exclusive or of the two's complement forms |
+| `a << b` | *x* × 2<sup>*y*</sup> |
+| `a >> b` | ⌊*x* / 2<sup>*y*</sup>⌋ |
+
+Division, floor division, modulo, and `divmod` by zero raise a
+`ZeroDivisionError` exception ("division by zero"); `0 ** b` for *b* < 0 raises
+a `ZeroDivisionError` exception ("zero to a negative power"). A negative shift
+count raises a `ValueError` exception ("negative shift count"). A left shift
+whose result would exceed the implementation's size limit raises an
+`OverflowError` exception ("too many digits in integer"); a right shift by any
+count does not fail. The results of `+a`, `abs(a)`, and the binary operations
+are of type `int`, even when an operand is a subclass.
+
+IntTrueDivide(*x*, *y*) raises the `ZeroDivisionError` above when *y* is 0, and
+otherwise returns the `float` nearest to the exact quotient *x* / *y* (ties to
+even). If that is not finite, raise an `OverflowError` exception ("integer
+division result too large for a float").
+
+The three-argument form `pow(a, b, m)` with `int` operands: if *m* is 0, raise
+a `ValueError` exception ("pow() 3rd argument cannot be 0"). If *b* < 0, let *a*
+be the inverse of *a* modulo |*m*|, raising a `ValueError` exception ("base is
+not invertible for the given modulus") if there is none, and *b* be −*b*.
+Return *a*<sup>*b*</sup> mod *m*, with the sign of *m* (as `%`).
+
+#### 22.1.4 Comparison
+
+Integers compare by value. An `int` compares with a `float` exactly: the
+comparison is made between the mathematical values (a NaN compares unequal and
+unordered), never by converting the integer to `float`.
+
+#### 22.1.5 Methods
+
+| Method | Result |
+| --- | --- |
+| `bit_length()` | the least *k* ≥ 0 with \|*x*\| < 2<sup>*k*</sup> |
+| `bit_count()` | the number of ones in the binary form of \|*x*\| |
+| `as_integer_ratio()` | (`int`(*x*), 1) |
+| `is_integer()` | `True` |
+| `conjugate()`, `__trunc__()`, `__floor__()`, `__ceil__()`, `__index__()`, `__int__()` | an `int` equal to *x* |
+| `__float__()` | IntToFloat(*x*) |
+| `__round__(ndigits=None)` | 22.1.6 |
+| `real`, `numerator` | an `int` equal to *x* (read-only) |
+| `imag` | 0; `denominator` 1 (read-only) |
+
+Assigning to a read-only attribute raises an `AttributeError` exception
+("attribute '*name*' of 'int' objects is not writable").
+
+`to_bytes(length=1, byteorder='big', *, signed=False)` returns a `bytes` of
+*length* (ToIndex; negative raises `ValueError` "length cannot be negative")
+holding *x* most significant byte first for `'big'` and last for `'little'`
+(any other value raises `ValueError` "byteorder must be either 'little' or
+'big'"), in two's complement when *signed* is true. A negative *x* with *signed*
+false raises an `OverflowError` exception ("can't convert negative int to
+unsigned"); a value that does not fit, an `OverflowError` exception ("int too
+big to convert").
+
+The class method `from_bytes(bytes, byteorder='big', *, signed=False)` takes a
+bytes-like object or an iterable of integers in range(0, 256) (another value
+raises `ValueError` "bytes must be in range(0, 256)", a non-iterable
+`TypeError` "cannot convert '*tname*' object to bytes"), reads it as
+`to_bytes` writes, and returns the result as an instance of the class it is
+called on (calling that class with the integer when it is not `int`).
+
+#### 22.1.6 Rounding
+
+`int.__round__(ndigits)` returns *x* when *ndigits* is `None` or ≥ 0
+(*ndigits* is converted by ToIndex). Otherwise let *q* be 10<sup>−*ndigits*</sup>
+and return the multiple of *q* nearest to *x*, choosing the even multiple of *q*
+on a tie.
+
+#### 22.1.7 IntToFloat ( *x* )
+
+Returns the `float` nearest to *x*, ties to even. If |*x*| is not less than
+2<sup>1024</sup> − 2<sup>970</sup> (so that the rounded result would not be
+finite), raise an `OverflowError` exception ("int too large to convert to
+float").
+
+#### 22.1.8 The integer string conversion limit
+
+The execution context holds an *int string limit*, initially 4300 (a host may
+change it, Annex C). When it is not 0, converting an `int` to decimal text
+(`str`, `repr`, `format` with an integer presentation of base 10, and
+`%d`/`%i`/`%u`) when the value has more digits than the limit raises a
+`ValueError` exception ("Exceeds the limit (*L* digits) for integer string
+conversion; use sys.set\_int\_max\_str\_digits() to increase the limit"), and
+parsing text of more digits in a base that is not a power of two (StringToInt,
+and decimal integer literals) raises a `ValueError` exception ("Exceeds the
+limit (*L* digits) for integer string conversion: value has *n* digits; use
+sys.set\_int\_max\_str\_digits() to increase the limit"); a literal reports it
+as a `SyntaxError`. Signs, underscores, and white space are not counted.
+Conversions in bases 2, 8, and 16, and `float` conversions, are unaffected.
+A non-zero limit is at least 640.
+
+#### 22.1.9 Hashing of numbers
+
+Numbers that compare equal have equal hashes, whatever their types. Let *P*
+be the *hash modulus*, 2<sup>61</sup> − 1 (Annex D permits 2<sup>31</sup> − 1
+where the hash range is 32 bits). The hash of a rational number *r* is:
+
+1. If *r* = *m* / *n* in lowest terms with *n* > 0, *m* ≥ 0, and *n* not
+   divisible by *P*, the hash is (*m* × *n*<sup>*P*−2</sup>) mod *P* (*m* times the
+   inverse of *n*).
+2. If *r* < 0, the hash is the negation of the hash of −*r*.
+3. A result of −1 becomes −2.
+
+Thus the hash of an `int` *x* with 0 ≤ *x* < *P* is *x*. The infinities hash to
+314159 and −314159; a NaN hashes as `object.__hash__` does (by identity). A
+`complex` *z* hashes to *h*(*z*.real) + 1000003 × *h*(*z*.imag), reduced to the
+signed range of the hash width by two's complement wrapping, with −1 becoming
+−2.
+
+### 22.2 The `bool` type
+
+`bool` is a subclass of `int` with exactly two instances, `False` and `True`,
+whose integer values are 0 and 1. `bool` is not an acceptable base type ("type
+'bool' is not an acceptable base type").
+
+`bool(x=False, /)` returns ToBoolean(*x*) as `True` or `False`; it takes at
+most one argument ("bool expected at most 1 argument, got *n*") and no keyword
+arguments ("bool() takes no keyword arguments").
+
+`repr` and `str` of `False` and `True` are `"False"` and `"True"`; `format`
+with an empty spec uses `str`, and with any other spec formats the integer
+value. `&`, `|`, and `^` with two `bool` operands return a `bool`; every other
+operation on `bool` values is that of `int` and returns an `int` (so `~True` is
+−2).
+
+### 22.3 The `float` type
+
+A `float` value is an IEEE 754 binary64 number, including signed zeros,
+infinities, and NaNs. Arithmetic rounds to nearest, ties to even, and does not
+trap: a finite result too large for the format is an infinity, except where
+this clause says an `OverflowError` is raised.
+
+#### 22.3.1 float ( *x*=0.0, / )
+
+1. If *x* is a `str`, `bytes`, or `bytearray` (or another bytes-like object),
+   return ? StringToFloat of it.
+2. Let *m* be ? LookupSpecial(*x*, `"__float__"`). If *m* is not **absent**:
+   let *r* be ? Call(*m*, «»); if Type(*r*) is `float`, return it; if a strict
+   subclass, issue a `DeprecationWarning` and return a `float` with its value;
+   otherwise raise a `TypeError` exception ("*fqname*(*x*).`__float__`() must
+   return a float, not *tname*(*r*)").
+3. If LookupSpecial(*x*, `"__index__"`) is not **absent**, return
+   IntToFloat(? ToIndex(*x*)).
+4. Raise a `TypeError` exception ("float() argument must be a string or a real
+   number, not '*tname*(*x*)'").
+
+StringToFloat strips white space and accepts an optional sign followed by
+`inf`, `infinity`, or `nan` in any case, or by a decimal number as the
+`floatnumber` or `intpart` of 12.6 (digits may be any Nd characters, single
+underscores between digits). The value is the correctly rounded `float`;
+magnitudes too large are infinities and too small zeros. Other text raises a
+`ValueError` exception ("could not convert string to float: *r*") with *r* the
+repr of the argument.
+
+The class method `from_number(x)` performs steps 2–4 for a non-string *x*, and
+raises a `TypeError` exception ("must be real number, not *tname*(*x*)") for a
+string.
+
+#### 22.3.2 Arithmetic
+
+`+`, `-`, `*`, and `/` are the IEEE 754 operations. Division by a zero raises a
+`ZeroDivisionError` exception ("division by zero"), as do `//`, `%`, and
+`divmod`. FloatDivMod(*x*, *y*) gives `//` and `%`:
+
+1. Let *mod* be the IEEE remainder fmod(*x*, *y*) (the sign of *x*, exact).
+2. Let *div* be (*x* − *mod*) / *y*.
+3. If *mod* is not zero and its sign differs from that of *y*, set *mod* to
+   *mod* + *y* and *div* to *div* − 1. If *mod* is zero, give it the sign of
+   *y*.
+4. If *div* is not zero, let *fd* be ⌊*div*⌋, plus 1 if *div* − *fd* > 0.5;
+   otherwise let *fd* be a zero with the sign of *x* / *y*.
+5. Return (*fd*, *mod*).
+
+`float.__pow__(x, y)`:
+
+1. If *x* is zero and *y* < 0, raise a `ZeroDivisionError` exception ("zero to
+   a negative power").
+2. If *x* < 0 and *y* is finite and not an integer, return the `complex` power
+   of (*x* + 0j) and *y* (22.4.2).
+3. Otherwise return the IEEE 754 pow(*x*, *y*) with its special cases (1 to any
+   power and any number to the power 0 are 1.0; (−1) ** ±∞ is 1.0). If the
+   result is infinite while both operands are finite, raise an
+   `OverflowError` exception whose `args` are (ERANGE, `"Result too large"`),
+   ERANGE being the host's error number (34 on POSIX hosts).
+
+A modulus is not accepted: `pow(x, y, m)` with a `float` operand raises a
+`TypeError` exception ("pow() 3rd argument not allowed unless all arguments
+are integers"). Bitwise operators and shifts are not defined for `float`.
+
+#### 22.3.3 Comparison
+
+Floats compare as IEEE 754 values: a NaN is unequal to everything, itself
+included, and unordered; −0.0 equals 0.0. Comparison with an `int` is exact
+(22.1.4).
+
+#### 22.3.4 FloatRepr ( *x* )
+
+`repr(x)` and `str(x)` return FloatRepr(*x*):
+
+1. If *x* is a NaN, return `"nan"`; if an infinity, `"inf"` or `"-inf"`.
+2. Let *d* be the shortest string of decimal digits *d*₁…*d*ₖ, and *e* the
+   integer, such that *d*₁ ≠ 0 (or *k* = 1 and *d* is `"0"`) and the decimal
+   value 0.*d*₁…*d*ₖ × 10<sup>*e*</sup> rounds to |*x*|; among the shortest,
+   choose the one nearest to |*x*|.
+3. Let *s* be `"-"` if *x* has its sign bit set and `""` otherwise.
+4. If −4 < *e* ≤ 16, return *s* followed by *d* written in positional notation
+   with the decimal point after *e* digits (padding with zeros), and with
+   `".0"` appended when there is no fractional digit.
+5. Otherwise return *s* followed by *d*₁, then `"."` and *d*₂…*d*ₖ if *k* > 1,
+   then `"e"`, the sign of *e* − 1 (`+` or `-`), and |*e* − 1| with at least
+   two digits.
+
+#### 22.3.5 Methods
+
+| Method | Result |
+| --- | --- |
+| `is_integer()` | whether *x* is finite and integral |
+| `as_integer_ratio()` | the pair of integers (*m*, *n*) in lowest terms with *n* > 0 and *m* / *n* = *x* exactly; an infinity raises `OverflowError` ("cannot convert Infinity to integer ratio"), a NaN `ValueError` ("cannot convert NaN to integer ratio") |
+| `hex()` | `"[-]0x0.0p+0"` for a zero; otherwise `"[-]0x"` followed by the leading digit (`1` for normal numbers, `0` for subnormals), `"."`, the 13 hexadecimal fraction digits, `"p"`, and the signed decimal binary exponent (−1022 for subnormals); `"inf"`, `"-inf"`, `"nan"` for the special values |
+| `fromhex(s)` (class method) | the value of the text: optional white space and sign, `inf`/`infinity`/`nan`, or an optional `0x` prefix, hexadecimal digits with an optional point, and an optional `p` exponent, rounded correctly; other text raises `ValueError` ("invalid hexadecimal floating-point string"), a value too large `OverflowError` ("hexadecimal value too large to represent as a float") |
+| `conjugate()`, `real` | *x*; `imag` 0.0 |
+| `__trunc__()`, `__int__()` | 22.1.1 |
+| `__floor__()`, `__ceil__()` | ⌊*x*⌋, ⌈*x*⌉ as `int`, with the errors of 22.1.1 |
+| `__round__(ndigits=None)` | 22.3.6 |
+
+#### 22.3.6 Rounding
+
+`float.__round__(ndigits)`:
+
+1. If *ndigits* is `None`: return the integer nearest to *x*, ties to even, as
+   an `int`; an infinity or NaN raises the error of 22.1.1.
+2. Let *n* be ℝ(? ToIndex(*ndigits*)). If *x* is not finite or zero, return
+   *x*.
+3. Let *r* be the multiple of 10<sup>−*n*</sup> nearest to the exact value of
+   *x*, ties to even, and return the `float` nearest to *r*. (Because the exact
+   value of the float 2.675 is below 2.675, `round(2.675, 2)` is 2.67.) If that
+   is an infinity, raise an `OverflowError` exception ("rounded value too large
+   to represent").
+
+### 22.4 The `complex` type
+
+A `complex` value is a pair of `float` values, its real and imaginary parts,
+read-only as `real` and `imag` ("readonly attribute").
+
+#### 22.4.1 complex ( *real*=0, *imag*=0 )
+
+1. If *real* is a `str`: if *imag* is given, raise a `TypeError` exception
+   ("complex() argument 'real' must be a real number, not str"); otherwise
+   return ? StringToComplex(*real*).
+2. If *imag* is a `str`, raise a `TypeError` exception ("complex() argument
+   'imag' must be a real number, not str").
+3. Let *r* be ? ToComplex(*real*) (below); if *real* is not a number, raise a
+   `TypeError` exception ("complex() argument must be a string or a number,
+   not *tname*(*real*)").
+4. If *imag* is not given, return *r*. Otherwise let *i* be ? ToComplex(*imag*)
+   and return the complex number with real part *r*.real − *i*.imag and
+   imaginary part *r*.imag + *i*.real.
+
+ToComplex(*o*): if *o* is a `complex`, its value; else call `__complex__` if
+present, requiring a `complex` result ("*fqname*(*o*).`__complex__`() must
+return a complex, not *tname*(*r*)"); else the `float` conversion of 22.3.1
+steps 2–3 with an imaginary part 0.0.
+
+StringToComplex strips white space and accepts, optionally inside one pair of
+parentheses (with white space inside them), a real number, an imaginary number
+(a real number or nothing, followed by `j` or `J`), or a real number followed
+by a signed imaginary number, each real number written as for StringToFloat.
+Other text raises a `ValueError` exception ("complex() arg is a malformed
+string").
+
+`complex.from_number(x)` is ToComplex(*x*), refusing strings as
+`float.from_number` does.
+
+#### 22.4.2 Arithmetic
+
+For *a* = *p* + *q*j and *b* = *r* + *s*j:
+
+- `a + b` and `a - b` are componentwise.
+- `a * b` is (*pr* − *qs*) + (*ps* + *qr*)j, computed in IEEE 754 arithmetic
+  after any conversion of a real operand to `complex` (so `inf * (1+0j)` is
+  `(inf+nanj)`).
+- `a / b` raises a `ZeroDivisionError` exception ("division by zero") if *b* is
+  0, and otherwise is computed by Smith's algorithm, scaling by whichever of
+  |*r*| and |*s*| is larger.
+- `a ** b`: if *b* is 0, the result is 1+0j. If *a* is 0, the result is 0j
+  unless *b*.imag ≠ 0 or *b*.real < 0, which raise a `ZeroDivisionError`
+  exception ("zero to a negative or complex power"). If *b* is an integer *n*
+  with |*n*| ≤ 100 and no imaginary part, the result is computed by repeated
+  squaring (and its reciprocal for *n* < 0). Otherwise the result is
+  exp(*b* × log *a*) in polar form. An infinite result from finite operands
+  raises an `OverflowError` exception ("complex exponentiation").
+- `-a`, `+a`, `abs(a)` (the hypotenuse, `OverflowError` "absolute value too
+  large" when it overflows), and `conjugate()`.
+
+`//`, `%`, `divmod`, the ordering comparisons, and the bitwise operators are not
+defined for `complex`. `pow` with a third argument raises a `ValueError`
+exception ("complex modulo"). `==` compares both parts, and a `complex` equals
+an `int` or `float` when its imaginary part is zero and its real part equals it.
+
+#### 22.4.3 ComplexRepr ( *z* )
+
+Let *fmt*(*v*) be FloatRepr(*v*) without the trailing `".0"` added by step 4.
+If *z*.real is +0.0, return *fmt*(*z*.imag) followed by `"j"`. Otherwise return
+`"("`, *fmt*(*z*.real), the sign of *z*.imag (`+` unless its sign bit is set;
+a NaN is written with `+`), *fmt*(|*z*.imag|), and `"j)"`.
