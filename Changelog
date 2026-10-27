@@ -400,6 +400,11 @@
 - A slice checks its step before its bounds, and a bound without __index__
   gets CPython's message; tb_frame, tb_lasti, and slice attributes are
   "readonly attribute". TLA+ models of traceback and slice objects.
+- A classmethod made by calling classmethod binds any callable (a builtin
+  too) as a method object, as types.MethodType does; static and class
+  method objects copy only the callable's naming attributes and read its
+  annotations on demand; a method over a non-function callable has
+  CPython's repr. TLA+ model of static and class method objects.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

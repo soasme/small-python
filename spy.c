@@ -84,9 +84,9 @@ struct SPYValue {
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
                  void (*release)(void *); /* Host cleanup for data, run when the value is freed. */ } native;
         struct { SPYValue *self; int method; SPYValue *name; } bound;
-        struct { SPYValue *self, *function; } method;
+        struct { SPYValue *self, *function; int plain; /* a method object even over a builtin */ } method;
         struct { SPYValue *type, *self, *owner; } super;
-        struct { SPYValue *function, *attributes; } wrapper;
+        struct { SPYValue *function, *attributes; int user; /* made by calling the type */ } wrapper;
         struct { SPYValue *get, *set, *del, *doc, *name; int getter_doc; } property;
         struct { SPYValue *start, *stop, *step, *length; } range;
         struct { SPYValue *start, *stop, *step; } slice;
@@ -1491,6 +1491,7 @@ static int iterator_class_id(SPYValue *v) {
 }
 enum { NATIVE_FUNCTION, NATIVE_METHOD_DESCRIPTOR, NATIVE_WRAPPER_DESCRIPTOR, NATIVE_METHOD_WRAPPER, NATIVE_BOUND };
 static int native_kind(SPYValue *v) {
+    if (v->type == SPY_METHOD && v->as.method.plain) return NATIVE_FUNCTION;
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
     if ((v->type != SPY_NATIVE && v->type != SPY_METHOD) || function->type != SPY_NATIVE) return NATIVE_FUNCTION;
     if (!function->as.native.owner || !function->as.native.method || !function->as.native.name ||
@@ -2145,6 +2146,17 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
     case SPY_NATIVE: case SPY_BOUND_METHOD: case SPY_METHOD: {
         SPYValue *function = v->type == SPY_METHOD ? v->as.method.function : v;
         SPYValue *self = v->type == SPY_METHOD ? v->as.method.self : v->type == SPY_BOUND_METHOD ? v->as.bound.self : NULL;
+        if (v->type == SPY_METHOD && function->type != SPY_FUNCTION && (function->type != SPY_NATIVE || v->as.method.plain)) {
+            /* method_repr: the callable's __qualname__, else its __name__. */
+            SPYValue *name = attribute(b->ctx, function, "__qualname__");
+            if (!name && error_is(b->ctx, "AttributeError")) { spy_clear_error(b->ctx); name = attribute(b->ctx, function, "__name__"); }
+            if (!name && error_is(b->ctx, "AttributeError")) spy_clear_error(b->ctx);
+            if (b->ctx->error_type[0]) { spy_release(name); return -1; }
+            int status = puts_buffer(b, "<bound method ") ||
+                puts_buffer(b, name && name->type == SPY_STRING ? name->as.string.data : "?") ||
+                puts_buffer(b, " of ") || format_value(b, self, 1) || puts_buffer(b, ">");
+            spy_release(name); return status;
+        }
         if (function->type == SPY_FUNCTION) {
             SPYValue *qualname = name_local(function->as.function.metadata, "__qualname__");
             return puts_buffer(b, "<bound method ") ||
@@ -7676,6 +7688,13 @@ static SPYValue *bind_method(SPYContext *c, SPYValue *self, SPYValue *function) 
     if (method) { method->as.method.self = spy_retain(self); method->as.method.function = spy_retain(function); }
     return method;
 }
+/* A method object binding any callable, as types.MethodType and a
+ * classmethod object made by calling classmethod give. */
+static SPYValue *plain_method(SPYContext *c, SPYValue *self, SPYValue *function) {
+    SPYValue *method = bind_method(c, self, function);
+    if (method) method->as.method.plain = 1;
+    return method;
+}
 static SPYValue *property_new(SPYContext *c, SPYValue *get, SPYValue *set, SPYValue *del, SPYValue *doc) {
     SPYValue *v = value_new(c, SPY_PROPERTY);
     if (v) {
@@ -7788,7 +7807,7 @@ static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, SPYType type)
     if (!v) return NULL;
     v->as.wrapper.function = spy_retain(function);
     v->as.wrapper.attributes = value_new(c, SPY_DICT);
-    const char *names[] = {"__module__", "__name__", "__qualname__", "__doc__", "__annotations__", "__type_params__"};
+    const char *names[] = {"__module__", "__name__", "__qualname__", "__doc__"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names) && !c->error_type[0]; i++) {
         SPYValue *value = attribute(c, function, names[i]);
         if (value) name_set(c, v->as.wrapper.attributes, names[i], value);
@@ -7948,7 +7967,8 @@ static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self
         if (c->error_type[0]) return NULL;
     }
     if (value->type == SPY_STATICMETHOD) return spy_retain(value->as.wrapper.function);
-    if (value->type == SPY_CLASSMETHOD) return bind_method(c, owner, value->as.wrapper.function);
+    if (value->type == SPY_CLASSMETHOD)
+        return (value->as.wrapper.user ? plain_method : bind_method)(c, owner, value->as.wrapper.function);
     if (self && (value->type == SPY_FUNCTION || (value->type == SPY_NATIVE && value->as.native.method)))
         return bind_method(c, self, value);
     return spy_retain(value);
@@ -8505,12 +8525,18 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "__dict__")) return spy_retain(v->as.wrapper.attributes);
         SPYValue *value = name_local(v->as.wrapper.attributes, name);
         if (value) return spy_retain(value);
+        /* The callable's annotations, read once and kept in __dict__. */
+        if (!strcmp(name, "__annotations__") || !strcmp(name, "__annotate__")) {
+            value = attribute(c, v->as.wrapper.function, name);
+            if (value && name_set(c, v->as.wrapper.attributes, name, value)) { spy_release(value); return NULL; }
+            return value;
+        }
     }
     if (v->type == SPY_METHOD) {
         if (!strcmp(name, "__self__")) return spy_retain(v->as.method.self);
         /* A builtin method has no __func__, and __module__ None; a
          * method-wrapper has neither. */
-        if (v->as.method.function->type == SPY_NATIVE && (!strcmp(name, "__func__") || !strcmp(name, "__module__"))) {
+        if (v->as.method.function->type == SPY_NATIVE && !v->as.method.plain && (!strcmp(name, "__func__") || !strcmp(name, "__module__"))) {
             if (!strcmp(name, "__module__") && native_kind(v) == NATIVE_BOUND) return spy_none(c);
             return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
         }
@@ -11788,7 +11814,7 @@ static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *a
     if (argc != 2) return errorf(c, "TypeError", "method expected 2 arguments, got %zu", argc);
     if (!callable_value(c, argv[0])) return spy_error(c, "TypeError", "first argument must be callable");
     if (argv[1]->type == SPY_NONE) return spy_error(c, "TypeError", "instance must not be None");
-    return bind_method(c, argv[1], argv[0]);
+    return plain_method(c, argv[1], argv[0]);
 }
 /* type.__call__: allocate with __new__, then initialize with __init__. */
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -20210,7 +20236,9 @@ execution_fail:
     }
     if (id == B_STATICMETHOD || id == B_CLASSMETHOD) {
         if (argc != 1) return errorf(c, "TypeError", "%s expected 1 argument, got %zu", id == B_STATICMETHOD ? "staticmethod" : "classmethod", argc);
-        return method_wrapper(c, a, id == B_STATICMETHOD ? SPY_STATICMETHOD : SPY_CLASSMETHOD);
+        SPYValue *wrapper = method_wrapper(c, a, id == B_STATICMETHOD ? SPY_STATICMETHOD : SPY_CLASSMETHOD);
+        if (wrapper) wrapper->as.wrapper.user = 1;
+        return wrapper;
     }
     if (id == B_SLICE) {
         if (argc < 1 || argc > 3) goto arity;
@@ -20848,6 +20876,7 @@ static SPYValue *descriptor_new(SPYContext *c, SPYValue *cls, int type, size_t a
     if (!base) return NULL;
     if (type != SPY_PROPERTY) {
         base->as.wrapper.function = spy_retain(argv[0]);
+        base->as.wrapper.user = 1;
         if (!(base->as.wrapper.attributes = value_new(c, SPY_DICT))) { spy_release(base); return NULL; }
     }
     SPYValue *self = base;
@@ -20906,7 +20935,7 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
         if (!object && !owner) return spy_error(c, "TypeError", "__get__(None, None) is invalid");
         if (type == SPY_PROPERTY) return property_get(c, self, storage, object);
         if (type == SPY_STATICMETHOD) return spy_retain(storage->as.wrapper.function);
-        return bind_method(c, owner ? owner : value_class(c, object), storage->as.wrapper.function);
+        return (storage->as.wrapper.user ? plain_method : bind_method)(c, owner ? owner : value_class(c, object), storage->as.wrapper.function);
     }
     case DESCR_SET: return property_set(c, storage, argv[1], argv[2]) ? NULL : spy_none(c);
     case DESCR_DELETE: return property_set(c, storage, argv[1], NULL) ? NULL : spy_none(c);

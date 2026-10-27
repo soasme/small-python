@@ -222,3 +222,17 @@ try:
 except TypeError as error:
     assert_eq(str(error), "slice indices must be integers or have an __index__ method")
 assert_raises(ValueError, slice("a", None, 0).indices, 3)
+
+# A classmethod object binds any callable as a method object; static and
+# class method objects copy only the callable's naming attributes, and read
+# its annotations on demand.
+class Binder:
+    absolute = classmethod(abs)
+bound = Binder.absolute
+assert_eq((type(bound).__name__, bound.__func__ is abs, bound.__self__ is Binder), ("method", True, True))
+assert_true(repr(type(bound)(len, [1])).startswith("<bound method len of [1]"))
+def annotated(a: int): pass
+wrapped = staticmethod(annotated)
+assert_eq(sorted(wrapped.__dict__), ["__doc__", "__module__", "__name__", "__qualname__"])
+assert_eq(wrapped.__annotations__, {"a": int})
+assert_true("__annotations__" in wrapped.__dict__)

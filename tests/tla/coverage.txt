@@ -108,8 +108,8 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Internal types > Frame object methods | Frames
 3. Data model > Data model > The standard type hierarchy > Internal types > Traceback objects | Tracebacks
 3. Data model > Data model > The standard type hierarchy > Internal types > Slice objects | Slices
-3. Data model > Data model > The standard type hierarchy > Internal types > Static method objects | TODO: MethodDescriptors
-3. Data model > Data model > The standard type hierarchy > Internal types > Class method objects | TODO: MethodDescriptors
+3. Data model > Data model > The standard type hierarchy > Internal types > Static method objects | MethodDescriptors
+3. Data model > Data model > The standard type hierarchy > Internal types > Class method objects | MethodDescriptors
 3. Data model > Data model > Special method names | = sections
 3. Data model > Data model > Special method names > Basic customization | TODO: BasicCustomization
 3. Data model > Data model > Special method names > Customizing attribute access | TODO: Attributes, Descriptors
