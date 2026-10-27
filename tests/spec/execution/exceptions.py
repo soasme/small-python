@@ -112,3 +112,7 @@ assert_eq(ImportError("m", name="a", path="p").path, "p")
 # Recursion limit is a RecursionError.
 def deep(): return deep()
 assert_raises(RecursionError, deep)
+
+# add_note requires a str.
+e = assert_raises(TypeError, ValueError().add_note, 1)
+assert_eq(str(e), "add_note() argument must be str, not int")

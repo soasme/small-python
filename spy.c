@@ -2337,6 +2337,7 @@ typedef struct {
     size_t len, cap, pos, depth;
     int functions, loops, async_function;
     int star; /* One more than the loop depth inside an except* block, else 0. */
+    const char *literal_start; /* The body of the string literal being decoded. */
     const char *annotation_scope; /* Set while parsing a type-parameter value or alias, e.g. "a TypeVar bound". */
     const char *private_name;
     const char *error_start, *error_end;
@@ -3334,7 +3335,12 @@ static int literal_character(Parser *p, Buffer *out, const char **cursor, const 
             const char *close = s < end && *s == '{' ? memchr(s, '}', (size_t)(end - s)) : NULL;
             unsigned code;
             if (!close || close == s + 1) { syntax(p, "(unicode error) malformed \\N character escape"); return -1; }
-            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) { syntax(p, "(unicode error) unknown Unicode character name"); return -1; }
+            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) {
+                char message[160];
+                snprintf(message, sizeof(message), "(unicode error) 'unicodeescape' codec can't decode bytes in position %zu-%zu: unknown Unicode character name",
+                         (size_t)(s - 2 - p->literal_start), (size_t)(close - p->literal_start));
+                syntax(p, message); return -1;
+            }
             *cursor = close + 1;
             return append_codepoint(out, code);
         } else if (ch != '\\' && ch != '\'' && ch != '"') {
@@ -3474,6 +3480,7 @@ static Node *string_node(Parser *p) {
         const char *end = t->start + t->len - quote;
         s += quote;
         formatted |= flags & L_FORMAT;
+        p->literal_start = s;
         if (string_parts(p, &s, end, flags, 0, &tail, &literal, 0)) { free(literal.data); return NULL; }
         p->pos++;
     } while (at(p, T_STRING));
@@ -4708,7 +4715,7 @@ static Node *pattern_reachable(Parser *p, Node *n, int allow) {
         char message[300];
         if (n->op == PT_WILDCARD) snprintf(message, sizeof(message), "wildcard makes remaining patterns unreachable");
         else snprintf(message, sizeof(message), "name capture '%s' makes remaining patterns unreachable", source_name(n->a));
-        return syntax(p, message);
+        return syntax_at(p, n, message);
     }
     if (n->op == PT_AS) return pattern_reachable(p, n->a, allow) ? n : NULL;
     for (Node *item = n->op == PT_STAR ? NULL : n->args; item; item = item->next)
@@ -4771,7 +4778,7 @@ static Node *match_statement(Parser *p) {
         if (status == -2) snprintf(message, sizeof(message), "multiple assignments to name '%s' in pattern", bad);
         if (status == -3) snprintf(message, sizeof(message), "alternative patterns bind different names");
         if (status == -1) snprintf(message, sizeof(message), "too many names in pattern");
-        if (status < 0) return syntax(p, message);
+        if (status < 0) return syntax_at(p, item->a, message);
     }
     return expect(p, T_DEDENT, "invalid syntax") ? n : NULL;
 }
@@ -5617,7 +5624,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             if (n->args->kind == N_STAR) { spy_error(c, "SyntaxError", "lazy from ... import * is not allowed"); return -1; }
         }
         if (n->args->kind == N_STAR) {
-            if (scope->kind != S_MODULE) { spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
+            if (scope->kind != S_MODULE) { c->line = n->line; spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
             return 0;
         }
         for (Node *item = n->args; item; item = item->next) {
@@ -13516,7 +13523,7 @@ const char *spy_error_display(SPYContext *c) {
     return c->error_display;
 }
 static int exception_add_note(SPYContext *c, SPYValue *exception, SPYValue *note) {
-    if (note->type != SPY_STRING) { spy_error(c, "TypeError", "note must be a str"); return -1; }
+    if (!builtin_value(c, note, SPY_STRING)) { errorf(c, "TypeError", "add_note() argument must be str, not %s", type_name(note)); return -1; }
     SPYValue *notes = name_local(exception, "__notes__");
     if (!notes) {
         notes = spy_list(c);

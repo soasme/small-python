@@ -341,3 +341,6 @@
   subclasses are accepted as search needles.
 - object.__repr__ uses the qualified name and omits the builtins module;
   type() arity and __classcell__ validation follow CPython.
+- Pattern-matching and import * syntax errors carry the offending line;
+  unknown \N{...} names use the codec's message; add_note() names the
+  argument type.

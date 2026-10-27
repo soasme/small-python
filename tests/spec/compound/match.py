@@ -153,3 +153,9 @@ class Missing:
 match Missing():
     case Missing(1): fail("missing attribute")
     case _: pass
+
+# Pattern errors are reported on the line of the offending case.
+e = assert_syntax_error("match x:\n    case a:\n        pass\n    case 1:\n        pass\n")
+assert_eq((e.msg, e.lineno), ("name capture 'a' makes remaining patterns unreachable", 2))
+e = assert_syntax_error("match x:\n    case [a, a]:\n        pass\n")
+assert_eq((e.msg, e.lineno), ("multiple assignments to name 'a' in pattern", 2))
