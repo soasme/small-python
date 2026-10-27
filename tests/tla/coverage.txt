@@ -259,8 +259,8 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `type` statement | TypeAliases
 8. Compound statements | = sections
 8. Compound statements > Compound statements | TODO: Grammar
-8. Compound statements > Compound statements > The `if` statement | TODO: Conditionals
-8. Compound statements > Compound statements > The `while` statement | TODO: Conditionals
+8. Compound statements > Compound statements > The `if` statement | Conditionals
+8. Compound statements > Compound statements > The `while` statement | Conditionals
 8. Compound statements > Compound statements > The `for` statement | Iteration
 8. Compound statements > Compound statements > The `try` statement | Exceptions
 8. Compound statements > Compound statements > The `try` statement > `except` clause | Exceptions
@@ -270,7 +270,7 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > The `with` statement | With
 8. Compound statements > Compound statements > The `match` statement | Match
 8. Compound statements > Compound statements > The `match` statement > Overview | Match
-8. Compound statements > Compound statements > The `match` statement > Guards | TODO: MatchGuards
+8. Compound statements > Compound statements > The `match` statement > Guards | MatchGuards
 8. Compound statements > Compound statements > The `match` statement > Irrefutable Case Blocks | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > OR Patterns | Match
@@ -278,8 +278,8 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > The `match` statement > Patterns > Literal Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > Capture Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > Wildcard Patterns | Match
-8. Compound statements > Compound statements > The `match` statement > Patterns > Value Patterns | TODO: MatchGuards
-8. Compound statements > Compound statements > The `match` statement > Patterns > Group Patterns | TODO: MatchGuards
+8. Compound statements > Compound statements > The `match` statement > Patterns > Value Patterns | MatchGuards
+8. Compound statements > Compound statements > The `match` statement > Patterns > Group Patterns | MatchGuards
 8. Compound statements > Compound statements > The `match` statement > Patterns > Sequence Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > Mapping Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > Class Patterns | Match
