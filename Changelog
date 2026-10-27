@@ -421,6 +421,7 @@
   that type.__new__ fills; a metaclass that drops it or fills it with
   another class raises CPython's RuntimeError or TypeError. TLA+ model of
   metaclass selection.
+- TLA+ models of instance and subclass check hooks and __class_getitem__.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

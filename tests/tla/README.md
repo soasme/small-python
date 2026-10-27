@@ -54,6 +54,8 @@ and tied to real implementations by replaying them.
 | `Slots.tla` | `__slots__` with and without `__dict__`, inherited from plain and slotted bases: `__dict__` and `__weakref__`, assignment, unset slots, class variable conflicts, and `__class__` assignment | yes |
 | `BasicCustomization.tla` | rich comparison order (a subclass's reflected method first), `NotImplemented` and the identity fallback, `__ne__` inverting `__eq__`, `__hash__` with and without `__eq__`, truth from `__bool__` or `__len__`, and `str()`, `repr()`, and `format(x, "")` falling back to `__repr__` | yes |
 | `Metaclasses.tla` | `__mro_entries__` and `__orig_bases__`, the most derived metaclass among the explicit one and the bases', metaclass conflicts, a non-class metaclass, and the `__classcell__` that `type.__new__` fills | yes |
+| `InstanceChecks.tla` | `__instancecheck__` and `__subclasscheck__` on a metaclass (and ignored on the class), bool conversion, the exact-type shortcut, tuples of classes, and a bad second argument | yes |
+| `ClassGetitem.tla` | `__class_getitem__` (plain or a classmethod) against a metaclass's and an instance's `__getitem__`, unsubscriptable classes, and builtin generic aliases | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 

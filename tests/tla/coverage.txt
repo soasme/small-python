@@ -125,10 +125,10 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > Customizing class creation > Executing the class body | ClassCreation, Scopes
 3. Data model > Data model > Special method names > Customizing class creation > Creating the class object | ClassCreation, Metaclasses
 3. Data model > Data model > Special method names > Customizing class creation > Uses for metaclasses | - informative: suggests uses for metaclasses
-3. Data model > Data model > Special method names > Customizing instance and subclass checks | TODO: InstanceChecks
-3. Data model > Data model > Special method names > Emulating generic types | TODO: ClassGetitem
-3. Data model > Data model > Special method names > Emulating generic types > The purpose of *\_\_class_getitem\_\_* | TODO: ClassGetitem
-3. Data model > Data model > Special method names > Emulating generic types > *\_\_class_getitem\_\_* versus *\_\_getitem\_\_* | TODO: ClassGetitem
+3. Data model > Data model > Special method names > Customizing instance and subclass checks | InstanceChecks
+3. Data model > Data model > Special method names > Emulating generic types | ClassGetitem
+3. Data model > Data model > Special method names > Emulating generic types > The purpose of *\_\_class_getitem\_\_* | ClassGetitem
+3. Data model > Data model > Special method names > Emulating generic types > *\_\_class_getitem\_\_* versus *\_\_getitem\_\_* | ClassGetitem
 3. Data model > Data model > Special method names > Emulating callable objects | Callables
 3. Data model > Data model > Special method names > Emulating container types | TODO: Containers
 3. Data model > Data model > Special method names > Emulating numeric types | TODO: Operators, NumericProtocol
