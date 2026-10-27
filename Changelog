@@ -306,3 +306,12 @@
   module's __dir__ and a metaclass __dir__.
 - __class__ assignment between Python classes with the same layout, with
   CPython's errors.
+- Builtin types are immutable; their __dict__ and dir() list the method,
+  getset and member descriptors (int.real, range.start, property.fget,
+  classmethod.__func__); class.__type_params__ defaults to ().
+- object.__dir__, object.__sizeof__, type.__dir__, type.__instancecheck__,
+  type.__subclasscheck__, type.__or__/__ror__; a class's own methods take
+  priority over its metaclass's non-data descriptors.
+- bytes/bytearray splitlines and maketrans, float/complex from_number,
+  __getnewargs__, range.__bool__, enumerate/slice/memoryview generics.
+- nonlocal cannot bind a type parameter.
