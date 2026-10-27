@@ -228,6 +228,15 @@ The `doctests` chapter runs CPython's doctest-based tests through a core-only
 runner in the harness, with library-dependent examples rewritten to use only
 the language. All 50 tests currently pass.
 
+`make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
+(fetched by `make tla-tools`; it needs a Java runtime) and replays every
+transition of the bounded models on the oracle and on spy. They cover
+generator and coroutine methods, try/with control flow and exception context,
+name resolution, and object finalization and cycle collection; `SpyGC.tla`
+also checks spy's own memory-management algorithm against the language
+model step for step. The [README](../tests/tla/README.md) states what these
+checks do and do not establish.
+
 For CPython coverage, run `make oracle`, `make cpython-discover`, and
 `make cpython-report`. The [CPython coverage report](testing/cpython.md) explains
 the complete file inventory, dynamic discovery, framework adaptations, and

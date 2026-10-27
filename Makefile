@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs standard check-standard oracle test-cpython test-cpython-doctests cpython-report cpython-discover test-cpython-unittest cpython-unittest-report test-templates test-binding test-spec tla-tools test-tla
 all: spy spyc libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -85,6 +85,22 @@ cpython-unittest-report: run-cython
 # Language reference tests: each must pass on the oracle, then on spy.
 test-spec: spy
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/spec_runner.py ./spy --strict
+
+# TLA+ tools 1.7.4 (TLC 2.19), pinned by checksum; TLC needs a Java runtime.
+TLA_JAR = $(OBJDIR)/tla/tla2tools.jar
+TLA_URL = https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+TLA_SHA256 = 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+JAVA ?= java
+
+tla-tools: $(TLA_JAR)
+$(TLA_JAR):
+	mkdir -p $(dir $@)
+	curl -fsSL -o $@.tmp $(TLA_URL)
+	echo "$(TLA_SHA256)  $@.tmp" | shasum -a 256 -c -
+	mv $@.tmp $@
+
+test-tla: spy $(TLA_JAR)
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(TLA_JAR)
 
 test-cpython: test-cpython-doctests test-cpython-unittest
 	$(CPYTHON) tests/cpython.py discover
