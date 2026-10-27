@@ -10043,6 +10043,32 @@ static int traceback_set_next(SPYContext *c, SPYValue *tb, SPYValue *next) {
 static int builtin_class(SPYContext *, SPYValue *);
 static int class_layout(SPYContext *, SPYValue *);
 static SPYValue *slots_base(SPYValue *);
+/* The next slot member a class itself adds, from entry *i on, or NULL. */
+static SPYValue *next_slot(SPYValue *cls, size_t *i) {
+    for (; *i < cls->as.map.len; (*i)++) {
+        SPYValue *value = cls->as.map.items[*i].value;
+        if (value && value->type == SPY_MEMBER_DESCRIPTOR && (value->as.member.flags & DESC_SLOT) && value->as.member.owner == cls)
+            return cls->as.map.items[(*i)++].key;
+    }
+    return NULL;
+}
+/* compatible_for_assignment: the classes adding slots are the same, or add
+ * the same slot names over the same layout (same_slots_added). */
+static int same_slot_layout(SPYValue *old, SPYValue *value) {
+    SPYValue *x = slots_base(old), *y = slots_base(value);
+    if (x == y) return 1;
+    if (!x || !y) return 0;
+    SPYValue *below_x = NULL, *below_y = NULL;
+    for (size_t i = 1; !below_x && x->as.map.mro && i < x->as.map.mro->as.seq.len; i++) below_x = slots_base(x->as.map.mro->as.seq.items[i]);
+    for (size_t i = 1; !below_y && y->as.map.mro && i < y->as.map.mro->as.seq.len; i++) below_y = slots_base(y->as.map.mro->as.seq.items[i]);
+    if (below_x != below_y) return 0;
+    size_t i = 0, j = 0;
+    for (;;) {
+        SPYValue *a = next_slot(x, &i), *b = next_slot(y, &j);
+        if (!a || !b) return !a && !b;
+        if (strcmp(a->as.string.data, b->as.string.data)) return 0;
+    }
+}
 /* object.__class__ = value, as object_set_class: both classes are Python
  * classes with the same instance layout. */
 static int set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
@@ -10051,7 +10077,7 @@ static int set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
     if (object->type != SPY_INSTANCE || builtin_class(c, old) || builtin_class(c, value)) {
         spy_error(c, "TypeError", "__class__ assignment only supported for mutable types or ModuleType subclasses"); return -1;
     }
-    if (class_layout(c, old) != class_layout(c, value) || slots_base(old) != slots_base(value) ||
+    if (class_layout(c, old) != class_layout(c, value) || !same_slot_layout(old, value) ||
         (old->as.map.flags & 8) != (value->as.map.flags & 8)) {
         errorf(c, "TypeError", "__class__ assignment: '%s' object layout differs from '%s'",
                name_local(value, "__name__")->as.string.data, name_local(old, "__name__")->as.string.data);
@@ -10161,7 +10187,8 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
     if (object->type == SPY_INSTANCE) {
         SPYValue *descriptor = class_lookup(object->as.map.parent, name);
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, value);
-        if (!instance_has_dict(object)) {
+        /* __class__ is object's to assign, dictionary or not. */
+        if (!instance_has_dict(object) && strcmp(name, "__class__")) {
             if (descriptor && !c->error_type[0]) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
             else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
             return -1;
@@ -13190,16 +13217,19 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
             free(buffer);
         } else mangled = spy_retain(item);
         if (!mangled) { status = -1; break; }
-        if (strcmp(mangled->as.string.data, "__qualname__") && name_local(namespace, mangled->as.string.data)) {
-            errorf(c, "ValueError", "'%s' in __slots__ conflicts with class variable", mangled->as.string.data);
-            spy_release(mangled); status = -1; break;
-        }
         status = sequence_append(c, list, mangled);
         spy_release(mangled);
     }
     int layout = builtin_layout(c, cls);
     if (!status && list->as.seq.len && (layout == SPY_INT || layout == SPY_BYTES)) {
         errorf(c, "TypeError", "arbitrary __slots__ not supported for subtype of '%s'", layout == SPY_INT ? "int" : "bytes"); status = -1;
+    }
+    /* Class variables conflict only once every name has been checked. */
+    for (size_t i = 0; !status && i < list->as.seq.len; i++) {
+        const char *name = list->as.seq.items[i]->as.string.data;
+        if (strcmp(name, "__qualname__") && name_local(namespace, name)) {
+            errorf(c, "ValueError", "'%s' in __slots__ conflicts with class variable", name); status = -1;
+        }
     }
     if (!status) status = sort_list(c, list, NULL, 0);
     int weakrefs_allowed = layout != SPY_INT && layout != SPY_BYTES && layout != SPY_TUPLE;

@@ -116,7 +116,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > Customizing attribute access > Customizing module attribute access | ModuleObjects
 3. Data model > Data model > Special method names > Customizing attribute access > Implementing Descriptors | Attributes, Descriptors
 3. Data model > Data model > Special method names > Customizing attribute access > Invoking Descriptors | Descriptors
-3. Data model > Data model > Special method names > Customizing attribute access > \_\_slots\_\_ | TODO: Slots
+3. Data model > Data model > Special method names > Customizing attribute access > \_\_slots\_\_ | Slots
 3. Data model > Data model > Special method names > Customizing class creation | TODO: ClassCreation, Metaclasses
 3. Data model > Data model > Special method names > Customizing class creation > Metaclasses | TODO: Metaclasses
 3. Data model > Data model > Special method names > Customizing class creation > Resolving MRO entries | TODO: Metaclasses

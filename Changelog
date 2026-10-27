@@ -411,6 +411,9 @@
   metaclass. TLA+ model of special method lookup.
 - A data descriptor without __get__ yields to the instance dictionary on
   reads. TLA+ model of descriptor invocation.
+- __class__ can be assigned on instances without a __dict__, and between
+  classes that add the same slots over the same layout; __slots__ checks
+  every name before class variable conflicts. TLA+ model of __slots__.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

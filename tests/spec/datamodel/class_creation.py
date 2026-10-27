@@ -94,3 +94,23 @@ assert_eq(outer().__qualname__, "outer.<locals>.Inner")
 assert_raises(TypeError, type, 1, 2, message="type() takes 1 or 3 arguments")
 e = assert_raises(TypeError, type, "X", (), {"__classcell__": 1})
 assert_eq(str(e), "__classcell__ must be a nonlocal cell, not <class 'int'>")
+
+# __class__ can be assigned between classes adding the same slots, though
+# instances have no __dict__; a __dict__ slot over a base that has one is
+# refused before any class variable conflict.
+class SameA:
+    __slots__ = ("x",)
+class SameB:
+    __slots__ = ("x",)
+class Other:
+    __slots__ = ("y",)
+same = SameA()
+same.__class__ = SameB
+assert_true(type(same) is SameB)
+assert_raises(TypeError, setattr, same, "__class__", Other)
+class HasDict:
+    pass
+try:
+    type("Clash", (HasDict,), {"__slots__": ("a", "__dict__"), "a": 0})
+except TypeError as error:
+    assert_eq(str(error), "__dict__ slot disallowed: we already got one")
