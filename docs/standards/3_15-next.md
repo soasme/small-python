@@ -6115,8 +6115,6 @@ For a mutable sequence *s*:
 
 ## 26 Mappings and Sets
 
-### 26.0 Hashed collections
-
 `dict`, `frozendict`, `set`, and `frozenset` store their keys (elements) by
 hash. Two keys *a* and *b* are *the same key* when Hash(*a*) = Hash(*b*) and
 either *a* is *b* or ? RichCompare(*a*, *b*, `==`) is true; equal numbers of
@@ -6217,7 +6215,7 @@ unmodified set.
 #### 26.3.1 set ( [ *iterable* ] ) and frozenset ( [ *iterable* ] )
 
 Return a new set of the elements of the iterable, added in order by SetAdd.
-SetAdd(*s*, *x*) adds *x* unless the same element (26.0) is present, in which
+SetAdd(*s*, *x*) adds *x* unless the same element (see the introduction to this clause) is present, in which
 case the present element is kept. Neither takes keywords ("set() takes no
 keyword arguments") and each takes at most one argument ("set expected at most
 1 argument, got *n*"). Whether `frozenset()` or `frozenset(f)` for an exact
