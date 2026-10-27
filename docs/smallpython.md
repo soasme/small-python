@@ -235,7 +235,8 @@ generator and coroutine methods, try/with control flow and exception context,
 name resolution, integer arithmetic, argument binding, unpacking, method
 resolution order, operator dispatch, attribute access, pattern matching,
 evaluation order, class creation, `yield from`, async generators,
-`except*`, and object finalization and cycle collection; `SpyGC.tla`
+`except*`, the iteration protocol, `super()`, dict order, and object
+finalization and cycle collection; `SpyGC.tla`
 also checks spy's own memory-management algorithm against the language
 model step for step. The [README](../tests/tla/README.md) states what these
 checks do and do not establish.

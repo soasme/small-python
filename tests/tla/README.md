@@ -20,6 +20,9 @@ and tied to real implementations by replaying them.
 | `YieldFrom.tla` | delegation with `yield from`: sent values, thrown exceptions, and `close()` reaching the subgenerator, and its return value | yes |
 | `AsyncGenerators.tla` | asend/athrow/aclose on async generators, including ignored GeneratorExit and a closed generator | yes |
 | `ExceptStar.tla` | `except*` clauses splitting exception groups, re-raising, raising new exceptions, and the shape of what escapes | yes |
+| `Iteration.tla` | `for` loops with `break`, `continue`, and `else` over the iterator and sequence protocols, and objects that are not iterable | yes |
+| `Super.tla` | cooperative `super()` calls in a diamond hierarchy | yes |
+| `Dicts.tla` | dict insertion order under setting, updating, deleting, popping, and re-inserting keys | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 

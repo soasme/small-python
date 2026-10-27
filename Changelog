@@ -361,7 +361,7 @@
 - TLA+ models of integer arithmetic, argument binding, unpacking, method
   resolution order, operator dispatch, attribute access, pattern matching,
   evaluation order, class creation, yield from delegation, async
-  generators, and except*.
+  generators, except*, the iteration protocol, super(), and dict order.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.
