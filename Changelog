@@ -452,6 +452,9 @@
   a.b in sys.lazy_modules until looked up; __lazy_modules__ makes the
   module-level imports it lists lazy. TLA+ models of imports and lazy
   imports.
+- A relative import whose globals lack __name__ raises KeyError, and a
+  non-string __name__ or __package__ raises TypeError with CPython's
+  messages. TLA+ model of future statements.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

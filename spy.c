@@ -12563,15 +12563,15 @@ static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals,
         return copy_text(c, suffix, strlen(suffix));
     }
     if (level < 0) { spy_error(c, "ValueError", "level must be >= 0"); return NULL; }
-    if (!globals || globals->type != SPY_DICT) { spy_error(c, "TypeError", "globals must be a dict"); return NULL; }
+    if (!globals) { spy_error(c, "KeyError", "'__name__' not in globals"); return NULL; }
+    if (!(globals = dictionary_value(c, globals))) { spy_error(c, "TypeError", "globals must be a dict or a frozendict"); return NULL; }
     SPYValue *package = name_local(globals, "__package__");
     int fallback = !package || package->type == SPY_NONE;
     if (fallback) {
         package = name_local(globals, "__name__");
-        if (!package || package->type != SPY_STRING) {
-            spy_error(c, "ImportError", "attempted relative import with no known parent package"); return NULL;
-        }
-    } else if (package->type != SPY_STRING) { spy_error(c, "TypeError", "__package__ must be a string"); return NULL; }
+        if (!package) { spy_error(c, "KeyError", "'__name__' not in globals"); return NULL; }
+        if (package->type != SPY_STRING) { spy_error(c, "TypeError", "__name__ must be a string"); return NULL; }
+    } else if (package->type != SPY_STRING) { spy_error(c, "TypeError", "package must be a string"); return NULL; }
     size_t len = package->as.string.len;
     if (fallback && !name_local(globals, "__path__")) {
         const char *dot = strrchr(package->as.string.data, '.');

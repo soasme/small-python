@@ -73,6 +73,7 @@ and tied to real implementations by replaying them.
 | `CompileModes.tla` | `compile()` in exec, eval, and single modes: what each accepts, its result, values passed to `sys.displayhook`, and bad modes | yes |
 | `Imports.tla` | the import system over fixture packages (`Imports.files`): submodules and parents, run-once caching, `sys.modules` entries that are None or replaced, failed and circular imports, regular and namespace packages, module attributes, relative imports, `from ... import *`, and import errors | yes |
 | `LazyImports.tla` | lazy imports (PEP 810): placeholders, reification on first use, lazy submodules in `sys.lazy_modules`, where `lazy` is allowed, and `__lazy_modules__` | yes |
+| `Future.tla` | future statements: placement, known and historical features, stringized annotations, inheritance by `exec()` and `compile()`, and relative imports of `__future__` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -173,9 +174,11 @@ statement) in an except handler, a finally block, or `__exit__` lost its
 `__context__` once it left the handler; interactive input printed values
 itself instead of calling `sys.displayhook`; a None in `sys.modules` was
 imported as the module instead of halting the import, and a namespace
-package had no `__file__`; and `lazy import a.b` imported `a.b` when `a`
+package had no `__file__`; `lazy import a.b` imported `a.b` when `a`
 was first used (rather than when `a.b` was looked up), and
-`__lazy_modules__` was ignored.
+`__lazy_modules__` was ignored; and a relative import from globals without
+`__name__` raised ImportError instead of KeyError, with other messages for
+a non-string `__name__` or `__package__`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

@@ -253,7 +253,7 @@ Reference chapter contents | - table of contents
 7. Simple statements > Simple statements > The `import` statement | Imports
 7. Simple statements > Simple statements > The `import` statement > Lazy imports | LazyImports
 7. Simple statements > Simple statements > The `import` statement > Lazy imports > Compatibility via `__lazy_modules__` | LazyImports
-7. Simple statements > Simple statements > The `import` statement > Future statements | TODO: Future
+7. Simple statements > Simple statements > The `import` statement > Future statements | Future
 7. Simple statements > Simple statements > The `global` statement | Scopes, ScopeErrors
 7. Simple statements > Simple statements > The `nonlocal` statement | Scopes, ScopeErrors
 7. Simple statements > Simple statements > The `type` statement | TypeAliases

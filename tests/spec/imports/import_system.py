@@ -44,6 +44,13 @@ assert_syntax_error("from x import (*)\n")
 assert_compiles("from . import (a, b,)\n")
 assert_compiles("from .... import a\n")
 assert_raises(ImportError, run, "from . import x\n", {"__name__": "__main__"})
+# A relative import resolves its package from __package__, else __name__.
+e = assert_raises(KeyError, __import__, "x", {}, None, (), 1)
+assert_eq(e.args, ("'__name__' not in globals",))
+e = assert_raises(TypeError, __import__, "x", {"__name__": 5}, None, (), 1)
+assert_eq(str(e), "__name__ must be a string")
+e = assert_raises(TypeError, __import__, "x", {"__package__": 5}, None, (), 1)
+assert_eq(str(e), "package must be a string")
 
 # A module that raises during import is not left in a usable state.
 assert_raises(ValueError, run, "import spec_raises\n")
