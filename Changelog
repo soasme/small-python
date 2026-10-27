@@ -360,7 +360,8 @@
   SpyGC.tla checks spy's memory manager against the language model.
 - TLA+ models of integer arithmetic, argument binding, unpacking, method
   resolution order, operator dispatch, attribute access, pattern matching,
-  evaluation order, and class creation.
+  evaluation order, class creation, yield from delegation, async
+  generators, and except*.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

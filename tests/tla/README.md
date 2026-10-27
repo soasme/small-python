@@ -17,6 +17,9 @@ and tied to real implementations by replaying them.
 | `Match.tla` | `match` statements of two cases over literal, singleton, capture, wildcard, sequence, star, mapping, class, or, and as patterns | yes |
 | `Evaluation.tla` | evaluation order of operands, short-circuiting, chained comparisons, call arguments, displays, and assignment targets | yes |
 | `ClassCreation.tla` | the order of `__prepare__`, the class body, metaclass `__new__`/`__init__`, `__set_name__`, `__init_subclass__`, and class decorators | yes |
+| `YieldFrom.tla` | delegation with `yield from`: sent values, thrown exceptions, and `close()` reaching the subgenerator, and its return value | yes |
+| `AsyncGenerators.tla` | asend/athrow/aclose on async generators, including ignored GeneratorExit and a closed generator | yes |
+| `ExceptStar.tla` | `except*` clauses splitting exception groups, re-raising, raising new exceptions, and the shape of what escapes | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -69,4 +72,8 @@ freeing an object ran after objects that were already waiting, and `str`
 length, slicing, and `find()` rescanned the whole string on every call
 (which made the replays themselves time out). They also found a mistake in a
 first draft of `Generators.tla`: CPython raises RuntimeError when throwing
-into a finished coroutine, which the oracle replay caught.
+into a finished coroutine, which the oracle replay caught. Oracle replays
+likewise corrected `Evaluation.tla` (`*args` in a call are evaluated before
+keyword arguments written earlier) and `AsyncGenerators.tla` (after
+`aclose()`, `athrow()` and `aclose()` raise StopAsyncIteration without
+running the body).
