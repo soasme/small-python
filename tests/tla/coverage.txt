@@ -229,9 +229,9 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Comparisons > Membership test operations | Comparisons
 6. Expressions > Expressions > Comparisons > Identity comparisons | Comparisons
 6. Expressions > Expressions > Boolean operations | Evaluation, Truth
-6. Expressions > Expressions > Assignment expressions | TODO: AssignExpr
+6. Expressions > Expressions > Assignment expressions | FunctionDefs
 6. Expressions > Expressions > Conditional expressions | Evaluation
-6. Expressions > Expressions > Lambdas | TODO: Lambdas
+6. Expressions > Expressions > Lambdas | FunctionDefs
 6. Expressions > Expressions > Expression lists | Unpacking, Displays
 6. Expressions > Expressions > Expression lists > Iterable unpacking | Unpacking, Displays
 6. Expressions > Expressions > Evaluation order | Evaluation
@@ -283,7 +283,7 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > The `match` statement > Patterns > Sequence Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > Mapping Patterns | Match
 8. Compound statements > Compound statements > The `match` statement > Patterns > Class Patterns | Match
-8. Compound statements > Compound statements > Function definitions | TODO: FunctionDefs, Calls
+8. Compound statements > Compound statements > Function definitions | FunctionDefs, Calls
 8. Compound statements > Compound statements > Class definitions | ClassCreation, MRO
 8. Compound statements > Compound statements > Class definitions > Multiple inheritance | MRO, Super
 8. Compound statements > Compound statements > Coroutines | = sections

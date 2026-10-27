@@ -83,6 +83,7 @@ and tied to real implementations by replaying them.
 | `SimpleStatements.tla` | chained and unpacking assignments to names, attributes, and items, augmented assignment, and del, with their evaluation order; assignment, annotation, assert, del, and pass cases and the targets the grammar rejects | yes |
 | `Conditionals.tla` | if/elif/else chains of every outcome and while loops with break, continue, and else, with the conditions each evaluates; break and continue placement, walrus conditions, and conditional expressions | yes |
 | `MatchGuards.tla` | match statements of up to two guarded or unguarded case blocks over literal, capture, value, and group patterns: evaluation order, bindings left by failed guards, and unreachable irrefutable cases | yes |
+| `FunctionDefs.tla` | the evaluation order of decorators, defaults, bases, and bodies for every def, lambda, and class of up to three decorators and two defaults or bases; parameter list rules, docstrings and names, lambdas, and assignment expressions | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
