@@ -3621,3 +3621,210 @@ Static Semantics: a type parameter with a default may not be followed by one
 without a default ("non-default type parameter '*n*' follows default type
 parameter"); a `TypeVarTuple` default must be starred; and the duplicate
 error of 8.3.1.
+
+## 17 Modules and Imports
+
+### 17.1 Modules
+
+A module is the unit of source text that the host supplies by name (Annex B)
+or that a program passes to `exec`. Evaluating a module's source in a module
+object's namespace is *executing* the module. A module's source is parsed with
+the start rule `file` (17.6.1), analysed (clause 8), and evaluated as a block
+whose scope is a module scope and whose globals and locals are the module's
+`__dict__`.
+
+### 17.2 Module objects
+
+A module object (%ModuleType%) has a namespace, its `__dict__`. Attribute
+access on a module uses GenericGetAttr and GenericSetAttr (7.3) on that
+namespace, with these additions:
+
+1. If GenericGetAttr fails with `AttributeError` and the namespace has a
+   `__getattr__` entry, the result is ? Call(that entry, «*name*»).
+2. Otherwise the error is an `AttributeError` exception ("module '*n*' has no
+   attribute '*name*'"), where *n* is the module's `__name__`; if the module is
+   being initialized (17.4.2), the message is ("partially initialized module
+   '*n*' has no attribute '*name*' (most likely due to a circular import)").
+3. `dir(m)` calls the namespace's `__dir__` entry if present; otherwise it
+   returns the sorted keys of the namespace.
+
+`%ModuleType%(name, doc=None)` creates a module whose namespace holds
+`__name__` (a `str`, else a `TypeError`: "module() argument 'name' must be str,
+not *tname*"), `__doc__`, `__package__` `None`, `__loader__` `None`, and
+`__spec__` `None`. A module imported by the import system additionally has
+`__file__` when the host reports a location, `__path__` (a list) when it is a
+package, `__package__` (the package name: the module's own name for a package,
+its parent's otherwise), and `__spec__` and `__loader__` as the host supplies
+them (`None` when it supplies none).
+
+`repr(m)` is `<module 'name'>`, followed by ` from 'file'` inside the brackets
+when the module has a `__file__`, and is `<module 'name' (namespace) from
+['path', …]>` for a namespace package. A module's `__annotations__` and
+`__annotate__` are attributes computed as 16.6.2 specifies.
+
+Assigning `__class__` of a module object to a subclass of %ModuleType% is
+allowed (10.1.3).
+
+### 17.3 The module cache
+
+The *module cache* (%ModuleCache%) is a `dict` mapping fully qualified module
+names to module objects. It is shared by all code run by one implementation
+instance. Hosts expose it to programs, for example as `sys.modules` (Annex C).
+A program may read and modify it; the import system consults it as 17.4.2
+specifies. Mapping a name to `None` makes the import of that name fail.
+
+### 17.4 Importing
+
+#### 17.4.1 ResolveName ( *name*, *package*, *level* )
+
+1. If *level* is 0, return *name*.
+2. If *package* is `None` or `""` or absent, raise an `ImportError` exception
+   ("attempted relative import with no known parent package").
+3. Let *parts* be *package* split on `"."`. If *level* is greater than the
+   number of *parts*, raise an `ImportError` exception ("attempted relative
+   import beyond top-level package").
+4. Let *base* be the first (number of *parts* − *level* + 1) parts joined by `"."`.
+5. If *name* is not empty, return *base* + `"."` + *name*; otherwise return
+   *base*.
+
+The *package* of the running module is its globals' `__package__` if that is a
+`str`, otherwise derived from `__spec__.parent`, otherwise from `__name__` (the
+name itself if the globals have `__path__`, its parent otherwise).
+
+#### 17.4.2 ImportModule ( *name* )
+
+ImportModule takes a fully qualified name and returns a module or a raise
+completion.
+
+1. If the module cache has *name*:
+   1. Let *m* be the cached value. If *m* is `None`, raise a
+      `ModuleNotFoundError` exception ("import of *name* halted; None in
+      sys.modules").
+   2. Return *m*.
+2. If *name* contains a dot, let *parent* be the part before the last dot and
+   *child* the rest; let *pm* be ? ImportModule(*parent*); if the module cache
+   now has *name*, return its value; let *path* be *pm*.`__path__`, and if *pm*
+   has none, raise a `ModuleNotFoundError` exception ("No module named
+   '*name*'; '*parent*' is not a package").
+3. Let *spec* be HostFindModule(*name*, *path*) (Annex B). If it is **absent**,
+   raise a `ModuleNotFoundError` exception ("No module named '*name*'") whose
+   `name` attribute is *name*.
+4. Let *m* be a new module object named *name*, with the attributes the host
+   supplies in *spec* (17.2).
+5. Set the module cache entry *name* to *m*, and mark *m* as initializing.
+6. Let *r* be HostExecuteModule(*spec*, *m*): for source modules, executing the
+   source (17.1) in *m*.`__dict__`.
+7. Unmark *m*. If *r* is a raise completion, remove *name* from the module cache
+   (if it still maps to *m*) and return *r*.
+8. Let *m* be the module cache's current value for *name* (a module may replace
+   itself in the cache).
+9. If there was a parent, set the attribute *child* of the parent module to *m*.
+10. Return *m*.
+
+#### 17.4.3 The `import` statement
+
+`import a.b.c` (without `as`):
+
+1. Let *m* be ? ImportModule(`"a.b.c"`) (which imports `a` and `a.b` first).
+2. Perform StoreName(`a`, ? ImportModule(`"a"`) as cached).
+
+`import a.b.c as n`: import `a.b.c`, then obtain the module by attribute access
+from `a` through `b` and `c` (falling back to the module cache for a missing
+attribute), and perform StoreName(`n`, it).
+
+`from` *relative* `import` *x* `as` *n*, … :
+
+1. Let *full* be ? ResolveName(the module name, *package*, the number of
+   leading dots).
+2. Let *m* be ? ImportModule(*full*).
+3. For each name *x*, in order:
+   1. Let *v* be GetAttribute(*m*, *x*).
+   2. If that raises `AttributeError`, try ? ImportModule(*full* + `"."` + *x*)
+      (only if *m* is a package) and take its result; if that also fails with
+      `ModuleNotFoundError` for that submodule, raise an `ImportError` exception
+      ("cannot import name '*x*' from '*full*' (*location*)", or a message
+      beginning with "cannot import name '*x*' from" that names a partially
+      initialized module and suggests a circular import, when *m* is
+      initializing), whose `name` attribute is *full*.
+   3. Perform StoreName(*n* or *x*, *v*).
+
+`from m import *`, permitted only at module level ("import * only allowed at
+module level"):
+
+1. Let *m* be the module as above.
+2. If *m* has `__all__`, iterate it; each element *k* must be a `str` ("Item in
+   *full*.`__all__` must be str, not *tname*(*k*)"); bind each *k* to
+   ? GetAttribute(*m*, *k*).
+3. Otherwise bind every key of *m*.`__dict__` that does not begin with `_`.
+
+#### 17.4.4 The `__import__` function
+
+`__import__(name, globals=None, locals=None, fromlist=(), level=0)` (19.3)
+performs the import above and returns: for an empty *fromlist*, the top-level
+package of the imported name (the module named by the part of *name* before
+its first dot, resolved relative to *globals*' package); otherwise the module
+named by *name*, after importing each submodule listed in *fromlist* that is not
+already an attribute. Its errors: "module name must be a string"
+(`TypeError`), "Empty module name" (`ValueError`, for `""` with *level* 0),
+"level must be >= 0" (`ValueError`). The `import` statement calls the
+`__import__` found in the builtins of the running frame; if it is the original
+built-in function, the implementation may use ImportModule directly.
+
+### 17.5 Lazy imports
+
+A module-level `lazy import` or `lazy from … import` statement does not import
+anything. It binds each name to a new *lazy import object* (%LazyImportType%,
+29.8) that records the module name, the name to import (for `from`), and the
+importing globals. The module is not looked up, cached, or executed.
+
+When LoadGlobal or LoadFromLocals of a module scope finds a lazy import object
+bound in the globals, it *reifies* it: it performs the import the statement
+would have performed, rebinds the global name to the result, and returns it. A
+failing import raises its exception at the point of use, and the name stays
+bound to the lazy import object. Reading the lazy import object other than by
+name lookup — through `globals()`, `__dict__`, or `vars()` — returns the lazy
+import object itself.
+
+`lazy import a.b` binds `a`; on reification only `a` is imported, and `a.b` is
+imported when the attribute `b` is first looked up on it. A host records the
+pending names in %LazyModules% (exposed, for example, as `sys.lazy_modules`).
+
+A module whose globals bind `__lazy_modules__` to a container of absolute module
+names when an ordinary import statement executes makes that statement lazy
+when its module (for `from`, the module after `from`) is in the container,
+except inside `try` statements, functions, and classes.
+
+Static Semantics: Early Errors. "lazy import not allowed inside functions"
+(and "lazy from ... import not allowed inside functions"), "… inside classes",
+"… inside try/except blocks", "lazy from ... import * is not allowed", "lazy
+from `__future__` import is not allowed".
+
+### 17.6 Top-level components
+
+#### 17.6.1 Complete modules
+
+```text
+file: [statements] ENDMARKER
+```
+
+A module, a script run by the host, and the source passed to `exec` or to
+`compile` with mode `'exec'` are parsed with `file`.
+
+#### 17.6.2 Interactive input
+
+```text
+interactive: statement_newline
+```
+
+Interactive input (mode `'single'`) is parsed one statement at a time; the value
+of each expression statement that is not `None` is passed to HostDisplay
+(Annex B), and is bound to `_` in the built-in namespace by the default display
+hook.
+
+#### 17.6.3 Expression input
+
+```text
+eval: expressions NEWLINE* ENDMARKER
+```
+
+`eval` and `compile` with mode `'eval'` parse an expression list.
