@@ -112,3 +112,34 @@ class J(int): pass
 i = I(5)
 i.__class__ = J
 assert_eq((type(i), i + 1), (J, 6))
+
+# A function's __code__ is writable: calls run the new code with the same
+# defaults, given as many free variables as the function has cells.
+def double(x=3):
+    return x * 2
+double.__code__ = (lambda x: x + 1).__code__
+assert_eq((double(), double(5), double.__name__), (4, 6, "double"))
+def closure():
+    v = 1
+    def inner():
+        return v
+    return inner
+inner = closure()
+assert_raises(ValueError, setattr, inner, "__code__", (lambda: 0).__code__)
+assert_raises(TypeError, setattr, inner, "__code__", 1)
+# __builtins__ is the read-only builtins namespace the function uses.
+assert_true(double.__builtins__["len"] is len)
+namespace = {"__builtins__": {"marker": 1}}
+exec("def g(): pass", namespace)
+assert_eq(namespace["g"].__builtins__, {"marker": 1})
+assert_raises(AttributeError, setattr, double, "__builtins__", {})
+
+# Built-in methods: __self__ is the object; __module__ is None for methods
+# and absent from method-wrappers and descriptors; there is no __func__.
+items = []
+assert_true(items.append.__self__ is items)
+assert_eq((items.append.__module__, len.__module__, "".join.__module__), (None, "builtins", None))
+for value, absent in [(items.append, "__func__"), (items.__len__, "__func__"), (items.__len__, "__module__"),
+                      (list.append, "__module__"), (object.__new__, "__objclass__")]:
+    assert_false(hasattr(value, absent))
+assert_true(items.__len__.__objclass__ is list)

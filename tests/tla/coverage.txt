@@ -77,21 +77,21 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > The standard type hierarchy > Mappings > Dictionaries | Dicts
 3. Data model > Data model > The standard type hierarchy > Mappings > Frozen dictionaries | FrozenDicts
 3. Data model > Data model > The standard type hierarchy > Callable types | = sections
-3. Data model > Data model > The standard type hierarchy > Callable types > User-defined functions | TODO: FunctionObjects
-3. Data model > Data model > The standard type hierarchy > Callable types > Special read-only attributes | TODO: FunctionObjects
-3. Data model > Data model > The standard type hierarchy > Callable types > Special writable attributes | TODO: FunctionObjects
-3. Data model > Data model > The standard type hierarchy > Callable types > Instance methods | TODO: Methods
+3. Data model > Data model > The standard type hierarchy > Callable types > User-defined functions | FunctionObjects
+3. Data model > Data model > The standard type hierarchy > Callable types > Special read-only attributes | FunctionObjects
+3. Data model > Data model > The standard type hierarchy > Callable types > Special writable attributes | FunctionObjects
+3. Data model > Data model > The standard type hierarchy > Callable types > Instance methods | Methods
 3. Data model > Data model > The standard type hierarchy > Callable types > Generator functions | Generators
 3. Data model > Data model > The standard type hierarchy > Callable types > Coroutine functions | TODO: Generators, Awaitables
 3. Data model > Data model > The standard type hierarchy > Callable types > Asynchronous generator functions | AsyncGenerators
-3. Data model > Data model > The standard type hierarchy > Callable types > Built-in functions | TODO: Methods
-3. Data model > Data model > The standard type hierarchy > Callable types > Built-in methods | TODO: Methods
-3. Data model > Data model > The standard type hierarchy > Callable types > Classes | TODO: Callables
-3. Data model > Data model > The standard type hierarchy > Callable types > Class Instances | TODO: Callables
+3. Data model > Data model > The standard type hierarchy > Callable types > Built-in functions | Methods
+3. Data model > Data model > The standard type hierarchy > Callable types > Built-in methods | Methods
+3. Data model > Data model > The standard type hierarchy > Callable types > Classes | Callables
+3. Data model > Data model > The standard type hierarchy > Callable types > Class Instances | Callables
 3. Data model > Data model > The standard type hierarchy > Modules | = sections
 3. Data model > Data model > The standard type hierarchy > Modules > Import-related attributes on module objects | TODO: Imports
-3. Data model > Data model > The standard type hierarchy > Modules > Other writable attributes on module objects | TODO: ModuleObjects
-3. Data model > Data model > The standard type hierarchy > Modules > Module dictionaries | TODO: ModuleObjects
+3. Data model > Data model > The standard type hierarchy > Modules > Other writable attributes on module objects | ModuleObjects
+3. Data model > Data model > The standard type hierarchy > Modules > Module dictionaries | ModuleObjects
 3. Data model > Data model > The standard type hierarchy > Custom classes | = sections
 3. Data model > Data model > The standard type hierarchy > Custom classes > Special attributes | TODO: ClassObjects
 3. Data model > Data model > The standard type hierarchy > Custom classes > Special methods | TODO: SpecialLookup
@@ -113,7 +113,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names | = sections
 3. Data model > Data model > Special method names > Basic customization | TODO: BasicCustomization
 3. Data model > Data model > Special method names > Customizing attribute access | TODO: Attributes, Descriptors
-3. Data model > Data model > Special method names > Customizing attribute access > Customizing module attribute access | TODO: ModuleObjects
+3. Data model > Data model > Special method names > Customizing attribute access > Customizing module attribute access | ModuleObjects
 3. Data model > Data model > Special method names > Customizing attribute access > Implementing Descriptors | TODO: Attributes, Descriptors
 3. Data model > Data model > Special method names > Customizing attribute access > Invoking Descriptors | TODO: Descriptors
 3. Data model > Data model > Special method names > Customizing attribute access > \_\_slots\_\_ | TODO: Slots
@@ -129,7 +129,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Special method names > Emulating generic types | TODO: ClassGetitem
 3. Data model > Data model > Special method names > Emulating generic types > The purpose of *\_\_class_getitem\_\_* | TODO: ClassGetitem
 3. Data model > Data model > Special method names > Emulating generic types > *\_\_class_getitem\_\_* versus *\_\_getitem\_\_* | TODO: ClassGetitem
-3. Data model > Data model > Special method names > Emulating callable objects | TODO: Callables
+3. Data model > Data model > Special method names > Emulating callable objects | Callables
 3. Data model > Data model > Special method names > Emulating container types | TODO: Containers
 3. Data model > Data model > Special method names > Emulating numeric types | TODO: Operators, NumericProtocol
 3. Data model > Data model > Special method names > With Statement Context Managers | TODO: With
@@ -172,7 +172,7 @@ Reference chapter contents | - table of contents
 5. Import system > The import system > Loading > Submodules | TODO: Imports
 5. Import system > The import system > Loading > Module specs | - Host profile: module discovery metadata (SLP315-HOST)
 5. Import system > The import system > Loading > \_\_path\_\_ attributes on modules | TODO: Imports
-5. Import system > The import system > Loading > Module reprs | TODO: ModuleObjects
+5. Import system > The import system > Loading > Module reprs | ModuleObjects
 5. Import system > The import system > Loading > Cached bytecode invalidation | - Host profile: module discovery service; bytecode is not prescribed (SLP315-NORM)
 5. Import system > The import system > The Path Based Finder | - Host profile: module discovery service (SLP315-HOST)
 5. Import system > The import system > The Path Based Finder > Path entry finders | - Host profile: module discovery service (SLP315-HOST)
@@ -350,10 +350,10 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Generic Alias Type > Special Attributes of `GenericAlias` objects | TODO: GenericAlias
 11. Built-in types > Built-in Types > Type Annotation Types --- [Generic Alias](#types-genericalias), [Union](#types-union) > Union Type | TODO: UnionType
 11. Built-in types > Built-in Types > Other Built-in Types | = sections
-11. Built-in types > Built-in Types > Other Built-in Types > Modules | TODO: ModuleObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Modules | ModuleObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Classes and Class Instances | TODO: ClassObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Functions | TODO: FunctionObjects
-11. Built-in types > Built-in Types > Other Built-in Types > Methods | TODO: Methods
+11. Built-in types > Built-in Types > Other Built-in Types > Functions | FunctionObjects
+11. Built-in types > Built-in Types > Other Built-in Types > Methods | Methods
 11. Built-in types > Built-in Types > Other Built-in Types > Code Objects | TODO: CodeObjects
 11. Built-in types > Built-in Types > Other Built-in Types > Type Objects | TODO: ClassObjects
 11. Built-in types > Built-in Types > Other Built-in Types > The Null Object | Singletons

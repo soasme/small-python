@@ -39,6 +39,10 @@ and tied to real implementations by replaying them.
 | `Lists.tla` | item and slice assignment and deletion, `+=`, `*=`, and the mutable sequence methods, over list and bytearray | yes |
 | `Sets.tla` | set and frozenset operators, comparisons, mutation, hashing, and equal numbers as one element | yes |
 | `FrozenDicts.tla` | `frozendict` construction, order, `|` and `|=`, equality with dict, hashing, and the absent mutating methods | yes |
+| `FunctionObjects.tla` | function special attributes: read-only ones, type-checked writes, new defaults and code taking effect, and closures | yes |
+| `Methods.tla` | method binding (instance, classmethod, staticmethod, instance attribute), method attributes, and built-in functions and methods | yes |
+| `Callables.tla` | calling classes (`__new__`, `__init__`, extra arguments) and instances (`__call__` looked up on the type) | yes |
+| `ModuleObjects.tla` | module attributes and namespace, read-only `__dict__`, annotations, and attributes of modules made by the module type | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -107,7 +111,10 @@ lexer runs only as far as the parser reads), accepted a backslash
 continuation at the end of the source, and bound a name such as `Ｔrue`
 (full-width T) that normalizes to `True`, which CPython cannot compile;
 f-string format specifications nested more than two deep were accepted,
-and a t-string interpolation's expression text kept its comments.
+a t-string interpolation's expression text kept its comments; assigning
+a function's `__code__` and reading its `__builtins__` were missing; bound
+built-in methods had `__func__` and the wrong `__module__`; a module's
+`__dict__` could be replaced and it had no `__annotate__`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

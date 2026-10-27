@@ -8358,8 +8358,17 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 puts_buffer(&out, text->as.string.data) ? NULL : spy_string(c, out.data, out.len);
             free(out.data); return result;
         }
-        if (v->type == SPY_NATIVE && owner && !strcmp(name, "__objclass__")) return spy_retain(owner);
+        if (v->type == SPY_NATIVE && (!strcmp(name, "__module__") || !strcmp(name, "__objclass__"))) {
+            /* Descriptors have __objclass__ and no __module__; functions bound
+             * to a class (object.__new__) have __module__ None and no __objclass__. */
+            int descriptor = native_kind(v) != NATIVE_FUNCTION;
+            if (descriptor && !strcmp(name, "__objclass__") && owner) return spy_retain(owner);
+            if (!descriptor && owner && !strcmp(name, "__module__")) return spy_none(c);
+            if (descriptor || owner)
+                return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
+        }
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__self__")) return spy_retain(v->as.bound.self);
+        if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__module__")) return spy_none(c);
         /* A builtin function is bound to its class (a static method such as
          * object.__new__) or to the builtins module; descriptors are unbound. */
         if (v->type == SPY_NATIVE && !strcmp(name, "__self__") && native_kind(v) == NATIVE_FUNCTION)
@@ -8367,6 +8376,17 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     }
     if (v->type == SPY_FUNCTION) {
         if (!strcmp(name, "__globals__")) return spy_retain(namespace_map(module_env(c, v->as.function.env)));
+        if (!strcmp(name, "__builtins__")) {
+            /* The globals' __builtins__ (a module's __dict__ for a module), else builtins'. */
+            SPYValue *globals = namespace_map(module_env(c, v->as.function.env));
+            SPYValue *builtins = globals ? name_local(globals, "__builtins__") : NULL;
+            if (builtins && builtins->type == SPY_DICT) return spy_retain(builtins);
+            if (builtins && builtins->type == SPY_MODULE) return attribute(c, builtins, "__dict__");
+            SPYValue *module = load_source_module(c, "builtins");
+            SPYValue *dict = module ? attribute(c, module, "__dict__") : NULL;
+            spy_release(module);
+            return dict;
+        }
         if (!strcmp(name, "__code__")) return definition_code(c, v->as.function.unit, v->as.function.def);
         if (!strcmp(name, "__closure__")) return function_closure(c, v);
         if (!strcmp(name, "__dict__")) {
@@ -8396,6 +8416,12 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     }
     if (v->type == SPY_METHOD) {
         if (!strcmp(name, "__self__")) return spy_retain(v->as.method.self);
+        /* A builtin method has no __func__, and __module__ None; a
+         * method-wrapper has neither. */
+        if (v->as.method.function->type == SPY_NATIVE && (!strcmp(name, "__func__") || !strcmp(name, "__module__"))) {
+            if (!strcmp(name, "__module__") && native_kind(v) == NATIVE_BOUND) return spy_none(c);
+            return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
+        }
         if (!strcmp(name, "__func__")) return spy_retain(v->as.method.function);
         /* The method type's own attributes come before the function's; bound
          * builtins (builtin methods and method-wrappers) are not descriptors. */
@@ -8485,6 +8511,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     }
     if (v->type == SPY_MODULE) {
         if (!strcmp(name, "__dict__")) return spy_retain(namespace_map(v));
+        if (!strcmp(name, "__annotate__") && !name_local(v, name)) {
+            if (name_set(c, v, name, c->none)) return NULL;
+            return spy_none(c);
+        }
         if (!strcmp(name, "__annotations__") && !name_local(v, name)) {
             SPYValue *value = annotation_dict(c, name_local(v, "__annotate__"));
             if (value && name_set(c, v, name, value)) { spy_release(value); return NULL; }
@@ -9830,6 +9860,34 @@ static int set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
     spy_release(previous);
     return 0;
 }
+/* f.__code__ = code: the code must have as many free variables as f has
+ * cells. The closure is f's environment, so only code without free
+ * variables, or f's own, can replace it. */
+static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
+    if (code->type != SPY_CODE) { spy_error(c, "TypeError", "__code__ must be set to a code object"); return -1; }
+    SPYValue *old = attribute(c, fn, "__code__");
+    SPYValue *old_free = old ? attribute(c, old, "co_freevars") : NULL;
+    SPYValue *new_free = old_free ? attribute(c, code, "co_freevars") : NULL;
+    spy_release(old);
+    if (!new_free) { spy_release(old_free); return -1; }
+    size_t have = old_free->as.seq.len, need = new_free->as.seq.len;
+    spy_release(old_free); spy_release(new_free);
+    if (have != need) {
+        SPYValue *name = name_local(fn->as.function.metadata, "__name__");
+        errorf(c, "ValueError", "%s() requires a code object with %zu free vars, not %zu",
+               name && name->type == SPY_STRING ? name->as.string.data : "?", have, need);
+        return -1;
+    }
+    Node *def = code->as.unit.definition;
+    if (!def || (def->kind != N_DEF && def->kind != N_LAMBDA) || (need && def != fn->as.function.def)) {
+        spy_error(c, "NotImplementedError", "replacing a function's code with this code object is not implemented"); return -1;
+    }
+    SPYValue *unit = fn->as.function.unit;
+    fn->as.function.unit = spy_retain(code->as.unit.owner);
+    fn->as.function.def = def;
+    spy_release(unit);
+    return 0;
+}
 /* Builtin classes, the builtin exceptions included, refuse attribute changes. */
 static int immutable_type(SPYContext *c, SPYValue *cls, const char *name) {
     if (!static_type(c, cls)) return 0;
@@ -9838,6 +9896,7 @@ static int immutable_type(SPYContext *c, SPYValue *cls, const char *name) {
 }
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
+    if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
     if (object->type == SPY_TRACEBACK && !strcmp(name, "tb_next")) return traceback_set_next(c, object, value);
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, value);
     if (object->type == SPY_FUNCTION && !strcmp(name, "__closure__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
@@ -9858,9 +9917,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             !strcmp(name, "__builtins__") || !strcmp(name, "__closure__"))) {
             spy_error(c, "AttributeError", "readonly attribute"); return -1;
         }
-        if (object->type == SPY_FUNCTION && !strcmp(name, "__code__")) {
-            spy_error(c, "NotImplementedError", "function code replacement is not implemented"); return -1;
-        }
+        if (object->type == SPY_FUNCTION && !strcmp(name, "__code__")) return function_set_code(c, object, value);
         SPYValue **attributes = object->type == SPY_FUNCTION ? &object->as.function.attributes : &object->as.wrapper.attributes;
         if (!strcmp(name, "__dict__")) {
             if (value->type != SPY_DICT) { spy_error(c, "TypeError", "__dict__ must be set to a dictionary"); return -1; }
@@ -13863,6 +13920,7 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
     return env->type == V_ENV && env->as.map.scope ? declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
+    SPYValue *target = object;
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (!strcmp(name, "__class__")) { spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1; }
     if (object->type == SPY_CELL && !strcmp(name, "cell_contents")) return cell_set(c, object, NULL);
@@ -13909,7 +13967,10 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         }
     }
     if (!object || !name_local(object, name)) {
-        errorf(c, "AttributeError", "object has no attribute '%s'", name); return -1;
+        if (target->type == SPY_CLASS)
+            errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", name_local(target, "__name__")->as.string.data, name);
+        else errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(target), name);
+        return -1;
     }
     delete_name(object, name); return 0;
 }

@@ -379,6 +379,12 @@
 - TLA+ models of the standard type hierarchy: singletons, object identity,
   numeric types and reprs, sequence operations, mutable sequences, sets,
   and frozendict.
+- Function __code__ is writable (checked against the closure's free
+  variables) and __builtins__ readable; bound built-in methods have no
+  __func__ and __module__ None, method-wrappers and descriptors no
+  __module__; a module's __dict__ is read-only and __annotate__ defaults to
+  None; deleting a missing attribute reports the object's type. TLA+ models
+  of function objects, methods, callables, and module objects.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

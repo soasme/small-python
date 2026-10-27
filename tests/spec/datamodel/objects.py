@@ -114,3 +114,11 @@ assert_raises(TypeError, memoryview, BadExporter())
 class Text(str): pass
 class Data(bytes): pass
 assert_eq(("abc".find(Text("c")), b"abc".find(Data(b"b")), "ab".endswith((Text("b"),))), (2, 1, True))
+
+# Modules: __annotate__ is None without annotations; __dict__ is read-only;
+# deleting a missing attribute names the type.
+module = type(__import__("builtins"))("m")
+assert_eq((module.__annotate__, module.__annotations__), (None, {}))
+assert_raises(AttributeError, setattr, module, "__dict__", {})
+error = assert_raises(AttributeError, delattr, module, "nope")
+assert_eq(str(error), "'module' object has no attribute 'nope'")
