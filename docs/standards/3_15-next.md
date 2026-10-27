@@ -6773,3 +6773,206 @@ level of the unwinding of an exception (18.1.3).
 shall be a traceback or `None` ("expected traceback object or None, got
 '*tname*'") and *tb_frame* a frame ("traceback() argument 'tb_frame' must be
 frame, not *tname*").
+
+## 29 Typing Objects
+
+### 29.1 Overview
+
+The language creates the objects of this clause for type parameter lists
+(16.7), the `type` statement (14.15), the `|` operator on types, subscription of
+built-in classes, and lazy imports. They are intrinsics. Those whose
+`__module__` is `"typing"` or `"types"` are reachable by name only through the
+library facade (Annex C), and by `type()` of an instance otherwise; none is an
+acceptable base type except %Generic%.
+
+The intrinsic %NoDefault% is a unique object, `repr` `typing.NoDefault`,
+of the type `NoDefaultType`, that marks a type parameter without a default.
+
+### 29.2 TypeVar
+
+%TypeVar% (`typing.TypeVar`) objects are type variables.
+
+#### 29.2.1 TypeVar ( *name*, ...*constraints*, *bound*=None, *covariant*=False, *contravariant*=False, *infer_variance*=False, *default*=%NoDefault% )
+
+1. *name* shall be a `str` ("typevar() argument 'name' must be str, not
+   *tname*").
+2. Exactly one constraint raises `TypeError` ("A single constraint is not
+   allowed"); constraints together with a *bound* raise `TypeError`
+   ("Constraints cannot be combined with bound=...").
+3. Both *covariant* and *contravariant* raise `ValueError` ("Bivariant types
+   are not supported."); either with *infer_variance* raises `ValueError`
+   ("Variance cannot be specified with infer\_variance.").
+4. Return a new TypeVar whose `__module__` is the `__name__` of the caller's
+   globals.
+
+A TypeVar created by a type parameter list has `__infer_variance__` `True`,
+and its bound, constraints, and default are evaluated lazily (16.7).
+
+#### 29.2.2 Attributes and methods
+
+`__name__`, `__bound__` (or `None`), `__constraints__` (a tuple),
+`__default__` (or %NoDefault%), `__covariant__`, `__contravariant__`, and
+`__infer_variance__` are read-only ("readonly attribute"). `has_default()`
+says whether a default was given. `repr` is the name prefixed by `+` for a
+covariant, `-` for a contravariant, `~` for an invariant variable, and nothing
+when the variance is inferred. `T | X` and `X | T` make a union (29.5). A
+TypeVar used as a base class raises `TypeError` ("Cannot subclass an instance
+of TypeVar"). `__typing_subst__(arg)` returns *arg* (after the library's
+checks); `__reduce__()` returns the name.
+
+### 29.3 TypeVarTuple
+
+%TypeVarTuple% (`typing.TypeVarTuple`) objects, created by `*Ts` or
+`TypeVarTuple(name, *, default=NoDefault)`, have `__name__`, `__default__`,
+and `has_default()`. `repr` is the name. Iterating over one yields a single
+`typing.Unpack[Ts]` object (a generic alias whose origin is the library's
+`Unpack`; Annex C), so that `*Ts` in a subscription stands for the unpacked
+tuple.
+
+### 29.4 ParamSpec
+
+%ParamSpec% (`typing.ParamSpec`) objects, created by `**P` or
+`ParamSpec(name, *, bound=None, covariant=False, contravariant=False,
+infer_variance=False, default=NoDefault)`, have the attributes of a TypeVar
+that apply. `P.args` and `P.kwargs` are `ParamSpecArgs` and `ParamSpecKwargs`
+objects whose `__origin__` is *P*, with reprs "*P*.args" and "*P*.kwargs".
+
+### 29.5 Union types
+
+%UnionType% (`typing.Union`, `repr` "\<class 'typing.Union'\>") objects
+represent `X | Y`. Calling the type raises `TypeError` ("cannot create
+'typing.Union' instances"); subscripting the type itself, `Union[X, Y]`,
+returns ? MakeUnion over the arguments.
+
+#### 29.5.1 MakeUnion ( *x*, *y* )
+
+1. Each operand shall be a *union member*: a class, `None`, a union, a generic
+   alias, a TypeVar, ParamSpec, or TypeAliasType, or another object whose type
+   defines `__origin__`; otherwise MakeUnion returns `NotImplemented` (so `int
+   | 1` raises "unsupported operand type(s) for |: 'type' and 'int'").
+2. Let *args* be the members of *x* followed by those of *y*, where a union
+   contributes its `__args__` and `None` contributes `type(None)`.
+3. Remove every element equal to an earlier one.
+4. If one element remains, return it.
+5. Return a new union with `__args__` *args*.
+
+#### 29.5.2 Operations
+
+| Operation | Result |
+| --- | --- |
+| `__args__` | the members, as a tuple |
+| `__parameters__` | the type parameters occurring in the members, in order |
+| `u[…]` | substitution of `__parameters__`; a union without parameters raises `TypeError` ("*repr*(*u*) is not a generic class") |
+| `==`, `hash` | equality of the sets of members, ignoring order |
+| `isinstance(o, u)`, `issubclass(c, u)` | whether some member accepts it; a member that is a parameterized generic raises `TypeError` ("isinstance() argument 2 cannot be a parameterized generic") |
+| `u \| x`, `x \| u` | MakeUnion |
+| `repr(u)` | the members' type reprs (29.9.3) joined with `" \| "`, `None` for `type(None)` |
+
+### 29.6 TypeAliasType
+
+%TypeAliasType% (`typing.TypeAliasType`) objects are created by the `type`
+statement (14.15) or by `TypeAliasType(name, value, *, type_params=())`
+(*name* a `str`, "typealias() argument 'name' must be str, not *tname*";
+*value* required, "typealias() missing required argument 'value' (pos 2)";
+each type parameter a TypeVar, TypeVarTuple, or ParamSpec, "Expected a type
+param, got *repr*").
+
+| Attribute | Value |
+| --- | --- |
+| `__name__` | the name |
+| `__module__` | the `__name__` of the defining globals (writable) |
+| `__value__` | the value; for an alias made by the `type` statement, the value expression is evaluated in its annotation scope the first time `__value__` is read, and the result kept |
+| `__type_params__`, `__parameters__` | the type parameters |
+
+The attributes other than `__module__` are read-only ("attribute '*name*' of
+'typing.TypeAliasType' objects is not writable"). `repr` is the name.
+Subscripting a generic alias returns a generic alias (29.9) whose origin is
+the TypeAliasType; subscripting a non-generic one raises `TypeError` ("Only
+generic type aliases are subscriptable"). It supports `|`.
+
+### 29.7 Generic
+
+%Generic% (`typing.Generic`) is a class. A class with a type parameter list
+(16.7) gets %Generic% appended to its bases (unless one of its bases already
+derives from it) and its `__type_params__` and `__parameters__` set to the
+parameters. `Generic[T1, …]` requires type variables, TypeVarTuples, or
+ParamSpecs ("Parameters to Generic[...] must all be type variables or parameter
+specification variables.") and returns a generic alias usable as a base,
+which sets `__parameters__` of the derived class. Calling `Generic()` creates an instance as `object()` does.
+
+Subscripting a generic class *C* (through `Generic.__class_getitem__`) checks
+the number of arguments against `__parameters__` ("Too many arguments for
+*repr*(*C*); actual *m*, expected *n*", or "Too few …") and returns a generic
+alias (29.9) with origin *C*. The library's `Protocol` and the other `typing`
+forms are not part of this Standard (Annex C).
+
+### 29.8 LazyImportType
+
+%LazyImportType% (`__name__` `"lazy_import"`, module `builtins`) is the type of
+the placeholders bound by lazy imports (17.5). It cannot be instantiated
+("cannot create 'lazy\_import' instances"). A placeholder's `repr` is
+"\<lazy\_import '*name*'\>", where *name* is the module name, followed by
+`.`*attr* for a `from` import. Its `resolve()` method performs the import the
+statement would have performed and returns the result without rebinding the
+name.
+
+When reification or `resolve()` fails with an exception *e*, *e* is raised
+with its `__cause__` set to a new `ImportError` exception ("lazy import of
+'*name*' raised an exception during resolution") whose traceback refers to the
+lazy import statement.
+
+### 29.9 Generic aliases
+
+#### 29.9.1 GenericAlias objects
+
+%GenericAlias% (`types.GenericAlias`) objects represent a subscripted class.
+`GenericAlias(origin, args)` takes exactly two arguments ("GenericAlias
+expected 2 arguments, got *n*"); a non-tuple *args* is wrapped in a tuple.
+The built-in classes `tuple`, `list`, `dict`, `frozendict`, `set`,
+`frozenset`, `enumerate`, `slice`, `memoryview`, `classmethod`,
+`staticmethod`, `BaseExceptionGroup`, `ExceptionGroup`, and %Template% define
+`__class_getitem__` returning a GenericAlias, and subscripting `type` itself
+returns one.
+
+| Member | Value |
+| --- | --- |
+| `__origin__`, `__args__` | the class and the arguments |
+| `__parameters__` | the type parameters in `__args__` (also inside nested aliases), in order of first appearance |
+| `__unpacked__` | whether the alias is `*tuple[…]` |
+| other attributes | read from `__origin__`, except the alias's own and dunder names other than `__name__`, `__qualname__`, `__module__`, `__doc__` |
+| calling | calls `__origin__` with the arguments and sets `__orig_class__` on the result when possible |
+| `__mro_entries__(bases)` | (`__origin__`,), so the alias can be a base class; the class records the alias in `__orig_bases__` |
+| `==`, `hash` | by origin, arguments, and unpacked flag |
+| `a[…]` | substitution (29.9.2) |
+| `iter(a)` | yields one alias equal to `*a` |
+| `isinstance`, `issubclass` | `TypeError` ("isinstance() argument 2 cannot be a parameterized generic") |
+
+#### 29.9.2 Substitution
+
+`a[args]` with *params* = `a.__parameters__`:
+
+1. If *params* is empty, raise `TypeError` ("*repr*(*a*) is not a generic
+   class").
+2. Let *args* be a tuple (a single argument is wrapped). Match *args* to
+   *params*, a TypeVarTuple taking the surplus arguments; a count mismatch
+   raises `TypeError` ("Too many arguments for *repr*(*a*); actual *m*,
+   expected *n*" or "Too few …").
+3. Return a new alias of the same origin whose arguments are `__args__` with
+   each parameter replaced by its argument, recursively inside nested aliases
+   and unions.
+
+#### 29.9.3 Representation
+
+`repr(a)` is the origin's type repr followed by `[`, the arguments' type reprs
+separated by `", "`, and `]` (`[()]` for no arguments), prefixed by `*` when
+unpacked. The *type repr* of an object is: `...` for `Ellipsis`; the
+qualified name (with the module unless `builtins`) for a class, and `None`
+for `type(None)`; `repr` for a
+generic alias, union, type variable, or string; a list's type reprs in
+brackets; and `repr` otherwise.
+
+#### 29.9.4 `__class_getitem__`
+
+Subscripting a class *C* that is not handled by its metaclass's `__getitem__`
+calls *C*.`__class_getitem__` (7.8), which is implicitly a class method when
+defined in a class body (16.4.3).
