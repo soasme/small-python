@@ -462,6 +462,10 @@
   report it as CPython does; a __bool__ or __contains__ of None raises
   TypeError; `in` on str and bytes reports a wrong left operand with
   CPython's messages. TLA+ models of truth testing and comparisons.
+- Unsupported operators on numbers, augmented assignments, `*`, divmod(),
+  and three-argument pow() raise CPython's TypeErrors; complex division
+  by zero and overflowing complex powers report as CPython does. TLA+
+  model of binary arithmetic.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

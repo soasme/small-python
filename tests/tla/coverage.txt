@@ -184,7 +184,7 @@ Reference chapter contents | - table of contents
 5. Import system > The import system > References | - informative: bibliography
 6. Expressions | = sections
 6. Expressions > Expressions | = sections
-6. Expressions > Expressions > Arithmetic conversions | TODO: ArithConversions
+6. Expressions > Expressions > Arithmetic conversions | BinaryArith
 6. Expressions > Expressions > Atoms | TODO: Atoms
 6. Expressions > Expressions > Atoms > Built-in constants | Singletons
 6. Expressions > Expressions > Atoms > Identifiers (Names) | = sections
@@ -219,9 +219,9 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Primaries > Subscriptions and slicings > Formal subscription grammar | TODO: Subscripts
 6. Expressions > Expressions > Primaries > Calls | Calls
 6. Expressions > Expressions > Await expression | Awaitables
-6. Expressions > Expressions > The power operator | TODO: Power
-6. Expressions > Expressions > Unary arithmetic and bitwise operations | TODO: IntArith, ArithConversions
-6. Expressions > Expressions > Binary arithmetic operations | TODO: BinaryArith, ArithConversions
+6. Expressions > Expressions > The power operator | BinaryArith
+6. Expressions > Expressions > Unary arithmetic and bitwise operations | IntArith, BinaryArith
+6. Expressions > Expressions > Binary arithmetic operations | BinaryArith
 6. Expressions > Expressions > Shifting operations | IntArith
 6. Expressions > Expressions > Binary bitwise operations | IntArith
 6. Expressions > Expressions > Comparisons | Comparisons
@@ -308,7 +308,7 @@ Reference chapter contents | - table of contents
 11. Built-in types > Built-in Types > Truth Value Testing | Truth
 11. Built-in types > Built-in Types > Boolean Operations --- `and`, `or`, `not` | Truth, Evaluation
 11. Built-in types > Built-in Types > Comparisons | Comparisons
-11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` | TODO: NumericTypes, BinaryArith, ArithConversions
+11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` | NumericTypes, BinaryArith
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Bitwise Operations on Integer Types | IntArith
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Integer Types | TODO: IntMethods
 11. Built-in types > Built-in Types > Numeric Types --- `int`, `float`, `complex` > Additional Methods on Float | TODO: FloatMethods

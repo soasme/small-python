@@ -7197,7 +7197,16 @@ static SPYValue *dict_union(SPYContext *c, SPYValue *a, SPYValue *b) {
     return result;
 }
 static SPYValue *buffer_bytes(SPYContext *, SPYValue *, SPYValue **);
+/* The operator a binary operation's TypeError names. */
+static const char *binary_symbol(int op) {
+    static const struct { int op; const char *text; } names[] = {
+        {'+', "+"}, {'-', "-"}, {'*', "*"}, {'/', "/"}, {'%', "%"}, {'@', "@"}, {'&', "&"}, {'|', "|"}, {'^', "^"},
+        {T_POW, "** or pow()"}, {T_FLOORDIV, "//"}, {T_LSHIFT, "<<"}, {T_RSHIFT, ">>"}};
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) if (names[i].op == op) return names[i].text;
+    return "?";
+}
 static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    SPYValue *left = a, *right = b;
     if (is_set(a) && is_set(b) && (op == '|' || op == '&' || op == '-' || op == '^')) return set_binary(c, op, a, b);
     if (op == '|' && is_dict(a) && is_dict(b)) return dict_union(c, a, b);
     if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
@@ -7272,17 +7281,13 @@ seq_fail:
         SPYValue *args[] = {a, b};
         return call_intrinsic(c, "_union", 2, args);
     }
-    static const struct { int op; const char *text; } names[] = {
-        {'+', "+"}, {'-', "-"}, {'*', "*"}, {'/', "/"}, {'%', "%"}, {'@', "@"}, {'&', "&"}, {'|', "|"}, {'^', "^"},
-        {T_POW, "** or pow()"}, {T_FLOORDIV, "//"}, {T_LSHIFT, "<<"}, {T_RSHIFT, ">>"}};
-    const char *symbol = "?";
-    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) if (names[i].op == op) symbol = names[i].text;
+    const char *symbol = binary_symbol(op);
     /* Sequence concatenation reports the left operand's type. */
     if (op == '+' && (a->type == SPY_STRING || a->type == SPY_LIST || a->type == SPY_TUPLE))
         return errorf(c, "TypeError", "can only concatenate %s (not \"%s\") to %s", type_name(a), type_name(b), type_name(a));
     if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY))
         return errorf(c, "TypeError", "can't concat %s to %s", type_name(b), type_name(a));
-    return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(a), type_name(b));
+    return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(left), type_name(right));
 }
 static double complex numeric_complex(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_COMPLEX) return value->as.number;
@@ -7345,7 +7350,7 @@ static SPYValue *complex_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b)
         else result = x * y;
         break;
     case '/':
-        if (y == 0) return spy_error(c, "ZeroDivisionError", "complex division by zero");
+        if (y == 0) return spy_error(c, "ZeroDivisionError", "division by zero");
         result = real_right ? complex_parts(creal(x) / creal(y), cimag(x) / creal(y))
                             : complex_divide(x, y, real_left);
         break;
@@ -7373,7 +7378,8 @@ static SPYValue *complex_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b)
                 phase += cimag(y) * log(magnitude);
             }
             result = complex_parts(length * cos(phase), length * sin(phase));
-            if (errno == ERANGE) return spy_error(c, "OverflowError", "complex exponentiation");
+            if (errno == ERANGE || (!isfinite(creal(result)) && isfinite(magnitude) && isfinite(creal(y))))
+                return spy_error(c, "OverflowError", "complex exponentiation");
         }
         break;
     default: return spy_error(c, "TypeError", "unsupported complex operator");
@@ -7427,6 +7433,15 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if ((op == '&' || op == '|' || op == '-' || op == '^') && (set_view(a) || set_view(b)) &&
         !(is_set(a) && is_set(b))) return view_binary(c, op, a, b);
     if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
+    if ((is_number(a) || a->type == SPY_COMPLEX) && (is_number(b) || b->type == SPY_COMPLEX)) {
+        /* Numeric slots a type lacks: @ for all, bitwise operators for float
+         * and complex, // and % for complex. */
+        int has_complex = a->type == SPY_COMPLEX || b->type == SPY_COMPLEX;
+        int inexact = has_complex || a->type == SPY_FLOAT || b->type == SPY_FLOAT;
+        int bitwise = op == T_LSHIFT || op == T_RSHIFT || op == '&' || op == '|' || op == '^';
+        if (op == '@' || (inexact && bitwise) || (has_complex && (op == T_FLOORDIV || op == '%')))
+            return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%s' and '%s'", binary_symbol(op), type_name(a), type_name(b));
+    }
     if (a->type == SPY_COMPLEX || b->type == SPY_COMPLEX) return complex_binary(c, op, a, b);
     if (a->type == SPY_BOOL && b->type == SPY_BOOL && (op == '&' || op == '|' || op == '^')) {
         int x = (int)a->as.integer_data.small, y = (int)b->as.integer_data.small;
@@ -13029,7 +13044,19 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         }
         return spy_retain(old);
     }
-    return binary(c, operation->token, old, rhs);
+    result = binary(c, token, old, rhs);
+    /* An unsupported operation is reported with the augmented operator. */
+    char expected[sizeof(c->error_message)];
+    if (!result && error_is(c, "TypeError")) {
+        const char *symbol = binary_symbol(token);
+        snprintf(expected, sizeof(expected), "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(old), type_name(rhs));
+        if (!strcmp(c->error_message, expected)) {
+            size_t len = strcspn(symbol, " ");
+            spy_clear_error(c);
+            errorf(c, "TypeError", "unsupported operand type(s) for %.*s=: '%s' and '%s'", (int)len, symbol, type_name(old), type_name(rhs));
+        }
+    }
+    return result;
 }
 static int assign(SPYContext *c, Frame *f, Node *n) {
     if (n->op == '=') {
@@ -20096,6 +20123,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc < 2 || argc > 3) goto arity;
         SPYValue *b = argv[1], *modulus = argc == 3 && argv[2]->type != SPY_NONE ? argv[2] : NULL;
         if (!modulus) return binary(c, T_POW, a, b);
+        SPYValue *operands[] = {a, b, modulus};
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
             const Operator power = {T_POW, "__pow__", "__rpow__", "__ipow__"};
             SPYValue *result = binary_special(c, &power, a, b, modulus);
@@ -20104,26 +20132,34 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (b->type == SPY_INSTANCE && b->as.map.base) b = b->as.map.base;
             if (modulus->type == SPY_INSTANCE && modulus->as.map.base) modulus = modulus->as.map.base;
         }
-        if (!is_int(a) || !is_int(b) || !is_int(modulus)) return spy_error(c, "TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
-        return integer_modpow(c, a, b, modulus);
+        if (is_int(a) && is_int(b) && is_int(modulus)) return integer_modpow(c, a, b, modulus);
+        /* ternary_op: each distinct built-in power slot in turn; int's declines
+         * other types, float's and complex's refuse a modulus. */
+        SPYValue *values[] = {a, b, modulus};
+        for (int i = 0; i < 3; i++) {
+            int kind = is_int(values[i]) ? SPY_INT : values[i]->type;
+            if (kind == SPY_FLOAT) return spy_error(c, "TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
+            if (kind == SPY_COMPLEX) return spy_error(c, "ValueError", "complex modulo");
+        }
+        return errorf(c, "TypeError", "unsupported operand type(s) for ** or pow(): '%s', '%s', '%s'",
+                      type_name(operands[0]), type_name(operands[1]), type_name(operands[2]));
     }
     if (id == B_DIVMOD) {
         if (argc != 2) goto arity;
-        SPYValue *b = argv[1], *quotient = NULL, *remainder = NULL;
+        SPYValue *b = argv[1], *quotient = NULL, *remainder = NULL, *left = a, *right = b;
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
             const Operator operation = {0, "__divmod__", "__rdivmod__", NULL};
             SPYValue *result = binary_special(c, &operation, a, b, NULL);
             if (result || c->error_type[0]) return result;
             if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
             if (b->type == SPY_INSTANCE && b->as.map.base) b = b->as.map.base;
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) return spy_error(c, "TypeError", "unsupported divmod operands");
         }
         if (is_int(a) && is_int(b)) {
             if (integer_divmod(c, a, b, &quotient, &remainder)) return NULL;
         } else if (is_number(a) && is_number(b)) {
             quotient = binary(c, T_FLOORDIV, a, b);
             if (quotient) remainder = binary(c, '%', a, b);
-        } else return spy_error(c, "TypeError", "unsupported divmod operands");
+        } else return errorf(c, "TypeError", "unsupported operand type(s) for divmod(): '%s' and '%s'", type_name(left), type_name(right));
         SPYValue *result = quotient && remainder ? value_new(c, SPY_TUPLE) : NULL;
         if (result && (sequence_append(c, result, quotient) || sequence_append(c, result, remainder))) {
             spy_release(result); result = NULL;
