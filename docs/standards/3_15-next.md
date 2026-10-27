@@ -1849,7 +1849,8 @@ their concatenation would otherwise be read as a different token.
 A code point that cannot begin any token, outside a string literal or comment,
 is an error:
 
-- U+0024 `$`, U+003F `?`, and U+0060 `` ` ``: `SyntaxError` ("invalid syntax");
+- U+0024 DOLLAR SIGN, U+003F QUESTION MARK, and U+0060 GRAVE ACCENT:
+  `SyntaxError` ("invalid syntax");
 - a printable character that is not part of an operator, identifier, or
   literal: `SyntaxError` ("invalid character '*c*' (U+*XXXX*)");
 - a non-printable character (Unicode general categories Cc, Cf, Cs, Co, Cn, Zl,
@@ -2713,3 +2714,599 @@ From lowest to highest binding:
 | `await x` | await expression |
 | `x[…]`, `x(…)`, `x.attr` | subscription, slicing, call, attribute reference |
 | `(…)`, `[…]`, `{…}`, literals | binding or parenthesized expression, displays |
+
+## 14 Simple Statements
+
+```text
+simple_stmts: simple_stmt !';' NEWLINE | ';'.simple_stmt+ [';'] NEWLINE
+```
+
+Several simple statements may share a logical line, separated by `;`. They are
+executed in order; an abrupt completion of one ends the line.
+
+### 14.1 Expression statements
+
+An expression statement evaluates its expression list (13.15) and discards the
+value, except in interactive input (17.6.2), where a value other than `None` is
+passed to the host hook HostDisplay (Annex B). An expression statement that is
+a bare `yield` expression is the yield of 13.16.
+
+### 14.2 Assignment statements
+
+```text
+assignment: (star_targets '=')+ (yield_expr | star_expressions) !'='
+star_targets: star_target !',' | star_target (',' star_target)* [',']
+star_target: '*' (!'*' star_target) | target_with_star_atom
+target_with_star_atom: t_primary '.' NAME !t_lookahead | t_primary '[' slices ']' !t_lookahead | star_atom
+star_atom: NAME | '(' target_with_star_atom ')' | '(' [star_targets_tuple_seq] ')' | '[' [star_targets_list_seq] ']'
+```
+
+#### 14.2.1 Runtime Semantics: Evaluation
+
+1. Let *v* be the value of the right-hand side.
+2. For each target list, from left to right, perform ? AssignTarget(*target*,
+   *v*).
+
+#### 14.2.2 AssignTarget ( *target*, *v* )
+
+1. If *target* is a name, perform ? StoreName(*name*, *v*) (9.3.5).
+2. If *target* is `primary.name`: evaluate *primary* to *o*, then perform
+   ? SetAttribute(*o*, *name*, *v*).
+3. If *target* is `primary[subscript]`: evaluate *primary* to *o*, then the
+   subscript to *key* (13.3.2), then perform ? SetItem(*o*, *key*, *v*).
+4. If *target* is a parenthesized or bracketed target list *t₁*, …, *tₙ*:
+   perform ? UnpackTargets(the targets, *v*).
+
+UnpackTargets(*targets*, *v*):
+
+1. Let *k* be the number of targets, and let *s* be the index of the starred
+   target, if any.
+2. If GetIterator(*v*) would fail because *v* is not iterable, raise a
+   `TypeError` exception ("cannot unpack non-iterable *tname*(*v*) object").
+3. Let *it* be ? GetIterator(*v*).
+4. If there is no starred target:
+   1. Take *k* items from *it* with IteratorStep. If it is exhausted after *j*
+      < *k* items, raise a `ValueError` exception ("not enough values to unpack
+      (expected *k*, got *j*)").
+   2. If ? IteratorStep(*it*) is not **done**, raise a `ValueError` exception
+      ("too many values to unpack (expected *k*, got *n*)") when *v* is a list
+      or tuple of length *n*, and ("too many values to unpack (expected *k*)")
+      otherwise.
+5. If there is a starred target at index *s*:
+   1. Take *s* items; then collect all remaining items into a new list *rest*.
+   2. If fewer than *k* − 1 items were obtained in total, raise a `ValueError`
+      exception ("not enough values to unpack (expected at least *k* − 1, got
+      *j*)").
+   3. The last *k* − 1 − *s* items of *rest* are removed from it and become the
+      items of the targets after the starred one; the starred target receives
+      the list *rest*.
+6. Assign the items to the targets from left to right with AssignTarget.
+
+Static Semantics: Early Errors. "multiple starred expressions in assignment";
+"starred assignment target must be in a list or tuple" for a lone starred
+target; "cannot assign to *what*" for a target that is a literal, call,
+operator expression, or other non-target expression, where *what* names it
+(for example `literal`, `function call`, `expression`, `True`, `None`,
+`__debug__`, `f-string expression`), with " here. Maybe you meant '==' instead
+of '='?" appended when the target is a comparison-like expression in a
+statement; "cannot assign to *keyword*" for a keyword.
+
+### 14.3 Augmented assignment statements
+
+```text
+augassign: '+=' | '-=' | '*=' | '@=' | '/=' | '%=' | '&=' | '|=' | '^=' | '<<=' | '>>=' | '**=' | '//='
+```
+
+`target op= expr`, where *target* is a single name, attribute reference, or
+subscription:
+
+1. If *target* is `primary.name` or `primary[subscript]`, evaluate *primary*
+   (and the subscript) once.
+2. Let *old* be the current value of the target (? LoadName, ? GetAttribute, or
+   ? GetItem).
+3. Let *v* be the value of *expr*.
+4. Let *new* be ? InPlaceOp(*old*, *v*, *op*) (7.6.3).
+5. Store *new* in the target (? StoreName, ? SetAttribute, or ? SetItem), using
+   the objects evaluated in step 1.
+
+Static Semantics: a target that is a list, tuple, or other expression raises
+"'*what*' is an illegal expression for augmented assignment".
+
+### 14.4 Annotated assignment statements
+
+```text
+assignment: NAME ':' expression ['=' annotated_rhs]
+          | ('(' single_target ')' | single_subscript_attribute_target) ':' expression ['=' annotated_rhs]
+```
+
+1. If the target is an attribute reference or subscription, evaluate its
+   *primary* (and subscript) for its side effects, even without a value.
+2. If there is a value, evaluate it to *v* (a tuple when it is an unparenthesized
+   expression list) and perform ? AssignTarget(*target*, *v*).
+3. The annotation is not evaluated. In a module or class scope, the annotation
+   of a simple name target is recorded for the scope's `__annotate__` function
+   (16.6). In a function scope, the annotation is never evaluated, and the
+   target name is classified **local** (8.2).
+
+Static Semantics: "only single target (not list) can be annotated" and
+"only single target (not tuple) can be annotated".
+
+### 14.5 The `assert` statement
+
+```text
+assert_stmt: 'assert' expression [',' expression]
+```
+
+`assert e` and `assert e, m`:
+
+1. If the implementation runs with assertions disabled (Annex D), do nothing.
+2. If ? ToBoolean(the value of *e*) is **true**, return.
+3. If *m* is present, raise `AssertionError` called with the value of *m*;
+   otherwise raise `AssertionError` with no arguments.
+
+The value of `__debug__` (19.1) is `True` exactly when assertions are enabled.
+An assertion whose test is a non-empty parenthesized tuple issues a compile-time
+`SyntaxWarning` ("assertion is always true, perhaps remove parentheses?").
+
+### 14.6 The `pass` statement
+
+`pass` does nothing.
+
+### 14.7 The `del` statement
+
+```text
+del_stmt: 'del' del_targets &(';' | NEWLINE)
+```
+
+Each target is deleted from left to right: a name by ? DeleteName (9.3.5); an
+attribute reference by ? DeleteAttribute (7.3.9); a subscription by
+? DeleteItem (7.8.2); a parenthesized or bracketed target list by deleting
+each of its elements. Static Semantics: "cannot delete *what*" for other
+expressions, including starred ones ("cannot delete starred").
+
+### 14.8 The `raise` statement
+
+```text
+raise_stmt: 'raise' expression ['from' expression] | 'raise'
+```
+
+1. If there is no expression:
+   1. Let *e* be the current handled exception (9.5). If it is `None`, raise a
+      `RuntimeError` exception ("No active exception to reraise").
+   2. Return a raise completion with *e*, keeping its traceback.
+2. Let *e* be ? MakeException(the value of the first expression).
+3. If there is a `from` clause, let *c* be the value of its expression:
+   1. If *c* is `None`, set *cause* to `None`.
+   2. Else let *cause* be ? MakeException(*c*), raising a `TypeError` exception
+      ("exception causes must derive from BaseException") if *c* is neither an
+      exception class nor an exception instance.
+   3. Set *e*.`__cause__` to *cause* and *e*.`__suppress_context__` to `True`.
+4. Return a raise completion with *e* (18.1).
+
+MakeException(*x*):
+
+1. If *x* is a class that is a subclass of `BaseException`, let *r* be ? Call(*x*,
+   «»); if *r* is not an instance of `BaseException`, raise a `TypeError`
+   exception ("calling *repr*(*x*) should have returned an instance of
+   BaseException, not *repr*(Type(*r*))"); return *r*.
+2. If *x* is an instance of `BaseException`, return *x*.
+3. Raise a `TypeError` exception ("exceptions must derive from BaseException").
+
+### 14.9 The `return` statement
+
+`return [expr]` returns a **return** completion whose value is the value of
+*expr*, or `None`. Clause 15.4 specifies how `finally` clauses run on the way
+out. Static Semantics: "'return' outside function". In a generator,
+`return v` ends the iteration with `StopIteration(v)` (27.2); in an
+asynchronous generator a `return` with a value raises ("'return' with value in
+async generator").
+
+### 14.10 The `break` statement
+
+`break` returns a **break** completion, which ends the nearest enclosing `for`
+or `while` loop (15.2, 15.3). Static Semantics: "'break' outside loop" when the
+statement is not within a loop of the same function or class body.
+
+### 14.11 The `continue` statement
+
+`continue` returns a **continue** completion, which starts the next iteration of
+the nearest enclosing loop. Static Semantics: "'continue' not properly in loop".
+
+A `return`, `break`, or `continue` statement that would leave a `finally`
+block issues a compile-time `SyntaxWarning` ("'return' in a 'finally' block",
+and likewise for `break` and `continue`).
+
+### 14.12 The `import` statement
+
+```text
+import_stmt: ["lazy"] import_name | ["lazy"] import_from
+import_name: 'import' dotted_as_names
+import_from: 'from' ('.' | '...')* dotted_name 'import' import_from_targets
+           | 'from' ('.' | '...')+ 'import' import_from_targets
+import_from_targets: '(' import_from_as_names [','] ')' | import_from_as_names !',' | '*'
+```
+
+The forms of the `import` statement and their evaluation are specified in clause
+17.4, and the `lazy` form in 17.5.
+
+### 14.13 Future statements
+
+A *future statement* is a `from __future__ import` *features* statement that
+appears before any other statement of a module, other than its docstring, blank
+lines, comments, and other future statements. The features `nested_scopes`,
+`generators`, `division`, `absolute_import`, `with_statement`,
+`print_function`, `unicode_literals`, `barry_as_FLUFL`, `generator_stop`, and
+`annotations` are recognized. All but `annotations` and `barry_as_FLUFL` have
+no effect. `annotations` makes every annotation in the module be evaluated as
+the string of its source text (16.6.4). `barry_as_FLUFL` makes `<>` the
+inequality operator and `!=` a syntax error.
+
+A future statement is also an ordinary import of the `__future__` module (17.4),
+which the host provides; when the host has no such module, the statement binds
+nothing and is not an error.
+
+Static Semantics: "from `__future__` imports must occur at the beginning of the
+file"; "future feature *name* is not defined"; and `braces`: "not a chance".
+
+### 14.14 The `global` and `nonlocal` statements
+
+`global` and `nonlocal` are declarations (8.3). At run time they do nothing.
+
+### 14.15 The `type` statement
+
+```text
+type_alias: "type" NAME [type_params] '=' expression
+```
+
+`type Name[params] = value` creates a %TypeAliasType% object (29.6) named
+`Name` whose type parameters are *params* (16.7) and whose value is computed by
+evaluating *value* lazily, in an annotation scope, the first time its
+`__value__` attribute is read. It binds the alias to *Name* with StoreName.
+
+## 15 Compound Statements
+
+```text
+block: NEWLINE INDENT statements DEDENT | simple_stmts
+```
+
+A compound statement's *block* is either an indented sequence of statements or
+one line of simple statements after the colon. Evaluating a block evaluates its
+statements in order and returns the first abrupt completion, or a normal
+completion when all complete normally.
+
+### 15.1 The `if` statement
+
+```text
+if_stmt: 'if' named_expression ':' block (elif_stmt | [else_block])
+elif_stmt: 'elif' named_expression ':' block (elif_stmt | [else_block])
+else_block: 'else' &&':' block
+```
+
+The conditions are evaluated in order until one for which ToBoolean is
+**true**; its block is evaluated. If none is, the `else` block, if any, is
+evaluated.
+
+### 15.2 The `while` statement
+
+```text
+while_stmt: 'while' named_expression ':' block [else_block]
+```
+
+1. Repeat:
+   1. If ? ToBoolean(the value of the condition) is **false**, evaluate the
+      `else` block, if any, and return its completion.
+   2. Let *r* be the result of evaluating the block.
+   3. If *r* is a **break** completion, return a normal completion.
+   4. If *r* is a **continue** completion or normal, continue.
+   5. Return *r*.
+
+### 15.3 The `for` statement
+
+```text
+for_stmt: 'for' star_targets 'in' ~ star_expressions ':' block [else_block]
+        | 'async' 'for' star_targets 'in' ~ star_expressions ':' block [else_block]
+```
+
+#### 15.3.1 Runtime Semantics: Evaluation
+
+1. Let *it* be ? GetIterator(the value of the expression list).
+2. Repeat:
+   1. Let *v* be ? IteratorStep(*it*).
+   2. If *v* is **done**, evaluate the `else` block, if any, and return its
+      completion.
+   3. Perform ? AssignTarget(*target*, *v*).
+   4. Let *r* be the result of evaluating the block.
+   5. If *r* is a **break** completion, return a normal completion.
+   6. If *r* is a **return** or **raise** completion, return *r*.
+
+The target remains bound to the last value assigned after the loop. Changing
+the iterated object during the loop affects the iteration only as its
+iterator's clause specifies (for a `list`, 25.1.5).
+
+#### 15.3.2 The `async for` statement
+
+`async for` is permitted only in an `async def` function ("'async for' outside
+async function"). It obtains *it* by ? GetAsyncIterator (7.7.4), and each step
+awaits (13.4) the result of calling `__anext__` of *it*; a
+`StopAsyncIteration` exception from that await ends the loop as **done**. The
+result of `__anext__` must be awaitable ("'async for' received an invalid
+object from `__anext__`: *tname*(*r*)").
+
+### 15.4 The `try` statement
+
+```text
+try_stmt: 'try' &&':' block finally_block
+        | 'try' &&':' block except_block+ [else_block] [finally_block]
+        | 'try' &&':' block except_star_block+ [else_block] [finally_block]
+except_block: 'except' expression ['as' NAME] ':' block
+            | 'except' expressions ':' block
+            | 'except' ':' block
+except_star_block: 'except' '*' expression ['as' NAME] ':' block
+                 | 'except' '*' expressions ':' block
+finally_block: 'finally' &&':' block
+```
+
+#### 15.4.1 Runtime Semantics: Evaluation of `try` … `except`
+
+1. Let *r* be the result of evaluating the `try` block.
+2. If *r* is a raise completion with exception *e*, then
+   1. For each `except` clause, in order:
+      1. If the clause has no expression, it matches.
+      2. Otherwise let *t* be the value of its expression (a tuple when it is an
+         unparenthesized list of expressions). If *t* is a class, or a tuple,
+         possibly nested, of classes, any of which is not a subclass of
+         `BaseException`, raise a `TypeError` exception ("catching classes that
+         do not inherit from BaseException is not allowed"); the clause matches
+         if IsInstance(*e*, *c*) is **true** for *t* or for some class in *t*.
+      3. If the clause matches:
+         1. If it has `as` *name*, perform StoreName(*name*, *e*).
+         2. Make *e* the handled exception of the frame (9.5), saving the
+            previous one.
+         3. Let *h* be the result of evaluating the clause's block.
+         4. Restore the previous handled exception.
+         5. If it has `as` *name*, perform DeleteName(*name*), ignoring an
+            unbound name. (This breaks the reference cycle through the
+            traceback.)
+         6. Set *r* to *h* and go to step 4.
+   2. No clause matched: go to step 4 with *r* unchanged.
+3. If *r* is a normal completion and there is an `else` block, set *r* to the
+   result of evaluating it.
+4. If there is a `finally` block, perform FinallyBlock(*r*) and return its
+   result; otherwise return *r*.
+
+An exception raised while a handler runs gets the handled exception as its
+`__context__` (18.1.2).
+
+#### 15.4.2 FinallyBlock ( *r* )
+
+1. Save *r*. If *r* is a raise completion, its exception is the handled
+   exception while the `finally` block runs.
+2. Let *f* be the result of evaluating the `finally` block.
+3. If *f* is abrupt, return *f* (the saved completion is discarded, and a saved
+   exception becomes the `__context__` of a new one).
+4. Return *r*.
+
+#### 15.4.3 `except*`
+
+A `try` statement with `except*` clauses handles exception groups (21.4):
+
+1. Let *r* be the result of evaluating the `try` block. If it is not a raise
+   completion, continue as in 15.4.1 step 3.
+2. Let *e* be its exception. If *e* is not an exception group, let *e* be a new
+   `ExceptionGroup` (or `BaseExceptionGroup` if *e* is not an `Exception`) with
+   message `""` and the single exception *e*, which is marked *naked*.
+3. Let *rest* be *e* and *excs* be an empty List.
+4. For each `except*` clause, in order, while *rest* is not `None`:
+   1. Let *t* be the value of its expression. If *t* is or contains a subclass
+      of `BaseExceptionGroup`, raise a `TypeError` exception ("catching
+      ExceptionGroup with except* is not allowed. Use except instead."). If it
+      contains a non-exception class, raise the `TypeError` of 15.4.1.
+   2. Let (*match*, *rest*) be ? *rest*.`split`(*t*) (21.4.3).
+   3. If *match* is not `None`: bind it to the `as` name, make it the handled
+      exception, and evaluate the block. If the block raises an exception *x*,
+      append *x* to *excs*. (A bare `raise` re-raises *match*.)
+5. If *rest* is not `None`, append it to *excs*.
+6. If *excs* is empty, the exception is handled: go to step 10.
+7. If *e* was naked, propagate *excs*[0] and go to step 10.
+8. Let *reraised* be the elements of *excs* that have the same `__traceback__`,
+   `__cause__`, `__context__`, and `__notes__` as *e* (they are parts of *e*
+   produced by `split`), and *raised* the others, in order. Let *group* be the
+   projection of *e* onto the leaf exceptions of *reraised*: the subgroup of *e*
+   (21.4.3) containing exactly those leaves, keeping *e*'s nesting, or `None`.
+9. If *raised* is empty, propagate *group* (if it is `None`, the exception is
+   handled). Otherwise append *group*, if not `None`, to *raised*; propagate the
+   only element of *raised* if it has one, and otherwise a new `ExceptionGroup`
+   with message `""` and the elements of *raised*.
+10. The `else` block does not run when the `try` block raised. Run the
+    `finally` block as 15.4.2.
+
+Static Semantics: Early Errors. "cannot have both 'except' and 'except*' on
+the same 'try'"; "expected one or more exception types" for `except*:`;
+"'break', 'continue' and 'return' cannot appear in an except* block"; "default
+'except:' must be last"; "multiple exception types must be parenthesized when
+using 'as'"; "expected 'except' or 'finally' block" for a `try` with neither.
+
+### 15.5 The `with` statement
+
+```text
+with_stmt: 'with' '(' ','.with_item+ ','? ')' ':' block
+         | 'with' ','.with_item+ ':' block
+         | 'async' 'with' '(' ','.with_item+ ','? ')' ':' block
+         | 'async' 'with' ','.with_item+ ':' block
+with_item: expression 'as' star_target &(',' | ')' | ':') | expression
+```
+
+#### 15.5.1 Runtime Semantics: Evaluation
+
+A `with` statement with several items behaves as nested `with` statements, one
+item each. For one item `with m as t: block`:
+
+1. Let *manager* be the value of *m*.
+2. Let *ctx* be ? EnterContext(*manager*) (7.9.1).
+3. If there is a target, perform AssignTarget(*t*, *ctx*.[[Value]]); if it
+   completes abruptly, set *r* to that completion and go to step 5.
+4. Let *r* be the result of evaluating the block.
+5. If *r* is a raise completion with exception *e*:
+   1. Let *x* be ? Call(*ctx*.[[Exit]], «Type(*e*), *e*, *e*.`__traceback__`»),
+      with *e* as the handled exception.
+   2. If ? ToBoolean(*x*) is **true**, return a normal completion (the
+      exception is suppressed).
+   3. Return *r*.
+6. Otherwise, perform ? Call(*ctx*.[[Exit]], «`None`, `None`, `None`»), and
+   return *r* (a **return**, **break**, or **continue** completion still
+   leaves the block after `__exit__` runs).
+
+#### 15.5.2 The `async with` statement
+
+`async with` is permitted only in an `async def` function ("'async with'
+outside async function"). It uses AsyncEnterContext (7.9.1): it awaits the
+result of `__aenter__()` and of `__aexit__(…)` at the points where `with` calls
+`__enter__` and `__exit__`.
+
+### 15.6 The `match` statement
+
+```text
+match_stmt: "match" subject_expr ':' NEWLINE INDENT case_block+ DEDENT
+subject_expr: star_named_expression ',' star_named_expressions? | named_expression
+case_block: "case" patterns guard? ':' block
+guard: 'if' named_expression
+```
+
+#### 15.6.1 Runtime Semantics: Evaluation
+
+1. Let *subject* be the value of the subject expression (a tuple if it has a
+   comma).
+2. For each case block, in order:
+   1. Let *bindings* be an empty List of (name, value) pairs.
+   2. If ? MatchPattern(*pattern*, *subject*, *bindings*) is **true**:
+      1. Perform StoreName for each pair of *bindings*, in order.
+      2. If there is a guard and ? ToBoolean(its value) is **false**, continue
+         with the next case block.
+      3. Return the result of evaluating the block.
+   3. Otherwise, names bound by a partially successful match may have been
+      stored (implementation-defined, Annex D); continue.
+3. Return a normal completion.
+
+Static Semantics: Early Errors. An irrefutable case pattern (a capture pattern
+or wildcard, possibly in an or-pattern) that is not the last case: "name capture
+'*n*' makes remaining patterns unreachable" or "wildcard makes remaining
+patterns unreachable". An irrefutable alternative of an or-pattern that is not
+the last alternative: "alternative patterns bind different names" when they
+bind different names, and the corresponding "makes remaining patterns
+unreachable" message otherwise. A name bound twice in one pattern: "multiple
+assignments to name '*n*' in pattern". Two starred sub-patterns in one sequence
+pattern: "multiple starred names in sequence pattern". Two literal keys of a
+mapping pattern that are equal: "mapping pattern checks duplicate key (*repr*)".
+A keyword attribute repeated in a class pattern: "attribute name repeated in
+class pattern: *name*".
+
+#### 15.6.2 Patterns
+
+```text
+patterns: open_sequence_pattern | pattern
+pattern: as_pattern | or_pattern
+as_pattern: or_pattern 'as' pattern_capture_target
+or_pattern: '|'.closed_pattern+
+closed_pattern: literal_pattern | capture_pattern | wildcard_pattern | value_pattern
+              | group_pattern | sequence_pattern | mapping_pattern | class_pattern
+```
+
+MatchPattern(*p*, *subject*, *bindings*) returns **true** or **false**, or
+completes abruptly:
+
+- **as pattern** `p as name`: if MatchPattern(*p*, …) is **true**, append
+  (*name*, *subject*) and return **true**.
+- **or pattern** `p₁ | … | pₙ`: try each alternative in order with a fresh List;
+  for the first that matches, append its bindings and return **true**. All
+  alternatives bind the same names.
+- **literal pattern**: a number, string, or complex literal (`a + bj`, `a - bj`,
+  `-a`): return ? RichCompareBool(*subject*, *value*, `==`). `None`, `True`,
+  and `False`: return SameObject(*subject*, the constant).
+- **capture pattern** `name`: append (*name*, *subject*); return **true**.
+- **wildcard pattern** `_`: return **true**.
+- **value pattern** `a.b.c`: evaluate the dotted name and return
+  ? RichCompareBool(*subject*, *value*, `==`).
+- **group pattern** `(p)`: MatchPattern(*p*, …).
+- **sequence pattern**: 15.6.3. **mapping pattern**: 15.6.4. **class
+  pattern**: 15.6.5.
+
+A complex literal pattern requires a real number on the left of `+`/`-` ("real
+number required in complex literal") and an imaginary number on the right
+("imaginary number required in complex literal").
+
+#### 15.6.3 Sequence patterns
+
+`[p₁, …, pₙ]`, `(p₁, …, pₙ)`, or `p₁, …, pₙ`, with at most one star pattern
+`*name` or `*_`:
+
+1. If *subject* is not a *sequence for matching*, return **false**: its type is
+   `list`, `tuple`, `range`, `memoryview`, or a subclass, or a class designated
+   a sequence by the host (Annex C), and is not `str`, `bytes`, `bytearray`, or
+   a subclass of them.
+2. Let *len* be ? Length(*subject*).
+3. Without a star pattern: if *len* ≠ *n*, return **false**; otherwise match each
+   *pᵢ* against ? GetItem(*subject*, *i*) in order, returning **false** at the
+   first failure.
+4. With a star pattern at index *s*: if *len* < *n* − 1, return **false**; match
+   the patterns before the star against the first items, the patterns after it
+   against the last items, and bind the star name (unless `_`) to a new list of
+   the items between, in order of the patterns.
+5. Return **true**.
+
+#### 15.6.4 Mapping patterns
+
+`{k₁: p₁, …, kₙ: pₙ, **rest}`:
+
+1. If *subject* is not a *mapping for matching* (a `dict`, `frozendict`, or
+   %MappingProxyType%, a subclass of these, or a class designated a mapping by
+   the host), return **false**.
+2. If *n* > 0 and ? Length(*subject*) < *n*, return **false**.
+3. Let *get* be ? GetAttribute(*subject*, `"get"`). Evaluate each key *kᵢ* in
+   order (literals and value patterns). If two evaluated keys are equal, raise a
+   `ValueError` exception ("mapping pattern checks duplicate key (*repr*(*k*))").
+4. For each key *k*, in order: let *v* be ? Call(*get*, «*k*, *missing*»), where
+   *missing* is a fresh object; if *v* is *missing*, return **false**.
+5. Match each *pᵢ* against its value in order, returning **false** at the first
+   failure.
+6. If `**rest` is present, bind *rest* to a new `dict` with all items of
+   *subject* except the matched keys.
+7. Return **true**.
+
+#### 15.6.5 Class patterns
+
+`C(p₁, …, pₙ, a₁=q₁, …, aₘ=qₘ)`:
+
+1. Evaluate the name or dotted name *C* to *cls*. If *cls* is not a class, raise
+   a `TypeError` exception ("class pattern must refer to a class").
+2. If ? IsInstance(*subject*, *cls*) (with `__instancecheck__`, 19.3) is
+   **false**, return **false**.
+3. If *n* + *m* = 0, return **true**.
+4. Let *seen* be an empty set if *n* > 0 and *n* + *m* > 1, and **absent**
+   otherwise.
+5. If *n* > 0:
+   1. Let *ma* be the `__match_args__` attribute of *cls*, if it has one.
+   2. If *ma* exists and is not exactly a tuple, raise a `TypeError` exception
+      ("*cls*.`__name__`.`__match_args__` must be a tuple (got
+      *tname*(*ma*))").
+   3. If *ma* does not exist and *cls* is a *self-matching* class (`bool`,
+      `bytearray`, `bytes`, `dict`, `float`, `frozendict`, `frozenset`, `int`,
+      `list`, `set`, `str`, `tuple`, or a subclass that does not define
+      `__match_args__`), the allowed count is 1 and the single positional
+      sub-pattern matches *subject* itself; otherwise the allowed count is the
+      length of *ma* (0 if absent).
+   4. If *n* exceeds the allowed count, raise a `TypeError` exception
+      ("*cls*.`__name__`() accepts *a* positional sub-pattern*s* (*n* given)").
+   5. For each *i* < *n* (when not self-matching): let *name* be *ma*[*i*]; if it
+      is not exactly a `str`, raise a `TypeError` exception ("`__match_args__`
+      elements must be strings (got *tname*(*name*))"); perform
+      ClassAttr(*name*).
+6. For each keyword *aⱼ*, perform ClassAttr(*aⱼ*).
+7. Match the sub-patterns against the attribute values obtained, positional
+   ones first, in order, returning **false** at the first failure.
+8. Return **true**.
+
+ClassAttr(*name*): if *seen* is not **absent** and contains *name*, raise a
+`TypeError` exception ("*cls*.`__name__`() got multiple sub-patterns for
+attribute *repr*(*name*)"); add *name* to *seen*; let *v* be ? GetAttribute(*subject*,
+*name*), and if it raises `AttributeError`, return **false** from the class
+pattern. All attributes are obtained before any sub-pattern is matched.
