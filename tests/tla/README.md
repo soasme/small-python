@@ -70,6 +70,7 @@ and tied to real implementations by replaying them.
 | `BuiltinsScope.tla` | builtins lookup through `__builtins__` as a module or a dictionary, shadowing globals, an extended builtins module, restricted `__import__`, and `__builtins__` insertion | yes |
 | `DynamicScopes.tla` | `exec()` and `eval()` with default and given namespaces, free variables, `locals()` snapshots, `f_locals` write-through, and class-body `eval()` | yes |
 | `Raise.tla` | `raise` with classes, instances, non-exceptions, and bare re-raise, `from` causes and `None`, and implicit `__context__` for raised and failing operations in handlers | yes |
+| `CompileModes.tla` | `compile()` in exec, eval, and single modes: what each accepts, its result, values passed to `sys.displayhook`, and bad modes | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -165,9 +166,10 @@ variance attributes, type parameters from `*Ts` did not infer variance,
 `async for`, `aiter()`, `with`, and `async with` reported protocol errors
 with older messages and no hints; an annotated name could be declared
 global or nonlocal, and global with nonlocal was reported at the second
-declaration; and an error raised by an operation (rather than a raise
+declaration; an error raised by an operation (rather than a raise
 statement) in an except handler, a finally block, or `__exit__` lost its
-`__context__` once it left the handler.
+`__context__` once it left the handler; and interactive input printed values
+itself instead of calling `sys.displayhook`.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

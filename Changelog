@@ -445,6 +445,8 @@
   __exit__ keeps the exception being handled as its __context__ after it
   propagates out (it was created only once the handler had exited). TLA+
   model of the raise statement.
+- Interactive (single mode) expression statements call sys.displayhook once
+  sys is loaded. TLA+ model of compile modes.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

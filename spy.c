@@ -14869,7 +14869,16 @@ static SPYValue *sys_module(SPYContext *c) {
     SPYValue *sys = name_local(c->modules, "sys");
     return sys && sys->type == SPY_MODULE ? sys : NULL;
 }
+/* An interactive expression statement's value goes to sys.displayhook
+ * once sys is loaded; until then the default hook's work is done here. */
 static int display_value(SPYContext *c, SPYValue *value) {
+    SPYValue *loaded = sys_module(c);
+    if (loaded) {
+        SPYValue *hook = name_local(loaded, "displayhook");
+        if (!hook) { spy_error(c, "RuntimeError", "lost sys.displayhook"); return -1; }
+        spy_release(spy_call(c, hook, 1, &value));
+        return c->error_type[0] ? -1 : 0;
+    }
     if (value->type == SPY_NONE) return 0;
     if (name_set(c, c->builtins, "_", c->none)) return -1;
     SPYValue *text = spy_repr(c, value);

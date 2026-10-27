@@ -144,7 +144,7 @@ Reference chapter contents | - table of contents
 3. Data model > Data model > Coroutines > Asynchronous Context Managers | AsyncWith
 4. Execution model | = sections
 4. Execution model > Execution model | = sections
-4. Execution model > Execution model > Structure of a program | TODO: CompileModes
+4. Execution model > Execution model > Structure of a program | CompileModes
 4. Execution model > Execution model > Naming and binding | = sections
 4. Execution model > Execution model > Naming and binding > Binding of names | Scopes, ScopeErrors
 4. Execution model > Execution model > Naming and binding > Resolution of names | Scopes
@@ -238,7 +238,7 @@ Reference chapter contents | - table of contents
 6. Expressions > Expressions > Operator precedence | TODO: Precedence
 7. Simple statements | = sections
 7. Simple statements > Simple statements | TODO: Grammar
-7. Simple statements > Simple statements > Expression statements | TODO: CompileModes
+7. Simple statements > Simple statements > Expression statements | CompileModes
 7. Simple statements > Simple statements > Assignment statements | TODO: Unpacking, Evaluation, Assignment
 7. Simple statements > Simple statements > Assignment statements > Augmented assignment statements | TODO: Operators, Evaluation, Assignment
 7. Simple statements > Simple statements > Assignment statements > Annotated assignment statements | Annotations
@@ -297,10 +297,10 @@ Reference chapter contents | - table of contents
 8. Compound statements > Compound statements > Annotations | Annotations
 9. Top-level components | = sections
 9. Top-level components > Top-level components | = sections
-9. Top-level components > Top-level components > Complete Python programs | TODO: CompileModes
-9. Top-level components > Top-level components > File input | TODO: CompileModes
-9. Top-level components > Top-level components > Interactive input | TODO: CompileModes
-9. Top-level components > Top-level components > Expression input | TODO: CompileModes
+9. Top-level components > Top-level components > Complete Python programs | CompileModes
+9. Top-level components > Top-level components > File input | CompileModes
+9. Top-level components > Top-level components > Interactive input | CompileModes
+9. Top-level components > Top-level components > Expression input | CompileModes
 10. Complete grammar | = sections
 10. Complete grammar > Full Grammar specification | TODO: Grammar, Precedence
 11. Built-in types | = sections

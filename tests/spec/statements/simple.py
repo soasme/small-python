@@ -109,3 +109,15 @@ for function, kind in [(fails_in_handler, ZeroDivisionError), (fails_in_finally,
                        (bad_raise_in_handler, TypeError), (fails_in_exit, ZeroDivisionError)]:
     e = assert_raises(kind, function)
     assert_type(e.__context__, KeyError)
+
+# Interactive expression statements go through sys.displayhook.
+import sys
+shown = []
+saved_hook = sys.displayhook
+sys.displayhook = shown.append
+try:
+    exec(compile("1 + 1\n", "<input>", "single"), {})
+    exec(compile("None\n", "<input>", "single"), {})
+finally:
+    sys.displayhook = saved_hook
+assert_eq(shown, [2, None])
