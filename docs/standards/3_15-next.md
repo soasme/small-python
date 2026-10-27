@@ -6580,3 +6580,196 @@ calls the host's *finalizer* hook with the generator, if the host installed
 them (HostAsyncGenHooks, Annex B); without a finalizer it calls `aclose()` and
 drives the resulting awaitable to completion, reporting any exception as
 unraisable.
+
+## 28 Reflection Objects
+
+The objects of this clause describe running code. Each type is an intrinsic
+that is not an acceptable base type, with `__module__` `"builtins"`; a program
+reaches it through `type()` of an instance, and Annex C lists the names the
+library facade gives them.
+
+### 28.1 Function type
+
+%FunctionType% (`__name__` `"function"`) is the type of user-defined functions
+(16.2). Calling it, `function(code, globals, name=None, argdefs=None,
+closure=None, kwdefaults=None)`, creates a function directly:
+
+1. *code* shall be a code object ("function() argument 'code' must be code,
+   not *tname*") and *globals* a `dict` ("function() argument 'globals' must be
+   dict, not *tname*").
+2. *name* shall be `None` or a `str` ("arg 3 (name) must be None or string"),
+   defaulting to *code*.`co_name`; *argdefs* `None` or a tuple ("arg 4
+   (defaults) must be None or tuple"); *kwdefaults* `None` or a dict.
+3. *closure* shall be `None` or a tuple ("arg 5 (closure) must be tuple") of
+   cells ("arg 5 (closure) expected cell, found *tname*") whose length equals
+   the number of free variables of *code* ("*name* requires closure of length
+   *n*, not *m*").
+4. Return a new function whose `__qualname__` is *code*.`co_qualname`,
+   `__module__` is *globals*`["__name__"]` if present, and whose other
+   attributes come from the arguments.
+
+### 28.2 Code objects
+
+A code object (%CodeType%, `__name__` `"code"`) wraps a Code Record (6.2.7).
+It is immutable: assigning any attribute raises `AttributeError` ("readonly
+attribute").
+
+| Attribute | Value |
+| --- | --- |
+| `co_name`, `co_qualname` | the name and qualified name |
+| `co_filename`, `co_firstlineno` | the file name and the first line |
+| `co_argcount`, `co_posonlyargcount`, `co_kwonlyargcount` | the numbers of positional (including positional-only), positional-only, and keyword-only parameters |
+| `co_varnames` | the names of the parameters (positional, keyword-only, then `*args`, then `**kwargs`) followed by the other local names, in order of first appearance |
+| `co_nlocals` | the length of `co_varnames` |
+| `co_cellvars`, `co_freevars` | the **cell** names and the **free** names (8.4), in order of first appearance |
+| `co_names` | the global, builtin, and attribute names the code uses, in order of first use |
+| `co_consts` | a tuple whose first element is the docstring when the code has one |
+| `co_flags` | Table 28-1 |
+| `co_code`, `co_stacksize`, `co_exceptiontable`, `co_linetable` | implementation-defined (Annex D); `co_code` is a `bytes` and `co_stacksize` a positive `int` |
+
+Table 28-1: Code flags
+
+| Value | Meaning |
+| --- | --- |
+| 0x01, 0x02 | always set for function code (optimized, new locals) |
+| 0x04 | has `*args` |
+| 0x08 | has `**kwargs` |
+| 0x10 | nested in a function |
+| 0x20 | generator |
+| 0x80 | coroutine |
+| 0x100 | iterable coroutine (27.4.5) |
+| 0x200 | asynchronous generator |
+| 0x4000000 | has a docstring |
+
+Methods: `replace(**changes)` returns a copy with the named `co_` attributes
+replaced; `co_lines()` returns an iterator of (*start*, *end*, *line*) triples
+whose ranges are consecutive and cover `co_code` from 0; `co_positions()`
+returns an iterator of (*line*, *end_line*, *col*, *end_col*) quadruples, one
+per instruction unit. Code objects compare equal when all their attributes
+are equal, and hash accordingly. `repr` is "\<code object *name* at *address*,
+file "*filename*", line *n*\>". Calling the code type to build a code object is
+implementation-defined.
+
+### 28.3 Frame objects
+
+A frame object (%FrameType%, `__name__` `"frame"`) exposes a Frame Record (9.2)
+that is or was running. A program obtains one from a traceback's `tb_frame`, a
+generator's `gi_frame`, or a host facility.
+
+| Attribute | Value |
+| --- | --- |
+| `f_code`, `f_globals`, `f_builtins` | the code, the globals, the builtins namespace |
+| `f_back` | the frame that called this one, or `None` (always `None` for a generator's frame) |
+| `f_locals` | for a function frame, a *frame locals proxy* (`FrameLocalsProxy`), a mapping that reads and writes the frame's local variables and cells; for module and class frames, the locals mapping itself |
+| `f_lineno` | the current line; assignable only from a trace function ("f\_lineno can only be set in a trace function") |
+| `f_lasti` | the current instruction index (implementation-defined) |
+| `f_generator` | the generator or coroutine owning the frame while it runs, else `None` |
+| `f_trace`, `f_trace_lines`, `f_trace_opcodes` | host tracing hooks; the latter two accept only `bool` |
+
+`clear()` releases the frame's local variables; on the frame of a generator
+that has not started it finalizes the generator; on an executing or suspended
+frame it raises a `RuntimeError` exception ("cannot clear an executing frame"
+or "cannot clear a suspended frame"). `repr` is "\<frame at *address*, file
+'*filename*', line *n*, code *name*\>".
+
+### 28.4 Method objects
+
+A method object (%MethodType%, `__name__` `"method"`) binds a callable
+`__func__` to an object `__self__`. `method(function, instance)` requires a
+callable ("first argument must be callable") and an instance that is not
+`None` ("instance must not be None").
+
+Calling a method calls `__func__` with `__self__` inserted before the
+arguments (7.4.1). Attribute reads that the method type does not define are
+forwarded to `__func__`, so `__name__`, `__qualname__`, `__doc__`,
+`__module__`, and function attributes read through; setting an attribute
+raises `AttributeError` ("'method' object has no attribute '*name*' and no
+\_\_dict\_\_ for setting new attributes"). Two methods are equal when their
+`__func__` are equal and their `__self__` are the same object; the hash
+combines the hash of `__func__` with the identity of `__self__`. `repr` is
+"\<bound method *qualname* of *repr*(`__self__`)\>". A method's `__get__`
+returns the method itself.
+
+### 28.5 Built-in functions and methods
+
+%BuiltinFunctionType% (`__name__` `"builtin_function_or_method"`) is the type
+of functions implemented by the implementation: the functions of clause 19
+and the methods of built-in objects bound to their instance.
+
+| Attribute | Value |
+| --- | --- |
+| `__name__`, `__qualname__` | the name; for a bound method *T*`.`*name* |
+| `__self__` | the object the method is bound to; for a module-level built-in function, its module (the module object of `builtins`) |
+| `__module__` | the module name for a function, `None` for a bound method |
+| `__doc__`, `__text_signature__` | implementation-defined text, or `None` |
+
+They are not descriptors: storing one in a class does not make it a method.
+Two are equal when they wrap the same function and the same `__self__`.
+`repr` is "\<built-in function *name*\>" or "\<built-in method *name* of
+*tname*(`__self__`) object at *address*\>".
+
+### 28.6 Cell objects
+
+A cell (%CellType%, `__name__` `"cell"`) holds at most one object. `cell()`
+creates an empty cell and `cell(x)` one holding *x*. `cell_contents` reads the
+object (`ValueError` "Cell is empty" when empty), and can be assigned and
+deleted. Cells compare by their contents (an empty cell is less than a full
+one and equal to another empty one) and are unhashable. `repr` is "\<cell at
+*address*: *tname*(*x*) object at *address*\>" or "\<cell at *address*:
+empty\>".
+
+### 28.7 Method descriptors
+
+The methods of built-in types are stored in their classes as descriptors:
+
+| `__name__` | Kind | Bound form |
+| --- | --- | --- |
+| `method_descriptor` | an ordinary method, `list.append` | %BuiltinFunctionType% |
+| `wrapper_descriptor` | a special method slot, `list.__add__` | `method-wrapper` |
+| `classmethod_descriptor` | a class method, `dict.__dict__['fromkeys']` | %BuiltinFunctionType% bound to the class |
+
+Each has `__name__`, `__qualname__` (*T*`.`*name*), `__objclass__` (the type
+*T* defining it), and `__doc__`. `__get__(instance, owner)` returns the
+descriptor itself when *instance* is `None` (for a `classmethod_descriptor`,
+binds *owner*) and otherwise the bound form; the instance shall be an instance
+of `__objclass__` ("descriptor '*name*' for '*T*' objects doesn't apply to a
+'*tname*' object"). Calling the descriptor directly takes the instance as the
+first argument, with the same check (for a slot wrapper, "descriptor '*name*'
+requires a '*T*' object but received a '*tname*'"); a call without arguments
+raises `TypeError` ("unbound method *T*.*name*() needs an argument", or
+"descriptor '*name*' of '*T*' object needs an argument").
+
+The reprs are "\<method '*name*' of '*T*' objects\>", "\<slot wrapper '*name*'
+of '*T*' objects\>", "\<method '*name*' of '*T*' objects\>", and, for a bound
+`method-wrapper`, "\<method-wrapper '*name*' of *tname* object at
+*address*\>".
+
+### 28.8 Getset and member descriptors
+
+%GetSetDescriptorType% (`getset_descriptor`) describes a computed attribute of
+a built-in type (`int.real`, `type.__name__`, `BaseException.args`, an
+instance's `__dict__` slot), and %MemberDescriptorType% (`member_descriptor`) a
+stored attribute (a `__slots__` entry, 10.1.2). Both are data descriptors with
+`__name__`, `__qualname__`, `__objclass__`, and `__doc__`; `__get__` applies
+the same instance check as 28.7. A read-only one raises `AttributeError` on
+`__set__` and `__delete__` ("attribute '*name*' of '*T*' objects is not
+writable"). Reading an empty slot raises `AttributeError` ("'*fqname*(*o*)'
+object has no attribute '*name*'"). Reprs are "\<attribute '*name*' of '*T*'
+objects\>" and "\<member '*name*' of '*T*' objects\>".
+
+### 28.9 Traceback objects
+
+A traceback object (%TracebackType%, `__name__` `"traceback"`) records one
+level of the unwinding of an exception (18.1.3).
+
+| Attribute | Value |
+| --- | --- |
+| `tb_frame` | the frame of that level (read-only) |
+| `tb_lineno` | the line at which the exception passed through the level (read-only) |
+| `tb_lasti` | the instruction index (implementation-defined, read-only) |
+| `tb_next` | the next level towards where the exception was raised, or `None`; assignable to a traceback or `None` ("expected traceback object or None, got '*tname*'"), refusing a value that would make a cycle (`ValueError` "traceback loop detected") |
+
+`traceback(tb_next, tb_frame, tb_lasti, tb_lineno)` creates one: *tb_next*
+shall be a traceback or `None` ("expected traceback object or None, got
+'*tname*'") and *tb_frame* a frame ("traceback() argument 'tb_frame' must be
+frame, not *tname*").
