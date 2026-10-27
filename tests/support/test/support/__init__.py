@@ -341,6 +341,15 @@ class _AdjustLimit:
     def __exit__(self, *exc):
         self.set(self.current)
 
+    def __call__(self, function):
+        # contextlib's context managers also decorate functions.
+        def wrapper(*args, **kwargs):
+            with self:
+                return function(*args, **kwargs)
+        wrapper.__name__ = function.__name__
+        wrapper.__qualname__ = function.__qualname__
+        return wrapper
+
 
 def adjust_int_max_str_digits(max_digits):
     """Temporarily change the integer string conversion length limit."""

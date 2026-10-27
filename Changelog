@@ -285,3 +285,8 @@
   __dict__, and CPython's slot validation and layout-conflict errors.
 - CPython unittest ports add test_contains, test_exception_group,
   test_iterlen, and test_userdict (322 cases in 18 modules).
+- Future statements: placement and feature checks, barry_as_FLUFL and
+  CO_FUTURE_BARRY_AS_BDFL with the '<>' operator; the statement runs without
+  a __future__ module. Compiler-phase errors in strings have text None.
+- A comparison's result is tested for truth only between chained comparisons.
+- test.support's recursion and digit limit helpers also decorate functions.

@@ -227,12 +227,12 @@ remaining coverage gaps. `make test-cpython-doctests` is strict about the curren
 ports; `make test-cpython` additionally requires closing the full inventory.
 Both strict upstream targets currently fail.
 
-`make test-cpython-unittest` passes all 322 cases in eighteen unchanged modules:
+`make test-cpython-unittest` passes all 326 cases in nineteen unchanged modules:
 decorators, augmented assignments, integer literals, unary operators, keyword-only
 arguments, assignment expressions, large expressions, Unicode identifiers, exception
 variations, type checks, subclass initialization, UTF-8 source, binary operators,
-isinstance/issubclass, containment, exception groups, iterator length hints, and
-UserDict.
+isinstance/issubclass, containment, exception groups, iterator length hints,
+UserDict, and barry_as_FLUFL.
 It also checks all 119 executed subtests
 against the oracle using the documented test-only framework adapter.
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
@@ -557,6 +557,15 @@ and reuse. Comprehensions share that execution machinery, including nested
 async clauses and awaited elements/filters. Generator-based coroutines, automatic async
 finalization, unawaited-operation warnings, and frame/code introspection remain
 missing. The core does not provide an event loop.
+
+Future statements are checked as CPython's compiler does: they must come
+first (after at most a docstring), name a known feature (`braces` is "not a
+chance"), and `barry_as_FLUFL` or compile()'s `CO_FUTURE_BARRY_AS_BDFL` flag
+makes `<>` the inequality operator. The statement still imports `__future__`
+when a host provides it and binds nothing otherwise. `from __future__ import
+annotations` does not yet turn annotations into strings. Compiler-phase
+SyntaxErrors from compile(), exec(), and eval() strings have no `text`, as in
+CPython.
 
 Lazy annotations, structural matching, exception groups, generic parameters,
 and type aliases have implementations and local checks; their complete upstream

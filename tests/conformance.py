@@ -1366,6 +1366,64 @@ for bad in [lambda: object.__reduce_ex__(A()), lambda: object.__reduce__(A(), 1)
 class R:
     def __reduce__(self): return "custom"
 print(R().__reduce_ex__(2))
+""",    r'''
+class __future__: CO_FUTURE_BARRY_AS_BDFL = 0x400000
+def t(src, flags=0):
+    try:
+        compile(src, "<s>", "exec", flags); print("ok")
+    except SyntaxError as e: print(repr(e.msg), e.lineno, e.offset, e.end_lineno, e.end_offset, repr(e.text))
+t("1 <> 2")
+t("1 <> 2", __future__.CO_FUTURE_BARRY_AS_BDFL)
+t("1 != 2", __future__.CO_FUTURE_BARRY_AS_BDFL)
+t("from __future__ import barry_as_FLUFL\n1 <> 2")
+t("from __future__ import barry_as_FLUFL\n1 != 2")
+t("from __future__ import braces")
+t("from __future__ import nope")
+t("from __future__ import nope, braces")
+t("x = 1\nfrom __future__ import annotations")
+t('"""doc"""\nfrom __future__ import annotations\nfrom __future__ import division')
+t('"""doc"""\n"""x"""\nfrom __future__ import annotations')
+t('def f():\n    from __future__ import annotations')
+t('from __future__ import (annotations, division,)')
+t('from __future__ import annotations as a')
+t('from __future__ import *')
+t('import __future__\nfrom __future__ import annotations')
+t('from .__future__ import annotations')
+t('if 1:\n    from __future__ import annotations')
+t('from __future__ import annotations; x = 1; from __future__ import division')
+t('from __future__ import barry_as_FLUFL\ndef f(a: 1 <> 2): pass')
+t('a <> b', 0)
+t('a < > b', 0)
+t('class A:\n    from __future__ import annotations')
+''',    r"""
+for s in ["return 1", "async for x in y: pass", "nonlocal x", "def f():\n    x = 1\n    global x"]:
+    try: compile(s, "<s>", "exec")
+    except SyntaxError as e: print(e.msg, repr(e.text))
+""",    r"""
+class operator:
+    lt = __lt__ = staticmethod(lambda a, b: a < b)
+    eq = staticmethod(lambda a, b: a == b)
+class V:
+    def __init__(s, d): s.d = d
+    def __bool__(s): raise TypeError("no bool")
+    def __lt__(s, o): return V([1])
+    def __eq__(s, o): return V([2])
+    def __gt__(s, o): return V([3])
+    def __repr__(s): return "V%r" % s.d
+for f in (lambda a,b: a<b, operator.lt, operator.__lt__, lambda a,b: a==b, operator.eq, lambda a,b: a>b):
+    for a, b in ((list(range(3)), V(1)), (V(1), [1]), (V(1), V(2))):
+        try: print(f(a, b))
+        except TypeError as e: print("TE", e)
+""",    r"""
+class V:
+    def __bool__(s): raise TypeError("no bool")
+    def __lt__(s, o): return V()
+try: V() < 1 < 2
+except TypeError as e: print(e)
+def g():
+    try: yield V() < 1 < 2
+    except TypeError as e: yield str(e)
+print(list(g()), 1 < 2 < 3, 1 < 3 < 2)
 """,    r"""
 class A:
     __slots__ = ("x", "y")

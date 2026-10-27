@@ -123,6 +123,8 @@ struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
+    int compile_flags; /* compile()'s future flags while it parses. */
+    int string_source; /* compile(), exec(), or eval() is parsing a string. */
     /* Modules a host registered with spy_new_module, created on first import. */
     struct HostModule { char *name; SPYModuleInit init; } *host_modules;
     /* Mounted host directories (resolved host path, normalized guest path)
@@ -2316,6 +2318,10 @@ typedef struct {
     size_t error_pos; /* The token a syntax() error points at. */
     const char *unclosed; /* The innermost bracket still open at the end. */
     size_t unclosed_line;
+    /* Future statements: nesting of statement(), top-level statements seen,
+     * whether one may still appear, and barry_as_FLUFL. */
+    int statement_level, future_closed, barry;
+    size_t top_statements;
 } Parser;
 static int token_add(Parser *p, int kind, const char *s, size_t n, size_t line) {
     if (grow(p->ctx, (void **)&p->tokens, &p->cap, p->len + 1, sizeof(Token))) return -1;
@@ -2681,8 +2687,8 @@ static int lex(Parser *p, const char *s) {
         } else if (isdigit((unsigned char)*start) || (*start == '.' && isdigit((unsigned char)*s))) {
             if (!(s = scan_number(p, start, line, &kind))) return -1;
         } else {
-            const char *pairs[] = {"==", "!=", "<=", ">=", "**", "//", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", ":=", "->"};
-            const int kinds[] = {T_EQ, T_NE, T_LE, T_GE, T_POW, T_FLOORDIV, T_LSHIFT, T_RSHIFT, T_ADDEQ, T_SUBEQ, T_MULEQ, T_DIVEQ, T_MODEQ, T_MATEQ, T_ANDEQ, T_OREQ, T_XOREQ, T_WALRUS, T_ARROW};
+            const char *pairs[] = {"==", "!=", "<>", "<=", ">=", "**", "//", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", ":=", "->"};
+            const int kinds[] = {T_EQ, T_NE, T_NE, T_LE, T_GE, T_POW, T_FLOORDIV, T_LSHIFT, T_RSHIFT, T_ADDEQ, T_SUBEQ, T_MULEQ, T_DIVEQ, T_MODEQ, T_MATEQ, T_ANDEQ, T_OREQ, T_XOREQ, T_WALRUS, T_ARROW};
             for (size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); i++)
                 if (start[0] == pairs[i][0] && *s == pairs[i][1]) { kind = kinds[i]; s++; break; }
             if (*s == '=' && kind >= T_POW && kind <= T_RSHIFT) {
@@ -2777,6 +2783,21 @@ static int reserved(Token *t) {
     for (size_t i = 0; i < sizeof(words) / sizeof(*words); i++)
         if (strlen(words[i]) == t->len && !memcmp(words[i], t->start, t->len)) return 1;
     return 0;
+}
+static int token_is(Token *t, const char *text) { return t->kind == T_NAME && t->len == strlen(text) && !memcmp(t->start, text, t->len); }
+/* future_check_features: barry_as_FLUFL changes the rest of the parse. */
+static void future_feature(Parser *p, size_t name) {
+    static const char *const features[] = {"nested_scopes", "generators", "division", "absolute_import", "with_statement",
+                                           "print_function", "unicode_literals", "barry_as_FLUFL", "generator_stop", "annotations"};
+    Token *t = &p->tokens[name];
+    if (token_is(t, "barry_as_FLUFL")) p->barry = 1;
+    for (size_t i = 0; i < sizeof(features) / sizeof(*features); i++) if (token_is(t, features[i])) return;
+    if (p->deferred) return;
+    char message[128];
+    if (token_is(t, "braces")) snprintf(message, sizeof(message), "not a chance");
+    else snprintf(message, sizeof(message), "future feature %.*s is not defined", (int)t->len, t->start);
+    size_t pos = p->pos;
+    p->pos = name; defer(p, message); p->pos = pos;
 }
 static Node *identifier(Parser *p) {
     if (!at(p, T_NAME) || reserved(peek(p))) return syntax(p, "invalid syntax");
@@ -3761,6 +3782,10 @@ static Node *expression_inner(Parser *p, int min, int named) {
             do {
                 Node *cmp = node(p, N_BINARY);
                 if (!cmp) return NULL;
+                /* The tokenizer reads '<>' as NOTEQUAL; only barry_as_FLUFL accepts it. */
+                if (op == T_NE && (*peek(p)->start == '<') != p->barry)
+                    return syntax(p, p->barry ? "with Barry as BDFL, use '<>' instead of '!='" :
+                                  "invalid syntax.  Maybe you meant '!=' instead of '<>'?");
                 cmp->op = op; p->pos += (size_t)width;
                 cmp->a = expression(p, 4);
                 if (!cmp->a) return NULL;
@@ -4620,9 +4645,20 @@ static void soft_keyword_error(Parser *p, size_t start) {
     spy_error(c, "SyntaxError", message);
     c->line = line; p->pos = pos; p->error_start = error_start; p->error_end = error_end;
 }
+/* future.c: future statements come first, after at most a docstring. */
 static Node *statement(Parser *p) {
     Token *first = peek(p);
+    int future = token_is(first, "from") && p->pos + 2 < p->len && token_is(first + 1, "__future__") && token_is(first + 2, "import");
+    int misplaced = future && (p->statement_level || p->future_closed) && !p->deferred;
+    if (misplaced) defer(p, "from __future__ imports must occur at the beginning of the file");
+    p->statement_level++;
     Node *n = statement_body(p);
+    p->statement_level--;
+    if (n && misplaced) p->deferred_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
+    if (!p->statement_level) {
+        if (!future && !(!p->top_statements && n && n->kind == N_EXPR && n->a && n->a->kind == N_STRING)) p->future_closed = 1;
+        p->top_statements++;
+    }
     if (n && (n->kind == N_IF || n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_DEF || n->kind == N_CLASS ||
               n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH) && first->line >= p->last_stmt_line) {
         p->last_stmt_line = first->line; p->last_stmt = first->start;
@@ -4894,14 +4930,17 @@ static Node *statement_body(Parser *p) {
                 p->pos = lazy - 1;
                 return syntax(p, "lazy from __future__ import is not allowed");
             }
+            if (!n->op && !strcmp(source_name(n->a), "__future__") && at(p, '*')) defer(p, "future feature * is not defined");
             if (take(p, '*')) { n->args = node(p, N_STAR); return n; }
         }
+        int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
         if (at(p, T_NL)) return syntax(p, "Expected one or more names after 'import'");
         int grouped = from && take(p, '(');
         Node **tail = &n->args;
         do {
             Node *item = node(p, N_ASSIGN);
             if (!item || !(item->a = from ? identifier(p) : import_name(p))) return NULL;
+            if (future) future_feature(p, p->pos - 1);
             if (take_word(p, "as")) {
                 /* invalid_dotted_as_name and invalid_import_from_as_name */
                 size_t name = p->pos;
@@ -5546,7 +5585,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
     unit->as.unit.filename = copy_text(c, filename, strlen(filename));
-    Parser p = { .ctx = c, .unit = unit };
+    Parser p = { .ctx = c, .unit = unit, .barry = (c->compile_flags & 0x400000) != 0 };
     int parsing = 1, at_end = 0;
     if (unit->as.unit.filename && !lex(&p, source)) {
         unit->as.unit.body = statements(&p);
@@ -5596,7 +5635,9 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         snprintf(c->filename, sizeof(c->filename), "%s", filename);
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
-        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | (p.error_end_zero ? 2 : 0));
+        /* The compiler's errors read the line from the file, which a string has not. */
+        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | (p.error_end_zero ? 2 : 0) |
+                                              (!parsing && c->string_source ? 4 : 0));
         if (incomplete) *incomplete = syntax_error && parsing && (p.incomplete || at_end);
         if (syntax_error && parsing && c->exception) {
             size_t column = 0;
@@ -10198,7 +10239,11 @@ container_fail:
             if (!b) break;
             result = comparison(c, cmp->op, a, b);
             spy_release(a); a = b; b = NULL;
-            if (!result || !spy_truth(result) || !cmp->next) break;
+            if (!result || !cmp->next) break;
+            if (!spy_truth(result)) {
+                if (c->error_type[0]) { spy_release(result); result = NULL; }
+                break;
+            }
             spy_release(result); result = NULL;
         }
         break;
@@ -10475,7 +10520,7 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
 }
 static void attach_syntax_error(SPYContext *c, const char *filename, const char *source,
                                 const char *position, const char *finish, int trim_line) {
-    int end_zero = trim_line & 2;
+    int end_zero = trim_line & 2, textless = trim_line & 4;
     trim_line &= 1;
     char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
     memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
@@ -10504,7 +10549,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
     SPYValue *fields[] = {
         spy_string(c, filename, strlen(filename)), spy_int(c, (int64_t)line),
         position ? spy_int(c, (int64_t)offset) : spy_none(c),
-        spy_string(c, text.data ? text.data : "", text.len),
+        textless ? spy_none(c) : spy_string(c, text.data ? text.data : "", text.len),
         position ? spy_int(c, (int64_t)line) : spy_none(c),
         position ? spy_int(c, (int64_t)end_offset) : spy_none(c)
     };
@@ -14420,6 +14465,10 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             }
             SPYValue *module = fromlist && !c->error_type[0] ? call_import(c, f, n->a ? source_name(n->a) : "", fromlist, n->op) : NULL;
             spy_release(fromlist);
+            /* A future statement is a compiler directive; without a __future__
+             * module to import it binds nothing. */
+            if (!module && n->kind == N_FROM && !n->op && !strcmp(source_name(n->a), "__future__") &&
+                error_is(c, "ModuleNotFoundError")) { spy_clear_error(c); break; }
             if (n->kind == N_FROM && !module) break;
             for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
                 if (module && item->kind == N_STAR) { import_star(c, f, module); continue; }
@@ -14691,7 +14740,10 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_COMPARE:
             b = machine_pop(m); a = machine_pop(m); value = comparison(c, n->op, a, b);
             if (value && ins->arg && spy_truth(value)) { spy_release(value); value = spy_retain(b); }
-            else m->pc = ins->target;
+            else {
+                if (value && c->error_type[0]) { spy_release(value); value = NULL; }
+                m->pc = ins->target;
+            }
             machine_push(c, m, value); break;
         case BC_NEW: machine_push(c, m, display_new(c, n, ins->arg)); break;
         case BC_ADD: case BC_EXTEND:
@@ -18648,7 +18700,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
                 if (!bytes) { spy_error(c, "TypeError", "source must be a string or code object"); goto execution_fail; }
                 text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
             }
+            c->string_source++;
             if (text) unit = parse_source(c, text->as.string.data, filename, NULL);
+            c->string_source--;
             spy_release(text);
             if (!unit) goto execution_fail;
             Node *body = unit->as.unit.body;
@@ -19223,7 +19277,11 @@ static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *ar
     if (args[6] && args[6]->type != SPY_NONE && !builtin_value(c, args[6], SPY_STRING))
         return errorf(c, "TypeError", "compile() argument 'module' must be str or None, not %s", type_name(args[6]));
     if (flags & CF_ONLY_AST) return spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
-    return builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
+    int saved = c->compile_flags;
+    c->compile_flags = (int)(flags & CF_FUTURE_MASK);
+    SPYValue *code = builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
+    c->compile_flags = saved;
+    return code;
 }
 /* The function a definition's code object makes in a globals dict, as
  * PyFunction_New. spy closures share their defining environment rather than
