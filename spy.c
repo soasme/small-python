@@ -112,7 +112,7 @@ struct SPYValue {
          * DESC_ flags; values live in the instance's hidden fields. */
         struct { SPYValue *name, *owner; int flags; } member;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
-        struct { SPYValue *source, *counter; size_t index, size; int kind, done; } iterator;
+        struct { SPYValue *source, *counter; size_t index, size; int kind, done; const void *last; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
         struct {
             SPYValue *env, *unit, *name, *qualname, *code, *frame; /* frame: gi_frame, once read */
@@ -6452,10 +6452,20 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     case I_SEQUENCE: case I_REVERSED: {
         SPYValue *sized = is_view(source) ? source->as.bound.self : source;
         int reversed = v->as.iterator.kind == I_REVERSED;
+        size_t at = v->as.iterator.index;
         if ((sized->type == SPY_DICT || ((sized->type == SPY_SET || sized->type == SPY_FROZENSET) && !reversed)) && v->as.iterator.size != sized->as.map.len) {
             spy_error(c, "RuntimeError", sized->type == SPY_DICT ? "dictionary changed size during iteration" : "Set changed size during iteration");
             v->as.iterator.done = 1;
-        } else if (!reversed) result = iter_at(c, source, v->as.iterator.index++);
+        } else if (sized->type == SPY_DICT && !reversed && at && v->as.iterator.last &&
+                   (at > sized->as.map.len || (const void *)sized->as.map.items[at - 1].key != v->as.iterator.last)) {
+            /* The key last produced has moved: keys were removed and added
+             * (26.1.4). It is compared by identity only, never used. */
+            spy_error(c, "RuntimeError", "dictionary keys changed during iteration");
+            v->as.iterator.done = 1;
+        } else if (!reversed) {
+            result = iter_at(c, source, v->as.iterator.index++);
+            if (result && sized->type == SPY_DICT && at < sized->as.map.len) v->as.iterator.last = sized->as.map.items[at].key;
+        }
         else if (v->as.iterator.index && source->type == SPY_INSTANCE) {
             /* reversed_next over a sequence: stop at IndexError or StopIteration. */
             SPYValue *key = spy_int(c, (int64_t)v->as.iterator.index - 1);
@@ -6967,7 +6977,13 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
     SliceBounds bounds;
     if (slice_bounds(c, key, &bounds)) return -1;
     SPYValue *items = spy_list(c), *iterator = source ? get_iterator(c, source) : NULL;
-    if (!items || (source && !iterator)) { spy_release(items); spy_release(iterator); return -1; }
+    if (!items || (source && !iterator)) {
+        /* PySequence_Fast's message replaces GetIterator's TypeError. */
+        if (source && !iterator && error_is(c, "TypeError")) {
+            spy_clear_error(c); spy_error(c, "TypeError", "must assign iterable to extended slice");
+        }
+        spy_release(items); spy_release(iterator); return -1;
+    }
     while (iterator && !c->error_type[0]) {
         if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
         SPYValue *item = iterator_next(c, iterator);
@@ -7263,6 +7279,9 @@ static SPYValue *round_value(SPYContext *c, SPYValue *value, SPYValue *digits) {
                 scaled = integer_multiply(c, rounded, power);
                 double number;
                 if (scaled && !spy_as_float(c, scaled, &number)) result = spy_float(c, number);
+                else if (scaled && error_is(c, "OverflowError")) {
+                    spy_clear_error(c); spy_error(c, "OverflowError", "rounded value too large to represent");
+                }
                 spy_release(scaled);
             }
             if (result) result->as.real = copysign(result->as.real, value->as.real);
@@ -7542,23 +7561,27 @@ static SPYValue *complex_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b)
         result = real_right ? complex_parts(creal(x) / creal(y), cimag(x) / creal(y))
                             : complex_divide(x, y, real_left);
         break;
-    case T_POW:
-        if (y == 0) result = complex_parts(1, 0);
-        else if (x == 0) {
-            if (cimag(y) != 0 || creal(y) < 0) return spy_error(c, "ZeroDivisionError", "zero to a negative or complex power");
-            result = complex_parts(0, 0);
-        } else if (cimag(y) == 0 && fabs(creal(y)) <= 100 && floor(creal(y)) == creal(y)) {
-            int exponent = (int)fabs(creal(y));
+    case T_POW: {
+        /* complex_pow: a small integral exponent by repeated squaring and,
+         * when not positive, a reciprocal; otherwise the polar form. A zero
+         * divisor is a ZeroDivisionError and an infinite part an overflow. */
+        int zero_divisor = 0;
+        if (cimag(y) == 0 && floor(creal(y)) == creal(y) && fabs(creal(y)) <= 100) {
+            long n = (long)creal(y);
             double complex power = x;
             result = complex_parts(1, 0);
-            while (exponent) {
-                if (exponent & 1) result *= power;
-                exponent >>= 1;
-                if (exponent) power *= power;
+            for (long m = n < 0 ? -n : n; m; m >>= 1) {
+                if (m & 1) result *= power;
+                if (m > 1) power *= power;
             }
-            if (creal(y) < 0) result = complex_divide(complex_parts(1, 0), result, 0);
+            if (n <= 0) {
+                if (creal(result) == 0 && cimag(result) == 0) zero_divisor = 1;
+                else result = complex_divide(complex_parts(1, 0), result, 0);
+            }
+        } else if (x == 0) {
+            zero_divisor = cimag(y) != 0 || creal(y) < 0;
+            result = complex_parts(0, 0);
         } else {
-            errno = 0;
             double magnitude = hypot(creal(x), cimag(x)), angle = atan2(cimag(x), creal(x));
             double length = pow(magnitude, creal(y)), phase = angle * creal(y);
             if (cimag(y) != 0) {
@@ -7566,10 +7589,11 @@ static SPYValue *complex_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b)
                 phase += cimag(y) * log(magnitude);
             }
             result = complex_parts(length * cos(phase), length * sin(phase));
-            if (errno == ERANGE || (!isfinite(creal(result)) && isfinite(magnitude) && isfinite(creal(y))))
-                return spy_error(c, "OverflowError", "complex exponentiation");
         }
+        if (zero_divisor) return spy_error(c, "ZeroDivisionError", "zero to a negative or complex power");
+        if (isinf(creal(result)) || isinf(cimag(result))) return spy_error(c, "OverflowError", "complex exponentiation");
         break;
+    }
     default: return spy_error(c, "TypeError", "unsupported complex operator");
     }
     return complex_new(c, result);
@@ -8111,7 +8135,10 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     }
     SPYValue *value = hidden_field(object, name);
     if (value) return spy_retain(value);
-    if (d->as.member.flags & DESC_SLOT) return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(object), name);
+    if (d->as.member.flags & DESC_SLOT) {
+        char fq[256];
+        return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_fqname(object, fq, sizeof(fq)), name);
+    }
     if (!strcmp(name, "characters_written")) return spy_error(c, "AttributeError", "characters_written");
     return spy_none(c);
 }
@@ -10034,6 +10061,9 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
             int method = bound->as.bound.method;
             if (!argc || argc > (method == M_INDEX ? 3u : 1u)) break;
             int64_t start = 0, stop = INT64_MAX;
+            for (size_t i = 1; i < argc; i++)
+                if (argv[i]->type == SPY_NONE || slice_part_bad(c, argv[i]))
+                    return spy_error(c, "TypeError", "slice indices must be integers or have an __index__ method");
             if ((argc > 1 && slice_index(c, argv[1], &start)) || (argc > 2 && slice_index(c, argv[2], &stop))) return NULL;
             if (start < 0) { start += (int64_t)self->as.seq.len; if (start < 0) start = 0; }
             if (stop < 0) { stop += (int64_t)self->as.seq.len; if (stop < 0) stop = 0; }
@@ -17293,8 +17323,10 @@ static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValu
     if (argc) return spy_error(c, "TypeError", "sort() takes no positional arguments");
     SPYValue *key = keywords ? name_local(keywords, "key") : NULL;
     SPYValue *reverse = keywords ? name_local(keywords, "reverse") : NULL;
-    if (keywords && keywords->as.map.len != (size_t)(!!key + !!reverse))
-        return spy_error(c, "TypeError", "invalid keyword argument for sort()");
+    for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
+        const char *name = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
+        if (strcmp(name, "key") && strcmp(name, "reverse")) return errorf(c, "TypeError", "sort() got an unexpected keyword argument '%s'", name);
+    }
     int descending = reverse ? spy_truth(reverse) : 0;
     if (c->error_type[0]) return NULL;
     SPYValue *working = spy_list(c);
@@ -18653,15 +18685,19 @@ static unsigned latin9_encode(unsigned code) {
         if (code == latin9_codes[i]) return latin9_bytes[i];
     return code < 256 && latin9_decode(code) == code ? code : 256;
 }
-enum { ERRORS_STRICT, ERRORS_IGNORE, ERRORS_REPLACE, ERRORS_BACKSLASH, ERRORS_XMLCHARREF, ERRORS_SURROGATEESCAPE, ERRORS_SURROGATEPASS };
+enum { ERRORS_STRICT, ERRORS_IGNORE, ERRORS_REPLACE, ERRORS_BACKSLASH, ERRORS_XMLCHARREF, ERRORS_SURROGATEESCAPE, ERRORS_SURROGATEPASS, ERRORS_UNKNOWN };
 static int errors_lookup(SPYContext *c, SPYValue *errors, int *handler) {
     static const char *const names[] = {"strict", "ignore", "replace", "backslashreplace", "xmlcharrefreplace", "surrogateescape", "surrogatepass"};
     *handler = ERRORS_STRICT;
     if (!errors) return 0;
     if (errors->type != SPY_STRING) { errorf(c, "TypeError", "errors must be str, not %s", type_name(errors)); return -1; }
     for (int i = 0; i < 7; i++) if (!strcmp(errors->as.string.data, names[i])) { *handler = i; return 0; }
+    /* The name is looked up only when an error occurs (23.3.2). */
+    *handler = ERRORS_UNKNOWN;
+    return 0;
+}
+static void unknown_handler(SPYContext *c, SPYValue *errors) {
     errorf(c, "LookupError", "unknown error handler name '%s'", errors->as.string.data);
-    return -1;
 }
 static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, SPYValue *errors) {
     int codec, handler;
@@ -18688,6 +18724,8 @@ static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, 
             unicode_escape(&out, code);
         } else if (handler == ERRORS_XMLCHARREF) {
             char text[16]; int len = snprintf(text, sizeof(text), "&#%u;", code); append(&out, text, (size_t)len);
+        } else if (handler == ERRORS_UNKNOWN) {
+            unknown_handler(c, errors);
         } else {
             /* A strict error covers the run of characters that fail alike. */
             size_t end = position + 1;
@@ -18756,6 +18794,10 @@ static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYVa
             for (size_t j = 0; j < bad; j++) { char hex[5]; snprintf(hex, sizeof(hex), "\\x%02x", text[i + j]); append(&out, hex, 4); }
         } else if (handler == ERRORS_SURROGATEESCAPE) {
             for (size_t j = 0; j < bad; j++) if (text[i + j] >= 128) append_codepoint(&out, 0xdc00 + text[i + j]);
+        } else if (handler == ERRORS_UNKNOWN) {
+            unknown_handler(c, errors);
+        } else if (handler == ERRORS_XMLCHARREF) {
+            spy_error(c, "TypeError", "don't know how to handle UnicodeDecodeError in error callback");
         } else {
             SPYValue *object = spy_bytes(c, data, len);
             if (object) codec_error(c, "UnicodeDecodeError", codec_names[codec], object, i, i + bad, reason);

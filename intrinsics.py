@@ -278,7 +278,12 @@ class GenericAlias:
     E.g. for t = list[int], t.__origin__ is list and t.__args__ is (int,)."""
     __module__ = 'types'
 
-    def __new__(cls, origin, args, /):
+    def __new__(cls, *arguments, **keywords):
+        if keywords:
+            raise TypeError('GenericAlias() takes no keyword arguments')
+        if len(arguments) != 2:
+            raise TypeError(f'GenericAlias expected 2 arguments, got {len(arguments)}')
+        origin, args = arguments
         self = object.__new__(cls)
         object.__setattr__(self, '__origin__', origin)
         object.__setattr__(self, '__args__', args if isinstance(args, tuple) else (args,))

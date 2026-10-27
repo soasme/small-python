@@ -597,3 +597,13 @@
   like tuple() and take four to seven items, with CPython's messages.
   bytes() and bytearray() with errors but no encoding no longer assume
   UTF-8. SLP-315 19.2 states the T.__new__ checks.
+- List slice assignment of a non-iterable, sort() with an unknown keyword,
+  and list/tuple index() with non-integer bounds give CPython's messages.
+  Reading an empty slot names the type by its qualified name. round() of a
+  float to a value beyond the float range raises "rounded value too large
+  to represent". Complex powers follow complex_pow: a zero divisor in the
+  integral-exponent path is a ZeroDivisionError and any infinite part an
+  OverflowError. A dict iterator detects keys removed and added at an
+  unchanged size. Error handler names are looked up only when an error
+  occurs, and xmlcharrefreplace refuses to decode. GenericAlias() counts
+  its arguments as CPython does.
