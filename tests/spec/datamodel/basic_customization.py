@@ -194,3 +194,30 @@ class BadInit:
         return 1
 e = assert_raises(TypeError, BadInit)
 assert_eq(str(e), "__init__() should return None, not 'int'")
+# Conversion hooks name the type by its qualified name, prefixed by a module
+# other than __main__; a builtin subclass result stands for its value.
+namespace = {"__name__": "mod"}
+exec("class I(int): pass\nclass F(float): pass\nclass C(complex): pass\n"
+     "class Outer:\n    class Hooks:\n        def __init__(self, value): self.value = value\n"
+     "        def __int__(self): return self.value\n        def __float__(self): return self.value\n"
+     "        def __complex__(self): return self.value\n        def __str__(self): return self.value\n"
+     "class Index:\n    def __init__(self, value): self.value = value\n    def __index__(self): return self.value\n",
+     namespace)
+Hooks, Index = namespace["Outer"].Hooks, namespace["Index"]
+for call, message in ((int, "mod.Outer.Hooks.__int__() must return an int, not str"),
+                      (float, "mod.Outer.Hooks.__float__() must return a float, not str"),
+                      (complex, "mod.Outer.Hooks.__complex__() must return a complex, not str"),
+                      (str, "mod.Outer.Hooks.__str__() must return a str, not bytes")):
+    e = assert_raises(TypeError, call, Hooks(b"x" if call is str else "x"))
+    assert_eq(str(e), message)
+e = assert_raises(TypeError, complex, 1, Index(1.5))
+assert_eq(str(e), "mod.Index.__index__() must return an int, not float")
+e = assert_raises(TypeError, complex, 1, object.__new__(namespace["Outer"]))
+assert_eq(str(e), "complex() argument 'imag' must be a real number, not mod.Outer")
+for value, call, expected in ((namespace["I"](3), int, 3), (True, int, 1), (namespace["F"](2.0), float, 2.0),
+                              (namespace["C"](1j), complex, 1j)):
+    result = call(Hooks(value))
+    assert_eq((type(result), result), (call, expected))
+for call, expected in ((int, 1), (float, 1.0), (complex, 1 + 0j)):
+    result = call(Index(True))
+    assert_eq((type(result), result), (call, expected))

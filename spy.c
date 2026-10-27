@@ -248,6 +248,7 @@ static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     return dict ? dict : builtin_value(c, value, SPY_FROZENDICT);
 }
 static const char *type_name(SPYValue *);
+static const char *type_fqname(SPYValue *, char *, size_t);
 static SPYValue *set_copy_type(SPYContext *, SPYValue *, int);
 static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static int set_subset(SPYContext *, SPYValue *, SPYValue *);
@@ -1061,7 +1062,7 @@ int spy_truth(SPYValue *v) {
         spy_release(method);
         if (!result) return 0;
         int64_t length = 0;
-        if (boolean && result->type != SPY_BOOL) errorf(c, "TypeError", "%s.__bool__() must return a bool, not %s", type_name(v), type_name(result));
+        if (boolean && result->type != SPY_BOOL) { char fq[256]; errorf(c, "TypeError", "%s.__bool__() must return a bool, not %s", type_fqname(v, fq, sizeof(fq)), type_name(result)); }
         else if (!boolean) length_result(c, result, &length);
         else length = result == c->booleans[1];
         spy_release(result); return !c->error_type[0] && length != 0;
@@ -1567,6 +1568,18 @@ static const char *type_name(SPYValue *value) {
         kind == NATIVE_METHOD_WRAPPER ? "method-wrapper" : "builtin_function_or_method";
     return value->type <= SPY_LAST_TYPE ? names[value->type] : "object";
 }
+/* fqname: a class's __qualname__, prefixed by its __module__ unless that is
+ * builtins or __main__; buffer holds the joined text. Other values use their type name. */
+static const char *type_fqname(SPYValue *value, char *buffer, size_t size) {
+    SPYValue *kind = value->type == SPY_INSTANCE ? value->as.map.parent :
+        value->type == SPY_CLASS && value->as.map.meta ? value->as.map.meta : NULL;
+    SPYValue *name = kind ? name_local(kind, "__qualname__") : NULL, *module = kind ? name_local(kind, "__module__") : NULL;
+    if (!name || name->type != SPY_STRING) return type_name(value);
+    if (!module || module->type != SPY_STRING || !strcmp(module->as.string.data, "builtins") ||
+        !strcmp(module->as.string.data, "__main__")) return name->as.string.data;
+    snprintf(buffer, size, "%s.%s", module->as.string.data, name->as.string.data);
+    return buffer;
+}
 static Symbol *scope_symbol(Scope *scope, const char *name) {
     if (scope) for (size_t i = 0; i < scope->len; i++)
         if (!strcmp(scope->symbols[i].name, name)) return &scope->symbols[i];
@@ -2051,7 +2064,7 @@ static int append_conversion(Buffer *b, SPYValue *v, SPYValue *text, const char 
     if (!text) return -1;
     SPYValue *string = builtin_value(b->ctx, text, SPY_STRING);
     if (string) return append(b, string->as.string.data, string->as.string.len);
-    errorf(b->ctx, "TypeError", "%s.%s() must return a str, not %s", type_name(v), method, type_name(text));
+    { char fq[256]; errorf(b->ctx, "TypeError", "%s.%s() must return a str, not %s", type_fqname(v, fq, sizeof(fq)), method, type_name(text)); }
     return -1;
 }
 /* Py_ReprEnter: 1 when v's repr is already being built, else push it (0). */
@@ -6280,7 +6293,7 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
             if (iterator->type == SPY_TEMPLATE_ITERATOR || iterator->type == SPY_ITERATOR || iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(iterator)) return iterator;
             method = special_method(c, iterator, "__next__");
             if (!method) {
-                errorf(c, "TypeError", "%s.__iter__() must return an iterator, not %s", type_name(source), type_name(iterator));
+                { char fq[256]; errorf(c, "TypeError", "%s.__iter__() must return an iterator, not %s", type_fqname(source, fq, sizeof(fq)), type_name(iterator)); }
                 spy_release(iterator); return NULL;
             }
             spy_release(method);
@@ -6595,10 +6608,10 @@ static SPYValue *index_object(SPYContext *c, SPYValue *value) {
     SPYValue *index = spy_call(c, method, 0, NULL);
     spy_release(method);
     if (index && !(integer = builtin_value(c, index, SPY_INT))) {
-        errorf(c, "TypeError", "%s.__index__() must return an int, not %s", type_name(value), type_name(index));
+        { char fq[256]; errorf(c, "TypeError", "%s.__index__() must return an int, not %s", type_fqname(value, fq, sizeof(fq)), type_name(index)); }
         spy_release(index); return NULL;
     }
-    if (index && integer != index) {
+    if (index && (integer != index || integer->type == SPY_BOOL)) {
         SPYValue *exact = integer->type == SPY_BOOL ? spy_int(c, integer->as.integer_data.small) : spy_retain(integer);
         spy_release(index); index = exact;
     }
@@ -9398,7 +9411,7 @@ static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
             SPYValue *result = spy_call(c, method, 1, &spec);
             spy_release(method);
             if (result && result->type != SPY_STRING) {
-                errorf(c, "TypeError", "%s.__format__() must return a str, not %s", type_name(value), type_name(result));
+                { char fq[256]; errorf(c, "TypeError", "%s.__format__() must return a str, not %s", type_fqname(value, fq, sizeof(fq)), type_name(result)); }
                 spy_release(result); return NULL;
             }
             return result;
@@ -15400,7 +15413,7 @@ static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPY
     SPYValue *result = spy_call(c, method, 0, NULL);
     spy_release(method);
     if (result && result->type != SPY_BYTES) {
-        errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_name(v), type_name(result));
+        { char fq[256]; errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_fqname(v, fq, sizeof(fq)), type_name(result)); }
         spy_release(result); return NULL;
     }
     return result;
@@ -16179,7 +16192,7 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
         return iterator;
     method = special_method(c, iterator, "__next__");
     if (method) { spy_release(method); return iterator; }
-    errorf(c, "TypeError", "%s.__await__() must return an iterator, not %s", type_name(value), type_name(iterator));
+    { char fq[256]; errorf(c, "TypeError", "%s.__await__() must return an iterator, not %s", type_fqname(value, fq, sizeof(fq)), type_name(iterator)); }
     spy_release(iterator);
     return NULL;
 }
@@ -17384,18 +17397,24 @@ static int as_complex(SPYContext *c, SPYValue *value, double complex *number, in
     if (!method && !c->error_type[0]) { method = special_method(c, value, "__index__"); kind = "__index__"; }
     if (!method) {
         if (c->error_type[0]) return -1;
-        if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_name(value));
-        else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_name(value));
+        char fq[256];
+        if (role) errorf(c, "TypeError", "complex() argument '%s' must be a real number, not %s", role, type_fqname(value, fq, sizeof(fq)));
+        else errorf(c, "TypeError", "complex() argument must be a string or a number, not %s", type_fqname(value, fq, sizeof(fq)));
         return -1;
     }
-    SPYValue *converted = spy_call(c, method, 0, NULL);
-    spy_release(method);
+    SPYValue *converted;
+    if (!strcmp(kind, "__index__")) { spy_release(method); converted = index_object(c, value); }
+    else { converted = spy_call(c, method, 0, NULL); spy_release(method); }
     if (!converted) return -1;
-    int valid = !strcmp(kind, "__complex__") ? converted->type == SPY_COMPLEX :
-        !strcmp(kind, "__float__") ? converted->type == SPY_FLOAT : converted->type == SPY_INT;
-    if (valid) { *number = numeric_complex(c, converted); *was_complex = converted->type == SPY_COMPLEX; }
-    else errorf(c, "TypeError", "%s returned an invalid type", kind);
-    spy_release(converted); return valid && !c->error_type[0] ? 0 : -1;
+    SPYValue *exact = builtin_value(c, converted, !strcmp(kind, "__complex__") ? SPY_COMPLEX :
+                                    !strcmp(kind, "__float__") ? SPY_FLOAT : SPY_INT);
+    if (exact) { *number = numeric_complex(c, exact); *was_complex = exact->type == SPY_COMPLEX; }
+    else {
+        char fq[256];
+        errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(value, fq, sizeof(fq)), kind,
+               !strcmp(kind, "__complex__") ? "a complex" : "a float", type_name(converted));
+    }
+    spy_release(converted); return exact && !c->error_type[0] ? 0 : -1;
 }
 /* complex(x) parses a string or converts a number; complex(real, imag), or
  * either given by keyword, takes numbers only, as actual_complex_new and
@@ -18716,7 +18735,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
         SPYValue *result = spy_call(c, method, 0, NULL);
         spy_release(method);
         if (result && result->type != SPY_BYTES) {
-            errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_name(a), type_name(result));
+            { char fq[256]; errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_fqname(a, fq, sizeof(fq)), type_name(result)); }
             spy_release(result); return NULL;
         }
         return result;
@@ -19495,9 +19514,8 @@ static SPYValue *memory_from(SPYContext *c, SPYValue *object) {
         SPYValue *flags = spy_int(c, 284), *view = flags ? call_special(c, object, "__buffer__", 1, &flags) : NULL;
         spy_release(flags);
         if (view && view->type != SPY_MEMORYVIEW) {
-            SPYValue *kind = value_class(c, object), *name = kind ? name_local(kind, "__name__") : NULL;
-            errorf(c, "TypeError", "%s.__buffer__() must return a memoryview, not %s",
-                   name && name->type == SPY_STRING ? name->as.string.data : type_name(object), type_name(view));
+            char fq[256];
+            errorf(c, "TypeError", "%s.__buffer__() must return a memoryview, not %s", type_fqname(object, fq, sizeof(fq)), type_name(view));
             spy_release(view); return NULL;
         }
         if (!view || memory_check(c, view)) { spy_release(view); return NULL; }
@@ -20941,19 +20959,30 @@ execution_fail:
             return integer_from_double(c, a->as.real);
         }
         if (a->type == SPY_INSTANCE || meta_class(a)) {
-            SPYValue *method = special_method(c, a, id == B_INT ? "__int__" : "__float__");
-            int index = !method;
-            if (!method && !c->error_type[0]) method = special_method(c, a, "__index__");
+            /* A subclass result stands for its value (the DeprecationWarning
+             * goes to HostWarn, which spy does not provide). */
+            const char *name = id == B_INT ? "__int__" : "__float__";
+            SPYValue *method = special_method(c, a, name);
+            if (!method && !c->error_type[0] && (method = special_method(c, a, "__index__"))) {
+                spy_release(method);
+                SPYValue *integer = index_object(c, a), *result = integer;
+                if (integer && id == B_FLOAT) {
+                    double number;
+                    result = spy_as_float(c, integer, &number) ? NULL : spy_float(c, number);
+                    spy_release(integer);
+                }
+                return result;
+            }
             if (method) {
-                SPYValue *converted = spy_call(c, method, 0, NULL), *result = NULL;
+                SPYValue *converted = spy_call(c, method, 0, NULL), *exact, *result = NULL;
                 spy_release(method);
                 if (!converted) return NULL;
-                if ((id == B_INT || index) ? !is_int(converted) : converted->type != SPY_FLOAT)
-                    spy_error(c, "TypeError", "numeric conversion returned an invalid type");
-                else if (id == B_FLOAT) {
-                    double number;
-                    if (!spy_as_float(c, converted, &number)) result = spy_float(c, number);
-                } else result = converted->type == SPY_BOOL ? spy_int(c, converted->as.integer_data.small) : spy_retain(converted);
+                if (!(exact = builtin_value(c, converted, id == B_INT ? SPY_INT : SPY_FLOAT))) {
+                    char fq[256];
+                    errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(a, fq, sizeof(fq)), name,
+                           id == B_INT ? "an int" : "a float", type_name(converted));
+                } else if (id == B_FLOAT) result = spy_float(c, exact->as.real);
+                else result = exact->type == SPY_BOOL ? spy_int(c, exact->as.integer_data.small) : spy_retain(exact);
                 spy_release(converted); return result;
             }
             if (c->error_type[0]) return NULL;

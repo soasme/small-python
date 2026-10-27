@@ -567,3 +567,10 @@
   maps the 574 new sections to the 108 models.
 - A compound statement after ';' (class, def, if, match, decorators, ...)
   is a SyntaxError, as SLP-315 Annex A's simple_stmts requires.
+- Conversion hooks (__int__, __float__, __complex__, __index__, __bool__,
+  __str__, __repr__, __format__, __bytes__, __iter__, __await__, __buffer__)
+  report a wrong result with the type's fully qualified name (SLP-315 5.2),
+  as do complex()'s argument errors. A strict int, float, or complex subclass
+  returned by __int__, __float__, __complex__, or __index__ is converted to
+  its value; int(), float(), and complex() fall back to __index__ through
+  ToIndex, which also turns a returned bool into an int.
