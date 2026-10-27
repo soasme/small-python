@@ -201,3 +201,18 @@ assert_raises(OverflowError, len, range(10**20))
 assert_eq((2**53 + 1 == float(2**53 + 1), 2**53 + 1 > float(2**53), 1 == 1.0 == 1 + 0j, 10**400 > float("1e308"), 0.1 == 1/10), (False, True, True, True, True))
 assert_eq(hash(2**61 - 1), 0)
 assert_eq((hash(-1), hash(-2), hash(1.5) == hash(1.5), hash(10**20) == hash(float(10**20))), (-2, -2, True, True))
+
+# from_bytes, bytes(), and bytearray() take only bytes-like objects and iterables; bytearray ignores __bytes__.
+class WithBytes:
+    def __bytes__(self): return b"\x01\x02"
+    def __iter__(self): return iter([3])
+assert_eq((int.from_bytes(WithBytes()), bytes(WithBytes()), bytearray(WithBytes())), (258, b"\x01\x02", bytearray(b"\x03")))
+for convert, target in ((int.from_bytes, "bytes"), (bytes, "bytes"), (bytearray, "bytearray")):
+    try:
+        convert(1.5)
+    except TypeError as error:
+        assert_eq(str(error), "cannot convert 'float' object to %s" % target)
+    else:
+        raise AssertionError("converted a float")
+assert_raises(TypeError, int.from_bytes, 5)
+assert_raises(TypeError, int.from_bytes, b"\x01", b"big")

@@ -88,6 +88,7 @@ and tied to real implementations by replaying them.
 | `Sentinels.tla` | `sentinel()` construction and its argument errors, representation, identity and equality, attributes, copying, pickling reduction, `\|` in type expressions, and the type's restrictions | yes |
 | `Atoms.tla` | the keyword constants and why they cannot be targets, name evaluation, the type of each kind of literal, negative and complex numbers as operations, literal immutability, and which identities of literals are guaranteed | yes |
 | `Grammar.tla` | every compound statement with every form of suite (one-line, semicolon-separated, indented, nested, missing, misindented), and the acceptance or rejection, with its message, of the full grammar's productions | yes |
+| `NumberMethods.tla` | `bit_length`, `bit_count`, `to_bytes`, and `from_bytes` computed over boundary integers, every length up to three bytes, byte order, and signedness; the float and complex methods `from_number`, `as_integer_ratio`, `is_integer`, `hex`, and `fromhex` | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
 
@@ -206,7 +207,9 @@ index too large for a Py_ssize_t was reported as out of range, and
 deleting an item from a type without `__delitem__` was worded without
 regard to whether the type has sequence methods and the key is an index;
 a global deleted in `exec()`'s namespace read as an unbound local,
-and `sentinel()` refused `repr=` and a new `__module__`.
+`sentinel()` refused `repr=` and a new `__module__`, and
+`int.from_bytes()`, `bytes()`, and `bytearray()` misreported objects they
+cannot convert.
 Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`

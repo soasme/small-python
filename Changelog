@@ -476,6 +476,12 @@
   __module__ can be set and deleted, and setting __name__ raises
   "readonly attribute", as in CPython. TLA+ models of operator
   precedence and sentinels.
+- int.from_bytes() converts only bytes-like objects and iterables, so an
+  int or str argument is a TypeError, as is a non-iterable passed to
+  bytes() or bytearray() ("cannot convert 'float' object to bytes");
+  bytearray() ignores __bytes__. to_bytes() and from_bytes() name a
+  non-str byteorder's type, and float.fromhex() rejects a non-str with
+  CPython's message. TLA+ models of atoms, grammar, and number methods.
 - Comprehensions report an unbound local of their function as
   UnboundLocalError; finalizers run depth first; str length, slicing, and
   find() no longer rescan the string.

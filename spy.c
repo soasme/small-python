@@ -18484,12 +18484,15 @@ static SPYValue *str_format_map(SPYContext *c, size_t argc, SPYValue *const *arg
 }
 
 /* Integer and float methods. */
-static int byteorder_argument(SPYContext *c, SPYValue *value, int *little) {
+static int byteorder_argument(SPYContext *c, const char *function, SPYValue *value, int *little) {
     *little = 0;
     if (!value) return 0;
-    if (value->type == SPY_STRING && !strcmp(value->as.string.data, "little")) { *little = 1; return 0; }
-    if (value->type == SPY_STRING && !strcmp(value->as.string.data, "big")) return 0;
-    spy_error(c, value->type == SPY_STRING ? "ValueError" : "TypeError", "byteorder must be either 'little' or 'big'");
+    if (!builtin_value(c, value, SPY_STRING)) {
+        errorf(c, "TypeError", "%s() argument 'byteorder' must be str, not %s", function, type_name(value)); return -1;
+    }
+    if (!strcmp(value->as.string.data, "little")) { *little = 1; return 0; }
+    if (!strcmp(value->as.string.data, "big")) return 0;
+    spy_error(c, "ValueError", "byteorder must be either 'little' or 'big'");
     return -1;
 }
 static SPYValue *int_to_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -18497,11 +18500,11 @@ static SPYValue *int_to_bytes(SPYContext *c, size_t argc, SPYValue *const *argv,
     static const char *const names[] = {"length", "byteorder", "signed"};
     SPYValue *self = method_self(c, argc, argv, SPY_INT, "to_bytes"), *args[3];
     if (!self || parse_arguments(c, "to_bytes", argc - 1, argv + 1, keywords, names, 3, 0, 0, args)) return NULL;
-    if (argc - 1 > 2) return spy_error(c, "TypeError", "to_bytes() takes at most 2 positional arguments");
+    if (argc - 1 > 2) return errorf(c, "TypeError", "to_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
     int64_t length = 1;
     int little, is_signed = args[2] && spy_truth(args[2]);
-    if ((args[0] && index_value(c, args[0], &length)) || byteorder_argument(c, args[1], &little)) return NULL;
-    if (length < 0) return spy_error(c, "ValueError", "length argument must be non-negative");
+    if ((args[0] && index_value(c, args[0], &length)) || byteorder_argument(c, "to_bytes", args[1], &little)) return NULL;
+    if (length < 0) return spy_error(c, "ValueError", "length cannot be negative");
     if ((uint64_t)length > SIZE_MAX / 2) return spy_error(c, "OverflowError", "length too large");
     IntView view; integer_view(self, &view);
     if (view.sign < 0 && !is_signed) return spy_error(c, "OverflowError", "can't convert negative int to unsigned");
@@ -18532,18 +18535,65 @@ static SPYValue *int_to_bytes(SPYContext *c, size_t argc, SPYValue *const *argv,
     free(out);
     return result;
 }
+/* PyBytes_FromObject: the bytes of a bytes-like object, a __bytes__ result
+ * (bytes only), or an iterable of byte values; target names the type made. */
+static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *target) {
+    if (a->type == SPY_BYTES) return spy_retain(a);
+    if (a->type == SPY_BYTEARRAY) return spy_bytes(c, a->as.string.data, a->as.string.len);
+    if (a->type == SPY_MEMORYVIEW) return memory_check(c, a) ? NULL : memory_bytes(c, a);
+    SPYValue *method = target[5] ? NULL : special_method(c, a, "__bytes__");
+    if (method) {
+        SPYValue *result = spy_call(c, method, 0, NULL);
+        spy_release(method);
+        if (result && result->type != SPY_BYTES) {
+            errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_name(a), type_name(result));
+            spy_release(result); return NULL;
+        }
+        return result;
+    }
+    if (c->error_type[0]) return NULL;
+    if (buffer_exporter(c, a)) {
+        SPYValue *copy;
+        buffer_bytes(c, a, &copy);
+        return copy;
+    }
+    SPYValue *iterator = a->type == SPY_STRING ? NULL : get_iterator(c, a);
+    if (!iterator) {
+        if (a->type != SPY_STRING && !error_is(c, "TypeError")) return NULL;
+        spy_clear_error(c);
+        return errorf(c, "TypeError", "cannot convert '%s' object to %s", type_name(a), target);
+    }
+    Buffer out = {.ctx = c};
+    for (;;) {
+        SPYValue *item = iterator_next(c, iterator);
+        if (!item) break;
+        SPYValue *index = index_object(c, item);
+        if (index) {
+            if (index->as.integer_data.big || index->as.integer_data.small < 0 || index->as.integer_data.small > 255)
+                spy_error(c, "ValueError", "bytes must be in range(0, 256)");
+            else {
+                char byte = (char)index->as.integer_data.small;
+                append(&out, &byte, 1);
+            }
+        }
+        spy_release(index); spy_release(item);
+        if (c->error_type[0]) break;
+        if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
+    }
+    SPYValue *result = c->error_type[0] ? NULL : spy_bytes(c, out.data ? out.data : "", out.len);
+    free(out.data); spy_release(iterator); return result;
+}
 static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     static const char *const names[] = {"bytes", "byteorder", "signed"};
     SPYValue *args[3];
     if (parse_arguments(c, "from_bytes", argc - 1, argv + 1, keywords, names, 3, 1, 0, args)) return NULL;
     int little, is_signed = args[2] && spy_truth(args[2]);
-    if (byteorder_argument(c, args[1], &little)) return NULL;
+    if (byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
     SPYValue *source = builtin_value(c, args[0], SPY_BYTES), *owned = NULL;
     if (!source) source = builtin_value(c, args[0], SPY_BYTEARRAY);
     if (!source) {
-        SPYValue *arg = args[0];
-        owned = builtin(c, 1, &arg, (void *)(intptr_t)B_BYTES);
+        owned = bytes_from_object(c, args[0], "bytes");
         if (!owned) return NULL;
         source = owned;
     }
@@ -18660,7 +18710,7 @@ static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
     (void)data;
     SPYValue *args[1];
     if (parse_arguments(c, "fromhex", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
-    if (args[0]->type != SPY_STRING) return errorf(c, "TypeError", "must be str, not %s", type_name(args[0]));
+    if (args[0]->type != SPY_STRING) return spy_error(c, "TypeError", "bad argument type for built-in operation");
     const char *s = args[0]->as.string.data, *end = s + args[0]->as.string.len;
     while (s < end && isspace((unsigned char)*s)) s++;
     while (end > s && isspace((unsigned char)end[-1])) end--;
@@ -20093,7 +20143,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     if (id == B_BYTEARRAY) {
         if (argc > 3) goto arity;
-        SPYValue *bytes = argc ? builtin(c, argc, argv, (void *)(intptr_t)B_BYTES) : spy_bytes(c, "", 0);
+        SPYValue *bytes = !argc ? spy_bytes(c, "", 0) :
+            argc == 1 && a->type != SPY_STRING && !is_int(a) && !(a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))
+            ? bytes_from_object(c, a, "bytearray") : builtin(c, argc, argv, (void *)(intptr_t)B_BYTES);
         SPYValue *array = bytes ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : NULL;
         spy_release(bytes);
         return array;
@@ -20106,20 +20158,6 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             return text_encode(c, a, argv[1], argc > 2 ? argv[2] : NULL);
         }
         if (argc > 1) return spy_error(c, "TypeError", argv[1]->type == SPY_STRING ? "encoding without a string argument" : "errors without a string argument");
-        if (a->type == SPY_BYTES) return spy_retain(a);
-        if (a->type == SPY_BYTEARRAY) return spy_bytes(c, a->as.string.data, a->as.string.len);
-        if (a->type == SPY_MEMORYVIEW) return memory_check(c, a) ? NULL : memory_bytes(c, a);
-        SPYValue *method = special_method(c, a, "__bytes__");
-        if (method) {
-            SPYValue *result = spy_call(c, method, 0, NULL);
-            spy_release(method);
-            if (result && result->type != SPY_BYTES) {
-                errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_name(a), type_name(result));
-                spy_release(result); return NULL;
-            }
-            return result;
-        }
-        if (c->error_type[0]) return NULL;
         if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) {
             int64_t len;
             if (index_value(c, a, &len)) return NULL;
@@ -20131,32 +20169,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (!result->as.string.data) { spy_release(result); return NULL; }
             return result;
         }
-        if (buffer_exporter(c, a)) {
-            SPYValue *copy;
-            buffer_bytes(c, a, &copy);
-            return copy;
-        }
-        SPYValue *iterator = get_iterator(c, a);
-        if (!iterator) return NULL;
-        Buffer out = {.ctx = c};
-        for (;;) {
-            SPYValue *item = iterator_next(c, iterator);
-            if (!item) break;
-            SPYValue *index = index_object(c, item);
-            if (index) {
-                if (index->as.integer_data.big || index->as.integer_data.small < 0 || index->as.integer_data.small > 255)
-                    spy_error(c, "ValueError", "bytes must be in range(0, 256)");
-                else {
-                    char byte = (char)index->as.integer_data.small;
-                    append(&out, &byte, 1);
-                }
-            }
-            spy_release(index); spy_release(item);
-            if (c->error_type[0]) break;
-            if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
-        }
-        SPYValue *result = c->error_type[0] ? NULL : spy_bytes(c, out.data ? out.data : "", out.len);
-        free(out.data); spy_release(iterator); return result;
+        return bytes_from_object(c, a, "bytes");
     }
     if (id == B_BIN || id == B_OCT || id == B_HEX) {
         if (argc != 1) goto arity;
