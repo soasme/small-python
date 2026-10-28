@@ -60,7 +60,9 @@ Pushing a tag `vX.Y.Z` that matches the `version` in `python/pyproject.toml`
 and in `javascript/package.json` runs `.github/workflows/publish.yml`, which
 builds the sdist and wheels and publishes them to PyPI, and builds the
 WebAssembly worker and publishes the JavaScript package to npm, both with
-trusted publishing.
+trusted publishing. Files already published are skipped, so running the
+workflow by hand on `main` (`gh workflow run publish.yml`) adds what the
+current release lacks, such as the wheels of a newly supported platform.
 
 To prepare a release, preview the version bump:
 
