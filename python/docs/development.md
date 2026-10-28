@@ -50,8 +50,8 @@ runs them. Rebuild after changing the engine sources: `uv sync --reinstall-packa
 
 The wheel holds an executable, not an extension module, so it is tagged
 `py3-none-<platform>` and one wheel per platform serves CPython 3.10 and later.
-Wheels are built on Linux (manylinux and musllinux, x86_64 and aarch64) and
-macOS (arm64 and x86_64) by
+Wheels are built on Linux (manylinux and musllinux, x86_64 and aarch64),
+macOS (arm64 and x86_64), and Windows (x86_64, with MinGW-w64 GCC on `PATH`) by
 [cibuildwheel](https://cibuildwheel.pypa.io/), configured under
 `[tool.cibuildwheel]` in `pyproject.toml`; each wheel runs the tests in
 `python/tests`.

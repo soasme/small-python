@@ -78,11 +78,14 @@ cannot reach more than the engine could:
   make, such as starting processes or opening sockets.
 - **macOS**: a sandbox profile that denies everything except reading file
   metadata and using your mounted directories.
+- **Windows**: none. The engine has no `open()` there and `mount` raises
+  `Error` of type `OSError`, but a worker taken over by an exploit runs with
+  your privileges.
 
 Because of this, mount directories before running code: `mount` after the
 first `eval`, `exec`, or `call` raises `Error` of type `PermissionError`.
 A kernel without Landlock or seccomp gets the layers it has; on other systems,
-run hostile code inside a container as well.
+including Windows, run hostile code inside a container or VM as well.
 
 ## Threads
 

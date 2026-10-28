@@ -24,7 +24,7 @@ them, and give that code exactly the functions, modules, and files you choose.
 pip install small-python
 ```
 
-Requires CPython 3.10 or newer on Linux or macOS.
+Requires CPython 3.10 or newer on Linux, macOS, or Windows (x86_64).
 
 ## Example
 

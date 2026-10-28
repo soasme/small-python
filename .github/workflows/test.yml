@@ -43,6 +43,19 @@ jobs:
       - run: make test-binding
       - run: make test-javascript
 
+  # The Python package on Windows; its worker is built with the runner's
+  # MinGW-w64 GCC (python/setup.py).
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: gcc --version
+      - run: pip install ./python
+      - run: python -m unittest discover -s python/tests
+
   upstream-baseline:
     runs-on: ubuntu-latest
     steps:

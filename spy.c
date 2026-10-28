@@ -25054,6 +25054,7 @@ static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv,
     SPYValue *fn = intrinsic(c, "open");
     return fn ? spy_call_keywords(c, fn, argc, argv, keywords) : NULL;
 }
+#if SPY_FILES
 /* Raise the OSError subclass for errno code, as PyErr_SetFromErrnoWithFilenameObject. */
 static SPYValue *file_error(SPYContext *c, int code, SPYValue *filename) {
     const char *text = strerror(code);
@@ -25089,7 +25090,6 @@ static int path_within(const char *path, const char *root) {
     if (len == 1) return 1;
     return !strncmp(path, root, len) && (path[len] == 0 || path[len] == '/');
 }
-#if SPY_FILES
 /* The host path of a guest path inside the mount that holds it, with the
  * final component unresolved only when it does not exist yet; NULL with errno. */
 static char *mount_resolve(SPYContext *c, const char *path, int writing) {

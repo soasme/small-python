@@ -28,6 +28,10 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <limits.h>
 #endif
 
 void *spy_worker_malloc(size_t);
@@ -120,6 +124,10 @@ static int read_bytes(void *p, size_t n) {
 }
 static void write_bytes(const void *p, size_t n) { spy_host_write(p, n); }
 #else
+#ifdef _WIN32 /* The C runtime's names for these calls take an unsigned count. */
+#define read(fd, p, n) _read(fd, p, (unsigned)((n) < INT_MAX ? (n) : INT_MAX))
+#define write(fd, p, n) _write(fd, p, (unsigned)((n) < INT_MAX ? (n) : INT_MAX))
+#endif
 static int in_fd = 0, out_fd = 1;
 static int read_bytes(void *p, size_t n) {
     while (n) {
@@ -1024,7 +1032,7 @@ static void seal(void) {
 static void seal(void) {}
 #endif
 
-#if !defined(__wasm__)
+#if !defined(__wasm__) && !defined(_WIN32)
 #if defined(__APPLE__)
 #include <pthread.h>
 #include <sys/event.h>
@@ -1056,6 +1064,40 @@ static void hygiene(void) {
     if (pthread_create(&thread, NULL, watch_parent, (void *)(intptr_t)parent)) exit(1);
     pthread_detach(thread);
 #endif
+}
+#elif defined(_WIN32)
+#include <windows.h>
+#include <tlhelp32.h>
+static DWORD WINAPI watch_parent(LPVOID parent) {
+    WaitForSingleObject(parent, INFINITE);
+    _exit(0);
+}
+/* The parent, unless it has already exited and its id was reused by a
+ * process younger than this one. */
+static HANDLE open_parent(void) {
+    DWORD me = GetCurrentProcessId(), id = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0), parent;
+    PROCESSENTRY32 entry = {.dwSize = sizeof(entry)};
+    for (BOOL more = Process32First(snapshot, &entry); more; more = Process32Next(snapshot, &entry))
+        if (entry.th32ProcessID == me) id = entry.th32ParentProcessID;
+    CloseHandle(snapshot);
+    FILETIME born, mine, unused;
+    if (!(parent = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, id)) ||
+        !GetProcessTimes(parent, &born, &unused, &unused, &unused) ||
+        !GetProcessTimes(GetCurrentProcess(), &mine, &unused, &unused, &unused) ||
+        CompareFileTime(&born, &mine) > 0) _exit(0);
+    return parent;
+}
+/* protocol.md 9 on Windows: the protocol off stdin and stdout in binary
+ * mode, no crash dialogs, and a thread that ends the worker with the parent. */
+static void hygiene(void) {
+    in_fd = _dup(0); out_fd = _dup(1);
+    int null = _open("NUL", _O_RDWR);
+    if (in_fd < 0 || out_fd < 0 || null < 0 || _dup2(null, 0) < 0 || _dup2(2, 1) < 0) exit(1);
+    _close(null);
+    _setmode(in_fd, _O_BINARY); _setmode(out_fd, _O_BINARY);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    if (!CreateThread(NULL, 0, watch_parent, open_parent(), 0, NULL)) exit(1);
 }
 #endif
 

@@ -18,3 +18,4 @@ wheels/
 csrc/
 *.so
 src/small_python/spy-worker
+src/small_python/spy-worker.exe

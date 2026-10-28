@@ -292,14 +292,16 @@ is gone, and a new runtime must be made.
 
 The worker is started with an empty environment, working directory `/`, no
 inherited descriptors besides 0, 1, and 2, and in its own process group, so a
-terminal's `SIGINT` reaches only the parent. At start it:
+terminal's `SIGINT` (Ctrl+C on Windows) reaches only the parent. At start it:
 
-1. moves the protocol to two fresh descriptors and points 0 at `/dev/null` and
-   1 at 2, so a stray write to stdout cannot corrupt the stream;
-2. sets `RLIMIT_CORE` to 0;
+1. moves the protocol to two fresh descriptors (in binary mode on Windows) and
+   points 0 at `/dev/null` (`NUL`) and 1 at 2, so a stray write to stdout
+   cannot corrupt the stream;
+2. sets `RLIMIT_CORE` to 0, or on Windows turns off crash dialogs;
 3. arranges to die with its parent: `prctl(PR_SET_PDEATHSIG, SIGKILL)` on
-   Linux, and a thread waiting on the parent with `kqueue` `NOTE_EXIT` on
-   macOS. It also exits when its input stream ends.
+   Linux, a thread waiting on the parent with `kqueue` `NOTE_EXIT` on macOS,
+   and a thread waiting on the parent's process handle on Windows. It also
+   exits when its input stream ends.
 
 Diagnostics from a crashing worker (an assertion, a sanitizer report) go to
 the inherited stderr.

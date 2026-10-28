@@ -2,7 +2,6 @@
 process, takes turns with it, runs host callbacks, and proxies engine values.
 See docs/packaging/python.md."""
 import os
-import select
 import signal
 import subprocess
 import sys
@@ -12,7 +11,14 @@ import time
 from . import _wire as wire
 from ._wire import Violation
 
-WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spy-worker")
+if sys.platform == "win32":
+    import msvcrt
+    import _winapi
+else:
+    import select
+
+WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "spy-worker.exe" if sys.platform == "win32" else "spy-worker")
 
 
 class Error(Exception):
@@ -94,7 +100,8 @@ class Runtime:
         try:
             self._process = subprocess.Popen(
                 [WORKER], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0,
-                env={}, cwd="/", close_fds=True, start_new_session=True)
+                env={}, cwd="/", close_fds=True, start_new_session=True,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         except OSError as e:
             raise WorkerError(f"cannot start the worker: {e}") from e
         self._to = self._process.stdin.fileno()
@@ -186,12 +193,15 @@ class Runtime:
         return b"".join(chunks)
 
     def _wait(self, fd, write):
-        if self._deadline is None:
+        if sys.platform == "win32":
+            ready = _peek(fd, write, self._deadline)
+        elif self._deadline is None:
             return
-        remaining = self._deadline - time.monotonic()
-        poll = select.poll()
-        poll.register(fd, select.POLLOUT if write else select.POLLIN)
-        if not poll.poll(max(remaining, 0) * 1000):
+        else:
+            poll = select.poll()
+            poll.register(fd, select.POLLOUT if write else select.POLLIN)
+            ready = poll.poll(max(self._deadline - time.monotonic(), 0) * 1000)
+        if not ready:
             raise self._lose(Timeout(f"the operation exceeded the timeout of {self._timeout} seconds"))
 
     def _receive(self):
@@ -633,6 +643,24 @@ def _name(name):
     if not isinstance(name, str):
         raise TypeError(f"global names must be str, not '{type(name).__name__}'")
     return name
+
+
+def _peek(fd, write, deadline):
+    """Whether a Windows pipe is ready before the deadline, if any. Its pipes
+    cannot be polled, and a blocked read ignores Ctrl+C: readers peek until
+    data or the end arrives; writers proceed, as the worker reads whenever it
+    is the parent's turn."""
+    handle = msvcrt.get_osfhandle(fd)
+    while not write:
+        try:
+            if _winapi.PeekNamedPipe(handle, 0)[0]:
+                break
+        except OSError:  # the worker closed its end; the read reports it
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(0.001)
+    return True
 
 
 def _signal_name(number):

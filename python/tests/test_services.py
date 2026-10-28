@@ -146,6 +146,7 @@ class OutputTest(unittest.TestCase):
             self.assertEqual(cm.exception.type, "EOFError")
 
 
+@unittest.skipIf(sys.platform == "win32", "open() needs a POSIX host")
 class MountTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -205,6 +206,15 @@ class MountTest(unittest.TestCase):
                 rt.mount(self.path, "/x", True)
             with self.assertRaises(TypeError):
                 rt.mount(42)
+
+
+@unittest.skipUnless(sys.platform == "win32", "open() reaches mounts on POSIX hosts")
+class NoFilesTest(unittest.TestCase):
+    def test_mount_unsupported(self):
+        with tempfile.TemporaryDirectory() as path, Runtime() as rt:
+            with self.assertRaises(Error) as cm:
+                rt.mount(path)
+            self.assertEqual(cm.exception.type, "OSError")
 
 
 if __name__ == "__main__":

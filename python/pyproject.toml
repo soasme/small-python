@@ -16,6 +16,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Operating System :: POSIX",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
 ]
 
 [project.urls]
@@ -30,7 +31,7 @@ package-dir = { "" = "src" }
 packages = ["small_python"]
 
 [tool.setuptools.package-data]
-small_python = ["py.typed", "*.pyi", "spy-worker"]
+small_python = ["py.typed", "*.pyi", "spy-worker", "spy-worker.exe"]
 
 [tool.setuptools.exclude-package-data]
 small_python = ["*.c"]
@@ -38,5 +39,5 @@ small_python = ["*.c"]
 # One py3-none wheel per platform, built once: the package holds an executable,
 # not an extension module. open() needs a POSIX host and the engine C11.
 [tool.cibuildwheel]
-build = "cp313-manylinux_* cp313-musllinux_* cp313-macosx_*"
+build = "cp313-manylinux_* cp313-musllinux_* cp313-macosx_* cp313-win_amd64"
 test-command = "python -m unittest discover -s {project}/python/tests"

@@ -1,4 +1,5 @@
 """The worker boundary: crashes, hostile workers, limits, and interruption."""
+import _thread
 import os
 import signal
 import struct
@@ -16,6 +17,7 @@ from small_python import Error, Runtime, Timeout, WorkerError
 
 
 class CrashTest(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "no POSIX signals")
     def test_signals_mid_operation(self):
         for number in (signal.SIGSEGV, signal.SIGABRT, signal.SIGKILL):
             with self.subTest(signal=number.name):
@@ -33,7 +35,7 @@ class CrashTest(unittest.TestCase):
     def test_objects_of_a_lost_runtime(self):
         rt = Runtime()
         obj = rt.eval("object()")
-        os.kill(rt._process.pid, signal.SIGKILL)
+        rt._process.kill()
         with self.assertRaises(WorkerError):
             rt.eval("1")
         with self.assertRaises(WorkerError):
@@ -43,7 +45,7 @@ class CrashTest(unittest.TestCase):
     def test_other_runtimes_survive(self):
         with Runtime() as healthy:
             doomed = Runtime()
-            os.kill(doomed._process.pid, signal.SIGKILL)
+            doomed._process.kill()
             with self.assertRaises(WorkerError):
                 doomed.eval("1")
             self.assertEqual(healthy.eval("6 * 7"), 42)
@@ -90,6 +92,7 @@ def string(s):
     return b"s" + u32(len(s)) + s
 
 
+@unittest.skipIf(sys.platform == "win32", "the fake worker runs through its #! line")
 class HostileWorkerTest(unittest.TestCase):
     CASES = {
         "unknown kind": 'send(b"\\x7f")',
@@ -240,7 +243,8 @@ class SandboxTest(unittest.TestCase):
 class InterruptTest(unittest.TestCase):
     def test_keyboard_interrupt_while_waiting(self):
         rt = Runtime()
-        timer = threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGINT))
+        interrupt = _thread.interrupt_main if sys.platform == "win32" else lambda: os.kill(os.getpid(), signal.SIGINT)
+        timer = threading.Timer(0.3, interrupt)
         timer.start()
         with self.assertRaises(KeyboardInterrupt):
             rt.exec("while True:\n    pass")
@@ -264,14 +268,30 @@ class InterruptTest(unittest.TestCase):
         parent.kill()
         parent.wait()
         parent.stdout.close()
-        for _ in range(100):
-            try:
-                os.kill(worker, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.05)
-        os.kill(worker, signal.SIGKILL)
-        self.fail("the worker outlived its parent")
+        if not exits(worker):
+            os.kill(worker, signal.SIGTERM)
+            self.fail("the worker outlived its parent")
+
+
+def exits(pid, seconds=5):
+    """Whether process pid ends within seconds."""
+    if sys.platform == "win32":
+        import _winapi
+        try:
+            handle = _winapi.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        except OSError:
+            return True
+        try:
+            return _winapi.WaitForSingleObject(handle, seconds * 1000) == _winapi.WAIT_OBJECT_0
+        finally:
+            _winapi.CloseHandle(handle)
+    for _ in range(seconds * 20):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 if __name__ == "__main__":

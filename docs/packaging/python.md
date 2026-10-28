@@ -40,14 +40,16 @@ small_python/
   _wire.py         value codec and message framing (protocol.md §3–§4)
   _runtime.py      the parent side: turns, handles, host callbacks
   _runtime.pyi     types
-  spy-worker       the worker executable for this platform
+  spy-worker       the worker executable for this platform (.exe on Windows)
   py.typed
 ```
 
 The wheel is tagged `py3-none-<platform>`: it holds no extension module, so
 one wheel serves CPython 3.10 and later. Wheels are built for manylinux and
-musllinux (x86_64, aarch64) and macOS (x86_64, arm64). An sdist builds the
-worker with the system C compiler.
+musllinux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64). An
+sdist builds the worker with the system C compiler, or on Windows with
+MinGW-w64 GCC, since MSVC lacks C11 complex numbers. Windows hosts have no
+`open()` in the engine (`manual.md`: files need a POSIX host).
 
 ## 3 API
 
@@ -230,8 +232,8 @@ first runs engine code (its first `EVAL`, `EXEC`, `CALL`, or `OP`; see
 | macOS | `sandbox_init` profile: deny by default; allow metadata reads, and reading (and writing, unless read-only) beneath the mounted directories |
 
 A layer the kernel lacks is skipped; one the kernel refuses ends the worker.
-Other platforms have no OS layer; for hostile code there, also run the parent
-in a container.
+Other platforms, Windows among them, have no OS layer; for hostile code
+there, also run the parent in a container or VM.
 
 ## 5 Compatibility with the retired extension
 

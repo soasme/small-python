@@ -37,8 +37,10 @@ with small_python.Runtime() as rt:
 ## Requirements
 
 - CPython 3.10 or later.
-- Linux or macOS. Wheels are published for both; other POSIX systems build
-  from the source distribution with a C11 compiler. Windows is not supported.
+- Linux, macOS, or Windows (x86_64). Wheels are published for all three;
+  other POSIX systems build from the source distribution with a C11 compiler.
+  On Windows the engine's `open()` is unavailable and the worker has no OS
+  sandbox (see [Limits and safety](safety.md)).
 
 The language itself is described in the engine manual,
 [docs/manual.md](../../docs/manual.md), and the target standard in
