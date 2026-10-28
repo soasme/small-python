@@ -7972,6 +7972,12 @@ static SPYValue *dict_subscript(SPYContext *c, SPYValue *dict, SPYValue *self, S
     return c->error_type[0] ? NULL : missing_key(c, key);
 }
 static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
+    /* An exact list or tuple at a small int position in range comes first. */
+    if ((v->type == SPY_LIST || v->type == SPY_TUPLE) && key->type == SPY_INT && !key->as.integer_data.big) {
+        int64_t i = key->as.integer_data.small, len = (int64_t)v->as.seq.len;
+        if (i < 0) i += len;
+        if (i >= 0 && i < len) return spy_retain(v->as.seq.items[i]);
+    }
     if (v->type == SPY_RANGE) return range_index(c, v, key);
     if (v->type == SPY_CLASS && v->as.map.meta) {
         SPYValue *method = special_method(c, v, "__getitem__");
@@ -8019,6 +8025,16 @@ static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
 }
 static int bytearray_set(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) {
+    if (v->type == SPY_LIST && key->type == SPY_INT && !key->as.integer_data.big) {
+        int64_t i = key->as.integer_data.small, len = (int64_t)v->as.seq.len;
+        if (i < 0) i += len;
+        if (i >= 0 && i < len) {
+            SPYValue *old = v->as.seq.items[i];
+            v->as.seq.items[i] = spy_retain(item);
+            spy_release(old);
+            return 0;
+        }
+    }
     SPYValue *base = builtin_base(c, v, "__setitem__", NULL);
     if (base) return set_index(c, base, key, item);
     if (v->type == SPY_INSTANCE || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || meta_class(v)) {
