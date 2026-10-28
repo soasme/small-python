@@ -3964,18 +3964,20 @@ static int hex_digit(int c) {
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
-static int append_codepoint(Buffer *b, unsigned code) {
-    char text[4]; size_t len;
-    if (code < 0x80) { text[0] = (char)code; len = 1; }
-    else if (code < 0x800) { text[0] = (char)(0xc0 | (code >> 6)); text[1] = (char)(0x80 | (code & 63)); len = 2; }
-    else if (code < 0x10000) {
+/* Write code's UTF-8 encoding to text, returning its length. */
+static size_t utf8_encode(char *text, unsigned code) {
+    if (code < 0x80) { text[0] = (char)code; return 1; }
+    if (code < 0x800) { text[0] = (char)(0xc0 | (code >> 6)); text[1] = (char)(0x80 | (code & 63)); return 2; }
+    if (code < 0x10000) {
         text[0] = (char)(0xe0 | (code >> 12)); text[1] = (char)(0x80 | ((code >> 6) & 63));
-        text[2] = (char)(0x80 | (code & 63)); len = 3;
-    } else {
-        text[0] = (char)(0xf0 | (code >> 18)); text[1] = (char)(0x80 | ((code >> 12) & 63));
-        text[2] = (char)(0x80 | ((code >> 6) & 63)); text[3] = (char)(0x80 | (code & 63)); len = 4;
+        text[2] = (char)(0x80 | (code & 63)); return 3;
     }
-    return append(b, text, len);
+    text[0] = (char)(0xf0 | (code >> 18)); text[1] = (char)(0x80 | ((code >> 12) & 63));
+    text[2] = (char)(0x80 | ((code >> 6) & 63)); text[3] = (char)(0x80 | (code & 63)); return 4;
+}
+static int append_codepoint(Buffer *b, unsigned code) {
+    char text[4];
+    return append(b, text, utf8_encode(text, code));
 }
 /* CPython's _getcode for \N{...}: case-insensitive character names and
  * aliases, Hangul syllables, and names derived from a code point. */
@@ -10226,6 +10228,14 @@ static int default_hook(SPYValue *definition, int object_id, int type_id) {
     intptr_t id = (intptr_t)definition->as.native.data;
     return id == object_id || id == type_id;
 }
+/* A value of an exact builtin type whose attributes are its type's alone. */
+static int builtin_receiver(SPYValue *v) {
+    switch (v->type) {
+    case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: case SPY_LIST: case SPY_TUPLE: case SPY_DICT:
+    case SPY_SET: case SPY_FROZENSET: case SPY_INT: case SPY_FLOAT: return 1;
+    default: return 0;
+    }
+}
 /* An instance of a plain object layout, its attributes in its own entries. */
 static int plain_instance(SPYValue *v) {
     return v->type == SPY_INSTANCE && !v->as.map.namespace && !v->as.map.base;
@@ -13108,7 +13118,18 @@ static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self
         *self = object;
         return spy_retain(n->attr_method);
     }
+    /* A builtin type's methods do not depend on the value: the lookup's
+     * answer, its own function bound to the object, is kept for the type. */
+    SPYValue *type = builtin_receiver(object) ? c->types[object->type] : NULL;
+    if (type && n->attr_class == type && n->attr_epoch == c->classes_changed) {
+        *self = object;
+        return spy_retain(n->attr_method);
+    }
     SPYValue *callee = node_attribute(c, object, n);
+    if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
+        !(n->b->text[0] == '_' && n->b->text[1] == '_') && callee->as.method.function == class_lookup(type, n->b->text)) {
+        n->attr_class = type; n->attr_method = callee->as.method.function; n->attr_epoch = c->classes_changed;
+    }
     spy_release(object);
     return callee;
 }
@@ -13821,12 +13842,12 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     } else if (fn->type == SPY_METHOD) {
         if (argc >= SIZE_MAX / sizeof(SPYValue *) - 1) spy_error(c, "MemoryError", "too many arguments");
         else {
-            SPYValue **args = allocate(c, (argc + 1) * sizeof(*args));
+            SPYValue *small[9], **args = argc < 9 ? small : allocate(c, (argc + 1) * sizeof(*args));
             if (args) {
                 args[0] = fn->as.method.self;
                 for (size_t i = 0; i < argc; i++) args[i + 1] = argv[i];
                 result = call_keywords(c, fn->as.method.function, argc + 1, args, keywords);
-                free(args);
+                if (args != small) free(args);
             }
         }
     } else if (fn->type == SPY_CLASS && fn->as.map.meta &&
@@ -19984,16 +20005,20 @@ static int units_from(SPYContext *c, SPYValue *v, Units *u) {
     }
     return 0;
 }
+/* A new str, bytes or bytearray (type) of the units, encoded in one pass
+ * into storage of the exact size. */
 static SPYValue *units_value(SPYContext *c, int type, const uint32_t *items, size_t len) {
-    Buffer out = {.ctx = c};
-    for (size_t i = 0; i < len && !c->error_type[0]; i++) {
-        if (type == SPY_STRING) append_codepoint(&out, items[i]);
-        else { char byte = (char)items[i]; append(&out, &byte, 1); }
+    size_t size = 0;
+    for (size_t i = 0; i < len; i++) size += type != SPY_STRING || items[i] < 0x80 ? 1 : items[i] < 0x800 ? 2 : items[i] < 0x10000 ? 3 : 4;
+    SPYValue *v = value_new(c, SPY_STRING);
+    char *data = v ? allocate(c, size + 1) : NULL;
+    if (!data) { spy_release(v); return NULL; }
+    v->type = type; v->as.string.data = data; v->as.string.len = size;
+    for (size_t i = 0; i < len; i++) {
+        if (type == SPY_STRING) data += utf8_encode(data, items[i]);
+        else *data++ = (char)items[i];
     }
-    SPYValue *result = c->error_type[0] ? NULL : type == SPY_STRING ? spy_string(c, out.data ? out.data : "", out.len) :
-        type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) : spy_bytes(c, out.data ? out.data : "", out.len);
-    free(out.data);
-    return result;
+    return v;
 }
 
 enum { C_ALPHA, C_DECIMAL, C_DIGIT, C_NUMERIC, C_SPACE, C_UPPER, C_LOWER, C_TITLE, C_CASED, C_IGNORABLE, C_ALNUM };
