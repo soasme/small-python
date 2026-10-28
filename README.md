@@ -130,5 +130,5 @@ make bench        # startup benchmark
 
 ## License
 
-[MIT](LICENSE). Parts derived from CPython and the Unicode data keep their own
-licenses in [`docs/licenses`](docs/licenses).
+[MIT](LICENSE). Third-party notices, including CPython's and Unicode's, are in
+[`docs/licenses`](docs/licenses).
