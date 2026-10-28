@@ -903,7 +903,7 @@ static void hygiene(void) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts(SPY_VERSION); return 0; }
-    if (argc != 1) { fputs("usage: spy-worker [--version]\n", stderr); return 2; }
+    if (argc > 1) { fputs("usage: spy-worker [--version]\n", stderr); return 2; }
 #if !defined(__wasm__)
     hygiene();
 #endif

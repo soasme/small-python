@@ -1,0 +1,20 @@
+{
+  "name": "small-python",
+  "version": "0.0.1",
+  "description": "Run Small Python, a small embeddable Python engine, from JavaScript in a WebAssembly worker.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": ["index.js", "index.d.ts", "wire.js", "worker.js", "spy-worker.wasm", "README.md", "LICENSE", "licenses/"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test test/*.test.js" },
+  "repository": { "type": "git", "url": "git+https://github.com/soasme/small-python.git", "directory": "javascript" },
+  "author": "Ju Lin <soasme@gmail.com>",
+  "license": "MIT",
+  "keywords": ["python", "interpreter", "sandbox", "webassembly"]
+}

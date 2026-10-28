@@ -117,8 +117,11 @@ class HostileWorkerTest(unittest.TestCase):
                 try:
                     with mock.patch.object(runtime_module, "WORKER", path):
                         rt = Runtime(timeout=10)
-                    with self.assertRaises(WorkerError):
+                    with self.assertRaises(WorkerError) as cm:
                         rt.eval("1")
+                    expected = "exited with status 0" if name.startswith(("stream", "truncated stream")) \
+                        else "broke the protocol"
+                    self.assertIn(expected, str(cm.exception))
                     self.assertTrue(rt.closed)
                 finally:
                     os.unlink(path)

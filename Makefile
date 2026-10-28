@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
 all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -38,6 +38,26 @@ $(OBJDIR)/spy-worker.o: spy-worker.c spy.h spy-std.h
 $(OBJDIR)/spy-worker-engine.o: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DSPY_WORKER_ENGINE -c $< -o $@
+
+# The JavaScript package's worker: the same file for wasm32-wasip1, built
+# with wasi-sdk (https://github.com/WebAssembly/wasi-sdk).
+WASI_SDK ?= /opt/wasi-sdk
+WASM_CC = $(WASI_SDK)/bin/clang --target=wasm32-wasip1 --sysroot=$(WASI_SDK)/share/wasi-sysroot
+WASM_CFLAGS = -O2 -std=c11 -Wall -Wextra -Wno-tautological-constant-out-of-range-compare -Wno-unused-function
+WASM_LDFLAGS = -Wl,--import-memory -Wl,--initial-memory=16777216 -Wl,-z,stack-size=8388608
+javascript/spy-worker.wasm: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
+	mkdir -p $(OBJDIR)/wasm
+	$(WASM_CC) $(WASM_CFLAGS) -DSPY_WORKER_ENGINE -c spy-worker.c -o $(OBJDIR)/wasm/engine.o
+	$(WASM_CC) $(WASM_CFLAGS) -c spy-worker.c -o $(OBJDIR)/wasm/worker.o
+	$(WASM_CC) $(WASM_LDFLAGS) $(OBJDIR)/wasm/engine.o $(OBJDIR)/wasm/worker.o -lm -o $@
+	mkdir -p javascript/licenses
+	cp LICENSE javascript/LICENSE
+	cp docs/licenses/python.txt docs/licenses/unicode.txt javascript/licenses/
+
+wasm: javascript/spy-worker.wasm
+
+test-javascript: javascript/spy-worker.wasm
+	cd javascript && node --test test/*.test.js
 
 spyc: $(OBJDIR)/spyc.o
 	$(CC) $(LDFLAGS) $^ -o $@

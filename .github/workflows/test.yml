@@ -18,6 +18,31 @@ jobs:
       - run: make CC=${{ matrix.compiler }} sanitize
         if: runner.os == 'Linux'
 
+  packages:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install wasi-sdk
+        run: |
+          case "${{ runner.os }}-$(uname -m)" in
+            Linux-x86_64) asset=x86_64-linux ;;
+            macOS-arm64) asset=arm64-macos ;;
+            *) asset=x86_64-macos ;;
+          esac
+          curl -sSfL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-$asset.tar.gz" | tar xz
+          echo "WASI_SDK=$PWD/wasi-sdk-34.0-$asset" >> "$GITHUB_ENV"
+      - run: make test-binding
+      - run: make test-javascript
+
   upstream-baseline:
     runs-on: ubuntu-latest
     steps:

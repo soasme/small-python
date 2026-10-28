@@ -117,8 +117,10 @@ Methods:
 | `closed` | `rt.closed` |
 | `version` | the engine version, from the `INIT` reply |
 
-`get` of a missing name and `delete` of one reject with `PythonError` of type
-`NameError`. A `Runtime` also implements `Symbol.dispose` for `using`.
+`get` of a missing name rejects with `PythonError` of type `NameError`, and
+`delete` of one with type `KeyError`. `define` names the engine function after
+the global, so anonymous functions get a useful `__name__`. A `Runtime` also
+implements `Symbol.dispose` for `using`.
 
 ### 3.2 Conversion
 
@@ -158,7 +160,7 @@ Engine to JavaScript:
 | anything else | `PyObject` |
 
 JavaScript values nested deeper than 200 levels reject with `TypeError`;
-engine containers that deep arrive with their innermost level as `PyObject`
+engine values that deep reject with `PythonError` of type `RecursionError`
 (`protocol.md` §4).
 
 ### 3.3 Host functions
@@ -238,6 +240,9 @@ or output runs, operations of that runtime run immediately as nested requests
 Other runtimes with `Worker`, `SharedArrayBuffer`, `Atomics.waitAsync`, and
 `WebAssembly` should work but are not tested.
 
+The Worker is started with an empty `execArgv`, so flags of the embedding
+process (`--inspect`, `--input-type`) do not reach it.
+
 ## 6 Package
 
 ```text
@@ -250,8 +255,8 @@ small-python/
   index.d.ts          types
 ```
 
-The repository builds it from `javascript/` with `make wasm` (wasi-sdk) and
-tests it with `node --test`.
+The repository builds `spy-worker.wasm` with `make wasm WASI_SDK=<path>`
+(wasi-sdk 34 or later) and tests the package with `make test-javascript`.
 
 ## 7 Tests
 
