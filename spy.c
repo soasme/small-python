@@ -13187,6 +13187,8 @@ container_fail:
     return result;
 }
 static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
+    /* A literal made once cannot fail, so it skips the step bookkeeping. */
+    if (n->constant) return c->error_type[0] ? NULL : spy_retain(n->constant);
     if (deeper(c, "")) return NULL;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
