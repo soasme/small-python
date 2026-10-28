@@ -33,9 +33,8 @@ a written specification of the Python 3.15 core language. All 353
 specification tests and all 112 TLA+ models pass. Each test is also checked
 against CPython 3.15.
 
-The standard library is out of scope. Only a few built-in modules ship with
-the `spy` command: `sys`, `gc`, `types`, `weakref`, `itertools`,
-`collections`, `_thread`, and `_typing`.
+Small Python implements the language and its builtins. The standard library
+is out of scope.
 
 PLS-315 is a project document, not an official PSF standard.
 
