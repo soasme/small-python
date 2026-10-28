@@ -297,7 +297,7 @@ compatibility. The language
 edition, engine release, and upstream test revisions are separate identifiers.
 
 spy conforms to the Core profile of PLS-315, by the evidence of [Local tests](#24-local-tests)
-and no other: it passes all 351 specification tests, which `make
+and no other: it passes all 353 specification tests, which `make
 test-spec-oracle` also validates on the pinned CPython 3.15 build, covering
 each of the 180 clauses of chapters 6–29 and Annexes A–B; and all 112 TLA+
 models check, with every transition of the 111 that replay on an engine

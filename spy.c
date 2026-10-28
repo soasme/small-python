@@ -2444,6 +2444,13 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
                 status = puts_buffer(b, type_name(v)) || puts_buffer(b, "(");
                 for (size_t i = 0; i < args->as.seq.len && !status; i++)
                     status = (i && puts_buffer(b, ", ")) || format_value(b, args->as.seq.items[i], 1);
+                /* ImportError_repr: its name and path, as keywords. */
+                int shown = args->as.seq.len != 0;
+                for (int i = 0; i < 2 && !status && subclass(v->as.map.parent, name_local(b->ctx->classes, "ImportError")); i++) {
+                    SPYValue *field = hidden_field(v, i ? "path" : "name");
+                    if (field && field->type != SPY_NONE)
+                        status = (shown++ && puts_buffer(b, ", ")) || puts_buffer(b, i ? "path=" : "name=") || format_value(b, field, 1);
+                }
                 if (!status) status = puts_buffer(b, ")");
             } else if (subclass(v->as.map.parent, name_local(b->ctx->classes, "SyntaxError"))) {
                 SPYValue *message = hidden_field(v, "msg"), *file = hidden_field(v, "filename"), *line = hidden_field(v, "lineno");
@@ -2611,6 +2618,7 @@ typedef struct {
     const char *literal_start; /* The body of the string literal being decoded. */
     const char *lexeme; /* The token lex() is reading. */
     int lexeme_formatted; /* That token is an f-string or t-string. */
+    int lex_stopped; /* lex() stopped without raising: CPython's done codes. */
     const char *annotation_scope; /* Set while parsing a type-parameter value or alias, e.g. "a TypeVar bound". */
     const char *private_name;
     const char *error_start, *error_end;
@@ -3020,9 +3028,13 @@ static int lex(Parser *p, const char *s) {
         unsigned code = utf8_decode(ch, (size_t)(end - ch), &width);
         if ((unsigned char)*ch >= 128 && ((unsigned char)*ch < 0xc2 || width == 1 || code < (width == 2 ? 0x80u : width == 3 ? 0x800u : 0x10000u) ||
             code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) || (unsigned char)*ch > 0xf4)) {
+            /* 11.2 step 6; a string given to compile() names no file. */
+            const char *file = p->ctx->string_source || !p->unit ? NULL : p->unit->as.unit.filename;
+            errorf(p->ctx, "SyntaxError", "Non-UTF-8 code starting with '\\x%02x' %s%s%son line %zu, but no encoding declared; "
+                   "see https://peps.python.org/pep-0263/ for details", (unsigned char)*ch, file ? "in file " : "", file ? file : "", file ? " " : "", line);
             p->ctx->line = line;
-            p->error_start = ch; p->error_end = ch + width;
-            spy_error(p->ctx, "SyntaxError", "invalid UTF-8 source"); return -1;
+            p->error_start = p->error_end = ch; p->error_trim_line = 1;
+            return -1;
         }
         if (*ch == '\n') line++;
         ch += width;
@@ -3063,7 +3075,7 @@ static int lex(Parser *p, const char *s) {
                         p->len = line_tokens;
                         p->ctx->line = line;
                         /* E_DEDENT: the column is the end of the line, with no end. */
-                        p->error_start = p->error_end = s + strcspn(s, "\n"); p->error_end_zero = 2;
+                        p->error_start = p->error_end = s + strcspn(s, "\n"); p->error_end_zero = 2; p->lex_stopped = 1;
                         spy_error(p->ctx, "IndentationError", "unindent does not match any outer indentation level");
                         return -1;
                     }
@@ -3079,23 +3091,17 @@ static int lex(Parser *p, const char *s) {
             /* A continuation must join with a line; exec input ends with an
              * implicit newline, which a final backslash continues. */
             size_t joined = s[1] == '\n' ? 2 : s[1] == '\r' && s[2] == '\n' ? 3 : !s[1] && !p->ctx->eval_input ? 1 : 0;
-            if (joined && !s[joined]) {
+            if (joined && !s[joined] && !brackets) {
                 p->ctx->line = line;
-                if (brackets) {
-                    p->ctx->line = opened_line[brackets - 1];
-                    p->error_start = opened_at[brackets - 1]; p->error_end = p->error_start + 1; p->error_end_zero = 1;
-                    errorf(p->ctx, "SyntaxError", "'%c' was never closed", *p->error_start);
-                } else {
-                    p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2;
-                    spy_error(p->ctx, "SyntaxError", "unexpected EOF while parsing");
-                }
+                p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2; p->lex_stopped = 1;
+                spy_error(p->ctx, "SyntaxError", "unexpected EOF while parsing");
                 return -1;
             }
             if (joined) { s += joined; line++; continue; }
         }
         if (*s == '\\') {
             /* 12.2.2: a backslash outside a literal must end the line. */
-            p->ctx->line = line; p->error_start = s + !!s[1]; p->error_end = NULL; p->error_end_zero = 1;
+            p->ctx->line = line; p->error_start = s + !!s[1]; p->error_end = NULL; p->error_end_zero = 1; p->lex_stopped = 1;
             spy_error(p->ctx, "SyntaxError", "unexpected character after line continuation character");
             return -1;
         }
@@ -3189,11 +3195,11 @@ static int lex(Parser *p, const char *s) {
     }
     return token_add(p, T_END, s, 0, line) || token_add(p, T_END, s, 0, line);
 nesting:
-    p->ctx->line = line;
+    p->ctx->line = line; p->lex_stopped = 1;
     spy_error(p->ctx, "SyntaxError", "too many nested blocks or delimiters"); return -1;
 tab_error:
     p->len = line_tokens;
-    p->ctx->line = line;
+    p->ctx->line = line; p->lex_stopped = 1;
     p->error_start = p->error_end = line_start; p->error_end_zero = 1;
     spy_error(p->ctx, "TabError", "inconsistent use of tabs and spaces in indentation");
     return -1;
@@ -4331,7 +4337,11 @@ static int call_arguments(Parser *p, Node *n) {
             if (!generator) return -1;
             generator->args = arg;
             if (!comprehension(p, generator)) return -1;
-            if (at(p, ',')) { syntax_span(p, first, p->pos, "Generator expression must be parenthesized"); return -1; }
+            if (at(p, ',')) {
+                /* CPython's invalid_arguments reads the arguments after the comma. */
+                p->pos++; peek(p); p->pos--;
+                syntax_span(p, first, p->pos, "Generator expression must be parenthesized"); return -1;
+            }
             arg = generator;
             *tail = arg;
             break;
@@ -6628,11 +6638,12 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             goto lexer_error;
         }
         /* _PyPegen_tokenize_full_source_to_check_for_errors: a lexer error
-         * after a parser's syntax error wins, unless it is inside an f-string
-         * or the parser stopped at an unexpected indentation. */
+         * raised after a parser's syntax error wins, unless it is inside an
+         * f-string or the parser stopped at an unexpected indentation. */
         if (lexed != SIZE_MAX && c->error_type[0]) invalid_expression_error(&p);
         int lexer_wins = !c->error_type[0] || p.far >= lexed ||
-                         (!p.lexeme_formatted && strcmp(c->error_message, "unexpected indent") && strcmp(c->error_message, "unexpected unindent") &&
+                         (!p.lex_stopped && !p.lexeme_formatted && strcmp(c->error_message, "unexpected indent") &&
+                          strcmp(c->error_message, "unexpected unindent") &&
                           (!strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") || !strcmp(c->error_type, "TabError")));
         if (lexed != SIZE_MAX && lexer_wins) {
             spy_clear_error(c);
@@ -9834,15 +9845,19 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
 }
 static void attribute_details(SPYContext *, SPYValue *, SPYValue *, const char *);
 static SPYValue *attribute_lookup(SPYContext *, SPYValue *, const char *);
-static SPYValue *attribute(SPYContext *c, SPYValue *v, const char *name) {
-    SPYValue *result = attribute_lookup(c, v, name);
-    if (result || !error_is(c, "AttributeError")) return result;
+/* A failed lookup's AttributeError names the attribute and object. */
+static SPYValue *attribute_failed(SPYContext *c, SPYValue *v, const char *name) {
+    if (!error_is(c, "AttributeError")) return NULL;
     if (c->exception) attribute_details(c, c->exception, v, name);
     else if (!c->error_object && strlen(name) < sizeof(c->error_name)) {
         c->error_object = spy_retain(v);
         memcpy(c->error_name, name, strlen(name) + 1);
     }
     return NULL;
+}
+static SPYValue *attribute(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *result = attribute_lookup(c, v, name);
+    return result ? result : attribute_failed(c, v, name);
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
@@ -12987,12 +13002,20 @@ static int unicode_error_text(Buffer *b, SPYValue *v, int kind) {
     if (!object || !first || !last || !reason) return 0;
     int64_t start = 0, end = 0;
     if (spy_as_int(c, first, &start) || spy_as_int(c, last, &end)) return -1;
-    SPYValue *text = builtin_value(c, object, kind == 1 ? SPY_BYTES : SPY_STRING);
-    int64_t len = !text ? 0 : kind == 1 ? (int64_t)text->as.string.len : (int64_t)string_length(text);
+    /* The reason and encoding as str, whose conversions may change the object. */
+    SPYValue *reason_text = spy_str(c, reason), *encoding_text = reason_text && kind != 2 ? spy_str(c, encoding ? encoding : c->none) : NULL;
+    if (!reason_text || (kind != 2 && !encoding_text)) { spy_release(reason_text); return -1; }
+    object = hidden_field(v, "object");
+    SPYValue *text = object ? builtin_value(c, object, kind == 1 ? SPY_BYTES : SPY_STRING) : NULL;
+    if (!text) {
+        errorf(c, "TypeError", "UnicodeError 'object' attribute %s", !object ? "is not set" : kind == 1 ? "must be a bytes" : "must be a string");
+        spy_release(reason_text); spy_release(encoding_text); return -1;
+    }
+    int64_t len = kind == 1 ? (int64_t)text->as.string.len : (int64_t)string_length(text);
     static const char *const verbs[] = {"encode", "decode", "translate"};
-    int status = 0;
-    if (kind != 2) status = puts_buffer(b, "'") || format_value(b, encoding ? encoding : c->none, 0) || puts_buffer(b, "' codec ");
-    if (status) return -1;
+    int status = kind != 2 && (puts_buffer(b, "'") || format_value(b, encoding_text, 0) || puts_buffer(b, "' codec "));
+    spy_release(encoding_text);
+    if (status) { spy_release(reason_text); return -1; }
     char detail[96];
     if (start >= 0 && start < len && end >= 0 && end <= len && end == start + 1) {
         unsigned code = 0;
@@ -13008,7 +13031,9 @@ static int unicode_error_text(Buffer *b, SPYValue *v, int kind) {
                       code <= 0xff ? "x" : code <= 0xffff ? "u" : "U", code <= 0xff ? 2 : code <= 0xffff ? 4 : 8, code, (long long)start);
     } else snprintf(detail, sizeof(detail), "can't %s %s in position %lld-%lld: ", verbs[kind], kind == 1 ? "bytes" : "characters",
                     (long long)start, (long long)end - 1);
-    return puts_buffer(b, detail) || format_value(b, reason, 0);
+    status = puts_buffer(b, detail) || format_value(b, reason_text, 0);
+    spy_release(reason_text);
+    return status;
 }
 static SPYValue *raise_value(SPYContext *, SPYValue *);
 /* Raise a codec error with its fields, as the codecs do. */
@@ -13070,12 +13095,13 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
     if (trim_line && end > start && end[-1] == '\n') end--;
     size_t offset = 1, end_offset = 1, end_line = line;
     if (position) {
-        for (const char *ch = start; ch < position; ch++) if (((unsigned char)*ch & 192) != 128) offset++;
+        /* Columns count characters; without the line's text, the compiler's count UTF-8 bytes. */
+        for (const char *ch = start; ch < position; ch++) if (textless || ((unsigned char)*ch & 192) != 128) offset++;
         end_offset = offset;
         /* A range may run onto later lines, through an explicit line join. */
         for (const char *ch = position; ch < finish; ch++)
             if (*ch == '\n' && ch + 1 < finish) { end_line++; end_offset = 1; }
-            else if (((unsigned char)*ch & 192) != 128) end_offset++;
+            else if (textless || ((unsigned char)*ch & 192) != 128) end_offset++;
         if (end_zero) end_offset = 0;
         if (zero_based) offset--;
     }
@@ -15982,18 +16008,16 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
     spy_release(method); spy_release(result);
     return c->error_type[0] ? -1 : 0;
 }
+static int valid_exception_types(SPYContext *, SPYValue *);
+/* An exception class, or a tuple of them, all checked before matching. */
 static int exception_matches(SPYContext *c, SPYValue *exception, SPYValue *type) {
-    if (type->type == SPY_TUPLE) {
-        for (size_t i = 0; i < type->as.seq.len; i++) {
-            int match = exception_matches(c, exception, type->as.seq.items[i]);
-            if (match) return match;
-        }
-        return 0;
-    }
-    if (type->type != SPY_CLASS || !subclass(type, name_local(c->classes, "BaseException"))) {
+    if (!valid_exception_types(c, type)) {
         spy_error(c, "TypeError", "catching classes that do not inherit from BaseException is not allowed"); return -1;
     }
-    return subclass(exception->as.map.parent, type);
+    size_t count = type->type == SPY_TUPLE ? type->as.seq.len : 1;
+    for (size_t i = 0; i < count; i++)
+        if (subclass(exception->as.map.parent, type->type == SPY_TUPLE ? type->as.seq.items[i] : type)) return 1;
+    return 0;
 }
 static void delete_name(SPYValue *env, const char *name) {
     if (env->as.map.namespace) {
@@ -16257,6 +16281,7 @@ static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     SPYValue *outer = c->handled;
     c->handled = error.value ? spy_retain(error.value) : spy_retain(outer);
     SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none, error.value ? error.value : c->none, exception_traceback(c, error.value)};
+    size_t line = c->line, frame_line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
     relocate(c, item); /* __exit__ is called at its manager's line (15.5) */
     SPYValue *result = spy_call(c, exit, 3, args);
     materialize_error(c);
@@ -16266,7 +16291,12 @@ static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
         int suppress = spy_truth(result);
         if (c->error_type[0]) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
         else if (suppress) { spy_release(r.value); r = (Result){FLOW_NORMAL, NULL}; }
-        else restore_error(c, &error);
+        else {
+            /* The exception leaves the frame from the line that raised it. */
+            restore_error(c, &error);
+            c->line = line;
+            if (c->py_depth) c->frames[c->py_depth - 1].line = frame_line;
+        }
     }
     spy_release(result); spy_release(error.value);
     spy_release(c->handled); c->handled = outer;
@@ -16339,11 +16369,11 @@ done:
     return status;
 }
 static int valid_exception_types(SPYContext *c, SPYValue *type) {
-    if (type->type == SPY_TUPLE) {
-        for (size_t i = 0; i < type->as.seq.len; i++) if (!valid_exception_types(c, type->as.seq.items[i])) return 0;
-        return 1;
-    }
-    return type->type == SPY_CLASS && subclass(type, name_local(c->classes, "BaseException"));
+    size_t count = type->type == SPY_TUPLE ? type->as.seq.len : 1;
+    SPYValue *const *classes = type->type == SPY_TUPLE ? type->as.seq.items : &type;
+    for (size_t i = 0; i < count; i++)
+        if (classes[i]->type != SPY_CLASS || !subclass(classes[i], name_local(c->classes, "BaseException"))) return 0;
+    return 1;
 }
 static int group_condition(SPYContext *c, SPYValue *exception, void *data) {
     SPYValue *condition = data;
@@ -22037,7 +22067,10 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc != (id == B_OBJECT_SETATTR ? 3u : 2u) || argv[1]->type != SPY_STRING)
             return spy_error(c, "TypeError", "object attribute operation requires a string name");
         const char *name = argv[1]->as.string.data;
-        if (id == B_OBJECT_GETATTRIBUTE) return attribute_value(c, argv[0], name);
+        if (id == B_OBJECT_GETATTRIBUTE) {
+            SPYValue *result = attribute_value(c, argv[0], name);
+            return result ? result : attribute_failed(c, argv[0], name);
+        }
         if (argv[0]->type == SPY_CLASS)
             return errorf(c, "TypeError", "can't apply this %s to type object", id == B_OBJECT_SETATTR ? "__setattr__" : "__delattr__");
         int status = id == B_OBJECT_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name);
@@ -22546,7 +22579,7 @@ execution_fail:
                 size_t count = details->as.seq.len;
                 if (count < 4 || count > 7) errorf(c, "TypeError", "function takes at %s %d arguments (%zu given)", count < 4 ? "least" : "most", count < 4 ? 4 : 7, count);
                 else if (count == 5) spy_error(c, "TypeError", "end_offset must be provided when end_lineno is provided");
-                else for (size_t i = 0; i < count && i < 6 && !c->error_type[0]; i++) set_hidden_field(c, a, fields[i], details->as.seq.items[i]);
+                else for (size_t i = 0; i < 6 && !c->error_type[0]; i++) set_hidden_field(c, a, fields[i], i < count ? details->as.seq.items[i] : c->none);
                 spy_release(details);
                 if (c->error_type[0]) return NULL;
             }
