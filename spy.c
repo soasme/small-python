@@ -45,7 +45,7 @@ typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]
 enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32 };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 typedef struct { const char *name; unsigned flags; size_t line; Node *declared; } Symbol;
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap; int kind, tries; };
+struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap; int kind, tries; const char *within; };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
@@ -2619,7 +2619,6 @@ typedef struct {
     const char *lexeme; /* The token lex() is reading. */
     int lexeme_formatted; /* That token is an f-string or t-string. */
     int lex_stopped; /* lex() stopped without raising: CPython's done codes. */
-    const char *annotation_scope; /* Set while parsing a type-parameter value or alias, e.g. "a TypeVar bound". */
     const char *private_name;
     const char *error_start, *error_end;
     int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset). */
@@ -4028,12 +4027,6 @@ static Node *string_node(Parser *p) {
     free(literal.data);
     return status ? NULL : n;
 }
-/* The error covers tokens [first, end): the whole offending expression. */
-static Node *syntax_within(Parser *p, const char *what, size_t first, size_t end) {
-    char message[128];
-    snprintf(message, sizeof(message), "%s expression cannot be used within %s", what, p->annotation_scope);
-    return syntax_span(p, first, end, message);
-}
 static Node *yield_expression(Parser *p) {
     size_t start = p->pos++;
     int outside = !p->functions && !p->deferred;
@@ -4047,13 +4040,11 @@ static Node *yield_expression(Parser *p) {
     if (take_word(p, "from")) {
         n->op = 1;
         if (!(n->a = expression(p, 0))) return NULL;
-        if (p->annotation_scope) return syntax_within(p, "yield", start, p->pos);
         if (p->async_function) return syntax_at(p, span(p, n, start), "'yield from' inside async function");
     } else if (!at(p, T_NL) && !at(p, ';') && !at(p, ')') && !at(p, T_END) && !at(p, '=')) {
         if (!(n->a = expression_list(p, 0))) return NULL;
         if (n->a->kind == N_STAR) return syntax_at(p, n->a, "can't use starred expression here");
     }
-    if (p->annotation_scope) return syntax_within(p, "yield", start, p->pos);
     return span(p, n, start);
 }
 static Node *atom(Parser *p) {
@@ -4386,7 +4377,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
         for (Node *n = outer; n != inner->a; n = n->a) extend(p, n, n);
         left = outer;
     } else {
-        size_t await_line = peek(p)->line, await_at = p->pos, atom_start;
+        size_t await_line = peek(p)->line, atom_start;
         int awaiting = take_word(p, "await");
         atom_start = p->pos;
         left = span(p, atom(p), atom_start);
@@ -4427,8 +4418,6 @@ static Node *expression_inner(Parser *p, int min, int named) {
             Node *n = node(p, N_AWAIT);
             if (!n) return NULL;
             n->a = left; n->line = await_line; left = n;
-            /* The error covers the whole await expression. */
-            if (p->annotation_scope) return syntax_within(p, "await", await_at, p->pos);
         }
     }
     for (;;) {
@@ -4486,15 +4475,6 @@ static Node *expression_inner(Parser *p, int min, int named) {
         left = n;
     }
 assignment_expression:
-    if (min == 0 && named && at(p, T_WALRUS) && p->annotation_scope) {
-        /* The error covers the whole assignment expression. */
-        p->pos++;
-        if (!expression(p, 0)) return NULL;
-        syntax_within(p, "named", p->pos, p->pos);
-        p->ctx->line = left->line; p->error_start = left->start;
-        p->error_end = p->tokens[p->pos - 1].start + p->tokens[p->pos - 1].len;
-        return NULL;
-    }
     if (min == 0 && named && take(p, T_WALRUS)) {
         if (left->kind != N_NAME) {
             /* A call argument has no invalid_named_expression alternative. */
@@ -5487,36 +5467,19 @@ static Node *type_params(Parser *p) {
         if (take(p, ':')) {
             if (kind) return syntax(p, kind == 1 ? "cannot use bound with TypeVarTuple" : "cannot use bound with ParamSpec");
             /* A parenthesized tuple is a constraint list. */
-            int constraints = 0;
-            if (at(p, '(')) {
-                size_t depth = 0;
-                for (size_t i = p->pos; i < p->len; i++) {
-                    int k = p->tokens[i].kind;
-                    if (k == '(' || k == '[' || k == '{') depth++;
-                    else if ((k == ')' || k == ']' || k == '}') && !--depth) {
-                        k = i + 1 < p->len ? p->tokens[i + 1].kind : T_END;
-                        if (k != ',' && k != ']' && k != '=') constraints = 0;
-                        break;
-                    } else if (k == ',' && depth == 1) constraints = 1;
-                }
-            }
-            p->annotation_scope = constraints ? "a TypeVar constraint" : "a TypeVar bound";
             Node *bound = expression(p, 0);
-            p->annotation_scope = NULL;
             if (!bound) return NULL;
             if (bound->kind == N_TUPLE) param->flags |= F_CONSTRAINTS;
             if (!(param->b = lazy_function(p, param->text, bound))) return NULL;
         }
         if (take(p, '=')) {
             Node *value;
-            p->annotation_scope = kind == 0 ? "a TypeVar default" : kind == 1 ? "a TypeVarTuple default" : "a ParamSpec default";
             if (kind == 1 && at(p, '*')) {
                 value = node(p, N_STAR);
                 p->pos++;
                 if (value) value->a = expression(p, 4);
                 if (value && !value->a) value = NULL;
             } else value = expression(p, 0);
-            p->annotation_scope = NULL;
             if (!value) return NULL;
             if (!(param->c = lazy_function(p, param->text, value))) return NULL;
             defaults = 1;
@@ -5543,9 +5506,7 @@ static Node *type_alias(Parser *p) {
     if (!(n->a = identifier(p))) return NULL;
     if (take(p, '[') && !(n->params = type_params(p))) return NULL;
     if (!expect(p, '=', "expected '='")) return NULL;
-    p->annotation_scope = "a type alias";
     Node *value = expression(p, 0);
-    p->annotation_scope = NULL;
     if (!value || !(n->b = lazy_function(p, source_name(n->a), value))) return NULL;
     return n;
 }
@@ -5678,10 +5639,7 @@ static Node *statement_body(Parser *p) {
         if (!n || !(n->a = identifier(p))) return NULL;
         if (take(p, '[') && !(n->params = type_params(p))) return NULL;
         if (take(p, '(')) {
-            if (n->params) p->annotation_scope = "the definition of a generic";
-            int failed = call_arguments(p, n);
-            p->annotation_scope = NULL;
-            if (failed) return NULL;
+            if (call_arguments(p, n)) return NULL;
         }
         int loops = p->loops, functions = p->functions, async_function = p->async_function, star = p->star;
         const char *private_name = p->private_name;
@@ -6246,28 +6204,29 @@ static int scope_await(SPYContext *c, Scope *scope, Node *n) {
 }
 /* Annotation functions run in their own scope. Unlike methods, they see the
  * names of an enclosing class body. */
-static int scope_annotations(SPYContext *c, Scope *parent, Node *fn) {
+static int scope_annotations(SPYContext *c, Scope *parent, Node *fn, const char *within) {
     if (!fn) return 0;
     fn->scope = scope_new(c, parent, S_FUNCTION);
     if (!fn->scope) return -1;
-    fn->scope->owner = fn;
+    fn->scope->owner = fn; fn->scope->within = within;
     if (scope_record(c, fn->scope, fn->args, S_PARAM)) return -1;
-    for (Node *entry = fn->b->args; entry; entry = entry->next) {
-        if (entry->a->kind == N_YIELD || entry->a->kind == N_AWAIT || entry->a->kind == N_NAMED) {
-            c->line = entry->a->line;
-            spy_error(c, "SyntaxError", entry->a->kind == N_YIELD ? "yield expression cannot be used within an annotation" :
-                      entry->a->kind == N_AWAIT ? "await expression cannot be used within an annotation" :
-                      "named expression cannot be used within an annotation");
-            return -1;
-        }
+    for (Node *entry = fn->b->args; entry; entry = entry->next)
         if (scope_node(c, fn->scope, entry->a)) return -1;
-    }
     return 0;
+}
+/* symtable_raise_if_annotation_block: an annotation scope evaluates no
+ * yield, await or named expression of its own. */
+static int scope_annotation_error(SPYContext *c, Scope *scope, Node *n) {
+    if (!scope->within) return 0;
+    node_error(c, n);
+    errorf(c, "SyntaxError", "%s expression cannot be used within %s",
+           n->kind == N_YIELD ? "yield" : n->kind == N_AWAIT ? "await" : "named", scope->within);
+    return -1;
 }
 /* The annotation scope binding a definition's type parameters. */
 static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
     if (!(generic->scope = scope_new(c, parent, S_FUNCTION))) return NULL;
-    generic->scope->owner = generic;
+    generic->scope->owner = generic; generic->scope->within = "the definition of a generic";
     for (Node *param = generic->args; param; param = param->next) {
         if (scope_symbol(generic->scope, param->text)) {
             c->line = param->line;
@@ -6276,8 +6235,10 @@ static Scope *scope_generic(SPYContext *c, Scope *parent, Node *generic) {
         }
         if (scope_record(c, generic->scope, param, S_LOCAL)) return NULL;
     }
+    static const char *const defaults[] = {"a TypeVar default", "a TypeVarTuple default", "a ParamSpec default"};
     for (Node *param = generic->args; param; param = param->next)
-        if (scope_annotations(c, generic->scope, param->b) || scope_annotations(c, generic->scope, param->c)) return NULL;
+        if (scope_annotations(c, generic->scope, param->b, param->flags & F_CONSTRAINTS ? "a TypeVar constraint" : "a TypeVar bound") ||
+            scope_annotations(c, generic->scope, param->c, defaults[param->op])) return NULL;
     return generic->scope;
 }
 static SPYValue *unary(SPYContext *, int, SPYValue *);
@@ -6339,8 +6300,9 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         return 0;
     }
     case N_AWAIT:
-        return scope_await(c, scope, n) || scope_node(c, scope, n->a) ? -1 : 0;
+        return scope_annotation_error(c, scope, n) || scope_await(c, scope, n) || scope_node(c, scope, n->a) ? -1 : 0;
     case N_YIELD:
+        if (scope_annotation_error(c, scope, n)) return -1;
         if (scope->kind == S_FUNCTION && scope->owner->op) scope->owner->op = 2;
         return scope_node(c, scope, n->a);
     case N_NAME: return scope_record(c, scope, n, S_USE);
@@ -6379,7 +6341,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         if (!strcmp(n->text, "__debug__")) { node_error(c, n); spy_error(c, "SyntaxError", "cannot assign to __debug__"); return -1; }
         return scope_node(c, scope, n->a);
     case N_NAMED: {
-        if (scope_node(c, scope, n->b)) return -1;
+        if (scope_annotation_error(c, scope, n) || scope_node(c, scope, n->b)) return -1;
         Scope *owner = scope;
         while (owner->kind == S_COMPREHENSION) owner = owner->parent;
         return scope_record(c, owner, n->a, S_LOCAL);
@@ -6387,7 +6349,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     case N_TYPEALIAS: {
         if (scope_record(c, scope, n->a, S_LOCAL)) return -1;
         Scope *outer = n->params ? scope_generic(c, scope, n->params) : scope;
-        return outer ? scope_annotations(c, outer, n->b) : -1;
+        return outer ? scope_annotations(c, outer, n->b, "a type alias") : -1;
     }
     case N_DEF: case N_LAMBDA: case N_CLASS: {
         if (scope_walk(c, scope, n->decorators)) return -1;
@@ -6404,7 +6366,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         n->scope->owner = n;
         if (n->kind != N_CLASS) for (Node *param = n->args; param; param = param->next)
             if (scope_record(c, n->scope, param, S_PARAM)) return -1;
-        if (scope_annotations(c, n->kind == N_CLASS ? n->scope : outer, n->annotate)) return -1;
+        if (scope_annotations(c, n->kind == N_CLASS ? n->scope : outer, n->annotate, "an annotation")) return -1;
         return scope_walk(c, n->scope, n->b);
     }
     case N_COMPREHENSION:
@@ -6698,7 +6660,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (!c->error_type[0]) {
             unit->as.unit.scope = scope_new(c, NULL, S_MODULE);
             if (unit->as.unit.scope && !scope_walk(c, unit->as.unit.scope, unit->as.unit.body) &&
-                !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate)) scope_resolve(c, unit->as.unit.scope);
+                !scope_annotations(c, unit->as.unit.scope, unit->as.unit.annotate, "an annotation")) scope_resolve(c, unit->as.unit.scope);
         }
         for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated) {
             if (scope_resolve(c, n->scope)) break;
@@ -17787,6 +17749,18 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
     if (!result && !c->error_type[0]) spy_error(c, "StopIteration", "");
     return result;
 }
+/* _PyErr_FormatFromCause: the pending exception becomes the new one's cause. */
+static void error_from_cause(SPYContext *c, const char *type, const char *text) {
+    ErrorState error = take_error(c);
+    SPYValue *message = spy_string(c, text, strlen(text));
+    SPYValue *exception = message ? new_exception(c, name_local(c->classes, type), 1, &message) : NULL;
+    if (exception) {
+        set_hidden_field(c, exception, "__cause__", error.value);
+        set_hidden_field(c, exception, "__context__", error.value);
+        raise_value(c, exception);
+    }
+    spy_release(exception); spy_release(message); spy_release(error.value);
+}
 /* A generator whose code carries CO_ITERABLE_COROUTINE (27.4.5). */
 static int iterable_coroutine(SPYValue *v) {
     if (v->type != SPY_GENERATOR || !v->as.generator.code || !v->as.generator.code->as.unit.replaced) return 0;
@@ -17795,6 +17769,15 @@ static int iterable_coroutine(SPYValue *v) {
     return flags && !spy_as_int(v->ctx, flags, &value) && (value & 0x100);
 }
 static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *method_name) {
+    if (method_name && !strcmp(method_name, "__anext__")) {
+        SPYValue *iterator = await_iterator(c, value, NULL);
+        if (!iterator) {
+            char text[160];
+            snprintf(text, sizeof(text), "'async for' received an invalid object from __anext__: %.100s", type_name(value));
+            error_from_cause(c, "TypeError", text);
+        }
+        return iterator;
+    }
     if (iterable_coroutine(value)) return spy_retain(value);
     if (value->type == SPY_COROUTINE) {
         Machine *m = value->as.generator.machine;
@@ -17804,8 +17787,6 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
     }
     SPYValue *method = special_method(c, value, "__await__");
     if (!method) {
-        if (method_name && !strcmp(method_name, "__anext__"))
-            return errorf(c, "TypeError", "'async for' received an invalid object from __anext__: %s", type_name(value));
         if (method_name) return errorf(c, "TypeError", "'async with' received an object from %s that does not implement __await__: %s", method_name, type_name(value));
         return errorf(c, "TypeError", "'%s' object can't be awaited", type_name(value));
     }
@@ -18012,7 +17993,8 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             a = machine_pop(m);
             m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
                                                   ins->arg == DELEGATE_AEXIT ? "__aexit__" : NULL) :
-                a->type == SPY_COROUTINE && iterable_coroutine(generator) ? await_iterator(c, a, NULL) : get_iterator(c, a);
+                a->type != SPY_COROUTINE ? get_iterator(c, a) : iterable_coroutine(generator) ? await_iterator(c, a, NULL) :
+                spy_error(c, "TypeError", "cannot 'yield from' a coroutine object in a non-coroutine generator");
             if (m->delegate) {
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
                 value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
@@ -18231,18 +18213,9 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     } else if (!(g->as.generator.node->kind == N_COMPREHENSION && g->as.generator.node->op != N_TUPLE) &&
                (error_is(c, "StopIteration") || (g->type == SPY_ASYNC_GENERATOR && error_is(c, "StopAsyncIteration")))) {
         int async_stop = error_is(c, "StopAsyncIteration");
-        ErrorState error = take_error(c);
-        const char *text = g->type == SPY_ASYNC_GENERATOR ?
+        error_from_cause(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ?
             (async_stop ? "async generator raised StopAsyncIteration" : "async generator raised StopIteration") :
-            g->type == SPY_COROUTINE ? "coroutine raised StopIteration" : "generator raised StopIteration";
-        SPYValue *message = spy_string(c, text, strlen(text));
-        SPYValue *exception = message ? new_exception(c, name_local(c->classes, "RuntimeError"), 1, &message) : NULL;
-        if (exception) {
-            set_hidden_field(c, exception, "__cause__", error.value);
-            set_hidden_field(c, exception, "__context__", error.value);
-            raise_value(c, exception);
-        }
-        spy_release(exception); spy_release(message); spy_release(error.value);
+            g->type == SPY_COROUTINE ? "coroutine raised StopIteration" : "generator raised StopIteration");
     }
     spy_release(result.value); generator_close(g); return NULL;
 }
@@ -22891,7 +22864,7 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
  * flags do not change the code spy produces; optimize>=1 drops asserts and
  * makes __debug__ False. */
 enum { CF_ONLY_AST = 0x400, CF_FUTURE_MASK = 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000 | 0x1000000,
-       CF_ALLOWED = CF_FUTURE_MASK | 0x10 | CF_ONLY_AST | 0x2000 | 0x1000 | 0x200 | 0x4000 | 0x8000 };
+       CF_ALLOWED = CF_FUTURE_MASK | 0x10 | CF_ONLY_AST | 0x1000 | 0x200 | 0x4000 | 0x8000 };
 static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     static const char *const names[] = {"source", "filename", "mode", "flags", "dont_inherit", "optimize", "module", "_feature_version"};
     SPYValue *args[8];
@@ -23628,8 +23601,8 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__complex__", SLOT_OTHER, SLOT_COMPLEX, T(SPY_COMPLEX)}, {"__trunc__", SLOT_OTHER, SLOT_TRUNC, T(SPY_INT) | T(SPY_FLOAT)},
     {"__floor__", SLOT_OTHER, SLOT_FLOOR, T(SPY_INT) | T(SPY_FLOAT)}, {"__ceil__", SLOT_OTHER, SLOT_CEIL, T(SPY_INT) | T(SPY_FLOAT)},
     {"__len__", SLOT_BUILTIN, B_LEN, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
-    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR) | T(SPY_GENERATOR)},
-    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR)},
+    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR)},
+    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR)},
     {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
     {"__getitem__", SLOT_OTHER, SLOT_GETITEM, T_SEQUENCES | T_DICTS | T(SPY_RANGE)},
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
@@ -23847,8 +23820,8 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
     /* Generators have no sample value to probe; their methods are known. */
     static const char *const generator_methods[][2] = {
         {"send", " throw close "}, {"send", " throw close __await__ "}, {"asend", " athrow aclose __aiter__ __anext__ "}};
-    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR)) {
-        const char *const *known = generator_methods[type == SPY_GENERATOR ? 0 : type == SPY_COROUTINE ? 1 : 2];
+    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE_ITERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR)) {
+        const char *const *known = generator_methods[type == SPY_COROUTINE ? 1 : type == SPY_ASYNC_GENERATOR ? 2 : 0];
         char padded[136];
         snprintf(padded, sizeof(padded), " %s ", name);
         exists = !strcmp(known[0], name) || strstr(known[1], padded);
