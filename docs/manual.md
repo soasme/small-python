@@ -286,9 +286,9 @@ The lifecycle benchmark creates a context, parses and executes a hello-world
 program with discarded output, and destroys the context. It reports average CPU
 time across 20,000 iterations. It excludes process launch and terminal I/O.
 
-On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run measured 257
+On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run measured 260
 microseconds of CPU time per lifecycle. The Mach-O `__TEXT` segment was
-1,589,248 bytes; the executable file was 1,702,208 bytes. These measurements
+1,638,400 bytes; the executable file was 1,752,416 bytes. These measurements
 apply to this build. They do not establish x86 performance, a worst-case
 latency bound, or the few-kilobyte size goal.
 
@@ -479,7 +479,8 @@ outside function`, misplaced `async for`, `async with`, and `await`) are raised
 only after the whole source parses. Some diagnostics still differ from CPython.
 These are open compatibility issues, not changes to the standard.
 Classes defining `__eq__` without `__hash__` become unhashable. Dictionary/set
-entries store hashes and use linear lookup among matching hashes. `hash()` calls
+entries store hashes; maps with more than eight entries also keep an
+open-addressed index by hash, and smaller ones scan the entries. `hash()` calls
 user-defined hash methods, validates their results, and normalizes oversized
 integers. Numeric hashes preserve equality across integers, floats, and complex
 numbers. Tuples cache successful hashes; slices and ranges are hashable when
@@ -896,7 +897,9 @@ payload. Integers use a signed 64-bit fast path with arbitrary-precision
 32-bit limbs for larger values. Floats use C `double`, and
 complex values use C11 `double complex` with explicit component construction.
 Strings retain byte length so embedded NUL characters are representable. Lists
-and tuples use growable arrays; dictionaries and sets use linear entries.
+and tuples use growable arrays; dictionaries and sets keep their entries in
+insertion order in one array, with a hash index once they grow past eight
+entries.
 `None`, booleans, `NotImplemented`, and `Ellipsis` are per-context singletons. Builtin type objects belong to
 their context; no process-global mutable runtime objects are used.
 
