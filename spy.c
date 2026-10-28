@@ -69,7 +69,7 @@ struct Node {
     Program *code;
     Scope *scope;
     SPYValue *code_value;
-    SPYValue *constant; /* A numeric literal's value, parsed once at compilation. */
+    SPYValue *constant; /* A literal's value, made once. */
     size_t name_len; int64_t name_hash; /* A name's length and hash, once computed. */
     /* A name's symbol in the scope it last ran in, its entry position in
      * that function environment, and the str key and position it was last
@@ -12954,8 +12954,9 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     SPYValue *a = NULL, *b = NULL, *result = NULL;
     switch (n->kind) {
     case N_INT: case N_FLOAT: case N_IMAG: return number_literal(c, n);
-    case N_STRING: return spy_string(c, n->text, (size_t)n->op);
-    case N_BYTES: return spy_bytes(c, n->text, (size_t)n->op);
+    case N_STRING: case N_BYTES:
+        if (!n->constant) n->constant = n->kind == N_STRING ? spy_string(c, n->text, (size_t)n->op) : spy_bytes(c, n->text, (size_t)n->op);
+        return spy_retain(n->constant);
     case N_TEMPLATE: {
         SPYValue *parts = value_new(c, SPY_LIST);
         if (!parts) return NULL;
