@@ -274,6 +274,34 @@ _GA_ATTRIBUTES = frozenset({
     '__copy__', '__deepcopy__'})
 
 
+class generic_alias_iterator:
+    """The iterator of a GenericAlias: it yields the alias unpacked, once."""
+    __module__ = 'builtins'
+    __slots__ = ('_obj',)
+    __init_subclass__ = _final('generic_alias_iterator')
+
+    def __init__(self, obj):
+        object.__setattr__(self, '_obj', obj)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        obj = self._obj
+        if obj is None:
+            raise StopIteration
+        object.__setattr__(self, '_obj', None)
+        star = GenericAlias(obj.__origin__, obj.__args__)
+        object.__setattr__(star, '__unpacked__', True)
+        return star
+
+    def __reduce__(self):
+        # The builtins' iter is looked up first: looking it up can run code
+        # that exhausts this iterator.
+        it = iter
+        return (it, (self._obj,)) if self._obj is not None else (it, ((),))
+
+
 class GenericAlias:
     """Represent a PEP 585 generic type
 
@@ -348,9 +376,7 @@ class GenericAlias:
         return result
 
     def __iter__(self):
-        star = GenericAlias(self.__origin__, self.__args__)
-        object.__setattr__(star, '__unpacked__', True)
-        yield star
+        return generic_alias_iterator(self)
 
     def __mro_entries__(self, bases):
         return (self.__origin__,)

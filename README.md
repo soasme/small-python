@@ -7,8 +7,11 @@ As in QuickJS, the core (`spy.c`) is the language alone; the standard layer
 (`spy-std.c`) registers `sys`, `gc`, `weakref`, and the other built-in modules
 for the `spy` command and any host that links it.
 
-**Status:** experimental subset. The target is the full Python 3.15 core
-language; the current engine does not yet conform to it.
+**Status:** conforms to the Core profile of
+[PLS-315](docs/standards/3_15.md), the Python 3.15 core language: all 345
+specification tests (validated on CPython 3.15) and all 112 TLA+ models pass.
+The standard library is out of scope; see the
+[manual](docs/smallpython.md#31-python-language-support) for host choices.
 
 ```sh
 make

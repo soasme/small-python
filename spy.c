@@ -180,6 +180,7 @@ struct SPYContext {
     size_t cells_len, cells_cap;
     int weak_running;
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
+    SPYValue *small_ints[262]; /* -5 through 256, shared as in CPython. */
     SPYValue *unbound; /* What a forwarded empty cell reads as. */
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
     SPYValue *caller_env; /* Borrowed: where the running Python function was called. */
@@ -210,7 +211,7 @@ struct SPYContext {
     /* A pending AttributeError's name and object, attached when it is materialized. */
     char error_name[256];
     SPYValue *error_object;
-    char error_display[320]; /* spy_error_display's result. */
+    char *error_display; /* spy_error_display's result, owned. */
     size_t line;
 };
 static SPYValue *special_method(SPYContext *, SPYValue *, const char *);
@@ -731,6 +732,7 @@ size_t spy_live_values(const SPYContext *c) { return c->live; }
 SPYType spy_type(const SPYValue *v) { return (SPYType)v->type; }
 SPYValue *spy_none(SPYContext *c) { return spy_retain(c->none); }
 SPYValue *spy_int(SPYContext *c, int64_t i) {
+    if (i >= -5 && i <= 256 && c->small_ints[i + 5]) return spy_retain(c->small_ints[i + 5]);
     SPYValue *v = value_new(c, SPY_INT);
     if (v) v->as.integer_data.small = i;
     return v;
@@ -1703,13 +1705,27 @@ static int annotation_env(SPYValue *e) {
     Node *owner = e->as.map.scope ? e->as.map.scope->owner : NULL;
     return owner && (owner->flags & F_ANNOTATE);
 }
+/* The value of the key name in a dict namespace, borrowed: a key that is
+ * not a str but equal to name is found by comparison, as a dict lookup
+ * finds it. NULL for a missing key, with an error if a comparison raised. */
+static SPYValue *dict_name(SPYContext *c, SPYValue *dict, const char *name) {
+    SPYValue *value = name_local(dict, name), *map = dictionary_value(c, dict);
+    if (value || !map) return value;
+    size_t i = 0;
+    while (i < map->as.map.len && builtin_value(c, map->as.map.items[i].key, SPY_STRING)) i++;
+    if (i == map->as.map.len) return NULL;
+    SPYValue *key = spy_string(c, name, strlen(name));
+    ptrdiff_t at = key ? map_find(map, key) : -1;
+    spy_release(key);
+    return at >= 0 ? map->as.map.items[at].value : NULL;
+}
 /* Return an owned local value, or NULL without an error for a missing key. */
 static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
     SPYValue *namespace = env->as.map.namespace;
     /* A class body with a __classdict__ cell reads the mapping in it. */
     SPYValue *classdict = env->type == V_ENV && env->as.map.flags == 1 && env->as.map.base ? cell_contents(env->as.map.base) : NULL;
     if (classdict && classdict != namespace) {
-        if (classdict->type == SPY_DICT) return spy_retain(name_local(classdict, name));
+        if (classdict->type == SPY_DICT) return spy_retain(dict_name(c, classdict, name));
         namespace = classdict;
     }
     if (namespace && namespace->type != SPY_DICT) {
@@ -1719,6 +1735,7 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
         if (!value && error_is(c, "KeyError")) spy_clear_error(c);
         return value;
     }
+    if (env->type == SPY_DICT || (namespace && namespace->type == SPY_DICT)) return spy_retain(dict_name(c, namespace ? namespace : env, name));
     return spy_retain(name_local(env, name));
 }
 static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
@@ -7099,56 +7116,159 @@ static SPYValue *normalize_slice(SPYContext *c, SPYValue *slice, SPYValue *lengt
     spy_release(step); spy_release(lower); spy_release(upper); spy_release(start); spy_release(stop);
     return result;
 }
-/* __reduce__ and __setstate__ of the sequence and range iterators, after
+/* The index an iterator's __setstate__ takes: an int fitting a C ssize_t. */
+static int iterator_state_index(SPYContext *c, SPYValue *state, int64_t *index) {
+    SPYValue *integer = builtin_value(c, state, SPY_INT);
+    if (!integer) { spy_error(c, "TypeError", "an integer is required"); return -1; }
+    if (integer->as.integer_data.big) { spy_error(c, "OverflowError", "Python int too large to convert to C ssize_t"); return -1; }
+    return spy_as_int(c, integer, index);
+}
+/* The builtins entry name, owned, as _PyEval_GetBuiltin finds it for the
+ * iterators' __reduce__; an AttributeError if it is missing. */
+static SPYValue *builtin_entry(SPYContext *c, const char *name) {
+    SPYValue *value = c->builtins->type == SPY_DICT ? dict_name(c, c->builtins, name) : name_local(c->builtins, name);
+    if (!value && !c->error_type[0]) errorf(c, "AttributeError", "%s", name);
+    return spy_retain(value);
+}
+/* A copy of a built-in iterator's position, for __reduce__ to drain. */
+static SPYValue *iterator_copy(SPYContext *c, SPYValue *it) {
+    SPYValue *copy = value_new(c, SPY_ITERATOR);
+    if (!copy) return NULL;
+    copy->as.iterator = it->as.iterator;
+    spy_retain(copy->as.iterator.source);
+    if (copy->as.iterator.counter) spy_retain(copy->as.iterator.counter);
+    return copy;
+}
+/* __reduce__ of the intrinsic iterators of Table 27-1 other than the
+ * sequence and range iterators, as CPython's dictiter, setiter, reversed,
+ * listreviter, enumerate, zip, map, filter, and calliter give it; NULL with
+ * no error for those that iterator_state_call reduces itself. cls is the
+ * receiver's class, which enumerate, zip, map, filter, and reversed name. */
+static SPYValue *iterator_reduce(SPYContext *c, SPYValue *it, int id, SPYValue *cls) {
+    SPYValue *source = it->as.iterator.source, *head = NULL, *args = NULL, *extra = NULL, *empty = NULL;
+    switch (id) {
+    case IT_CALLABLE:
+        /* (iter, (callable, sentinel)), or (iter, ((),)) once exhausted. */
+        if (!(head = builtin_entry(c, "iter"))) return NULL;
+        if (it->as.iterator.done) { empty = spy_tuple(c, 0, NULL); args = empty ? spy_tuple(c, 1, &empty) : NULL; }
+        else { SPYValue *pair[] = {source, it->as.iterator.counter}; args = spy_tuple(c, 2, pair); }
+        break;
+    case IT_DICT_KEY: case IT_DICT_VALUE: case IT_DICT_ITEM: case IT_SET:
+    case IT_DICT_REVERSE_KEY: case IT_DICT_REVERSE_VALUE: case IT_DICT_REVERSE_ITEM: {
+        /* (iter, (the items a copy of the iterator still yields,)); iter is
+         * looked up after the items are listed. */
+        SPYValue *copy = iterator_copy(c, it), *rest = copy ? spy_list(c) : NULL, *item;
+        while (rest && (item = iterator_next(c, copy))) {
+            int status = sequence_append(c, rest, item);
+            spy_release(item);
+            if (status) break;
+        }
+        spy_release(copy);
+        if (rest && !c->error_type[0] && (head = builtin_entry(c, "iter"))) args = spy_tuple(c, 1, &rest);
+        spy_release(rest);
+        break;
+    }
+    case IT_LIST_REVERSE: case IT_REVERSED:
+        /* (reversed, (seq,), index), or (reversed, ([],)) or (cls, ((),)) once exhausted. */
+        head = id == IT_LIST_REVERSE ? builtin_entry(c, "reversed") : spy_retain(cls);
+        if (!head) return NULL;
+        if (it->as.iterator.done || !it->as.iterator.index) {
+            empty = id == IT_LIST_REVERSE ? spy_list(c) : spy_tuple(c, 0, NULL);
+            args = empty ? spy_tuple(c, 1, &empty) : NULL;
+        } else {
+            args = spy_tuple(c, 1, &source);
+            extra = spy_int(c, (int64_t)it->as.iterator.index - 1);
+            if (!extra) { spy_release(args); args = NULL; }
+        }
+        break;
+    case IT_ENUMERATE: {
+        head = spy_retain(cls);
+        SPYValue *pair[] = {source, it->as.iterator.counter};
+        args = spy_tuple(c, 2, pair);
+        break;
+    }
+    case IT_ZIP: case IT_MAP:
+        /* (cls, (map's function and) iterators), with True after them when strict. */
+        head = spy_retain(cls); args = spy_tuple(c, source->as.seq.len, source->as.seq.items);
+        if (it->as.iterator.size) extra = spy_bool(c, 1);
+        break;
+    case IT_FILTER:
+        head = spy_retain(cls); args = spy_retain(source);
+        break;
+    default: return NULL;
+    }
+    SPYValue *items[] = {head, args, extra}, *result = args ? spy_tuple(c, extra ? 3 : 2, items) : NULL;
+    spy_release(head); spy_release(args); spy_release(extra); spy_release(empty);
+    return result;
+}
+/* __reduce__ and __setstate__ of the intrinsic iterators (27.1.1), after
  * CPython's listiter, tupleiter, unicodeiter, striter, bytearrayiter,
- * rangeiter, and seqiter, and __reduce__ of the callable iterator. data is
- * the iterator class id, with bit 8 set for __setstate__. */
+ * rangeiter, seqiter, listreviter, reversed, zip, and map; the others
+ * reduce through iterator_reduce. data is the iterator class id, with
+ * bit 8 set for __setstate__. */
 static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data & 0xff, set = (int)(intptr_t)data >> 8;
     const char *owner = iterator_names[id], *name = set ? "__setstate__" : "__reduce__";
     if (!argc) return errorf(c, "TypeError", "unbound method %s.%s() needs an argument", owner, name);
-    SPYValue *it = argv[0];
-    if (it->type != SPY_ITERATOR || iterator_class_id(it) != id)
-        return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner, type_name(it));
+    SPYValue *it = builtin_value(c, argv[0], SPY_ITERATOR);
+    if (!it || iterator_class_id(it) != id)
+        return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner, type_name(argv[0]));
     if (argc != 1u + set)
         return set ? errorf(c, "TypeError", "%s.__setstate__() takes exactly one argument (%zu given)", owner, argc - 1)
                    : errorf(c, "TypeError", "%s.__reduce__() takes no arguments (%zu given)", owner, argc - 1);
     SPYValue *source = it->as.iterator.source;
     int range = it->as.iterator.kind == I_RANGE;
-    if (id == IT_CALLABLE) {
-        /* calliter_reduce: (iter, (callable, sentinel)), or (iter, ((),)) once exhausted. */
-        SPYValue *iter = name_local(c->builtins, "iter"), *empty = NULL, *args;
-        if (it->as.iterator.done) {
-            empty = spy_tuple(c, 0, NULL);
-            args = empty ? spy_tuple(c, 1, &empty) : NULL;
-        } else {
-            SPYValue *pair[] = {source, it->as.iterator.counter};
-            args = spy_tuple(c, 2, pair);
+    if (!set) {
+        SPYValue *cls = value_class(c, argv[0]), *reduced = iterator_reduce(c, it, id, cls);
+        if (reduced || c->error_type[0]) return reduced;
+    } else if (id == IT_ZIP || id == IT_MAP) {
+        /* zip_setstate and map_setstate: the state's truth is strict. */
+        int strict = spy_truth(argv[1]);
+        if (c->error_type[0]) return NULL;
+        it->as.iterator.size = (size_t)strict;
+        return spy_none(c);
+    } else if (id == IT_LIST_REVERSE || id == IT_REVERSED) {
+        /* listreviter_setstate and reversed_setstate: the index is clamped
+         * to -1 .. len - 1 of the sequence, unless exhausted. */
+        int64_t index, length;
+        if (iterator_state_index(c, argv[1], &index)) return NULL;
+        if (!it->as.iterator.done) {
+            length = id == IT_LIST_REVERSE ? (int64_t)source->as.seq.len : sequence_size(c, source);
+            if (length < 0) return NULL;
+            index = index < -1 ? -1 : index > length - 1 ? length - 1 : index;
+            it->as.iterator.index = (size_t)(index + 1);
         }
-        SPYValue *items[] = {iter, args}, *result = args ? spy_tuple(c, 2, items) : NULL;
-        spy_release(empty); spy_release(args);
-        return result;
+        return spy_none(c);
     }
     /* The rest of a range iteration, as a range from the current value. */
     SPYValue *rest = range ? range_new(c, it->as.iterator.counter, source->as.range.stop, source->as.range.step) : NULL;
     if (range && !rest) return NULL;
-    if (set) {
-        SPYValue *state = builtin_value(c, argv[1], SPY_INT);
-        int64_t index;
-        if (!state) { spy_release(rest); return spy_error(c, "TypeError", "an integer is required"); }
-        if (spy_as_int(c, state, &index)) { spy_release(rest); return NULL; }
-        if (range) {
-            int64_t length;
-            int status = spy_as_int(c, rest->as.range.length, &length);
+    if (set && range) {
+        /* rangeiter_setstate takes a C long, longrangeiter_setstate any int;
+         * both clamp it to 0 .. the items left and advance by that many. */
+        SPYValue *state = id == IT_RANGE ? index_object(c, argv[1]) : spy_retain(builtin_value(c, argv[1], SPY_INT));
+        int64_t small;
+        if (!state) {
             spy_release(rest);
-            if (status) return NULL;
-            SPYValue *count = spy_int(c, index < 0 ? 0 : index > length ? length : index);
-            SPYValue *offset = count ? integer_multiply(c, count, source->as.range.step) : NULL;
-            SPYValue *counter = offset ? integer_add(c, it->as.iterator.counter, offset, 0) : NULL;
-            spy_release(count); spy_release(offset);
-            if (!counter) return NULL;
-            spy_release(it->as.iterator.counter); it->as.iterator.counter = counter;
-        } else if (id == IT_ITERATOR) {
+            return c->error_type[0] ? NULL : errorf(c, "TypeError", "state must be an int, not %s", type_name(argv[1]));
+        }
+        if (id == IT_RANGE && (state->as.integer_data.big || spy_as_int(c, state, &small))) {
+            spy_release(rest); spy_release(state);
+            return c->error_type[0] ? NULL : spy_error(c, "OverflowError", "Python int too large to convert to C long");
+        }
+        SPYValue zero = {.type = SPY_INT};
+        SPYValue *count = integer_sign(state) < 0 ? &zero : integer_compare(state, rest->as.range.length) > 0 ? rest->as.range.length : state;
+        SPYValue *offset = integer_multiply(c, count, source->as.range.step);
+        SPYValue *counter = offset ? integer_add(c, it->as.iterator.counter, offset, 0) : NULL;
+        spy_release(rest); spy_release(offset); spy_release(state);
+        if (!counter) return NULL;
+        spy_release(it->as.iterator.counter); it->as.iterator.counter = counter;
+        return spy_none(c);
+    }
+    if (set) {
+        int64_t index;
+        if (iterator_state_index(c, argv[1], &index)) { spy_release(rest); return NULL; }
+        if (id == IT_ITERATOR) {
             /* seqiter: a negative state is 0; the sequence's length is not consulted. */
             if (!it->as.iterator.done) it->as.iterator.index = index < 0 ? 0 : (size_t)index;
         } else if (it->as.iterator.done != 1) {
@@ -7161,7 +7281,8 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
         }
         return spy_none(c);
     }
-    SPYValue *iter = name_local(c->builtins, "iter"), *args = NULL, *result = NULL;
+    SPYValue *iter = builtin_entry(c, "iter"), *args = NULL, *result = NULL;
+    if (!iter) { spy_release(rest); return NULL; }
     if (range) {
         SPYValue *span = integer_multiply(c, rest->as.range.length, source->as.range.step);
         SPYValue *stop = span ? integer_add(c, it->as.iterator.counter, span, 0) : NULL;
@@ -7183,7 +7304,7 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
         if (args) result = spy_tuple(c, 3, items);
         spy_release(index);
     }
-    spy_release(args); spy_release(rest);
+    spy_release(iter); spy_release(args); spy_release(rest);
     return result;
 }
 /* range.__reduce__: (range, (start, stop, step)). */
@@ -9252,6 +9373,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             const char *doc = slot_doc(text->as.string.data);
             return doc ? spy_string(c, doc, strlen(doc)) : spy_none(c);
         }
+        if (!strcmp(name, "__text_signature__")) return spy_none(c);
         if (!strcmp(name, "__qualname__")) {
             if (!owner) return spy_retain(text);
             SPYValue *qualname = name_local(owner, "__qualname__");
@@ -13981,12 +14103,10 @@ static SPYValue *call_import(SPYContext *c, Frame *f, const char *name, SPYValue
     SPYValue *result = text && depth && locals ? spy_call(c, function, 5, args) : NULL;
     spy_release(text); spy_release(depth); spy_release(locals); spy_release(function); return result;
 }
-static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
-    size_t count = 0, star = SIZE_MAX;
-    for (Node *item = n->args; item; item = item->next) {
-        if (item->kind == N_STAR) star = count;
-        count++;
-    }
+/* The count items of value, as an assignment target list with a star at
+ * index star (SIZE_MAX for none) receives them: the starred items gathered
+ * into a list. */
+static SPYValue *unpack_values(SPYContext *c, Frame *f, Node *n, SPYValue *value, size_t count, size_t star) {
     if (!iterable_type(value)) {
         const char *name = value->type == SPY_INT ? "int" : value->type == SPY_FLOAT ? "float" :
                            value->type == SPY_BOOL ? "bool" : value->type == SPY_NONE ? "NoneType" : "object";
@@ -14027,6 +14147,14 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
     spy_release(rest); spy_release(items);
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result;
+}
+static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    size_t count = 0, star = SIZE_MAX;
+    for (Node *item = n->args; item; item = item->next) {
+        if (item->kind == N_STAR) star = count;
+        count++;
+    }
+    return unpack_values(c, f, n, value, count, star);
 }
 static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     if (tick(c, f, n)) return -1;
@@ -15586,25 +15714,36 @@ static char *keyword_typo(SPYContext *c, SPYValue *exception) {
     free(text.data);
     return result;
 }
+/* The display is the stored message, unless that was cut to fit its buffer
+ * (then str() of the exception) or names a misspelt keyword. */
 const char *spy_error_display(SPYContext *c) {
-    snprintf(c->error_display, sizeof(c->error_display), "%s", c->error_message);
     SPYValue *exception = c->exception;
-    if (!exception || exception->type != SPY_INSTANCE || !subclass(exception->as.map.parent, name_local(c->classes, "SyntaxError")))
-        return c->error_display;
-    char type[sizeof(c->error_type)], message[sizeof(c->error_message)], file[sizeof(c->filename)];
-    size_t line = c->line, steps = c->steps, limit = c->step_limit;
-    memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
-    memcpy(file, c->filename, sizeof(file));
-    c->exception = NULL;
-    spy_clear_error(c);
-    char *typo = keyword_typo(c, exception);
-    if (typo) snprintf(c->error_display, sizeof(c->error_display), "%s", typo);
-    free(typo);
-    spy_clear_error(c);
-    memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-    memcpy(c->filename, file, sizeof(file));
-    c->line = line; c->exception = exception; c->steps = steps; c->step_limit = limit;
-    return c->error_display;
+    int syntax = exception && exception->type == SPY_INSTANCE &&
+        subclass(exception->as.map.parent, name_local(c->classes, "SyntaxError"));
+    int cut = exception && strlen(c->error_message) == sizeof(c->error_message) - 1;
+    char *text = NULL;
+    if (syntax || cut) {
+        char type[sizeof(c->error_type)], message[sizeof(c->error_message)], file[sizeof(c->filename)];
+        size_t line = c->line, steps = c->steps, limit = c->step_limit;
+        memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
+        memcpy(file, c->filename, sizeof(file));
+        c->exception = NULL;
+        spy_clear_error(c);
+        if (syntax) text = keyword_typo(c, exception);
+        else {
+            SPYValue *full = spy_str(c, exception);
+            if (full && (text = malloc(full->as.string.len + 1))) memcpy(text, full->as.string.data, full->as.string.len + 1);
+            spy_release(full);
+        }
+        spy_clear_error(c);
+        memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
+        memcpy(c->filename, file, sizeof(file));
+        c->line = line; c->exception = exception; c->steps = steps; c->step_limit = limit;
+    }
+    if (!text && (text = malloc(strlen(c->error_message) + 1))) strcpy(text, c->error_message);
+    free(c->error_display);
+    c->error_display = text;
+    return text ? text : c->error_message;
 }
 static int exception_add_note(SPYContext *c, SPYValue *exception, SPYValue *note) {
     if (!builtin_value(c, note, SPY_STRING)) { errorf(c, "TypeError", "add_note() argument must be str, not %s", type_name(note)); return -1; }
@@ -16871,7 +17010,7 @@ static int bind_capture(SPYContext *c, SPYValue *bindings, Node *name, SPYValue 
     return status;
 }
 static int match_sequence_subject(SPYContext *c, SPYValue *subject) {
-    if (subject->type == SPY_LIST || subject->type == SPY_TUPLE || subject->type == SPY_RANGE) return 1;
+    if (subject->type == SPY_LIST || subject->type == SPY_TUPLE || subject->type == SPY_RANGE || subject->type == SPY_MEMORYVIEW) return 1;
     if (subject->type != SPY_INSTANCE) return 0;
     return subclass(subject->as.map.parent, c->types[SPY_LIST]) || subclass(subject->as.map.parent, c->types[SPY_TUPLE]);
 }
@@ -16889,13 +17028,15 @@ static int match_equal(SPYContext *c, SPYValue *subject, SPYValue *value, int id
     spy_release(result);
     return c->error_type[0] ? -1 : truth;
 }
+static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub, size_t depth);
 static int match_class(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
     SPYValue *cls = eval(c, f, n->a);
     if (!cls) return -1;
     int result = -1;
     SPYValue *match_args = NULL;
     if (cls->type != SPY_CLASS) { errorf(c, "TypeError", "class pattern must refer to a class"); goto done; }
-    if (!subclass(value_class(c, subject), cls)) { result = 0; goto done; }
+    if ((result = instance_check(c, subject, cls, 0, 0)) <= 0) goto done;
+    result = -1;
     size_t positional = 0;
     for (Node *item = n->args; item; item = item->next) positional++;
     static const int self_types[] = {SPY_BOOL, SPY_BYTEARRAY, SPY_BYTES, SPY_DICT, SPY_FROZENDICT, SPY_FLOAT, SPY_FROZENSET, SPY_INT, SPY_LIST, SPY_SET, SPY_STRING, SPY_TUPLE};
@@ -17027,40 +17168,59 @@ done:
     spy_release(keys); spy_release(missing); spy_release(get);
     return result;
 }
+static int match_length(SPYContext *c, SPYValue *subject, int64_t *size) {
+    SPYValue *length = builtin(c, 1, &subject, (void *)(intptr_t)B_LEN);
+    int status = !length || spy_as_int(c, length, size);
+    spy_release(length);
+    return status ? -1 : 0;
+}
+static SPYValue *unpack_values(SPYContext *, Frame *, Node *, SPYValue *, size_t, size_t);
+/* 15.6.3, as CPython compiles a sequence pattern: after the length check, a
+ * pattern of wildcards reads nothing; with a `*_` star the other items are
+ * read by index, those after the star from a fresh length; otherwise the
+ * subject is unpacked by iteration, as a target list is, before any item
+ * is matched. */
 static int match_sequence(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
     if (!match_sequence_subject(c, subject)) return 0;
     size_t count = 0, star = SIZE_MAX;
-    for (Node *item = n->args; item; item = item->next, count++) if (item->op == PT_STAR) star = count;
-    SPYValue *length = builtin(c, 1, &subject, (void *)(intptr_t)B_LEN);
-    int64_t size;
-    int status = !length || spy_as_int(c, length, &size);
-    spy_release(length);
-    if (status) return -1;
-    if (star == SIZE_MAX ? (uint64_t)size != count : (uint64_t)size < count - 1) return 0;
-    size_t index = 0;
-    for (Node *item = n->args; item; item = item->next, index++) {
-        if (index == star) {
-            if (!item->a) continue;
-            SPYValue *rest = spy_list(c);
-            for (int64_t i = (int64_t)star; rest && i < size - (int64_t)(count - 1 - star); i++) {
-                SPYValue *key = spy_int(c, i), *value = key ? get_index(c, subject, key) : NULL;
-                if (!value || sequence_append(c, rest, value)) { spy_release(rest); rest = NULL; }
-                spy_release(key); spy_release(value);
-            }
-            int bound = rest ? bind_capture(c, bindings, item->a, rest) : -1;
-            spy_release(rest);
-            if (bound) return -1;
-            continue;
-        }
-        int64_t position = star == SIZE_MAX || index < star ? (int64_t)index : size - (int64_t)(count - index);
-        SPYValue *key = spy_int(c, position), *value = key ? get_index(c, subject, key) : NULL;
-        spy_release(key);
-        if (!value) return -1;
-        int matched = match_pattern(c, f, item, value, bindings);
-        spy_release(value);
-        if (matched <= 0) return matched;
+    int wildcards = 1;
+    for (Node *item = n->args; item; item = item->next, count++) {
+        if (item->op == PT_STAR) star = count;
+        wildcards &= item->op == PT_WILDCARD || (item->op == PT_STAR && !item->a);
     }
-    return 1;
+    int64_t size;
+    if ((star == SIZE_MAX || count > 1) && match_length(c, subject, &size)) return -1;
+    if (star == SIZE_MAX ? (uint64_t)size != count : count > 1 && (uint64_t)size < count - 1) return 0;
+    if (wildcards) return 1;
+    Node *star_item = n->args;
+    for (size_t i = 0; star != SIZE_MAX && i < star; i++) star_item = star_item->next;
+    if (star != SIZE_MAX && !star_item->a) {
+        size_t index = 0;
+        for (Node *item = n->args; item; item = item->next, index++) {
+            if (item->op == PT_WILDCARD || index == star) continue;
+            int64_t position = (int64_t)index;
+            if (index > star && match_length(c, subject, &size)) return -1;
+            if (index > star) position = size - (int64_t)(count - index);
+            SPYValue *key = spy_int(c, position), *value = key ? get_index(c, subject, key) : NULL;
+            spy_release(key);
+            if (!value) return -1;
+            int matched = match_pattern(c, f, item, value, bindings);
+            spy_release(value);
+            if (matched <= 0) return matched;
+        }
+        return 1;
+    }
+    SPYValue *items = unpack_values(c, f, n, subject, count, star);
+    if (!items) return -1;
+    size_t index = 0;
+    int matched = 1;
+    for (Node *item = n->args; item && matched > 0; item = item->next, index++) {
+        SPYValue *value = items->as.seq.items[index];
+        matched = item->op == PT_STAR ? (item->a ? (bind_capture(c, bindings, item->a, value) ? -1 : 1) : 1)
+                                      : match_pattern(c, f, item, value, bindings);
+    }
+    spy_release(items);
+    return matched;
 }
 static int match_pattern(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
     if (deeper(c, "")) return -1;
@@ -24028,6 +24188,8 @@ SPYContext *spy_context_new(void) {
     c->booleans[1] = value_new(c, SPY_BOOL);
     if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
+    for (int64_t i = -5; i <= 256; i++)
+        if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;
     c->recursion_limit = 1000; c->int_max_str_digits = 4300; c->stack_size = 4 << 20;
     c->builtins = value_new(c, SPY_DICT);
     c->classes = value_new(c, SPY_DICT);
@@ -24289,10 +24451,14 @@ SPYContext *spy_context_new(void) {
         spy_release(hint);
         if (status) { spy_release(module); goto fail; }
     }
-    static const int stateful[] = {IT_LIST, IT_TUPLE, IT_STR_ASCII, IT_STR, IT_BYTES, IT_BYTEARRAY, IT_RANGE, IT_LONGRANGE, IT_ITERATOR, IT_CALLABLE};
-    for (size_t i = 0; i < 2 * sizeof(stateful) / sizeof(*stateful); i++) {
-        int id = stateful[i / 2], set = i % 2;
-        if (set && id == IT_CALLABLE) continue;
+    /* Every intrinsic iterator but TemplateIter has __reduce__; these
+     * eleven also have __setstate__. */
+    static const int stateful[] = {IT_LIST, IT_TUPLE, IT_STR_ASCII, IT_STR, IT_BYTES, IT_BYTEARRAY, IT_RANGE, IT_LONGRANGE,
+                                   IT_ITERATOR, IT_LIST_REVERSE, IT_REVERSED, IT_ZIP, IT_MAP};
+    for (size_t i = 0; i < 2 * IT_COUNT; i++) {
+        int id = (int)(i / 2), set = i % 2, has = 0;
+        for (size_t k = 0; k < sizeof(stateful) / sizeof(*stateful); k++) has |= stateful[k] == id;
+        if (id == IT_TEMPLATE || (set && !has)) continue;
         SPYValue *method = value_new(c, SPY_NATIVE);
         if (!method) { spy_release(module); goto fail; }
         method->as.native.call = iterator_state_call; method->as.native.data = (void *)(intptr_t)(id | set << 8);
@@ -24395,7 +24561,7 @@ void spy_context_free(SPYContext *c) {
 #if SPY_FILES
     for (size_t i = 0; i < c->files_len; i++) close(c->files[i]);
 #endif
-    free(c->files);
+    free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     free(c);
 }

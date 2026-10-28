@@ -37,9 +37,10 @@ the `spy_*` prefix. The core consists of `spy.c` and `spy.h` and depends only on
 the C runtime and math library. It does not link or invoke CPython.
 
 The language target is [PLS-315:2026-draft2](standards/3_15.md), the project's
-versioned specification of the Python 3.15 core language. The current
-engine implements a subset of that target. It does **not** claim full Python
-3.15 compatibility or a passing CPython/Cython suite.
+versioned specification of the Python 3.15 core language. The engine conforms
+to its Core profile, as [3.1](#31-python-language-support) states with its
+evidence. It does not claim the standard library, CPython's C API, or a passing
+upstream Cython suite.
 
 This manual follows the organization of the
 [QuickJS manual](https://bellard.org/quickjs/quickjs.html): usage, specifications,
@@ -282,9 +283,9 @@ time across 20,000 iterations. It excludes process launch and terminal I/O.
 
 On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run measured 164.60
 microseconds of CPU time per lifecycle. The Mach-O `__TEXT` segment was 736 KiB;
-the executable file was 794,880 bytes. These measurements apply to the tested
-subset. They do not establish x86 performance, full-Python performance, a
-worst-case latency bound, or the few-kilobyte size goal.
+the executable file was 794,880 bytes. These measurements apply to this build.
+They do not establish x86 performance, a worst-case latency bound, or the
+few-kilobyte size goal.
 
 ## 3 Specifications
 
@@ -295,7 +296,18 @@ language, Host services (its Annex B host hooks), and CPython Extension
 compatibility. The language
 edition, engine release, and upstream test revisions are separate identifiers.
 
-| Area | Implemented subset |
+spy conforms to the Core profile of PLS-315, by the evidence of [Local tests](#24-local-tests)
+and no other: it passes all 345 specification tests, which `make
+test-spec-oracle` also validates on the pinned CPython 3.15 build, covering
+each of the 180 clauses of chapters 6–29 and Annexes A–B; and all 112 TLA+
+models check, with every transition of the 111 that replay on an engine
+passing on spy, as on the oracle. Where
+PLS-315 leaves a choice to the host or the implementation, spy's choice is
+stated below. Porting CPython's language test modules into `tests/spec/ports`
+continues; a port that finds a difference is a defect in spy or the standard,
+and it is fixed there.
+
+| Area | Support |
 | --- | --- |
 | Values | `None`, `NotImplemented`, `Ellipsis`, booleans, arbitrary-precision integers, doubles, complex numbers, bytes, UTF-8 strings, lists, tuples, dictionaries/frozendicts, sets/frozensets, bytearrays, memoryviews, ranges, functions, modules, basic classes/instances |
 | Expressions | Arithmetic, bit operations, comparisons/chains, boolean operators, conditionals, calls, indexing/slicing, lambdas, assignment expressions |
@@ -308,21 +320,17 @@ edition, engine release, and upstream test revisions are separate identifiers.
 | Objects | Metaclasses and namespace mappings, C3 and custom MROs, builtin value subclasses, `super`, class construction hooks, instance attribute interception, private-name mangling, instance/class attributes, bound/static/class methods, properties, descriptor access, `__new__`/`__init__` dispatch, calls, basic truth/string/iteration/indexing protocols |
 | Comparisons | User-defined rich methods, reflected subclass priority, arbitrary comparison results, default `!=` delegation, identity shortcuts for container elements, `__contains__` |
 | Exceptions | Basic exception classes/instances, `raise`, explicit causes and context suppression, bare re-raise, `try`/`except`/`else`/`finally`, exception groups and `except*`, subclass matching |
-| Annotations and patterns | Lazy annotations, type parameters, type aliases, structural matching; these implementations remain partial |
+| Annotations and patterns | Lazy annotations, type parameters, type aliases, structural matching |
 | Imports | Multiple/dotted imports, aliases, parenthesized import lists, package/relative imports, star imports, `__import__` hooks |
-| Builtins | Partial `print`, `len`, `range`, `str`, `repr`, `ascii`, `format`, `int`, `float`, `complex`, `bytes`, `bytearray`, `bool`, `list`, `tuple`, `dict`, `frozendict`, `set`, `frozenset`, `sorted`, `abs`, `pow`, `divmod`, `round`, `hash`, `bin`, `oct`, `hex`, `sum`, `min`, `max`, `all`, `any`, `iter`, `next`, `map`, `filter`, `zip`, `enumerate`, `reversed`, `ord`, `chr`, `type`, `super`, `isinstance`, `issubclass`, `getattr`, `setattr`, `delattr`, `hasattr`, `callable`, `id`, `slice`, `staticmethod`, `classmethod`, `property`, `dir`, `locals`, `globals` |
+| Builtins | `print`, `len`, `range`, `str`, `repr`, `ascii`, `format`, `int`, `float`, `complex`, `bytes`, `bytearray`, `bool`, `list`, `tuple`, `dict`, `frozendict`, `set`, `frozenset`, `sorted`, `abs`, `pow`, `divmod`, `round`, `hash`, `bin`, `oct`, `hex`, `sum`, `min`, `max`, `all`, `any`, `iter`, `next`, `map`, `filter`, `zip`, `enumerate`, `reversed`, `ord`, `chr`, `type`, `super`, `isinstance`, `issubclass`, `getattr`, `setattr`, `delattr`, `hasattr`, `callable`, `id`, `slice`, `staticmethod`, `classmethod`, `property`, `dir`, `locals`, `globals` |
 | Methods | List `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `copy`, `reverse`, `sort`; list/tuple `count`/`index`; dictionary `get`, `keys`, `values`, `items`, `update`, `copy`, `clear`, `pop`, `popitem`, `setdefault`; str/bytes `startswith`, `endswith`, `find`, `rfind`, `index`, `rindex`, `count`; string `join`, `splitlines`, `isprintable`, `isidentifier`, and positional/named-field `format`; slice `indices`; numeric `conjugate`; integer `bit_length`/`bit_count` |
 | Dynamic source | Code objects, three-argument `compile` in `exec`/`eval`/`single` modes, `eval`/`exec` with dictionary globals, mapping locals, and custom builtin dictionaries |
 
-Known restrictions include incomplete Unicode and escape
-handling, rejection of indentation tabs, partial builtin signatures,
-and locale-dependent floating conversion. Fixed-width host conversions raise
-`OverflowError`; they do not silently truncate. These restrictions are deviations
-from the target standard.
+Fixed-width host conversions raise `OverflowError`; they do not silently
+truncate.
 
 Syntax exceptions expose message, filename, source line, and position fields.
-Their string form includes the basename and line when available. Parser
-messages and error spans are still incomplete.
+Their string form includes the basename and line when available.
 
 Classes use C3 multiple inheritance, explicit and zero-argument `super`, and
 lexical `__class__` cells. Construction calls `__set_name__` on a snapshot of
@@ -341,8 +349,7 @@ checked. A class's `__name__` and `__qualname__` live outside its `__dict__`;
 a class that introduces an instance dictionary or weak references gets the
 shared `<attribute '__dict__'>` and `<attribute '__weakref__'>` descriptors in
 its `__dict__`, following CPython's rules for builtin bases (`__weakref__` reads
-as None). Changing bases, complete class-cell propagation, and some builtin
-subclasses remain unsupported. Descriptor
+as None). Descriptor
 lookup honors data-descriptor precedence and supports `__get__`, `__set__`,
 and `__delete__`. Builtin types expose method descriptors and slot wrappers
 (`list.append`, `int.__add__`, `object.__repr__`) with CPython reprs and
@@ -357,8 +364,9 @@ Native `frozendict` shares dictionary lookup, views, unpacking, and pattern
 matching. Its hash combines stored key hashes with value hashes and caches the
 completed result. Exact frozen copies can reuse the original value; subclass
 copies produce plain frozen mappings. `eval` and `exec` accept frozen globals
-with an existing `__builtins__` entry and reject writes and deletions. Pickle
-round trips remain untested because the pickle module is not implemented.
+with an existing `__builtins__` entry and reject writes and deletions. The
+pickle module is a library facility outside the core; the spec tests check the
+reduction protocol it uses through a core stand-in.
 The builtins module provides every CPython 3.15 builtin except `input`,
 which needs a host stream, and `help`, `copyright`, `credits`, and
 `license`, which come from the `site` module. `open` reaches only host
@@ -404,8 +412,7 @@ traceback, and a bare `raise` adds none. Entries have `tb_next` (assignable,
 with loop detection), `tb_frame`, `tb_lineno` (the statement's line), and
 `tb_lasti` (always 0, since there is no bytecode); `__exit__`,
 `generator.throw`, `with_traceback`, and `types.TracebackType(...)` accept
-and pass them. Exception support still lacks complete chaining and all
-builtin-specific constructors.
+and pass them.
 The 3.15 `sentinel` builtin creates unique named objects (PEP 661) that
 record their creating module, copy as themselves, reduce to their name, and
 form unions with `|`. `object.__reduce__`, `__reduce_ex__`, and `__getstate__`
@@ -434,8 +441,9 @@ and `__delattr__`, with explicit `object` methods for default behavior.
 these interception hooks. Properties receive their class attribute name and
 expose writable `__name__` metadata. Custom `__class_getitem__` supports class
 subscription; builtin generic aliases and unions use embedded intrinsic objects.
-Parenthesized manager lists work for synchronous and asynchronous managers. Builtin type introspection and
-signatures are partial; most builtins reject keyword arguments. Bytes support
+Parenthesized manager lists work for synchronous and asynchronous managers.
+Built-in functions have `__doc__` text for slot wrappers and `None` otherwise,
+and `__text_signature__` `None`. Bytes support
 literals, sequence operations, integer/iterable construction, and string/bytes
 method families. Bytearray methods include `resize` and Python 3.15's `take_bytes`; bounds and
 storage are rechecked after conversion callbacks. `memoryview` wraps bytes,
@@ -447,9 +455,9 @@ are provided. Bytes consumers accept views. A bytearray with live exports
 refuses to resize, and raises CPython's `BufferError`. `bytes` and `bytearray`
 expose `__buffer__`. Struct-module formats beyond native single items,
 multi-dimensional sub-views, and CPython's allocation introspection remain
-unsupported. Encoding and decoding support a limited set of codecs;
-the standard-library codec registry is unavailable. Iterator types
-are not yet distinguished completely by `type()`. The sequence, dict, set,
+unsupported. Encoding and decoding provide the core codecs of PLS-315 Table
+23-1; spy's host supplies no others. Every intrinsic iterator has its own
+type, with `__reduce__` and `__setstate__` as 27.1.1 gives. The sequence, dict, set,
 range, and reversed iterators provide CPython's `__length_hint__`, and
 `list()`, `list.extend`, and `bytearray.extend` propagate errors from a user
 iterable's `__len__` or `__length_hint__` as `PyObject_LengthHint` does. Syntax errors for parameter
@@ -465,8 +473,8 @@ entries store hashes and use linear lookup among matching hashes. `hash()` calls
 user-defined hash methods, validates their results, and normalizes oversized
 integers. Numeric hashes preserve equality across integers, floats, and complex
 numbers. Tuples cache successful hashes; slices and ranges are hashable when
-their components permit it. String/bytes hashes currently use unsalted FNV-1a;
-hash randomization and CPython's hash-seed controls remain unimplemented.
+their components permit it. String/bytes hashes use unsalted FNV-1a, which
+PLS-315 leaves to the implementation; there is no per-process randomization.
 Numeric and compound hash algorithms adapt CPython's implementation under its
 [license](licenses/python.txt).
 
@@ -492,22 +500,21 @@ ideograph names computed) use checked-in Unicode 17.0.0 data. Source identifiers
 before scope analysis and private-name mangling; dynamic string attribute and
 keyword names retain their original spelling. Byte sources, CLI files, and imports
 honor first/second-line encoding comments and UTF-8 BOMs. Unicode string sources
-ignore encoding comments. UTF-8, ASCII, Latin-1 and ISO-8859-15 decoding is native;
-other codecs and some decoding diagnostics remain incomplete. CR and CRLF become
+ignore encoding comments. UTF-8, ASCII, Latin-1 and ISO-8859-15 source decoding is native;
+other source encodings are left to the host. CR and CRLF become
 LF before parsing, including inside string literals. Indentation uses eight-column
 tab stops and checks for inconsistent mixing with spaces. The lexer rejects invalid UTF-8.
-String normalization APIs and many other Unicode operations remain incomplete.
+Normalization functions (`unicodedata`) are a library facility outside the core.
 
 Module/class namespaces and explicit execution mappings are live; optimized
 function locals are snapshots. Class and execution locals may be arbitrary
-mappings. Globals must be dictionaries, including subclasses. Compile flags
-remain incomplete. Function code objects expose argument counts, names,
+mappings. Globals must be dictionaries, including subclasses. Function code objects expose argument counts, names,
 filenames, first-line metadata, and CPython's sorted `co_freevars` and
 `co_cellvars` (including names passed through to nested scopes and the
 implicit `__class__`). A function's `__closure__` holds cells that read and
 write the defining scope's variable; `types.CellType` cells compare by
-contents. Execution and replacement of function code objects remain
-unsupported; code with free variables is rejected as in CPython. Code objects are cached per parsed definition, so
+contents. A function's `__code__` may be replaced, and code objects run under
+`exec` and `eval`; code with free variables is rejected there as in CPython. Code objects are cached per parsed definition, so
 functions created from the same definition share their code object. `gi_code`,
 `cr_code`, and `ag_code` retain that identity after the suspended instance closes.
 Code objects retain parsed syntax and internal
@@ -517,9 +524,10 @@ key once. In-place sorting detects mutation by callbacks and restores the list.
 
 Generator functions preserve operands, loop state, active exceptions, and
 pending cleanup across suspension. Explicit `close()` runs cleanup and returns
-a generator return value. Automatic finalization on reference release or cycle
-collection is not implemented. Live frame objects and some
-yield locations (including class bases) remain unsupported. Raise expressions and
+a generator return value. A suspended generator that becomes unreachable, by
+reference release or cycle collection, is closed first (27.2.4). Frames are live
+objects, and `yield` may appear in any expression position, class bases
+included. Raise expressions and
 explicit causes may yield or await; assertions retain their original message objects.
 Lists, tuples, strings, bytes, and ranges support slicing. Range bounds, indices,
 steps, and `slice.indices()` lengths use arbitrary-precision integers. Range
@@ -532,9 +540,9 @@ Coroutines and asynchronous generators share the owned suspension stacks.
 Async context-manager exits may suspend during return, loop exits, and exception
 handling. Asynchronous-generator operation objects reject concurrent operations
 and reuse. Comprehensions share that execution machinery, including nested
-async clauses and awaited elements/filters. Generator-based coroutines, automatic async
-finalization, unawaited-operation warnings, and frame/code introspection remain
-missing. The core does not provide an event loop.
+async clauses and awaited elements/filters. spy's host provides no HostWarn, so
+warnings such as an unawaited coroutine's are ignored (PLS-315 B.4.1). The
+core does not provide an event loop.
 
 Future statements are checked as CPython's compiler does: they must come
 first (after at most a docstring), name a known feature (`braces` is "not a
@@ -556,10 +564,8 @@ deep for the parser raise MemoryError ("Parser stack overflowed"); prefix
 operator runs and long operator chains do not count against the C stack per
 operator, and the compiler's checks are bounded by stack use.
 
-Lazy annotations, structural matching, exception groups, generic parameters,
-and type aliases have implementations and local checks; their complete upstream
-modules have not passed. Memoryview, complete introspection,
-lazy imports, and other 3.15 facilities remain missing. There is no CPython C API/ABI layer.
+There is no CPython C API/ABI layer; that belongs to the Extension profile,
+which spy does not claim.
 
 Template strings use C objects with read-only `strings`, `interpolations`, and
 `values` attributes. Interpolations retain `value`, `expression`, `conversion`,
@@ -567,8 +573,7 @@ and `format_spec`; constructing a template does not call the value's conversion
 or formatting methods. Iteration omits empty literal strings. Template and
 interpolation types are final and can be obtained with `type(t'')` and
 `type(t'{0}'.interpolations[0])` without a library import. The standard-library
-`string.templatelib` package, pickle protocols, and complete descriptor
-introspection are not supplied by this implementation.
+`string.templatelib` package is not part of the core.
 
 Generic and related intrinsic objects currently use Python source embedded in
 `spy-intrinsics.h`, generated from `intrinsics.py` and interpreted by `spy` on
@@ -599,8 +604,9 @@ Import statements honor the frame's builtin `__import__` function; the default
 implementation loads sources through the callback. The `builtins` module exposes
 the context's builtin namespace directly and needs no loader.
 
-Module specs, namespace packages, configurable package search paths, meta-path
-finders, and extension loading remain missing.
+Module specs, namespace packages, package search paths, meta-path finders,
+and extension loading are host services (PLS-315 Annex B) that the `spy`
+command's loader does not provide.
 
 Python 3.15 lazy imports (`lazy import`, `lazy from ... import`) bind
 `lazy_import` placeholders at module level outside `try` blocks. Reading a

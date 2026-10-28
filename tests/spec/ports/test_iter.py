@@ -5,11 +5,16 @@
 from harness import *
 # Test iterators.
 
-# (Ported) sys, os_helper, pickle, collections.abc, functools, contextlib,
-# builtins and traceback are not imported; core stand-ins follow.
+# (Ported) sys, os_helper, collections.abc, functools, contextlib, builtins
+# and traceback are not imported; core stand-ins follow, and the harness's
+# pickle works through __reduce_ex__ alone.
 cpython_only, check_free_after_iterating = support.cpython_only, support.check_free_after_iterating
 ALWAYS_EQ, NEVER_EQ, BrokenIter = support.ALWAYS_EQ, support.NEVER_EQ, support.BrokenIter
 maxsize = (1 << 63) - 1
+
+def is_iterator(obj):
+    """(Ported) collections.abc.Iterator's check: __iter__ and __next__ in the class."""
+    return all(any(name in vars(k) for k in type(obj).__mro__) for name in ("__iter__", "__next__"))
 
 # (Ported) An in-memory text file stands in for open(TESTFN): it holds the
 # written lines and is its own iterator over them when read.
@@ -165,9 +170,25 @@ class TestCase(unittest.TestCase):
             res.append(val)
         self.assertEqual(res, seq)
 
-    # (Ported) Pickling built-in iterators is outside the standard (Annex C.7).
+    # Helper to check picklability
     def check_pickle(self, itorg, seq):
-        pass
+        for proto in range(pickle.HIGHEST_PROTOCOL + 1):
+            d = pickle.dumps(itorg, proto)
+            it = pickle.loads(d)
+            # Cannot assert type equality because dict iterators unpickle as list
+            # iterators.
+            # self.assertEqual(type(itorg), type(it))
+            self.assertTrue(is_iterator(it))  # (Ported)
+            self.assertEqual(list(it), seq)
+
+            it = pickle.loads(d)
+            try:
+                next(it)
+            except StopIteration:
+                continue
+            d = pickle.dumps(it, proto)
+            it = pickle.loads(d)
+            self.assertEqual(list(it), seq[1:])
 
     # Test basic use of iter() function
     def test_iter_basic(self):
@@ -223,7 +244,41 @@ class TestCase(unittest.TestCase):
     def test_seq_class_iter(self):
         self.check_iterator(iter(SequenceClass(10)), list(range(10)))
 
-    # (Ported) test_mutating_seq_class_iter_pickle is omitted: it pickles.
+    def test_mutating_seq_class_iter_pickle(self):
+        orig = SequenceClass(5)
+        for proto in range(pickle.HIGHEST_PROTOCOL + 1):
+            # initial iterator
+            itorig = iter(orig)
+            d = pickle.dumps((itorig, orig), proto)
+            it, seq = pickle.loads(d)
+            seq.n = 7
+            self.assertIs(type(it), type(itorig))
+            self.assertEqual(list(it), list(range(7)))
+
+            # running iterator
+            next(itorig)
+            d = pickle.dumps((itorig, orig), proto)
+            it, seq = pickle.loads(d)
+            seq.n = 7
+            self.assertIs(type(it), type(itorig))
+            self.assertEqual(list(it), list(range(1, 7)))
+
+            # empty iterator
+            for i in range(1, 5):
+                next(itorig)
+            d = pickle.dumps((itorig, orig), proto)
+            it, seq = pickle.loads(d)
+            seq.n = 7
+            self.assertIs(type(it), type(itorig))
+            self.assertEqual(list(it), list(range(5, 7)))
+
+            # exhausted iterator
+            self.assertRaises(StopIteration, next, itorig)
+            d = pickle.dumps((itorig, orig), proto)
+            it, seq = pickle.loads(d)
+            seq.n = 7
+            self.assertTrue(is_iterator(it))  # (Ported)
+            self.assertEqual(list(it), [])
 
     def test_mutating_seq_class_exhausted_iter(self):
         a = SequenceClass(5)
@@ -236,8 +291,80 @@ class TestCase(unittest.TestCase):
         self.assertEqual(list(empit), [5, 6])
         self.assertEqual(list(a), [0, 1, 2, 3, 4, 5, 6])
 
-    # (Ported) test_reduce_mutating_builtins_iter is omitted: it tests __reduce__
-    # results, which the standard leaves unspecified (Annex C.7).
+    def test_reduce_mutating_builtins_iter(self):
+        # This is a reproducer of issue #101765
+        # where iter `__reduce__` calls could lead to a segfault or SystemError
+        # depending on the order of C argument evaluation, which is undefined
+
+        # Backup builtins
+        builtins_dict = vars(iter.__self__)  # (Ported) the builtins module
+        orig = {"iter": iter, "reversed": reversed}
+
+        def run(builtin_name, item, sentinel=None):
+            it = iter(item) if sentinel is None else iter(item, sentinel)
+
+            class CustomStr:
+                def __init__(self, name, iterator):
+                    self.name = name
+                    self.iterator = iterator
+                def __hash__(self):
+                    return hash(self.name)
+                def __eq__(self, other):
+                    # Here we exhaust our iterator, possibly changing
+                    # its `it_seq` pointer to NULL
+                    # The `__reduce__` call should correctly get
+                    # the pointers after this call
+                    list(self.iterator)
+                    return other == self.name
+
+            # del is required here
+            # to not prematurely call __eq__ from
+            # the hash collision with the old key
+            del builtins_dict[builtin_name]
+            builtins_dict[CustomStr(builtin_name, it)] = orig[builtin_name]
+
+            return it.__reduce__()
+
+        types = [
+            (EmptyIterClass(),),
+            (bytes(8),),
+            (bytearray(8),),
+            ((1, 2, 3),),
+            (lambda: 0, 0),
+            (tuple[int],)  # GenericAlias
+        ]
+
+        try:
+            run_iter = lambda *args: run("iter", *args)  # (Ported)
+            # The returned value of `__reduce__` should not only be valid
+            # but also *empty*, as `it` was exhausted during `__eq__`
+            # i.e "xyz" returns (iter, ("",))
+            self.assertEqual(run_iter("xyz"), (orig["iter"], ("",)))
+            self.assertEqual(run_iter([1, 2, 3]), (orig["iter"], ([],)))
+
+            # _PyEval_GetBuiltin is also called for `reversed` in a branch of
+            # listiter_reduce_general
+            self.assertEqual(
+                run("reversed", orig["reversed"](list(range(8)))),
+                (reversed, ([],))
+            )
+
+            for case in types:
+                self.assertEqual(run_iter(*case), (orig["iter"], ((),)))
+        finally:
+            # Restore original builtins
+            for key, func in orig.items():
+                # need to suppress KeyErrors in case
+                # a failed test deletes the key without setting anything
+                # (Ported) try/except stands in for contextlib.suppress.
+                try:
+                    # del is required here
+                    # to not invoke our custom __eq__ from
+                    # the hash collision with the old key
+                    del builtins_dict[key]
+                except KeyError:
+                    pass
+                builtins_dict[key] = func
 
     # Test a new_style class with __iter__ but no next() method
     def test_new_style_iter_class(self):

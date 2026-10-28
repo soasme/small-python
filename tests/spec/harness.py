@@ -1410,6 +1410,25 @@ class operator:
         return range(a).stop
 
     @staticmethod
+    def length_hint(obj, default=0):
+        """len(obj), else type(obj).__length_hint__(obj), else default."""
+        try:
+            return len(obj)
+        except TypeError:
+            pass
+        hint = getattr(type(obj), "__length_hint__", None)
+        if hint is None:
+            return default
+        value = hint(obj)
+        if value is NotImplemented:
+            return default
+        if not isinstance(value, int):
+            raise TypeError("__length_hint__ must be an integer, not %s" % type(value).__name__)
+        if value < 0:
+            raise ValueError("__length_hint__() should return >= 0")
+        return value
+
+    @staticmethod
     def setitem(a, b, c):
         a[b] = c
 
@@ -1433,6 +1452,109 @@ class operator:
             if item is b or item == b:
                 return i
         raise ValueError("sequence.index(x): x not in sequence")
+
+
+class pickle:
+    """A stand-in for the pickle module over the core reduction protocol
+    (20.1.4): dumps() snapshots an object as its reduction tree, taking
+    __reduce_ex__(protocol) of every object other than a scalar, tuple,
+    list, dict, set or bytearray, and loads() rebuilds fresh objects from
+    the snapshot by calling the reductions and applying their state.
+    Functions and classes are kept by reference."""
+    HIGHEST_PROTOCOL = DEFAULT_PROTOCOL = 5
+
+    class PicklingError(Exception):
+        pass
+
+    class _Pickled:
+        def __init__(self, tree):
+            self.tree = tree
+
+    _SCALARS = (type(None), bool, int, float, complex, str, bytes, type(Ellipsis), type(NotImplemented))
+    _REFERENCES = (type, type(len), type(lambda: 0), type([].append))
+
+    @classmethod
+    def dumps(cls, obj, protocol=None):
+        return cls._Pickled(cls._freeze(obj, cls.DEFAULT_PROTOCOL if protocol is None else protocol, {}))
+
+    @classmethod
+    def loads(cls, data):
+        return cls._thaw(data.tree, {})
+
+    @classmethod
+    def _freeze(cls, obj, protocol, memo):
+        kind = type(obj)
+        if kind in cls._SCALARS or isinstance(obj, cls._REFERENCES):
+            if isinstance(obj, type(lambda: 0)) and obj.__name__ == "<lambda>":
+                raise cls.PicklingError("Can't pickle %r: it's not found as __main__.<lambda>" % (obj,))
+            return ("atom", obj)
+        key = id(obj)
+        if key in memo:
+            return ("ref", key)
+        memo[key] = obj
+        freeze = lambda value: cls._freeze(value, protocol, memo)
+        if kind is tuple:
+            return ("tuple", key, [freeze(item) for item in obj])
+        if kind is list:
+            return ("list", key, [freeze(item) for item in obj])
+        if kind is dict:
+            return ("dict", key, [(freeze(k), freeze(v)) for k, v in obj.items()])
+        if kind in (set, frozenset):
+            return ("set", key, kind, [freeze(item) for item in obj])
+        if kind is bytearray:
+            return ("bytearray", key, bytes(obj))
+        reduced = obj.__reduce_ex__(protocol)
+        if isinstance(reduced, str):
+            return ("atom", obj)
+        reduced = tuple(reduced) + (None,) * (5 - len(reduced))
+        func, args, state, listitems, dictitems = reduced
+        return ("reduce", key, freeze(func), freeze(args), freeze(state),
+                None if listitems is None else [freeze(item) for item in listitems],
+                None if dictitems is None else [(freeze(k), freeze(v)) for k, v in dictitems])
+
+    @classmethod
+    def _thaw(cls, tree, memo):
+        kind = tree[0]
+        if kind == "atom":
+            return tree[1]
+        if kind == "ref":
+            return memo[tree[1]]
+        thaw = lambda node: cls._thaw(node, memo)
+        key = tree[1]
+        if kind == "tuple":
+            memo[key] = result = tuple(thaw(item) for item in tree[2])
+        elif kind == "list":
+            memo[key] = result = []
+            result.extend(thaw(item) for item in tree[2])
+        elif kind == "dict":
+            memo[key] = result = {}
+            for k, v in tree[2]:
+                result[thaw(k)] = thaw(v)
+        elif kind == "set":
+            memo[key] = result = tree[2](thaw(item) for item in tree[3])
+        elif kind == "bytearray":
+            memo[key] = result = bytearray(tree[2])
+        else:
+            func, args = thaw(tree[2]), thaw(tree[3])
+            memo[key] = result = func(*args)
+            state = thaw(tree[4])
+            if state is not None:
+                setstate = getattr(result, "__setstate__", None)
+                if setstate is not None:
+                    setstate(state)
+                else:
+                    slots = None
+                    if isinstance(state, tuple) and len(state) == 2:
+                        state, slots = state
+                    if state:
+                        result.__dict__.update(state)
+                    for name, value in (slots or {}).items():
+                        setattr(result, name, value)
+            for item in tree[5] or ():
+                result.append(thaw(item))
+            for k, v in tree[6] or ():
+                result[thaw(k)] = thaw(v)
+        return result
 
 
 class random:

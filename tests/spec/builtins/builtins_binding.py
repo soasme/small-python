@@ -39,6 +39,10 @@ for static, owner in [(str.maketrans, str), (bytes.maketrans, bytes), (bytearray
     assert_true(repr(static).startswith("<built-in method maketrans of type object at 0x"))
 assert_eq((str.__new__.__self__, int.__new__.__self__, str.__new__.__module__), (str, int, None))
 assert_eq((dict.fromkeys.__self__, dict.fromkeys.__module__, [].append.__module__, len.__module__), (dict, None, None, "builtins"))
+# __doc__ and __text_signature__ are implementation-defined text or None.
+for f in (len, [].append, str.maketrans, object.__new__):
+    for name in ("__doc__", "__text_signature__"):
+        assert_true(isinstance(getattr(f, name), (str, type(None))), (f, name))
 
 # dir() lists the keys of an object's __dict__ with its class's attributes.
 def fn(): pass
