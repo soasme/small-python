@@ -798,3 +798,14 @@
   orders and which multi-dimensional operations raise
   NotImplementedError, as CPython 3.15 does; builtins/memoryview_dimensions
   tests them.
+- spy builds functions from code objects with any closure: cells from
+  unrelated scopes, new cells mixed with a scope's cells, and globals
+  other than the cells' scope's are read through a scope that forwards
+  each free variable to its cell. A function of module or eval code runs
+  the code with its globals as locals, and a function's __code__ may be
+  replaced by code with other free variables. exec and eval accept
+  builtins that are not a dict, looked up by subscription, and a class
+  statement calls __build_class__ from its frame's builtins, passing the
+  class body as a function to any other builder. PLS-315 16.4.1, 28.1
+  and 28.2 say so; builtins/function_closures and compound/class_builder
+  test it.
