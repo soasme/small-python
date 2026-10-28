@@ -18,6 +18,11 @@
 (*     replaced   on C, then C.M = an implementation giving 6 (or True)    *)
 (*     deleted    on C, then del C.M                                       *)
 (*     metaclass  on Meta, with class C(metaclass=Meta)                    *)
+(*     failing    on C, as a property whose getter raises AttributeError   *)
+(*                                                                         *)
+(* A failing descriptor makes M absent for the operations with a fallback  *)
+(* (bool and iter here, PLS-315 7.3.2 LookupSpecialMaybe), and raises its  *)
+(* AttributeError for the rest.                                            *)
 (*                                                                         *)
 (* where C may also define __getattribute__ recording the names it looks   *)
 (* up, then invokes M implicitly on c (len(c), list(iter(c)), bool(c),     *)
@@ -28,7 +33,10 @@
 EXTENDS Naturals, Sequences
 
 Methods == {"__len__", "__iter__", "__bool__", "__call__", "__neg__"}
-Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass"}
+Wheres == {"instance", "class", "base", "replaced", "deleted", "metaclass", "failing"}
+
+\* The methods looked up with LookupSpecialMaybe here.
+Optional == {"__bool__", "__iter__"}
 Programs == [method : Methods, where : Wheres, getattribute : BOOLEAN, op : {"implicit", "onclass", "explicit"}]
 
 VARIABLES program, outcome
@@ -49,10 +57,12 @@ Missing(m, onclass) == CASE m = "__bool__" -> "True"                 \* everythi
 \* Where the object's type has M: the class (or its base) for c, the metaclass for C.
 Implicit(p, onclass) ==
     LET found == IF onclass THEN p.where = "metaclass" ELSE p.where \in {"class", "base", "replaced"}
-    IN  IF found THEN Gives(p.method, p.where = "replaced") ELSE Missing(p.method, onclass)
+    IN  IF found THEN Gives(p.method, p.where = "replaced")
+        ELSE IF p.where = "failing" /\ ~onclass /\ p.method \notin Optional THEN "AttributeError"
+        ELSE Missing(p.method, onclass)
 
 \* c.M through ordinary attribute access: instance dict, then the class.
-Explicit(p) == IF p.where \in {"deleted", "metaclass"} THEN "AttributeError" ELSE Gives(p.method, p.where = "replaced")
+Explicit(p) == IF p.where \in {"deleted", "metaclass", "failing"} THEN "AttributeError" ELSE Gives(p.method, p.where = "replaced")
 
 Run(p) ==
     CASE p.op = "implicit" -> Implicit(p, FALSE) \o " seen=False"
@@ -70,5 +80,9 @@ Done == outcome # Pending
 
 \* An instance attribute never serves an implicit invocation.
 InstanceIgnored == Done /\ program.op = "implicit" /\ program.where = "instance" =>
+    outcome = Missing(program.method, FALSE) \o " seen=False"
+
+\* A failing descriptor of an optional method is as if it were absent.
+FailingIsAbsent == Done /\ program.op = "implicit" /\ program.where = "failing" /\ program.method \in Optional =>
     outcome = Missing(program.method, FALSE) \o " seen=False"
 =============================================================================

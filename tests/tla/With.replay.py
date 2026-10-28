@@ -1,5 +1,6 @@
 # Replays With.tla: each case runs a with statement over the spec's
-# managers and compares the methods' log and the ending with the model's.
+# managers and compares the methods' log and the ending with the model's;
+# an exception from __exit__ records whether it is reported at the with line.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -46,6 +47,11 @@ def outcome(p):
         end = single(p, log) if p["part"] == "single" else nested(p, log)
     except (TypeError, ValueError, KeyError, RuntimeError) as error:
         end = type(error).__name__
+        tb = error.__traceback__
+        while tb and tb.tb_frame.f_code is not single.__code__:
+            tb = tb.tb_next
+        if isinstance(error, RuntimeError) and tb and tb.tb_lineno == single.__code__.co_firstlineno + 2:
+            end += " at with"
     return " ".join(log + [end])
 
 

@@ -213,6 +213,7 @@ struct SPYContext {
     size_t line;
 };
 static SPYValue *special_method(SPYContext *, SPYValue *, const char *);
+static SPYValue *special_method_maybe(SPYContext *, SPYValue *, const char *);
 static SPYValue *intrinsic(SPYContext *, const char *);
 static SPYValue *call_intrinsic(SPYContext *, const char *, size_t, SPYValue *const *);
 static SPYValue *attribute(SPYContext *, SPYValue *, const char *);
@@ -258,7 +259,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_COMPILE, B_EVAL, B_EXEC, B_SLICE, B_STATICMETHOD, B_CLASSMETHOD, B_PROPERTY, B_DIR, B_LOCALS, B_FORMAT, B_ASCII, B_MAP, B_GLOBALS, B_COMPLEX,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
-       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
+       B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_TYPE_GETATTRIBUTE, B_TYPE_SETATTR, B_TYPE_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
        B_EXCEPTION_REDUCE, B_OSERROR_REDUCE, B_IMPORT_REDUCE, B_ATTRIBUTE_REDUCE, B_ATTRIBUTE_GETSTATE, B_EXCEPTION_SETSTATE,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */ };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
@@ -1076,9 +1077,11 @@ int spy_truth(SPYValue *v) {
         SPYContext *c = v->ctx;
         SPYValue *base = builtin_base(c, v, "__bool__", "__len__");
         if (base) return spy_truth(base);
-        SPYValue *method = special_method(c, v, "__bool__");
+        SPYValue *method = special_method_maybe(c, v, "__bool__");
         int boolean = method != NULL;
-        if (!method && !c->error_type[0]) method = special_method(c, v, "__len__");
+        /* __len__ is optional only behind a defined __bool__ (slot_nb_bool). */
+        if (!method && !c->error_type[0])
+            method = class_lookup(value_class(c, v), "__bool__") ? special_method_maybe(c, v, "__len__") : special_method(c, v, "__len__");
         if (!method) return !c->error_type[0];
         if (boolean && method->type == SPY_NONE) {
             spy_release(method);
@@ -1357,6 +1360,10 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
             return hash_value(c, base, result);
         }
         SPYValue *method = special_method(c, value, "__hash__");
+        if (!method && error_is(c, "AttributeError")) {
+            /* slot_tp_hash: a __hash__ whose descriptor fails is no hash. */
+            spy_clear_error(c); break;
+        }
         if (!method) {
             if (c->error_type[0]) return -1;
             *result = hash_pointer(value); return 0;
@@ -2174,6 +2181,12 @@ static int repr_enter(SPYContext *c, SPYValue *v) {
 }
 static void repr_leave(SPYContext *c) { c->repr_len--; }
 static SPYValue *attribute_value(SPYContext *, SPYValue *, const char *);
+/* slot_tp_repr's fallback when a __repr__ descriptor fails: the bare type name. */
+static int bare_repr(Buffer *b, SPYValue *v) {
+    char text[64];
+    snprintf(text, sizeof(text), " object at %p>", (void *)v);
+    return puts_buffer(b, "<") || puts_buffer(b, type_name(v)) || puts_buffer(b, text) ? -1 : 0;
+}
 static int format_value(Buffer *b, SPYValue *v, int repr) {
     char num[96];
     switch (v->type) {
@@ -2356,6 +2369,9 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             const char *name = repr ? "__repr__" : "__str__";
             SPYValue *method = special_method(b->ctx, v, name);
             if (!method && !repr && !b->ctx->error_type[0]) method = special_method(b->ctx, v, name = "__repr__");
+            if (!method && !strcmp(name, "__repr__") && error_is(b->ctx, "AttributeError")) {
+                spy_clear_error(b->ctx); return bare_repr(b, v);
+            }
             if (method) {
                 SPYValue *text = spy_call(b->ctx, method, 0, NULL);
                 spy_release(method);
@@ -2392,7 +2408,10 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         if (deeper(b->ctx, repr ? " while getting the repr of an object" : " while getting the str of an object")) return -1;
         const char *name = repr ? "__repr__" : "__str__";
         SPYValue *method = special_method(b->ctx, v, name);
-        if (!method && !repr) method = special_method(b->ctx, v, name = "__repr__");
+        if (!method && !repr && !b->ctx->error_type[0]) method = special_method(b->ctx, v, name = "__repr__");
+        if (!method && !strcmp(name, "__repr__") && error_is(b->ctx, "AttributeError")) {
+            spy_clear_error(b->ctx); b->ctx->depth--; return bare_repr(b, v);
+        }
         if (method) {
             SPYValue *text = spy_call(b->ctx, method, 0, NULL);
             spy_release(method);
@@ -6667,7 +6686,7 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     if (base && base->type == SPY_ITERATOR) return spy_retain(source);
     if (base) return get_iterator(c, base);
     if (special_dispatch(source)) {
-        SPYValue *method = special_method(c, source, "__iter__");
+        SPYValue *method = special_method_maybe(c, source, "__iter__");
         /* __iter__ = None blocks iteration, the sequence protocol included. */
         if (method && method->type == SPY_NONE) {
             spy_release(method); return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
@@ -6686,9 +6705,8 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
             return iterator;
         }
         if (c->error_type[0]) return NULL;
-        method = special_method(c, source, "__getitem__");
-        if (!method) return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
-        spy_release(method);
+        /* The sequence protocol needs only a __getitem__ in the class. */
+        if (!class_lookup(value_class(c, source), "__getitem__")) return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
     }
     if (!iterable_type(source)) return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
     SPYValue *v = value_new(c, source->type == SPY_TEMPLATE ? SPY_TEMPLATE_ITERATOR : SPY_ITERATOR);
@@ -7568,7 +7586,8 @@ static SPYValue *big_integer_binary(SPYContext *c, int op, SPYValue *a, SPYValue
 static SPYValue *round_value(SPYContext *c, SPYValue *value, SPYValue *digits) {
     int supplied = digits && digits->type != SPY_NONE;
     if (!is_number(value)) {
-        SPYValue *method = special_method(c, value, "__round__");
+        SPYValue *method = special_method_maybe(c, value, "__round__");
+        if (!method && c->error_type[0]) return NULL;
         if (!method) return errorf(c, "TypeError", "type %s doesn't define __round__ method", type_name(value));
         SPYValue *result = spy_call(c, method, supplied ? 1 : 0, &digits);
         spy_release(method); return result;
@@ -8109,7 +8128,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         SPYValue *base = builtin_base(c, b, "__contains__", NULL);
         if (base) return comparison(c, op, a, base);
         if (special_dispatch(b)) {
-            SPYValue *method = special_method(c, b, "__contains__");
+            SPYValue *method = special_method_maybe(c, b, "__contains__");
             if (method && method->type == SPY_NONE) {
                 spy_release(method);
                 return errorf(c, "TypeError", "'%s' object is not a container", type_name(b));
@@ -8634,9 +8653,16 @@ static SPYValue *special_method(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *function = class_lookup(v->as.map.parent, name);
     return function ? descriptor_get(c, function, v, v->as.map.parent) : NULL;
 }
+/* A special method whose descriptor raises AttributeError is absent for the
+ * operations that have a fallback (LookupSpecial's maybe form, 7.3.2). */
+static SPYValue *special_method_maybe(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *method = special_method(c, v, name);
+    if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
+    return method;
+}
 static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *other) {
     static const char *names[] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};
-    SPYValue *method = special_method(c, self, names[op]);
+    SPYValue *method = special_method_maybe(c, self, names[op]);
     if (!method) {
         if (c->error_type[0]) return NULL;
         /* Builtin bases define every comparison themselves. */
@@ -8663,8 +8689,10 @@ static SPYValue *rich_compare(SPYContext *c, int op, SPYValue *left, SPYValue *r
     if (!first && !result && !c->error_type[0]) result = rich_method(c, reflected[op], right, left);
     spy_release(left); spy_release(right); return result;
 }
-static SPYValue *try_operator(SPYContext *c, SPYValue *self, const char *name, SPYValue *other, SPYValue *modulus) {
-    SPYValue *method = special_method(c, self, name);
+/* Binary methods are optional (special_method_maybe); an in-place method's
+ * lookup error propagates. */
+static SPYValue *try_operator(SPYContext *c, SPYValue *self, const char *name, SPYValue *other, SPYValue *modulus, int inplace) {
+    SPYValue *method = inplace ? special_method(c, self, name) : special_method_maybe(c, self, name);
     if (!method) return NULL;
     SPYValue *args[] = {other, modulus};
     SPYValue *result = spy_call(c, method, modulus ? 2 : 1, args);
@@ -8676,11 +8704,11 @@ static SPYValue *binary_special(SPYContext *c, const Operator *op, SPYValue *lef
     SPYValue *a = value_class(c, left), *b = value_class(c, right);
     int reflected_first = a != b && subclass(b, a) &&
         class_lookup(b, op->reflected) != class_lookup(a, op->reflected);
-    SPYValue *result = reflected_first ? try_operator(c, right, op->reflected, left, modulus) : NULL;
+    SPYValue *result = reflected_first ? try_operator(c, right, op->reflected, left, modulus, 0) : NULL;
     if (result || c->error_type[0]) return result;
-    result = try_operator(c, left, op->direct, right, modulus);
+    result = try_operator(c, left, op->direct, right, modulus, 0);
     if (result || c->error_type[0]) return result;
-    if (a != b && !reflected_first) result = try_operator(c, right, op->reflected, left, modulus);
+    if (a != b && !reflected_first) result = try_operator(c, right, op->reflected, left, modulus, 0);
     return result;
 }
 static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size_t argc, SPYValue *const *argv) {
@@ -9517,7 +9545,8 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
      * it only after an AttributeError, so the lookup cannot change it. */
     SPYValue *fallback = owner ? spy_retain(class_lookup(owner, "__getattr__")) : NULL;
     SPYValue *result;
-    if (definition && definition != name_local(name_local(c->classes, "object"), "__getattribute__")) {
+    if (definition && definition != name_local(name_local(c->classes, "object"), "__getattribute__") &&
+        definition != name_local(c->types[SPY_CLASS], "__getattribute__")) {
         SPYValue *method = descriptor_get(c, definition, v, owner);
         SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
         result = key ? spy_call(c, method, 1, &key) : NULL;
@@ -9542,7 +9571,7 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
 static SPYValue *ascii_repr(SPYContext *c, SPYValue *value) {
     SPYValue *repr = NULL, *text;
     if (value->type == SPY_INSTANCE && !builtin_base(c, value, "__repr__", NULL)) {
-        SPYValue *method = special_method(c, value, "__repr__");
+        SPYValue *method = special_method_maybe(c, value, "__repr__");
         if (method) { repr = spy_call(c, method, 0, NULL); spy_release(method); if (!repr) return NULL; }
         else if (c->error_type[0]) return NULL;
     }
@@ -11219,9 +11248,12 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
  * object method reaches the default operation without redispatching the hook. */
 static int attribute_write_hook(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     const char *hook = value ? "__setattr__" : "__delattr__";
-    SPYValue *definition = object->type == SPY_INSTANCE ? class_lookup(object->as.map.parent, hook) : NULL;
-    if (!definition || definition == name_local(name_local(c->classes, "object"), hook)) return 0;
-    SPYValue *method = descriptor_get(c, definition, object, object->as.map.parent);
+    /* An instance's class, or a class's metaclass, may customize assignment. */
+    SPYValue *owner = object->type == SPY_INSTANCE ? object->as.map.parent : meta_class(object) ? object->as.map.meta : NULL;
+    SPYValue *definition = owner ? class_lookup(owner, hook) : NULL;
+    if (!definition || definition == name_local(name_local(c->classes, "object"), hook) ||
+        definition == name_local(c->types[SPY_CLASS], hook)) return 0;
+    SPYValue *method = descriptor_get(c, definition, object, owner);
     SPYValue *key = method ? spy_string(c, name, strlen(name)) : NULL;
     SPYValue *args[] = {key, value};
     SPYValue *result = key ? spy_call(c, method, value ? 2 : 1, args) : NULL;
@@ -11234,7 +11266,8 @@ static int set_attribute(SPYContext *c, SPYValue *object, const char *name, SPYV
 }
 
 typedef struct { SPYValue *env, *unit; int interactive; } Frame;
-enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR, FLOW_YIELD };
+/* FLOW_HALT: an error raised before a suspended generator resumed, which stays suspended. */
+enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR, FLOW_YIELD, FLOW_HALT };
 enum { AWAIT_NONE, AWAIT_YIELD, AWAIT_DELEGATE, AWAIT_NEXT, AWAIT_COMPREHENSION };
 enum { DELEGATE_ITERATOR, DELEGATE_AWAITABLE, DELEGATE_COMPREHENSION, DELEGATE_AENTER, DELEGATE_AEXIT };
 typedef struct { int flow; SPYValue *value; } Result;
@@ -13194,7 +13227,7 @@ static void weak_callbacks(SPYContext *c) {
         SPYValue *self = c->finalize_calls[0];
         memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
         size_t waiting = c->finalize_calls_len;
-        SPYValue *method = self->type == SPY_INSTANCE ? special_method(c, self, "__del__") : NULL;
+        SPYValue *method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
         if (method) spy_release(spy_call(c, method, 0, NULL));
         else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
         else if (self->type == SPY_ASYNC_GENERATOR) {
@@ -14057,7 +14090,7 @@ static void generator_close(SPYValue *v) {
 static int bytearray_exported(SPYContext *, SPYValue *);
 static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     const Operator *operation = &operators[op - T_ADDEQ];
-    SPYValue *result = try_operator(c, old, operation->inplace, rhs, NULL);
+    SPYValue *result = try_operator(c, old, operation->inplace, rhs, NULL, 1);
     if (result || c->error_type[0]) return result;
     SPYValue *base = builtin_base(c, old, operation->inplace, NULL);
     if (base && (base->type == SPY_LIST || base->type == SPY_SET || base->type == SPY_DICT || base->type == SPY_BYTEARRAY)) {
@@ -15656,8 +15689,9 @@ static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
         return status;
     }
     delete_name(env, name);
-    /* A deleted function local reads as unbound; a global is just gone. */
-    return env->type == V_ENV && env->as.map.scope && env->as.map.scope->kind != S_MODULE ? declare_name(c, env, name) : 0;
+    /* A deleted function local, or the __class__ cell, reads as unbound; a global is just gone. */
+    return env->type == V_ENV && ((env->as.map.scope && env->as.map.scope->kind != S_MODULE) || env->as.map.flags == 4) ?
+        declare_name(c, env, name) : 0;
 }
 static int delete_attribute_default(SPYContext *c, SPYValue *object, const char *name) {
     SPYValue *target = object;
@@ -15778,7 +15812,7 @@ static int delete_target(SPYContext *c, Frame *f, Node *n) {
         SPYValue *value = name_local(owner, n->text);
         if (!value || value->type == V_UNBOUND) {
             if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->text);
-            else if (value && owner->type == V_ENV && owner->as.map.scope && owner->as.map.scope->kind != S_MODULE)
+            else if (value && owner->type == V_ENV && ((owner->as.map.scope && owner->as.map.scope->kind != S_MODULE) || owner->as.map.flags == 4))
                 name_error(c, n->text, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
             else name_error(c, n->text, "name '%s' is not defined");
             return -1;
@@ -15891,6 +15925,7 @@ static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     SPYValue *outer = c->handled;
     c->handled = error.value ? spy_retain(error.value) : spy_retain(outer);
     SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none, error.value ? error.value : c->none, exception_traceback(c, error.value)};
+    relocate(c, item); /* __exit__ is called at its manager's line (15.5) */
     SPYValue *result = spy_call(c, exit, 3, args);
     materialize_error(c);
     spy_release(exit);
@@ -17336,8 +17371,10 @@ static SPYValue *stop_value(SPYContext *c) {
     value = value ? spy_retain(value) : spy_none(c);
     spy_clear_error(c); return value;
 }
+/* *halt, when given, is set if getting the iterator's throw failed: the
+ * delegating generator does not resume (13.16.3). */
 static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent, SPYValue *thrown,
-                               size_t argc, SPYValue *const *argv) {
+                               size_t argc, SPYValue *const *argv, int *halt) {
     if (awaitable_iterator(iterator))
         return awaitable_method(c, iterator, thrown ? M_THROW : M_SEND, thrown ? argc : 1,
                                       thrown ? argv : (SPYValue *[]){sent ? sent : c->none});
@@ -17348,8 +17385,10 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
     if (thrown) {
         int closing = subclass(thrown->as.map.parent, name_local(c->classes, "GeneratorExit"));
         SPYValue *method = attribute(c, iterator, closing ? "close" : "throw");
-        if (!method && error_is(c, "AttributeError")) { spy_clear_error(c); return raise_value(c, thrown); }
-        if (!method) return NULL;
+        /* A missing close or throw passes the exception on; any other error
+         * getting close is unraisable (13.16.3), which spy discards. */
+        if (!method && (closing || error_is(c, "AttributeError"))) { spy_clear_error(c); return raise_value(c, thrown); }
+        if (!method) { if (halt) *halt = 1; return NULL; }
         SPYValue *result = spy_call(c, method, closing ? 0 : argc, argv);
         spy_release(method);
         if (closing) { spy_release(result); if (!c->error_type[0]) raise_value(c, thrown); return NULL; }
@@ -17433,8 +17472,10 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
     Frame f = {generator->as.generator.env, generator->as.generator.unit, 0};
     Result flow = {FLOW_NORMAL, NULL};
     if (m->awaiting >= AWAIT_DELEGATE) {
-        SPYValue *item = iterator_send(c, m->delegate, sent, thrown, argc, argv);
+        int halt = 0;
+        SPYValue *item = iterator_send(c, m->delegate, sent, thrown, argc, argv, &halt);
         if (item) return (Result){FLOW_YIELD, item};
+        if (halt) return (Result){FLOW_HALT, NULL};
         finish_delegate(c, m);
     } else {
         if (thrown) raise_value(c, thrown);
@@ -17591,7 +17632,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
                 a->type == SPY_COROUTINE && iterable_coroutine(generator) ? await_iterator(c, a, NULL) : get_iterator(c, a);
             if (m->delegate) {
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
-                value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL);
+                value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
                 if (value) { spy_release(a); return (Result){FLOW_YIELD, value}; }
                 finish_delegate(c, m);
             }
@@ -17613,7 +17654,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target;
                 if (a) m->delegate = await_iterator(c, a, "__anext__");
                 if (m->delegate) {
-                    value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL);
+                    value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
                     if (value) { spy_release(a); return (Result){FLOW_YIELD, value}; }
                 }
                 finish_delegate(c, m);
@@ -17798,6 +17839,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     g->as.generator.line = c->frames[c->py_depth - 1].line;
     g->as.generator.running = 0; c->depth--; leave_frame(c);
     if (result.flow == FLOW_YIELD) return result.value;
+    if (result.flow == FLOW_HALT) return NULL;
     g->as.generator.returned = result.flow == FLOW_RETURN;
     if (result.flow == FLOW_RETURN) {
         SPYValue *exception = new_exception(c, name_local(c->classes, g->type == SPY_ASYNC_GENERATOR ? "StopAsyncIteration" : "StopIteration"),
@@ -17884,7 +17926,7 @@ static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_
         if (!iterator) return NULL;
         SPYValue *value;
         if (method == M_NEXT || method == M_SEND)
-            value = iterator_send(c, iterator, method == M_SEND ? argv[0] : c->none, NULL, 0, NULL);
+            value = iterator_send(c, iterator, method == M_SEND ? argv[0] : c->none, NULL, 0, NULL, NULL);
         else {
             SPYValue *fn = attribute(c, iterator, method == M_THROW ? "throw" : "close");
             value = fn ? spy_call(c, fn, argc, argv) : NULL;
@@ -21633,8 +21675,20 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             return spy_error(c, "TypeError", "object attribute operation requires a string name");
         const char *name = argv[1]->as.string.data;
         if (id == B_OBJECT_GETATTRIBUTE) return attribute_value(c, argv[0], name);
-        if (argv[0]->type == SPY_CLASS) return spy_error(c, "TypeError", "object attribute operation cannot be applied to a type");
+        if (argv[0]->type == SPY_CLASS)
+            return errorf(c, "TypeError", "can't apply this %s to type object", id == B_OBJECT_SETATTR ? "__setattr__" : "__delattr__");
         int status = id == B_OBJECT_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name);
+        return status ? NULL : spy_none(c);
+    }
+    if (id == B_TYPE_GETATTRIBUTE || id == B_TYPE_SETATTR || id == B_TYPE_DELATTR) {
+        const char *method = id == B_TYPE_GETATTRIBUTE ? "__getattribute__" : id == B_TYPE_SETATTR ? "__setattr__" : "__delattr__";
+        if (argc && argv[0]->type != SPY_CLASS)
+            return errorf(c, "TypeError", "descriptor '%s' requires a 'type' object but received a '%s'", method, type_name(argv[0]));
+        if (argc != (id == B_TYPE_SETATTR ? 3u : 2u) || argv[1]->type != SPY_STRING)
+            return spy_error(c, "TypeError", "object attribute operation requires a string name");
+        const char *name = argv[1]->as.string.data;
+        if (id == B_TYPE_GETATTRIBUTE) return attribute_value(c, argv[0], name);
+        int status = id == B_TYPE_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name);
         return status ? NULL : spy_none(c);
     }
     if (id == B_SUPER) {
@@ -21895,9 +21949,11 @@ execution_fail:
     }
     if (id == B_GETATTR || id == B_SETATTR || id == B_HASATTR || id == B_DELATTR) {
         if (argc < 2 || argc > 3 || (id == B_SETATTR && argc != 3) || ((id == B_HASATTR || id == B_DELATTR) && argc != 2)) goto arity;
-        if (argv[1]->type != SPY_STRING) return errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(argv[1]));
-        if (id == B_DELATTR) return delete_attribute(c, a, argv[1]->as.string.data) ? NULL : spy_none(c);
-        const char *name = argv[1]->as.string.data;
+        /* A str subclass names the attribute by its string value. */
+        SPYValue *text = builtin_value(c, argv[1], SPY_STRING);
+        if (!text) return errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(argv[1]));
+        if (id == B_DELATTR) return delete_attribute(c, a, text->as.string.data) ? NULL : spy_none(c);
+        const char *name = text->as.string.data;
         if (id == B_SETATTR) {
             return set_attribute(c, a, name, argv[2]) ? NULL : spy_none(c);
         }
@@ -24224,6 +24280,8 @@ SPYContext *spy_context_new(void) {
         {"object", "__reduce__", B_OBJECT_REDUCE, 1}, {"object", "__reduce_ex__", B_OBJECT_REDUCE_EX, 1},
         {"object", "__getstate__", B_OBJECT_GETSTATE, 1},
         {"type", "mro", B_TYPE_MRO, 1}, {"type", "__subclasses__", B_TYPE_SUBCLASSES, 1},
+        {"type", "__getattribute__", B_TYPE_GETATTRIBUTE, 1}, {"type", "__setattr__", B_TYPE_SETATTR, 1},
+        {"type", "__delattr__", B_TYPE_DELATTR, 1},
         {"BaseException", "add_note", B_ADD_NOTE, 1}, {"BaseException", "with_traceback", B_WITH_TRACEBACK, 1},
         {"BaseException", "__reduce__", B_EXCEPTION_REDUCE, 1}, {"BaseException", "__setstate__", B_EXCEPTION_SETSTATE, 1},
         {"OSError", "__reduce__", B_OSERROR_REDUCE, 1}, {"ImportError", "__reduce__", B_IMPORT_REDUCE, 1},

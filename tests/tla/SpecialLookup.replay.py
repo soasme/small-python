@@ -28,6 +28,10 @@ def outcome(p):
     base_body = {m: IMPLEMENTATIONS[m]} if where == "base" else {}
     B = type("B", (), base_body)
     body = {m: IMPLEMENTATIONS[m]} if where in ("class", "replaced", "deleted") else {}
+    if where == "failing":
+        def fail(self):
+            raise AttributeError(m)
+        body[m] = property(fail)
     if p["getattribute"]:
         def __getattribute__(self, name):
             seen.append(name)

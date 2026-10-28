@@ -1,4 +1,4 @@
-# spec: PLS-315 13.16
+# spec: PLS-315 13.16, 13.16.3
 # description: Generators: yield, send, yield from, and return values.
 from harness import *
 
@@ -173,3 +173,36 @@ assert next(g) == 1
 assert g.gi_yieldfrom is it
 assert list(g) == [2,3,4]
 assert g.gi_yieldfrom is None
+
+# close() through yield from: an error getting the subiterator's close is
+# unraisable and the delegation ends as if there were no close; throw() and
+# send() propagate theirs, and an exception from close itself propagates.
+class BrokenAttrs:
+    def __iter__(self): return self
+    def __next__(self): return 1
+    def __getattr__(self, name): 1 / 0
+def delegator(it):
+    yield from it
+d = delegator(BrokenAttrs())
+next(d)
+assert_eq(d.close(), None)
+assert_eq(d.gi_frame, None)
+# throw() raises the lookup error without resuming the delegator.
+d = delegator(BrokenAttrs())
+next(d)
+assert_raises(ZeroDivisionError, d.throw, KeyError)
+assert_eq((d.gi_suspended, next(d)), (True, 1))
+d = delegator(BrokenAttrs())
+next(d)
+assert_raises(ZeroDivisionError, d.send, 1)
+class NoClose:
+    def __iter__(self): return self
+    def __next__(self): return 1
+d = delegator(NoClose())
+next(d)
+assert_eq(d.close(), None)
+class CloseRaises(NoClose):
+    def close(self): raise KeyError("closing")
+d = delegator(CloseRaises())
+next(d)
+assert_eq(str(assert_raises(KeyError, d.close)), "'closing'")

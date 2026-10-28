@@ -26,3 +26,22 @@ assert_eq(str(assert_raises(TypeError, super, int, "a")),
           "super(type, obj): obj (instance of str) is not an instance or subtype of type (int).")
 assert_eq(str(assert_raises(TypeError, super, int, Other)),
           "super(type, obj): obj (type Other) is not an instance or subtype of type (int).")
+
+# Deleting the __class__ cell through nonlocal leaves it empty, for super()
+# and for reads of the free variable.
+class Emptied:
+    def f(self):
+        nonlocal __class__
+        del __class__
+        try:
+            super()
+        except RuntimeError as e:
+            assert_eq(str(e), "super(): empty __class__ cell")
+        else:
+            assert_true(False, "super() with an empty cell")
+        e = assert_raises(NameError, lambda: __class__)
+        assert_eq(str(e), "cannot access free variable '__class__' where it is not associated with a value in enclosing scope")
+        return __class__
+assert_eq(str(assert_raises(NameError, Emptied().f)),
+          "cannot access free variable '__class__' where it is not associated with a value in enclosing scope")
+assert_raises(ValueError, lambda: Emptied.f.__closure__[0].cell_contents)

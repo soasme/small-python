@@ -58,9 +58,9 @@ Contents | - navigation
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.4 GetAttribute ( *o*, *name* ) | Attributes
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.5 GenericGetAttr ( *o*, *name* ) | Attributes, Descriptors
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.6 TypeGetAttr ( *C*, *name* ) | ClassObjects, Descriptors
-7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.7 SetAttribute ( *o*, *name*, *value* ) | Attributes
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.7 SetAttribute ( *o*, *name*, *value* ) | Attributes, ClassAttributeHooks
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.8 GenericSetAttr ( *o*, *name*, *value* ) | Attributes, Descriptors, ReadOnlyAttributes, Slots
-7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.9 DeleteAttribute ( *o*, *name* ) | Attributes
+7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.9 DeleteAttribute ( *o*, *name* ) | Attributes, ClassAttributeHooks
 7 Abstract Operations > 7.4 Call operations | = sections
 7 Abstract Operations > 7.4 Call operations > 7.4.1 Call ( *f*, *args* [ , *kwargs* ] ) | Callables, Calls, Methods
 7 Abstract Operations > 7.4 Call operations > 7.4.2 CallFunction ( *f*, *args*, *kwargs* ) | Calls, FunctionObjects
@@ -129,7 +129,7 @@ Contents | - navigation
 10 Object Behaviours > 10.2 Instance creation > 10.2.2 `object.__new__` and `object.__init__` | Callables, BuiltinsObjects
 10 Object Behaviours > 10.3 Descriptors | Descriptors, MethodDescriptors
 10 Object Behaviours > 10.4 Class objects | = sections
-10 Object Behaviours > 10.4 Class objects > 10.4.1 Attribute access on classes | ClassObjects, Descriptors
+10 Object Behaviours > 10.4 Class objects > 10.4.1 Attribute access on classes | ClassObjects, Descriptors, ClassAttributeHooks
 10 Object Behaviours > 10.4 Class objects > 10.4.2 Type attributes | ClassObjects
 10 Object Behaviours > 10.5 Special method names | SpecialLookup, BasicCustomization, NumericProtocol, Containers
 11 Source Text | = sections
@@ -196,7 +196,7 @@ Contents | - navigation
 13 Expressions > 13.16 Yield expressions | Generators
 13 Expressions > 13.16 Yield expressions > 13.16.1 `yield` *expression* | Generators
 13 Expressions > 13.16 Yield expressions > 13.16.2 Asynchronous generators | AsyncGenerators
-13 Expressions > 13.16 Yield expressions > 13.16.3 YieldFrom ( *it* ) | YieldFrom, Awaitables
+13 Expressions > 13.16 Yield expressions > 13.16.3 YieldFrom ( *it* ) | YieldFrom, Awaitables, YieldFromIterator
 13 Expressions > 13.17 Evaluation order | Evaluation
 13 Expressions > 13.18 Operator precedence | Precedence
 14 Simple Statements | = sections

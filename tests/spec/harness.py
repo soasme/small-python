@@ -226,6 +226,23 @@ class Host:
             thunk()
         return [(w.category, str(w.message), w.lineno) for w in caught]
 
+    def record_warnings(self):
+        """Start recording the warnings HostWarn receives (18.3), shown, not
+        raised. Return a function that stops and returns their (category,
+        message, line) triples, or None when the host supplies no HostWarn."""
+        try:
+            module = __import__("warnings")
+        except ImportError:
+            return None
+        catcher = module.catch_warnings(record=True)
+        caught = catcher.__enter__()
+        module.simplefilter("always")
+
+        def stop():
+            catcher.__exit__(None, None, None)
+            return [(w.category, str(w.message), w.lineno) for w in caught]
+        return stop
+
     def async_gen_hooks(self):
         """The (firstiter, finalizer) pair HostAsyncGenHooks returns (B.5.1),
         or None when the host offers programs no way to install them."""
@@ -766,6 +783,30 @@ class _AssertRaises:
         return True
 
 
+class _AssertWarns:
+    def __init__(self, testcase, category, regex):
+        self.testcase, self.category, self.regex = testcase, category, regex
+        self.warning = self.filename = self.lineno = None
+
+    def __enter__(self):
+        self.stop = host.record_warnings()
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb):
+        if self.stop is None:
+            return False
+        caught = self.stop()
+        if exc_type is not None:
+            return False
+        categories = self.category if isinstance(self.category, tuple) else (self.category,)
+        for category, message, line in caught:
+            if issubclass(category, categories) and (self.regex is None or _search(self.regex, message)):
+                self.warning, self.lineno = category(message), line
+                return False
+        names = ", ".join(c.__name__ for c in categories)
+        self.testcase.fail(f"{names} not triggered" + (f" matching {self.regex!r}" if self.regex else ""))
+
+
 class _SubTest:
     def __init__(self, case, message, params):
         self.case = case
@@ -1230,11 +1271,26 @@ class TestCase:
         with context:
             args[0](*args[1:], **kwargs)
 
-    def assertWarns(self, *args, **kwargs):
-        raise NotImplementedError('warning assertions are not supported by the test framework')
+    def assertWarns(self, expected_warning, *args, **kwargs):
+        """A warning of the category is required only where the host
+        supplies HostWarn (18.3); otherwise the code just runs."""
+        context = _AssertWarns(self, expected_warning, None)
+        if not args:
+            return context
+        with context:
+            args[0](*args[1:], **kwargs)
 
-    assertWarnsRegex = assertWarns
-    assertLogs = assertNoLogs = assertWarns
+    def assertWarnsRegex(self, expected_warning, expected_regex, *args, **kwargs):
+        context = _AssertWarns(self, expected_warning, expected_regex)
+        if not args:
+            return context
+        with context:
+            args[0](*args[1:], **kwargs)
+
+    def assertLogs(self, *args, **kwargs):
+        raise NotImplementedError('log assertions are not supported by the test framework')
+
+    assertNoLogs = assertLogs
 
 
 def _test_names(cls):
@@ -1327,6 +1383,88 @@ class unittest:
         return run_tests(namespace)
 
 
+class operator:
+    """Core equivalents of the operator functions ported modules use."""
+    lt = __lt__ = staticmethod(lambda a, b: a < b)
+    le = __le__ = staticmethod(lambda a, b: a <= b)
+    eq = __eq__ = staticmethod(lambda a, b: a == b)
+    ne = __ne__ = staticmethod(lambda a, b: a != b)
+    gt = __gt__ = staticmethod(lambda a, b: a > b)
+    ge = __ge__ = staticmethod(lambda a, b: a >= b)
+    not_ = __not__ = staticmethod(lambda a: not a)
+    truth = staticmethod(lambda a: bool(a))
+    is_ = staticmethod(lambda a, b: a is b)
+    is_not = staticmethod(lambda a, b: a is not b)
+    contains = __contains__ = staticmethod(lambda a, b: b in a)
+    getitem = __getitem__ = staticmethod(lambda a, b: a[b])
+    neg = __neg__ = staticmethod(lambda a: -a)
+    add = __add__ = staticmethod(lambda a, b: a + b)
+    sub = __sub__ = staticmethod(lambda a, b: a - b)
+    mul = __mul__ = staticmethod(lambda a, b: a * b)
+    mod = __mod__ = staticmethod(lambda a, b: a % b)
+    pow = __pow__ = staticmethod(lambda a, b: a ** b)
+
+    @staticmethod
+    def index(a):
+        """ToIndex (7.5.3), which a range applies to its bound."""
+        return range(a).stop
+
+    @staticmethod
+    def setitem(a, b, c):
+        a[b] = c
+
+    @staticmethod
+    def delitem(a, b):
+        del a[b]
+
+
+class random:
+    """A fixed pseudo-random sequence (a linear congruential generator) for
+    the random module functions ported modules use; tests need only
+    varied, reproducible values."""
+    _state = 12345
+
+    @classmethod
+    def seed(cls, value=12345):
+        cls._state = hash(value) % 2 ** 31
+
+    @classmethod
+    def _bits(cls):
+        cls._state = (cls._state * 1103515245 + 12345) % 2 ** 31
+        return cls._state
+
+    @classmethod
+    def randrange(cls, start, stop=None, step=1):
+        if stop is None:
+            start, stop = 0, start
+        width = (stop - start + step - 1) // step
+        if width <= 0:
+            raise ValueError(f"empty range in randrange({start}, {stop})")
+        value, scale = 0, 1
+        while scale < width * 2 ** 31:
+            value = value * 2 ** 31 + cls._bits()
+            scale *= 2 ** 31
+        return start + step * (value % width)
+
+    @classmethod
+    def randint(cls, a, b):
+        return cls.randrange(a, b + 1)
+
+    @classmethod
+    def random(cls):
+        return cls._bits() / 2 ** 31
+
+    @classmethod
+    def choice(cls, seq):
+        return seq[cls.randrange(len(seq))]
+
+    @classmethod
+    def shuffle(cls, items):
+        for i in range(len(items) - 1, 0, -1):
+            j = cls.randrange(i + 1)
+            items[i], items[j] = items[j], items[i]
+
+
 class _NeverEq:
     def __eq__(self, other):
         return False
@@ -1369,8 +1507,27 @@ class _Smallest:
         return True
 
 
+class _BrokenIter:
+    def __init__(self, init_raises=False, next_raises=False, iter_raises=False):
+        if init_raises:
+            1/0
+        self.next_raises = next_raises
+        self.iter_raises = iter_raises
+
+    def __next__(self):
+        if self.next_raises:
+            1/0
+
+    def __iter__(self):
+        if self.iter_raises:
+            1/0
+        return self
+
+
 class support:
     """Core equivalents of the test.support helpers ported modules use."""
+    BrokenIter = _BrokenIter
+    MAX_Py_ssize_t = 2 ** 63 - 1  # the index-size range of Annex D
     NEVER_EQ = _NeverEq()
     ALWAYS_EQ = _AlwaysEq()
     LARGEST = _Largest()
@@ -1393,6 +1550,21 @@ class support:
         host.collect()
 
     @staticmethod
+    def refcount_test(test):
+        """Reference counts are an implementation detail outside PLS-315."""
+        return skip("reference counts are an implementation detail")(test)
+
+    @staticmethod
+    def requires_docstrings(test):
+        """Docstrings are kept at the default optimization level (Annex D)."""
+        return test
+
+    @staticmethod
+    def no_tracing(test):
+        """Tracing is a host facility outside PLS-315."""
+        return test
+
+    @staticmethod
     def cpython_only(test):
         """CPython implementation details are outside PLS-315."""
         return skip("CPython implementation detail")(test)
@@ -1409,13 +1581,27 @@ class support:
     skip_emscripten_stack_overflow = skip_wasi_stack_overflow = skip_if_huge_c_stack
 
     @staticmethod
+    def thread_unsafe(reason=None):
+        """Free-threaded test runs are a host facility outside PLS-315."""
+        return lambda test: test
+
+    @staticmethod
     def infinite_recursion(max_depth=None):
-        """Lower the recursion limit to max_depth frames past the caller's
-        depth (counted through frame objects, 28.3) while the block runs."""
+        """Lower the recursion limit to max_depth frames past the depth at
+        which the block is entered (counted through frame objects, 28.3)
+        while it runs; also usable as a decorator."""
         if max_depth is None:
             max_depth = 20_000
         elif max_depth < 3:
             raise ValueError(f"max_depth must be at least 3, got {max_depth}")
+        return _RecursionLimit(max_depth)
+
+
+class _RecursionLimit:
+    def __init__(self, max_depth):
+        self.max_depth = max_depth
+
+    def __enter__(self):
         try:
             raise SkipTest
         except SkipTest as caught:
@@ -1424,16 +1610,15 @@ class support:
         while frame is not None:
             depth += 1
             frame = frame.f_back
-        return _RecursionLimit(max(depth - 1, 1) + max_depth)
-
-
-class _RecursionLimit:
-    def __init__(self, limit):
-        self.limit = limit
-
-    def __enter__(self):
         self.saved = host.recursion_limit()
-        host.set_recursion_limit(self.limit)
+        host.set_recursion_limit(max(depth - 1, 1) + self.max_depth)
 
     def __exit__(self, *exc):
         host.set_recursion_limit(self.saved)
+
+    def __call__(self, function):
+        def wrapper(*args, **kwargs):
+            with self:
+                return function(*args, **kwargs)
+        wrapper.__name__ = function.__name__
+        return wrapper

@@ -9,8 +9,9 @@
 (* the body ends, with the exception's type, value, and traceback or with  *)
 (* three Nones; a true result suppresses the exception, while the result   *)
 (* is ignored after a normal exit or a return; an exception from __exit__  *)
-(* replaces the body's; and several managers nest, so a later __enter__    *)
-(* that raises reaches the earlier managers' __exit__.                     *)
+(* replaces the body's, and is reported at the with line; and several    *)
+(* managers nest, so a later __enter__ that raises reaches the earlier     *)
+(* managers' __exit__.                                                     *)
 (*                                                                         *)
 (* A single program runs `with M(): BODY` in a function, where M's         *)
 (* __enter__ succeeds, raises ValueError, or is missing; its __exit__      *)
@@ -18,7 +19,8 @@
 (* BODY completes, raises KeyError, or returns. A nested program runs      *)
 (* `with M(), N(): pass` where N's __enter__ raises ValueError and M's     *)
 (* __exit__ returns False or True. Every method logs a word; the outcome   *)
-(* is the log followed by "done", "returned", or the exception's name.     *)
+(* is the log followed by "done", "returned", or the exception's name,    *)
+(* with " at with" when __exit__'s exception is reported at the with line. *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -36,7 +38,7 @@ Single(p) ==
     ELSE IF p.enter = "raise" THEN "enter ValueError"
     ELSE LET raised == p.body = "raise"
              start == "enter body exit:" \o (IF raised THEN "KeyError" ELSE "None") \o " "
-             final == CASE p.exit = "raise" -> "RuntimeError"
+             final == CASE p.exit = "raise" -> "RuntimeError at with"
                         [] raised /\ p.exit = "true" -> "done"
                         [] raised -> "KeyError"
                         [] p.body = "return" -> "returned"
@@ -57,4 +59,8 @@ Done == outcome # Pending
 \* __exit__ runs exactly when __enter__ returned.
 ExitAfterEnter == Done /\ program.part = "single" /\ program.enter = "ok" /\ program.exit # "missing" =>
     outcome # "TypeError" /\ outcome # "enter ValueError"
+
+\* An exception raised by __exit__ is reported at the with statement's line.
+ExitAtWithLine == Done /\ program.part = "single" /\ program.enter = "ok" /\ program.exit = "raise" =>
+    outcome \in {"enter body exit:" \o e \o " RuntimeError at with" : e \in {"None", "KeyError"}}
 =============================================================================

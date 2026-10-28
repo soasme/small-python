@@ -861,3 +861,45 @@
   @prop.setter kept its old name). The cell is now filled last, and both
   read the class dictionary wherever it is kept. Found by porting
   CPython's test_property; compound/class_body_code tests it.
+- Nineteen more CPython test modules are ported to tests/spec/ports in
+  the test262 style, their library imports replaced by core equivalents
+  marked "(Ported)": test_opcodes, test_global, test_raise, test_scope,
+  test_index, test_richcmp, test_dictcomps, test_setcomps, test_bool,
+  test_pow, test_baseexception, test_property, test_slice, test_compare,
+  test_with, test_positional_only_arg, test_super, test_class and
+  test_yield_from. The harness gains core operator and random stand-ins,
+  assertWarns, support.BrokenIter, MAX_Py_ssize_t, thread_unsafe and a
+  decorator form of infinite_recursion.
+- __exit__ (and __aexit__) is called at the line of its with item, so an
+  exception it raises is reported there rather than at the block's last
+  line (PLS-315 15.5.1; compound/with and the With model test it).
+  Found by porting test_with.
+- type has its own __getattribute__, __setattr__ and __delattr__ (10.4.1),
+  and a metaclass's __setattr__ and __delattr__ now run for assignment
+  and deletion on its classes; spy skipped them. object.__setattr__ on a
+  class says "can't apply this __setattr__ to type object". Deleting a
+  nonlocal __class__ leaves the cell empty, so super() says "empty
+  __class__ cell" and reading it names the free variable. The standard
+  also now gives the deletion message for immutable types as CPython's
+  "cannot set ...". datamodel/type_attribute_slots, builtins/super_more
+  and the new ClassAttributeHooks model test it. Found by porting
+  test_super.
+- A special method whose descriptor raises AttributeError is absent for
+  the operations that have a fallback, as CPython's lookup_maybe_method
+  makes it: binary and reflected operators, rich comparisons, in,
+  truth (__bool__, and __len__ behind a defined __bool__), hash, repr,
+  iter, round and __del__. spy raised the AttributeError. Hashing then
+  says "unhashable type", repr gives "<E object at 0x...>", and iter()
+  needs only a __getitem__ in the class to take the sequence protocol.
+  Other exceptions, and every other operation's lookup, still propagate.
+  getattr, setattr, hasattr and delattr accept a str subclass as the
+  name. PLS-315 7.3.2 (LookupSpecialMaybe) and 19.3.11 say so;
+  datamodel/special_lookup_maybe and the SpecialLookup model's new
+  failing-descriptor case test it. Found by porting test_class.
+- yield from delegating to an iterator that is not a generator: an
+  error getting its close (other than AttributeError) is unraisable, so
+  close() still closes the delegator (spy raised it); an error getting
+  its throw propagates from throw() without resuming the delegator, which
+  stays suspended (spy finished it). PLS-315 13.16.3 says so;
+  expressions/yield and the new YieldFromIterator model test it. Found by
+  porting test_yield_from.
