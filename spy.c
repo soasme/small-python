@@ -70,6 +70,9 @@ struct Node {
     Scope *scope;
     SPYValue *code_value;
     SPYValue *constant; /* A numeric literal's value, parsed once at compilation. */
+    size_t name_len; int64_t name_hash; /* A name's length and hash, once computed. */
+    /* A name's place in the last function environment it ran in (local_slot). */
+    Scope *slot_scope; size_t slot_symbol, slot;
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
 struct SPYValue {
@@ -1613,6 +1616,10 @@ static Name name_of(const char *text) {
     size_t len = strlen(text);
     return (Name){text, len, text_hash(text, len)};
 }
+static Name node_name(Node *n) {
+    if (!n->name_len) { n->name_len = strlen(n->text); n->name_hash = text_hash(n->text, n->name_len); }
+    return (Name){n->text, n->name_len, n->name_hash};
+}
 /* The entry stored under name in env's own entries. */
 static Entry *env_find(SPYValue *env, Name name) {
     MapCursor cursor = map_cursor(env, name.hash);
@@ -1880,8 +1887,8 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, Name name) {
 }
 static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
 static int inlined_comprehension(SPYValue *);
-static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) {
-    Name name = name_of(text);
+static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
+    const char *text = name.text;
     int annotation = 1;
     for (SPYValue *e = env; e; e = e->as.map.parent) {
         e = binding_env(c, e, name);
@@ -1897,7 +1904,7 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) {
         if (!v && e->type == V_ENV && e->as.map.scope && e->as.map.scope->kind == S_CLASS) {
             Symbol *symbol = scope_find(e->as.map.scope, name);
             if (symbol && (symbol->flags & S_LOCAL) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)))
-                return name_get(c, module_env(c, e), text);
+                return name_find(c, module_env(c, e), name);
         }
         if (v) {
             if (v->type == V_UNBOUND) {
@@ -1905,7 +1912,7 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) {
                 if (e->type == V_ENV && e->as.map.flags == 1) {
                     /* A class-local name that has not been assigned falls back
                      * to globals, not a same-named enclosing function cell. */
-                    return name_get(c, module_env(c, e), text);
+                    return name_find(c, module_env(c, e), name);
                 }
                 /* List, set, and dict comprehensions are inlined into their
                  * function (PEP 709), so its locals are theirs too. */
@@ -1923,14 +1930,36 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) {
     }
     return name_error(c, text, "name '%s' is not defined");
 }
+static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
+/* The entry of a function local that name node n reads or rebinds in env,
+ * or NULL to take the full path. A plain function environment binds its
+ * locals itself, under their symbols' keys, so an entry holding the
+ * symbol's key is the binding; n remembers the symbol and the entry's
+ * position from the last environment of the same scope. */
+static Entry *local_slot(SPYValue *env, Node *n) {
+    Scope *scope = env->type == V_ENV && !env->as.map.flags && !env->as.map.namespace ? env->as.map.scope : NULL;
+    if (!scope || scope->kind != S_FUNCTION) return NULL;
+    if (n->slot_scope != scope) {
+        Symbol *symbol = scope_find(scope, node_name(n));
+        int local = symbol && (symbol->flags & (S_LOCAL | S_PARAM)) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL));
+        n->slot_scope = scope; n->slot_symbol = local ? (size_t)(symbol - scope->symbols) : SIZE_MAX; n->slot = 0;
+    }
+    SPYValue *key = n->slot_symbol < scope->len ? scope->symbols[n->slot_symbol].key : NULL;
+    if (!key) return NULL;
+    if (n->slot < env->as.map.len && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
+    Entry *entry = env_find(env, node_name(n));
+    if (!entry || entry->key != key) return NULL;
+    n->slot = (size_t)(entry - env->as.map.items);
+    return entry;
+}
 /* The str for name, owned: a symbol's own key when there is a symbol. */
 static SPYValue *name_key(SPYContext *c, Name name, Symbol *symbol) {
     if (!symbol) return spy_string(c, name.text, name.len);
     if (!symbol->key) symbol->key = spy_string(c, name.text, name.len);
     return spy_retain(symbol->key);
 }
-static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v) {
-    Name name = name_of(text);
+static int name_bind(SPYContext *c, SPYValue *env, Name name, SPYValue *v) {
+    const char *text = name.text;
     if (env->type == SPY_CLASS && class_slot_name(text)) {
         if (!env->as.map.class_cell && !(env->as.map.class_cell = value_new(c, SPY_DICT))) return -1;
         env = env->as.map.class_cell;
@@ -1962,6 +1991,7 @@ static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v)
     spy_release(key);
     return status;
 }
+static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v) { return name_bind(c, env, name_of(text), v); }
 SPYValue *spy_get_global(SPYContext *c, const char *name) { return name_get(c, c->globals, name); }
 int spy_set_global(SPYContext *c, const char *name, SPYValue *v) {
     return same_context(c, v) ? name_set(c, c->globals, name, v) : -1;
@@ -12903,7 +12933,11 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     case N_NONE: return spy_none(c);
     case N_ELLIPSIS: return spy_retain(c->ellipsis);
     case N_BOOL: return spy_bool(c, n->op);
-    case N_NAME: return !strcmp(n->text, "__debug__") ? spy_bool(c, 1) : name_get(c, f->env, n->text);
+    case N_NAME: {
+        Entry *local = local_slot(f->env, n);
+        if (local && local->value->type != V_UNBOUND) return spy_retain(local->value);
+        return !strcmp(n->text, "__debug__") ? spy_bool(c, 1) : name_find(c, f->env, node_name(n));
+    }
     case N_SLICE: {
         a = n->a ? eval(c, f, n->a) : spy_none(c);
         if (a) b = n->b ? eval(c, f, n->b) : spy_none(c);
@@ -14550,7 +14584,14 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
 }
 static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     if (tick(c, f, n)) return -1;
-    if (n->kind == N_NAME) return name_set(c, f->env, n->text, value);
+    if (n->kind == N_NAME) {
+        Entry *local = local_slot(f->env, n);
+        if (!local) return name_bind(c, f->env, node_name(n), value);
+        SPYValue *old = local->value;
+        local->value = spy_retain(value);
+        spy_release(old);
+        return 0;
+    }
     if (n->kind == N_ATTR) {
         SPYValue *object = eval(c, f, n->a);
         if (!object) return -1;
