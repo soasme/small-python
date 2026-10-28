@@ -798,11 +798,13 @@ count. Context teardown frees remaining cycles regardless of collection timing.
 
 ### 3.5 Python binding
 
-The `small-python` package (in `python/`, imported as `small_python`) embeds
-the engine in CPython 3.13 or later as the extension module
-`small_python._core`, compiled from `spy.c`, `spy-std.c`, and the binding
-(`python/src/small_python/_core.c`). It lets Python programs run Small Python
-code and inject Python functions as host functions. Its user documentation is
+The `small-python` package (in `python/`, imported as `small_python`) runs
+the engine from CPython 3.10 or later. It links no C into CPython: each
+`Runtime` starts a worker process, `spy-worker`, built from `spy-worker.c`,
+`spy.c`, and `spy-std.c`, and speaks to it over pipes with the protocol of
+[packaging/protocol.md](packaging/protocol.md). An engine crash ends only the
+worker and raises `small_python.WorkerError`. The package is specified in
+[packaging/python.md](packaging/python.md); its user documentation is
 [python/docs](../python/docs/README.md).
 
 ```sh
@@ -813,7 +815,7 @@ make test-binding
 ```python
 import small_python
 
-with small_python.Runtime(step_limit=1_000_000) as rt:
+with small_python.Runtime(step_limit=1_000_000, memory_limit=64 << 20, timeout=5) as rt:
     @rt.function
     def fetch(key, *, default=None):
         return {"answer": 42}.get(key, default)
@@ -823,24 +825,29 @@ with small_python.Runtime(step_limit=1_000_000) as rt:
     print(rt.eval("twice(fetch('answer'))"))  # 84
 ```
 
-`Runtime(*, std=True, step_limit=0, output=None, loader=None)` owns one
-context. `std` registers the standard layer; `output` receives printed text
-(default `sys.stdout.write`); `loader` maps a module name to source or `None`.
-Its methods are `eval(source, filename)` (the last expression's value),
-`exec`, `call(function_or_global_name, *args, **kwargs)`, `define(name, f)`
-and the `function` decorator, `register_module(name, members, source)` (built
-on `spy_new_module`), `mount(directory, path=None, *, read_only=False)` (no
-directory is mounted by default), `collect`, and `close`; `rt[name]` reads, assigns, and
-deletes globals. A runtime is a context manager.
+`Runtime(*, std=True, step_limit=0, memory_limit=0, timeout=None,
+output=None, loader=None, message_limit=64 << 20)` owns one context in one
+worker. `std` registers the standard layer; `memory_limit` bounds the bytes
+the engine allocates (`MemoryError` beyond it); `timeout` bounds the seconds
+one operation runs in the worker, after which the worker is terminated and
+`small_python.Timeout` raised; `output` receives printed text (default
+`sys.stdout.write`); `loader` maps a module name to source or `None`. Its
+methods are `eval(source, filename)` (the last expression's value), `exec`,
+`call(function_or_global_name, *args, **kwargs)`, `define(name, f)` and the
+`function` decorator, `register_module(name, members, source)` (built on
+`spy_new_module`), `mount(directory, path=None, *, read_only=False)` (no
+directory is mounted by default), `collect`, and `close`; `rt[name]` reads,
+assigns, and deletes globals. A runtime is a context manager.
 
 Values cross the boundary by copy when they are `None`, `bool`, `int`
 (any size), `float`, `complex`, `str`, `bytes`, `bytearray`, `list`, `tuple`,
-`dict`, `set`, or `frozenset`. Python callables become native functions that
-keep a reference to the callable and receive keyword arguments; other engine
-values come back as `small_python.Object`, which forwards calls, attributes,
-items, `len`, `in`, iteration, comparisons, hashing, `repr`, `str`, `dir`, and
-truth to the engine and stops working once its runtime closes. Other Python
-objects are rejected with `TypeError`.
+`dict`, `set`, or `frozenset` (from the engine, only exact instances of those
+types). Python callables become native functions that keep a reference to the
+callable and receive keyword arguments; other engine values come back as
+`small_python.Object`, a handle the worker holds, which forwards calls,
+attributes, items, `len`, `in`, iteration, comparisons, hashing, `repr`,
+`str`, `dir`, and truth to the engine and stops working once its runtime
+closes. Other Python objects are rejected with `TypeError`.
 
 An engine exception reaches Python as `small_python.Error` with `type`,
 `message`, `exception` (the engine object), `filename`, and `lineno`. A Python
@@ -849,8 +856,8 @@ the nearest builtin class name in its MRO (else `RuntimeError`) and the same
 `args`, and is the `__cause__` of the `Error` if nothing handles it; an `Error`
 passing back through a host function re-raises its original exception. Host
 functions cannot call `eval`, `exec`, or `close` on their own runtime; they may
-call engine functions they receive. One runtime must not be used from two
-threads at once; while a host function runs, other threads are refused.
+call engine functions they receive. A runtime belongs to one thread at a time;
+other threads are refused while it runs.
 
 ## 4 Internals
 

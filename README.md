@@ -92,8 +92,10 @@ handling, and the [manual](docs/manual.md#34-c-api) for the full API.
 
 ## From Python
 
-The [`small_python`](python/docs/README.md) package runs Small Python inside
-CPython. Each runtime is a separate interpreter that sees only what you give it:
+The [`small_python`](python/docs/README.md) package runs Small Python from
+CPython. Each runtime is a separate interpreter, in a worker process of its
+own, that sees only what you give it; an engine crash raises an exception
+instead of taking your program down:
 
 ```sh
 pip install small-python

@@ -2,23 +2,29 @@
 
 ```python
 import small_python
-from small_python import Runtime, Object, Error, SPY_VERSION
+from small_python import Runtime, Object, Error, WorkerError, Timeout, SPY_VERSION
 ```
 
 ## `Runtime`
 
 ```python
-Runtime(*, std=True, step_limit=0, output=None, loader=None)
+Runtime(*, std=True, step_limit=0, memory_limit=0, timeout=None,
+        output=None, loader=None, message_limit=64 << 20)
 ```
 
-An independent engine context with its own globals and modules.
+An independent engine context with its own globals and modules, running in
+its own worker process. Creating one starts the worker; `WorkerError` if it
+cannot start.
 
 | Argument | Meaning |
 |---|---|
-| `std` | Register the standard modules (`sys`, `gc`, `weakref`, `collections`, `itertools`, `types`, `_thread`, `_typing`). |
+| `std` | Register the standard modules (`sys`, `gc`, `weakref`). |
 | `step_limit` | Maximum evaluation steps, counted from the start of each `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. Must be `>= 0`. |
+| `memory_limit` | Bytes the engine may hold allocated; `0` is unlimited. Exceeding it raises `MemoryError` in the engine, which code can catch; the runtime keeps working. |
+| `timeout` | Seconds one operation may run in the worker, or `None`. Time spent in host functions, `output`, and `loader` does not count. Exceeding it terminates the worker and raises `Timeout`. |
 | `output` | Callable receiving each piece of printed text; `None` writes to `sys.stdout`. |
 | `loader` | Callable mapping a module name to its source `str`, or `None` when there is no such module. |
+| `message_limit` | Largest message between the runtime and its worker, in bytes. A value too large to send raises `ValueError` (from Python) or `OverflowError` (in the engine). |
 
 ### Running code
 
@@ -49,9 +55,10 @@ An independent engine context with its own globals and modules.
 ### Lifetime
 
 - `collect()`: Run the cycle collector; returns the number of values freed.
-- `close()`: Free the engine context. Every `Object` from this runtime stops working.
+- `close()`: End the worker. Every `Object` from this runtime stops working.
   Calling it again does nothing.
-- `closed`: `True` after `close()`.
+- `closed`: `True` after `close()`, or once the worker is lost.
+- `version`: The engine version reported by the worker.
 
 A runtime is a context manager; leaving the `with` block calls `close()`.
 Closing also drops the runtime's references to host functions, module
@@ -98,6 +105,20 @@ Other engine exceptions, and any exception from a call, raise `Error`.
 Deleting attributes or items is not supported (`TypeError`). After the runtime
 closes, every operation except `repr` raises `RuntimeError`.
 
+## `WorkerError` and `Timeout`
+
+`WorkerError` (a `RuntimeError`) means the worker is gone: it crashed, it sent
+something the protocol does not allow, or it was terminated. `returncode` is
+its exit status (negative for a signal), or `None`. The runtime is then
+closed; every later operation, including those of its `Object`s, raises
+`WorkerError` again. Its state is lost: make a new `Runtime`.
+
+`Timeout` (a `WorkerError` and a `TimeoutError`) means an operation ran past
+`timeout`.
+
+A `KeyboardInterrupt` that arrives while the runtime waits for its worker
+terminates the worker and propagates.
+
 ## `Error`
 
 Subclass of `Exception` raised when an exception escapes the engine.
@@ -130,20 +151,23 @@ arguments, return values, globals, module members, and exception arguments.
 | `int` | `int` | any size |
 | `float`, `complex` | same | |
 | `str`, `bytes`, `bytearray` | same | copied |
-| `list`, `tuple`, `dict`, `set`, `frozenset` | same | copied recursively; at most 200 levels deep |
+| `list`, `tuple`, `dict`, `set`, `frozenset` | same | copied recursively; at most 200 levels deep (`RecursionError`) |
 | callable | native function | keeps a reference to the callable; receives positional and keyword arguments |
 | `Object` | the wrapped value | must belong to the same runtime, else `ValueError` |
 | anything else | | `TypeError` |
 
-From the engine, the types in the first five rows come back as the same Python
-type; every other value (functions, classes, instances, iterators, modules,
-...) comes back as an `Object`. A Python callable passed in and read back
+Python subclasses of these types convert as their base type. From the
+engine, values whose type is exactly one of the first five rows come back as
+the same Python type; every other value (functions, classes, instances,
+iterators, modules, and instances of subclasses such as a `dict` subclass)
+comes back as an `Object`. An engine value nested more than 200 levels deep
+raises `Error` of type `RecursionError`. A Python callable passed in and read back
 returns as an `Object` wrapping the native function, not the original
 callable.
 
 ## Module constants
 
-- `SPY_VERSION`: Version of the engine compiled into the package.
+- `SPY_VERSION`: Version of the engine bundled with the package.
 - `__version__`: Version of the `small-python` distribution.
 
-The package ships type information (`py.typed` and `_core.pyi`).
+The package ships type information (`py.typed` and `_runtime.pyi`).

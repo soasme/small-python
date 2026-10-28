@@ -26,44 +26,63 @@ exception: the engine can call it with any arguments.
 
 ## Bounding execution
 
-`Runtime(step_limit=n)` stops evaluation after about `n` steps (evaluated
-syntax nodes plus loop and iterator work) with a `RuntimeError`. The count
-restarts at each `eval` or `exec`; calls made with `call()` or through an
-`Object` add to the current count. Zero, the default, means no limit.
+| Limit | Argument | When exceeded | Runtime survives |
+|---|---|---|---|
+| Steps | `step_limit=n` | `RuntimeError` in the engine | yes |
+| Memory | `memory_limit=bytes` | `MemoryError` in the engine | yes |
+| Recursion | engine's own | `RecursionError` in the engine | yes |
+| Time | `timeout=seconds` | worker terminated, `Timeout` raised | no |
+| Message size | `message_limit=bytes` | the value is refused | yes |
+
+`step_limit` counts evaluated syntax nodes plus loop and iterator work. The
+count restarts at each `eval` or `exec`; calls made with `call()` or through
+an `Object` add to the current count. It does not count allocation:
+`'x' * 10**9` takes few steps, which is what `memory_limit` is for.
+
+`timeout` is wall-clock time per operation spent in the worker. Time inside
+your host functions, `output`, and `loader` is yours and does not count.
+Because a timeout kills the worker, the runtime's state is lost; prefer
+`step_limit` for a recoverable bound and `timeout` as the backstop.
 
 ```python
-from small_python import Error, Runtime
+from small_python import Error, Runtime, Timeout
 
-with Runtime(step_limit=1_000_000) as rt:
+with Runtime(step_limit=1_000_000, memory_limit=64 << 20, timeout=5) as rt:
     try:
         rt.exec("while True:\n    pass")
     except Error as e:
         print(e)   # RuntimeError: execution step limit exceeded
 ```
 
-The step limit is not a memory quota or a wall-clock timeout, and it does not
-interrupt a host function while it runs. Code can still allocate large values
-(`'x' * 10**9`) in few steps.
+## Isolation
 
-## Not an isolation boundary
+Each runtime runs the engine in its own `spy-worker` process, speaking a
+message protocol over pipes. If the engine crashes, whether from a bug or from
+code that exploits one, the worker dies and the runtime raises `WorkerError`;
+your process continues. Your process treats the worker as hostile: it checks
+every message, terminates the worker at the first malformed one, and never
+evaluates anything the worker sends.
 
-Small Python is experimental. The engine runs in your process, and a bug in it
-(or in a host function) can crash or compromise that process. Do not treat a
-runtime as a security sandbox for hostile code. For code that may be
-malicious, also run it in a separate process with OS-level limits: a
-container, `seccomp`/`sandbox-exec`, `resource.setrlimit` for memory and CPU
-time, and a timeout enforced by the parent.
+The worker starts with an empty environment, the root directory as working
+directory, no open files but its pipes and stderr, and in its own process
+group. It exits when your process exits. Separate runtimes are separate
+processes and cannot affect each other.
+
+What the process boundary does not do yet is restrict the worker's operating
+system privileges: a worker taken over by an exploit runs as your user. An OS
+sandbox for the worker (seccomp and Landlock on Linux, the sandbox profile on
+macOS) is planned. Until then, for code that may be malicious, also run your
+program in a container or a dedicated low-privilege account.
 
 ## Threads
 
-A runtime must not be used from two threads at once. While a host function
-runs, the binding refuses calls into its runtime from other threads with
-`RuntimeError`; other overlapping use is not detected. Separate runtimes are
-independent and may be used from different threads, one thread each.
+A runtime belongs to one thread at a time: while an operation runs, calls from
+any other thread raise `RuntimeError`. Separate runtimes are independent and
+may be used from different threads at once.
 
 ## Interrupting
 
-The engine does not check for signals, so Ctrl-C does not stop a running
-`eval` until it calls a host function or finishes. Use `step_limit` to bound
-code that may not finish. A `KeyboardInterrupt` raised in a host function
-propagates to your code.
+Ctrl-C reaches your process, not the worker. A `KeyboardInterrupt` that
+arrives while a runtime waits for its worker terminates the worker and
+propagates; the runtime is then closed. A `KeyboardInterrupt` raised inside a
+host function is an ordinary host exception and reaches engine code.

@@ -90,9 +90,9 @@ host function is re-raised as itself.
 
 `register_module(name, members=None, source=None)` makes `import name` work in
 the engine. `members` is a dict of attribute names to values (functions,
-constants, or plain data); `source` is Python code run in the module's
-namespace after the members are set, so it can use them. The module is built on
-its first import.
+constants, or plain data), converted when you call it; `source` is Python
+code run in the module's namespace after the members are set, so it can use
+them. The module is built on its first import.
 
 ```python
 from small_python import Runtime
@@ -146,8 +146,7 @@ Without a loader, importing anything else raises `ModuleNotFoundError`.
 ### Standard modules
 
 `Runtime(std=True)` (the default) registers the engine's standard modules:
-`sys`, `gc`, `weakref`, `collections`, `itertools`, `types`, `_thread`, and
-`_typing`. Pass `std=False` for a runtime with only builtins. Other library
+`sys`, `gc`, and `weakref`. Pass `std=False` for a runtime with only builtins. Other library
 modules (`json`, `re`, `math`, ...) are not part of the engine; provide them
 with `register_module` or a loader if code needs them.
 
@@ -155,7 +154,8 @@ with `register_module` or a loader if code needs them.
 
 `print` writes to `sys.stdout` of the host process by default. Pass
 `output=` to receive the text instead; it is called with each piece of text
-as it is printed.
+as it is printed. If it raises, the exception is reported with
+`sys.unraisablehook` and the engine's `print` raises `OSError`.
 
 ```python
 from small_python import Runtime

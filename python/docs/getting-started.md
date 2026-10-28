@@ -14,13 +14,14 @@ The distribution is named `small-python`; the import name is `small_python`.
 import small_python
 
 print(small_python.__version__)   # version of the package, e.g. 0.0.1
-print(small_python.SPY_VERSION)   # version of the engine compiled into it
+print(small_python.SPY_VERSION)   # version of the engine bundled with it
 ```
 
 ## Create a runtime
 
-A `Runtime` owns one engine context. Use it as a context manager so the engine
-is freed when you are done, or call `close()` yourself.
+A `Runtime` owns one engine context, running in a worker process of its own.
+Use it as a context manager so the worker ends when you are done, or call
+`close()` yourself.
 
 ```python
 from small_python import Runtime
