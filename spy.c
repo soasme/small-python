@@ -76,6 +76,9 @@ struct Node {
      * found under in a dictionary (name_fast); global_key is traced. */
     Scope *slot_scope; size_t slot_symbol, slot;
     SPYValue *global_key; size_t global_slot;
+    /* How an attribute read answers for instances of attr_class while
+     * classes_changed is attr_epoch (node_attribute); all borrowed. */
+    SPYValue *attr_class, *attr_method; size_t attr_epoch; int attr_kind;
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
 struct SPYValue {
@@ -8799,6 +8802,10 @@ static SPYValue *bound_method(SPYContext *c, SPYValue *self, int method) {
 static int extend_display(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *inplace(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *sort_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+/* Whether every change to cls's own entries bumps classes_changed. */
+static int class_watched(SPYValue *cls) {
+    return cls->type == SPY_CLASS && (!cls->as.map.namespace || cls->as.map.namespace->watched);
+}
 static SPYValue *class_lookup(SPYValue *cls, const char *name) {
     if (cls && cls->as.map.mro) {
         SPYContext *c = cls->ctx;
@@ -8812,7 +8819,7 @@ static SPYValue *class_lookup(SPYValue *cls, const char *name) {
         int cacheable = len < sizeof(hit->name) && !class_slot_name(name);
         for (size_t i = 0; i < mro->as.seq.len && !value; i++) {
             SPYValue *base = mro->as.seq.items[i];
-            cacheable = cacheable && base->type == SPY_CLASS && (!base->as.map.namespace || base->as.map.namespace->watched);
+            cacheable = cacheable && class_watched(base);
             value = name_local(base, name);
         }
         if (cacheable) {
@@ -9555,7 +9562,7 @@ static SPYValue *docstring(SPYContext *c, Node *body) {
     return result;
 }
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
-    if (!strcmp(name, "__class__") && v->type != SPY_INSTANCE) return spy_retain(value_class(c, v));
+    if (v->type != SPY_INSTANCE && !strcmp(name, "__class__")) return spy_retain(value_class(c, v));
     if ((v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD) && !strcmp(name, "__module__")) {
         SPYValue **slot = builtin_module_slot(v);
         if (slot && *slot) return spy_retain(*slot);
@@ -10160,6 +10167,43 @@ static int default_hook(SPYValue *definition, int object_id, int type_id) {
     if (definition->type != SPY_NATIVE || definition->as.native.call != builtin) return 0;
     intptr_t id = (intptr_t)definition->as.native.data;
     return id == object_id || id == type_id;
+}
+/* An instance of a plain object layout, its attributes in its own entries. */
+static int plain_instance(SPYValue *v) {
+    return v->type == SPY_INSTANCE && !v->as.map.namespace && !v->as.map.base;
+}
+enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD };
+/* How cls's plain instances answer a read of name: from their own entries
+ * (ATTR_OWN), else by binding the Python function *method (ATTR_METHOD),
+ * or only by the full lookup (ATTR_SLOW). The answer holds while
+ * classes_changed does: every class in the MRO is watched, and none is a
+ * builtin class whose slots could precede the class entries. */
+static int instance_read(SPYContext *c, SPYValue *cls, const char *name, SPYValue **method) {
+    SPYValue *mro = cls->as.map.mro, *hook;
+    if (!mro || (name[0] == '_' && name[1] == '_')) return ATTR_SLOW;
+    for (size_t i = 0; i < mro->as.seq.len; i++) {
+        SPYValue *base = mro->as.seq.items[i];
+        if (!class_watched(base) || (base != c->object && (base->as.map.native || base->as.map.flags == 2))) return ATTR_SLOW;
+    }
+    if ((hook = class_lookup(cls, "__getattribute__")) && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) return ATTR_SLOW;
+    if (!(*method = class_lookup(cls, name))) return class_lookup(cls, "__getattr__") ? ATTR_SLOW : ATTR_OWN;
+    return (*method)->type == SPY_FUNCTION ? ATTR_METHOD : ATTR_SLOW;
+}
+/* The attribute node n read from v, with n remembering how v's class answers. */
+static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
+    if (plain_instance(v)) {
+        SPYValue *cls = v->as.map.parent;
+        if (cls != n->attr_class || n->attr_epoch != c->classes_changed) {
+            n->attr_kind = instance_read(c, cls, n->b->text, &n->attr_method);
+            n->attr_class = cls; n->attr_epoch = c->classes_changed;
+        }
+        if (n->attr_kind != ATTR_SLOW) {
+            Entry *e = env_find(v, node_name(n->b));
+            if (e) return spy_retain(e->value);
+            if (n->attr_kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, cls);
+        }
+    }
+    return attribute(c, v, n->b->text);
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
@@ -13100,7 +13144,7 @@ container_fail:
         break;
     case N_ATTR:
         a = eval(c, f, n->a);
-        if (a) { relocate(c, n); result = attribute(c, a, n->b->text); }
+        if (a) { relocate(c, n); result = node_attribute(c, a, n); }
         break;
     case N_CALL: {
         a = eval(c, f, n->a);
@@ -18311,7 +18355,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_INDEX:
             b = machine_pop(m); a = machine_pop(m); machine_push(c, m, get_index(c, a, b)); break;
         case BC_ATTR:
-            a = machine_pop(m); machine_push(c, m, attribute(c, a, n->b->text)); break;
+            a = machine_pop(m); machine_push(c, m, node_attribute(c, a, n)); break;
         case BC_COMPARE:
             b = machine_pop(m); a = machine_pop(m); value = comparison(c, n->op, a, b);
             if (value && ins->arg && spy_truth(value)) { spy_release(value); value = spy_retain(b); }
