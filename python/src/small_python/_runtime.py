@@ -130,15 +130,18 @@ class Runtime:
         data = wire.message(kind, fields, self._reference)
         if len(data) - 4 > self._message_limit:
             raise ValueError("message exceeds the limit")
-        done = False
+        # Anything that interrupts the exchange before the reply has arrived
+        # (KeyboardInterrupt, a timeout) leaves the worker mid-turn: lose it.
+        reader = None
         try:
             self._send(data)
-            reply, value = self._await_reply()
-            done = True
+            reader = self._await_reply()
         finally:
-            if not done:
+            if reader is None:
                 self._lose(WorkerError("the worker was terminated while it was running"))
-        if reply == wire.RAISE:
+        value = self._decode(reader, 1)[0]
+        if reader.data[0] == wire.RAISE:
+            self._check_error(value)
             raise self._engine_error(value)
         return value
 
@@ -146,22 +149,20 @@ class Runtime:
         while True:
             reader = self._receive()
             kind = reader.data[0]
-            if kind in (wire.HOST, wire.LOAD, wire.OUTPUT):
-                self._serve(kind, reader)
-                continue
-            if kind not in (wire.RESULT, wire.RAISE):
+            if kind in (wire.RESULT, wire.RAISE):
+                return reader
+            if kind not in (wire.HOST, wire.LOAD, wire.OUTPUT):
                 raise self._violation(f"unexpected message kind {kind:#x}")
-            value = self._decode(reader, 1)[0]
-            if kind == wire.RAISE:
-                self._check_error(value)
-            return kind, value
+            self._serve(kind, reader)
 
     # The stream.
 
     def _send(self, data):
         if self._released:
-            ids, self._released[:] = tuple(self._released), []
-            self._write(wire.message(wire.RELEASE, (ids,), self._reference))
+            ids = []
+            while self._released:  # pop is atomic; Objects may be collected meanwhile
+                ids.append(self._released.pop())
+            self._write(wire.message(wire.RELEASE, (tuple(ids),), self._reference))
         self._write(data)
 
     def _write(self, data):
@@ -188,8 +189,9 @@ class Runtime:
         if self._deadline is None:
             return
         remaining = self._deadline - time.monotonic()
-        ready = select.select([], [fd], [], max(remaining, 0)) if write else select.select([fd], [], [], max(remaining, 0))
-        if not any(ready):
+        poll = select.poll()
+        poll.register(fd, select.POLLOUT if write else select.POLLIN)
+        if not poll.poll(max(remaining, 0) * 1000):
             raise self._lose(Timeout(f"the operation exceeded the timeout of {self._timeout} seconds"))
 
     def _receive(self):
@@ -295,6 +297,13 @@ class Runtime:
     # Host callbacks (worker requests).
 
     def _serve(self, kind, reader):
+        try:
+            self._dispatch(kind, reader)
+        except _Unconvertible as e:
+            # The request was read whole; the engine gets the conversion error.
+            self._send(wire.message(wire.RAISE, (self._failure_of(e.__cause__),), self._reference))
+
+    def _dispatch(self, kind, reader):
         if kind == wire.HOST:
             fid, args, kwargs = self._decode_fields(reader, 3)
             function = self._functions.get(fid) if type(fid) is int else None
@@ -336,7 +345,7 @@ class Runtime:
         except WorkerError:
             raise
         except Exception as e:
-            raise self._violation(f"unconvertible request: {e}") from None
+            raise _Unconvertible from e
 
     def _load(self, name):
         if self._loader is None:
@@ -494,9 +503,12 @@ class Object:
         raise TypeError("Object values come from a Runtime")
 
     def __del__(self):
-        runtime = object.__getattribute__(self, "_runtime")
-        if not runtime.closed:
-            runtime._released.append(object.__getattribute__(self, "_id"))
+        try:
+            runtime = object.__getattribute__(self, "_runtime")
+            if not runtime.closed:
+                runtime._released.append(object.__getattribute__(self, "_id"))
+        except Exception:  # a half-built Object, or interpreter shutdown
+            pass
 
     def _op(self, op, *operands, key=None):
         runtime = object.__getattribute__(self, "_runtime")
@@ -585,6 +597,10 @@ class Object:
     def __call__(self, *args, **kwargs):
         runtime = object.__getattribute__(self, "_runtime")
         return runtime._run(wire.CALL, self, args, kwargs)
+
+
+class _Unconvertible(Exception):
+    """A request whose values decoded but could not be built."""
 
 
 class _Named:

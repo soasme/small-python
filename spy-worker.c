@@ -186,6 +186,24 @@ static void put_text(Buffer *b, int tag, const char *s, size_t n) {
     put(b, s, n);
 }
 static void put_str(Buffer *b, const char *s) { put_text(b, 's', s, strlen(s)); }
+/* Engine C strings (error details) live in fixed buffers that may cut a
+ * character short; send the bytes up to the first sequence that is not UTF-8
+ * (lone surrogates included, as the protocol allows). */
+static void put_c_text(Buffer *b, const char *text) {
+    const unsigned char *s = (const unsigned char *)text;
+    size_t n = 0;
+    while (s[n]) {
+        unsigned char c = s[n];
+        size_t len = c < 0x80 ? 1 : c >= 0xC2 && c < 0xE0 ? 2 : c >= 0xE0 && c < 0xF0 ? 3 : c >= 0xF0 && c < 0xF5 ? 4 : 0;
+        int valid = len != 0;
+        for (size_t i = 1; valid && i < len; i++) valid = (s[n + i] & 0xC0) == 0x80;
+        if (valid && len == 3) valid = c != 0xE0 || s[n + 1] >= 0xA0;
+        if (valid && len == 4) valid = (c != 0xF0 || s[n + 1] >= 0x90) && (c != 0xF4 || s[n + 1] < 0x90);
+        if (!valid) break;
+        n += len;
+    }
+    put_text(b, 's', text, n);
+}
 static void put_int(Buffer *b, int64_t n) { put_byte(b, 'i'); put_u64(b, (uint64_t)n); }
 static void begin(Buffer *b, int kind) { b->len = 0; put_u32(b, 0); put_byte(b, kind); }
 static int over_limit(const Buffer *b) { return b->len - 4 > message_limit || b->len - 4 > UINT32_MAX; }
@@ -503,9 +521,9 @@ static void send_raise(void) {
     Buffer b = {0};
     begin(&b, RAISE);
     put_byte(&b, 'd'); put_u32(&b, 6);
-    put_str(&b, "type"); put_str(&b, spy_error_type(c));
-    put_str(&b, "message"); put_str(&b, spy_error_display(c));
-    put_str(&b, "filename"); put_str(&b, spy_error_filename(c));
+    put_str(&b, "type"); put_c_text(&b, spy_error_type(c));
+    put_str(&b, "message"); put_c_text(&b, spy_error_display(c));
+    put_str(&b, "filename"); put_c_text(&b, spy_error_filename(c));
     put_str(&b, "line"); put_int(&b, (int64_t)spy_error_line(c));
     put_str(&b, "exception");
     if (exception) { put_byte(&b, 'h'); put_u64(&b, handle_new(exception)); }
