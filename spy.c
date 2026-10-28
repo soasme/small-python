@@ -14011,7 +14011,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         /* object.__new__ then a Python __init__, called directly. */
         SPYValue *args[8], *value;
         if (!(args[0] = result = new_instance(c, fn))) return NULL;
-        memcpy(args + 1, argv, argc * sizeof(*argv));
+        for (size_t i = 0; i < argc; i++) args[i + 1] = argv[i];
         value = call_keywords(c, plain, argc + 1, args, keywords);
         if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
         spy_release(value);
