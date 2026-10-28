@@ -19198,6 +19198,39 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
     return sub ? recursive_issubclass(c, a, target) : object_isinstance(c, a, target);
 }
 typedef struct { SPYValue *value, *key; } SortItem;
+/* a < b for exact small ints, floats or strs of one type: 1 or 0, or -1
+ * when the pair is of other kinds. */
+static int plain_less(SPYValue *a, SPYValue *b) {
+    if (a->type != b->type) return -1;
+    if (a->type == SPY_INT) return a->as.integer_data.big || b->as.integer_data.big ? -1 : a->as.integer_data.small < b->as.integer_data.small;
+    if (a->type == SPY_FLOAT) return a->as.real < b->as.real;
+    if (a->type != SPY_STRING) return -1;
+    size_t n = a->as.string.len < b->as.string.len ? a->as.string.len : b->as.string.len;
+    int order = memcmp(a->as.string.data, b->as.string.data, n);
+    return order ? order < 0 : a->as.string.len < b->as.string.len;
+}
+/* Whether sort key a orders before b. Plain values, and tuples or lists of
+ * them, which no callback can change, compare directly. */
+static int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
+    int less = plain_less(a, b);
+    if (less >= 0) return less;
+    if ((a->type == SPY_TUPLE || a->type == SPY_LIST) && a->type == b->type) {
+        size_t i = 0, n = a->as.seq.len < b->as.seq.len ? a->as.seq.len : b->as.seq.len;
+        for (; i < n; i++) {
+            SPYValue *x = a->as.seq.items[i], *y = b->as.seq.items[i];
+            if (x == y) continue;
+            if ((less = plain_less(x, y)) < 0) break;
+            /* The first unequal items decide; NaN equals nothing. */
+            int same = x->type == SPY_FLOAT ? x->as.real == y->as.real : !less && !plain_less(y, x);
+            if (!same) return less;
+        }
+        if (i == n) return a->as.seq.len < b->as.seq.len;
+    }
+    SPYValue *value = comparison(c, '<', a, b);
+    less = value ? spy_truth(value) : 0;
+    spy_release(value);
+    return less;
+}
 static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) {
     size_t len = list->as.seq.len;
     if (len > SIZE_MAX / sizeof(SortItem)) { spy_error(c, "MemoryError", "list too large to sort"); return -1; }
@@ -19222,11 +19255,7 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
             size_t left = start, right = mid;
             for (size_t out = start; out < end; out++) {
                 int take_right = left == mid;
-                if (left < mid && right < end && !c->error_type[0]) {
-                    SPYValue *less = comparison(c, '<', items[right].key, items[left].key);
-                    if (less) take_right = spy_truth(less);
-                    spy_release(less);
-                }
+                if (left < mid && right < end && !c->error_type[0]) take_right = sort_less(c, items[right].key, items[left].key);
                 scratch[out] = take_right && right < end ? items[right++] : items[left++];
             }
         }
