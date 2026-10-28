@@ -115,6 +115,8 @@ export class Runtime {
   }
 
   async _start(std) {
+    if (typeof SharedArrayBuffer !== "function")
+      throw new WorkerError("SharedArrayBuffer is unavailable; a browser page must be cross-origin isolated");
     const module = await compile();
     this._inbox = new SharedArrayBuffer(8 + INBOX);
     this._control = new Int32Array(this._inbox, 0, 2);

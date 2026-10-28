@@ -39,6 +39,7 @@ small_python/
   __init__.py      Runtime, Object, Error, WorkerError, Timeout, versions
   _wire.py         value codec and message framing (protocol.md §3–§4)
   _runtime.py      the parent side: turns, handles, host callbacks
+  _runtime.pyi     types
   spy-worker       the worker executable for this platform
   py.typed
 ```
@@ -250,8 +251,9 @@ Changed:
 5. Engine values nested too deeply to convert raise `Error` of type
    `RecursionError` rather than Python's `RecursionError`.
 6. Overlapping use from two threads is always detected.
-7. Each operation is a message round trip (tens of microseconds) and each
-   runtime a process (about a millisecond to start).
+7. Each operation is a message round trip and each runtime a process. On an
+   Apple M-series Mac with `-O2`, a round trip (`eval("1")`) takes about
+   15 µs and starting and closing a runtime about 4 ms.
 8. `SPY_VERSION` is read from the bundled worker (`spy-worker --version`) on
    first access.
 
@@ -276,10 +278,12 @@ API tests:
 
 1. a worker killed by `SIGSEGV`, `SIGABRT`, and `SIGKILL` mid-operation raises
    `WorkerError` with the status, and the runtime stays lost;
-2. a parent fed malformed messages by a fake worker (bad tag, over-long
-   length, unknown function id, unknown handle, truncated stream, deep
-   nesting, invalid UTF-8, non-canonical `I`) terminates it and raises
-   `WorkerError`, without hanging or raising anything else;
+2. a parent fed malformed messages by a fake worker (unknown kind or tag,
+   truncated or trailing bytes, a length out of range, a count beyond the
+   message, deep nesting, invalid UTF-8, non-canonical `I`, an unknown
+   function id, a parent-only tag, a malformed error, an ended stream)
+   terminates it and raises `WorkerError` naming the violation, without
+   hanging or raising anything else; a silent fake worker times out;
 3. `timeout` on `while True: pass`, and its exclusion of host-function time;
 4. `memory_limit` raising a catchable `MemoryError` and the runtime working
    afterwards;
@@ -287,4 +291,7 @@ API tests:
 6. handle release: creating and dropping many objects does not grow the
    worker's table;
 7. `KeyboardInterrupt` while waiting terminates the worker;
-8. the worker exits when the parent is killed.
+8. the worker exits when the parent is killed;
+9. the worker is sandboxed once code has run (`NoNewPrivs` and `Seccomp` in
+   `/proc` on Linux, `sandbox_check` on macOS), and `mount` is refused
+   afterwards.

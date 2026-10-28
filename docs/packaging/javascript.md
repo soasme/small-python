@@ -27,8 +27,8 @@ worker's `main`, which loops reading requests. Two kinds of separation stack:
 1. **WebAssembly.** Engine code, and anything that corrupts the engine's
    memory, can touch only the module's linear memory and call only its
    imports. The imports are the two stream functions below and a WASI shim
-   that writes diagnostics, reads clocks and random bytes, exits, and refuses
-   everything else (`ENOSYS`; no preopened directories). A trap (an `abort`,
+   that writes diagnostics, reads clocks, exits, and refuses everything else
+   (`ENOSYS`; no preopened directories). A trap (an `abort`,
    an out-of-bounds access) ends the Worker, not the program.
 2. **A Worker thread.** The engine blocks while it runs; the Worker keeps the
    main thread responsive and can be terminated at any time, which is how
@@ -65,10 +65,11 @@ is written at a time (`protocol.md` §6 gives the turn to one side).
 
 ### 2.2 Memory
 
-The module imports its memory. The Runtime creates it with a maximum of
-`memoryLimit` plus 16 MiB for the stack and protocol buffers (or the 4 GiB
-`wasm32` maximum when unlimited), so even an allocator bug cannot grow the
-Worker beyond it. The engine's C stack is 8 MiB, matching the engine's own
+The module imports its memory, 16 MiB initially (stack, static data, and
+protocol buffers). The Runtime gives it a maximum of those 16 MiB plus 1.25 ×
+`memoryLimit`, for the allocator's own overhead (or the 4 GiB `wasm32`
+maximum when unlimited), so even an allocator bug cannot grow the Worker
+beyond it. The engine's C stack is 8 MiB, matching the engine's own
 4 MiB recursion guard with room to spare.
 
 ## 3 API
@@ -181,8 +182,9 @@ with its `message`; any other thrown value becomes `RuntimeError` with
 `String(value)`. When engine code does not handle it, the `PythonError` that
 rejects the operation has the original as its `cause`.
 
-`output` and `loader` follow the same rules; the loader sees the same probe
-names as in Python (`python.md` §3.5).
+The loader follows the same rules and sees the same probe names as in Python
+(`python.md` §3.5). An exception from `output` is reported with
+`console.error`, and the engine's `print` raises `OSError`.
 
 ### 3.4 `PyObject`
 
@@ -249,8 +251,9 @@ process (`--inspect`, `--input-type`) do not reach it.
 small-python/
   package.json        "type": "module", "exports": "./index.js"
   index.js            Runtime, PyObject, conversions, errors
-  wire.js             value codec and framing, shared with worker.js
-  worker.js           the Worker: WASI shim, streams, instantiation
+  wire.js             value codec and framing (protocol.md §3–§4)
+  worker.js           the Worker: WASI shim, streams, instantiation; it
+                      moves bytes and decodes none
   spy-worker.wasm     the engine and worker
   index.d.ts          types
 ```
@@ -260,8 +263,9 @@ The repository builds `spy-worker.wasm` with `make wasm WASI_SDK=<path>`
 
 ## 7 Tests
 
-As `python.md` §6, adapted: traps from an `abort` and an out-of-bounds write
-reject with `WorkerError`; a fake worker sending malformed messages; `timeout`
-with an infinite loop and its exclusion of host time; `memoryLimit`; nested
-async callbacks; handle release; queued concurrent operations; and messages
-larger than the inbox, in both directions.
+As `python.md` §7, adapted: a Worker that exits or is terminated rejects with
+`WorkerError`; a fake Worker sending malformed messages, or nothing at all;
+`timeout` with an infinite loop and its exclusion of host time;
+`memoryLimit`; nested and parallel async callbacks; handle release; queued
+concurrent operations; and messages larger than the inbox, in both
+directions. The suite runs on every supported Node.js major version.
