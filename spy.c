@@ -16338,15 +16338,13 @@ static void delete_name(SPYValue *env, const char *name) {
         env = builtin_value(env->ctx, env->as.map.namespace, SPY_DICT);
         if (!env) return;
     }
-    for (size_t i = 0; i < env->as.map.len; i++) {
-        Entry *entry = &env->as.map.items[i];
-        if (strcmp(entry->key->as.string.data, name)) continue;
-        spy_release(entry->key); spy_release(entry->value);
-        map_removed(env, i);
-        env->as.map.len--;
-        memmove(entry, entry + 1, (env->as.map.len - i) * sizeof(*entry));
-        return;
-    }
+    Entry *entry = env_find(env, name_of(name));
+    if (!entry) return;
+    size_t i = (size_t)(entry - env->as.map.items);
+    spy_release(entry->key); spy_release(entry->value);
+    map_removed(env, i);
+    env->as.map.len--;
+    memmove(entry, entry + 1, (env->as.map.len - i) * sizeof(*entry));
 }
 static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
     env = binding_env(c, env, name_of(name));

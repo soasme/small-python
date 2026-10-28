@@ -469,3 +469,13 @@ assert loop_exit_with_scopes_after_it() == [
     [2, 3],
     [3, 4],
 ], loop_exit_with_scopes_after_it()
+
+# clearing the target of 'except ... as' leaves other kinds of keys alone
+globals()[1] = "int key"
+try:
+    raise KeyError("k")
+except KeyError as cleared:
+    pass
+assert "cleared" not in globals()
+assert globals()[1] == "int key"
+del globals()[1]
