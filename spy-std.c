@@ -36,15 +36,16 @@ static int std_module_init(SPYContext *c, SPYValue *module) {
     free(source); free(filename); spy_release(name);
     return status;
 }
+/* The standard modules are written on the engine primitives, as _spy. */
 int spy_std_init_module(SPYContext *c, const char *name) {
     if (std_find(name) == sizeof(std_modules) / sizeof(*std_modules)) {
         spy_error(c, "ImportError", "no such standard module");
         return -1;
     }
-    return spy_new_module(c, name, std_module_init);
+    return spy_new_module(c, "_spy", spy_init_primitives) || spy_new_module(c, name, std_module_init) ? -1 : 0;
 }
 int spy_std_init(SPYContext *c) {
     for (size_t i = 0; i < sizeof(std_modules) / sizeof(*std_modules); i++)
-        if (spy_new_module(c, std_modules[i].name, std_module_init)) return -1;
+        if (spy_std_init_module(c, std_modules[i].name)) return -1;
     return 0;
 }

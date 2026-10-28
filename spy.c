@@ -1628,10 +1628,7 @@ static const char *class_tname(SPYValue *cls) {
         {"string.templatelib", "Template"}, {"string.templatelib", "Interpolation"}, {"string.templatelib", "TemplateIter"},
         {"typing", "TypeVar"}, {"typing", "ParamSpec"}, {"typing", "TypeVarTuple"}, {"typing", "ParamSpecArgs"},
         {"typing", "ParamSpecKwargs"}, {"typing", "TypeAliasType"}, {"typing", "Generic"}, {"typing", "Union"},
-        {"types", "GenericAlias"}, {"types", "SimpleNamespace"}, {"collections", "deque"}, {"collections", "_deque_iterator"},
-        {"collections", "_tuplegetter"}, {"collections", "defaultdict"}, {"collections", "OrderedDict"},
-        {"weakref", "ReferenceType"}, {"weakref", "ProxyType"}, {"weakref", "CallableProxyType"},
-        {"itertools", "chain"}, {"itertools", "repeat"}, {"itertools", "starmap"}, {"operator", "itemgetter"},
+        {"types", "GenericAlias"}, {"weakref", "ReferenceType"}, {"weakref", "ProxyType"}, {"weakref", "CallableProxyType"},
         {"_io", "_IOBase"}, {"_io", "_RawIOBase"}, {"_io", "_BufferedIOBase"}, {"_io", "_TextIOBase"}, {"_io", "FileIO"},
         {"_io", "BytesIO"}, {"_io", "StringIO"}, {"_io", "BufferedReader"}, {"_io", "BufferedWriter"},
         {"_io", "BufferedRandom"}, {"_io", "BufferedRWPair"}, {"_io", "TextIOWrapper"}, {"_io", "IncrementalNewlineDecoder"}};
@@ -13830,6 +13827,9 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     }
     return status;
 }
+int spy_init_primitives(SPYContext *c, SPYValue *module) {
+    return sys_natives(c, module) || gc_natives(c, module) || weakref_natives(c, module) || file_natives(c, module) ? -1 : 0;
+}
 static SPYValue *import_module(SPYContext *, const char *);
 /* A module already in sys.modules; None there halts the import. */
 static SPYValue *cached_module(SPYContext *c, const char *name, SPYValue *cached) {
@@ -13846,18 +13846,6 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (!module) return NULL;
         module->as.map.namespace = spy_retain(c->builtins);
         if (name_set(c, c->modules, name, module)) { spy_release(module); return NULL; }
-        return module;
-    }
-    if (!strcmp(name, "_spy")) {
-        /* Engine primitives for a standard layer: the weak table, frames,
-         * collection, limits, the handled exception, and host output. */
-        SPYValue *module = value_new(c, SPY_MODULE), *module_name = spy_string(c, name, strlen(name));
-        if (module) module->as.map.namespace = value_new(c, SPY_DICT);
-        int status = !module || !module_name || !module->as.map.namespace || name_set(c, module, "__name__", module_name) ||
-            sys_natives(c, module) || gc_natives(c, module) || weakref_natives(c, module) || file_natives(c, module) ||
-            name_set(c, c->modules, name, module);
-        spy_release(module_name);
-        if (status) { spy_release(module); return NULL; }
         return module;
     }
     size_t builtin = 0;
@@ -13977,9 +13965,10 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     if (c->error_type[0]) { spy_release(module); return NULL; }
     return module;
 }
-/* Generics, unions, and type parameters are Python objects defined by the
- * embedded intrinsics module. It runs once per context, on first use, in a
- * private module named typing that imports cannot reach. */
+/* Generics, unions, type parameters, and file objects are Python objects
+ * defined by the embedded intrinsics module. It runs once per context, on
+ * first use, in a private module named typing that imports cannot reach,
+ * with the file primitives in its globals. */
 static SPYValue *intrinsic(SPYContext *c, const char *name) {
     if (!c->intrinsics) {
         if (c->intrinsics_loading) return errorf(c, "SystemError", "intrinsic '%s' used while loading intrinsics", name);
@@ -13993,7 +13982,8 @@ static SPYValue *intrinsic(SPYContext *c, const char *name) {
         if (module) module->as.map.parent = spy_retain(c->builtins);
         if (module) module->as.map.namespace = value_new(c, SPY_DICT);
         if (!module || !module_name || !module->as.map.namespace ||
-            name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name)) {
+            name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name) ||
+            file_natives(c, module)) {
             spy_release(module); spy_release(module_name); spy_release(unit); return NULL;
         }
         spy_release(module_name);
@@ -15392,12 +15382,14 @@ static SPYValue *lazy_import_builtin(SPYContext *c, size_t argc, SPYValue *const
     free(name); spy_release(text); spy_release(packed);
     return lazy;
 }
-/* builtins.breakpoint(*args, **kws) calls sys.breakpointhook. */
+static SPYValue *sys_module(SPYContext *);
+/* builtins.breakpoint(*args, **kws) calls sys.breakpointhook once sys is
+ * loaded; until then HostBreakpoint is absent and it returns None. */
 static SPYValue *breakpoint_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
-    SPYValue *sys = import_module(c, "sys");
-    SPYValue *hook = sys ? attribute(c, sys, "breakpointhook") : NULL;
-    spy_release(sys);
+    SPYValue *sys = sys_module(c);
+    if (!sys) return spy_none(c);
+    SPYValue *hook = attribute(c, sys, "breakpointhook");
     if (!hook) {
         if (c->error_type[0] && !error_is(c, "AttributeError")) return NULL;
         spy_clear_error(c);

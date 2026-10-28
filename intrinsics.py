@@ -1569,7 +1569,6 @@ class FileIO(_IOBase):
     __module__ = '_io'
 
     def __init__(self, file, mode='r', closefd=True, opener=None):
-        from _spy import _file_open
         if opener is not None:
             raise NotImplementedError("open() does not support opener")
         self._fd = -1
@@ -1585,7 +1584,6 @@ class FileIO(_IOBase):
             raise OSError(9, "Bad file descriptor")
         self._fd = _file_open(file, kind + ('+' if plus else ''))
         if kind == 'a':
-            from _spy import _file_seek
             _file_seek(self._fd, 0, 2)
         self.name = file
         self.closefd = closefd
@@ -1620,7 +1618,6 @@ class FileIO(_IOBase):
         return True
 
     def read(self, size=-1):
-        from _spy import _file_read
         _check_open(self)
         if not self._readable:
             raise UnsupportedOperation('File not open for reading')
@@ -1639,14 +1636,12 @@ class FileIO(_IOBase):
         return _readline_bytes(self, -1 if size is None else size)
 
     def write(self, data):
-        from _spy import _file_write
         _check_open(self)
         if not self._writable:
             raise UnsupportedOperation('File not open for writing')
         return _file_write(self._fd, bytes(data) if isinstance(data, memoryview) else data)
 
     def seek(self, pos, whence=0):
-        from _spy import _file_seek
         _check_open(self)
         return _file_seek(self._fd, pos, whence)
 
@@ -1654,14 +1649,12 @@ class FileIO(_IOBase):
         return self.seek(0, 1)
 
     def truncate(self, size=None):
-        from _spy import _file_truncate
         _check_open(self)
         if not self._writable:
             raise UnsupportedOperation('File not open for writing')
         return _file_truncate(self._fd, self.tell() if size is None else size)
 
     def close(self):
-        from _spy import _file_close
         if self._fd >= 0:
             fd, self._fd = self._fd, -1
             if self.closefd:

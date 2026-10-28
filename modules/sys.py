@@ -90,7 +90,7 @@ class _Implementation:
 
 
 implementation = _Implementation(name="smallpython", cache_tag=None, version=version_info, hexversion=hexversion)
-builtin_module_names = ("_thread", "_typing", "_weakref", "builtins", "collections", "gc", "itertools", "sys", "types", "weakref")
+builtin_module_names = ("_spy", "_weakref", "builtins", "gc", "sys", "weakref")
 argv = []
 orig_argv = []
 path = []

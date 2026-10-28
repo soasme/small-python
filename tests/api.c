@@ -190,10 +190,10 @@ int main(void) {
         spy_context_free(templates);
     }
     {
-        /* The core has no standard modules until a host registers them. */
+        /* The core has only builtins until a host registers modules. */
         SPYContext *bare = spy_context_new();
         assert(bare && spy_exec(bare, "import sys", "bare.py") && !strcmp(spy_error_type(bare), "ModuleNotFoundError"));
-        assert(!spy_exec(bare, "import _spy, builtins", "bare_core.py"));
+        assert(spy_exec(bare, "import _spy", "bare_spy.py") && !spy_exec(bare, "import builtins\nopen", "bare_core.py"));
         assert(!spy_std_init_module(bare, "sys") && !spy_exec(bare, "import sys\nassert sys.modules['sys'] is sys", "bare_sys.py"));
         assert(spy_exec(bare, "import gc", "bare_gc.py") && spy_std_init_module(bare, "nope"));
         spy_context_free(bare);

@@ -369,7 +369,14 @@ class ArbitraryFunctionAttrTest(FuncAttrsTest):
 class FunctionDictsTest(FuncAttrsTest):
     def test_setting_dict_to_invalid(self):
         self.cannot_set_attr(self.b, '__dict__', None, TypeError)
-        from collections import UserDict
+        # (Ported) a mapping that is not a dict stands in for collections.UserDict.
+        class UserDict:
+            def __init__(self, data):
+                self.data = dict(data)
+            def __getitem__(self, key):
+                return self.data[key]
+            def keys(self):
+                return self.data.keys()
         d = UserDict({'known_attr': 7})
         self.cannot_set_attr(self.fi.a.__func__, '__dict__', d, TypeError)
 

@@ -61,10 +61,14 @@ void spy_set_input(SPYContext *, SPYReadLine, void *);
  * __package__, and __builtins__ set, and calls init to fill it. Init returns 0,
  * or -1 with an error set, which fails the import. A package's init sets
  * __path__; its submodules register under dotted names. Registering a name
- * again replaces its init. The module _spy always exists and exposes engine
- * primitives to such modules; spy-std.c registers the standard ones. */
+ * again replaces its init. spy-std.c registers the standard ones. */
 typedef int (*SPYModuleInit)(SPYContext *, SPYValue *);
 int spy_new_module(SPYContext *, const char *, SPYModuleInit);
+/* A module init that fills the module with engine primitives (the module
+ * cache, frames, limits, the handled exception, collection, the weak table,
+ * host output) for host modules written in Python. Programs reach them only
+ * where the host registers it: spy_new_module(c, "_spy", spy_init_primitives). */
+int spy_init_primitives(SPYContext *, SPYValue *);
 /* Execute source with a module's namespace as its globals. */
 int spy_exec_module(SPYContext *, SPYValue *, const char *source, const char *filename);
 /* Zero means unlimited. Budget resets for each top-level evaluation. */
