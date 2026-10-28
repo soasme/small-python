@@ -88,7 +88,8 @@ struct SPYValue {
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
-        struct { SPYNative call; void *data; int method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+        /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
+        struct { SPYNative call; void *data; int method, static_method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
                  SPYValue *module; /* An assigned __module__, or NULL for the default. */
                  void (*release)(void *); /* Host cleanup for data, run when the value is freed. */ } native;
@@ -2337,10 +2338,11 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         if (!self) {
             SPYValue *owner = function->as.native.owner;
             if (!owner) return puts_buffer(b, "<built-in function ") || puts_buffer(b, name) || puts_buffer(b, ">");
-            if (!strcmp(name, "__new__")) {
-                /* Builtin allocators are bound to their type, as tp_new wrappers are. */
+            if (!strcmp(name, "__new__") || function->as.native.static_method) {
+                /* Builtin allocators and static methods name their type, as CPython's do. */
                 snprintf(num, sizeof(num), " object at %p>", (void *)owner);
-                return puts_buffer(b, "<built-in method __new__ of ") || puts_buffer(b, type_name(owner)) || puts_buffer(b, num);
+                return puts_buffer(b, "<built-in method ") || puts_buffer(b, name) || puts_buffer(b, " of ") ||
+                    puts_buffer(b, type_name(owner)) || puts_buffer(b, num);
             }
             if (owner == name_local(b->ctx->classes, "object"))
                 return puts_buffer(b, dunder ? "<slot wrapper '" : "<method '") || puts_buffer(b, name) || puts_buffer(b, "'>");
@@ -6769,13 +6771,17 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     SPYValue *source = v->as.iterator.source, *result = NULL;
     switch (v->as.iterator.kind) {
     case I_CALLABLE: {
-        /* calliter_iternext: stop on StopIteration or a value equal to the sentinel. */
+        /* calliter_iternext: stop on StopIteration or a value equal to the
+           sentinel, or when the call itself exhausted the iterator. */
+        spy_retain(source);
         result = spy_call(c, source, 0, NULL);
+        spy_release(source);
         if (!result) {
             if (error_is(c, "StopIteration")) spy_clear_error(c);
             v->as.iterator.done = !c->error_type[0];
             break;
         }
+        if (v->as.iterator.done) { spy_release(result); result = NULL; break; }
         SPYValue *sentinel = spy_retain(v->as.iterator.counter);
         int stop = sentinel == result || equal(sentinel, result, 0);
         spy_release(sentinel);
@@ -7094,11 +7100,11 @@ static SPYValue *normalize_slice(SPYContext *c, SPYValue *slice, SPYValue *lengt
     return result;
 }
 /* __reduce__ and __setstate__ of the sequence and range iterators, after
- * CPython's listiter, tupleiter, unicodeiter, striter, bytearrayiter, and
- * rangeiter. data is the iterator class id, negated for __setstate__. */
+ * CPython's listiter, tupleiter, unicodeiter, striter, bytearrayiter,
+ * rangeiter, and seqiter, and __reduce__ of the callable iterator. data is
+ * the iterator class id, with bit 8 set for __setstate__. */
 static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
-    int id = (int)(intptr_t)data, set = id < 0;
-    if (set) id = -id;
+    int id = (int)(intptr_t)data & 0xff, set = (int)(intptr_t)data >> 8;
     const char *owner = iterator_names[id], *name = set ? "__setstate__" : "__reduce__";
     if (!argc) return errorf(c, "TypeError", "unbound method %s.%s() needs an argument", owner, name);
     SPYValue *it = argv[0];
@@ -7109,6 +7115,20 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
                    : errorf(c, "TypeError", "%s.__reduce__() takes no arguments (%zu given)", owner, argc - 1);
     SPYValue *source = it->as.iterator.source;
     int range = it->as.iterator.kind == I_RANGE;
+    if (id == IT_CALLABLE) {
+        /* calliter_reduce: (iter, (callable, sentinel)), or (iter, ((),)) once exhausted. */
+        SPYValue *iter = name_local(c->builtins, "iter"), *empty = NULL, *args;
+        if (it->as.iterator.done) {
+            empty = spy_tuple(c, 0, NULL);
+            args = empty ? spy_tuple(c, 1, &empty) : NULL;
+        } else {
+            SPYValue *pair[] = {source, it->as.iterator.counter};
+            args = spy_tuple(c, 2, pair);
+        }
+        SPYValue *items[] = {iter, args}, *result = args ? spy_tuple(c, 2, items) : NULL;
+        spy_release(empty); spy_release(args);
+        return result;
+    }
     /* The rest of a range iteration, as a range from the current value. */
     SPYValue *rest = range ? range_new(c, it->as.iterator.counter, source->as.range.stop, source->as.range.step) : NULL;
     if (range && !rest) return NULL;
@@ -7128,6 +7148,9 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
             spy_release(count); spy_release(offset);
             if (!counter) return NULL;
             spy_release(it->as.iterator.counter); it->as.iterator.counter = counter;
+        } else if (id == IT_ITERATOR) {
+            /* seqiter: a negative state is 0; the sequence's length is not consulted. */
+            if (!it->as.iterator.done) it->as.iterator.index = index < 0 ? 0 : (size_t)index;
         } else if (it->as.iterator.done != 1) {
             size_t length = source->type == SPY_STRING ? string_length(source) :
                 source->type == SPY_BYTES || source->type == SPY_BYTEARRAY ? source->as.string.len : source->as.seq.len;
@@ -9242,7 +9265,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
              * to a class (object.__new__) have __module__ None and no __objclass__. */
             int descriptor = native_kind(v) != NATIVE_FUNCTION;
             if (descriptor && !strcmp(name, "__objclass__") && owner) return spy_retain(owner);
-            if (!descriptor && owner && !strcmp(name, "__module__")) return spy_none(c);
+            if (!descriptor && owner && !strcmp(name, "__module__"))
+                return v->as.native.static_method ? spy_retain(name_local(owner, "__module__")) : spy_none(c);
             if (descriptor || owner)
                 return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
         }
@@ -9251,16 +9275,15 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         /* A builtin function is bound to its class (a static method such as
          * object.__new__) or to the builtins module; descriptors are unbound. */
         if (v->type == SPY_NATIVE && !strcmp(name, "__self__") && native_kind(v) == NATIVE_FUNCTION)
-            return owner ? spy_retain(owner) : load_source_module(c, "builtins");
+            return v->as.native.static_method ? spy_none(c) : owner ? spy_retain(owner) : load_source_module(c, "builtins");
     }
     if (v->type == SPY_FUNCTION) {
         if (!strcmp(name, "__globals__")) return spy_retain(namespace_map(module_env(c, v->as.function.env)));
         if (!strcmp(name, "__builtins__")) {
-            /* The globals' __builtins__ (a module's __dict__ for a module), else builtins'. */
-            SPYValue *globals = namespace_map(module_env(c, v->as.function.env));
-            SPYValue *builtins = globals ? name_local(globals, "__builtins__") : NULL;
-            if (builtins && builtins->type == SPY_DICT) return spy_retain(builtins);
-            if (builtins && builtins->type == SPY_MODULE) return attribute(c, builtins, "__dict__");
+            /* The builtins fixed when the function was made (9.3.4): those its globals lead to. */
+            SPYValue *parent = module_env(c, v->as.function.env)->as.map.parent;
+            if (parent && parent->type == V_ENV) parent = parent->as.map.namespace;
+            if (parent && is_dict(parent)) return spy_retain(parent);
             SPYValue *module = load_source_module(c, "builtins");
             SPYValue *dict = module ? attribute(c, module, "__dict__") : NULL;
             spy_release(module);
@@ -18615,8 +18638,16 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
     } else {
         SPYValue *source = object ? object : c->eval_env ? c->eval_env : c->globals;
         if (source->type != SPY_INSTANCE && source->type != SPY_CLASS && source->type != SPY_MODULE && source->type != V_ENV &&
-            (object || source->type != SPY_DICT))
+            (object || source->type != SPY_DICT)) {
+            /* object.__dir__: the keys of the object's __dict__ (a bound
+             * method's is its function's), then its class's attributes. */
+            SPYValue *own = attribute(c, source, "__dict__");
+            if (!own && error_is(c, "AttributeError")) spy_clear_error(c);
+            for (size_t i = 0; own && own->type == SPY_DICT && i < own->as.map.len && !c->error_type[0]; i++)
+                if (own->as.map.items[i].key->type == SPY_STRING) map_set(c, names, own->as.map.items[i].key, c->none);
+            spy_release(own);
             source = value_class(c, source);
+        }
         SPYValue *mro = !object ? NULL : source->type == SPY_CLASS ? source->as.map.mro :
             source->type == SPY_INSTANCE ? source->as.map.parent->as.map.mro : NULL;
         size_t next = 0;
@@ -22542,7 +22573,12 @@ static SPYValue *builtins_env(SPYContext *c, SPYValue *builtins) {
 static SPYValue *globals_env(SPYContext *c, SPYValue *globals) {
     SPYValue *builtins = name_local(globals, "__builtins__");
     if (builtins && builtins->type == SPY_MODULE) builtins = namespace_map(builtins);
-    if (!builtins) builtins = c->builtins;
+    if (!builtins) {
+        /* Globals without __builtins__ take the running frame's (9.3.4, 16.2). */
+        SPYValue *current = c->eval_env ? module_env(c, c->eval_env)->as.map.parent : NULL;
+        if (current && current->type == V_ENV) current = current->as.map.namespace;
+        builtins = current && is_dict(current) ? current : c->builtins;
+    }
     SPYValue *env = value_new(c, V_ENV);
     if (!env) return NULL;
     env->as.map.flags = 3;
@@ -23837,6 +23873,9 @@ static int register_value_fields(SPYContext *c) {
          "co_filename co_name co_qualname co_firstlineno co_linetable co_exceptiontable"},
         {SPY_CODE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "co_varnames co_cellvars co_freevars co_code"},
         {SPY_METHOD, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__func__ __self__"},
+        {SPY_FUNCTION, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__builtins__ __closure__ __globals__"},
+        {SPY_FUNCTION, SPY_GETSET_DESCRIPTOR, 0,
+         "__annotate__ __annotations__ __code__ __defaults__ __dict__ __kwdefaults__ __type_params__"},
         {SPY_MEMORYVIEW, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
          "obj nbytes readonly itemsize format ndim shape strides suboffsets c_contiguous f_contiguous contiguous"},
         {SPY_TEMPLATE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "strings interpolations"},
@@ -23894,6 +23933,8 @@ static int class_method_set(SPYContext *c, SPYValue *cls, const char *name, Nati
     method->as.native.kwcall = call;
     method->as.native.data = (void *)data;
     method->as.native.method = kind == METHOD_INSTANCE;
+    /* Allocators stay bound to their type, as tp_new wrappers are. */
+    method->as.native.static_method = kind == METHOD_STATIC && strcmp(name, "__new__");
     if (kind != METHOD_INSTANCE) {
         SPYValue *wrapper = method_wrapper(c, method, kind == METHOD_CLASS ? SPY_CLASSMETHOD : SPY_STATICMETHOD);
         spy_release(method);
@@ -24248,12 +24289,13 @@ SPYContext *spy_context_new(void) {
         spy_release(hint);
         if (status) { spy_release(module); goto fail; }
     }
-    static const int stateful[] = {IT_LIST, IT_TUPLE, IT_STR_ASCII, IT_STR, IT_BYTES, IT_BYTEARRAY, IT_RANGE, IT_LONGRANGE};
+    static const int stateful[] = {IT_LIST, IT_TUPLE, IT_STR_ASCII, IT_STR, IT_BYTES, IT_BYTEARRAY, IT_RANGE, IT_LONGRANGE, IT_ITERATOR, IT_CALLABLE};
     for (size_t i = 0; i < 2 * sizeof(stateful) / sizeof(*stateful); i++) {
         int id = stateful[i / 2], set = i % 2;
+        if (set && id == IT_CALLABLE) continue;
         SPYValue *method = value_new(c, SPY_NATIVE);
         if (!method) { spy_release(module); goto fail; }
-        method->as.native.call = iterator_state_call; method->as.native.data = (void *)(intptr_t)(set ? -id : id);
+        method->as.native.call = iterator_state_call; method->as.native.data = (void *)(intptr_t)(id | set << 8);
         method->as.native.method = 1;
         method->as.native.name = spy_string(c, set ? "__setstate__" : "__reduce__", set ? 12 : 10);
         method->as.native.owner = spy_retain(c->iterator_types[id]);
@@ -24321,7 +24363,10 @@ SPYContext *spy_context_new(void) {
     /* B.1.3: the module cache holds builtins before the main module runs. */
     SPYValue *builtins_module = load_source_module(c, "builtins");
     if (!builtins_module) goto fail;
+    /* The main module's __builtins__ is the builtins module itself (9.8). */
+    int bound = name_set(c, c->globals, "__builtins__", builtins_module);
     spy_release(builtins_module);
+    if (bound) goto fail;
     SPYValue *name = spy_string(c, "__main__", 8);
     if (!name) goto fail;
     /* sys.modules["__main__"] is the module whose namespace is the globals. */

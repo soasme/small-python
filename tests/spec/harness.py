@@ -1417,6 +1417,23 @@ class operator:
     def delitem(a, b):
         del a[b]
 
+    @staticmethod
+    def countOf(a, b):
+        """The number of items of a that are b or equal to it."""
+        count = 0
+        for item in a:
+            if item is b or item == b:
+                count += 1
+        return count
+
+    @staticmethod
+    def indexOf(a, b):
+        """The index of the first item of a that is b or equal to it."""
+        for i, item in enumerate(a):
+            if item is b or item == b:
+                return i
+        raise ValueError("sequence.index(x): x not in sequence")
+
 
 class random:
     """A fixed pseudo-random sequence (a linear congruential generator) for
@@ -1548,6 +1565,25 @@ class support:
     @staticmethod
     def gc_collect():
         host.collect()
+
+    @staticmethod
+    def check_free_after_iterating(test, iter, cls, args=()):
+        """The iterable is released once its iterator is exhausted, and
+        then calling next() on it from __del__ raises StopIteration."""
+        done = False
+        def wrapper():
+            class A(cls):
+                def __del__(self):
+                    nonlocal done
+                    try:
+                        next(it)
+                    except StopIteration:
+                        done = True
+            it = iter(A(*args))
+            test.assertRaises(StopIteration, next, it)
+        wrapper()
+        support.gc_collect()
+        test.assertTrue(done)
 
     @staticmethod
     def refcount_test(test):

@@ -21,7 +21,9 @@
 (* each with the count of items left in its iterator; iter() of a callable *)
 (* taking the next item, with sentinel 2; or the first position of the     *)
 (* maximum by max(key=, default=-1); or runs one of the sources of CASES   *)
-(* in a fresh namespace. The outcome is the repr of the result, or the     *)
+(* in a fresh namespace, among them a callable iterator its own callable   *)
+(* exhausts, and the sequence and callable iterators' __reduce__ and       *)
+(* __setstate__ state. The outcome is the repr of the result, or the       *)
 (* exception and its message.                                              *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, TLC
@@ -59,7 +61,8 @@ Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_d
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
           "sort_mutated", "sort_key_error", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
-          "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type"}
+          "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
+          "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
             \cup [case : Cases]
 
@@ -128,6 +131,9 @@ Case(c) ==
       [] c = "aiter_sync" -> "TypeError: 'list' object is not an async iterable"
       [] c = "slice_builtin" -> "([1, 3], (0, 3, 1), 'slice(1, 2, None)')"
       [] c = "range_iter_type" -> "'range_iterator'"
+      [] c = "iter_sentinel_reentrant" -> "([], 2, ((),))"
+      [] c = "iter_sentinel_reduce" -> "(<class 'int'>, 1)"
+      [] c = "iter_sequence_state" -> "(1, 0, [3], ((),))"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

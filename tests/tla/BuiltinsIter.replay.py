@@ -91,7 +91,27 @@ SOURCES = {
     "sum_iter": 'result = sum(x * x for x in range(4))',
     "aiter_sync": 'result = aiter([])',
     "slice_builtin": 'result = ([0, 1, 2, 3][slice(1, None, 2)], slice(3).indices(10), repr(slice(1, 2)))',
-    "range_iter_type": 'result = type(iter(range(3))).__name__'
+    "range_iter_type": 'result = type(iter(range(3))).__name__',
+    "iter_sentinel_reentrant": ("calls = []\n"
+                                "def f():\n"
+                                "    calls.append(0)\n"
+                                "    if len(calls) > 1: return 'stop'\n"
+                                "    list(it)\n"
+                                "    return 'more'\n"
+                                "it = iter(f, 'stop')\n"
+                                "result = (list(it), len(calls), it.__reduce__()[1])"),
+    "iter_sentinel_reduce": "it = iter(int, 1)\nresult = it.__reduce__()[1]",
+    "iter_sequence_state": ("class S:\n"
+                            "    def __getitem__(self, i):\n"
+                            "        if i < 4: return i\n"
+                            "        raise IndexError\n"
+                            "it = iter(S())\n"
+                            "next(it)\n"
+                            "a = it.__reduce__()[2]\n"
+                            "it.__setstate__(-3)\n"
+                            "b = next(it)\n"
+                            "it.__setstate__(3)\n"
+                            "result = (a, b, list(it), it.__reduce__()[1])"),
 }
 
 

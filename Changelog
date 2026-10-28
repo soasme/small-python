@@ -903,3 +903,27 @@
   stays suspended (spy finished it). PLS-315 13.16.3 says so;
   expressions/yield and the new YieldFromIterator model test it. Found by
   porting test_yield_from.
+- CPython's test_funcattrs is ported to tests/spec/ports, its types,
+  textwrap and typing imports replaced by core equivalents. It found:
+  the main module's __builtins__ is the builtins module, as in CPython
+  (spy bound the dict; imported modules still get the dict, 9.8); a
+  function made over globals without __builtins__ takes the builtins of
+  the frame that made it, and __builtins__ is that namespace (9.3.4);
+  dir() of an object other than an instance, class or module lists the
+  keys of its __dict__ (19.3.12); a builtin static method has __self__
+  None, its type's __module__, and the repr "<built-in method NAME of
+  type object at 0x...>" (28.5); and the function type's __dict__ holds
+  the member and getset descriptors for __builtins__, __closure__,
+  __globals__, __code__, __defaults__, __kwdefaults__, __dict__,
+  __annotations__, __annotate__ and __type_params__ (16.2.1).
+  builtins/builtins_binding tests them.
+- CPython's test_iter is ported to tests/spec/ports; an in-memory text
+  file stands in for open(TESTFN), operator.countOf and indexOf join the
+  harness, and its pickle checks are omitted (the __reduce__ results of
+  most built-in iterators are unspecified, Annex C.7). It found: a
+  callable iterator whose callable exhausts the iterator crashed spy (it
+  compared the result with the released sentinel); the result is now
+  discarded and StopIteration raised (27.1.3). The sequence iterator
+  lacked __reduce__ and __setstate__, and the callable iterator
+  __reduce__ (27.1.2, 27.1.3). builtins/iter_state and three new
+  BuiltinsIter cases test them.
