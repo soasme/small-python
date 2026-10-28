@@ -127,3 +127,8 @@ make bench        # startup benchmark
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)
 - [Contributing](AGENTS.md): architecture and code style
+
+## License
+
+[MIT](LICENSE). Parts derived from CPython and the Unicode data keep their own
+licenses in [`docs/licenses`](docs/licenses).
