@@ -2070,6 +2070,28 @@ static int name_bind(SPYContext *c, SPYValue *env, Name name, SPYValue *v) {
     return status;
 }
 static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v) { return name_bind(c, env, name_of(text), v); }
+/* Whether env is a plain function environment, whose locals bind under
+ * their symbols' keys in its own entries. */
+static int fresh_locals(SPYValue *env) {
+    return env->type == V_ENV && !env->as.map.flags && !env->as.map.namespace && env->as.map.scope &&
+        env->as.map.scope->kind == S_FUNCTION;
+}
+/* Bind symbol, a local not yet in env, to v. */
+static int local_append(SPYContext *c, SPYValue *env, Symbol *symbol, SPYValue *v) {
+    SPYValue *key = name_key(c, (Name){symbol->name, strlen(symbol->name), symbol->hash}, symbol);
+    int status = key ? map_append(c, env, key, v, symbol->hash) : -1;
+    spy_release(key);
+    return status;
+}
+/* The symbol node n names in scope, remembered on n. */
+static Symbol *node_symbol(Scope *scope, Node *n) {
+    if (n->slot_scope != scope) {
+        Symbol *symbol = scope_find(scope, node_name(n));
+        n->slot_scope = scope; n->slot = 0;
+        n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
+    }
+    return n->slot_symbol < scope->len ? &scope->symbols[n->slot_symbol] : NULL;
+}
 SPYValue *spy_get_global(SPYContext *c, const char *name) { return name_get(c, c->globals, name); }
 int spy_set_global(SPYContext *c, const char *name, SPYValue *v) {
     return same_context(c, v) ? name_set(c, c->globals, name, v) : -1;
@@ -13207,8 +13229,14 @@ static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
 }
 static int declare_locals(SPYContext *c, SPYValue *env) {
     Scope *scope = env->as.map.scope;
-    for (size_t i = 0; i < scope->len; i++)
-        if ((scope->symbols[i].flags & S_LOCAL) && declare_name(c, env, scope->symbols[i].name)) return -1;
+    /* A new function environment holds just its bound parameters. */
+    int fresh = fresh_locals(env);
+    for (size_t i = 0; i < scope->len; i++) {
+        Symbol *symbol = &scope->symbols[i];
+        if (!(symbol->flags & S_LOCAL)) continue;
+        if (!fresh) { if (declare_name(c, env, symbol->name)) return -1; }
+        else if (!(symbol->flags & (S_PARAM | S_GLOBAL | S_NONLOCAL)) && local_append(c, env, symbol, c->unbound)) return -1;
+    }
     return 0;
 }
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
@@ -13560,8 +13588,12 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         Node *arg = params;
         for (; arg && (arg->op == P_POSITIONAL || arg->op == P_POSONLY) && !arg->local; arg = arg->next) count++;
         if (!arg && count == argc) {
-            for (arg = params, count = 0; arg; arg = arg->next, count++)
-                if (name_set(c, env, arg->text, argv[count])) return -1;
+            int fresh = fresh_locals(env) && !env->as.map.len;
+            for (arg = params, count = 0; arg; arg = arg->next, count++) {
+                Symbol *symbol = fresh ? node_symbol(env->as.map.scope, arg) : NULL;
+                if (symbol && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)) ? local_append(c, env, symbol, argv[count]) :
+                    name_set(c, env, arg->text, argv[count])) return -1;
+            }
             return 0;
         }
     }
