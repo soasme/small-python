@@ -3075,24 +3075,28 @@ static int lex(Parser *p, const char *s) {
         if (!*s) break;
         if (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\f') { s++; continue; }
         if (*s == '#') { while (*s && *s != '\n') s++; continue; }
-        if (*s == '\\' && (s[1] == '\n' || (s[1] == '\r' && s[2] == '\n'))) {
-            if (!s[s[1] == '\r' ? 3 : 2] && !brackets) {
-                /* A continuation must join with a line. */
-                p->ctx->line = line; p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2;
-                spy_error(p->ctx, "SyntaxError", "unexpected EOF while parsing");
+        if (*s == '\\') {
+            /* A continuation must join with a line; exec input ends with an
+             * implicit newline, which a final backslash continues. */
+            size_t joined = s[1] == '\n' ? 2 : s[1] == '\r' && s[2] == '\n' ? 3 : !s[1] && !p->ctx->eval_input ? 1 : 0;
+            if (joined && !s[joined]) {
+                p->ctx->line = line;
+                if (brackets) {
+                    p->ctx->line = opened_line[brackets - 1];
+                    p->error_start = opened_at[brackets - 1]; p->error_end = p->error_start + 1; p->error_end_zero = 1;
+                    errorf(p->ctx, "SyntaxError", "'%c' was never closed", *p->error_start);
+                } else {
+                    p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2;
+                    spy_error(p->ctx, "SyntaxError", "unexpected EOF while parsing");
+                }
                 return -1;
             }
-            s += s[1] == '\r' ? 3 : 2;
-            line++;
-            continue;
+            if (joined) { s += joined; line++; continue; }
         }
-        if (*s == '\\' && !s[1] && brackets && !p->ctx->eval_input) { s++; continue; }
         if (*s == '\\') {
-            /* 12.2.2: a backslash outside a literal must end the line. Exec
-             * input ends with an implicit newline; eval input does not. */
-            int eof = !s[1] && !p->ctx->eval_input;
-            p->ctx->line = line; p->error_start = s + (s[1] || eof); p->error_end = NULL; p->error_end_zero = eof ? 2 : 1;
-            spy_error(p->ctx, "SyntaxError", eof ? "unexpected EOF while parsing" : "unexpected character after line continuation character");
+            /* 12.2.2: a backslash outside a literal must end the line. */
+            p->ctx->line = line; p->error_start = s + !!s[1]; p->error_end = NULL; p->error_end_zero = 1;
+            spy_error(p->ctx, "SyntaxError", "unexpected character after line continuation character");
             return -1;
         }
         if (*s == '\n') {
@@ -3852,10 +3856,11 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
     Parser inner = {.ctx = p->ctx, .unit = p->unit, .private_name = p->private_name,
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
     Node *result = NULL;
-    if (!lex(&inner, text.data)) {
+    const char *copy = text.data + 1, *copy_end = copy + (end - start);
+    if (lex(&inner, text.data)) p->ctx->line += line - 1;
+    else {
         /* Point the tokens into the outer source, which outlives this copy;
          * the added parentheses become empty tokens at the field's ends. */
-        const char *copy = text.data + 1, *copy_end = copy + (end - start);
         for (size_t i = 0; i < inner.len; i++) {
             Token *t = &inner.tokens[i];
             t->line += line - 1;
@@ -3883,6 +3888,9 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
                    flags & L_TEMPLATE ? 't' : 'f');
             error_token(&inner, &inner.tokens[valid ? valid : 1]);
         }
+        if (!result && failed && inner.far < inner.len && inner.tokens[inner.far].len) *failed = inner.tokens[inner.far].start;
+    }
+    if (!result) {
         /* The error's position, in the outer source. */
         const char **ends[] = {&inner.error_start, &inner.error_end};
         for (int i = 0; i < 2; i++)
@@ -3890,7 +3898,6 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
             else if (*ends[i] && (*ends[i] < start || *ends[i] > end)) *ends[i] = NULL;
         p->error_start = inner.error_start; p->error_end = inner.error_end;
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
-        if (!result && failed && inner.far < inner.len && inner.tokens[inner.far].len) *failed = inner.tokens[inner.far].start;
     }
     free(inner.tokens); free(text.data);
     return result;
@@ -5868,7 +5875,7 @@ static Node *statement_body(Parser *p) {
                 return syntax(p, "lazy from __future__ import is not allowed");
             }
             if (!n->op && !strcmp(source_name(n->a), "__future__") && at(p, '*')) defer(p, "future feature * is not defined");
-            if (take(p, '*')) { n->args = node(p, N_STAR); return n; }
+            if (at(p, '*')) { size_t star = p->pos++; n->args = node(p, N_STAR); return n->args ? (span(p, n->args, star), n) : NULL; }
         }
         int future = from && !n->op && !strcmp(source_name(n->a), "__future__");
         if (at(p, T_NL)) { syntax(p, "Expected one or more names after 'import'"); p->error_end = p->error_start; return NULL; }
@@ -6047,13 +6054,14 @@ static Node *statements(Parser *p) {
     return head;
 }
 static SPYValue *number_literal(SPYContext *, Node *);
-static int target_contains(Node *n, const char *name) {
-    if (n->kind == N_NAME) return !strcmp(n->text, name);
-    if (n->kind == N_STAR) return target_contains(n->a, name);
+/* The name node in target n that binds name, if any. */
+static Node *target_name(Node *n, const char *name) {
+    if (n->kind == N_NAME) return strcmp(n->text, name) ? NULL : n;
+    if (n->kind == N_STAR) return target_name(n->a, name);
     if (n->kind == N_LIST || n->kind == N_TUPLE)
-        for (Node *item = n->args; item; item = item->next)
-            if (target_contains(item, name)) return 1;
-    return 0;
+        for (Node *item = n->args, *found; item; item = item->next)
+            if ((found = target_name(item, name))) return found;
+    return NULL;
 }
 typedef struct { Node *expression, *clause; } NamedScope;
 static int validate_named(SPYContext *, Node *, NamedScope *, size_t, int, int);
@@ -6080,9 +6088,12 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
                 int future = 0;
                 for (Node *clause = comps[i].expression->a; clause; clause = clause->b) {
                     if (clause == comps[i].clause) future = 1;
-                    if (clause->kind == N_FOR && target_contains(clause->args, n->a->text))
-                        errorf(c, "SyntaxError", future ? "comprehension inner loop cannot rebind assignment expression target '%s'" :
-                               "assignment expression cannot rebind comprehension iteration variable '%s'", source_name(n->a));
+                    Node *bound = clause->kind == N_FOR ? target_name(clause->args, n->a->text) : NULL;
+                    if (!bound) continue;
+                    /* An inner loop's error is at its own target. */
+                    if (future) node_error(c, bound);
+                    errorf(c, "SyntaxError", future ? "comprehension inner loop cannot rebind assignment expression target '%s'" :
+                           "assignment expression cannot rebind comprehension iteration variable '%s'", source_name(n->a));
                 }
             }
             if (c->error_type[0]) { status = -1; break; }
@@ -6116,7 +6127,7 @@ static int compile_comprehension(SPYContext *, Node *);
 static int validate_yields(SPYContext *c, Node *n, int comp) {
     for (; n; n = n->next) {
         if (n->kind == N_YIELD && comp) {
-            c->line = n->line;
+            node_error(c, n);
             errorf(c, "SyntaxError", "'yield' inside %s",
                    comp == N_LIST ? "list comprehension" : comp == N_SET ? "set comprehension" :
                    comp == N_DICT ? "dict comprehension" : "generator expression");
@@ -6340,7 +6351,7 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
         /* __lazy_modules__ may make a module-level import outside try lazy. */
         else if (scope->kind == S_MODULE && !scope->tries && n->args->kind != N_STAR) n->flags |= F_LAZY_COMPAT;
         if (n->args->kind == N_STAR) {
-            if (scope->kind != S_MODULE) { c->line = n->line; spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
+            if (scope->kind != S_MODULE) { node_error(c, n->args); spy_error(c, "SyntaxError", "import * only allowed at module level"); return -1; }
             return 0;
         }
         for (Node *item = n->args; item; item = item->next) {
@@ -20148,7 +20159,9 @@ static SPYValue *decode_source(SPYContext *c, const char *source, size_t len, co
     if (bom && encoding && strcmp(encoding->as.string.data, "utf-8")) {
         errorf(c, "SyntaxError", "encoding problem: %s with BOM", encoding->as.string.data);
         c->line = 1;
-        attach_syntax_error(c, filename, source, source, source, 1);
+        /* The tokenizer's range: from column 0 to the line's last character. */
+        size_t width = strcspn(source, "\n");
+        attach_syntax_error(c, filename, source, source, source + (width ? width - 1 : 0), 1 | 16);
     } else {
         int codec;
         if (!codec_lookup(c, encoding, &codec)) {
