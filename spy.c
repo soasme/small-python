@@ -10950,10 +10950,11 @@ static int class_layout(SPYContext *, SPYValue *);
 static SPYValue *slots_base(SPYValue *);
 /* The next slot member a class itself adds, from entry *i on, or NULL. */
 static SPYValue *next_slot(SPYValue *cls, size_t *i) {
-    for (; *i < cls->as.map.len; (*i)++) {
-        SPYValue *value = cls->as.map.items[*i].value;
+    SPYValue *dict = namespace_map(cls);
+    for (; *i < dict->as.map.len; (*i)++) {
+        SPYValue *value = dict->as.map.items[*i].value;
         if (value && value->type == SPY_MEMBER_DESCRIPTOR && (value->as.member.flags & DESC_SLOT) && value->as.member.owner == cls)
-            return cls->as.map.items[(*i)++].key;
+            return dict->as.map.items[(*i)++].key;
     }
     return NULL;
 }
@@ -14629,13 +14630,14 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
             else cell_set(c, entry->value, cls);
         } else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
-    SPYValue *dict = classdict && !c->error_type[0] ? instance_dict(c, cls) : NULL;
-    if (dict) cell_set(c, classdict, dict);
-    spy_release(dict);
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (qualname->type != SPY_STRING) errorf(c, "TypeError", "type __qualname__ must be a str, not %s", type_name(qualname));
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
     if (!c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace)) finish_class(c, cls, keywords);
+    /* Last, as the class's attributes then move into the dictionary. */
+    SPYValue *dict = classdict && !c->error_type[0] ? instance_dict(c, cls) : NULL;
+    if (dict) cell_set(c, classdict, dict);
+    spy_release(dict);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
 }
@@ -15575,10 +15577,10 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
     if (name_local(cls, "__eq__") && !name_local(cls, "__hash__")) name_set(c, cls, "__hash__", c->none);
     /* Notify the original namespace in definition order. A callback may add,
      * replace, or delete attributes, including itself and later descriptors. */
-    SPYValue *snapshot = value_new(c, SPY_DICT);
+    SPYValue *snapshot = value_new(c, SPY_DICT), *dict = namespace_map(cls);
     if (!snapshot) return -1;
-    for (size_t i = 0; i < cls->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &cls->as.map.items[i];
+    for (size_t i = 0; i < dict->as.map.len && !c->error_type[0]; i++) {
+        Entry *entry = &dict->as.map.items[i];
         map_append(c, snapshot, entry->key, entry->value, entry->hash);
     }
     for (size_t i = 0; i < snapshot->as.map.len && !c->error_type[0]; i++) {

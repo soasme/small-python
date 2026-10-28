@@ -143,3 +143,33 @@ f2()
 cell.cell_contents = 42
 assert_eq((g2["x"], g2["get"](None)), (41, 42))
 assert_eq(str(assert_raises(TypeError, FunctionType, body, g2)), "arg 5 (closure) must be tuple")
+
+# A body with a __classdict__ cell still has its descriptors named and its
+# base's __init_subclass__ called, and its slots laid out.
+names = []
+class Named:
+    def __set_name__(self, owner, name): names.append(name)
+class Base:
+    def __init_subclass__(cls, **kw): names.append(("init", cls.__name__, kw))
+class WithMethods(Base, flag=1):
+    __slots__ = ("a",)
+    first = Named()
+    def method(self): return __class__
+    second = Named()
+    @property
+    def prop(self): return 1
+    @prop.setter
+    def renamed(self, value): pass
+assert_eq(names, ["first", "second", ("init", "WithMethods", {"flag": 1})])
+assert_eq((WithMethods.prop.__name__, WithMethods.renamed.__name__, WithMethods().method()), ("prop", "renamed", WithMethods))
+class SameSlots(Base):
+    __slots__ = ("a",)
+    def method(self): pass
+class OtherLayout:
+    __slots__ = ("a",)
+    def method(self): pass
+instance = WithMethods()
+instance.__class__ = SameSlots
+assert_eq(type(instance), SameSlots)
+e = assert_raises(TypeError, setattr, instance, "__class__", OtherLayout)
+assert_eq(str(e), "__class__ assignment: 'OtherLayout' object layout differs from 'SameSlots'")

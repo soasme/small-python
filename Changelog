@@ -854,3 +854,10 @@
   new 28.2.1 CodeReplace say so; builtins/code_replace,
   compound/class_body_code and builtins/function_closures test it, and
   the CodeObjects model gains renamed and keyword-only signatures.
+- Filling a class's __classdict__ cell moved the class's attributes into
+  a dictionary before class creation finished, and finish_class and the
+  slot-layout comparison read the class's own entries, so a class body
+  with a method lost its __set_name__ calls (a property set by
+  @prop.setter kept its old name). The cell is now filled last, and both
+  read the class dictionary wherever it is kept. Found by porting
+  CPython's test_property; compound/class_body_code tests it.
