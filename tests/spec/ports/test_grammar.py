@@ -230,7 +230,7 @@ class TokenTests(unittest.TestCase):
             with self.assertRaisesRegex(SyntaxError, r"invalid character '⁄' \(U\+2044\)"):
                 compile(f"{num}⁄7", "<testcase>", "eval")
 
-            if host.record_warnings() is not None:  # (Ported) only with HostWarn
+            if host.has_warnings():  # (Ported) only with HostWarn
                 with self.assertWarnsRegex(SyntaxWarning, r'invalid \w+ literal'):
                     compile(f"{num}is x", "<testcase>", "eval")
             def promoted():  # (Ported)

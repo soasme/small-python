@@ -2609,6 +2609,7 @@ typedef struct {
     int functions, loops, async_function;
     int star; /* One more than the loop depth inside an except* block, else 0. */
     const char *literal_start; /* The body of the string literal being decoded. */
+    const char *lexeme; /* The token lex() is reading. */
     const char *annotation_scope; /* Set while parsing a type-parameter value or alias, e.g. "a TypeVar bound". */
     const char *private_name;
     const char *error_start, *error_end;
@@ -2686,98 +2687,188 @@ static int literal_prefix(const char *s, size_t *prefix, int *flags) {
     }
     return s[*prefix] == '\'' || s[*prefix] == '"';
 }
-static const char *scan_literal(Parser *, const char *, size_t, int);
-/* Stop at the replacement field's conversion, format, debug or closing marker.
- * Quoted strings and nested delimiters belong to its Python expression. */
-static const char *scan_field_expression(Parser *p, const char *s, size_t depth, int outer_flags) {
-    char closing[128];
+/* A replacement field being scanned: its literal's flags and quote, its '{',
+ * and a lambda that begins one of its top-level items. */
+typedef struct { int flags, quote; const char *open, *lambda; } Field;
+static const char *scan_literal(Parser *, const char *, size_t, const Field *);
+static Node *field_expression(Parser *, const char *, const char *, int, size_t, const char **);
+static char field_kind(const Field *f) { return f->flags & L_TEMPLATE ? 't' : 'f'; }
+/* The line of 'at' within the token lex() is reading, which starts on ctx->line. */
+static size_t lexeme_line(Parser *p, const char *at) {
+    size_t line = p->ctx->line;
+    for (const char *s = p->lexeme; s && s < at; s++) if (*s == '\n') line++;
+    return line;
+}
+/* CPython's parser reads a field's tokens as its lexer makes them. When the
+ * field's text up to 'end' fails to parse before the lexer error just raised
+ * (anywhere, once the expression is complete), the parser's error wins. */
+static void field_parser_error(Parser *p, const Field *f, const char *end, int complete) {
+    if (strcmp(p->ctx->error_type, "SyntaxError")) return;
+    char message[256];
+    snprintf(message, sizeof(message), "%s", p->ctx->error_message);
+    size_t line = p->ctx->line;
+    const char *start = p->error_start, *stop = p->error_end;
+    int trim = p->error_trim_line, zero = p->error_end_zero;
+    const char *failed = NULL;
+    spy_clear_error(p->ctx);
+    p->ctx->line = line;
+    size_t base = lexeme_line(p, f->open + 1);
+    if (!field_expression(p, f->open + 1, end, f->flags, base, &failed) && (complete || failed) &&
+        !strcmp(p->ctx->error_type, "SyntaxError")) {
+        /* lex() counts the lines to a located error from the token's first. */
+        if (p->error_start) p->ctx->line = line;
+        return;
+    }
+    spy_clear_error(p->ctx);
+    spy_error(p->ctx, "SyntaxError", message);
+    p->ctx->line = line; p->error_start = start; p->error_end = stop; p->error_trim_line = trim; p->error_end_zero = zero;
+}
+/* Scan the field's expression the way CPython's lexer reads it, up to the
+ * conversion, format, debug or closing marker. */
+static int identifier_byte(int c) { return isalnum(c) || c == '_' || c >= 128; }
+static const char *scan_field_expression(Parser *p, const char *s, size_t depth, Field *f) {
+    const char *start = s;
+    char closing[200]; /* CPython's MAXLEVEL */
+    const char *opened[200];
     size_t brackets = 0;
     for (; *s; s++) {
         size_t prefix; int flags;
         if (literal_prefix(s, &prefix, &flags)) {
-            s = scan_literal(p, s, depth + 1, outer_flags);
-            if (!s) return NULL;
-            s--; continue;
-        }
-        if (*s == '#') { while (*s && *s != '\n') s++; if (!*s) break; continue; }
-        if (*s == '(' || *s == '[' || *s == '{') {
-            if (brackets == sizeof(closing)) break;
+            const char *next = scan_literal(p, s, depth + 1, f);
+            if (!next) goto fail;
+            s = next - 1;
+        } else if (*s == '#') {
+            while (s[1] && s[1] != '\n') s++;
+        } else if (*s == '\\') {
+            if (s[1] == '\n' || (s[1] == '\r' && s[2] == '\n')) { s += s[1] == '\r' ? 2 : 1; continue; }
+            p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 1;
+            spy_error(p->ctx, "SyntaxError", "unexpected character after line continuation character"); goto fail;
+        } else if (*s == '(' || *s == '[' || *s == '{') {
+            if (brackets == sizeof(closing)) {
+                p->error_start = p->error_end = s; p->error_trim_line = 1;
+                spy_error(p->ctx, "SyntaxError", "too many nested parentheses"); goto fail;
+            }
+            opened[brackets] = s;
             closing[brackets++] = *s == '(' ? ')' : *s == '[' ? ']' : '}';
         } else if (*s == ')' || *s == ']' || *s == '}') {
             if (!brackets && *s == '}') return s;
-            if (!brackets || closing[--brackets] != *s) {
-                errorf(p->ctx, "SyntaxError", "%c-string: mismatched delimiter", outer_flags & L_TEMPLATE ? 't' : 'f'); return NULL;
+            p->error_start = p->error_end = s; p->error_trim_line = 1;
+            if (!brackets) { errorf(p->ctx, "SyntaxError", "%c-string: unmatched '%c'", field_kind(f), *s); goto fail; }
+            if (closing[--brackets] != *s) {
+                int opening = *opened[brackets];
+                size_t line = lexeme_line(p, opened[brackets]);
+                if (line != lexeme_line(p, s))
+                    errorf(p->ctx, "SyntaxError", "closing parenthesis '%c' does not match opening parenthesis '%c' on line %zu", *s, opening, line);
+                else errorf(p->ctx, "SyntaxError", "closing parenthesis '%c' does not match opening parenthesis '%c'", *s, opening);
+                goto fail;
             }
         } else if (!brackets) {
-            if (*s == ';' || *s == ':' || (*s == '!' && s[1] != '=') || (*s == '=' && s[1] != '=')) return s;
+            if (*s == ':' || (*s == '!' && s[1] != '=') || (*s == '=' && s[1] != '=')) return s;
             if ((*s == '=' || *s == '!' || *s == '<' || *s == '>') && s[1] == '=') s++;
+            else if (!strncmp(s, "lambda", 6) && !identifier_byte((unsigned char)s[6]) && (s == start || !identifier_byte((unsigned char)s[-1]))) {
+                const char *before = s;
+                while (before > start && isspace((unsigned char)before[-1])) before--;
+                if (before == start || before[-1] == ',') f->lambda = s;
+            }
         }
     }
-    spy_error(p->ctx, "SyntaxError", outer_flags & L_TEMPLATE ? "'{' was never closed" : "f-string: expecting '}'"); return NULL;
+    /* The source ended inside the field. */
+    p->error_start = f->open; p->error_end = f->open + 1; p->error_end_zero = 1;
+    spy_error(p->ctx, "SyntaxError", "'{' was never closed");
+fail:
+    field_parser_error(p, f, s, 0);
+    return NULL;
+}
+/* Skip what the lexer ignores between a field's tokens. */
+static const char *field_space(const char *s) {
+    for (;;) {
+        if (*s == ' ' || *s == '\t' || *s == '\f' || *s == '\r' || *s == '\n') s++;
+        else if (*s == '\\' && s[1] == '\n') s += 2;
+        else if (*s == '#') while (*s && *s != '\n') s++;
+        else return s;
+    }
+}
+/* A parser error at token 'at', which may begin a string that the lexer rejects first. */
+static const char *field_token_error(Parser *p, const Field *f, const char *at, const char *message, size_t depth) {
+    size_t prefix; int flags;
+    const char *end = literal_prefix(at, &prefix, &flags) ? scan_literal(p, at, depth + 1, f) : at + 1;
+    if (!end) return NULL;
+    p->error_start = at; p->error_end = end;
+    errorf(p->ctx, "SyntaxError", "%c-string: %s", field_kind(f), message);
+    return NULL;
 }
 /* specs counts the format specifications this field is nested in. */
-static const char *scan_field(Parser *p, const char *s, size_t depth, size_t specs, int flags) {
-    char kind = flags & L_TEMPLATE ? 't' : 'f';
+static const char *scan_field(Parser *p, const char *s, size_t depth, size_t specs, int flags, int quote) {
+    Field f = {flags, quote, s - 1, NULL};
+    char kind = field_kind(&f);
     if (depth > 128) { errorf(p->ctx, "SyntaxError", "%c-string nesting too deep", kind); return NULL; }
-    const char *begin = s;
-    s = scan_field_expression(p, s, depth, flags);
+    s = scan_field_expression(p, s, depth, &f);
     if (!s) return NULL;
-    while (begin < s && isspace((unsigned char)*begin)) begin++;
-    if (begin == s) {
+    const char *expression = s;
+    if (field_space(f.open + 1) == s) {
+        p->error_start = s; p->error_end = s + 1;
         errorf(p->ctx, "SyntaxError", "%c-string: valid expression required before '%c'", kind, *s); return NULL;
     }
-    if (*s == ';') {
-        errorf(p->ctx, "SyntaxError", "%c-string: expecting '=', or '!', or ':', or '}'", kind); return NULL;
-    }
-    if ((size_t)(s - begin) >= 6 && !memcmp(begin, "lambda", 6) &&
-        (begin + 6 == s || isspace((unsigned char)begin[6]))) {
+    if (f.lambda && *s == ':') {
+        p->error_start = f.lambda; p->error_end = s + 1;
         errorf(p->ctx, "SyntaxError", "%c-string: lambda expressions are not allowed without parentheses", kind); return NULL;
     }
     int debug = *s == '=', converted = 0, spec = 0;
-    if (debug) {
-        s++;
-        while (isspace((unsigned char)*s) || *s == '#' || (*s == '\\' && s[1] == '\n'))
-            if (*s == '#') while (*s && *s != '\n') s++;
-            else s += *s == '\\' ? 2 : 1;
-    }
+    if (debug) s = field_space(s + 1);
     if (*s == '!') {
-        s++;
-        if (!*s || *s == '}' || *s == ':') {
-            errorf(p->ctx, "SyntaxError", "%c-string: missing conversion character", kind); return NULL;
+        /* The conversion is a NAME token right after the '!'. */
+        const char *bang = s, *name = field_space(s + 1), *end = name;
+        while (isalnum((unsigned char)*end) || *end == '_' || (unsigned char)*end >= 128) end++;
+        if (end == name || isdigit((unsigned char)*name)) {
+            if (*name == ':' || *name == '}') field_token_error(p, &f, name, "missing conversion character", depth);
+            else field_token_error(p, &f, name, "invalid conversion character", depth);
+            goto fail;
         }
-        if (*s != 's' && *s != 'r' && *s != 'a') {
-            errorf(p->ctx, "SyntaxError", "%c-string: invalid conversion character '%c': expected 's', 'r', or 'a'", kind, *s); return NULL;
+        if (name != bang + 1) {
+            p->error_start = bang; p->error_end = end;
+            errorf(p->ctx, "SyntaxError", "%c-string: conversion type must come right after the exclamation mark", kind); goto fail;
         }
-        s++; converted = 1;
-        while (isspace((unsigned char)*s) || (*s == '\\' && s[1] == '\n')) s += *s == '\\' ? 2 : 1;
+        if (end - name != 1 || (*name != 's' && *name != 'r' && *name != 'a')) {
+            p->error_start = name; p->error_end = end;
+            errorf(p->ctx, "SyntaxError", "%c-string: invalid conversion character '%.*s': expected 's', 'r', or 'a'", kind, (int)(end - name), name);
+            goto fail;
+        }
+        s = field_space(end); converted = 1;
     }
     if (*s == ':') {
         spec = 1;
         for (s++; *s && *s != '}'; s++) {
+            if (*s == quote && (!(flags & L_MULTILINE) || (s[1] == quote && s[2] == quote))) break;
             if (*s == '\n' && !(flags & L_MULTILINE)) {
-                errorf(p->ctx, "SyntaxError", "%c-string: newlines are not allowed in format specifiers", kind); return NULL;
+                p->error_start = p->error_end = s; p->error_trim_line = 1;
+                errorf(p->ctx, "SyntaxError", "%c-string: newlines are not allowed in format specifiers for single quoted %c-strings", kind, kind);
+                goto fail;
             }
             if (*s == '{') {
-                if (s[1] == ';') {
-                    errorf(p->ctx, "SyntaxError", "%c-string: expecting a valid expression after '{'", kind); return NULL;
-                }
                 if (specs == 2) {
-                    p->error_start = p->error_end = s - 1;
-                    errorf(p->ctx, "SyntaxError", "%c-string: expressions nested too deeply", kind); return NULL;
+                    p->error_start = p->error_end = s - 1; p->error_trim_line = 1;
+                    errorf(p->ctx, "SyntaxError", "%c-string: expressions nested too deeply", kind); goto fail;
                 }
-                s = scan_field(p, s + 1, depth + 1, specs + 1, flags);
-                if (!s) return NULL;
+                s = scan_field(p, s + 1, depth + 1, specs + 1, flags, quote);
+                if (!s) goto fail;
             }
         }
     }
+    if (*s != '}' && spec) {
+        /* The specification stops at the literal's closing quote. */
+        p->error_start = s; p->error_end = s + 1;
+        errorf(p->ctx, "SyntaxError", "%c-string: expecting '}', or format specs", kind); goto fail;
+    }
     if (*s != '}') {
-        errorf(p->ctx, "SyntaxError", "%c-string: %s", kind, spec ? "expecting '}', or format specs" :
-               converted ? "expecting ':' or '}'" : debug ? "expecting '!', or ':', or '}'" : "expecting '}'");
-        return NULL;
+        field_token_error(p, &f, s, converted ? "expecting ':' or '}'" : debug ? "expecting '!', or ':', or '}'" : "expecting '}'", depth);
+        goto fail;
     }
     return s;
+fail:
+    field_parser_error(p, &f, expression, 1);
+    return NULL;
 }
-static const char *scan_literal(Parser *p, const char *s, size_t depth, int field_flags) {
+static const char *scan_literal(Parser *p, const char *s, size_t depth, const Field *field) {
     if (depth > 128) { spy_error(p->ctx, "SyntaxError", "string nesting too deep"); return NULL; }
     size_t prefix; int flags;
     if (!literal_prefix(s, &prefix, &flags)) return NULL;
@@ -2791,9 +2882,10 @@ static const char *scan_literal(Parser *p, const char *s, size_t depth, int fiel
         if ((flags & L_FORMAT) && (*s == '{' || *s == '}')) {
             if (s[1] == *s) { s++; continue; }
             if (*s == '}') {
+                p->error_start = p->error_end = s; p->error_trim_line = 1;
                 errorf(p->ctx, "SyntaxError", "%c-string: single '}' is not allowed", flags & L_TEMPLATE ? 't' : 'f'); return NULL;
             }
-            s = scan_field(p, s + 1, depth + 1, 0, flags);
+            s = scan_field(p, s + 1, depth + 1, 0, flags, quote);
             if (!s) return NULL;
         } else if (*s == '\\' && s[1] == 'N' && s[2] == '{' && (flags & L_FORMAT) && !(flags & L_RAW)) {
             /* A named escape's braces are not a replacement field. */
@@ -2802,15 +2894,20 @@ static const char *scan_literal(Parser *p, const char *s, size_t depth, int fiel
         } else if (*s == '\\' && s[1] && (!(flags & L_FORMAT) || (s[1] != '{' && s[1] != '}'))) s++;
     }
     if (triple && !*s) p->incomplete = 1;
-    if (field_flags) errorf(p->ctx, "SyntaxError", "%c-string: expecting '}'", field_flags & L_TEMPLATE ? 't' : 'f');
-    else {
-        /* The tokenizer's line when it gave up; a final newline ends no line. */
-        size_t detected = p->ctx->line;
-        for (const char *ch = begin; ch < s; ch++) if (*ch == '\n' && ch[1]) detected++;
-        errorf(p->ctx, "SyntaxError", "unterminated %s%sstring literal (detected at line %zu)", triple ? "triple-quoted " : "",
-               flags & L_TEMPLATE ? "t-" : flags & L_FORMAT ? "f-" : "", detected);
-        p->error_start = p->error_end = begin;
+    p->error_start = p->error_end = begin; p->error_trim_line = 1;
+    if (field && field->quote == quote && !(field->flags & L_MULTILINE) == !triple) {
+        /* The field's own closing quote: its '}' is missing. */
+        size_t line = lexeme_line(p, field->open);
+        if (line != lexeme_line(p, begin))
+            errorf(p->ctx, "SyntaxError", "%c-string: expecting '}' to close '{' on line %zu", field_kind(field), line);
+        else errorf(p->ctx, "SyntaxError", "%c-string: expecting '}'", field_kind(field));
+        return NULL;
     }
+    /* The tokenizer's line when it gave up; a final newline ends no line. */
+    size_t detected = lexeme_line(p, begin);
+    for (const char *ch = begin; ch < s; ch++) if (*ch == '\n' && ch[1]) detected++;
+    errorf(p->ctx, "SyntaxError", "unterminated %s%sstring literal (detected at line %zu)", triple ? "triple-quoted " : "",
+           flags & L_TEMPLATE ? "t-" : flags & L_FORMAT ? "f-" : "", detected);
     return NULL;
 }
 /* CPython's number tokenizer and its diagnostics. Errors point at the
@@ -2988,11 +3085,13 @@ static int lex(Parser *p, const char *s) {
             line++;
             continue;
         }
-        if (*s == '\\' && !s[1] && brackets) { s++; continue; }
+        if (*s == '\\' && !s[1] && brackets && !p->ctx->eval_input) { s++; continue; }
         if (*s == '\\') {
-            /* 12.2.2: a backslash outside a literal must end the line. */
-            p->ctx->line = line; p->error_start = s + 1; p->error_end = NULL; p->error_end_zero = 2;
-            spy_error(p->ctx, "SyntaxError", s[1] ? "unexpected character after line continuation character" : "unexpected EOF while parsing");
+            /* 12.2.2: a backslash outside a literal must end the line. Exec
+             * input ends with an implicit newline; eval input does not. */
+            int eof = !s[1] && !p->ctx->eval_input;
+            p->ctx->line = line; p->error_start = s + (s[1] || eof); p->error_end = NULL; p->error_end_zero = eof ? 2 : 1;
+            spy_error(p->ctx, "SyntaxError", eof ? "unexpected EOF while parsing" : "unexpected character after line continuation character");
             return -1;
         }
         if (*s == '\n') {
@@ -3007,8 +3106,8 @@ static int lex(Parser *p, const char *s) {
         if (string_prefix_error(p, start, line)) return -1;
         if (literal_prefix(start, &prefix, &flags)) {
             p->ctx->line = line;
-            p->error_start = NULL;
-            s = scan_literal(p, start, 0, 0);
+            p->error_start = NULL; p->lexeme = start;
+            s = scan_literal(p, start, 0, NULL);
             if (!s) {
                 /* An error placed inside the literal is on its line. */
                 for (const char *ch = start; p->error_start && ch < p->error_start; ch++) if (*ch == '\n') p->ctx->line++;
@@ -3244,6 +3343,7 @@ static Node *plain_expression(Parser *, int);
 static Node *expression_mode(Parser *, int, int);
 static Node *syntax_at(Parser *, Node *, const char *);
 static Node *expression_list(Parser *, int);
+static Node *yield_expression(Parser *);
 static void star_expression_error(Parser *, size_t);
 static int named_equals_error(Parser *, size_t);
 static const char *expression_name(Node *);
@@ -3742,7 +3842,8 @@ static int flush_literal(Parser *p, Node ***tail, Buffer *out) {
 }
 static void invalid_expression_error(Parser *);
 static size_t probe_expression(Parser *, size_t, int);
-static Node *field_expression(Parser *p, const char *start, const char *end, int flags) {
+/* The field's expression; failed receives where a failed parse stopped within it. */
+static Node *field_expression(Parser *p, const char *start, const char *end, int flags, size_t line, const char **failed) {
     Buffer text = {.ctx = p->ctx};
     if (puts_buffer(&text, "(") || append(&text, start, (size_t)(end - start)) || puts_buffer(&text, "\n)")) {
         free(text.data); return NULL;
@@ -3756,31 +3857,53 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         const char *copy = text.data + 1, *copy_end = copy + (end - start);
         for (size_t i = 0; i < inner.len; i++) {
             Token *t = &inner.tokens[i];
-            t->line += peek(p)->line - 1;
+            t->line += line - 1;
             if (t->start >= copy && t->start + t->len <= copy_end) t->start = start + (t->start - copy);
             else { t->start = t->start < copy ? start : end; t->len = 0; }
         }
-        result = expression(&inner, 0);
+        /* annotated_rhs, inside the added parentheses. */
+        inner.pos = 1;
+        result = keyword(&inner, "yield") ? yield_expression(&inner) : expression_list(&inner, 0);
+        if (result && result->kind == N_STAR) result = syntax_at(&inner, result, "can't use starred expression here");
+        if (result && !take(&inner, ')')) result = syntax(&inner, "invalid syntax");
         take(&inner, T_NL);
-        if (result && !at(&inner, T_END)) result = syntax(&inner, "invalid f-string expression");
         if (!result) invalid_expression_error(&inner);
         /* Compiler errors found inside the field are reported like the outer source's. */
         if (result && inner.deferred && !p->deferred) {
             defer(p, inner.deferred);
-            p->deferred_line = inner.deferred_line;
+            p->deferred_line = inner.deferred_line; p->deferred_node = inner.deferred_node;
+            p->deferred_start = inner.deferred_start; p->deferred_end = inner.deferred_end;
         }
         /* invalid_replacement_field: what follows the expression, if any. */
         if (!result && error_is(p->ctx, "SyntaxError") && !strcmp(p->ctx->error_message, "invalid syntax")) {
-            size_t line = p->ctx->line;
-            int valid = probe_expression(&inner, 1, 11) != 0;
+            size_t valid = probe_expression(&inner, 1, 11);
             spy_clear_error(p->ctx);
             errorf(p->ctx, "SyntaxError", valid ? "%c-string: expecting '=', or '!', or ':', or '}'" : "%c-string: expecting a valid expression after '{'",
                    flags & L_TEMPLATE ? 't' : 'f');
-            p->ctx->line = line;
+            error_token(&inner, &inner.tokens[valid ? valid : 1]);
         }
+        /* The error's position, in the outer source. */
+        const char **ends[] = {&inner.error_start, &inner.error_end};
+        for (int i = 0; i < 2; i++)
+            if (*ends[i] >= copy && *ends[i] <= copy_end) *ends[i] = start + (*ends[i] - copy);
+            else if (*ends[i] && (*ends[i] < start || *ends[i] > end)) *ends[i] = NULL;
+        p->error_start = inner.error_start; p->error_end = inner.error_end;
+        p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
+        if (!result && failed && inner.far < inner.len && inner.tokens[inner.far].len) *failed = inner.tokens[inner.far].start;
     }
     free(inner.tokens); free(text.data);
     return result;
+}
+/* Append the source text [s, end) without its comments. */
+static int append_source(Parser *p, Buffer *b, const char *s, const char *end) {
+    while (s < end) {
+        size_t prefix; int flags;
+        const char *next = literal_prefix(s, &prefix, &flags) ? scan_literal(p, s, 1, NULL) : NULL;
+        if (next && next <= end) { if (append(b, s, (size_t)(next - s))) return -1; s = next; }
+        else if (*s == '#') while (s < end && *s != '\n') s++;
+        else if (append(b, s++, 1)) return -1;
+    }
+    return p->ctx->error_type[0] ? -1 : 0;
 }
 static int string_parts(Parser *p, const char **cursor, const char *end, int flags,
                         int spec, Node ***tail, Buffer *literal, size_t depth) {
@@ -3794,32 +3917,29 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 s += 2; continue;
             }
             if (*s == '}') { syntax(p, "f-string: single '}' is not allowed"); return -1; }
-            const char *begin = ++s, *expr_end = scan_field_expression(p, s, depth, flags);
+            Field f = {flags, 0, s, NULL};
+            size_t line = peek(p)->line;
+            for (const char *ch = peek(p)->start; ch < s; ch++) if (*ch == '\n') line++;
+            const char *begin = ++s, *expr_end = scan_field_expression(p, s, depth, &f);
             if (!expr_end || expr_end >= end) return -1;
             const char *nonspace = begin;
             while (nonspace < expr_end && isspace((unsigned char)*nonspace)) nonspace++;
             if (nonspace == expr_end) { syntax(p, "f-string: empty expression not allowed"); return -1; }
             Node *field = node(p, !spec && (flags & L_TEMPLATE) ? N_INTERPOLATION : N_FORMAT);
-            if (!field || !(field->a = field_expression(p, begin, expr_end, flags))) return -1;
+            if (!field || !(field->a = field_expression(p, begin, expr_end, flags, line, NULL))) return -1;
             if (field->kind == N_INTERPOLATION) {
                 /* Interpolation.expression is the source text without comments. */
                 Buffer source = {.ctx = p->ctx};
-                for (const char *ch = begin; ch < expr_end;) {
-                    size_t prefix; int literal_flags;
-                    const char *next = literal_prefix(ch, &prefix, &literal_flags) ? scan_literal(p, ch, 1, 0) : NULL;
-                    if (next && next <= expr_end) { if (append(&source, ch, (size_t)(next - ch))) break; ch = next; continue; }
-                    if (*ch == '#') { while (ch < expr_end && *ch != '\n') ch++; continue; }
-                    if (append(&source, ch++, 1)) break;
+                if (append_source(p, &source, begin, expr_end) || (!source.data && !(source.data = copy_text(p->ctx, "", 0)))) {
+                    free(source.data); return -1;
                 }
-                if (!source.data && !(source.data = copy_text(p->ctx, "", 0))) return -1;
-                if (p->ctx->error_type[0]) { free(source.data); return -1; }
                 field->text = source.data;
             }
             s = expr_end;
             int debug = *s == '=';
             if (debug) {
                 /* The debug text keeps the whitespace after '=' but not comments. */
-                if (append(literal, begin, (size_t)(++s - begin))) return -1;
+                if (append_source(p, literal, begin, ++s)) return -1;
                 while (s < end && (isspace((unsigned char)*s) || *s == '#' || (*s == '\\' && s + 1 < end && s[1] == '\n'))) {
                     const char *start = s;
                     if (*s == '#') { while (s < end && *s != '\n') s++; continue; }
@@ -4217,7 +4337,7 @@ static int call_arguments(Parser *p, Node *n) {
 static Node *expression_inner(Parser *p, int min, int named) {
     Node *left;
     if (keyword(p, "lambda")) {
-        if (min) return syntax(p, "invalid lambda expression");
+        if (min) return syntax(p, "invalid syntax");
         p->pos++;
         left = node(p, N_LAMBDA);
         if (!left || !(left->a = node(p, N_NAME))) return NULL;
@@ -6504,6 +6624,16 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             goto lexer_error;
         }
         if (!c->error_type[0] && !at(&p, T_END)) syntax(&p, "unexpected indentation");
+        if (c->eval_input && !strcmp(c->error_type, "SyntaxError")) {
+            /* eval_input has no statement rules: report what its expressions find. */
+            spy_clear_error(c);
+            p.pos = 0; p.error_start = p.error_end = NULL; p.error_trim_line = p.error_end_zero = 0;
+            if (expression_list(&p, 0)) {
+                while (at(&p, T_NL)) p.pos++;
+                if (at(&p, T_END)) { p.pos = 0; statements(&p); }
+                else syntax(&p, "invalid syntax");
+            }
+        }
         if (c->error_type[0] && p.pos < p.len && (at(&p, T_END) || at(&p, T_DEDENT)) &&
             (!p.error_start || p.error_start == peek(&p)->start)) {
             at_end = 1;

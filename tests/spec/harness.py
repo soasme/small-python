@@ -243,6 +243,14 @@ class Host:
             return [(w.category, str(w.message), w.lineno) for w in caught]
         return stop
 
+    def has_warnings(self):
+        """Whether the host supplies HostWarn (18.3)."""
+        try:
+            __import__("warnings")
+        except ImportError:
+            return False
+        return True
+
     def raising_warnings(self, thunk):
         """Call thunk with HostWarn raising every warning it receives as an
         exception (18.3), and return True; or return False without calling
