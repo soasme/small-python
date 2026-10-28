@@ -8687,6 +8687,26 @@ static int view_compare(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     return op == T_NE ? !result : result;
 }
 static int view_equal(SPYContext *c, SPYValue *a, SPYValue *b) { return view_compare(c, T_EQ, a, b); }
+static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
+/* a op b for an ordering operator on two lists, tuples or slices: the first
+ * unequal items decide, else the lengths. */
+static SPYValue *sequence_order(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if (deeper(c, " in comparison")) return NULL;
+    for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
+        SPYValue *x = spy_retain(comparison_item(a, i)), *y = spy_retain(comparison_item(b, i));
+        if (x == y || equal(x, y, 0)) { spy_release(x); spy_release(y); continue; }
+        spy_release(x); spy_release(y);
+        if (c->error_type[0]) { c->depth--; return NULL; }
+        if (i >= comparison_length(a) || i >= comparison_length(b)) break;
+        x = spy_retain(comparison_item(a, i)); y = spy_retain(comparison_item(b, i));
+        SPYValue *value = comparison(c, op, x, y);
+        spy_release(x); spy_release(y);
+        c->depth--; return value;
+    }
+    c->depth--;
+    int order = comparison_length(a) < comparison_length(b) ? -1 : comparison_length(a) > comparison_length(b);
+    return spy_bool(c, op == '<' ? order < 0 : op == '>' ? order > 0 : op == T_LE ? order <= 0 : order >= 0);
+}
 /* x op y for an ordering or equality operator. */
 #define COMPARE(op, x, y) ((op) == '<' ? (x) < (y) : (op) == T_LE ? (x) <= (y) : (op) == '>' ? (x) > (y) : \
                           (op) == T_GE ? (x) >= (y) : (op) == T_EQ ? (x) == (y) : (x) != (y))
@@ -8697,6 +8717,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         if (a->type == SPY_INT && !a->as.integer_data.big && !b->as.integer_data.big)
             return spy_bool(c, COMPARE(op, a->as.integer_data.small, b->as.integer_data.small));
         if (a->type == SPY_FLOAT) return spy_bool(c, COMPARE(op, a->as.real, b->as.real));
+        if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && op != T_EQ && op != T_NE) return sequence_order(c, op, a, b);
     }
     if ((special_dispatch(a) || special_dispatch(b)) &&
         (op == T_EQ || op == T_NE || op == '<' || op == T_LE || op == '>' || op == T_GE)) {
@@ -8810,23 +8831,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         return spy_bool(c, op == O_IN ? result : !result);
     }
     int order;
-    if ((a->type == SPY_LIST || a->type == SPY_TUPLE || a->type == SPY_SLICE) && a->type == b->type) {
-        if (deeper(c, " in comparison")) return NULL;
-        for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
-            SPYValue *x = spy_retain(comparison_item(a, i)), *y = spy_retain(comparison_item(b, i));
-            if (x == y || equal(x, y, 0)) { spy_release(x); spy_release(y); continue; }
-            spy_release(x); spy_release(y);
-            if (c->error_type[0]) { c->depth--; return NULL; }
-            if (i >= comparison_length(a) || i >= comparison_length(b)) break;
-            x = spy_retain(comparison_item(a, i)); y = spy_retain(comparison_item(b, i));
-            SPYValue *value = comparison(c, op, x, y);
-            spy_release(x); spy_release(y);
-            c->depth--; return value;
-        }
-        c->depth--;
-        order = comparison_length(a) < comparison_length(b) ? -1 : comparison_length(a) > comparison_length(b);
-        return spy_bool(c, op == '<' ? order < 0 : op == '>' ? order > 0 : op == T_LE ? order <= 0 : order >= 0);
-    }
+    if ((a->type == SPY_LIST || a->type == SPY_TUPLE || a->type == SPY_SLICE) && a->type == b->type) return sequence_order(c, op, a, b);
     if (is_number(a) && is_number(b)) {
         order = numeric_order(a, b);
         if (order == 2) return spy_bool(c, 0);
