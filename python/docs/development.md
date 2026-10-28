@@ -57,8 +57,10 @@ macOS (arm64 and x86_64), and Windows (x86_64, with MinGW-w64 GCC on `PATH`) by
 `python/tests`.
 
 Pushing a tag `vX.Y.Z` that matches the `version` in `python/pyproject.toml`
-runs `.github/workflows/publish.yml`, which builds the sdist and wheels and
-publishes them to PyPI with trusted publishing.
+and in `javascript/package.json` runs `.github/workflows/publish.yml`, which
+builds the sdist and wheels and publishes them to PyPI, and builds the
+WebAssembly worker and publishes the JavaScript package to npm, both with
+trusted publishing.
 
 To prepare a release, preview the version bump:
 
@@ -68,7 +70,8 @@ uv run python scripts/bumpversion.py patch
 ```
 
 Use `major`, `minor`, or `patch`. The script clones `origin` into a temporary
-directory, bumps the version and lockfile in `python/`, builds and checks the
+directory, bumps the version and lockfile in `python/` and the version in
+`javascript/package.json`, builds and checks the
 distributions, and shows the change. Add `-y` to commit, tag, and push:
 
 ```sh

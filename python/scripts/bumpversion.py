@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Preview a release in a temporary clone; use -y to commit, tag, and push it."""
+"""Preview a release in a temporary clone; use -y to commit, tag, and push it.
+The tag publishes both packages, so the npm package takes the same version."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from pathlib import Path
 
 # The package lives in python/ of the repository; git paths are from the root.
 PROJECT = "python"
-RELEASE_FILES = (f"{PROJECT}/pyproject.toml", f"{PROJECT}/uv.lock")
+RELEASE_FILES = (f"{PROJECT}/pyproject.toml", f"{PROJECT}/uv.lock", "javascript/package.json")
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -41,6 +42,7 @@ def main() -> None:
         package = clone / PROJECT
         run_checked("uv", "version", "--bump", args.part, "--no-sync", cwd=package)
         version = run("uv", "version", "--short", cwd=package)
+        run_checked("npm", "version", version, "--no-git-tag-version", cwd=clone / "javascript")
         tag = f"v{version}"
         if run("git", "tag", "--list", tag, cwd=clone):
             raise RuntimeError(f"Tag {tag} already exists.")
