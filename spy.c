@@ -59,6 +59,7 @@ struct Node {
     const char *start, *end;
     int spanned;
     char *text, *original;
+    char *local; /* A replace()d code's parameter: the body's name for its slot. */
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
@@ -85,7 +86,8 @@ struct SPYValue {
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         struct { Entry *items; size_t len, cap; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
-        struct { SPYValue *unit, *env, *attributes, *metadata; Node *def; } function;
+        /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
+        struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
         struct { SPYNative call; void *data; int method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
                  SPYValue *module; /* An assigned __module__, or NULL for the default. */
@@ -239,7 +241,8 @@ static SPYValue *cell_construct(SPYContext *, size_t, SPYValue *const *, SPYValu
 static SPYValue *traceback_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *function_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
-static SPYValue *call_module_code(SPYContext *, SPYValue *, size_t, SPYValue *);
+static SPYValue *call_module_code(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+static Node *replaced_signature(SPYValue *);
 static SPYValue *forward_env(SPYContext *, Node *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Node *, int);
@@ -626,7 +629,7 @@ static void free_value(SPYValue *v) {
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET: free(v->as.map.items); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n); n = next; }
+        while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
         free_scope(v->as.unit.scope);
         free(v->as.unit.filename);
         break;
@@ -1171,11 +1174,22 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
     switch (ta) {
     case SPY_NONE: return 1;
     case SPY_CODE: {
-        /* Codes for one definition are equal when replace() changed the same fields alike. */
+        /* Codes for one definition are equal when replace() changed the same
+         * fields alike, except those that take no part in equality (28.2). */
         if (!a->as.unit.owner || a->as.unit.owner != b->as.unit.owner || a->as.unit.definition != b->as.unit.definition) return 0;
-        SPYValue *x = a->as.unit.replaced, *y = b->as.unit.replaced;
-        if (!x || !y) return !(x ? x : y) || !(x ? x : y)->as.map.len;
-        return equal_value(x, y, depth + 1);
+        static const char *const ignored[] = {"co_qualname", "co_filename", "co_stacksize"};
+        for (int side = 0; side < 2; side++) {
+            SPYValue *x = side ? b->as.unit.replaced : a->as.unit.replaced, *y = side ? a->as.unit.replaced : b->as.unit.replaced;
+            for (size_t i = 0; x && i < x->as.map.len; i++) {
+                const char *name = x->as.map.items[i].key->as.string.data;
+                size_t skip = 0;
+                while (skip < sizeof(ignored) / sizeof(*ignored) && strcmp(ignored[skip], name)) skip++;
+                if (skip < sizeof(ignored) / sizeof(*ignored)) continue;
+                SPYValue *other = y ? name_local(y, name) : NULL;
+                if (!other || !equal(x->as.map.items[i].value, other, depth + 1)) return 0;
+            }
+        }
+        return 1;
     }
     case SPY_RANGE: {
         if (integer_compare(a->as.range.length, b->as.range.length)) return 0;
@@ -1684,6 +1698,12 @@ static int annotation_env(SPYValue *e) {
 /* Return an owned local value, or NULL without an error for a missing key. */
 static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
     SPYValue *namespace = env->as.map.namespace;
+    /* A class body with a __classdict__ cell reads the mapping in it. */
+    SPYValue *classdict = env->type == V_ENV && env->as.map.flags == 1 && env->as.map.base ? cell_contents(env->as.map.base) : NULL;
+    if (classdict && classdict != namespace) {
+        if (classdict->type == SPY_DICT) return spy_retain(name_local(classdict, name));
+        namespace = classdict;
+    }
     if (namespace && namespace->type != SPY_DICT) {
         SPYValue *key = spy_string(c, name, strlen(name));
         SPYValue *value = key ? get_index(c, namespace, key) : NULL;
@@ -9034,7 +9054,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (!strcmp(name, "co_qualname")) return qualified_name(c, def->scope);
         if (!strcmp(name, "co_freevars") || !strcmp(name, "co_cellvars"))
-            return def && def->kind != N_CLASS ? closure_names(c, def, name[3] == 'c') : value_new(c, SPY_TUPLE);
+            return def ? closure_names(c, def, name[3] == 'c') : value_new(c, SPY_TUPLE);
         if (!strcmp(name, "co_firstlineno")) return spy_int(c, def ? (int64_t)def->line : 1);
         if (!strcmp(name, "co_flags")) {
             /* CO_OPTIMIZED | CO_NEWLOCALS, CO_VARARGS, CO_VARKEYWORDS, CO_NESTED,
@@ -9060,6 +9080,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
              * bindings in first-use order. A class body has no fast locals. */
             SPYValue *names = value_new(c, SPY_TUPLE);
             Scope *scope = def && def->kind != N_CLASS ? def->scope : NULL;
+            /* A generator expression's code takes its iterable as ".0". */
+            SPYValue *iterable = def && def->kind == N_COMPREHENSION && def->op == N_TUPLE ? spy_string(c, ".0", 2) : NULL;
+            if (iterable && names && sequence_append(c, names, iterable)) { spy_release(names); names = NULL; }
+            spy_release(iterable);
             for (int pass = 0; pass < 3; pass++)
             for (Node *arg = def && def->kind != N_COMPREHENSION && def->kind != N_CLASS ? def->args : NULL; names && arg; arg = arg->next) {
                 if ((arg->op == P_VARARGS) != (pass == 1) || (arg->op == P_KWARGS) != (pass == 2)) continue;
@@ -10356,49 +10380,115 @@ static SPYValue *method_arity_error(SPYContext *c, SPYValue *bound, size_t argc)
     }
     return method_arity(c, owner, name, min, max, argc);
 }
-/* code.replace(**changes): a copy of code for the same definition with
- * those attributes changed. spy keeps no bytecode, so only the naming and
- * location attributes can change. */
-static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) {
-    static const char *const names[] = {"co_name", "co_qualname", "co_filename", "co_firstlineno"};
-    SPYValue *replaced = value_new(c, SPY_DICT);
-    if (!replaced || (code->as.unit.replaced && dict_update(c, replaced, code->as.unit.replaced))) { spy_release(replaced); return NULL; }
-    for (size_t i = 0; changes && i < changes->as.map.len; i++) {
-        Entry *entry = &changes->as.map.items[i];
-        const char *name = entry->key->as.string.data;
-        size_t known = 0;
-        while (known < sizeof(names) / sizeof(*names) && strcmp(names[known], name)) known++;
-        if (known == sizeof(names) / sizeof(*names) && !strcmp(name, "co_flags") && is_int(entry->value) &&
-            entry->value->type != SPY_BOOL) {
-            /* Only CO_ITERABLE_COROUTINE (0x100, 27.4.5) can change: the
-             * other flags follow from the definition. */
-            SPYValue *flags = attribute(c, code, "co_flags");
-            int64_t old = 0, new = 0;
-            int same = flags && !spy_as_int(c, flags, &old) && !spy_as_int(c, entry->value, &new) && ((old ^ new) & ~(int64_t)0x100) == 0;
-            spy_release(flags);
-            if (c->error_type[0]) { spy_release(replaced); return NULL; }
-            if (same) {
-                if (name_set(c, replaced, name, entry->value)) { spy_release(replaced); return NULL; }
-                continue;
-            }
+/* The parameters of code.replace()d code: argcount positional ones (the
+ * first posonly positional-only), then *args, keyword-only, and **kwargs as
+ * flags and kwonly say, named by varnames; each keeps the name the body has
+ * for its slot, from the definition's own co_varnames. */
+static Node *code_signature(SPYContext *c, SPYValue *varnames, SPYValue *locals, int64_t argcount, int64_t posonly,
+                            int64_t kwonly, int64_t flags) {
+    Node *head = NULL, **tail = &head;
+    size_t slots[4][2] = {{0, (size_t)argcount}, {(size_t)(argcount + kwonly), flags & 0x4 ? 1 : 0},
+                          {(size_t)argcount, (size_t)kwonly}, {(size_t)(argcount + kwonly + (flags & 0x4 ? 1 : 0)), flags & 0x8 ? 1 : 0}};
+    for (int group = 0; group < 4; group++)
+        for (size_t i = slots[group][0]; i < slots[group][0] + slots[group][1] && !c->error_type[0]; i++) {
+            Node *arg = allocate(c, sizeof(*arg));
+            if (!arg) break;
+            *tail = arg; tail = &arg->next;
+            arg->kind = N_NAME;
+            arg->op = group == 1 ? P_VARARGS : group == 2 ? P_KWONLY : group == 3 ? P_KWARGS : (int64_t)i < posonly ? P_POSONLY : P_POSITIONAL;
+            SPYValue *name = varnames->as.seq.items[i];
+            const char *local = i < locals->as.seq.len ? locals->as.seq.items[i]->as.string.data : NULL;
+            if ((arg->text = copy_text(c, name->as.string.data, name->as.string.len)) && local && strcmp(local, arg->text))
+                arg->local = copy_text(c, local, strlen(local));
         }
-        if (known == sizeof(names) / sizeof(*names)) {
-            spy_release(replaced);
-            if (!strncmp(name, "co_", 3)) return errorf(c, "NotImplementedError", "replace() cannot change %s in spy", name);
-            return errorf(c, "TypeError", "replace() got an unexpected keyword argument '%s'", name);
-        }
-        int number = known == 3;
-        if (number ? !is_int(entry->value) || entry->value->type == SPY_BOOL : entry->value->type != SPY_STRING) {
-            spy_release(replaced);
-            return errorf(c, "TypeError", "replace() argument '%s' must be %s, not %s", name, number ? "int" : "str", type_name(entry->value));
-        }
-        if (name_set(c, replaced, name, entry->value)) { spy_release(replaced); return NULL; }
+    for (Node *arg = head; arg; arg = arg->next) arg->allocated = arg->next;
+    if (c->error_type[0]) {
+        for (Node *arg = head, *next; arg; arg = next) { next = arg->next; free(arg->text); free(arg->local); free(arg); }
+        return NULL;
     }
-    SPYValue *copy = value_new(c, SPY_CODE);
-    if (!copy) { spy_release(replaced); return NULL; }
-    copy->as.unit.owner = spy_retain(code->as.unit.owner ? code->as.unit.owner : code);
-    copy->as.unit.definition = code->as.unit.definition;
-    copy->as.unit.replaced = replaced;
+    return head;
+}
+/* code.replace(**changes) (28.2): a copy of code for the same definition with
+ * those attributes changed, checked as CPython checks them. The parameter
+ * attributes change how a function of the copy binds its arguments; spy
+ * keeps no bytecode, so the other attributes are only reported (Annex D). */
+static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) {
+    /* CPython's parameter order, which is the order of its checks: ints,
+     * bytes, tuples, strs, bytes. */
+    static const char *const names[] = {"co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
+        "co_stacksize", "co_flags", "co_firstlineno", "co_code", "co_consts", "co_names", "co_varnames", "co_freevars",
+        "co_cellvars", "co_filename", "co_name", "co_qualname", "co_linetable", "co_exceptiontable"};
+    enum { FIELDS = sizeof(names) / sizeof(*names) };
+    SPYValue *values[FIELDS] = {0}, *base = NULL, *copy = NULL, *replaced = NULL;
+    int64_t numbers[7] = {0};
+    for (size_t i = 0; changes && i < changes->as.map.len; i++) {
+        const char *name = changes->as.map.items[i].key->as.string.data;
+        size_t known = 0;
+        while (known < FIELDS && strcmp(names[known], name)) known++;
+        if (known == FIELDS) return errorf(c, "TypeError", "replace() got an unexpected keyword argument '%s'", name);
+    }
+    for (size_t i = 0; i < FIELDS && !c->error_type[0]; i++) {
+        SPYValue *given = changes ? name_local(changes, names[i]) : NULL;
+        if (!given) { values[i] = attribute(c, code, names[i]); continue; }
+        if (i < 7) {
+            if ((values[i] = index_object(c, given)) && (values[i]->as.integer_data.big || values[i]->as.integer_data.small > INT_MAX ||
+                                                         values[i]->as.integer_data.small < INT_MIN))
+                spy_error(c, "OverflowError", "Python int too large to convert to C int");
+            continue;
+        }
+        int kind = i == 7 || i >= 16 ? SPY_BYTES : i < 13 ? SPY_TUPLE : SPY_STRING;
+        if (!builtin_value(c, given, kind)) {
+            errorf(c, "TypeError", "replace() argument '%s' must be %s, not %s", names[i],
+                   kind == SPY_BYTES ? "bytes" : kind == SPY_TUPLE ? "tuple" : "str", type_name(given));
+            break;
+        }
+        values[i] = spy_retain(given);
+    }
+    for (size_t i = 0; i < 7 && !c->error_type[0]; i++)
+        if (!spy_as_int(c, values[i], &numbers[i]) && numbers[i] < 0) errorf(c, "ValueError", "%s must be a positive integer", names[i]);
+    if (c->error_type[0]) goto done;
+    int64_t argcount = numbers[0], posonly = numbers[1], kwonly = numbers[2], flags = numbers[5];
+    SPYValue *varnames = builtin_value(c, values[10], SPY_TUPLE);
+    if (posonly > argcount) { spy_error(c, "SystemError", "bad argument to internal function"); goto done; }
+    if ((uint64_t)argcount + (uint64_t)kwonly + !!(flags & 0x4) + !!(flags & 0x8) > varnames->as.seq.len) {
+        spy_error(c, "ValueError", "code: co_varnames is too small"); goto done;
+    }
+    if ((size_t)numbers[3] != varnames->as.seq.len) { spy_error(c, "ValueError", "code: co_nlocals != len(co_varnames)"); goto done; }
+    for (size_t i = 9; i < 13; i++) {
+        SPYValue *tuple = builtin_value(c, values[i], SPY_TUPLE);
+        for (size_t j = 0; j < tuple->as.seq.len; j++)
+            if (tuple->as.seq.items[j]->type != SPY_STRING) { spy_error(c, "SystemError", "non-string found in code slot"); goto done; }
+    }
+    /* Keep only what differs from the definition's own code, so that equal
+     * changes compare equal. */
+    SPYValue *owner = code->as.unit.owner ? code->as.unit.owner : code;
+    Node *def = code->as.unit.definition;
+    base = def ? definition_code(c, owner, def) : spy_retain(owner);
+    if (!base || !(replaced = value_new(c, SPY_DICT))) goto done;
+    int signature = 0;
+    for (size_t i = 0; i < FIELDS && !c->error_type[0]; i++) {
+        SPYValue *original = attribute(c, base, names[i]);
+        int64_t old = 0;
+        int same = original && original->type == values[i]->type && equal(original, values[i], 0);
+        if (original && i == 5 && !spy_as_int(c, original, &old)) signature |= ((old ^ flags) & 0xC) != 0;
+        else if (!same && (i < 3 || i == 10)) signature = 1;
+        if (original && !same && !c->error_type[0]) name_set(c, replaced, names[i], values[i]);
+        spy_release(original);
+    }
+    if (c->error_type[0] || !(copy = value_new(c, SPY_CODE))) goto done;
+    copy->as.unit.owner = spy_retain(owner);
+    copy->as.unit.definition = def;
+    copy->as.unit.replaced = replaced; replaced = NULL;
+    /* Function code with another signature binds through its own parameters. */
+    if (signature && def && (def->kind == N_DEF || def->kind == N_LAMBDA)) {
+        SPYValue *locals = attribute(c, base, "co_varnames");
+        if (locals) copy->as.unit.nodes = code_signature(c, varnames, locals, argcount, posonly, kwonly, flags);
+        spy_release(locals);
+        if (c->error_type[0]) { spy_release(copy); copy = NULL; }
+    }
+done:
+    for (size_t i = 0; i < FIELDS; i++) spy_release(values[i]);
+    spy_release(base); spy_release(replaced);
     return copy;
 }
 static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValue *const *argv) {
@@ -10954,8 +11044,9 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
         return -1;
     }
     Node *def = code->as.unit.definition;
-    if (def && def->kind != N_DEF && def->kind != N_LAMBDA) {
-        spy_error(c, "NotImplementedError", "replacing a function's code with this code object is not implemented"); return -1;
+    if (def && def->kind == N_COMPREHENSION && def->op != N_TUPLE) {
+        /* List, set, and dict comprehensions are inlined and have no code of their own. */
+        spy_error(c, "NotImplementedError", "replacing a function's code with an inlined comprehension's code is not implemented"); return -1;
     }
     /* Code with other free variables reads f's cells through a forwarding scope. */
     if (need && def != fn->as.function.def) {
@@ -10969,6 +11060,7 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
     SPYValue *unit = fn->as.function.unit;
     fn->as.function.unit = spy_retain(def ? code->as.unit.owner : code);
     fn->as.function.def = def;
+    fn->as.function.signature = replaced_signature(code);
     spy_release(unit);
     /* Keep a replace()d code object as given. */
     return name_set(c, fn->as.function.metadata, "__code__", code);
@@ -12010,12 +12102,30 @@ static int code_names_walk(ClosureNames *w, Scope *scope, Node *n, int depth) {
     }
     return 0;
 }
+/* Whether a class body has a scope that can see the class namespace (a
+ * def, an annotation, a type alias, or type parameters), so its code has a
+ * __classdict__ cell (16.4.1). */
+static int needs_classdict(Node *n, int depth) {
+    for (; n && depth < 1000; n = n->next) {
+        if (n->kind == N_DEF || n->kind == N_ANNASSIGN || n->kind == N_TYPEALIAS || n->kind == N_GENERIC) return 1;
+        if (n->kind == N_CLASS || n->kind == N_LAMBDA || n->kind == N_COMPREHENSION) continue;
+        if (needs_classdict(n->a, depth + 1) || needs_classdict(n->b, depth + 1) || needs_classdict(n->c, depth + 1) ||
+            needs_classdict(n->args, depth + 1))
+            return 1;
+    }
+    return 0;
+}
 /* co_freevars (cells 0) or co_cellvars (cells 1) of a definition, sorted. */
 static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
     ClosureNames w = {c, def ? def->scope : NULL, value_new(c, SPY_TUPLE), cells};
     if (!w.names || !w.self) return w.names;
     if (closure_scope(&w, w.self) || closure_walk(&w, def->a, 0) || closure_walk(&w, def->b, 0) || closure_walk(&w, def->c, 0) ||
         closure_walk(&w, def->args, 0) || closure_walk(&w, def->params, 0)) { spy_release(w.names); return NULL; }
+    if (cells && def->kind == N_CLASS && needs_classdict(def->b, 0)) {
+        SPYValue *text = spy_string(c, "__classdict__", 13);
+        if (!text || sequence_append(c, w.names, text)) { spy_release(text); spy_release(w.names); return NULL; }
+        spy_release(text);
+    }
     SPYValue **items = w.names->as.seq.items;
     for (size_t i = 1; i < w.names->as.seq.len; i++)
         for (size_t j = i; j > 0 && strcmp(items[j - 1]->as.string.data, items[j]->as.string.data) > 0; j--) {
@@ -12092,11 +12202,11 @@ static SPYValue *function_new(SPYContext *c, Frame *f, Node *n) {
     fn->as.function.env = spy_retain(closure);
     fn->as.function.unit = spy_retain(f->unit);
     fn->as.function.metadata = value_new(c, SPY_DICT);
-    const char *name = n->kind == N_LAMBDA ? "<lambda>" : source_name(n->a);
+    const char *name = n->kind == N_LAMBDA ? "<lambda>" : n->kind == N_COMPREHENSION ? "<genexpr>" : source_name(n->a);
     SPYValue *text = spy_string(c, name, strlen(name));
     SPYValue *qualname = qualified_name(c, n->scope);
     SPYValue *module = name_local(module_env(c, f->env), "__name__");
-    Node *body = n->b;
+    Node *body = n->kind == N_COMPREHENSION ? NULL : n->b;
     SPYValue *doc = docstring(c, body);
     if (!doc && !c->error_type[0]) doc = spy_none(c);
     if (text && qualname && doc && fn->as.function.metadata) {
@@ -12656,15 +12766,21 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         c->line = line;
     }
 }
+/* The parameters of a replace()d code object whose signature changed, or NULL. */
+static Node *replaced_signature(SPYValue *code) {
+    return code->as.unit.owner && code->as.unit.definition ? code->as.unit.nodes : NULL;
+}
+static Node *function_parameters(SPYValue *fn) {
+    return fn->as.function.signature ? fn->as.function.signature : fn->as.function.def->args;
+}
 static int missing_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, int keyword_only) {
-    Node *def = fn->as.function.def;
     size_t missing = 0, index = 0;
-    for (Node *arg = def->args; arg; arg = arg->next)
+    for (Node *arg = function_parameters(fn); arg; arg = arg->next)
         if ((keyword_only ? arg->op == P_KWONLY : arg->op == P_POSITIONAL || arg->op == P_POSONLY) &&
             !name_local(env, arg->text)) missing++;
     if (!missing) return 0;
     Buffer names = {.ctx = c};
-    for (Node *arg = def->args; arg && !c->error_type[0]; arg = arg->next) {
+    for (Node *arg = function_parameters(fn); arg && !c->error_type[0]; arg = arg->next) {
         if (!(keyword_only ? arg->op == P_KWONLY : arg->op == P_POSITIONAL || arg->op == P_POSONLY) ||
             name_local(env, arg->text)) continue;
         if (index) puts_buffer(&names, index + 1 == missing ? (missing == 2 ? " and " : ", and ") : ", ");
@@ -12684,7 +12800,7 @@ static int keyword_matches(SPYContext *c, SPYValue *key, const char *name) {
     return match;
 }
 static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    Node *def = fn->as.function.def;
+    Node *params = function_parameters(fn);
     SPYValue *defaults = name_local(fn->as.function.metadata, "__defaults__");
     SPYValue *kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
     const char *name = name_local(fn->as.function.metadata, "__qualname__")->as.string.data;
@@ -12692,7 +12808,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
     size_t default_count = defaults->type == SPY_TUPLE ? defaults->as.seq.len : 0;
     int varargs = 0;
     SPYValue *extra = NULL; /* Borrowed from env after insertion. */
-    for (Node *arg = def->args; arg; arg = arg->next) {
+    for (Node *arg = params; arg; arg = arg->next) {
         if (arg->op == P_POSITIONAL || arg->op == P_POSONLY) {
             if (positional < argc && name_set(c, env, arg->text, argv[positional])) return -1;
             positional++;
@@ -12713,7 +12829,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         Entry *entry = &keywords->as.map.items[i];
         const char *keyword = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
         Node *arg;
-        for (arg = def->args; arg && !c->error_type[0]; arg = arg->next)
+        for (arg = params; arg && !c->error_type[0]; arg = arg->next)
             if ((arg->op == P_POSITIONAL || arg->op == P_KWONLY) &&
                 keyword_matches(c, entry->key, arg->text)) break;
         if (c->error_type[0]) return -1;
@@ -12726,7 +12842,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
             if (map_set(c, extra, entry->key, entry->value)) return -1;
         } else {
             Buffer names = {.ctx = c};
-            for (Node *param = def->args; param && param->op == P_POSONLY; param = param->next)
+            for (Node *param = params; param && param->op == P_POSONLY; param = param->next)
                 if (name_local(keywords, param->text)) {
                     if (names.len) puts_buffer(&names, ", ");
                     puts_buffer(&names, param->text);
@@ -12739,7 +12855,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
     if (!varargs && argc > positional) {
         int64_t required = (int64_t)positional - (int64_t)default_count;
         size_t kwonly = 0;
-        for (Node *arg = def->args; arg; arg = arg->next)
+        for (Node *arg = params; arg; arg = arg->next)
             if (arg->op == P_KWONLY && name_local(env, arg->text)) kwonly++;
         char expected[80], given[120];
         if (!default_count) snprintf(expected, sizeof(expected), "%zu", positional);
@@ -12752,19 +12868,41 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
                argc == 1 && !kwonly ? "was" : "were");
         return -1;
     }
-    for (Node *arg = def->args; arg; arg = arg->next) {
+    for (Node *arg = params; arg; arg = arg->next) {
         if (arg->op != P_POSITIONAL && arg->op != P_POSONLY) continue;
         if (!name_local(env, arg->text) && index + default_count >= positional &&
             name_set(c, env, arg->text, defaults->as.seq.items[index + default_count - positional])) return -1;
         index++;
     }
     if (missing_arguments(c, fn, env, 0)) return -1;
-    for (Node *arg = def->args; arg; arg = arg->next) {
+    for (Node *arg = params; arg; arg = arg->next) {
         if (arg->op != P_KWONLY || name_local(env, arg->text)) continue;
         SPYValue *value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->text) : NULL;
         if (value && name_set(c, env, arg->text, value)) return -1;
     }
-    return missing_arguments(c, fn, env, 1);
+    if (missing_arguments(c, fn, env, 1)) return -1;
+    /* Parameters of replace()d code bind under the body's names for their slots. */
+    size_t count = 0;
+    for (Node *arg = fn->as.function.signature; arg; arg = arg->next) count++;
+    ptrdiff_t *slots = count ? allocate(c, count * sizeof(*slots)) : NULL;
+    if (count && !slots) return -1;
+    size_t at = 0;
+    for (Node *arg = fn->as.function.signature; arg; arg = arg->next, at++) {
+        slots[at] = -1;
+        for (size_t i = 0; arg->local && i < env->as.map.len && slots[at] < 0; i++)
+            if (env->as.map.items[i].key->type == SPY_STRING && !strcmp(env->as.map.items[i].key->as.string.data, arg->text))
+                slots[at] = (ptrdiff_t)i;
+    }
+    at = 0;
+    for (Node *arg = fn->as.function.signature; arg && !c->error_type[0]; arg = arg->next, at++) {
+        if (slots[at] < 0) continue;
+        Entry *entry = &env->as.map.items[slots[at]];
+        SPYValue *key = spy_string(c, arg->local, strlen(arg->local));
+        if (key && !hash_value(c, key, &entry->hash)) { spy_release(entry->key); entry->key = key; }
+        else spy_release(key);
+    }
+    free(slots);
+    return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static void not_callable(SPYContext *, SPYValue *);
@@ -12833,8 +12971,9 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         SPYValue *method = special_method(c, fn, "__call__");
         if (method) { result = call_keywords(c, method, argc, argv, keywords); spy_release(method); }
         else if (!c->error_type[0]) not_callable(c, fn);
-    } else if (fn->type == SPY_FUNCTION && !fn->as.function.def) {
-        result = call_module_code(c, fn, argc, keywords);
+    } else if (fn->type == SPY_FUNCTION && (!fn->as.function.def || fn->as.function.def->kind == N_CLASS ||
+                                            fn->as.function.def->kind == N_COMPREHENSION)) {
+        result = call_module_code(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_FUNCTION) {
         Node *def = fn->as.function.def;
         SPYValue *env = value_new(c, V_ENV);
@@ -14474,19 +14613,25 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     if (!module) module = name_local(module_env(c, c->eval_env ? c->eval_env : c->globals), "__name__");
     SPYValue *cls = new_user_class(c, name->as.string.data, bases, module ? module : c->none);
     if (!cls) return NULL;
+    SPYValue *classdict = NULL;
     for (size_t i = 0; i < namespace->as.map.len && !c->error_type[0]; i++) {
         Entry *entry = &namespace->as.map.items[i];
         if (entry->value->type == V_UNBOUND) continue;
         if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__qualname__")) name_set(c, cls, "__qualname__", entry->value);
-        else if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__classcell__")) {
-            /* The cell is filled with the class, not stored. */
+        else if (entry->key->type == SPY_STRING && (!strcmp(entry->key->as.string.data, "__classcell__") ||
+                                                     !strcmp(entry->key->as.string.data, "__classdictcell__"))) {
+            /* The cells are filled with the class and its dictionary, not stored. */
             if (entry->value->type != SPY_CELL) {
                 SPYValue *kind = value_class(c, entry->value), *text = kind ? stringify(c, kind, 1) : NULL;
-                if (text) errorf(c, "TypeError", "__classcell__ must be a nonlocal cell, not %s", text->as.string.data);
+                if (text) errorf(c, "TypeError", "%s must be a nonlocal cell, not %s", entry->key->as.string.data, text->as.string.data);
                 spy_release(text);
-            } else cell_set(c, entry->value, cls);
+            } else if (entry->key->as.string.data[7] == 'd') classdict = entry->value;
+            else cell_set(c, entry->value, cls);
         } else map_set_hash(c, cls, entry->key, entry->value, entry->hash);
     }
+    SPYValue *dict = classdict && !c->error_type[0] ? instance_dict(c, cls) : NULL;
+    if (dict) cell_set(c, classdict, dict);
+    spy_release(dict);
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (qualname->type != SPY_STRING) errorf(c, "TypeError", "type __qualname__ must be a str, not %s", type_name(qualname));
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
@@ -14549,6 +14694,73 @@ static int setup_annotations(SPYContext *c, Frame *f, int setup) {
     int status = dict ? name_set(c, f->env, "__annotations__", dict) : -1;
     spy_release(dict); return status;
 }
+/* The environment a class body runs in: its namespace, under the nearest
+ * enclosing scope that is not a class, with an unbound __class__ cell. */
+static SPYValue *class_env(SPYContext *c, SPYValue *outer, SPYValue *namespace) {
+    SPYValue *env = value_new(c, V_ENV);
+    if (!env) return NULL;
+    env->as.map.flags = 1; /* Class namespaces are not method closure scopes. */
+    while (outer->type == V_ENV && (outer->as.map.flags == 1 || outer->as.map.flags == 2)) outer = outer->as.map.parent;
+    env->as.map.parent = spy_retain(outer);
+    env->as.map.namespace = spy_retain(namespace);
+    env->as.map.class_cell = value_new(c, V_ENV);
+    SPYValue *unbound = env->as.map.class_cell ? value_new(c, V_UNBOUND) : NULL;
+    if (unbound) {
+        env->as.map.class_cell->as.map.parent = spy_retain(outer);
+        env->as.map.class_cell->as.map.flags = 4;
+        name_set(c, env->as.map.class_cell, "__class__", unbound);
+    }
+    spy_release(unbound);
+    if (c->error_type[0] || !unbound) { spy_release(env); return NULL; }
+    return env;
+}
+/* Run class statement n's body in env (16.4.1 steps 8-10): the implicit
+ * names, the body, then __static_attributes__, __classdictcell__ and
+ * __classcell__. *classcell receives the __class__ cell when a method needs one. */
+static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPYValue *type_params, SPYValue **classcell) {
+    SPYValue *module = name_get(c, env, "__name__"), *qualname = module ? qualified_name(c, n->scope) : NULL;
+    SPYValue *firstline = spy_int(c, (int64_t)(n->decorators ? n->decorators->line : n->line));
+    if (qualname && firstline && !name_set(c, env, "__module__", module) && !name_set(c, env, "__qualname__", qualname))
+        name_set(c, env, "__firstlineno__", firstline);
+    if (!c->error_type[0] && type_params) name_set(c, env, "__type_params__", type_params);
+    spy_release(module); spy_release(qualname); spy_release(firstline);
+    if (c->error_type[0]) return -1;
+    Node *body = n->b;
+    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) {
+        SPYValue *doc = docstring(c, body);
+        if (doc) name_set(c, env, "__doc__", doc);
+        spy_release(doc);
+    }
+    env->as.map.scope = n->scope;
+    env->as.map.unit = spy_retain(unit);
+    declare_locals(c, env);
+    Frame frame = {env, unit, 0};
+    if (enter_frame(c, env, unit)) return -1;
+    Result r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
+    leave_frame(c);
+    spy_release(r.value);
+    if (r.flow != FLOW_NORMAL || c->error_type[0]) return -1;
+    SPYValue *attributes = static_attributes(c, unit, n->scope);
+    if (attributes) name_set(c, env, "__static_attributes__", attributes);
+    spy_release(attributes);
+    if (c->error_type[0]) return -1;
+    /* A method using __class__ or super() gets a cell that type.__new__ fills. */
+    SPYValue *cells = closure_names(c, n, 1);
+    for (size_t i = 0; cells && i < 2 * cells->as.seq.len && !c->error_type[0]; i++) {
+        /* __classdictcell__ comes first. */
+        const char *cell = cells->as.seq.items[i % cells->as.seq.len]->as.string.data;
+        if (i < cells->as.seq.len ? strcmp(cell, "__classdict__") : strcmp(cell, "__class__")) continue;
+        if (i < cells->as.seq.len) {
+            /* Annotation scopes read the namespace, then the class's own
+             * dictionary once type.__new__ fills the cell with it. */
+            if ((env->as.map.base = cell_new(c, NULL, NULL, env->as.map.namespace)))
+                name_set(c, env, "__classdictcell__", env->as.map.base);
+        } else if ((*classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL)))
+            name_set(c, env, "__classcell__", *classcell);
+    }
+    spy_release(cells);
+    return c->error_type[0] ? -1 : 0;
+}
 static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function, SPYValue *name,
                             SPYValue *bases, SPYValue *arguments, SPYValue *type_params) {
     SPYValue *keywords = value_new(c, SPY_DICT), *cls = NULL;
@@ -14595,22 +14807,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
                meta_name ? meta_name->as.string.data : "<metaclass>", type_name(namespace));
         goto done;
     }
-    env = value_new(c, V_ENV);
-    if (!env) goto done;
-    env->as.map.flags = 1; /* Class namespaces are not method closure scopes. */
-    SPYValue *outer = function ? function->as.function.env : f->env;
-    while (outer->type == V_ENV && (outer->as.map.flags == 1 || outer->as.map.flags == 2)) outer = outer->as.map.parent;
-    env->as.map.parent = spy_retain(outer);
-    env->as.map.namespace = spy_retain(namespace);
-    env->as.map.class_cell = value_new(c, V_ENV);
-    if (!env->as.map.class_cell) goto done;
-    env->as.map.class_cell->as.map.parent = spy_retain(outer);
-    env->as.map.class_cell->as.map.flags = 4;
-    SPYValue *unbound = value_new(c, V_UNBOUND);
-    if (unbound) name_set(c, env->as.map.class_cell, "__class__", unbound);
-    spy_release(unbound);
-    if (c->error_type[0]) goto done;
-    Result r;
+    if (!(env = class_env(c, function ? function->as.function.env : f->env, namespace))) goto done;
     if (function) {
         /* An ordinary function keeps its names in its own frame, so as in
          * CPython the namespace only holds what __prepare__ put there. */
@@ -14618,39 +14815,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
         if (c->error_type[0]) goto done;
         goto create;
     }
-    SPYValue *module = name_get(c, env, "__name__"), *qualname = module ? qualified_name(c, n->scope) : NULL;
-    SPYValue *firstline = spy_int(c, (int64_t)(n->decorators ? n->decorators->line : n->line));
-    if (qualname && firstline && !name_set(c, env, "__module__", module) && !name_set(c, env, "__qualname__", qualname))
-        name_set(c, env, "__firstlineno__", firstline);
-    if (!c->error_type[0] && type_params) name_set(c, env, "__type_params__", type_params);
-    spy_release(module); spy_release(qualname); spy_release(firstline);
-    if (c->error_type[0]) goto done;
-    Node *body = n->b;
-    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) {
-        SPYValue *doc = docstring(c, body);
-        if (doc) name_set(c, env, "__doc__", doc);
-        spy_release(doc);
-    }
-    env->as.map.scope = n->scope;
-    env->as.map.unit = spy_retain(f->unit);
-    declare_locals(c, env);
-    Frame frame = {env, f->unit, 0};
-    if (enter_frame(c, env, f->unit)) goto done;
-    r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
-    leave_frame(c);
-    spy_release(r.value);
-    if (r.flow != FLOW_NORMAL || c->error_type[0]) goto done;
-    SPYValue *attributes = static_attributes(c, f->unit, n->scope);
-    if (attributes) name_set(c, env, "__static_attributes__", attributes);
-    spy_release(attributes);
-    if (c->error_type[0]) goto done;
-    /* A method using __class__ or super() gets a cell that type.__new__ fills. */
-    SPYValue *cells = closure_names(c, n, 1);
-    for (size_t i = 0; cells && i < cells->as.seq.len && !classcell; i++)
-        if (!strcmp(cells->as.seq.items[i]->as.string.data, "__class__")) classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL);
-    spy_release(cells);
-    if (classcell) name_set(c, env, "__classcell__", classcell);
-    if (c->error_type[0]) goto done;
+    if (class_body(c, f->unit, n, env, type_params, &classcell)) goto done;
 create:
     if (resolved && name_set(c, env, "__orig_bases__", original)) goto done;
     if (meta == c->types[SPY_CLASS]) cls = create_class(c, meta, name, tuple, namespace, keywords);
@@ -22373,15 +22538,46 @@ static SPYValue *module_code_function(SPYContext *c, SPYValue *code, SPYValue *g
     if (status) { spy_release(fn); return NULL; }
     return fn;
 }
-static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *keywords) {
+/* A function of module, eval, or class body code, which takes no arguments,
+ * or of a generator expression's code, which takes its iterable (28.1). */
+static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     const char *name = name_local(fn->as.function.metadata, "__qualname__")->as.string.data;
+    Node *def = fn->as.function.def;
+    if (def && def->kind == N_COMPREHENSION) {
+        if (keywords && keywords->as.map.len) {
+            SPYValue *key = keywords->as.map.items[0].key;
+            return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
+        }
+        if (argc > 1) return errorf(c, "TypeError", "%s() takes 1 positional argument but %zu were given", name, argc);
+        if (!argc) return errorf(c, "TypeError", "%s() missing 1 required positional argument: '.0'", name);
+        Frame frame = {fn->as.function.env, fn->as.function.unit, 0};
+        SPYValue *generator = comprehension_from(c, &frame, def, argv[0]);
+        /* The generator is named after the function, as CPython's are. */
+        SPYValue *qualname = generator ? name_local(fn->as.function.metadata, "__qualname__") : NULL;
+        SPYValue *short_name = generator ? name_local(fn->as.function.metadata, "__name__") : NULL;
+        if (qualname && short_name) {
+            spy_release(generator->as.generator.name); generator->as.generator.name = spy_retain(short_name);
+            spy_release(generator->as.generator.qualname); generator->as.generator.qualname = spy_retain(qualname);
+        }
+        return generator;
+    }
     if (argc) return errorf(c, "TypeError", "%s() takes 0 positional arguments but %zu %s given", name, argc, argc == 1 ? "was" : "were");
     if (keywords && keywords->as.map.len) {
         SPYValue *key = keywords->as.map.items[0].key;
         return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
     }
-    SPYValue *global = module_env(c, fn->as.function.env), *unit = fn->as.function.unit, *env = value_new(c, V_ENV);
-    if (!env) return NULL;
+    SPYValue *global = module_env(c, fn->as.function.env), *unit = fn->as.function.unit, *env;
+    if (def) {
+        /* A class body's code runs with the globals as its namespace and
+         * returns its __class__ cell, or None (28.1). */
+        SPYValue *classcell = NULL;
+        if (!(env = class_env(c, fn->as.function.env, namespace_map(global)))) return NULL;
+        int status = class_body(c, unit, fn->as.function.def, env, NULL, &classcell);
+        spy_release(env);
+        if (status) { spy_release(classcell); return NULL; }
+        return classcell ? classcell : spy_none(c);
+    }
+    if (!(env = value_new(c, V_ENV))) return NULL;
     env->as.map.parent = spy_retain(global);
     env->as.map.namespace = spy_retain(namespace_map(global));
     env->as.map.flags = 1; /* Definitions capture globals. */
@@ -22443,7 +22639,15 @@ static SPYValue *function_from_code(SPYContext *c, SPYValue *code, SPYValue *glo
     spy_release(env);
     if (!fn) return NULL;
     SPYValue *module = name_local(globals, "__name__");
-    if (name_set(c, fn->as.function.metadata, "__module__", module ? module : c->none) ||
+    /* A replace()d code keeps its names and parameters. */
+    SPYValue *name = code->as.unit.replaced ? attribute(c, code, "co_name") : NULL;
+    SPYValue *qualname = name ? attribute(c, code, "co_qualname") : NULL;
+    int status = code->as.unit.replaced && (!qualname || name_set(c, fn->as.function.metadata, "__name__", name) ||
+                                            name_set(c, fn->as.function.metadata, "__qualname__", qualname));
+    spy_release(name); spy_release(qualname);
+    fn->as.function.signature = replaced_signature(code);
+    if (status || name_set(c, fn->as.function.metadata, "__code__", code) ||
+        name_set(c, fn->as.function.metadata, "__module__", module ? module : c->none) ||
         (closure && closure->type == SPY_TUPLE && closure->as.seq.len && name_set(c, fn->as.function.metadata, "__closure__", closure))) {
         spy_release(fn); return NULL;
     }

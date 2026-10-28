@@ -116,3 +116,43 @@ def target(): pass
 target.__code__ = compile("log.append('via target')", "<m>", "exec")
 target()
 assert_eq(log[-1], "via target")
+
+# A function of a generator expression's code takes the iterable as '.0' and returns the generator.
+gen_code = (x * 2 for x in range(3)).gi_code
+assert_eq((gen_code.co_argcount, gen_code.co_varnames, gen_code.co_nlocals), (1, (".0", "x"), 2))
+gx = FunctionType(gen_code, {})
+assert_eq((gx.__name__, gx.__qualname__, list(gx([1, 2])), list(gx(iter("ab")))), ("<genexpr>", "<genexpr>", [2, 4], ["aa", "bb"]))
+made = gx(iter([5]))
+assert_eq((made.__name__, made.__qualname__, made.gi_code is gen_code), ("<genexpr>", "<genexpr>", True))
+assert_eq(str(assert_raises(TypeError, gx)), "<genexpr>() missing 1 required positional argument: '.0'")
+assert_eq(str(assert_raises(TypeError, gx, iter([1]), 2)), "<genexpr>() takes 1 positional argument but 2 were given")
+assert_eq(str(assert_raises(TypeError, lambda: gx(a=1))), "<genexpr>() got an unexpected keyword argument 'a'")
+def with_free(k):
+    return (x + k for x in ())
+free_code = with_free(1).gi_code
+assert_eq((free_code.co_freevars, free_code.co_varnames), (("k",), (".0", "x")))
+assert_eq(list(FunctionType(free_code, {}, None, None, (CellType(10),))(iter([1, 2]))), [11, 12])
+def renamed_gen(): pass
+renamed_gen.__code__ = gen_code
+made = renamed_gen([3])
+assert_eq((made.__name__, made.__qualname__, list(made)), ("renamed_gen", "renamed_gen", [6]))
+assert_eq(str(assert_raises(TypeError, renamed_gen)), "renamed_gen() missing 1 required positional argument: '.0'")
+
+# An asynchronous generator expression's code makes an asynchronous generator.
+class Counter:
+    def __init__(self): self.n = 0
+    def __aiter__(self): return self
+    async def __anext__(self):
+        self.n += 1
+        if self.n > 2: raise StopAsyncIteration
+        return self.n
+async def make_async():
+    return (x * 10 async for x in Counter())
+def run_coroutine(coroutine):
+    try: coroutine.send(None)
+    except StopIteration as stop: return stop.value
+async_code = run_coroutine(make_async()).ag_code
+assert_eq((async_code.co_varnames, async_code.co_flags & 0x200, async_code.co_argcount), ((".0", "x"), 0x200, 1))
+agx = FunctionType(async_code, {})(Counter())
+async def collect(): return [x async for x in agx]
+assert_eq((type(agx).__name__, run_coroutine(collect())), ("async_generator", [10, 20]))

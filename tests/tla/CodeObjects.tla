@@ -10,7 +10,10 @@
 (* (0x200), and a docstring (0x4000000, with the docstring first in        *)
 (* co_consts); code objects are immutable, co_lines() ranges are           *)
 (* consecutive from 0 to the end of co_code, co_positions() gives          *)
-(* 4-tuples, and replace() returns a changed copy.                         *)
+(* 4-tuples, and replace() returns a changed copy, equal to the original   *)
+(* when every value is unchanged; a copy with renamed parameters, or with  *)
+(* every named parameter keyword-only, binds arguments by its own          *)
+(* signature (PLS-315 28.2).                                               *)
 (*                                                                         *)
 (* A program, after  v = 1  on line 1, defines f on line 2, or inside      *)
 (*  def outer(): v = 1  on line 4 (then returns it), as                    *)
@@ -38,7 +41,7 @@ Kinds == {"def", "gen", "async", "asyncgen"}
 Closures == {"none", "cell", "free"}
 Reads == {"co_name", "co_qualname", "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals", "co_varnames",
           "co_cellvars", "co_freevars", "co_names", "co_flags", "co_firstlineno"}
-Ops == {"doc", "replace", "copy", "setattr", "badkw", "lines", "positions"}
+Ops == {"doc", "replace", "copy", "setattr", "badkw", "lines", "positions", "rename", "resig"}
 Programs == [sig : Sigs, kind : Kinds, doc : BOOLEAN, closure : Closures, nested : BOOLEAN, op : {"read"}, attr : Reads]
             \cup [sig : Sigs, kind : Kinds, doc : BOOLEAN, closure : Closures, nested : BOOLEAN, op : Ops]
 
@@ -78,7 +81,16 @@ Run(p) ==
     IF p.op = "read" THEN Read(p, p.attr)
     ELSE CASE p.op = "doc" -> IF p.doc THEN "'doc'" ELSE "no docstring"
            [] p.op = "replace" -> "z 9 f False"      \* replace(co_name="z", co_firstlineno=9): a changed copy
-           [] p.op = "copy" -> "True"                \* replace() is equal, with an equal hash
+           [] p.op = "copy" -> "True"                \* replace() with unchanged values is equal, with an equal hash
+           \* co_varnames with "n_" before each parameter's name: a call passing
+           \* the keyword-only parameters by their new names binds; by their old
+           \* names it does not (they are unexpected, or go to **kw, leaving the
+           \* new ones missing).
+           [] p.op = "rename" -> "ok " \o (IF p.sig.kwonly > 0 THEN "TypeError" ELSE "ok")
+           \* co_argcount 0 and co_kwonlyargcount covering every named parameter:
+           \* a call by keyword binds; a call by position fails unless there are
+           \* no named parameters.
+           [] p.op = "resig" -> "ok " \o (IF Len(p.sig.names) = 0 THEN "ok" ELSE "TypeError")
            [] p.op = "setattr" -> "AttributeError"   \* immutable
            [] p.op = "badkw" -> "TypeError"
            [] p.op \in {"lines", "positions"} -> "ok"

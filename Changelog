@@ -828,3 +828,29 @@
   divisions whose last bit depends on whether the C compiler fuses
   multiply-adds leave programs/complex_numbers_01; Annex D lists that
   choice.
+- code.replace() accepts every co_ attribute with CPython's checks, in
+  its parameter order: index conversion and C int range, bytes, tuple and
+  str types, non-negative counts, positional-only within positional,
+  enough local names, co_nlocals matching, and str names. A copy whose
+  parameter names, counts, or *args/**kwargs flags changed binds the
+  arguments of its functions by its own signature, the body still seeing
+  each slot under its own name; bytecode-level changes are reported
+  only (Annex D). Fields that keep their values leave a copy equal to the
+  original, and co_qualname, co_filename and co_stacksize take no part
+  in equality, as in CPython. A function made from a replaced code keeps
+  it as __code__, with its name and qualified name.
+- The code of a class body is complete: its co_cellvars are __class__
+  and __classdict__ (when a def, annotation, type alias or generic needs
+  the class namespace) and its co_freevars the enclosing names it uses.
+  The body stores __classdictcell__ before __classcell__; type.__new__
+  checks it and fills it with the class's own dictionary, which
+  annotation scopes then read, so a class attribute assigned after the
+  class statement is seen by __annotations__ (spy read the stale
+  namespace before). A function of class body code runs the body with
+  its globals as the namespace and returns the __class__ cell, and
+  __code__ may be set to it. A function of a generator expression's code
+  takes the iterable as '.0' (FunctionType on such code used to crash)
+  and co_varnames lists '.0'. PLS-315 9.3.3, 16.4.2, 16.4.3, 28.1 and the
+  new 28.2.1 CodeReplace say so; builtins/code_replace,
+  compound/class_body_code and builtins/function_closures test it, and
+  the CodeObjects model gains renamed and keyword-only signatures.

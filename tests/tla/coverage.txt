@@ -504,6 +504,7 @@ Contents | - navigation
 28 Reflection Objects | = sections
 28 Reflection Objects > 28.1 Function type | FunctionObjects, IntrinsicTypes
 28 Reflection Objects > 28.2 Code objects | CodeObjects
+28 Reflection Objects > 28.2 Code objects > 28.2.1 CodeReplace ( *code*, *changes* ) | CodeObjects
 28 Reflection Objects > 28.3 Frame objects | Frames
 28 Reflection Objects > 28.4 Method objects | Methods
 28 Reflection Objects > 28.5 Built-in functions and methods | Methods, IntrinsicTypes

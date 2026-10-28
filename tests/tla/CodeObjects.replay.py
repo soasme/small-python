@@ -39,8 +39,29 @@ def outcome(p):
             r = co.replace(co_name="z", co_firstlineno=9)
             return " ".join([r.co_name, str(r.co_firstlineno), co.co_name, str(r == co)])
         if op == "copy":
-            r = co.replace()
-            return str(r == co and hash(r) == hash(co))
+            r, same = co.replace(), co.replace(co_name=co.co_name, co_argcount=co.co_argcount, co_varnames=co.co_varnames)
+            return str(r == co and hash(r) == hash(co) and same == co and hash(same) == hash(co))
+        if op in ("rename", "resig"):
+            f, sig = namespace["f"], p["sig"]
+            count = len(sig["names"]) + sig["varargs"] + sig["kwargs"]
+            if op == "rename":
+                renamed = tuple("n_" + n for n in co.co_varnames[:count]) + co.co_varnames[count:]
+                f.__code__ = co.replace(co_varnames=renamed)
+                calls = [((0,) * sig["argc"], {"n_" + n: 0 for n in sig["names"][sig["argc"]:]}),
+                         ((0,) * sig["argc"], {n: 0 for n in sig["names"][sig["argc"]:]})]
+            else:
+                f.__code__ = co.replace(co_argcount=0, co_posonlyargcount=0, co_kwonlyargcount=len(sig["names"]))
+                calls = [((), {n: 0 for n in sig["names"]}), ((0,) * len(sig["names"]), {})]
+            results = []
+            for args, kwargs in calls:
+                try:
+                    result = f(*args, **kwargs)
+                    if hasattr(result, "close"):
+                        result.close()
+                    results.append("ok")
+                except TypeError as error:
+                    results.append(type(error).__name__)
+            return " ".join(results)
         if op == "setattr":
             co.co_name = "x"
             return "set"
