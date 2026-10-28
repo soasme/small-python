@@ -77,6 +77,7 @@ struct SPYValue {
     int type;
     unsigned char marked, weak; /* weak: a weak-table entry names this value. */
     unsigned char finalized; /* __del__ has been queued for this instance. */
+    unsigned char watched; /* A class's namespace: its changes are class changes. */
     union {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
@@ -134,9 +135,16 @@ struct SPYValue {
         } generator;
     } as;
 };
+typedef struct { SPYValue *cls, *value; size_t epoch; int64_t hash; char name[24]; } ClassLookup;
 struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
+    SPYValue *spare; size_t spares; /* Released allocations of other values, linked by next; no value edges. */
+    /* class_lookup results, valid while classes_changed holds the epoch they
+     * were found in. A change to a class's entries or MRO, or a class's
+     * release, advances it. Results are borrowed, with no value edges. */
+    ClassLookup lookups[256]; /* Indexed by the top eight bits of a mixed key. */
+    size_t classes_changed;
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     int compile_flags; /* compile()'s future flags while it parses. */
@@ -436,6 +444,8 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     if (type == SPY_TUPLE && tuple_size < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache)) {
         v = c->tuple_cache[tuple_size];
         c->tuple_cache[tuple_size] = NULL;
+    } else if (type != SPY_TUPLE && c->spare) {
+        v = c->spare; c->spare = v->next; c->spares--;
     }
     if (v) memset(v, 0, sizeof(*v));
     else v = allocate(c, sizeof(*v));
@@ -632,7 +642,9 @@ static void free_value(SPYValue *v) {
     case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(v->as.generator.machine); break;
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
-    case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET: free(v->as.map.items); free(v->as.map.index); break;
+    case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
+        if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
+        free(v->as.map.items); free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
         while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
@@ -646,6 +658,7 @@ static void free_value(SPYValue *v) {
         c->tuple_cache[v->as.seq.len] = v;
         return;
     }
+    if (v->type != SPY_TUPLE && c->spares < 64) { v->next = c->spare; c->spare = v; c->spares++; return; }
     free(v);
 }
 static void release_edge(SPYValue *v, void *data) {
@@ -1441,7 +1454,9 @@ static size_t index_slot(int64_t hash, size_t cap) {
     h ^= h >> 32; h ^= h >> 16;
     return (size_t)h & (cap - 1);
 }
+static void class_changed(SPYValue *map) { if (map->type == SPY_CLASS || map->watched) map->ctx->classes_changed++; }
 static void map_unindex(SPYValue *map) {
+    class_changed(map);
     if (!map->as.map.index) return;
     free(map->as.map.index);
     map->as.map.index = NULL; map->as.map.index_cap = map->as.map.index_dead = 0; map->as.map.changes++;
@@ -1469,6 +1484,7 @@ static uint32_t index_number(SPYValue *map, size_t i) {
 }
 /* Entry i is about to be removed and the entries after it shifted down. */
 static void map_removed(SPYValue *map, size_t i) {
+    class_changed(map);
     if (!map->as.map.index) return;
     if (map->as.map.index_dead + 1 > map->as.map.len - 1) { map_unindex(map); return; }
     uint32_t *index = map->as.map.index, *removed = index + map->as.map.index_cap, number = index_number(map, i);
@@ -1555,6 +1571,7 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
              map->as.map.len + 1, sizeof(Entry))) return -1;
     Entry *entry = &map->as.map.items[map->as.map.len++];
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
+    class_changed(map);
     if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
     else if (map->as.map.index) index_insert(map, map->as.map.len - 1);
     return 0;
@@ -1566,6 +1583,7 @@ static int map_set_hash(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *v
     if (!pending_error && c->error_type[0]) return -1;
     if (i >= 0) {
         SPYValue *old = map->as.map.items[i].value;
+        class_changed(map);
         map->as.map.items[i].value = spy_retain(value);
         spy_release(old);
         return 0;
@@ -1580,9 +1598,7 @@ static int map_set(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value)
  * dict that class_cell holds for classes, as CPython's type slots do. */
 static int class_slot_name(const char *name) { return !strcmp(name, "__name__") || !strcmp(name, "__qualname__"); }
 /* The value stored under name in env's own entries, borrowed. */
-static Entry *env_find(SPYValue *env, const char *name) {
-    size_t len = strlen(name);
-    int64_t hash = text_hash(name, len);
+static Entry *env_find_hash(SPYValue *env, const char *name, size_t len, int64_t hash) {
     MapCursor cursor = map_cursor(env, hash);
     for (ptrdiff_t i; (i = map_next(env, hash, &cursor)) >= 0;) {
         Entry *e = &env->as.map.items[i];
@@ -1590,6 +1606,10 @@ static Entry *env_find(SPYValue *env, const char *name) {
         if (key && key->as.string.len == len && !memcmp(key->as.string.data, name, len)) return e;
     }
     return NULL;
+}
+static Entry *env_find(SPYValue *env, const char *name) {
+    size_t len = strlen(name);
+    return env_find_hash(env, name, len, text_hash(name, len));
 }
 static SPYValue *env_entry(SPYValue *env, const char *name) {
     Entry *e = env_find(env, name);
@@ -1896,24 +1916,25 @@ static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v)
         if (cell) return cell_set(c, cell, v->type == V_UNBOUND ? NULL : v);
     }
     SPYValue *namespace = namespace_map(env);
+    if (env->type == V_ENV && env->as.map.flags == 3) {
+        namespace = dictionary_value(c, namespace);
+        if (namespace->type == SPY_FROZENDICT) { spy_error(c, "TypeError", "frozendict object does not support item assignment"); return -1; }
+    }
+    int own = namespace == env && env->type != SPY_FROZENDICT;
+    size_t len = strlen(name);
+    int64_t hash = text_hash(name, len);
     /* Rebinding an exact str key is what map_set would do, without a new key. */
-    Entry *entry = namespace == env && env->type != SPY_FROZENDICT && !(env->type == V_ENV && env->as.map.flags == 3) ?
-        env_find(env, name) : NULL;
+    Entry *entry = own ? env_find_hash(env, name, len, hash) : NULL;
     if (entry && entry->key->type == SPY_STRING) {
         SPYValue *old = entry->value;
+        class_changed(env);
         entry->value = spy_retain(v);
         spy_release(old);
         return 0;
     }
-    SPYValue *key = spy_string(c, name, strlen(name));
+    SPYValue *key = spy_string(c, name, len);
     if (!key) return -1;
-    if (env->type == V_ENV && env->as.map.flags == 3) {
-        namespace = dictionary_value(c, namespace);
-        if (namespace->type == SPY_FROZENDICT) {
-            spy_release(key); spy_error(c, "TypeError", "frozendict object does not support item assignment"); return -1;
-        }
-    }
-    int status = namespace == env && env->type != SPY_FROZENDICT ? map_set(c, env, key, v) : set_index(c, namespace, key, v);
+    int status = own ? map_set_hash(c, env, key, v, hash) : set_index(c, namespace, key, v);
     spy_release(key);
     return status;
 }
@@ -8651,12 +8672,25 @@ static SPYValue *inplace(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *sort_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *class_lookup(SPYValue *cls, const char *name) {
     if (cls && cls->as.map.mro) {
-        SPYValue *mro = cls->as.map.mro;
-        for (size_t i = 0; i < mro->as.seq.len; i++) {
-            SPYValue *value = name_local(mro->as.seq.items[i], name);
-            if (value) return value;
+        SPYContext *c = cls->ctx;
+        SPYValue *mro = cls->as.map.mro, *value = NULL;
+        size_t len = strlen(name);
+        int64_t hash = text_hash(name, len);
+        ClassLookup *hit = &c->lookups[((uint64_t)hash ^ (uintptr_t)cls) * UINT64_C(0x9E3779B97F4A7C15) >> 56];
+        if (hit->epoch == c->classes_changed && hit->cls == cls && hit->hash == hash && !strcmp(hit->name, name)) return hit->value;
+        /* Only class entries are watched: not __name__ and __qualname__,
+         * which live in class_cell, nor a base stored elsewhere. */
+        int cacheable = len < sizeof(hit->name) && !class_slot_name(name);
+        for (size_t i = 0; i < mro->as.seq.len && !value; i++) {
+            SPYValue *base = mro->as.seq.items[i];
+            cacheable = cacheable && base->type == SPY_CLASS && (!base->as.map.namespace || base->as.map.namespace->watched);
+            value = name_local(base, name);
         }
-        return NULL;
+        if (cacheable) {
+            hit->cls = cls; hit->value = value; hit->epoch = c->classes_changed; hit->hash = hash;
+            memcpy(hit->name, name, len + 1);
+        }
+        return value;
     }
     for (; cls; cls = cls->as.map.parent) {
         SPYValue *value = name_local(cls, name);
@@ -9258,6 +9292,7 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
         dict->as.map.items = v->as.map.items; dict->as.map.len = v->as.map.len; dict->as.map.cap = v->as.map.cap;
         v->as.map.items = NULL; v->as.map.len = v->as.map.cap = 0;
         v->as.map.namespace = dict;
+        dict->watched = v->type == SPY_CLASS;
     }
     return spy_retain(v->as.map.namespace);
 }
@@ -14771,7 +14806,7 @@ static int class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
     if (set_class_bases(c, cls, bases)) return -1;
     SPYValue *order = default_mro(c, cls, cls->as.map.bases);
     if (!order) return -1;
-    spy_release(cls->as.map.mro); cls->as.map.mro = order;
+    cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = order;
     return 0;
 }
 static SPYValue *new_class(SPYContext *c, const char *name, SPYValue *base, SPYValue *module) {
@@ -14948,7 +14983,7 @@ static int initialize_mro(SPYContext *c, SPYValue *cls) {
             if (kind >= 0) layout = kind;
         }
         /* A metaclass observes the bases and namespace, but no completed MRO. */
-        spy_release(cls->as.map.mro); cls->as.map.mro = NULL;
+        cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = NULL;
         /* Looked up on the metaclass, as a special method is. */
         SPYValue *method = special_method(c, cls, "mro");
         if (!method && !c->error_type[0]) method = attribute(c, cls, "mro");
@@ -14970,7 +15005,7 @@ static int initialize_mro(SPYContext *c, SPYValue *cls) {
         }
     }
     if (!order || c->error_type[0]) { spy_release(order); return -1; }
-    spy_release(cls->as.map.mro); cls->as.map.mro = order;
+    cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = order;
     return 0;
 }
 /* Whether cls is base or one of its bases, through __bases__ links: an MRO
@@ -15055,11 +15090,11 @@ static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
         ErrorState error = take_error(c);
         for (size_t i = count; done && i-- > count - done;) {
             SPYValue *v = descendants[2 * i];
-            spy_release(v->as.map.mro); v->as.map.mro = spy_retain(descendants[2 * i + 1]);
+            v->ctx->classes_changed++; spy_release(v->as.map.mro); v->as.map.mro = spy_retain(descendants[2 * i + 1]);
         }
         if (cls->as.map.bases == installed) {
             set_class_bases(c, cls, old_bases);
-            spy_release(cls->as.map.mro); cls->as.map.mro = spy_retain(old_mro);
+            cls->ctx->classes_changed++; spy_release(cls->as.map.mro); cls->as.map.mro = spy_retain(old_mro);
         }
         restore_error(c, &error);
     }
@@ -25073,6 +25108,7 @@ void spy_context_free(SPYContext *c) {
 #endif
     free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
+    while (c->spare) { SPYValue *next = c->spare->next; free(c->spare); c->spare = next; }
     free(c);
 }
 void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
