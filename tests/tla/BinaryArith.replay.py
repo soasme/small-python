@@ -27,7 +27,7 @@ SOURCES = {
     "pow_zero_neg": "0 ** -1",
     "pow_zero_neg_float": "0.0 ** -1",
     "pow_precedence": "result = (-2 ** 2, 2 ** -1, 2 ** 3 ** 2, (-2) ** 2)",
-    "pow_overflow": "2.0 ** 10000",
+    "pow_overflow": "try:\n    2.0 ** 10000\nexcept OverflowError as e:\n    result = (type(e).__name__, e.args[0], type(e.args[1]).__name__)",
     "pow_float_neg_frac": "result = (-8.0) ** 0.5",
     "int_to_float_overflow": "10 ** 400 * 1.0",
     "int_true_div_big": "result = 10 ** 400 / 10 ** 399",

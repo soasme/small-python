@@ -41,7 +41,7 @@ SOURCES = {
     "unicode_build_bad": "result = UnicodeDecodeError('utf-8', 'notbytes', 0, 1, 'r')",
     "unicode_translate": "e = UnicodeTranslateError('\\xe9', 0, 1, 'bad')\nresult = (e.encoding, str(e))",
     "zero_division": 'try:\n    1 % 0\nexcept ZeroDivisionError as e:\n    result = str(e)',
-    "overflow_float": 'try:\n    2.0 ** 10000\nexcept OverflowError as e:\n    result = e.args',
+    "overflow_float": 'try:\n    2.0 ** 10000\nexcept OverflowError as e:\n    result = (e.args[0], type(e.args[1]).__name__)',
     "recursion": "def r(): return r()\ntry:\n    r()\nexcept RecursionError as e:\n    result = 'maximum recursion depth exceeded' in str(e)",
     "notimplemented_error": 'result = issubclass(NotImplementedError, RuntimeError) and NotImplementedError is not NotImplemented',
     "assertion_msg": "try:\n    assert 1 == 2, ('m', 1)\nexcept AssertionError as e:\n    result = e.args",

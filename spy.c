@@ -15574,9 +15574,10 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
     return NULL;
 }
 static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with_cause(c, value, NULL); }
-/* OverflowError(ERANGE, 'Result too large'), as a C math function's range error. */
+/* OverflowError(ERANGE, strerror(ERANGE)), as a C math function's range error. */
 static SPYValue *range_overflow(SPYContext *c) {
-    SPYValue *args[] = {spy_int(c, 34), spy_string(c, "Result too large", 16)};
+    const char *message = strerror(ERANGE);
+    SPYValue *args[] = {spy_int(c, ERANGE), spy_string(c, message, strlen(message))};
     SPYValue *error = args[0] && args[1] ? new_exception(c, name_local(c->classes, "OverflowError"), 2, args) : NULL;
     if (error) raise_value(c, error);
     spy_release(error); spy_release(args[0]); spy_release(args[1]);

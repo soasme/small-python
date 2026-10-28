@@ -97,7 +97,7 @@ Case(c) ==
       [] c = "unicode_build_bad" -> "TypeError: a bytes-like object is required, not 'str'"
       [] c = "unicode_translate" -> "(None, \"can't translate character '\\\\xe9' in position 0: bad\")"
       [] c = "zero_division" -> "'division by zero'"
-      [] c = "overflow_float" -> "(34, 'Result too large')"
+      [] c = "overflow_float" -> "(34, 'str')"
       [] c = "recursion" -> "True"
       [] c = "notimplemented_error" -> "True"
       [] c = "assertion_msg" -> "(('m', 1),)"

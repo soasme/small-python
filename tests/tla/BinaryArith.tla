@@ -111,7 +111,7 @@ Case(c) ==
       [] c = "pow_frac_neg" -> "'complex'"
       [] c \in {"pow_zero_neg", "pow_zero_neg_float"} -> "ZeroDivisionError: zero to a negative power"
       [] c = "pow_precedence" -> "(-4, 0.5, 512, 4)"                      \* binds tighter than unary minus on its left
-      [] c = "pow_overflow" -> "OverflowError: (34, 'Result too large')"
+      [] c = "pow_overflow" -> "('OverflowError', 34, 'str')"
       [] c = "pow_float_neg_frac" -> "(1.7319121124709868e-16+2.8284271247461903j)"
       [] c = "int_to_float_overflow" -> "OverflowError: int too large to convert to float"
       [] c = "int_true_div_big" -> "10.0"
