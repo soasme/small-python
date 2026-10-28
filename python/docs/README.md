@@ -40,5 +40,5 @@ with small_python.Runtime() as rt:
   from the source distribution with a C11 compiler. Windows is not supported.
 
 The language itself is described in the engine manual,
-[docs/smallpython.md](../../docs/smallpython.md), and the target standard in
+[docs/manual.md](../../docs/manual.md), and the target standard in
 [docs/standards/3_15.md](../../docs/standards/3_15.md).

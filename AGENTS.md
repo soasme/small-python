@@ -184,7 +184,7 @@
 
 ## Language standard and documentation
 
-- `docs/smallpython.md` is the engine manual, with the same broad organization as
+- `docs/manual.md` is the engine manual, with the same broad organization as
   QuickJS's manual: introduction, usage, specifications, internals, references.
 - `docs/standards/3_15.md` is the single-file, versioned language target,
   written in the style of ECMA-262: numbered clauses, abstract operations, and

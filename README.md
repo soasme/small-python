@@ -88,7 +88,7 @@ int main(void) {
 ```
 
 See [`examples/embed.c`](examples/embed.c) for the version with error
-handling, and the [manual](docs/smallpython.md#34-c-api) for the full API.
+handling, and the [manual](docs/manual.md#34-c-api) for the full API.
 
 ## From Python
 
@@ -121,7 +121,7 @@ make bench        # startup benchmark
 
 ## Documentation
 
-- [Manual](docs/smallpython.md): usage, embedding, internals, benchmarks
+- [Manual](docs/manual.md): usage, embedding, internals, benchmarks
 - [PLS-315](docs/standards/3_15.md): the language specification
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)

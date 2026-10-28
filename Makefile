@@ -117,7 +117,7 @@ install: all
 	install -m755 spy spyc "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h spy-std.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
-	install -m644 docs/smallpython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
+	install -m644 docs/manual.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
 	install -m644 docs/testing/cython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -d "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"

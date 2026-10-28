@@ -968,7 +968,7 @@ Annotation scopes and complete introspection remain work.
 | `examples/` | Python and C embedding examples |
 | `tests/` | Local checks, upstream pins, fetcher, adapter |
 | `bench/` | Lifecycle benchmark |
-| `docs/smallpython.md` | Engine manual |
+| `docs/manual.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
 | `AGENTS.md` | Architecture, naming, evidence, and code-taste requirements |
