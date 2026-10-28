@@ -13149,6 +13149,18 @@ container_fail:
     case N_CALL: {
         a = eval(c, f, n->a);
         if (!a) break;
+        /* Up to eight plain positional arguments go on the C stack. */
+        size_t argc = 0;
+        for (Node *arg = n->args; arg && argc <= 8; arg = arg->next, argc++)
+            if (arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) argc = 9;
+        if (argc <= 8) {
+            SPYValue *argv[8];
+            size_t done = 0;
+            for (Node *arg = n->args; arg && (argv[done] = eval(c, f, arg)); arg = arg->next) done++;
+            if (done == argc) { relocate(c, n); result = call_keywords(c, a, argc, argv, NULL); }
+            while (done) spy_release(argv[--done]);
+            break;
+        }
         SPYValue *args = spy_list(c), *keywords = value_new(c, SPY_DICT);
         if (!args || !keywords) { spy_release(args); spy_release(keywords); break; }
         eval_arguments(c, f, n->args, a, args, keywords);
