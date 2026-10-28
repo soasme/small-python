@@ -21,10 +21,23 @@ CFLAGS += -Werror
 endif
 
 .PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
-all: spy spyc libspy.a libspy-std.a
+all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# The packages' worker (docs/packaging/protocol.md): spy-worker.c compiled
+# once as the engine with counted allocations, once as the worker.
+spy-worker: $(OBJDIR)/spy-worker.o $(OBJDIR)/spy-worker-engine.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(OBJDIR)/spy-worker.o: spy-worker.c spy.h spy-std.h
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/spy-worker-engine.o: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DSPY_WORKER_ENGINE -c $< -o $@
 
 spyc: $(OBJDIR)/spyc.o
 	$(CC) $(LDFLAGS) $^ -o $@
@@ -151,9 +164,10 @@ test: all tests/api tests/run-spec run-cython check-intrinsics
 	$(PYTHON) tests/executable.py
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.
-test-binding:
-	cd python && python3 setup.py -q build_ext --build-lib ../$(OBJDIR)/binding --build-temp ../$(OBJDIR)/binding-temp
-	cp python/src/small_python/__init__.py python/src/small_python/_core.pyi python/src/small_python/py.typed $(OBJDIR)/binding/small_python/
+test-binding: spy-worker
+	mkdir -p $(OBJDIR)/binding
+	cp -R python/src/small_python $(OBJDIR)/binding/
+	cp spy-worker $(OBJDIR)/binding/small_python/
 	PYTHONPATH=$(OBJDIR)/binding python3 -m unittest discover -s python/tests
 
 # libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.
@@ -187,5 +201,5 @@ sanitize:
 	ASAN_OPTIONS=detect_stack_use_after_return=0 $(MAKE) CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer' LDFLAGS='-fsanitize=$(SANITIZERS)' test
 
 clean:
-	rm -f spy spyc run-cython *.o *.a tests/*.o tests/api tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
+	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
 	rm -rf $(OBJDIR)

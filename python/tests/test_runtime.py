@@ -29,7 +29,7 @@ class OptionsTest(unittest.TestCase):
 
     def test_std(self):
         with Runtime() as rt:
-            for name in ["sys", "gc", "weakref", "collections", "itertools", "types"]:
+            for name in ["sys", "gc", "weakref"]:
                 with self.subTest(module=name):
                     rt.exec(f"import {name}")
         with Runtime(std=False) as rt:

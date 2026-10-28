@@ -2,7 +2,7 @@
 import math
 import unittest
 
-from small_python import Object, Runtime
+from small_python import Error, Object, Runtime
 
 
 class RoundTripTest(unittest.TestCase):
@@ -110,10 +110,11 @@ class RoundTripTest(unittest.TestCase):
             deep = [deep]
         with self.assertRaises(RecursionError):
             self.rt["deep"] = deep
-        with self.assertRaises(RecursionError):
-            self.rt.eval("d = []\nfor _ in range(500):\n    d = [d]\nd")
-        with self.assertRaises(RecursionError):
-            self.rt.eval("a = []\na.append(a)\na")
+        # Engine values too deep to send fail in the worker, as engine errors.
+        for source in ["d = []\nfor _ in range(500):\n    d = [d]\nd", "a = []\na.append(a)\na"]:
+            with self.assertRaises(Error) as cm:
+                self.rt.eval(source)
+            self.assertEqual(cm.exception.type, "RecursionError")
         self.assertEqual(len(self.round_trip([[[[1]]]])), 1)
 
 

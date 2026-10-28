@@ -9,7 +9,7 @@ from small_python import Error, Object, Runtime
 
 class PackageTest(unittest.TestCase):
     def test_exports(self):
-        self.assertEqual(sorted(small_python.__all__), ["Error", "Object", "Runtime", "SPY_VERSION"])
+        self.assertEqual(sorted(small_python.__all__), ["Error", "Object", "Runtime", "SPY_VERSION", "Timeout", "WorkerError"])
         for name in small_python.__all__:
             self.assertTrue(hasattr(small_python, name))
 
@@ -22,17 +22,18 @@ class PackageTest(unittest.TestCase):
     def test_typed(self):
         files = importlib.resources.files("small_python")
         self.assertTrue(files.joinpath("py.typed").is_file())
-        stub = files.joinpath("_core.pyi").read_text()
-        for name in ["class Runtime", "class Object", "class Error", "SPY_VERSION", "def eval", "def exec",
+        stub = files.joinpath("_runtime.pyi").read_text()
+        for name in ["class Runtime", "class Object", "class Error", "class WorkerError", "class Timeout", "def eval", "def exec",
                      "def call", "def define", "def register_module", "def mount", "def collect", "def close"]:
             self.assertIn(name, stub)
 
     def test_stub_matches_runtime_methods(self):
-        stub = importlib.resources.files("small_python").joinpath("_core.pyi").read_text()
+        stub = importlib.resources.files("small_python").joinpath("_runtime.pyi").read_text()
         runtime = stub[stub.index("class Runtime"):stub.index("class Object")]
         stubbed = set(re.findall(r"def (\w+)", runtime)) - {"__init__"}
-        public = {name for name in dir(Runtime) if not name.startswith("_")} - {"function"}
-        self.assertEqual(stubbed - {"__getitem__", "__setitem__", "__delitem__", "closed"}, public - {"closed"})
+        public = {name for name in dir(Runtime) if not name.startswith("_")}
+        self.assertEqual(stubbed - {"__getitem__", "__setitem__", "__delitem__", "__enter__", "__exit__", "closed"},
+                         public - {"closed"})
 
 
 class ErrorTest(unittest.TestCase):

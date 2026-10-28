@@ -82,12 +82,11 @@ Rules:
    other than `bool`, a `str` subclass) are sent as handles, so a subclass's
    overridden behavior is never bypassed by copying its storage. `bool` is
    its own tag.
-2. Containers nest at most 200 levels. Deeper content is not an error in the
-   worker: the container at depth 200 is sent as a handle. The parent rejects
-   a message nesting deeper than 201 levels.
+2. Values nest at most 200 levels below a message field. A side asked to
+   send deeper content fails the conversion with `RecursionError` (the worker
+   raises it in the engine); a receiver treats deeper content as a violation.
 3. Containers are copied. A container reachable twice is sent twice; a
-   container that contains itself reaches the depth limit and its innermost
-   copy is a handle.
+   container that contains itself reaches the depth limit.
 4. `I` is used only when `i` cannot hold the value. A decoder rejects an `I`
    value that fits in `i`, leading zeros, uppercase digits, or `-0x0`.
 5. A `str` must decode as UTF-8 with `surrogatepass`; anything else, such as
@@ -138,13 +137,13 @@ and a full pipe cannot deadlock.
 
 ## 7 Messages
 
-Fields are listed in order; each is a value unless marked `u32`/`u64`.
+Fields are listed in order; each is a value (§4).
 
 ### 7.1 Parent to worker
 
 | Kind | Name | Fields | Reply value |
 |---|---|---|---|
-| `0x01` | `INIT` | `options` dict (§7.4) | `str`: the engine version |
+| `0x01` | `INIT` | `options` dict (§7.5) | `str`: the engine version |
 | `0x02` | `EVAL` | `source` str, `filename` str | the result |
 | `0x03` | `EXEC` | `source` str, `filename` str | `None` |
 | `0x04` | `CALL` | `target`, `args` tuple, `kwargs` dict | the result |
@@ -166,6 +165,9 @@ sent back as `h`. A parent sends `h` only for ids it holds.
 sets each member as an attribute, then runs `source` in the module with
 filename `<name>`. Registering a name again replaces it.
 
+`EVAL` and `EXEC` raise `SyntaxError` in the engine for source containing a
+NUL character.
+
 `MOUNT` passes an absolute host directory and an absolute engine path to
 `spy_mount`. The parent resolves both; the worker does not consult its own
 working directory.
@@ -176,13 +178,16 @@ working directory.
 
 | Kind | Name | Fields | Reply value |
 |---|---|---|---|
-| `0x21` | `HOST` | `function` u64, `args` tuple, `kwargs` dict | the result |
+| `0x21` | `HOST` | `function` int, `args` tuple, `kwargs` dict | the result |
 | `0x22` | `LOAD` | `name` str | `str` source, or `None` when absent |
 | `0x23` | `OUTPUT` | `text` str | `None` |
 
 `LOAD` names are what the engine's loader receives, including the
 `.__init__` and `.__namespace__` probes; the parent maps them onto its loader
 (`python.md` §3.5).
+
+A `RAISE` reply to `OUTPUT` makes the engine's write fail with its own
+`OSError`; the parent reports the cause on its side.
 
 ### 7.3 Object operations
 
@@ -199,14 +204,13 @@ engine builtins captured when the worker started, so engine code rebinding
 | 5 | `len(t)` | — | `int` |
 | 6 | `x in t` | `x` | `bool` |
 | 7 | `iter(t)` | — | value |
-| 8 | `next(t)` | — | value, or the reply `STOP` |
+| 8 | `next(t)` | — | value; at the end, a `RAISE` of type `StopIteration` |
 | 9 | `bool(t)` | — | `bool` |
 | 10 | `hash(t)` | — | `int` |
 | 11–16 | `t < o`, `<=`, `==`, `!=`, `>`, `>=` | `o` | value |
 | 17 | `repr(t)` | — | `str` |
 | 18 | `str(t)` | — | `str` |
 | 19 | `dir(t)` | — | `list` |
-| 20 | `t(*args, **kwargs)` | `args` tuple, `kwargs` dict | value |
 
 ### 7.4 Replies
 
@@ -214,7 +218,6 @@ engine builtins captured when the worker started, so engine code rebinding
 |---|---|---|
 | `0x40` | `RESULT` | `value` |
 | `0x41` | `RAISE` | worker: `error` (below); parent: `failure` (below) |
-| `0x42` | `STOP` | — (only to `OP` 8: the iterator is exhausted) |
 
 A worker's `error` is a dict with exactly these keys:
 
@@ -256,16 +259,17 @@ operation, its `error` carries the token.
 
 ### 7.5 `INIT` options
 
-`INIT` is the first message and is sent once. Unknown keys are a parent bug.
+`INIT` is the first message and is sent once, with exactly these keys.
 
 | Key | Value | Effect |
 |---|---|---|
 | `std` | `bool` | register the standard modules with `spy_std_init` |
 | `step_limit` | `int` ≥ 0 | `spy_set_step_limit`; 0 is unlimited |
 | `memory_limit` | `int` ≥ 0 | bytes the engine may hold allocated; 0 is unlimited (§10) |
-| `message_limit` | `int` ≥ 1 | the limit of §3, for both directions |
-| `loader` | `bool` | install a module loader that sends `LOAD` |
-| `output` | `bool` | send `OUTPUT` for printed text; without it, output is discarded |
+| `message_limit` | `int` from 1 to 2³²−1 | the limit of §3, for both directions |
+
+The worker always installs output and a module loader that send `OUTPUT` and
+`LOAD`; a parent without a loader answers `None`.
 
 ## 8 Losing the worker
 

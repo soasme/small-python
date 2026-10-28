@@ -17,3 +17,4 @@ wheels/
 # Engine sources copied in by setup.py
 csrc/
 *.so
+src/small_python/spy-worker

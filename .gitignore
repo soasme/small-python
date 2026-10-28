@@ -2,6 +2,7 @@
 *.a
 /spy
 /spyc
+/spy-worker
 /tests/api
 /tests/run-spec
 /bench/lifecycle

@@ -54,8 +54,9 @@ class ModuleTest(unittest.TestCase):
         with Runtime() as rt:
             rt.register_module("syntax", source="1 +")
             rt.register_module("raises", source="raise KeyError('in module')")
-            rt.register_module("member", {"x": object()})
-            for name, kind in [("syntax", "SyntaxError"), ("raises", "KeyError"), ("member", "TypeError")]:
+            with self.assertRaises(TypeError):
+                rt.register_module("member", {"x": object()})
+            for name, kind in [("syntax", "SyntaxError"), ("raises", "KeyError")]:
                 with self.subTest(module=name):
                     with self.assertRaises(Error) as cm:
                         rt.exec(f"import {name}")

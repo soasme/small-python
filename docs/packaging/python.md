@@ -119,7 +119,7 @@ Values cross by copy (`protocol.md` §4):
 |---|---|---|
 | `None`, `bool`, `int`, `float`, `complex` | same | any size `int` |
 | `str`, `bytes`, `bytearray` | same | copied |
-| `list`, `tuple`, `dict`, `set`, `frozenset` | same | copied; nesting over 200 levels raises `ValueError` |
+| `list`, `tuple`, `dict`, `set`, `frozenset` | same | copied; nesting over 200 levels raises `RecursionError` (an `Error` of that type from the engine) |
 | callable | native function | keeps the callable until the runtime closes |
 | `Object` | the engine value | from another runtime: `ValueError` |
 | anything else | — | `TypeError` |
@@ -135,7 +135,7 @@ content (`protocol.md` §4); everything else, subclasses included, is an
 A proxy for an engine value held by the worker. It supports calling,
 attribute get and set, item get and set, `len`, `in`, iteration, `next`,
 `bool`, `hash`, the six comparisons, `repr`, `str`, and `dir`; each is one
-`OP` (`protocol.md` §7.3). Protocol failures raise what Python expects:
+`OP` (`protocol.md` §7.3), and a call is one `CALL`. Protocol failures raise what Python expects:
 `AttributeError`, `KeyError` (with the key), `IndexError`, `TypeError`, and
 `StopIteration` at the end of iteration; other engine exceptions raise
 `Error`. Comparing with a value that does not convert is unequal for `==` and
@@ -178,7 +178,8 @@ exception's method resolution order, with the same `args` when they convert,
 else its message; otherwise `RuntimeError`. An escaping `Error` from the same
 runtime re-raises the original engine exception.
 
-`output` and `loader` follow the same rules. The loader receives the engine's
+The loader follows the same rules. An exception from `output` is reported
+with `sys.unraisablehook`, and the engine's `print` raises `OSError`. The loader receives the engine's
 probe names: for `import pkg.mod` it is asked for `pkg.mod.__init__` (a
 package), then `pkg.mod`; returning source for `pkg.mod.__namespace__` makes a
 namespace package. The parent answers the `__init__` and `__namespace__`
@@ -240,10 +241,14 @@ Changed:
    `WorkerError` and `Timeout`.
 3. Engine subclasses of the convertible types (a `dict` subclass defined in
    engine code) arrive as `Object` instead of being copied.
-4. Overlapping use from two threads is always detected.
-5. Each operation is a message round trip (tens of microseconds) and each
+4. `register_module` converts `members` when called, so an unconvertible
+   member raises `TypeError` there rather than at import.
+5. Engine values nested too deeply to convert raise `Error` of type
+   `RecursionError` rather than Python's `RecursionError`.
+6. Overlapping use from two threads is always detected.
+7. Each operation is a message round trip (tens of microseconds) and each
    runtime a process (about a millisecond to start).
-6. `SPY_VERSION` is read from the bundled worker (`spy-worker --version`) on
+8. `SPY_VERSION` is read from the bundled worker (`spy-worker --version`) on
    first access.
 
 ## 6 Alternatives considered
