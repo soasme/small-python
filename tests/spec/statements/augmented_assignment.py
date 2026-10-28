@@ -110,3 +110,20 @@ assert i.val == 0b101101
 i = InPlace(0b010101)
 i |= 0b111000
 assert i.val == 0b111101
+
+# Numbers without a shared in-place operator name the augmented operator.
+def shift(x, y):
+    x <<= y
+def matmul(x, y):
+    x @= y
+assert_raises(TypeError, shift, 7.5, 2, message="unsupported operand type(s) for <<=: 'float' and 'int'")
+assert_raises(TypeError, matmul, 7, 2, message="unsupported operand type(s) for @=: 'int' and 'int'")
+x = 7
+x //= 2
+x **= 2
+x <<= 1
+assert x == 18
+x = 7.5
+x /= 2
+x %= 2
+assert x == 1.75

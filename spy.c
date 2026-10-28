@@ -8558,8 +8558,9 @@ static SPYValue *set_intersect_iterable(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats and small ints with the common operators come first. */
-    if (a->type == SPY_FLOAT && b->type == SPY_FLOAT && (op == '+' || op == '-' || op == '*'))
-        return spy_float(c, op == '+' ? a->as.real + b->as.real : op == '-' ? a->as.real - b->as.real : a->as.real * b->as.real);
+    if (a->type == SPY_FLOAT && b->type == SPY_FLOAT && (op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real)))
+        return spy_float(c, op == '+' ? a->as.real + b->as.real : op == '-' ? a->as.real - b->as.real :
+                         op == '*' ? a->as.real * b->as.real : a->as.real / b->as.real);
     if (a->type == SPY_INT && b->type == SPY_INT && !a->as.integer_data.big && !b->as.integer_data.big && op != '/' && op != '@')
         return integer_binary(c, op, a->as.integer_data.small, b->as.integer_data.small);
     /* str/bytes % never defers, except to a reflected method of a subclass on the right. */
@@ -14934,6 +14935,13 @@ static void generator_close(SPYValue *v) {
 static int bytearray_exported(SPYContext *, SPYValue *);
 static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     const Operator *operation = &operators[op - T_ADDEQ];
+    /* Exact ints and floats have no in-place methods: an operator both
+     * support is the plain one. */
+    int token = operation->token;
+    if ((old->type == SPY_INT || old->type == SPY_FLOAT) && (rhs->type == SPY_INT || rhs->type == SPY_FLOAT) &&
+        (token == '+' || token == '-' || token == '*' || token == '/' || token == T_FLOORDIV || token == '%' || token == T_POW ||
+         (old->type == SPY_INT && rhs->type == SPY_INT && token != '@')))
+        return binary(c, token, old, rhs);
     SPYValue *result = try_operator(c, old, operation->inplace, rhs, NULL, 1);
     if (result || c->error_type[0]) return result;
     SPYValue *base = builtin_base(c, old, operation->inplace, NULL);
@@ -14944,7 +14952,6 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         if (result == base) { spy_release(result); return spy_retain(old); }
         return result;
     }
-    int token = operation->token;
     /* Mutable sets, dicts, and bytearrays update in place. */
     if ((old->type == SPY_SET && is_set(rhs) && (token == '|' || token == '&' || token == '-' || token == '^')) ||
         (old->type == SPY_BYTEARRAY && (token == '+' || token == '*'))) {
