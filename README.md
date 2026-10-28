@@ -8,7 +8,7 @@ As in QuickJS, the core (`spy.c`) is the language alone; the standard layer
 for the `spy` command and any host that links it.
 
 **Status:** conforms to the Core profile of
-[PLS-315](docs/standards/3_15.md), the Python 3.15 core language: all 345
+[PLS-315](docs/standards/3_15.md), the Python 3.15 core language: all 350
 specification tests (validated on CPython 3.15) and all 112 TLA+ models pass.
 The standard library is out of scope; see the
 [manual](docs/smallpython.md#31-python-language-support) for host choices.

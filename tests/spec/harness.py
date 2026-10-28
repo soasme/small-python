@@ -243,6 +243,19 @@ class Host:
             return [(w.category, str(w.message), w.lineno) for w in caught]
         return stop
 
+    def raising_warnings(self, thunk):
+        """Call thunk with HostWarn raising every warning it receives as an
+        exception (18.3), and return True; or return False without calling
+        thunk when the host supplies no HostWarn."""
+        try:
+            module = __import__("warnings")
+        except ImportError:
+            return False
+        with module.catch_warnings():
+            module.simplefilter("error")
+            thunk()
+        return True
+
     def async_gen_hooks(self):
         """The (firstiter, finalizer) pair HostAsyncGenHooks returns (B.5.1),
         or None when the host offers programs no way to install them."""

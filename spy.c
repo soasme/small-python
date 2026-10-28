@@ -5996,7 +5996,7 @@ static int validate_yields(SPYContext *c, Node *n, int comp) {
     for (; n; n = n->next) {
         if (n->kind == N_YIELD && comp) {
             c->line = n->line;
-            errorf(c, "SyntaxError", "'%s' inside %s", n->op ? "yield from" : "yield",
+            errorf(c, "SyntaxError", "'yield' inside %s",
                    comp == N_LIST ? "list comprehension" : comp == N_SET ? "set comprehension" :
                    comp == N_DICT ? "dict comprehension" : "generator expression");
             return -1;
@@ -6190,7 +6190,9 @@ static int scope_node(SPYContext *c, Scope *scope, Node *n) {
             errorf(c, "SyntaxError", "annotated name '%s' can't be %s", n->a->text, symbol->flags & S_GLOBAL ? "global" : "nonlocal");
             return -1;
         }
-        if (scope_node(c, scope, n->c) || scope_target(c, scope, n->a, n->c ? 1 : -1)) return -1;
+        /* A parenthesized name without a value is neither bound nor used. */
+        int bare = !n->c && n->a->kind == N_NAME && !(n->flags & F_SIMPLE);
+        if (scope_node(c, scope, n->c) || (!bare && scope_target(c, scope, n->a, n->c ? 1 : -1))) return -1;
         if ((n->flags & F_SIMPLE) && n->a->kind == N_NAME && (symbol = scope_symbol(scope, n->a->text))) symbol->flags |= S_ANNOT;
         return 0;
     }
@@ -8621,6 +8623,7 @@ static int builtin_class(SPYContext *, SPYValue *);
 static int static_type(SPYContext *, SPYValue *);
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
 static void delete_name(SPYValue *, const char *);
+static int set_class(SPYContext *, SPYValue *, SPYValue *);
 static int is_member(SPYValue *v) { return v && (v->type == SPY_MEMBER_DESCRIPTOR || v->type == SPY_GETSET_DESCRIPTOR); }
 static SPYValue *member_new(SPYContext *c, int type, const char *name, SPYValue *owner, int flags) {
     SPYValue *d = value_new(c, type);
@@ -8642,6 +8645,7 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (!member_applies(c, d, object)) return NULL;
     const char *name = d->as.member.name->as.string.data;
     if (d->as.member.flags & DESC_VALUE) {
+        if (!strcmp(name, "__class__")) return spy_retain(value_class(c, object));
         SPYValue *base = object->type == SPY_INSTANCE ? object->as.map.base : object;
         if (!base) return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(object), name);
         return attribute_value(c, base, name);
@@ -8666,6 +8670,10 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
     if (!member_applies(c, d, object)) return -1;
     const char *name = d->as.member.name->as.string.data;
     if (d->as.member.flags & DESC_VALUE) {
+        if (!strcmp(name, "__class__")) {
+            if (value) return set_class(c, object, value);
+            spy_error(c, "TypeError", "can't delete __class__ attribute"); return -1;
+        }
         SPYValue *base = object->type == SPY_INSTANCE ? object->as.map.base : object;
         if (!(d->as.member.flags & DESC_READONLY) && base) return value ? set_attribute(c, base, name, value) : delete_attribute(c, base, name);
         if (d->type == SPY_MEMBER_DESCRIPTOR) spy_error(c, "AttributeError", "readonly attribute");
@@ -9456,6 +9464,11 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
         }
         if (!strcmp(name, "__func__")) return spy_retain(v->as.method.function);
+        if (!strcmp(name, "__call__")) {
+            SPYValue *own = builtin_descriptor(c, c->types[SPY_METHOD], name);
+            if (own) return descriptor_get(c, own, v, c->types[SPY_METHOD]);
+            if (c->error_type[0]) return NULL;
+        }
         /* The method type's own attributes come before the function's; bound
          * builtins (builtin methods and method-wrappers) are not descriptors. */
         if (!strcmp(name, "__get__")) {
@@ -23385,7 +23398,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
  * object.__repr__. They are created on first lookup and cached per context,
  * outside the class dictionaries, so implicit special-method dispatch still
  * sees only Python-level overrides. */
-enum { SLOT_BINARY, SLOT_RBINARY, SLOT_INPLACE, SLOT_COMPARE, SLOT_UNARY, SLOT_BUILTIN, SLOT_OTHER };
+enum { SLOT_BINARY, SLOT_RBINARY, SLOT_INPLACE, SLOT_COMPARE, SLOT_UNARY, SLOT_BUILTIN, SLOT_CALL, SLOT_OTHER };
 enum { SLOT_REPR, SLOT_STR, SLOT_FORMAT, SLOT_ITER, SLOT_CONTAINS, SLOT_GETITEM, SLOT_SETITEM, SLOT_DELITEM,
        SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_SELF, SLOT_NEXT };
 #define T(x) (UINT64_C(1) << (x))
@@ -23418,7 +23431,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__eq__", SLOT_COMPARE, R_EQ, T_COMPARED | T_OBJECT | T(SPY_NONE)}, {"__ne__", SLOT_COMPARE, R_NE, T_COMPARED | T_OBJECT | T(SPY_NONE)},
     {"__gt__", SLOT_COMPARE, R_GT, T_COMPARED | T_OBJECT | T(SPY_NONE)}, {"__ge__", SLOT_COMPARE, R_GE, T_COMPARED | T_OBJECT | T(SPY_NONE)},
     {"__neg__", SLOT_UNARY, '-', T_NUMBERS}, {"__pos__", SLOT_UNARY, '+', T_NUMBERS}, {"__invert__", SLOT_UNARY, '~', T(SPY_INT)},
-    {"__abs__", SLOT_BUILTIN, B_ABS, T_NUMBERS}, {"__bool__", SLOT_OTHER, SLOT_BOOL, T_NUMBERS | T(SPY_RANGE)},
+    {"__abs__", SLOT_BUILTIN, B_ABS, T_NUMBERS}, {"__bool__", SLOT_OTHER, SLOT_BOOL, T_NUMBERS | T(SPY_RANGE) | T(SPY_NONE)},
     {"__int__", SLOT_BUILTIN, B_INT, T(SPY_INT) | T(SPY_FLOAT)}, {"__float__", SLOT_BUILTIN, B_FLOAT, T(SPY_INT) | T(SPY_FLOAT)},
     {"__complex__", SLOT_OTHER, SLOT_COMPLEX, T(SPY_COMPLEX)}, {"__trunc__", SLOT_OTHER, SLOT_TRUNC, T(SPY_INT) | T(SPY_FLOAT)},
     {"__floor__", SLOT_OTHER, SLOT_FLOOR, T(SPY_INT) | T(SPY_FLOAT)}, {"__ceil__", SLOT_OTHER, SLOT_CEIL, T(SPY_INT) | T(SPY_FLOAT)},
@@ -23433,6 +23446,7 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__repr__", SLOT_OTHER, SLOT_REPR, T_COMPARED | T_OBJECT | T(SPY_NONE) | T(SPY_NOT_IMPLEMENTED) | T(SPY_ELLIPSIS) | T(SPY_BOOL) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_INTERPOLATION)},
     {"__str__", SLOT_OTHER, SLOT_STR, T_OBJECT | T(SPY_STRING)},
     {"__format__", SLOT_OTHER, SLOT_FORMAT, T_OBJECT | T_NUMBERS | T(SPY_STRING)},
+    {"__call__", SLOT_CALL, 0, T(SPY_FUNCTION) | T(SPY_NATIVE) | T(SPY_METHOD)},
 };
 #undef T
 static int builtin_type_id(SPYContext *c, SPYValue *cls) {
@@ -23502,6 +23516,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         SPYValue *result = method ? call_keywords(c, method, argc, argv, keywords) : NULL;
         spy_release(method); return result;
     }
+    if (slots[index].kind == SLOT_CALL) return call_keywords(c, value, argc, argv, keywords);
     if (keywords && keywords->as.map.len) return errorf(c, "TypeError", "%s.%s() takes no keyword arguments", owner_name, name);
     int kind = slots[index].kind, op = slots[index].op;
     size_t expected = kind == SLOT_UNARY || kind == SLOT_BUILTIN ? 0 : 1;
@@ -23695,6 +23710,34 @@ static SPYValue *class_namespace(SPYContext *c, SPYValue *cls) {
         if (name_local(view, name)) continue;
         SPYValue *descriptor = builtin_descriptor(c, cls, name);
         if (descriptor && name_set(c, view, name, descriptor)) break;
+    }
+    /* Descriptors of instance fields spelt like the class's own __name__,
+     * __qualname__, __module__ and __class__, which lookups on the class
+     * itself must not find: they appear only in this view. */
+    static const struct { int type, kind, flags; const char *names; } shadowed[] = {
+        {63, SPY_GETSET_DESCRIPTOR, 0, "__class__"},
+        {SPY_FUNCTION, SPY_GETSET_DESCRIPTOR, 0, "__name__ __qualname__ __module__"},
+        {SPY_NATIVE, SPY_MEMBER_DESCRIPTOR, 0, "__module__"},
+        {SPY_NATIVE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__name__ __qualname__"},
+        {SPY_GENERATOR, SPY_GETSET_DESCRIPTOR, 0, "__name__ __qualname__"},
+        {SPY_COROUTINE, SPY_GETSET_DESCRIPTOR, 0, "__name__ __qualname__"},
+        {SPY_ASYNC_GENERATOR, SPY_GETSET_DESCRIPTOR, 0, "__name__ __qualname__"},
+        {SPY_PROPERTY, SPY_GETSET_DESCRIPTOR, 0, "__name__"},
+        {-1, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__name__"}, {-1, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__qualname__"},
+        {-2, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__name__"}, {-2, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__qualname__"},
+        {-3, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__name__ __qualname__"}};
+    for (size_t i = 0; i < sizeof(shadowed) / sizeof(*shadowed) && !c->error_type[0]; i++) {
+        int type = shadowed[i].type;
+        if (type >= 0 ? builtin_type_id(c, cls) != type : cls != c->native_types[-type - 1]) continue;
+        for (const char *name = shadowed[i].names; *name; ) {
+            size_t len = strcspn(name, " ");
+            char field[16];
+            snprintf(field, sizeof(field), "%.*s", (int)len, name);
+            SPYValue *descriptor = member_new(c, shadowed[i].kind, field, cls, DESC_VALUE | shadowed[i].flags);
+            if (!descriptor || name_set(c, view, field, descriptor)) { spy_release(descriptor); break; }
+            spy_release(descriptor);
+            name += len + (name[len] == ' ');
+        }
     }
     /* type's data descriptors for the class attributes of 10.4.2, which read
      * and write through the class. */
@@ -24008,6 +24051,11 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
     }
 }
 /* Descriptors for fields of builtin values, read through the value. */
+/* __call__ of the native descriptor classes: call the object. */
+static SPYValue *callable_call(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    return call_keywords(c, argv[0], argc - 1, argv + 1, keywords);
+}
 static int register_value_fields(SPYContext *c) {
     static const struct { int type, kind, flags; const char *names; } fields[] = {
         {SPY_INT, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "real imag numerator denominator"},
@@ -24036,6 +24084,9 @@ static int register_value_fields(SPYContext *c) {
         {SPY_FUNCTION, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "__builtins__ __closure__ __globals__"},
         {SPY_FUNCTION, SPY_GETSET_DESCRIPTOR, 0,
          "__annotate__ __annotations__ __code__ __defaults__ __dict__ __kwdefaults__ __type_params__"},
+        {SPY_NATIVE, SPY_GETSET_DESCRIPTOR, DESC_READONLY, "__self__ __text_signature__"},
+        {SPY_STATICMETHOD, SPY_GETSET_DESCRIPTOR, 0, "__annotations__ __annotate__"},
+        {SPY_CLASSMETHOD, SPY_GETSET_DESCRIPTOR, 0, "__annotations__ __annotate__"},
         {SPY_MEMORYVIEW, SPY_GETSET_DESCRIPTOR, DESC_READONLY,
          "obj nbytes readonly itemsize format ndim shape strides suboffsets c_contiguous f_contiguous contiguous"},
         {SPY_TEMPLATE, SPY_MEMBER_DESCRIPTOR, DESC_READONLY, "strings interpolations"},
@@ -24054,6 +24105,27 @@ static int register_value_fields(SPYContext *c) {
             name += len + (name[len] == ' ');
         }
     }
+    /* method_descriptor, wrapper_descriptor and method-wrapper (native_types
+     * 0 to 2) as CPython lays them out; attribute_value answers for them. */
+    static const struct { int native, kind; const char *names; } natives[] = {
+        {0, SPY_MEMBER_DESCRIPTOR, "__objclass__"}, {0, SPY_GETSET_DESCRIPTOR, "__text_signature__"},
+        {1, SPY_MEMBER_DESCRIPTOR, "__objclass__"}, {1, SPY_GETSET_DESCRIPTOR, "__text_signature__"},
+        {2, SPY_MEMBER_DESCRIPTOR, "__self__"}, {2, SPY_GETSET_DESCRIPTOR, "__objclass__ __text_signature__"}};
+    for (size_t i = 0; i < sizeof(natives) / sizeof(*natives); i++) {
+        SPYValue *cls = c->native_types[natives[i].native];
+        for (const char *name = natives[i].names; *name; ) {
+            size_t len = strcspn(name, " ");
+            char field[32];
+            snprintf(field, sizeof(field), "%.*s", (int)len, name);
+            SPYValue *descriptor = member_new(c, natives[i].kind, field, cls, DESC_READONLY | DESC_VALUE);
+            int status = !descriptor || name_set(c, cls, field, descriptor);
+            spy_release(descriptor);
+            if (status) return -1;
+            name += len + (name[len] == ' ');
+        }
+    }
+    for (size_t i = 0; i < 3; i++)
+        if (class_method_set(c, c->native_types[i], "__call__", callable_call, 0, METHOD_INSTANCE)) return -1;
     return 0;
 }
 static int class_method_set(SPYContext *, SPYValue *, const char *, NativeMethod, intptr_t, int);
