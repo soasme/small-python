@@ -50,7 +50,7 @@ def main():
                 continue
             target, _, fragment = unquote(link).partition("#")
             destination = (path.parent / target).resolve() if target else path
-            if not destination.is_file():
+            if not (destination.is_file() or (destination.is_dir() and not fragment)):
                 raise ValueError(f"missing file in {path.relative_to(ROOT)}: {link}")
             if fragment:
                 content = texts.get(destination)

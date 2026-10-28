@@ -35,7 +35,7 @@ enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* An environment whose entries are cells that its variables forward to. */
 enum { ENV_FORWARD = 6 };
 /* Instance layouts beyond the builtin value types. */
-enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE };
+enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
 typedef struct Machine Machine;
@@ -2399,7 +2399,9 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
             }
             if (b->ctx->error_type[0]) return -1;
         }
+        /* type_repr: a str module, a subclass's included, other than builtins. */
         SPYValue *name = name_local(v, "__qualname__"), *module = name_local(v, "__module__");
+        if (module) module = builtin_value(b->ctx, module, SPY_STRING);
         if (puts_buffer(b, "<class '")) return -1;
         if (module && strcmp(module->as.string.data, "builtins") &&
             (puts_buffer(b, module->as.string.data) || puts_buffer(b, "."))) return -1;
@@ -2487,9 +2489,10 @@ static int format_value(Buffer *b, SPYValue *v, int repr) {
         } else {
             /* object.__repr__: the class's module (unless builtins) and qualified name. */
             SPYValue *module = name_local(v->as.map.parent, "__module__"), *name = name_local(v->as.map.parent, "__qualname__");
+            if (module) module = builtin_value(b->ctx, module, SPY_STRING);
             snprintf(num, sizeof(num), " object at %p>", (void *)v);
             status = puts_buffer(b, "<") ||
-                (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins") &&
+                (module && strcmp(module->as.string.data, "builtins") &&
                  (puts_buffer(b, module->as.string.data) || puts_buffer(b, "."))) ||
                 puts_buffer(b, name && name->type == SPY_STRING ? name->as.string.data : type_name(v)) || puts_buffer(b, num);
         }
@@ -8559,8 +8562,10 @@ static SPYValue *instance_lookup(SPYValue *cls, const char *name) {
     if (strcmp(name, "__name__") && strcmp(name, "__qualname__")) return class_lookup(cls, name);
     SPYValue *mro = cls ? cls->as.map.mro : NULL;
     for (size_t i = 0; mro && i < mro->as.seq.len; i++) {
-        SPYValue *value = name_local(mro->as.seq.items[i], name);
-        if (value && value->type != SPY_STRING) return value;
+        /* A class's own __name__ and __qualname__ entries: slots of those names. */
+        SPYValue *base = mro->as.seq.items[i], *own = base->as.map.namespace ? dictionary_value(base->ctx, base->as.map.namespace) : base;
+        SPYValue *value = own ? env_entry(own, name) : NULL;
+        if (value) return value;
     }
     return NULL;
 }
@@ -8746,6 +8751,8 @@ static int static_type(SPYContext *, SPYValue *);
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
 static void delete_name(SPYValue *, const char *);
 static int set_class(SPYContext *, SPYValue *, SPYValue *);
+static int class_has_dict(SPYContext *, SPYValue *);
+static int class_has_weakref(SPYContext *, SPYValue *);
 static int is_member(SPYValue *v) { return v && (v->type == SPY_MEMBER_DESCRIPTOR || v->type == SPY_GETSET_DESCRIPTOR); }
 static SPYValue *member_new(SPYContext *c, int type, const char *name, SPYValue *owner, int flags) {
     SPYValue *d = value_new(c, type);
@@ -8763,6 +8770,10 @@ static int member_applies(SPYContext *c, SPYValue *d, SPYValue *object) {
     return 0;
 }
 static SPYValue *instance_dict(SPYContext *, SPYValue *);
+static SPYValue *class_namespace(SPYContext *, SPYValue *);
+static SPYValue *slot_new(SPYContext *, SPYValue *);
+static SPYValue *native_slot_new(SPYContext *, SPYValue *);
+static int static_type(SPYContext *, SPYValue *);
 static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (!member_applies(c, d, object)) return NULL;
     const char *name = d->as.member.name->as.string.data;
@@ -8773,7 +8784,14 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
         return attribute_value(c, base, name);
     }
     if (d->as.member.flags & DESC_GENERIC) {
-        if (name[2] == 'w') return spy_none(c);
+        /* subtype_getweakref: None while no weak reference is listed. */
+        if (name[2] == 'w')
+            return class_has_weakref(c, value_class(c, object)) ? spy_none(c) : spy_error(c, "AttributeError", "This object has no __weakref__");
+        if (object->type == SPY_CLASS) {
+            /* subtype_dict delegates to type's __dict__. */
+            SPYValue *namespace = static_type(c, object) ? class_namespace(c, object) : instance_dict(c, object), *proxy = namespace ? mappingproxy_new(c, namespace) : NULL;
+            spy_release(namespace); return proxy;
+        }
         if (object->type != SPY_INSTANCE || !instance_has_dict(object)) return spy_error(c, "AttributeError", "This object has no __dict__");
         return instance_dict(c, object);
     }
@@ -8804,6 +8822,12 @@ static int member_set(SPYContext *c, SPYValue *d, SPYValue *object, SPYValue *va
     }
     if (d->as.member.flags & DESC_GENERIC) {
         if (name[2] == 'w') { spy_error(c, "AttributeError", "attribute '__weakref__' of 'object' objects is not writable"); return -1; }
+        /* subtype_setdict defers to a builtin base's __dict__: a module's is
+         * read-only, an exception's cannot be deleted. */
+        if (builtin_value(c, object, SPY_MODULE)) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
+        if (!value && subclass(value_class(c, object), name_local(c->classes, "BaseException"))) {
+            spy_error(c, "TypeError", "cannot delete __dict__"); return -1; /* BaseException's __dict__ */
+        }
         if (object->type != SPY_INSTANCE || !instance_has_dict(object)) { spy_error(c, "AttributeError", "This object has no __dict__"); return -1; }
         if (value && !builtin_value(c, value, SPY_DICT)) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
         SPYValue *fresh = value ? spy_retain(value) : value_new(c, SPY_DICT), *old = fresh ? instance_dict(c, object) : NULL;
@@ -8883,6 +8907,12 @@ static int data_descriptor_get(SPYValue *value) {
 static SPYValue *descriptor_value(SPYContext *c, SPYValue *value, SPYValue *self, SPYValue *owner) {
     if (value->type == SPY_SUPER && !value->as.super.self && self)
         return super_new(c, value->as.super.type, self);
+    /* super_descr_get: an unbound super subclass instance calls its class. */
+    SPYValue *unbound = value->type == SPY_INSTANCE ? builtin_value(c, value, SPY_SUPER) : NULL;
+    if (unbound && !unbound->as.super.self && self && !class_lookup(value->as.map.parent, "__get__")) {
+        SPYValue *args[] = {unbound->as.super.type, self};
+        return spy_call(c, value->as.map.parent, 2, args);
+    }
     if (value->type == SPY_PROPERTY) return property_get(c, value, value, self);
     if (is_member(value)) return self ? member_get(c, value, self) : spy_retain(value);
     if (value->type == SPY_INSTANCE) {
@@ -9115,6 +9145,18 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
 static SPYValue *builtin_descriptor_lookup(SPYContext *, SPYValue *, const char *);
 static SPYValue *builtin_descriptor(SPYContext *, SPYValue *, const char *);
 static SPYValue *class_namespace(SPYContext *, SPYValue *);
+/* An instance __dict__ holding keys other than str is searched as a dict:
+ * an equal-hashed key's __eq__ runs. A new reference, or NULL. */
+static SPYValue *instance_dict_search(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *dict = v->type == SPY_INSTANCE && v->as.map.namespace ? dictionary_value(c, v->as.map.namespace) : NULL;
+    int other = 0;
+    for (size_t i = 0; dict && i < dict->as.map.len; i++) other |= dict->as.map.items[i].key->type != SPY_STRING;
+    if (!other) return NULL;
+    SPYValue *key = spy_string(c, name, strlen(name));
+    ptrdiff_t at = key ? map_find(dict, key) : -1;
+    spy_release(key);
+    return at >= 0 && !c->error_type[0] ? spy_retain(dict->as.map.items[at].value) : NULL;
+}
 /* The docstring CPython's slot wrapper of this name carries, or NULL. */
 static const char *slot_doc(const char *name) {
     static const char *const docs[][2] = {
@@ -9663,15 +9705,23 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             SPYValue *proxy = mappingproxy_new(c, dict);
             spy_release(dict); return proxy;
         }
+        SPYValue *held = value ? spy_retain(value) : NULL;
         value = name_local(v, name);
-        if (value) return v->type == SPY_CLASS ? descriptor_get(c, value, NULL, v) : spy_retain(value);
+        if (value) { spy_release(held); return v->type == SPY_CLASS ? descriptor_get(c, value, NULL, v) : spy_retain(value); }
+        value = instance_dict_search(c, v, name);
+        if (value || c->error_type[0]) { spy_release(held); return value; }
         value = v->type == SPY_CLASS ? class_lookup(v, name) : instance_lookup(v->as.map.parent, name);
+        /* The class attribute found before the dict search, which may delete it. */
+        if (!value) value = held;
         /* A builtin base before the defining class in the MRO provides its own slot. */
         SPYValue *slot = value ? builtin_slot_before(c, v->type == SPY_CLASS ? v : v->as.map.parent, name) : NULL;
-        if (c->error_type[0]) return NULL;
+        if (c->error_type[0]) { spy_release(held); return NULL; }
         if (slot) value = slot;
-        if (value) return descriptor_get(c, value, v->type == SPY_INSTANCE ? v : NULL,
-                                         v->type == SPY_INSTANCE ? v->as.map.parent : v);
+        if (value) {
+            SPYValue *result = descriptor_get(c, value, v->type == SPY_INSTANCE ? v : NULL, v->type == SPY_INSTANCE ? v->as.map.parent : v);
+            spy_release(held); return result;
+        }
+        spy_release(held);
         if (!strcmp(name, "__class__") && v->type == SPY_INSTANCE) return spy_retain(v->as.map.parent);
         if (v->type == SPY_INSTANCE && v->as.map.base) {
             value = attribute_value(c, v->as.map.base, name);
@@ -11329,7 +11379,8 @@ static int set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
         spy_error(c, "TypeError", "__class__ assignment only supported for mutable types or ModuleType subclasses"); return -1;
     }
     if (class_layout(c, old) != class_layout(c, value) || !same_slot_layout(old, value) ||
-        (old->as.map.flags & 8) != (value->as.map.flags & 8)) {
+        (old->as.map.flags & 8) != (value->as.map.flags & 8) ||
+        class_has_weakref(c, old) != class_has_weakref(c, value)) {
         errorf(c, "TypeError", "__class__ assignment: '%s' object layout differs from '%s'",
                name_local(value, "__name__")->as.string.data, name_local(old, "__name__")->as.string.data);
         return -1;
@@ -11405,7 +11456,7 @@ static int module_set_annotations(SPYContext *c, SPYValue *module, const char *n
 }
 /* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
  * to the class (20.2.8), not by binding it in the class body. */
-enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64 };
+enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64, CLASS_OWN_DICT = 128, CLASS_OWN_WEAKREF = 256 };
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
@@ -13377,6 +13428,19 @@ static SPYValue *module_init_method(SPYContext *c, size_t argc, SPYValue *const 
     if (!module) return errorf(c, "TypeError", "descriptor '__init__' of 'module' object needs an argument");
     return module_init(c, module, argc - 1, argv + 1, keywords) ? NULL : spy_none(c);
 }
+/* super.__init__(self, type, obj): rebinds self, as CPython's super_init. */
+static SPYValue *super_init_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *target = argc ? builtin_value(c, argv[0], SPY_SUPER) : NULL;
+    if (!target) return errorf(c, "TypeError", "descriptor '__init__' of 'super' object needs an argument");
+    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, c->types[SPY_SUPER]->as.map.native - 1, keywords, "super");
+    if (!fresh) return NULL;
+    SPYValue *type = target->as.super.type, *self = target->as.super.self, *owner = target->as.super.owner;
+    target->as.super = fresh->as.super;
+    fresh->as.super.type = type; fresh->as.super.self = self; fresh->as.super.owner = owner;
+    spy_release(fresh);
+    return spy_none(c);
+}
 /* method(function, instance, /), as CPython's method_new. */
 static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "method() takes no keyword arguments");
@@ -13408,7 +13472,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         else if (singleton) errorf(c, "TypeError", "%s takes no arguments", fn == c->types[SPY_ELLIPSIS] ? "EllipsisType" : name_local(fn, "__name__")->as.string.data);
         else errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
     } else {
-        SPYValue *allocator = class_lookup(fn, "__new__");
+        SPYValue *allocator = slot_new(c, fn);
         SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
         SPYValue *bound = method ? bind_method(c, fn, method) : NULL;
         if (bound) result = call_keywords(c, bound, argc, argv, keywords);
@@ -13434,13 +13498,6 @@ SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *ar
 /* Weak references. The weakref module builds its reference, proxy, and
  * container types on these private primitives; a reference object is any
  * value registered here with a borrowed target. */
-static int slots_name(SPYValue *slots, const char *name) {
-    if (slots->type == SPY_STRING) return !strcmp(slots->as.string.data, name);
-    if (slots->type != SPY_TUPLE && slots->type != SPY_LIST) return 1;
-    for (size_t i = 0; i < slots->as.seq.len; i++)
-        if (slots->as.seq.items[i]->type == SPY_STRING && !strcmp(slots->as.seq.items[i]->as.string.data, name)) return 1;
-    return 0;
-}
 static int weak_referenceable(SPYContext *c, SPYValue *v) {
     switch (v->type) {
     case SPY_CLASS: case SPY_FUNCTION: case SPY_SET: case SPY_FROZENSET: case SPY_GENERATOR: case SPY_COROUTINE:
@@ -13449,19 +13506,9 @@ static int weak_referenceable(SPYContext *c, SPYValue *v) {
     case SPY_INSTANCE: break;
     default: return 0;
     }
-    SPYValue *cls = v->as.map.parent;
-    /* Variable-size builtin layouts have no weak-reference slot. */
-    if (subclass(cls, c->types[SPY_INT]) || subclass(cls, c->types[SPY_TUPLE]) || subclass(cls, c->types[SPY_BYTES])) return 0;
-    SPYValue *mro = cls->as.map.mro;
-    size_t len = mro ? mro->as.seq.len : 1;
-    for (size_t i = 0; i < len; i++) {
-        SPYValue *klass = mro ? mro->as.seq.items[i] : cls, *name = name_local(klass, "__name__");
-        if (klass->as.map.native || klass->as.map.flags == 2 ||
-            (name && name->type == SPY_STRING && name_local(c->classes, name->as.string.data) == klass)) continue;
-        SPYValue *slots = name_local(klass, "__slots__");
-        if (!slots || slots_name(slots, "__weakref__")) return 1;
-    }
-    return 0;
+    /* A __weakref__ slot of the class or a base; variable-size builtin
+     * layouts have one only when __slots__ lists it. */
+    return class_has_weakref(c, v->as.map.parent);
 }
 static struct WeakEntry *weak_entry(SPYContext *c, SPYValue *ref) {
     for (size_t i = 0; i < c->weak_len; i++) if (c->weak[i].ref == ref) return &c->weak[i];
@@ -14592,7 +14639,7 @@ static int set_class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
         SPYValue *base = bases->as.seq.items[i];
         if (base->type != SPY_CLASS) { spy_error(c, "TypeError", "bases must be types"); break; }
         for (size_t j = 0; j < i; j++) if (bases->as.seq.items[j] == base)
-            spy_error(c, "TypeError", "duplicate base class");
+            errorf(c, "TypeError", "duplicate base class %s", name_local(base, "__name__")->as.string.data);
         if (!c->error_type[0]) sequence_append(c, copy, base);
     }
     if (c->error_type[0]) { spy_release(copy); return -1; }
@@ -14669,6 +14716,33 @@ static SPYValue *slots_base(SPYValue *cls) {
         if (mro->as.seq.items[i]->as.map.flags & CLASS_SLOTS && mro->as.seq.items[i]->as.map.flags != 2) return mro->as.seq.items[i];
     return NULL;
 }
+/* The __new__ a class call uses, as CPython's tp_new slot: a Python class
+ * whose own __new__ is a builtin type's leaves the slot it inherits, so the
+ * builtin new of the first builtin class serves, unless a Python __new__
+ * further along makes the class look __new__ up as usual. Borrowed. */
+static SPYValue *slot_new(SPYContext *c, SPYValue *cls) {
+    SPYValue *native = native_slot_new(c, cls);
+    return native ? native : class_lookup(cls, "__new__");
+}
+/* That builtin new, or NULL when a Python __new__ decides the slot. */
+static SPYValue *native_slot_new(SPYContext *c, SPYValue *cls) {
+    SPYValue *mro = cls->as.map.mro;
+    for (size_t i = 0; mro && i < mro->as.seq.len; i++) {
+        SPYValue *base = mro->as.seq.items[i], *value = name_local(base, "__new__");
+        if (!value || (value->type == SPY_NATIVE && !static_type(c, base))) continue;
+        return value->type == SPY_NATIVE ? value : NULL;
+    }
+    return NULL;
+}
+/* Py_TPFLAGS_BASETYPE: the builtin classes a class may derive from. */
+static int acceptable_base(SPYContext *c, SPYValue *base) {
+    if (!base->as.map.native && base->as.map.flags != 2) return 1;
+    for (size_t t = 0; t < sizeof(subclassable_types) / sizeof(*subclassable_types); t++)
+        if (base == c->types[subclassable_types[t]]) return 1;
+    return base == c->types[SPY_CLASS] || base == c->types[SPY_SUPER] || base == c->types[SPY_MODULE] ||
+           base == c->iterator_types[IT_MAP] || base == c->iterator_types[IT_ZIP] || base == c->iterator_types[IT_ENUMERATE] ||
+           base == c->iterator_types[IT_FILTER] || base == c->iterator_types[IT_REVERSED];
+}
 static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases, SPYValue *module) {
     SPYValue *exception = name_local(c->classes, "BaseException");
     int layout = -1;
@@ -14677,20 +14751,12 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
         SPYValue *base = bases->as.seq.items[i];
         if (base->type != SPY_CLASS)
             return spy_error(c, "TypeError", "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases");
-        if (base->as.map.native || base->as.map.flags == 2) {
-            int accepted = 0;
-            for (size_t t = 0; t < sizeof(subclassable_types) / sizeof(*subclassable_types); t++)
-                accepted |= base == c->types[subclassable_types[t]];
-            accepted |= base == c->types[SPY_CLASS];
-            accepted |= base == c->types[SPY_SUPER] || base == c->types[SPY_MODULE] ||
-                        base == c->iterator_types[IT_MAP] || base == c->iterator_types[IT_ZIP] || base == c->iterator_types[IT_ENUMERATE] ||
-                        base == c->iterator_types[IT_FILTER] || base == c->iterator_types[IT_REVERSED];
-            if (!accepted) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base));
-        }
+        if (!acceptable_base(c, base)) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base));
         /* Exceptions and each builtin value type have their own layout. */
         int kind = builtin_layout(c, base);
         if (kind < 0 && subclass(base, exception)) kind = LAYOUT_EXCEPTION;
         if (kind < 0 && subclass(base, c->types[SPY_CLASS])) kind = LAYOUT_TYPE;
+        if (kind < 0 && subclass(base, c->types[SPY_MODULE])) kind = LAYOUT_MODULE;
         if (kind >= 0 && layout >= 0 && kind != layout) return spy_error(c, "TypeError", "multiple bases have instance lay-out conflict");
         if (kind >= 0) layout = kind;
         SPYValue *slotted = slots_base(base);
@@ -14750,6 +14816,7 @@ static int class_layout(SPYContext *c, SPYValue *cls) {
     int layout = builtin_layout(c, cls);
     if (layout < 0 && subclass(cls, name_local(c->classes, "BaseException"))) return LAYOUT_EXCEPTION;
     if (layout < 0 && subclass(cls, c->types[SPY_CLASS])) return LAYOUT_TYPE;
+    if (layout < 0 && subclass(cls, c->types[SPY_MODULE])) return LAYOUT_MODULE;
     return layout;
 }
 static int initialize_mro(SPYContext *c, SPYValue *cls) {
@@ -14787,6 +14854,26 @@ static int initialize_mro(SPYContext *c, SPYValue *cls) {
     spy_release(cls->as.map.mro); cls->as.map.mro = order;
     return 0;
 }
+/* Whether cls is base or one of its bases, through __bases__ links: an MRO
+ * a reentrant mro() has yet to rebuild cannot hide a cycle. */
+static int reaches_through_bases(SPYValue *base, SPYValue *cls) {
+    if (base == cls) return 1;
+    for (size_t i = 0; base->as.map.bases && i < base->as.map.bases->as.seq.len; i++)
+        if (reaches_through_bases(base->as.map.bases->as.seq.items[i], cls)) return 1;
+    return 0;
+}
+/* The __dict__ and __weakref__ slots instances of a class with these bases
+ * inherit, and the nearest base whose __slots__ fix their layout. */
+static int bases_slots(SPYContext *c, SPYValue *bases, SPYValue **slotted) {
+    int slots = 0;
+    *slotted = NULL;
+    for (size_t i = 0; i < bases->as.seq.len; i++) {
+        SPYValue *base = bases->as.seq.items[i];
+        slots |= class_has_dict(c, base) | class_has_weakref(c, base) << 1;
+        if (!*slotted) *slotted = slots_base(base);
+    }
+    return slots;
+}
 /* type.__bases__ assignment: validate the new bases, then rebuild the MRO
  * of cls and of every class that inherits from it, oldest first. */
 static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
@@ -14799,52 +14886,67 @@ static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
         SPYValue *base = value->as.seq.items[i], *mro = base->type == SPY_CLASS ? base->as.map.mro : NULL;
         if (base->type != SPY_CLASS)
             { errorf(c, "TypeError", "%s.__bases__ must be tuple of classes, not '%s'", name, type_name(base)); return -1; }
-        for (size_t j = 0; mro && j < mro->as.seq.len; j++)
-            if (mro->as.seq.items[j] == cls) { spy_error(c, "TypeError", "a __bases__ item causes an inheritance cycle"); return -1; }
+        if (!acceptable_base(c, base)) { errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base)); return -1; }
+        int cycle = reaches_through_bases(base, cls);
+        for (size_t j = 0; mro && j < mro->as.seq.len; j++) cycle |= mro->as.seq.items[j] == cls;
+        if (cycle) { spy_error(c, "TypeError", "a __bases__ item causes an inheritance cycle"); return -1; }
     }
-    int layout = class_layout(c, cls);
+    SPYValue *slotted, *new_slotted;
+    int layout = class_layout(c, cls), slots = bases_slots(c, cls->as.map.bases, &slotted);
+    int own = !!(cls->as.map.flags & CLASS_OWN_DICT) | !!(cls->as.map.flags & CLASS_OWN_WEAKREF) << 1; /* cls's own slots */
     SPYValue *old_bases = spy_retain(cls->as.map.bases), *old_mro = spy_retain(cls->as.map.mro);
     if (set_class_bases(c, cls, value)) { spy_release(old_bases); spy_release(old_mro); return -1; }
+    SPYValue *installed = cls->as.map.bases;
     int kind = -1;
     for (size_t i = 0; i < cls->as.map.bases->as.seq.len; i++) {
         int k = class_layout(c, cls->as.map.bases->as.seq.items[i]);
         if (k >= 0) kind = k;
     }
     int status = 0;
-    if (kind != layout) {
+    if (kind != layout || (bases_slots(c, cls->as.map.bases, &new_slotted) | own) != (slots | own) ||
+        (slotted != new_slotted && (!slotted || !new_slotted || !same_slot_layout(slotted, new_slotted)))) {
         errorf(c, "TypeError", "__bases__ assignment: '%s' object layout differs from '%s'",
                name_local(cls->as.map.bases->as.seq.items[0], "__name__")->as.string.data,
                name_local(old_bases->as.seq.items[0], "__name__")->as.string.data);
         status = -1;
     }
     if (!status) status = initialize_mro(c, cls);
-    if (status) {
-        set_class_bases(c, cls, old_bases);
-        spy_release(cls->as.map.mro); cls->as.map.mro = old_mro;
-        spy_release(old_bases); return -1;
-    }
-    spy_release(old_bases); spy_release(old_mro);
-    /* Values are listed newest first; a subclass is younger than its bases. */
-    size_t count = 0, size = 0;
+    /* Then every class inheriting from cls, oldest first; values are listed
+     * newest first, and a subclass is younger than its bases. */
+    size_t count = 0, size = 0, done = 0;
     SPYValue **descendants = NULL;
-    for (SPYValue *v = c->values; v; v = v->next) {
+    for (SPYValue *v = c->values; v && !status; v = v->next) {
         if (v->type != SPY_CLASS || v == cls || !v->as.map.mro) continue;
         for (size_t i = 1; i < v->as.map.mro->as.seq.len; i++)
             if (v->as.map.mro->as.seq.items[i] == cls) {
                 if (count == size) {
-                    SPYValue **grown = realloc(descendants, (size = size ? size * 2 : 8) * sizeof(*grown));
-                    if (!grown) { free(descendants); spy_error(c, "MemoryError", "out of memory"); return -1; }
+                    SPYValue **grown = realloc(descendants, (size = size ? size * 2 : 8) * 2 * sizeof(*grown));
+                    if (!grown) { spy_error(c, "MemoryError", "out of memory"); status = -1; break; }
                     descendants = grown;
                 }
-                descendants[count++] = spy_retain(v);
+                descendants[2 * count] = spy_retain(v);
+                descendants[2 * count++ + 1] = spy_retain(v->as.map.mro);
                 break;
             }
     }
-    for (size_t i = count; i-- > 0;) {
-        if (!status) status = initialize_mro(c, descendants[i]);
-        spy_release(descendants[i]);
+    for (size_t i = count; !status && i-- > 0; done++) status = initialize_mro(c, descendants[2 * i]);
+    if (status) {
+        /* type_set_bases restores every MRO it rebuilt, and the bases unless a
+         * reentrant mro() assigned others meanwhile. */
+        ErrorState error = take_error(c);
+        for (size_t i = count; done && i-- > count - done;) {
+            SPYValue *v = descendants[2 * i];
+            spy_release(v->as.map.mro); v->as.map.mro = spy_retain(descendants[2 * i + 1]);
+        }
+        if (cls->as.map.bases == installed) {
+            set_class_bases(c, cls, old_bases);
+            spy_release(cls->as.map.mro); cls->as.map.mro = spy_retain(old_mro);
+        }
+        restore_error(c, &error);
     }
+    for (size_t i = 0; i < 2 * count; i++) spy_release(descendants[i]);
     free(descendants);
+    spy_release(old_bases); spy_release(old_mro);
     return status;
 }
 /* Turn the namespace's __slots__ into member descriptors on cls. */
@@ -14904,25 +15006,36 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     /* Class variables conflict only once every name has been checked. */
     for (size_t i = 0; !status && i < list->as.seq.len; i++) {
         const char *name = list->as.seq.items[i]->as.string.data;
-        if (strcmp(name, "__qualname__") && name_local(namespace, name)) {
+        /* type_new removes __qualname__ and __classcell__ from the namespace. */
+        if (strcmp(name, "__qualname__") && strcmp(name, "__classcell__") && name_local(namespace, name)) {
             errorf(c, "ValueError", "'%s' in __slots__ conflicts with class variable", name); status = -1;
         }
     }
     if (!status) status = sort_list(c, list, NULL, 0);
-    int weakrefs_allowed = layout != SPY_INT && layout != SPY_BYTES && layout != SPY_TUPLE;
+    /* Variable-size instances take __weakref__ only when __slots__ lists it. */
+    int weakrefs_allowed = (layout != SPY_INT && layout != SPY_BYTES && layout != SPY_TUPLE) || (slots && weakref);
     static const char *const getsets[] = {"__dict__", "__weakref__"};
     for (int i = 0; !status && i < 2; i++) {
         if (!(i ? weakref && !weakrefs && weakrefs_allowed : dict && !inherited)) continue;
-        SPYValue *getset = member_new(c, SPY_GETSET_DESCRIPTOR, getsets[i], name_local(c->classes, "object"), DESC_GENERIC);
-        status = getset ? name_set(c, cls, getsets[i], getset) : -1;
-        spy_release(getset);
+        if (name_local(namespace, getsets[i])) continue; /* type_add_getset: the class body's own wins. */
+        /* One generic getset of each name serves every class, as in CPython. */
+        if (!c->slots && !(c->slots = value_new(c, SPY_DICT))) { status = -1; break; }
+        SPYValue *getset = name_local(c->slots, getsets[i]);
+        if (!getset) {
+            if (!(getset = member_new(c, SPY_GETSET_DESCRIPTOR, getsets[i], name_local(c->classes, "object"), DESC_GENERIC)) ||
+                name_set(c, c->slots, getsets[i], getset)) { spy_release(getset); status = -1; break; }
+            spy_release(getset);
+        }
+        status = name_set(c, cls, getsets[i], getset);
     }
     for (size_t i = 0; !status && i < list->as.seq.len; i++) {
+        /* Into the class's own entries: a __qualname__ slot leaves the class's name. */
         SPYValue *member = member_new(c, SPY_MEMBER_DESCRIPTOR, list->as.seq.items[i]->as.string.data, cls, DESC_SLOT);
-        status = member ? name_set(c, cls, list->as.seq.items[i]->as.string.data, member) : -1;
+        status = member ? map_set(c, namespace_map(cls), list->as.seq.items[i], member) : -1;
         spy_release(member);
     }
     if (!status && !dict && !inherited) cls->as.map.flags |= CLASS_NO_DICT;
+    if (!status) cls->as.map.flags |= (dict ? CLASS_OWN_DICT : 0) | (weakref ? CLASS_OWN_WEAKREF : 0);
     if (!status && list->as.seq.len) cls->as.map.flags |= CLASS_SLOTS;
     if (!status && ((weakref && weakrefs_allowed) || weakrefs)) cls->as.map.flags |= CLASS_WEAKREF;
     spy_release(list); spy_release(names);
@@ -15962,9 +16075,17 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
     }
     spy_release(snapshot);
     if (c->error_type[0]) return -1;
-    SPYValue *definition = NULL;
-    for (size_t i = 1; i < cls->as.map.mro->as.seq.len && !definition; i++)
-        definition = name_local(cls->as.map.mro->as.seq.items[i], "__init_subclass__");
+    /* super(cls, cls).__init_subclass__: a custom MRO may leave cls out. */
+    SPYValue *mro = cls->as.map.mro, *definition = NULL;
+    size_t start = 0;
+    while (start < mro->as.seq.len && mro->as.seq.items[start] != cls) start++;
+    if (start == mro->as.seq.len) {
+        const char *name = class_tname(cls);
+        errorf(c, "TypeError", "super(type, obj): obj (type %s) is not an instance or subtype of type (%s).", name, name);
+        return -1;
+    }
+    for (size_t i = start + 1; i < mro->as.seq.len && !definition; i++)
+        definition = name_local(mro->as.seq.items[i], "__init_subclass__");
     SPYValue *method = definition ? descriptor_get(c, definition, NULL, cls) : NULL;
     SPYValue *result = method ? call_keywords(c, method, 0, NULL, keywords) : NULL;
     spy_release(method); spy_release(result);
@@ -16902,8 +17023,8 @@ static SPYValue *percent_integer(SPYContext *c, PercentArgs *p, SPYValue *key, S
     free(out.data); return result;
 }
 static SPYValue *percent_float(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v, int ch, int flags, int prec) {
-    SPYValue *number = NULL;
-    if (v->type == SPY_FLOAT) number = spy_retain(v);
+    SPYValue *number = builtin_value(c, v, SPY_FLOAT);
+    if (number) spy_retain(number); /* PyFloat_AsDouble reads a subclass's value directly. */
     else if (is_int(v) || (special_dispatch(v) && (percent_has(c, v, "__float__") || percent_has(c, v, "__index__")))) {
         number = builtin(c, 1, &v, (void *)(intptr_t)B_FLOAT);
         if (!number && !error_is(c, "TypeError")) return NULL;
@@ -18955,7 +19076,17 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
     if (!result || !names) { spy_release(result); spy_release(names); return NULL; }
     /* A module subclass's instance lists its module's namespace. */
     SPYValue *carried = !plain && object ? builtin_base(c, object, "__dir__", NULL) : NULL;
-    if (carried && carried->type == SPY_MODULE) object = carried;
+    if (carried && carried->type == SPY_MODULE && carried != object) {
+        /* module.__dir__ reads the instance's __dict__, which shall be a dict. */
+        SPYValue *own = attribute(c, object, "__dict__");
+        int dict = own && builtin_value(c, own, SPY_DICT);
+        spy_release(own);
+        if (!dict) {
+            if (!c->error_type[0]) spy_error(c, "TypeError", "<module>.__dict__ is not a dictionary");
+            spy_release(result); spy_release(names); return NULL;
+        }
+        object = carried;
+    }
     SPYValue *method = !plain && object && object->type == SPY_INSTANCE ? special_method(c, object, "__dir__") : NULL;
     /* A module's own __dir__ function (PEP 562), and a metaclass's __dir__. */
     if (!plain && object && object->type == SPY_MODULE && name_local(object, "__dir__")) method = spy_retain(name_local(object, "__dir__"));
@@ -22156,8 +22287,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (result || c->error_type[0]) return result;
             if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
             if (b->type == SPY_INSTANCE && b->as.map.base) b = b->as.map.base;
-            if (modulus->type == SPY_INSTANCE && modulus->as.map.base) modulus = modulus->as.map.base;
         }
+        /* int's power slot takes an int subclass's modulus by value. */
+        if (modulus->type == SPY_INSTANCE && modulus->as.map.base) modulus = modulus->as.map.base;
         if (is_int(a) && is_int(b) && is_int(modulus)) return integer_modpow(c, a, b, modulus);
         /* ternary_op: each distinct built-in power slot in turn; int's declines
          * other types, float's and complex's refuse a modulus. */
@@ -23163,7 +23295,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_int(c, hash);
     }
     if (id == B_OBJECT_NEW || id == B_OBJECT_INIT || id == B_EXCEPTION_NEW) {
-        if (!argc) return spy_error(c, "TypeError", "constructor requires a first argument");
+        if (!argc) return spy_error(c, "TypeError", id == B_OBJECT_NEW ? "object.__new__(): not enough arguments" :
+                                    id == B_EXCEPTION_NEW ? "BaseException.__new__(): not enough arguments" :
+                                    "descriptor '__init__' of 'object' object needs an argument");
         SPYValue *object = name_local(c->classes, "object");
         SPYValue *cls = id == B_OBJECT_INIT ? value_class(c, argv[0]) : argv[0];
         if (cls->type != SPY_CLASS) {
@@ -23180,7 +23314,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             return errorf(c, "TypeError", "object.__new__(%s) is not safe, use %s.__new__()", name_local(cls, "__name__")->as.string.data,
                           name_local(cls, "__name__")->as.string.data);
         if (argc > 1 || (keywords && keywords->as.map.len)) {
-            int default_new = class_lookup(cls, "__new__") == name_local(object, "__new__");
+            int default_new = native_slot_new(c, cls) == name_local(object, "__new__");
             int default_init = class_lookup(cls, "__init__") == name_local(object, "__init__");
             if (id == B_OBJECT_NEW) {
                 if (!default_new) return spy_error(c, "TypeError", "object.__new__() takes exactly one argument (the type to instantiate)");
@@ -23687,7 +23821,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     size_t expected = kind == SLOT_UNARY || kind == SLOT_BUILTIN ? 0 : 1;
     if (kind == SLOT_OTHER) expected = op == SLOT_FORMAT || op == SLOT_CONTAINS || op == SLOT_GETITEM || op == SLOT_DELITEM ? 1 : op == SLOT_SETITEM ? 2 : 0;
     if (kind == SLOT_BUILTIN && (op == B_DIVMOD)) expected = 1;
-    if (kind == SLOT_BUILTIN && op == B_POW) {
+    if ((kind == SLOT_BUILTIN && op == B_POW) || (kind == SLOT_RBINARY && op == T_POW)) {
         if (argc < 1 || argc > 2) return errorf(c, "TypeError", "expected 1 or 2 arguments, got %zu", argc);
     } else if (argc != expected) return errorf(c, "TypeError", "expected %zu argument%s, got %zu", expected, expected == 1 ? "" : "s", argc);
     SPYValue *other = argc ? operand_value(c, argv[0]) : NULL;
@@ -23709,6 +23843,11 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (op == B_DIVMOD) {
             SPYValue *pair[] = {other, value};
             return slot_result(c, builtin(c, 2, pair, (void *)(intptr_t)B_DIVMOD));
+        }
+        if (op == T_POW && argc == 2) {
+            /* __rpow__(value, mod): pow(value, self, mod). */
+            SPYValue *triple[] = {other, value, argv[1]};
+            return slot_result(c, builtin(c, 3, triple, (void *)(intptr_t)B_POW));
         }
         return slot_result(c, kind == SLOT_BINARY ? binary(c, op, value, other) : binary(c, op, other, value));
     case SLOT_INPLACE: {
@@ -24007,6 +24146,11 @@ static int register_native_new(SPYContext *c) {
     init->as.native.kwcall = module_init_method;
     init->as.native.method = 1;
     int status = name_set(c, c->types[SPY_MODULE], "__init__", init);
+    spy_release(init);
+    if (status || !(init = value_new(c, SPY_NATIVE))) return -1;
+    init->as.native.kwcall = super_init_method;
+    init->as.native.method = 1;
+    status = name_set(c, c->types[SPY_SUPER], "__init__", init);
     spy_release(init);
     return status;
 }
