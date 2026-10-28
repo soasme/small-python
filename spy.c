@@ -85,7 +85,7 @@ struct SPYValue {
          * point count plus one, once counted (str values are immutable). */
         struct { char *data; size_t len, exports, chars; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
-        struct { Entry *items; size_t len, cap; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
+        struct { Entry *items; size_t len, cap; uint32_t *index; size_t index_cap, index_dead, changes; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
@@ -632,7 +632,7 @@ static void free_value(SPYValue *v) {
     case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(v->as.generator.machine); break;
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
-    case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET: free(v->as.map.items); break;
+    case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET: free(v->as.map.items); free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
         while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
@@ -1257,6 +1257,12 @@ static int64_t hash_signed(uint64_t bits) {
     int64_t value = bits <= INT64_MAX ? (int64_t)bits : -1 - (int64_t)(UINT64_MAX - bits);
     return value == -1 ? -2 : value;
 }
+/* The hash of str and bytes: FNV-1a over the bytes, 0 when empty. */
+static int64_t text_hash(const char *data, size_t len) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < len; i++) hash = (hash ^ (unsigned char)data[i]) * UINT64_C(1099511628211);
+    return len ? hash_signed(hash) : 0;
+}
 static int64_t hash_pointer(SPYValue *value) {
     uint64_t bits = (uint64_t)(uintptr_t)value;
     return hash_signed((bits >> 4) | (bits << 60));
@@ -1330,13 +1336,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         *result = hash_signed((uint64_t)hash_double(value, creal(value->as.number)) +
                              UINT64_C(1000003) * (uint64_t)hash_double(value, cimag(value->as.number)));
         return 0;
-    case SPY_STRING: case SPY_BYTES: {
-        uint64_t hash = UINT64_C(14695981039346656037);
-        for (size_t i = 0; i < value->as.string.len; i++)
-            hash = (hash ^ (unsigned char)value->as.string.data[i]) * UINT64_C(1099511628211);
-        *result = value->as.string.len ? hash_signed(hash) : 0;
-        return 0;
-    }
+    case SPY_STRING: case SPY_BYTES: *result = text_hash(value->as.string.data, value->as.string.len); return 0;
     case SPY_TUPLE:
         if (!value->as.seq.hashed) {
             if (hash_items(c, value->as.seq.len, value->as.seq.items, 1, &value->as.seq.hash)) return -1;
@@ -1424,19 +1424,111 @@ static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
 static SPYValue *namespace_map(SPYValue *value) {
     return value->as.map.namespace ? value->as.map.namespace : value;
 }
+/* A map with more than MAP_INDEXED entries also keeps an open-addressed
+ * index by hash. A slot holds an entry's number plus one: the position the
+ * entry would have if nothing had been removed since the index was built.
+ * map_removed marks the slot INDEX_DEAD, so probes continue past it, and adds
+ * the number to the sorted list after the slots; a position is its number
+ * less the removed numbers below it. Appending and map_removed keep the index
+ * current; any other change to the entries drops it, as do removals
+ * outnumbering the entries, and the next lookup rebuilds it. changes counts
+ * rebuilt and dropped indexes, so a search that ran a comparison callback can
+ * tell that its index is gone. */
+enum { MAP_INDEXED = 8 };
+#define INDEX_DEAD UINT32_MAX
+static size_t index_slot(int64_t hash, size_t cap) {
+    uint64_t h = (uint64_t)hash;
+    h ^= h >> 32; h ^= h >> 16;
+    return (size_t)h & (cap - 1);
+}
+static void map_unindex(SPYValue *map) {
+    if (!map->as.map.index) return;
+    free(map->as.map.index);
+    map->as.map.index = NULL; map->as.map.index_cap = map->as.map.index_dead = 0; map->as.map.changes++;
+}
+/* How many removed numbers are below number. */
+static size_t removed_below(SPYValue *map, uint32_t number) {
+    const uint32_t *removed = map->as.map.index + map->as.map.index_cap;
+    size_t low = 0, high = map->as.map.index_dead;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (removed[middle] < number) low = middle + 1; else high = middle;
+    }
+    return low;
+}
+/* The number of the entry at position i: i plus the removed numbers below
+ * it, which are the k with removed[k] - k <= i. */
+static uint32_t index_number(SPYValue *map, size_t i) {
+    const uint32_t *removed = map->as.map.index + map->as.map.index_cap;
+    size_t low = 0, high = map->as.map.index_dead;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (removed[middle] - middle <= i) low = middle + 1; else high = middle;
+    }
+    return (uint32_t)(i + low);
+}
+/* Entry i is about to be removed and the entries after it shifted down. */
+static void map_removed(SPYValue *map, size_t i) {
+    if (!map->as.map.index) return;
+    if (map->as.map.index_dead + 1 > map->as.map.len - 1) { map_unindex(map); return; }
+    uint32_t *index = map->as.map.index, *removed = index + map->as.map.index_cap, number = index_number(map, i);
+    size_t slot = index_slot(map->as.map.items[i].hash, map->as.map.index_cap), at = removed_below(map, number);
+    while (index[slot] != number + 1) slot = (slot + 1) & (map->as.map.index_cap - 1);
+    index[slot] = INDEX_DEAD;
+    memmove(removed + at + 1, removed + at, (map->as.map.index_dead - at) * sizeof(*removed));
+    removed[at] = number; map->as.map.index_dead++;
+}
+/* Index the entry just appended at position i. */
+static void index_insert(SPYValue *map, size_t i) {
+    size_t slot = index_slot(map->as.map.items[i].hash, map->as.map.index_cap);
+    while (map->as.map.index[slot]) slot = (slot + 1) & (map->as.map.index_cap - 1);
+    map->as.map.index[slot] = (uint32_t)(i + map->as.map.index_dead) + 1;
+}
+/* Whether map has an index, building one when the map is large enough. */
+static int map_indexed(SPYValue *map) {
+    if (map->as.map.index) return 1;
+    size_t len = map->as.map.len, cap = 32;
+    if (len <= MAP_INDEXED || len >= UINT32_MAX / 4) return 0;
+    while (cap < len * 2) cap *= 2;
+    if (!(map->as.map.index = calloc(cap * 2, sizeof(*map->as.map.index)))) return 0;
+    map->as.map.index_cap = cap; map->as.map.changes++;
+    for (size_t i = 0; i < len; i++) index_insert(map, i);
+    return 1;
+}
+/* A search yields the positions of the entries with one hash, in insertion
+ * order: by probing the index, or by scanning a map too small for one. */
+typedef struct { size_t at, changes; int indexed; } MapCursor;
+static MapCursor map_cursor(SPYValue *map, int64_t hash) {
+    int indexed = map_indexed(map);
+    return (MapCursor){indexed ? index_slot(hash, map->as.map.index_cap) : 0, map->as.map.changes, indexed};
+}
+static ptrdiff_t map_next(SPYValue *map, int64_t hash, MapCursor *cursor) {
+    if (cursor->indexed) {
+        for (uint32_t slot; (slot = map->as.map.index[cursor->at]);) {
+            cursor->at = (cursor->at + 1) & (map->as.map.index_cap - 1);
+            if (slot == INDEX_DEAD) continue;
+            size_t i = slot - 1 - removed_below(map, slot - 1);
+            if (map->as.map.items[i].hash == hash) return (ptrdiff_t)i;
+        }
+        return -1;
+    }
+    while (cursor->at < map->as.map.len)
+        if (map->as.map.items[cursor->at++].hash == hash) return (ptrdiff_t)cursor->at - 1;
+    return -1;
+}
 static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
     map = namespace_map(map);
     int pending_error = map->ctx->error_type[0] != 0;
-    for (size_t i = 0; i < map->as.map.len;) {
-        if (map->as.map.items[i].hash != hash) { i++; continue; }
+    MapCursor cursor = map_cursor(map, hash);
+    for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
         SPYValue *candidate = spy_retain(map->as.map.items[i].key);
         int matches = candidate == key || equal(candidate, key, 0);
-        int unchanged = i < map->as.map.len && map->as.map.items[i].key == candidate;
+        int unchanged = (size_t)i < map->as.map.len && map->as.map.items[i].key == candidate &&
+            (!cursor.indexed || cursor.changes == map->as.map.changes);
         spy_release(candidate);
         if (!pending_error && map->ctx->error_type[0]) return -1;
-        if (!unchanged) { i = 0; continue; }
-        if (matches) return (ptrdiff_t)i;
-        i++;
+        if (!unchanged) { cursor = map_cursor(map, hash); continue; }
+        if (matches) return i;
     }
     return -1;
 }
@@ -1463,6 +1555,8 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
              map->as.map.len + 1, sizeof(Entry))) return -1;
     Entry *entry = &map->as.map.items[map->as.map.len++];
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
+    if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
+    else if (map->as.map.index) index_insert(map, map->as.map.len - 1);
     return 0;
 }
 static int map_set_hash(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value, int64_t hash) {
@@ -1487,10 +1581,13 @@ static int map_set(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value)
 static int class_slot_name(const char *name) { return !strcmp(name, "__name__") || !strcmp(name, "__qualname__"); }
 /* The value stored under name in env's own entries, borrowed. */
 static SPYValue *env_entry(SPYValue *env, const char *name) {
-    for (size_t i = 0; i < env->as.map.len; i++) {
+    size_t len = strlen(name);
+    int64_t hash = text_hash(name, len);
+    MapCursor cursor = map_cursor(env, hash);
+    for (ptrdiff_t i; (i = map_next(env, hash, &cursor)) >= 0;) {
         Entry *e = &env->as.map.items[i];
         SPYValue *key = builtin_value(env->ctx, e->key, SPY_STRING);
-        if (key && key->as.string.len == strlen(name) && !memcmp(key->as.string.data, name, key->as.string.len)) return e->value;
+        if (key && key->as.string.len == len && !memcmp(key->as.string.data, name, len)) return e->value;
     }
     return NULL;
 }
@@ -9142,6 +9239,7 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
     if (!v->as.map.namespace) {
         SPYValue *dict = value_new(c, SPY_DICT);
         if (!dict) return NULL;
+        map_unindex(v);
         dict->as.map.items = v->as.map.items; dict->as.map.len = v->as.map.len; dict->as.map.cap = v->as.map.cap;
         v->as.map.items = NULL; v->as.map.len = v->as.map.cap = 0;
         v->as.map.namespace = dict;
@@ -11102,6 +11200,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (self->type == SPY_DICT) {
             Entry *items = self->as.map.items;
             size_t len = self->as.map.len;
+            map_unindex(self);
             self->as.map.items = NULL; self->as.map.len = self->as.map.cap = 0;
             for (size_t i = 0; i < len; i++) { spy_release(items[i].key); spy_release(items[i].value); }
             free(items);
@@ -11158,6 +11257,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (sequence_append(c, pair, entry->key) || sequence_append(c, pair, entry->value)) {
             spy_release(pair); return NULL;
         }
+        map_removed(self, self->as.map.len - 1);
         self->as.map.len--;
         spy_release(entry->key); spy_release(entry->value);
         return pair;
@@ -11175,6 +11275,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
             SPYValue *value = spy_retain(self->as.map.items[i].value);
             if (bound->as.bound.method == M_DICT_POP) {
                 Entry old = self->as.map.items[i];
+                map_removed(self, (size_t)i);
                 self->as.map.len--;
                 memmove(&self->as.map.items[i], &self->as.map.items[i + 1], (self->as.map.len - (size_t)i) * sizeof(Entry));
                 spy_release(old.key); spy_release(old.value);
@@ -13294,6 +13395,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         if (slots[at] < 0) continue;
         Entry *entry = &env->as.map.items[slots[at]];
         SPYValue *key = spy_string(c, arg->local, strlen(arg->local));
+        map_unindex(env);
         if (key && !hash_value(c, key, &entry->hash)) { spy_release(entry->key); entry->key = key; }
         else spy_release(key);
     }
@@ -13961,6 +14063,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
             Entry *e = &c->modules->as.map.items[i];
             if (!strcmp(e->key->as.string.data, name)) {
                 spy_release(e->key); spy_release(e->value);
+                map_removed(c->modules, i);
                 c->modules->as.map.len--;
                 memmove(e, e + 1, (c->modules->as.map.len - i) * sizeof(*e));
                 break;
@@ -16115,6 +16218,7 @@ static void delete_name(SPYValue *env, const char *name) {
         Entry *entry = &env->as.map.items[i];
         if (strcmp(entry->key->as.string.data, name)) continue;
         spy_release(entry->key); spy_release(entry->value);
+        map_removed(env, i);
         env->as.map.len--;
         memmove(entry, entry + 1, (env->as.map.len - i) * sizeof(*entry));
         return;
@@ -16311,6 +16415,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
                 else {
                     Entry *entry = &object->as.map.items[index];
                     spy_release(entry->key); spy_release(entry->value);
+                    map_removed(object, (size_t)index);
                     object->as.map.len--;
                     memmove(entry, entry + 1, (object->as.map.len - (size_t)index) * sizeof(*entry));
                 }
@@ -17286,6 +17391,7 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
  * only after the whole pattern succeeds, before any guard runs. */
 static void bindings_truncate(SPYValue *bindings, size_t len) {
     while (bindings->as.map.len > len) {
+        map_removed(bindings, bindings->as.map.len - 1);
         Entry *entry = &bindings->as.map.items[--bindings->as.map.len];
         spy_release(entry->key); spy_release(entry->value);
     }
@@ -17441,6 +17547,7 @@ static int match_mapping(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SP
             ptrdiff_t found = map_find(rest, keys->as.seq.items[i]);
             if (found >= 0) {
                 Entry old = rest->as.map.items[found];
+                map_removed(rest, (size_t)found);
                 rest->as.map.len--;
                 memmove(&rest->as.map.items[found], &rest->as.map.items[found + 1], (rest->as.map.len - (size_t)found) * sizeof(Entry));
                 spy_release(old.key); spy_release(old.value);
@@ -20836,6 +20943,7 @@ static int set_contains(SPYContext *c, SPYValue *set, SPYValue *item, int64_t ha
 }
 static void set_remove_at(SPYValue *set, size_t i) {
     Entry old = set->as.map.items[i];
+    map_removed(set, i);
     set->as.map.len--;
     memmove(&set->as.map.items[i], &set->as.map.items[i + 1], (set->as.map.len - i) * sizeof(Entry));
     spy_release(old.key); spy_release(old.value);
