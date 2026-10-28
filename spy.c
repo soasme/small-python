@@ -146,6 +146,9 @@ struct SPYValue {
         } generator;
     } as;
 };
+/* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
+ * to the class (20.2.8), not by binding it in the class body. */
+enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64, CLASS_OWN_DICT = 128, CLASS_OWN_WEAKREF = 256 };
 typedef struct { SPYValue *cls, *value; size_t epoch; int64_t hash; char name[24]; } ClassLookup;
 struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
@@ -10208,38 +10211,63 @@ static int default_hook(SPYValue *definition, int object_id, int type_id) {
 static int plain_instance(SPYValue *v) {
     return v->type == SPY_INSTANCE && !v->as.map.namespace && !v->as.map.base;
 }
-enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD };
+enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD, ATTR_READ = 3, ATTR_WRITE = 4 };
 /* How cls's plain instances answer a read of name: from their own entries
  * (ATTR_OWN), else by binding the Python function *method (ATTR_METHOD),
- * or only by the full lookup (ATTR_SLOW). The answer holds while
- * classes_changed does: every class in the MRO is watched, and none is a
- * builtin class whose slots could precede the class entries. */
-static int instance_read(SPYContext *c, SPYValue *cls, const char *name, SPYValue **method) {
+ * or only by the full lookup (ATTR_SLOW); with ATTR_WRITE, an assignment
+ * binds name in their own entries. The answer holds while classes_changed
+ * does: every class in the MRO is watched, and none is a builtin class
+ * whose slots could precede the class entries. */
+static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYValue **method) {
     SPYValue *mro = cls->as.map.mro, *hook;
     if (!mro || (name[0] == '_' && name[1] == '_')) return ATTR_SLOW;
     for (size_t i = 0; i < mro->as.seq.len; i++) {
         SPYValue *base = mro->as.seq.items[i];
         if (!class_watched(base) || (base != c->object && (base->as.map.native || base->as.map.flags == 2))) return ATTR_SLOW;
     }
-    if ((hook = class_lookup(cls, "__getattribute__")) && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) return ATTR_SLOW;
-    if (!(*method = class_lookup(cls, name))) return class_lookup(cls, "__getattr__") ? ATTR_SLOW : ATTR_OWN;
-    return (*method)->type == SPY_FUNCTION ? ATTR_METHOD : ATTR_SLOW;
+    int read = ATTR_SLOW;
+    if (!(hook = class_lookup(cls, "__getattribute__")) || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
+        if (!(*method = class_lookup(cls, name))) read = class_lookup(cls, "__getattr__") ? ATTR_SLOW : ATTR_OWN;
+        else read = (*method)->type == SPY_FUNCTION ? ATTR_METHOD : ATTR_SLOW;
+    }
+    int write = !class_lookup(cls, name) && !(cls->as.map.flags & CLASS_NO_DICT) &&
+        (!(hook = class_lookup(cls, "__setattr__")) || default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR));
+    return read | (write ? ATTR_WRITE : 0);
+}
+/* n's answer for v, a plain instance, refreshed when v's class or any class changed. */
+static int node_access(SPYContext *c, SPYValue *v, Node *n) {
+    SPYValue *cls = v->as.map.parent;
+    if (cls != n->attr_class || n->attr_epoch != c->classes_changed) {
+        n->attr_kind = instance_access(c, cls, n->b->text, &n->attr_method);
+        n->attr_class = cls; n->attr_epoch = c->classes_changed;
+    }
+    return n->attr_kind;
 }
 /* The attribute node n read from v, with n remembering how v's class answers. */
 static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
-    if (plain_instance(v)) {
-        SPYValue *cls = v->as.map.parent;
-        if (cls != n->attr_class || n->attr_epoch != c->classes_changed) {
-            n->attr_kind = instance_read(c, cls, n->b->text, &n->attr_method);
-            n->attr_class = cls; n->attr_epoch = c->classes_changed;
-        }
-        if (n->attr_kind != ATTR_SLOW) {
-            Entry *e = env_find(v, node_name(n->b));
-            if (e) return spy_retain(e->value);
-            if (n->attr_kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, cls);
-        }
+    int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
+    if (kind != ATTR_SLOW) {
+        Entry *e = env_find(v, node_name(n->b));
+        if (e) return spy_retain(e->value);
+        if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
     return attribute(c, v, n->b->text);
+}
+/* Assign value to the attribute node n of v, as set_attribute. The key a
+ * new entry takes is kept on the name node. */
+static int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
+    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->text, value);
+    Name name = node_name(n->b);
+    Entry *e = env_find(v, name);
+    if (e && e->key->type == SPY_STRING) {
+        SPYValue *old = e->value;
+        e->value = spy_retain(value);
+        spy_release(old);
+        return 0;
+    }
+    if (e) return set_attribute(c, v, n->b->text, value);
+    if (!n->b->global_key && !(n->b->global_key = spy_string(c, name.text, name.len))) return -1;
+    return map_append(c, v, n->b->global_key, value, name.hash);
 }
 static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) {
     /* An instance's class, or a class's metaclass, may customize lookup. */
@@ -11822,9 +11850,6 @@ static int module_set_annotations(SPYContext *c, SPYValue *module, const char *n
     if (name_local(module, "__annotate__")) delete_name(module, "__annotate__");
     return 0;
 }
-/* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
- * to the class (20.2.8), not by binding it in the class body. */
-enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64, CLASS_OWN_DICT = 128, CLASS_OWN_WEAKREF = 256 };
 static int set_attribute_default(SPYContext *c, SPYValue *object, const char *name, SPYValue *value) {
     if (object->type == SPY_CLASS && immutable_type(c, object, name)) return -1;
     if (object->type == SPY_MODULE && !strcmp(name, "__dict__")) { spy_error(c, "AttributeError", "readonly attribute"); return -1; }
@@ -14776,7 +14801,7 @@ static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     if (n->kind == N_ATTR) {
         SPYValue *object = eval(c, f, n->a);
         if (!object) return -1;
-        int status = set_attribute(c, object, n->b->text, value);
+        int status = node_set_attribute(c, object, n, value);
         spy_release(object); return status;
     }
     if (n->kind == N_INDEX) {
@@ -18467,7 +18492,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);
-            else set_attribute(c, a, n->b->text, m->stack[m->len - 1]);
+            else node_set_attribute(c, a, n, m->stack[m->len - 1]);
             break;
         case BC_LOAD_TARGET:
             value = n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
@@ -18478,7 +18503,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, value);
-            else set_attribute(c, a, n->b->text, value);
+            else node_set_attribute(c, a, n, value);
             spy_release(value); break;
         case BC_INPLACE:
             b = machine_pop(m); a = machine_pop(m); machine_push(c, m, inplace(c, ins->arg, a, b)); break;
