@@ -71,8 +71,11 @@ struct Node {
     SPYValue *code_value;
     SPYValue *constant; /* A numeric literal's value, parsed once at compilation. */
     size_t name_len; int64_t name_hash; /* A name's length and hash, once computed. */
-    /* A name's place in the last function environment it ran in (local_slot). */
+    /* A name's symbol in the scope it last ran in, its entry position in
+     * that function environment, and the str key and position it was last
+     * found under in a dictionary (name_fast); global_key is traced. */
     Scope *slot_scope; size_t slot_symbol, slot;
+    SPYValue *global_key; size_t global_slot;
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
 struct SPYValue {
@@ -91,7 +94,7 @@ struct SPYValue {
          * point count plus one, once counted (str values are immutable). */
         struct { char *data; size_t len, exports, chars; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
-        struct { Entry *items; size_t len, cap; uint32_t *index; size_t index_cap, index_dead, changes; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
+        struct { Entry *items; size_t len, cap; uint32_t *index; size_t index_cap, index_dead, changes; int odd_keys; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
@@ -484,6 +487,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
             if (node->code_value) visit(node->code_value, data);
             if (node->constant) visit(node->constant, data);
+            if (node->global_key) visit(node->global_key, data);
             scope_edges(node->scope, visit, data);
         }
         scope_edges(v->as.unit.scope, visit, data);
@@ -1584,6 +1588,7 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
              map->as.map.len + 1, sizeof(Entry))) return -1;
     Entry *entry = &map->as.map.items[map->as.map.len++];
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
+    map->as.map.odd_keys |= key->type != SPY_STRING;
     class_changed(map);
     if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
     else if (map->as.map.index) index_insert(map, map->as.map.len - 1);
@@ -1931,26 +1936,81 @@ static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
     return name_error(c, text, "name '%s' is not defined");
 }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
-/* The entry of a function local that name node n reads or rebinds in env,
- * or NULL to take the full path. A plain function environment binds its
- * locals itself, under their symbols' keys, so an entry holding the
- * symbol's key is the binding; n remembers the symbol and the entry's
- * position from the last environment of the same scope. */
-static Entry *local_slot(SPYValue *env, Node *n) {
+/* What the full lookup of name node n does at env, a plain function
+ * environment: binds the name there (with *key its symbol's key, NULL while
+ * never bound), passes over env to its parent, or something else. The first
+ * environment's symbol is remembered by scope. */
+enum { NAME_HERE, NAME_PARENT, NAME_SLOW };
+static int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
     Scope *scope = env->type == V_ENV && !env->as.map.flags && !env->as.map.namespace ? env->as.map.scope : NULL;
-    if (!scope || scope->kind != S_FUNCTION) return NULL;
-    if (n->slot_scope != scope) {
-        Symbol *symbol = scope_find(scope, node_name(n));
-        int local = symbol && (symbol->flags & (S_LOCAL | S_PARAM)) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL));
-        n->slot_scope = scope; n->slot_symbol = local ? (size_t)(symbol - scope->symbols) : SIZE_MAX; n->slot = 0;
+    if (!scope || scope->kind != S_FUNCTION) return NAME_SLOW;
+    Symbol *symbol;
+    if (first && n->slot_scope == scope) symbol = n->slot_symbol < scope->len ? &scope->symbols[n->slot_symbol] : NULL;
+    else symbol = scope_find(scope, node_name(n));
+    if (first && n->slot_scope != scope) {
+        n->slot_scope = scope; n->slot = 0;
+        n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
     }
-    SPYValue *key = n->slot_symbol < scope->len ? scope->symbols[n->slot_symbol].key : NULL;
+    if (!symbol) return NAME_PARENT;
+    if (symbol->flags & (S_GLOBAL | S_NONLOCAL)) return NAME_SLOW;
+    if (!(symbol->flags & (S_LOCAL | S_PARAM))) return NAME_PARENT;
+    *key = symbol->key;
+    return NAME_HERE;
+}
+/* The entry of a function local under its symbol's key: function
+ * environments bind locals under those keys only. */
+static Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
     if (!key) return NULL;
-    if (n->slot < env->as.map.len && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
+    if (first && n->slot < env->as.map.len && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
     Entry *entry = env_find(env, node_name(n));
     if (!entry || entry->key != key) return NULL;
-    n->slot = (size_t)(entry - env->as.map.items);
+    if (first) n->slot = (size_t)(entry - env->as.map.items);
     return entry;
+}
+/* The entry for name node n in an exact dictionary, or NULL when it has none.
+ * An entry whose key is n's retained exact str is that entry. */
+static Entry *dict_slot(SPYValue *dict, Node *n) {
+    SPYValue *key = n->global_key;
+    if (key && n->global_slot < dict->as.map.len && dict->as.map.items[n->global_slot].key == key)
+        return &dict->as.map.items[n->global_slot];
+    Entry *entry = env_find(dict, node_name(n));
+    if (entry && entry->key->type == SPY_STRING) {
+        if (entry->key != key) { n->global_key = spy_retain(entry->key); spy_release(key); }
+        n->global_slot = (size_t)(entry - dict->as.map.items);
+    }
+    return entry;
+}
+/* The value name node n reads, borrowed, along the plain function
+ * environments and exact dictionaries the full lookup (name_find) would
+ * walk, or NULL to take that path. */
+static SPYValue *name_fast(SPYValue *env, Node *n) {
+    for (SPYValue *e = env; e; e = e->as.map.parent) {
+        Entry *entry;
+        if (e->type == SPY_DICT) {
+            /* A missing str may still equal another kind of key. */
+            if (!(entry = dict_slot(e, n)) && e->as.map.odd_keys) return NULL;
+            if (!entry) continue;
+        } else {
+            SPYValue *key = NULL;
+            int binding = function_binding(e, n, e == env, &key);
+            if (binding == NAME_SLOW) return NULL;
+            if (binding == NAME_PARENT) continue;
+            if (!(entry = function_slot(e, n, key, e == env))) return NULL;
+        }
+        SPYValue *value = entry->value;
+        return value->type == V_UNBOUND || value->type == SPY_LAZY_IMPORT ? NULL : value;
+    }
+    return NULL;
+}
+/* The entry that rebinding name node n in env replaces, or NULL to bind it
+ * through name_bind. */
+static Entry *name_slot(SPYValue *env, Node *n) {
+    if (env->type == SPY_DICT) {
+        Entry *entry = dict_slot(env, n);
+        return entry && entry->key->type == SPY_STRING ? entry : NULL;
+    }
+    SPYValue *key = NULL;
+    return function_binding(env, n, 1, &key) == NAME_HERE ? function_slot(env, n, key, 1) : NULL;
 }
 /* The str for name, owned: a symbol's own key when there is a symbol. */
 static SPYValue *name_key(SPYContext *c, Name name, Symbol *symbol) {
@@ -9344,6 +9404,7 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
         if (!dict) return NULL;
         map_unindex(v);
         dict->as.map.items = v->as.map.items; dict->as.map.len = v->as.map.len; dict->as.map.cap = v->as.map.cap;
+        dict->as.map.odd_keys = v->as.map.odd_keys;
         v->as.map.items = NULL; v->as.map.len = v->as.map.cap = 0;
         v->as.map.namespace = dict;
         dict->watched = v->type == SPY_CLASS;
@@ -12934,8 +12995,8 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     case N_ELLIPSIS: return spy_retain(c->ellipsis);
     case N_BOOL: return spy_bool(c, n->op);
     case N_NAME: {
-        Entry *local = local_slot(f->env, n);
-        if (local && local->value->type != V_UNBOUND) return spy_retain(local->value);
+        SPYValue *value = name_fast(f->env, n);
+        if (value) return spy_retain(value);
         return !strcmp(n->text, "__debug__") ? spy_bool(c, 1) : name_find(c, f->env, node_name(n));
     }
     case N_SLICE: {
@@ -14585,10 +14646,11 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
 static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     if (tick(c, f, n)) return -1;
     if (n->kind == N_NAME) {
-        Entry *local = local_slot(f->env, n);
-        if (!local) return name_bind(c, f->env, node_name(n), value);
-        SPYValue *old = local->value;
-        local->value = spy_retain(value);
+        Entry *entry = name_slot(f->env, n);
+        if (!entry) return name_bind(c, f->env, node_name(n), value);
+        SPYValue *old = entry->value;
+        class_changed(f->env);
+        entry->value = spy_retain(value);
         spy_release(old);
         return 0;
     }
