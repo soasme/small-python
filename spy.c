@@ -13079,6 +13079,22 @@ static void relocate(SPYContext *c, Node *n) {
     c->line = n->line;
     if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
 }
+/* The function the attribute node n names for a call. With *self set, it is
+ * a Python function of a plain instance's class, called with *self first as
+ * the bound method would; otherwise *self is NULL. */
+static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self) {
+    SPYValue *object = eval(c, f, n->a);
+    *self = NULL;
+    if (!object) return NULL;
+    relocate(c, n);
+    if (plain_instance(object) && (node_access(c, object, n) & ATTR_READ) == ATTR_METHOD && !env_find(object, node_name(n->b))) {
+        *self = object;
+        return spy_retain(n->attr_method);
+    }
+    SPYValue *callee = node_attribute(c, object, n);
+    spy_release(object);
+    return callee;
+}
 static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     if (tick(c, f, n)) return NULL;
     SPYValue *a = NULL, *b = NULL, *result = NULL;
@@ -13217,15 +13233,20 @@ container_fail:
         if (a) { relocate(c, n); result = node_attribute(c, a, n); }
         break;
     case N_CALL: {
-        a = eval(c, f, n->a);
-        if (!a) break;
-        /* Up to eight plain positional arguments go on the C stack. */
+        /* Up to eight plain positional arguments go on the C stack, after
+         * the instance a method call passes first. */
         size_t argc = 0;
         for (Node *arg = n->args; arg && argc <= 8; arg = arg->next, argc++)
             if (arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) argc = 9;
+        SPYValue *argv[9];
+        size_t done = 0;
+        if (argc <= 8 && n->a->kind == N_ATTR) {
+            a = method_callee(c, f, n->a, argv);
+            done = argv[0] != NULL;
+        } else a = eval(c, f, n->a);
+        if (!a) break;
         if (argc <= 8) {
-            SPYValue *argv[8];
-            size_t done = 0;
+            argc += done;
             for (Node *arg = n->args; arg && (argv[done] = eval(c, f, arg)); arg = arg->next) done++;
             if (done == argc) { relocate(c, n); result = call_keywords(c, a, argc, argv, NULL); }
             while (done) spy_release(argv[--done]);
