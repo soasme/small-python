@@ -1,49 +1,129 @@
 # Small Python
 
-A small, embeddable Python-language engine in C11, inspired by QuickJS.
-Commands and public APIs use the **spy** prefix: `spy`, `spyc`, `spy_*`,
-`SPYContext`, and `libspy.a`. No CPython or third-party runtime dependency.
-As in QuickJS, the core (`spy.c`) is the language alone; the standard layer
-(`spy-std.c`) registers `sys`, `gc`, `weakref`, and the other built-in modules
-for the `spy` command and any host that links it.
+A small, embeddable Python engine written in C11.
 
-**Status:** conforms to the Core profile of
-[PLS-315](docs/standards/3_15.md), the Python 3.15 core language: all 351
-specification tests (validated on CPython 3.15) and all 112 TLA+ models pass.
-The standard library is out of scope; see the
-[manual](docs/smallpython.md#31-python-language-support) for host choices.
+Small Python runs Python 3.15 code with nothing but a C compiler and the C
+standard library. It is built like [QuickJS](https://bellard.org/quickjs/):
+a few C files, one header to embed, and a plain Makefile. CPython is not
+needed to build or run it.
+
+```sh
+$ make
+$ ./spy -c 'print(sum(range(10)))'
+45
+```
+
+## Features
+
+- **The Python 3.15 core language**: arbitrary-precision integers, Unicode,
+  classes and metaclasses, generators, `async`/`await`, pattern matching,
+  f-strings, and template strings.
+- **Embeddable**: one header, `spy.h`, and one library, `libspy.a`. Each
+  context is independent, with no global state.
+- **Automatic memory management**: reference counting plus a cycle collector.
+- **Standalone executables**: `spyc` turns a `.py` file into a C program.
+- **Sandboxed files**: scripts can only `open` the directories the host mounts.
+- **Fast startup**: about 165 µs to create a context, run hello world, and
+  tear it down (Apple M2, `-O2`).
+
+## Conformance
+
+Small Python implements the Core profile of [PLS-315](docs/standards/3_15.md),
+a written specification of the Python 3.15 core language. All 353
+specification tests and all 112 TLA+ models pass. Each test is also checked
+against CPython 3.15.
+
+The standard library is out of scope. Only a few built-in modules ship with
+the `spy` command: `sys`, `gc`, `types`, `weakref`, `itertools`,
+`collections`, `_thread`, and `_typing`.
+
+PLS-315 is a project document, not an official PSF standard.
+
+## Getting started
+
+Build the interpreter, generator, and library:
 
 ```sh
 make
-./spy examples/hello.py
-./spy -c 'print(sum(range(10)))'
-make test
 ```
 
-- [Engine manual](docs/smallpython.md): usage, embedding, implementation, benchmarks.
-- [Python binding](python/docs/README.md): `pip install ./python` (or
-  `pip install small-python`) provides `small_python`, which runs Small Python
-  from CPython and injects Python functions as host functions.
-- [PLS-315, the Python Language Specification](docs/standards/3_15.md): a single-file, versioned
-  specification of the Python 3.15 core language in the style of ECMA-262, with
-  algorithms, intrinsic objects in place of library modules, host hooks, and
-  Core, Host, and Extension profiles. Project draft, not an official PSF standard.
-- [Upstream Cython baseline](docs/testing/cython.md): 343 passing and 11,107 failing
-  discovered examples; 13 files need another adapter. Reproduce with
-  `make upstream` followed by `make cython-report`.
-- [Specification tests](tests/spec/README.md): test262-style, core-only tests
-  of every clause of PLS-315, including CPython's language tests ported without
-  their library dependencies; `make test-spec` runs them on spy, and
-  `make test-spec-oracle` validates them against the pinned CPython 3.15.
-- [Development instructions](AGENTS.md): architecture, naming, code taste, and
-  requirements for honest upstream test evidence.
+Run a script or the interactive shell:
 
-The engine includes argument binding, closures, global/nonlocal scopes, decorators,
-properties, f-strings, native template strings, complex arithmetic, Unicode identifiers with NFKC
-normalization, user-defined hashing, C3 inheritance, `super`, class construction
-hooks, basic exceptions,
-unpacking, comprehensions, generator functions and delegation, sequence slices,
-native coroutines, asynchronous generators and context managers, host-loaded
-modules and packages, async comprehensions, reference counting, and cycle
-collection. Generator finalization and many other required features remain.
-See the manual for limits.
+```sh
+./spy examples/hello.py
+./spy -i
+```
+
+Compile a script into a standalone program:
+
+```sh
+./spyc -o hello.c examples/hello.py
+cc -std=c11 -Os -I. hello.c spy.c -lm -o hello
+./hello
+```
+
+## Embedding
+
+```c
+#include "spy.h"
+#include <stdio.h>
+
+static SPYValue *square(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    int64_t n;
+    if (spy_as_int(c, argv[0], &n)) return NULL;
+    return spy_int(c, n * n);
+}
+
+int main(void) {
+    SPYContext *c = spy_context_new();
+    spy_define(c, "square", square, NULL);
+
+    SPYValue *result = spy_eval(c, "square(12)", "<embed>");
+    int64_t n;
+    if (result && !spy_as_int(c, result, &n))
+        printf("%lld\n", (long long)n);   /* 144 */
+
+    spy_release(result);
+    spy_context_free(c);
+}
+```
+
+See [`examples/embed.c`](examples/embed.c) for the version with error
+handling, and the [manual](docs/smallpython.md#34-c-api) for the full API.
+
+## From Python
+
+The [`small_python`](python/docs/README.md) package runs Small Python inside
+CPython. Each runtime is a separate interpreter that sees only what you give it:
+
+```sh
+pip install small-python
+```
+
+```python
+import small_python
+
+with small_python.Runtime() as rt:
+    @rt.function
+    def lookup(key):
+        return {"answer": 42}.get(key)
+
+    print(rt.eval("lookup('answer') * 2"))  # 84
+```
+
+## Testing
+
+```sh
+make test         # C API tests and the specification suite
+make test-spec    # specification tests only
+make sanitize     # AddressSanitizer build
+make bench        # startup benchmark
+```
+
+## Documentation
+
+- [Manual](docs/smallpython.md): usage, embedding, internals, benchmarks
+- [PLS-315](docs/standards/3_15.md): the language specification
+- [Specification tests](tests/spec/README.md)
+- [Cython compatibility baseline](docs/testing/cython.md)
+- [Contributing](AGENTS.md): architecture and code style
