@@ -2202,7 +2202,14 @@ static int bare_repr(Buffer *b, SPYValue *v) {
     snprintf(text, sizeof(text), " object at %p>", (void *)v);
     return puts_buffer(b, "<") || puts_buffer(b, type_name(v)) || puts_buffer(b, text) ? -1 : 0;
 }
+static int format_object(Buffer *, SPYValue *, int);
+/* As PyObject_Repr and PyObject_Str, bound by the native stack. */
 static int format_value(Buffer *b, SPYValue *v, int repr) {
+    if (deeper(b->ctx, repr ? " while getting the repr of an object" : " while getting the str of an object")) return -1;
+    int status = format_object(b, v, repr);
+    b->ctx->depth--; return status;
+}
+static int format_object(Buffer *b, SPYValue *v, int repr) {
     char num[96];
     switch (v->type) {
     case SPY_NONE: return puts_buffer(b, "None");
@@ -14883,7 +14890,7 @@ static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
     }
     SPYValue *slotted, *new_slotted;
     int layout = class_layout(c, cls), slots = bases_slots(c, cls->as.map.bases, &slotted);
-    int own = !!(cls->as.map.flags & CLASS_OWN_DICT) | !!(cls->as.map.flags & CLASS_OWN_WEAKREF) << 1; /* cls's own slots */
+    int own = (cls->as.map.flags & CLASS_OWN_DICT ? 1 : 0) | (cls->as.map.flags & CLASS_OWN_WEAKREF ? 2 : 0); /* cls's own slots */
     SPYValue *old_bases = spy_retain(cls->as.map.bases), *old_mro = spy_retain(cls->as.map.mro);
     if (set_class_bases(c, cls, value)) { spy_release(old_bases); spy_release(old_mro); return -1; }
     SPYValue *installed = cls->as.map.bases;
@@ -16812,7 +16819,7 @@ static void annotated_assign(SPYContext *c, Frame *f, Node *n) {
     if (!c->error_type[0] && (n->flags & F_CONDITIONAL)) {
         SPYValue *executed = name_get(c, conditional_env(f), "__conditional_annotations__");
         SPYValue *index = executed ? spy_int(c, n->op) : NULL;
-        if (index && (executed->type == SPY_SET ? set_add(c, executed, index) : -1) && !c->error_type[0])
+        if (index && (executed->type != SPY_SET || set_add(c, executed, index)) && !c->error_type[0])
             spy_error(c, "TypeError", "__conditional_annotations__ must be a set");
         spy_release(index); spy_release(executed);
     }
@@ -21205,13 +21212,14 @@ static int memory_pack(SPYContext *c, const char *code, unsigned char *p, SPYVal
     }
     SPYValue *index = index_object(c, value);
     if (!index) return error_is(c, "TypeError") ? memory_value_error(c, code, 1) : -1;
-    int64_t s; uint64_t u;
+    int64_t s = 0; uint64_t u = 0;
     int is_signed = code[0] == 'b' || code[0] == 'h' || code[0] == 'i' || code[0] == 'l' || code[0] == 'q' || code[0] == 'n';
     int fits = is_signed ? !index->as.integer_data.big : !integer_to_u64(index, &u);
     if (is_signed && fits) s = index->as.integer_data.small;
     spy_release(index);
     if (!fits) return memory_value_error(c, code, 0);
 #define PACK(type, low, high, v) { if ((v) < (low) || (v) > (high)) return memory_value_error(c, code, 0); type x = (type)(v); memcpy(p, &x, sizeof(x)); return 0; }
+#define UPACK(type, high) { if (u > (high)) return memory_value_error(c, code, 0); type x = (type)u; memcpy(p, &x, sizeof(x)); return 0; }
     switch (code[0]) {
     case 'b': PACK(signed char, SCHAR_MIN, SCHAR_MAX, s)
     case 'h': PACK(short, SHRT_MIN, SHRT_MAX, s)
@@ -21219,15 +21227,16 @@ static int memory_pack(SPYContext *c, const char *code, unsigned char *p, SPYVal
     case 'l': PACK(long, LONG_MIN, LONG_MAX, s)
     case 'q': PACK(long long, LLONG_MIN, LLONG_MAX, s)
     case 'n': PACK(ptrdiff_t, PTRDIFF_MIN, PTRDIFF_MAX, s)
-    case 'B': PACK(unsigned char, 0, UCHAR_MAX, u)
-    case 'H': PACK(unsigned short, 0, USHRT_MAX, u)
-    case 'I': PACK(unsigned, 0, UINT_MAX, u)
-    case 'L': PACK(unsigned long, 0, ULONG_MAX, u)
-    case 'Q': PACK(unsigned long long, 0, ULLONG_MAX, u)
-    case 'N': PACK(size_t, 0, SIZE_MAX, u)
-    case 'P': PACK(uintptr_t, 0, UINTPTR_MAX, u)
+    case 'B': UPACK(unsigned char, UCHAR_MAX)
+    case 'H': UPACK(unsigned short, USHRT_MAX)
+    case 'I': UPACK(unsigned, UINT_MAX)
+    case 'L': UPACK(unsigned long, ULONG_MAX)
+    case 'Q': UPACK(unsigned long long, ULLONG_MAX)
+    case 'N': UPACK(size_t, SIZE_MAX)
+    case 'P': UPACK(uintptr_t, UINTPTR_MAX)
     }
 #undef PACK
+#undef UPACK
     errorf(c, "NotImplementedError", "memoryview: format %s not supported", code);
     return -1;
 }

@@ -22,7 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "tests/spec"
-TIMEOUT = 60
+# A sanitizer build (make sanitize sets ASAN_OPTIONS) runs several times slower.
+TIMEOUT = 600 if "ASAN_OPTIONS" in os.environ else 60
 
 
 def metadata(path):
