@@ -265,3 +265,4 @@ by the task and do not require repeated confirmation.
 ## Workflow
 
 * Commit as often as you can when you made progress.
+* Run bench before release a new version.

@@ -67,6 +67,7 @@ struct Node {
     Program *code;
     Scope *scope;
     SPYValue *code_value;
+    SPYValue *constant; /* A numeric literal's value, parsed once at compilation. */
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
 struct SPYValue {
@@ -460,8 +461,10 @@ static void edges(SPYValue *v, Visit visit, void *data) {
     case SPY_CODE:
         if (v->as.unit.owner) visit(v->as.unit.owner, data);
         if (v->as.unit.replaced) visit(v->as.unit.replaced, data);
-        for (Node *node = v->as.unit.nodes; node; node = node->allocated)
+        for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
             if (node->code_value) visit(node->code_value, data);
+            if (node->constant) visit(node->constant, data);
+        }
         break;
     case SPY_LIST: case SPY_TUPLE:
         for (i = 0; i < v->as.seq.len; i++) visit(v->as.seq.items[i], data);
@@ -6675,8 +6678,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (n->kind == N_COMPREHENSION) compile_comprehension(c, n);
             if (n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG) {
                 c->line = n->line;
-                SPYValue *literal = number_literal(c, n);
-                spy_release(literal);
+                n->constant = number_literal(c, n);
             }
         }
         /* The compiler's own errors follow every symbol table error. */
@@ -12293,13 +12295,15 @@ static int tick(SPYContext *c, Frame *f, Node *n) {
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
     if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
-    snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
+    if (strcmp(c->filename, f->unit->as.unit.filename))
+        snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
     if (c->step_limit && ++c->steps > c->step_limit) {
         spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
     }
     return 0;
 }
 static SPYValue *number_literal(SPYContext *c, Node *n) {
+    if (n->constant) return spy_retain(n->constant);
     char *s = copy_text(c, n->text, strlen(n->text));
     if (!s) return NULL;
     size_t j = 0;
