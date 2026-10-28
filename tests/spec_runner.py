@@ -37,9 +37,11 @@ def metadata(path):
 
 
 def run(command, directory):
+    # A sanitizer build keeps its options; nothing else leaks into a test.
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"}
+    env.update({name: value for name, value in os.environ.items() if name.endswith("SAN_OPTIONS")})
     try:
-        result = subprocess.run(command, cwd=directory, capture_output=True, text=True, timeout=TIMEOUT,
-                                env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"})
+        result = subprocess.run(command, cwd=directory, capture_output=True, text=True, timeout=TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         return None, "timed out"
     return result.returncode, (result.stdout + result.stderr).strip()

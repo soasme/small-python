@@ -809,3 +809,22 @@
   class body as a function to any other builder. PLS-315 16.4.1, 28.1
   and 28.2 say so; builtins/function_closures and compound/class_builder
   test it.
+- map, zip, enumerate, filter, reversed, super and module are
+  acceptable base types in spy, as PLS-315 27.1 already required: a
+  subclass instance carries the value its base class makes, an iterator
+  subclass is its own iterator, a super subclass looks up past its
+  __thisclass__, and a module subclass's instance shares the module's
+  namespace as its __dict__. ModuleType gains __new__ and __init__, and a
+  module's __class__ may be set to a ModuleType subclass and back. PLS-315
+  17.2 and 20.3 say so; datamodel/native_subclasses tests it.
+- An ASan and UBSan run of the spec suite (gcc in a Linux container)
+  found two older memory faults: f-string replacement fields left their
+  tokens and nodes pointing into a freed copy of the field, which a later
+  compile error read, and assigning an empty bytes to an extended
+  bytearray slice leaked a buffer. Field tokens now point into the outer
+  source and the buffer is freed. make sanitize disables ASan's fake
+  stack, which hides the stack depth the recursion guard measures, and
+  the spec runner passes sanitizer options to the tests. Four complex
+  divisions whose last bit depends on whether the C compiler fuses
+  multiply-adds leave programs/complex_numbers_01; Annex D lists that
+  choice.

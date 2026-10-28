@@ -179,7 +179,8 @@ bench: bench/lifecycle spy
 
 sanitize:
 	$(MAKE) clean
-	$(MAKE) CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer' LDFLAGS='-fsanitize=$(SANITIZERS)' test
+	# The native recursion guard measures the real stack, which ASan's fake frames hide.
+	ASAN_OPTIONS=detect_stack_use_after_return=0 $(MAKE) CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer' LDFLAGS='-fsanitize=$(SANITIZERS)' test
 
 clean:
 	rm -f spy spyc run-cython *.o *.a tests/*.o tests/api bench/*.o bench/lifecycle $(FUZZERS)

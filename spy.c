@@ -3693,7 +3693,15 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
     Node *result = NULL;
     if (!lex(&inner, text.data)) {
-        for (size_t i = 0; i < inner.len; i++) inner.tokens[i].line += peek(p)->line - 1;
+        /* Point the tokens into the outer source, which outlives this copy;
+         * the added parentheses become empty tokens at the field's ends. */
+        const char *copy = text.data + 1, *copy_end = copy + (end - start);
+        for (size_t i = 0; i < inner.len; i++) {
+            Token *t = &inner.tokens[i];
+            t->line += peek(p)->line - 1;
+            if (t->start >= copy && t->start + t->len <= copy_end) t->start = start + (t->start - copy);
+            else { t->start = t->start < copy ? start : end; t->len = 0; }
+        }
         result = expression(&inner, 0);
         take(&inner, T_NL);
         if (result && !at(&inner, T_END)) result = syntax(&inner, "invalid f-string expression");
@@ -6635,6 +6643,8 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     if (awaitable_iterator(source)) return spy_retain(source);
     if (source->type == SPY_TEMPLATE_ITERATOR || source->type == SPY_ITERATOR || source->type == SPY_GENERATOR || source->type == SPY_COROUTINE_ITERATOR) return spy_retain(source);
     SPYValue *base = builtin_base(c, source, "__iter__", NULL);
+    /* An iterator subclass's instance is its own iterator. */
+    if (base && base->type == SPY_ITERATOR) return spy_retain(source);
     if (base) return get_iterator(c, base);
     if (special_dispatch(source)) {
         SPYValue *method = special_method(c, source, "__iter__");
@@ -6709,6 +6719,8 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     if (v->type == SPY_GENERATOR) return generator_next(c, v);
     if (v->type == SPY_COROUTINE_ITERATOR) return generator_next(c, v->as.iterator.source);
+    SPYValue *base = v->type == SPY_INSTANCE ? builtin_base(c, v, "__next__", NULL) : NULL;
+    if (base && base->type == SPY_ITERATOR) return iterator_next(c, base);
     if (v->type == SPY_INSTANCE || awaitable_iterator(v)) {
         SPYValue *result = call_special(c, v, "__next__", 0, NULL);
         if (!result && error_is(c, "StopIteration")) spy_clear_error(c);
@@ -8969,6 +8981,13 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 if (c->error_type[0]) return NULL;
                 /* Builtin methods dispatched by value type live on the base. */
                 if (cls->as.map.native && self && self->type == SPY_INSTANCE && self->as.map.base) {
+                    /* A super subclass's carried super would look past its own type. */
+                    if (self->as.map.base->type == SPY_SUPER) {
+                        SPYValue *slot = attribute(c, cls, name), *method = slot ? descriptor_get(c, slot, self, v->as.super.owner) : NULL;
+                        spy_release(slot);
+                        if (method || !error_is(c, "AttributeError")) return method;
+                        spy_clear_error(c); continue;
+                    }
                     SPYValue *method = attribute_value(c, self->as.map.base, name);
                     if (method || !error_is(c, "AttributeError")) return method;
                     spy_clear_error(c);
@@ -9324,7 +9343,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "__class__") && v->type == SPY_INSTANCE) return spy_retain(v->as.map.parent);
         if (v->type == SPY_INSTANCE && v->as.map.base) {
             value = attribute_value(c, v->as.map.base, name);
-            if (value || !error_is(c, "AttributeError")) return value;
+            /* A module's own fallback ends the lookup: PEP 562 __getattr__ and its error. */
+            if (value || !error_is(c, "AttributeError") || v->as.map.base->type == SPY_MODULE) return value;
             spy_clear_error(c);
         }
         value = builtin_descriptor_lookup(c, v->type == SPY_CLASS ? v : v->as.map.parent, name);
@@ -10864,11 +10884,43 @@ static int same_slot_layout(SPYValue *old, SPYValue *value) {
         if (strcmp(a->as.string.data, b->as.string.data)) return 0;
     }
 }
+/* A module's __class__ may be any ModuleType subclass: the module becomes an
+ * instance carrying its former self, sharing the namespace, or returns to a
+ * plain module. */
+static int module_set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
+    if (object->type == SPY_MODULE) {
+        if (value == c->types[SPY_MODULE]) return 0;
+        SPYValue *base = value_new(c, SPY_MODULE);
+        if (!base) return -1;
+        base->as.map = object->as.map;
+        memset(&object->as.map, 0, sizeof(object->as.map));
+        object->type = SPY_INSTANCE;
+        object->as.map.parent = spy_retain(value);
+        object->as.map.base = base;
+        object->as.map.namespace = spy_retain(base->as.map.namespace);
+        return 0;
+    }
+    if (value != c->types[SPY_MODULE]) {
+        SPYValue *previous = object->as.map.parent;
+        object->as.map.parent = spy_retain(value);
+        spy_release(previous); return 0;
+    }
+    SPYValue *base = object->as.map.base, *parent = object->as.map.parent, *namespace = object->as.map.namespace;
+    if (object->as.map.len) { spy_error(c, "TypeError", "__class__ assignment: 'module' object layout differs"); return -1; }
+    free(object->as.map.items);
+    object->as.map = base->as.map;
+    memset(&base->as.map, 0, sizeof(base->as.map));
+    object->type = SPY_MODULE;
+    spy_release(base); spy_release(parent); spy_release(namespace);
+    return 0;
+}
 /* object.__class__ = value, as object_set_class: both classes are Python
  * classes with the same instance layout. */
 static int set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
     if (value->type != SPY_CLASS) { errorf(c, "TypeError", "__class__ must be set to a class, not '%s' object", type_name(value)); return -1; }
-    SPYValue *old = value_class(c, object);
+    SPYValue *old = value_class(c, object), *module_type = c->types[SPY_MODULE];
+    if (subclass(old, module_type) && subclass(value, module_type) && (object->type == SPY_MODULE || builtin_value(c, object, SPY_MODULE)))
+        return module_set_class(c, object, value);
     if (object->type != SPY_INSTANCE || builtin_class(c, old) || builtin_class(c, value)) {
         spy_error(c, "TypeError", "__class__ assignment only supported for mutable types or ModuleType subclasses"); return -1;
     }
@@ -12815,26 +12867,39 @@ static void not_callable(SPYContext *c, SPYValue *fn) {
 }
 static SPYValue *template_construct(SPYContext *, int, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *mappingproxy_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
-/* module(name, doc=None), as CPython's module___init___impl. */
-static SPYValue *module_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    if (argc > 2) return errorf(c, "TypeError", "module() takes at most 2 arguments (%zu given)", argc);
+/* module.__init__(name, doc=None), as CPython's module___init___impl. */
+static int module_init(SPYContext *c, SPYValue *module, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (argc > 2) { errorf(c, "TypeError", "module() takes at most 2 arguments (%zu given)", argc); return -1; }
     SPYValue *args[2] = {argc > 0 ? argv[0] : NULL, argc > 1 ? argv[1] : NULL};
     static const char *const names[] = {"name", "doc"};
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         SPYValue *key = keywords->as.map.items[i].key;
         int slot = key->type != SPY_STRING ? -1 : !strcmp(key->as.string.data, "name") ? 0 : !strcmp(key->as.string.data, "doc") ? 1 : -1;
-        if (slot < 0) return errorf(c, "TypeError", "module() got an unexpected keyword argument '%s'", key->type == SPY_STRING ? key->as.string.data : "");
-        if (args[slot]) return errorf(c, "TypeError", "argument for module() given by name ('%s') and position (%d)", names[slot], slot + 1);
+        if (slot < 0) { errorf(c, "TypeError", "module() got an unexpected keyword argument '%s'", key->type == SPY_STRING ? key->as.string.data : ""); return -1; }
+        if (args[slot]) { errorf(c, "TypeError", "argument for module() given by name ('%s') and position (%d)", names[slot], slot + 1); return -1; }
         args[slot] = keywords->as.map.items[i].value;
     }
-    if (!args[0]) return spy_error(c, "TypeError", "module() missing required argument 'name' (pos 1)");
-    if (args[0]->type != SPY_STRING) return errorf(c, "TypeError", "module() argument 'name' must be str, not %s", type_name(args[0]));
+    if (!args[0]) { spy_error(c, "TypeError", "module() missing required argument 'name' (pos 1)"); return -1; }
+    if (args[0]->type != SPY_STRING) { errorf(c, "TypeError", "module() argument 'name' must be str, not %s", type_name(args[0])); return -1; }
+    return name_set(c, module, "__name__", args[0]) || name_set(c, module, "__doc__", args[1] ? args[1] : c->none) ||
+        name_set(c, module, "__package__", c->none) || name_set(c, module, "__loader__", c->none) || name_set(c, module, "__spec__", c->none);
+}
+/* module.__new__ makes a module with an empty namespace. */
+static SPYValue *module_allocate(SPYContext *c) {
     SPYValue *module = value_new(c, SPY_MODULE);
-    if (module) module->as.map.namespace = value_new(c, SPY_DICT);
-    if (!module || !module->as.map.namespace || name_set(c, module, "__name__", args[0]) ||
-        name_set(c, module, "__doc__", args[1] ? args[1] : c->none) || name_set(c, module, "__package__", c->none) ||
-        name_set(c, module, "__loader__", c->none) || name_set(c, module, "__spec__", c->none)) { spy_release(module); return NULL; }
+    if (module && !(module->as.map.namespace = value_new(c, SPY_DICT))) { spy_release(module); return NULL; }
     return module;
+}
+static SPYValue *module_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *module = module_allocate(c);
+    if (module && module_init(c, module, argc, argv, keywords)) { spy_release(module); return NULL; }
+    return module;
+}
+static SPYValue *module_init_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *module = argc ? builtin_value(c, argv[0], SPY_MODULE) : NULL;
+    if (!module) return errorf(c, "TypeError", "descriptor '__init__' of 'module' object needs an argument");
+    return module_init(c, module, argc - 1, argv + 1, keywords) ? NULL : spy_none(c);
 }
 /* method(function, instance, /), as CPython's method_new. */
 static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -14135,10 +14200,9 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
             for (size_t t = 0; t < sizeof(subclassable_types) / sizeof(*subclassable_types); t++)
                 accepted |= base == c->types[subclassable_types[t]];
             accepted |= base == c->types[SPY_CLASS];
-            if (!accepted && (base == c->types[SPY_SUPER] || base == c->types[SPY_MODULE] ||
-                              base == c->iterator_types[IT_MAP] || base == c->iterator_types[IT_ZIP] || base == c->iterator_types[IT_ENUMERATE] ||
-                              base == c->iterator_types[IT_FILTER] || base == c->iterator_types[IT_REVERSED]))
-                return errorf(c, "NotImplementedError", "subclassing '%s' is not implemented", name_local(base, "__name__")->as.string.data);
+            accepted |= base == c->types[SPY_SUPER] || base == c->types[SPY_MODULE] ||
+                        base == c->iterator_types[IT_MAP] || base == c->iterator_types[IT_ZIP] || base == c->iterator_types[IT_ENUMERATE] ||
+                        base == c->iterator_types[IT_FILTER] || base == c->iterator_types[IT_REVERSED];
             if (!accepted) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base));
         }
         /* Exceptions and each builtin value type have their own layout. */
@@ -18324,6 +18388,9 @@ static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv
 static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
     SPYValue *result = spy_list(c), *names = value_new(c, SPY_DICT);
     if (!result || !names) { spy_release(result); spy_release(names); return NULL; }
+    /* A module subclass's instance lists its module's namespace. */
+    SPYValue *carried = !plain && object ? builtin_base(c, object, "__dir__", NULL) : NULL;
+    if (carried && carried->type == SPY_MODULE) object = carried;
     SPYValue *method = !plain && object && object->type == SPY_INSTANCE ? special_method(c, object, "__dir__") : NULL;
     /* A module's own __dir__ function (PEP 562), and a metaclass's __dir__. */
     if (!plain && object && object->type == SPY_MODULE && name_local(object, "__dir__")) method = spy_retain(name_local(object, "__dir__"));
@@ -18661,7 +18728,9 @@ static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
  * base value of an instance of a subclass. Returns NULL when inapplicable. */
 static SPYValue *builtin_value(SPYContext *c, SPYValue *v, int type) {
     if (v->type == type || (type == SPY_INT && v->type == SPY_BOOL)) return v;
-    if (v->type == SPY_INSTANCE && v->as.map.base && c->types[type] && subclass(v->as.map.parent, c->types[type]))
+    /* An iterator, super, or module subclass's instance carries a value of its base class. */
+    if (v->type == SPY_INSTANCE && v->as.map.base && ((c->types[type] && subclass(v->as.map.parent, c->types[type])) ||
+                                                      (v->as.map.base->type == type && subclass(v->as.map.parent, value_class(c, v->as.map.base)))))
         return builtin_value(c, v->as.map.base, type);
     return NULL;
 }
@@ -21208,7 +21277,8 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
             free(out.data); return 0;
         }
         /* Deleting an extended slice keeps the bytes not selected. */
-        if (slice.count && bytearray_exported(c, array)) { free(out.data); return -1; }
+        free(out.data);
+        if (slice.count && bytearray_exported(c, array)) return -1;
         Buffer kept = {.ctx = c};
         for (size_t i = 0; i < len; i++) {
             int64_t offset = (int64_t)i - slice.start;
@@ -21764,6 +21834,9 @@ execution_fail:
     }
     if (id == B_NEXT) {
         if (argc < 1 || argc > 2) goto arity;
+        /* An iterator subclass's instance without its own __next__. */
+        SPYValue *carried = a->type == SPY_INSTANCE ? builtin_base(c, a, "__next__", NULL) : NULL;
+        if (carried && carried->type == SPY_ITERATOR) a = carried;
         if (a->type == SPY_INSTANCE || meta_class(a) || a->type == SPY_GENERATOR || a->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(a)) {
             SPYValue *value = a->type == SPY_INSTANCE || meta_class(a) || awaitable_iterator(a) ? call_special(c, a, "__next__", 0, NULL) :
                 generator_send(c, a->type == SPY_COROUTINE_ITERATOR ? a->as.iterator.source : a, NULL, NULL);
@@ -22751,6 +22824,27 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
     default: return property_copy(c, self, storage, op - DESCR_GETTER, argv[1]);
     }
 }
+/* map, zip, enumerate, filter, reversed, super, and module .__new__(cls, ...):
+ * a subclass instance carries the value the class itself would make, and a
+ * module subclass's instance shares the module's namespace. data is the class. */
+static SPYValue *native_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    SPYValue *owner = data;
+    const char *name = name_local(owner, "__name__")->as.string.data;
+    if (!argc) return errorf(c, "TypeError", "%s.__new__(): not enough arguments", name);
+    SPYValue *cls = argv[0];
+    if (cls->type != SPY_CLASS) return errorf(c, "TypeError", "%s.__new__(X): X is not a type object (%s)", name, type_name(cls));
+    const char *cls_name = name_local(cls, "__name__")->as.string.data;
+    if (!subclass(cls, owner)) return errorf(c, "TypeError", "%s.__new__(%s): %s is not a subtype of %s", name, cls_name, cls_name, name);
+    SPYValue *base = owner == c->types[SPY_MODULE] ? module_allocate(c)
+                                                  : builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, name);
+    /* reversed() of an object with __reversed__ returns that method's result. */
+    if (!base || cls == owner || value_class(c, base) != owner) return base;
+    SPYValue *instance = new_instance(c, cls);
+    if (!instance) { spy_release(base); return NULL; }
+    instance->as.map.base = base;
+    if (base->type == SPY_MODULE) instance->as.map.namespace = spy_retain(base->as.map.namespace);
+    return instance;
+}
 static int mutable_layout(int type) { return type == SPY_LIST || type == SPY_DICT || type == SPY_SET || type == SPY_BYTEARRAY; }
 /* T.__new__(cls, ...): immutable values are built from the arguments; mutable
  * ones start empty and T.__init__ fills them. */
@@ -23034,7 +23128,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
             SPYValue *args[] = {value, argv[0]};
             return builtin(c, 2, args, (void *)(intptr_t)B_FORMAT);
         }
-    case SLOT_ITER: return get_iterator(c, value);
+    case SLOT_ITER: return type == SPY_ITERATOR ? spy_retain(self) : get_iterator(c, value);
     case SLOT_NEXT: {
         if (value->type == SPY_GENERATOR) return generator_send(c, value, NULL, NULL);
         SPYValue *result = iterator_next(c, value);
@@ -23228,6 +23322,27 @@ static int register_descriptor_methods(SPYContext *c) {
             if (register_method(c, types[t], descriptor_methods[op], descriptor_method, (intptr_t)types[t] << 8 | op, METHOD_INSTANCE)) return -1;
         }
     return 0;
+}
+/* The __new__ of the native classes of native_new, once they exist. */
+static int register_native_new(SPYContext *c) {
+    SPYValue *natives[] = {c->iterator_types[IT_MAP], c->iterator_types[IT_ZIP], c->iterator_types[IT_ENUMERATE],
+                           c->iterator_types[IT_FILTER], c->iterator_types[IT_REVERSED], c->types[SPY_SUPER], c->types[SPY_MODULE]};
+    for (size_t i = 0; i < sizeof(natives) / sizeof(*natives); i++) {
+        SPYValue *method = value_new(c, SPY_NATIVE);
+        if (!method) return -1;
+        method->as.native.kwcall = native_new;
+        method->as.native.data = natives[i];
+        int status = name_set(c, natives[i], "__new__", method);
+        spy_release(method);
+        if (status) return -1;
+    }
+    SPYValue *init = value_new(c, SPY_NATIVE);
+    if (!init) return -1;
+    init->as.native.kwcall = module_init_method;
+    init->as.native.method = 1;
+    int status = name_set(c, c->types[SPY_MODULE], "__init__", init);
+    spy_release(init);
+    return status;
 }
 static int register_constructors(SPYContext *c) {
     if (register_descriptor_methods(c)) return -1;
@@ -23858,6 +23973,7 @@ SPYContext *spy_context_new(void) {
             if (name_set(c, c->builtins, iterator_names[i], cls)) { spy_release(module); goto fail; }
         } else cls->as.map.flags = 2;
     }
+    if (register_native_new(c)) { spy_release(module); goto fail; }
     for (int i = 0; i < IT_COUNT; i++) {
         if (i == IT_CALLABLE || i == IT_TEMPLATE || (i >= IT_MAP && i != IT_REVERSED)) continue;
         SPYValue *hint = value_new(c, SPY_NATIVE);
