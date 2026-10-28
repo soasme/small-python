@@ -8641,8 +8641,17 @@ static int view_compare(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     return op == T_NE ? !result : result;
 }
 static int view_equal(SPYContext *c, SPYValue *a, SPYValue *b) { return view_compare(c, T_EQ, a, b); }
+/* x op y for an ordering or equality operator. */
+#define COMPARE(op, x, y) ((op) == '<' ? (x) < (y) : (op) == T_LE ? (x) <= (y) : (op) == '>' ? (x) > (y) : \
+                          (op) == T_GE ? (x) >= (y) : (op) == T_EQ ? (x) == (y) : (x) != (y))
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
+    /* Exact small ints and floats compare first. */
+    if (a->type == b->type && (op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE)) {
+        if (a->type == SPY_INT && !a->as.integer_data.big && !b->as.integer_data.big)
+            return spy_bool(c, COMPARE(op, a->as.integer_data.small, b->as.integer_data.small));
+        if (a->type == SPY_FLOAT) return spy_bool(c, COMPARE(op, a->as.real, b->as.real));
+    }
     if ((special_dispatch(a) || special_dispatch(b)) &&
         (op == T_EQ || op == T_NE || op == '<' || op == T_LE || op == '>' || op == T_GE)) {
         int kind = op == T_EQ ? R_EQ : op == T_NE ? R_NE : op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : R_GE;
