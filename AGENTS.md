@@ -261,3 +261,7 @@ Trust your discomfort. If something feels ugly, find out why and fix it. Check w
 These preferences do not authorize sending messages, publishing, or pushing
 changes. Routine local implementation, testing, and documentation are authorized
 by the task and do not require repeated confirmation.
+
+## Workflow
+
+* Commit as often as you can when you made progress.

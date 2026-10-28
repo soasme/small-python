@@ -3,7 +3,7 @@
 Usage: python3 bench/compare.py NAME=COMMAND [NAME=COMMAND ...]
 
 The first engine is the reference: another engine's run counts only when its
-output matches the reference output exactly. Each cell reports the median wall
+standard output matches the reference output exactly. Each cell reports the median wall
 time of the runs and the largest peak resident set size, measured per process
 with wait4. Mismatched output or a non-zero exit is reported, never timed.
 """
@@ -24,7 +24,7 @@ DEFAULT_RUNS = 5
 def run(command, path):
     begin = time.perf_counter()
     child = subprocess.Popen(command + [path], stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
+                             stderr=subprocess.DEVNULL)
     output = child.stdout.read()
     _, status, usage = os.wait4(child.pid, 0)
     elapsed = time.perf_counter() - begin
