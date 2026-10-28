@@ -8530,6 +8530,11 @@ static SPYValue *view_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *set_intersect_iterable(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    /* Exact floats and small ints with the common operators come first. */
+    if (a->type == SPY_FLOAT && b->type == SPY_FLOAT && (op == '+' || op == '-' || op == '*'))
+        return spy_float(c, op == '+' ? a->as.real + b->as.real : op == '-' ? a->as.real - b->as.real : a->as.real * b->as.real);
+    if (a->type == SPY_INT && b->type == SPY_INT && !a->as.integer_data.big && !b->as.integer_data.big && op != '/' && op != '@')
+        return integer_binary(c, op, a->as.integer_data.small, b->as.integer_data.small);
     /* str/bytes % never defers, except to a reflected method of a subclass on the right. */
     int formats = op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
         !(b->type == SPY_INSTANCE && subclass(b->as.map.parent, c->types[a->type]));

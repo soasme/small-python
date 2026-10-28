@@ -266,3 +266,4 @@ by the task and do not require repeated confirmation.
 
 * Commit as often as you can when you made progress.
 * Run bench before release a new version.
+* Commit message should come with a brief of test or bench results.
