@@ -304,6 +304,13 @@ terminal's `SIGINT` reaches only the parent. At start it:
 Diagnostics from a crashing worker (an assertion, a sanitizer report) go to
 the inherited stderr.
 
+Before it handles its first `EVAL`, `EXEC`, `CALL`, or `OP`, which are the
+requests that can run engine code, the worker *seals* itself under the
+platform's OS sandbox (`python.md` §4), allowing files only beneath the
+directories mounted so far. A `MOUNT` after sealing raises `PermissionError`
+in the engine. Only after sealing can code the parent did not write run in
+the worker.
+
 ## 10 Limits
 
 | Limit | Enforced by | Effect when exceeded | Runtime survives |

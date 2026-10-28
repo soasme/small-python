@@ -214,6 +214,29 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(value["a"], 1)
 
 
+class SandboxTest(unittest.TestCase):
+    def sandboxed(self, pid):
+        if sys.platform == "darwin":
+            import ctypes
+            return ctypes.CDLL(None).sandbox_check(pid, None, 0) == 1
+        with open(f"/proc/{pid}/status") as f:
+            status = dict(line.split(":", 1) for line in f if ":" in line)
+        return status["NoNewPrivs"].strip() == "1" and status["Seccomp"].strip() == "2"
+
+    @unittest.skipUnless(sys.platform in ("darwin", "linux"), "no OS sandbox on this platform")
+    def test_sealed_before_code_runs(self):
+        with tempfile.TemporaryDirectory() as work, Runtime() as rt:
+            rt.mount(work, "/work")
+            rt["x"] = 1
+            self.assertFalse(self.sandboxed(rt._process.pid))
+            rt.exec("with open('/work/f', 'w') as f:\n    f.write('ok')")
+            self.assertTrue(self.sandboxed(rt._process.pid))
+            self.assertEqual(rt.eval("open('/work/f').read()"), "ok")
+            with self.assertRaises(Error) as cm:
+                rt.mount(work, "/later")
+            self.assertEqual(cm.exception.type, "PermissionError")
+
+
 class InterruptTest(unittest.TestCase):
     def test_keyboard_interrupt_while_waiting(self):
         rt = Runtime()

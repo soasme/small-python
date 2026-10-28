@@ -214,19 +214,23 @@ confines code to its grants (`docs/manual.md`); outside it, the parent:
 3. bounds time per operation with `timeout`;
 4. never evaluates, unpickles, or imports anything the worker sends.
 
-A worker that has been taken over by an exploit runs with the user's
-operating-system privileges. Containing that is the job of an OS sandbox.
-The package applies one where the platform offers it without privileges:
+A worker that has been taken over by an exploit would run with the user's
+operating-system privileges. Containing that is the job of an OS sandbox,
+which the worker applies to itself, without privileges, immediately before it
+first runs engine code (its first `EVAL`, `EXEC`, `CALL`, or `OP`; see
+`protocol.md` §9). Mounts are fixed from then on: a later `mount` raises
+`Error` of type `PermissionError`.
 
-| Platform | Layer | Status |
-|---|---|---|
-| Linux | `PR_SET_NO_NEW_PRIVS` and a seccomp filter allowing only the system calls the engine needs: I/O on its own descriptors, memory management, `exit`, clocks, and, when directories are mounted, opening and inspecting files | planned |
-| Linux | Landlock rules limiting files to the mounted directories, read-only where mounted so | planned |
-| macOS | `sandbox_init` profile denying network and process creation and limiting files to the mounted directories | planned |
+| Platform | Layer |
+|---|---|
+| Linux | `PR_SET_NO_NEW_PRIVS` |
+| Linux | Landlock (kernel 5.13 and later): files only beneath the mounted directories, read-only where mounted so; no TCP (kernel 6.7 and later) |
+| Linux x86_64, aarch64 | seccomp: only the system calls the engine makes (I/O on open descriptors, memory, clocks, signals to itself, exit, and file calls when directories are mounted); any other fails with `EPERM`; a foreign architecture's calls kill the worker |
+| macOS | `sandbox_init` profile: deny by default; allow metadata reads, and reading (and writing, unless read-only) beneath the mounted directories |
 
-Until a platform's layer ships, the documentation must say that the worker is
-not OS-sandboxed there and recommend running the parent in a container for
-hostile code.
+A layer the kernel lacks is skipped; one the kernel refuses ends the worker.
+Other platforms have no OS layer; for hostile code there, also run the parent
+in a container.
 
 ## 5 Compatibility with the retired extension
 

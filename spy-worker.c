@@ -8,7 +8,9 @@
  * (spy.c and spy-std.c) with its allocator calls renamed to the counting
  * allocator below, which enforces the memory limit; without, it is the
  * worker itself. */
-#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#if defined(__linux__) && !defined(SPY_WORKER_ENGINE)
+#define _GNU_SOURCE /* syscall and O_PATH, for the sandbox */
+#elif !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
@@ -761,6 +763,13 @@ static SPYValue *operate(Cursor *k) {
 
 static int initialized;
 
+/* The worker seals itself under the operating system's sandbox before it
+ * first runs engine code; the mounts are fixed from then on. */
+static struct Mount { char *directory; int read_only; } *mounts;
+static size_t mounts_len;
+static int sealed;
+static void seal(void);
+
 static void initialize(Cursor *k) {
     SPYContext *c = w.c;
     SPYValue *options = decode_type(k, SPY_DICT);
@@ -787,6 +796,10 @@ static void serve(unsigned char *message, size_t len) {
     int kind = message[0];
     spy_clear_error(c);
     if (kind != INIT && !initialized) violation();
+    if (!sealed && (kind == EVAL || kind == EXEC || kind == CALL || kind == OP)) {
+        seal();
+        sealed = 1;
+    }
     switch (kind) {
     case INIT: initialize(&k); break;
     case EVAL: case EXEC: {
@@ -836,8 +849,18 @@ static void serve(unsigned char *message, size_t len) {
     case MOUNT: {
         SPYValue *directory = decode_type(&k, SPY_STRING), *path = decode_type(&k, SPY_STRING), *read_only = decode_type(&k, SPY_BOOL);
         finish(&k);
-        send_status(!directory || !path || !read_only ||
-                    spy_mount(c, spy_as_string(c, directory, NULL), spy_as_string(c, path, NULL), spy_truth(read_only) ? SPY_MOUNT_READ_ONLY : 0));
+        const char *host = directory ? spy_as_string(c, directory, NULL) : NULL;
+        int failed = !host || !path || !read_only;
+        if (!failed && sealed) failed = !spy_error(c, "PermissionError", "cannot mount after code has run");
+        if (!failed) failed = spy_mount(c, host, spy_as_string(c, path, NULL), spy_truth(read_only) ? SPY_MOUNT_READ_ONLY : 0);
+        if (!failed) {
+            struct Mount *grown = realloc(mounts, (mounts_len + 1) * sizeof(*grown));
+            char *copy = malloc(strlen(host) + 1);
+            if (!grown || !copy) exit(1);
+            mounts = grown;
+            mounts[mounts_len++] = (struct Mount){strcpy(copy, host), spy_truth(read_only)};
+        }
+        send_status(failed);
         spy_release(directory); spy_release(path); spy_release(read_only);
         break;
     }
@@ -864,10 +887,145 @@ static void serve(unsigned char *message, size_t len) {
     free(message);
 }
 
-#if !defined(__wasm__)
 #if defined(__linux__)
+/* Linux: no new privileges; Landlock confines files to the mounts and
+ * denies TCP; seccomp allows only the system calls the engine makes and
+ * fails every other with EPERM. Each layer the kernel lacks is skipped. */
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+
+#ifndef __NR_landlock_create_ruleset
+#define __NR_landlock_create_ruleset 444
+#define __NR_landlock_add_rule 445
+#define __NR_landlock_restrict_self 446
+#endif
+/* The kernel ABIs used here, declared so the worker builds without kernel
+ * headers (Alpine) or with old ones (manylinux). */
+#ifndef PR_SET_NO_NEW_PRIVS
+#define PR_SET_NO_NEW_PRIVS 38
+#endif
+#ifndef PR_SET_SECCOMP
+#define PR_SET_SECCOMP 22
+#endif
+struct bpf { uint16_t code; uint8_t yes, no; uint32_t k; };
+struct bpf_program { unsigned short len; struct bpf *filter; };
+enum { BPF_LOAD = 0x20, BPF_JEQ = 0x15, BPF_RETURN = 0x06, SECCOMP_FILTER = 2 };
+#define SECCOMP_KILL 0x80000000u
+#define SECCOMP_ERRNO 0x00050000u
+#define SECCOMP_ALLOW 0x7fff0000u
+
+struct landlock_ruleset { uint64_t fs, net, scoped; };
+struct landlock_path { uint64_t allowed; int32_t parent; } __attribute__((packed));
+enum {
+    LL_VERSION = 1, LL_PATH_BENEATH = 1,
+    LL_EXECUTE = 1, LL_WRITE_FILE = 2, LL_READ_FILE = 4, LL_READ_DIR = 8, LL_REMOVE_DIR = 16, LL_REMOVE_FILE = 32,
+    LL_MAKE_CHAR = 64, LL_MAKE_DIR = 128, LL_MAKE_REG = 256, LL_MAKE_SOCK = 512, LL_MAKE_FIFO = 1024,
+    LL_MAKE_BLOCK = 2048, LL_MAKE_SYM = 4096, LL_REFER = 8192, LL_TRUNCATE = 16384, LL_IOCTL_DEV = 32768
+};
+
+static void landlock(void) {
+    long abi = syscall(__NR_landlock_create_ruleset, NULL, 0, LL_VERSION);
+    if (abi < 1) return;
+    uint64_t fs = 8191 | (abi >= 2 ? LL_REFER : 0) | (abi >= 3 ? LL_TRUNCATE : 0) | (abi >= 5 ? LL_IOCTL_DEV : 0);
+    struct landlock_ruleset attr = {fs, abi >= 4 ? 3 : 0, 0};
+    size_t size = abi >= 6 ? sizeof(attr) : abi >= 4 ? 2 * sizeof(uint64_t) : sizeof(uint64_t);
+    int ruleset = (int)syscall(__NR_landlock_create_ruleset, &attr, size, 0);
+    if (ruleset < 0) return;
+    uint64_t read = LL_READ_FILE | LL_READ_DIR;
+    uint64_t write = LL_WRITE_FILE | LL_REMOVE_DIR | LL_REMOVE_FILE | LL_MAKE_DIR | LL_MAKE_REG | (abi >= 3 ? LL_TRUNCATE : 0);
+    for (size_t i = 0; i < mounts_len; i++) {
+        int fd = open(mounts[i].directory, O_PATH | O_CLOEXEC);
+        struct landlock_path rule = {read | (mounts[i].read_only ? 0 : write), fd};
+        if (fd < 0 || syscall(__NR_landlock_add_rule, ruleset, LL_PATH_BENEATH, &rule, 0)) exit(1);
+        close(fd);
+    }
+    if (syscall(__NR_landlock_restrict_self, ruleset, 0)) exit(1);
+    close(ruleset);
+}
+
+#if defined(__x86_64__)
+#define AUDIT_ARCH_HERE 0xC000003Eu
+#elif defined(__aarch64__)
+#define AUDIT_ARCH_HERE 0xC00000B7u
+#endif
+
+static void seccomp(void) {
+#ifdef AUDIT_ARCH_HERE
+    static const int always[] = {
+        __NR_read, __NR_write, __NR_readv, __NR_writev, __NR_close, __NR_lseek, __NR_fstat, __NR_fcntl,
+        __NR_brk, __NR_mmap, __NR_munmap, __NR_mremap, __NR_madvise, __NR_mprotect,
+        __NR_exit, __NR_exit_group, __NR_rt_sigreturn, __NR_rt_sigprocmask, __NR_rt_sigaction,
+        __NR_getpid, __NR_gettid, __NR_tgkill, __NR_futex, __NR_sched_yield, __NR_restart_syscall,
+        __NR_clock_gettime, __NR_getrandom,
+    };
+    static const int files[] = {
+        __NR_openat, __NR_newfstatat, __NR_readlinkat, __NR_getcwd, __NR_getdents64, __NR_ftruncate,
+        __NR_unlinkat, __NR_mkdirat,
+#ifdef __NR_statx
+        __NR_statx,
+#endif
+#ifdef __NR_open
+        __NR_open, __NR_stat, __NR_lstat, __NR_readlink,
+#endif
+    };
+    enum { ALWAYS = sizeof(always) / sizeof(*always), FILES = sizeof(files) / sizeof(*files) };
+    struct bpf program[ALWAYS + FILES + 6];
+    size_t n = 0, count = ALWAYS + (mounts_len ? FILES : 0);
+    /* seccomp_data: the system call number at offset 0, the architecture at 4. */
+    program[n++] = (struct bpf){BPF_LOAD, 0, 0, 4};
+    program[n++] = (struct bpf){BPF_JEQ, 1, 0, AUDIT_ARCH_HERE};
+    program[n++] = (struct bpf){BPF_RETURN, 0, 0, SECCOMP_KILL};
+    program[n++] = (struct bpf){BPF_LOAD, 0, 0, 0};
+    for (size_t i = 0; i < count; i++) /* a match jumps to the final ALLOW */
+        program[n++] = (struct bpf){BPF_JEQ, (uint8_t)(count - i), 0, (uint32_t)(i < ALWAYS ? always[i] : files[i - ALWAYS])};
+    program[n++] = (struct bpf){BPF_RETURN, 0, 0, SECCOMP_ERRNO | EPERM};
+    program[n++] = (struct bpf){BPF_RETURN, 0, 0, SECCOMP_ALLOW};
+    struct bpf_program filter = {(unsigned short)n, program};
+    if (prctl(PR_SET_SECCOMP, SECCOMP_FILTER, &filter) && errno != EINVAL) exit(1);
+#endif
+}
+
+static void seal(void) {
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) exit(1);
+    landlock();
+    seccomp();
+}
 #elif defined(__APPLE__)
+/* macOS: a sandbox profile denying everything but metadata reads, and
+ * reading (and writing) beneath the mounts. Declared here: the header marks
+ * the function deprecated, though it remains the documented interface. */
+int sandbox_init(const char *profile, uint64_t flags, char **error);
+static void quote(char **at, const char *s) {
+    *(*at)++ = '"';
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\') *(*at)++ = '\\';
+        *(*at)++ = *s;
+    }
+    *(*at)++ = '"';
+}
+static void seal(void) {
+    size_t size = 256;
+    for (size_t i = 0; i < mounts_len; i++) size += 2 * strlen(mounts[i].directory) + 64;
+    char *profile = malloc(size), *at = profile, *error = NULL;
+    if (!profile) exit(1);
+    at += sprintf(at, "(version 1)(deny default)(allow file-read-metadata)(allow sysctl-read)");
+    for (size_t i = 0; i < mounts_len; i++) {
+        at += sprintf(at, mounts[i].read_only ? "(allow file-read* (subpath " : "(allow file-read* file-write* (subpath ");
+        quote(&at, mounts[i].directory);
+        at += sprintf(at, "))");
+    }
+    if (sandbox_init(profile, 0, &error)) {
+        fprintf(stderr, "spy-worker: sandbox: %s\n", error ? error : "failed");
+        exit(1);
+    }
+    free(profile);
+}
+#else
+static void seal(void) {}
+#endif
+
+#if !defined(__wasm__)
+#if defined(__APPLE__)
 #include <pthread.h>
 #include <sys/event.h>
 static void *watch_parent(void *data) {

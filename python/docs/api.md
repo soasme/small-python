@@ -50,7 +50,8 @@ cannot start.
   namespace. Built on first import.
 - `mount(directory, path=None, *, read_only=False)`: Let the engine's `open()` reach host `directory` at the absolute engine path
   `path` (default: the directory's resolved path). Raises `Error` if the
-  directory does not exist.
+  directory does not exist, and `Error` of type `PermissionError` once code
+  has run in the runtime (the worker is then sandboxed to the mounts it has).
 
 ### Lifetime
 

@@ -68,11 +68,21 @@ directory, no open files but its pipes and stderr, and in its own process
 group. It exits when your process exits. Separate runtimes are separate
 processes and cannot affect each other.
 
-What the process boundary does not do yet is restrict the worker's operating
-system privileges: a worker taken over by an exploit runs as your user. An OS
-sandbox for the worker (seccomp and Landlock on Linux, the sandbox profile on
-macOS) is planned. Until then, for code that may be malicious, also run your
-program in a container or a dedicated low-privilege account.
+Before it runs any engine code, the worker also locks itself down with the
+operating system's sandbox, so that even a worker taken over by an exploit
+cannot reach more than the engine could:
+
+- **Linux**: no new privileges; Landlock (kernel 5.13+) limits files to your
+  mounted directories, read-only where you asked, and blocks TCP (6.7+);
+  seccomp (x86_64 and aarch64) refuses every system call the engine does not
+  make, such as starting processes or opening sockets.
+- **macOS**: a sandbox profile that denies everything except reading file
+  metadata and using your mounted directories.
+
+Because of this, mount directories before running code: `mount` after the
+first `eval`, `exec`, or `call` raises `Error` of type `PermissionError`.
+A kernel without Landlock or seccomp gets the layers it has; on other systems,
+run hostile code inside a container as well.
 
 ## Threads
 
