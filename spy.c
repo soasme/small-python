@@ -2610,6 +2610,7 @@ typedef struct {
     int star; /* One more than the loop depth inside an except* block, else 0. */
     const char *literal_start; /* The body of the string literal being decoded. */
     const char *lexeme; /* The token lex() is reading. */
+    int lexeme_formatted; /* That token is an f-string or t-string. */
     const char *annotation_scope; /* Set while parsing a type-parameter value or alias, e.g. "a TypeVar bound". */
     const char *private_name;
     const char *error_start, *error_end;
@@ -3106,7 +3107,7 @@ static int lex(Parser *p, const char *s) {
         if (string_prefix_error(p, start, line)) return -1;
         if (literal_prefix(start, &prefix, &flags)) {
             p->ctx->line = line;
-            p->error_start = NULL; p->lexeme = start;
+            p->error_start = NULL; p->lexeme = start; p->lexeme_formatted = flags & L_FORMAT;
             s = scan_literal(p, start, 0, NULL);
             if (!s) {
                 /* An error placed inside the literal is on its line. */
@@ -6615,7 +6616,14 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             errorf(c, "ValueError", "identifier field can't represent '%s' constant", p.constant_name);
             goto lexer_error;
         }
-        if (lexed != SIZE_MAX && (!c->error_type[0] || p.far >= lexed)) {
+        /* _PyPegen_tokenize_full_source_to_check_for_errors: a lexer error
+         * after a parser's syntax error wins, unless it is inside an f-string
+         * or the parser stopped at an unexpected indentation. */
+        if (lexed != SIZE_MAX && c->error_type[0]) invalid_expression_error(&p);
+        int lexer_wins = !c->error_type[0] || p.far >= lexed ||
+                         (!p.lexeme_formatted && strcmp(c->error_message, "unexpected indent") && strcmp(c->error_message, "unexpected unindent") &&
+                          (!strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") || !strcmp(c->error_type, "TabError")));
+        if (lexed != SIZE_MAX && lexer_wins) {
             spy_clear_error(c);
             p.len = p.pos = p.far = 0; p.tokenizing = 0;
             p.error_start = p.error_end = NULL; p.error_trim_line = p.error_end_zero = p.incomplete = 0;
@@ -13033,6 +13041,7 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
     if (status) { spy_release(v); return NULL; }
     return v;
 }
+static size_t utf8_valid(const unsigned char *, size_t, const char **, size_t *);
 static void attach_syntax_error(SPYContext *c, const char *filename, const char *source,
                                 const char *position, const char *finish, int trim_line) {
     int end_zero = trim_line & 2, textless = trim_line & 4, end_minus = trim_line & 8, zero_based = trim_line & 16;
@@ -13062,8 +13071,15 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
     spy_clear_error(c);
     SPYValue *details = value_new(c, SPY_TUPLE);
     SPYValue *msg = spy_string(c, message, strlen(message));
+    /* The line's text, decoded with replacement characters. */
     Buffer text = {.ctx = c};
-    append(&text, start, (size_t)(end - start));
+    for (const char *ch = start; ch < end;) {
+        const char *reason;
+        size_t bad = 1, width = utf8_valid((const unsigned char *)ch, (size_t)(end - ch), &reason, &bad);
+        if (width) append(&text, ch, width);
+        else append_codepoint(&text, 0xfffd);
+        ch += width ? width : bad;
+    }
     if (!trim_line && (end == start || end[-1] != '\n')) puts_buffer(&text, "\n");
     SPYValue *fields[] = {
         spy_string(c, filename, strlen(filename)), spy_int(c, (int64_t)line),

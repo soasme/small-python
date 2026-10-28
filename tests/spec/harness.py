@@ -280,6 +280,18 @@ class Host:
     def set_recursion_limit(self, limit):
         self._sys().setrecursionlimit(limit)
 
+    def exception(self):
+        """The handled exception (9.5), or None."""
+        return self._sys().exception()
+
+    def exc_info(self):
+        error = self.exception()
+        return (type(error), error, error.__traceback__) if error is not None else (None, None, None)
+
+    def weak_reference(self, obj):
+        """A host weak reference to obj: calling it gives obj until obj is reclaimed."""
+        return __import__("weakref").ref(obj)
+
 
 host = Host()
 
