@@ -155,6 +155,7 @@ struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *spare; size_t spares; /* Released allocations of other values, linked by next; no value edges. */
+    Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     /* class_lookup results, valid while classes_changed holds the epoch they
      * were found in. A change to a class's entries or MRO, or a class's
      * release, advances it. Results are borrowed, with no value edges. */
@@ -668,7 +669,10 @@ static void free_value(SPYValue *v) {
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
-        free(v->as.map.items - v->as.map.front); free(v->as.map.index); break;
+        if (v->as.map.cap + v->as.map.front == 8 && c->spare_entries_len < 16)
+            c->spare_entries[c->spare_entries_len++] = v->as.map.items - v->as.map.front;
+        else free(v->as.map.items - v->as.map.front);
+        free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
         while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
@@ -1602,6 +1606,10 @@ static ptrdiff_t map_find(SPYValue *map, SPYValue *key) {
     return map_hash(map->ctx, map, key, &hash) ? -1 : map_find_hash(map, key, hash);
 }
 static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value, int64_t hash) {
+    if (!map->as.map.items && map->ctx->spare_entries_len) {
+        map->as.map.items = map->ctx->spare_entries[--map->ctx->spare_entries_len];
+        map->as.map.cap = 8;
+    }
     if (map->as.map.front && map->as.map.len == map->as.map.cap) {
         Entry *items = map->as.map.items - map->as.map.front;
         memmove(items, map->as.map.items, map->as.map.len * sizeof(*items));
@@ -25517,6 +25525,7 @@ void spy_context_free(SPYContext *c) {
     free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     while (c->spare) { SPYValue *next = c->spare->next; free(c->spare); c->spare = next; }
+    while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
     free(c);
 }
 void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
