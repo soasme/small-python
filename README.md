@@ -23,7 +23,7 @@ $ ./spy -c 'print(sum(range(10)))'
 - **Automatic memory management**: reference counting plus a cycle collector.
 - **Standalone executables**: `spyc` turns a `.py` file into a C program.
 - **Sandboxed files**: scripts can only `open` the directories the host mounts.
-- **Fast startup**: about 165 µs to create a context, run hello world, and
+- **Fast startup**: about 260 µs to create a context, run hello world, and
   tear it down (Apple M2, `-O2`).
 
 ## Conformance
@@ -124,6 +124,7 @@ make bench        # startup benchmark
 ## Documentation
 
 - [Manual](docs/manual.md): usage, embedding, internals, benchmarks
+- [Benchmarks](docs/benchmark.md): comparison with other Python engines
 - [PLS-315](docs/standards/3_15.md): the language specification
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)

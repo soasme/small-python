@@ -286,11 +286,15 @@ The lifecycle benchmark creates a context, parses and executes a hello-world
 program with discarded output, and destroys the context. It reports average CPU
 time across 20,000 iterations. It excludes process launch and terminal I/O.
 
-On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run measured 164.60
-microseconds of CPU time per lifecycle. The Mach-O `__TEXT` segment was 736 KiB;
-the executable file was 794,880 bytes. These measurements apply to this build.
-They do not establish x86 performance, a worst-case latency bound, or the
-few-kilobyte size goal.
+On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run measured 257
+microseconds of CPU time per lifecycle. The Mach-O `__TEXT` segment was
+1,589,248 bytes; the executable file was 1,702,208 bytes. These measurements
+apply to this build. They do not establish x86 performance, a worst-case
+latency bound, or the few-kilobyte size goal.
+
+The [benchmark report](benchmark.md) compares whole-program wall time and
+memory with CPython, PyPy, RustPython, PocketPy, Monty, and MicroPython on
+core-language programs.
 
 ## 3 Specifications
 
@@ -978,7 +982,7 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `Makefile`, `VERSION`, `Changelog` | Build, installation, version, release history |
 | `examples/` | Python and C embedding examples |
 | `tests/` | Local checks, upstream pins, fetcher, adapter |
-| `bench/` | Lifecycle benchmark |
+| `bench/` | Lifecycle benchmark and cross-engine comparison programs |
 | `docs/manual.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
