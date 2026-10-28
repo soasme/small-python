@@ -7,10 +7,10 @@
 (* 1 (CPython's on 64-bit platforms), reduced modulo P, so that the hash   *)
 (* of m * 2^e is m rotated left by e modulo 61 within 61 bits; a negative  *)
 (* number hashes to the negation of its absolute value's hash, -1 becoming *)
-(* -2; the infinities hash to plus and minus sys.hash_info.inf, and a NaN  *)
-(* by its identity; and a complex number combines the hashes of its parts  *)
-(* as hash(real) + sys.hash_info.imag * hash(imag), reduced to a signed    *)
-(* 64-bit value, -1 again becoming -2.                                     *)
+(* -2; the infinities hash to plus and minus 314159, and a NaN by its     *)
+(* identity; and a complex number combines the hashes of its parts as      *)
+(* hash(real) + 1000003 * hash(imag), reduced to a signed 64-bit value, -1 *)
+(* again becoming -2.                                                      *)
 (*                                                                         *)
 (* A program hashes m * 2^e, or its negation, as an int (for e >= 0) or a  *)
 (* float, for m among small integers and e among exponents from the        *)
@@ -56,7 +56,7 @@ Pending == "pending"
 Generated(p) == Hash(p.m, p.e, p.negative)
 
 Case(c) ==
-    CASE c = "hash_info" -> "(True, 314159, 1000003, 64)"
+    CASE c = "hash_info" -> "(True, 314159, 1000003)"
       [] c = "inf" -> "(314159, -314159)"
       [] c = "nan_identity" -> "(True, True, False)"
       [] c = "modulus" -> "(0, 1, 0, 5, True)"

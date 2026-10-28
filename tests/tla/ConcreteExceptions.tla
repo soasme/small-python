@@ -79,7 +79,7 @@ Case(c) ==
       [] c = "unboundlocal" -> "('NameError', None, \"cannot access local variable 'v' where it is not associated with a value\")"
       [] c = "importerror_attrs" -> "('n', 'p', 'msg', 'msg', None)"
       [] c = "importerror_bad_kw" -> "TypeError: ImportError() got an unexpected keyword argument 'x'"
-      [] c = "importerror_from" -> "('sys', 'nosuchname', 'ImportError')"
+      [] c = "importerror_from" -> "('builtins', 'nosuchname', 'ImportError')"
       [] c = "modulenotfound" -> "('nosuchmod_q', None, \"No module named 'nosuchmod_q'\")"
       [] c = "indexerror" -> "'list index out of range'"
       [] c = "keyerror_missing" -> "(((),), '()')"

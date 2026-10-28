@@ -90,7 +90,7 @@ Case(c) ==
       [] c = "locals_snapshot" -> "(1, 2)"
       [] c = "locals_write_ignored" -> "1"
       [] c = "locals_module_is_globals" -> "True"
-      [] c = "import_builtin" -> "'sys'"
+      [] c = "import_builtin" -> "'builtins'"
       [] c = "import_missing" -> "ModuleNotFoundError: No module named 'nosuchmodule_xyz'"
       [] c = "import_level_bad" -> "ValueError: level must be >= 0"
       [] c = "import_empty" -> "ValueError: Empty module name"

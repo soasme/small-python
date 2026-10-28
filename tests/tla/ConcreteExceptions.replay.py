@@ -23,7 +23,7 @@ SOURCES = {
     "unboundlocal": 'def f():\n    print(v)\n    v = 1\ntry:\n    f()\nexcept UnboundLocalError as e:\n    result = (type(e).__mro__[1].__name__, e.name, str(e))',
     "importerror_attrs": "e = ImportError('msg', name='n', path='p')\nresult = (e.name, e.path, e.msg, str(e), e.name_from)",
     "importerror_bad_kw": 'result = ImportError(x=1)',
-    "importerror_from": 'try:\n    from sys import nosuchname\nexcept ImportError as e:\n    result = (e.name, e.name_from, type(e).__name__)',
+    "importerror_from": 'try:\n    from builtins import nosuchname\nexcept ImportError as e:\n    result = (e.name, e.name_from, type(e).__name__)',
     "modulenotfound": 'try:\n    import nosuchmod_q\nexcept ModuleNotFoundError as e:\n    result = (e.name, e.path, str(e))',
     "indexerror": 'try:\n    [][0]\nexcept IndexError as e:\n    result = str(e)',
     "keyerror_missing": 'try:\n    {}[()]\nexcept KeyError as e:\n    result = (e.args, str(e))',

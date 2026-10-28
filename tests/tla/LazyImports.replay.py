@@ -1,8 +1,8 @@
 # Replays LazyImports.tla: each case clears the fixture modules (the
-# Imports.files of LazyImports.files) from sys.modules and sys.lazy_modules,
+# Imports.files of LazyImports.files) from the module cache and the lazy-module registry,
 # runs the spec's statements, and compares the result and the modules' run
 # log with the model's.
-import sys
+from harness import host
 
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
@@ -21,9 +21,9 @@ SOURCES = {
     "broken": "lazy import pkg.broken\nimport tracelog\np = pkg\nbefore = list(tracelog.events)\ntry:\n"
               "    p.broken\nexcept ValueError:\n    result = before",
     "as": "lazy import pkg.sub as s\nresult = s.x",
-    "not_cached": "lazy import pkg\nimport sys\nresult = 'pkg' in sys.modules",
+    "not_cached": "lazy import pkg\nfrom harness import host\nresult = 'pkg' in host.module_cache()",
     "in_function_use": "lazy import pkg\ndef f(): return pkg.pub\nresult = f()",
-    "registry": "import sys\nlazy import pkg.inner.leaf\nresult = sorted(n for n in sys.lazy_modules if n.split('.')[0] == 'pkg')",
+    "registry": "from harness import host\nlazy import pkg.inner.leaf\nresult = sorted(n for n in host.lazy_modules() if n.split('.')[0] == 'pkg')",
     "submodule": "lazy import pkg.inner.leaf\np = pkg\ni = p.inner\nresult = i.leaf.subx",
     "in_function": "def f():\n    lazy import pkg",
     "in_try": "try:\n    lazy import pkg\nexcept ImportError:\n    pass",
@@ -40,12 +40,13 @@ SOURCES = {
 
 
 def clean():
-    for name in list(sys.modules):
+    modules, lazy_modules = host.module_cache(), host.lazy_modules()
+    for name in list(modules):
         if name.split(".")[0] in FIXTURES:
-            del sys.modules[name]
-    for name in list(sys.lazy_modules):
+            del modules[name]
+    for name in list(lazy_modules):
         if name.split(".")[0] in FIXTURES:
-            sys.lazy_modules.discard(name)
+            lazy_modules.discard(name)
 
 
 def outcome(p):

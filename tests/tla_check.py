@@ -259,6 +259,8 @@ def replay(name, all_cases, engine, oracle, directory):
     if template.count(MARKER) != 1:
         raise SystemExit(f"{name}.replay.py must contain the line {MARKER.strip()!r}")
     script = Path(directory) / f"{name}_replay.py"
+    # Replays reach host facilities through the spec harness's host.
+    shutil.copy(ROOT / "tests/spec/harness.py", directory)
     # All walks are one string, a state per line and a blank line between
     # walks, which the script decodes as it goes, so the cases do not crowd
     # the heap its collections scan. The script's FIELDS line names the

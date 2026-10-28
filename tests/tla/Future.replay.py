@@ -28,7 +28,7 @@ SOURCES = {
     "inherit": FA + "ns = {}\nexec('def g(x: undefined): pass', ns)\nresult = ns['g'].__annotations__",
     "dont_inherit": FA + "ns = {}\nexec(compile('def g(x: undefined): pass', '<s>', 'exec', dont_inherit=True), ns)\ntry:\n    ns['g'].__annotations__\nexcept NameError:\n    result = 'NameError'",
     "flag": "ns = {}\nexec(compile('def g(x: undefined): pass', '<s>', 'exec', flags=0x1000000), ns)\nresult = ns['g'].__annotations__",
-    "after_import": "import sys\n" + FA,
+    "after_import": "import builtins\n" + FA,
     "relative": "from .__future__ import annotations",
     "lambda_default": FA + "def f(x: int = 1 + 2): pass\nresult = (f.__annotations__, f.__defaults__)",
     "annotate": FA + "def f(x: int): pass\nresult = callable(f.__annotate__)",

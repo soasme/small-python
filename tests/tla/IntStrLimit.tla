@@ -8,10 +8,10 @@
 (* and, when parsing, the digit count; str(), repr(), format() with d, %d, *)
 (* f-strings, int() of str, bytes, and bytearray, and decimal literals are *)
 (* affected (a literal raising SyntaxError), while bases 2, 8, and 16 and  *)
-(* float() are not; the limit defaults to 4300, is read and set with       *)
-(* sys.get_int_max_str_digits() and sys.set_int_max_str_digits() (0        *)
-(* meaning unlimited, other values below 640 raising ValueError), and is   *)
-(* reported in sys.int_info and sys.flags.                                 *)
+(* float() are not; the limit defaults to 4300 and is read and set by the *)
+(* host (sys.get_int_max_str_digits() and sys.set_int_max_str_digits() in  *)
+(* CPython), 0 meaning unlimited and other values below 640 raising        *)
+(* ValueError.                                                             *)
 (*                                                                         *)
 (* A program sets the limit to 0, 640, or 1000, and for a digit count n    *)
 (* among 639, 640, 641, 999, 1000, 1001, 4300, and 4301 reports the length *)
@@ -55,7 +55,7 @@ Generated(p) ==
       [] OTHER -> "True"
 
 Case(c) ==
-    CASE c = "default" -> "(4300, 4300, 640, 4300)"
+    CASE c = "default" -> "4300"
       [] c = "str_over" -> "ValueError: Exceeds the limit (4300 digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit"
       [] c = "str_at_limit" -> "4300"
       [] c = "int_over" -> "ValueError: Exceeds the limit (4300 digits) for integer string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase the limit"

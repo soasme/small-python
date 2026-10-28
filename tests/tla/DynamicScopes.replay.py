@@ -1,6 +1,6 @@
 # Replays DynamicScopes.tla: each case runs the spec's exec(), eval(), or
 # locals() use and compares the result with the model's.
-import sys
+from harness import host
 
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
@@ -61,7 +61,7 @@ def locals_snapshot():
 
 def frame_locals():
     x = 1
-    sys._getframe().f_locals["x"] = 10
+    host.frame().f_locals["x"] = 10
     return x
 
 

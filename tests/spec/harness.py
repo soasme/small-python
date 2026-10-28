@@ -180,6 +180,8 @@ def check_program(source, expected, stdin=""):
 
 
 class Host:
+    """The host facilities of Annex B that tests reach, through CPython's
+    library facade (Annex C) on the oracle."""
     # The text by which messages name each facility: *host*(f) in 5.2.6.
     names = {
         "the module cache": "sys.modules",
@@ -211,6 +213,10 @@ class Host:
     def collect(self):
         """Reclaim every unreachable object now, finalizers included (9.7)."""
         __import__("gc").collect()
+
+    def disable_automatic_collection(self):
+        """Leave cycles to collect() alone."""
+        __import__("gc").disable()
 
     def warnings(self, thunk):
         """Call thunk and return the (category, message, line) of each
@@ -292,8 +298,70 @@ class Host:
         """A host weak reference to obj: calling it gives obj until obj is reclaimed."""
         return __import__("weakref").ref(obj)
 
+    def int_max_str_digits(self):
+        """The int string limit (22.1.8, B.6)."""
+        return self._sys().get_int_max_str_digits()
 
-host = Host()
+    def set_int_max_str_digits(self, *args, **kwargs):
+        self._sys().set_int_max_str_digits(*args, **kwargs)
+
+    def frame(self, depth=0):
+        """The frame object (28.3) of the caller, or of its depth-th caller."""
+        return self._sys()._getframe(depth + 1)
+
+    def maxsize(self):
+        """The largest index-size value (Annex D)."""
+        return self._sys().maxsize
+
+
+class EngineHost(Host):
+    """The same facilities on spy's test driver, which registers no library
+    module, only the engine primitives as _spy. Their names follow sys."""
+
+    def __init__(self, primitives):
+        self.primitives = primitives
+
+    def _sys(self):
+        return self.primitives
+
+    def display_hook(self):
+        """None when no sys facade is loaded: HostDisplay is then absent (B.3.4)."""
+        facade = self.primitives.modules.get("sys")
+        return facade.displayhook if facade is not None else None
+
+    def set_display_hook(self, hook):
+        # The engine calls the displayhook of the sys module in the module
+        # cache, where a host may preload such a facade (B.1.3).
+        if hook is None:
+            self.primitives.modules.pop("sys", None)
+        else:
+            facade = type(self.primitives)("sys")
+            facade.displayhook = hook
+            self.primitives.modules["sys"] = facade
+
+    def collect(self):
+        self.primitives._collect()
+
+    def disable_automatic_collection(self):
+        pass  # the engine collects cycles only when its host asks
+
+    def weak_reference(self, obj):
+        return _WeakReference(self.primitives, obj)
+
+
+class _WeakReference:
+    def __init__(self, primitives, obj):
+        self.primitives = primitives
+        primitives._weak_bind(obj, self, None)
+
+    def __call__(self):
+        return self.primitives._weak_get(self)
+
+
+try:
+    host = EngineHost(__import__("_spy"))
+except ImportError:
+    host = Host()
 
 
 def qualified(cls):

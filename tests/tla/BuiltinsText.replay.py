@@ -53,7 +53,7 @@ SOURCES = {
     "print_flush": "w = W()\nprint('x', file=w, flush=True)\nresult = w.flushed",
     "print_bad_sep": 'print(1, sep=1)',
     "print_bad_end": "print(1, end=b'')",
-    "print_file_none_ok": "import sys\nresult = print(end='', file=None) is None",
+    "print_file_none_ok": "result = print(end='', file=None) is None",
     "print_file_nowrite": 'print(1, file=1)',
     "print_unknown_kw": 'print(1, x=1)',
     "print_str_calls": "w = W()\nclass S:\n    def __str__(self): return 'S!'\nprint(S(), file=w)\nresult = w.parts",

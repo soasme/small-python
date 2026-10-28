@@ -28,23 +28,24 @@
   inside `mount_resolve` and never expose descriptors the context did not open.
   Modules are registered QuickJS-style: `spy_new_module(ctx, name, init)`
   (like `JS_NewCModule`), with `init` filling the module on first import.
-  `spy.c`/`spy.h` hold no standard module; the standard layer `spy-std.c`
-  (like `quickjs-libc.c`) registers the minimal modules `_thread` (the
-  engine's single thread), `_typing` (the intrinsic typing objects), `gc`,
-  `collections` (a package whose `abc` aliases the host's `_collections_abc`,
-  as in CPython), `itertools`, `sys`, `types`, and `weakref` (with its
-  primitive half `_weakref`) through the public API. Their Python sources are
-  in `modules/`, embedded in `spy-std-modules.h` by
-  `tools/build_intrinsics.py`. Engine primitives they need (weak table, frames,
-  collection, limits, host output) live in the core's private `_spy` module;
-  add a primitive there only when a module cannot be written without it. The
-  `spy` command and test drivers link the standard layer; `libspy.a` does not.
+  `spy.c`/`spy.h` hold no module but `builtins`; every other module is the
+  embedder's choice. `spy_init_primitives` fills a host-registered module
+  (`_spy`) with the engine primitives (module cache, weak table, frames,
+  collection, limits, host output); add a primitive only when a host module
+  cannot be written without it. The standard layer `spy-std.c` (like
+  `quickjs-libc.c`) supplies the host modules `sys`, `gc`, and `weakref` (with
+  its primitive half `_weakref`) on them through the public API. Their Python
+  sources are in `modules/`, embedded in `spy-std-modules.h` by
+  `tools/build_intrinsics.py`. The `spy` command links the standard layer and
+  `spyc -M` selects from it; `libspy.a` does not. Conformance runs on
+  `tests/run-spec` (like `run-test262`), the bare core with only `_spy`; tests
+  reach host facilities through the harness's `host`, never a library module.
 - Work on the language core, not the library. Do not add further standard
   library modules (`math`, `_struct`, `_sre`, `os`, `array`, ...), even when a
   CPython test imports one; skip tests that are blocked only by a missing
   module and raise pass rates by fixing core semantics instead. Add a module
   only when the user explicitly asks for it. The same holds inside the
-  existing modules: do not grow `sys`, `types`, `gc` and the rest with more
+  existing modules: do not grow `sys`, `gc`, `weakref` and the rest with more
   library surface (hooks, structseqs, helpers) just because a test reaches for
   it; the engine reports core behavior such as ignored exceptions itself.
 - Cache at most one released tuple allocation for each length zero through

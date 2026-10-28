@@ -40,12 +40,16 @@ $(OBJDIR)/%.o: %.c spy.h
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o: host.h
+$(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
 $(OBJDIR)/spy.o: spy-unicode.h spy-intrinsics.h
 $(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o: spy-std.h
 $(OBJDIR)/spy-std.o: spy-std-modules.h
 
 tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# The conformance driver: the bare core, without the standard layer.
+tests/run-spec: $(OBJDIR)/tests/run-spec.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 bench/lifecycle: $(OBJDIR)/bench/lifecycle.o $(OBJDIR)/spy.o
@@ -74,14 +78,14 @@ oracle:
 	cd tests/upstream/cpython-build && ../cpython/configure --without-ensurepip
 	$(MAKE) -C tests/upstream/cpython-build -j4
 
-# Language reference tests (PLS-315) on spy; they need no other implementation.
-test-spec: spy
+# Language reference tests (PLS-315) on the bare core; they need no other implementation.
+test-spec: tests/run-spec
 	python3 tests/spec_coverage.py
-	python3 tests/spec_runner.py ./spy --strict
+	python3 tests/spec_runner.py tests/run-spec --strict
 
 # The same tests validated against the pinned CPython oracle as well.
-test-spec-oracle: spy
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/spec_runner.py ./spy --strict --oracle $(CPYTHON)
+test-spec-oracle: tests/run-spec
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/spec_runner.py tests/run-spec --strict --oracle $(CPYTHON)
 
 # TLA+ tools 1.7.4 (TLC 2.19), pinned by checksum; TLC needs a Java runtime.
 TLA_JAR = $(OBJDIR)/tla/tla2tools.jar
@@ -96,12 +100,12 @@ $(TLA_JAR):
 	echo "$(TLA_SHA256)  $@.tmp" | shasum -a 256 -c -
 	mv $@.tmp $@
 
-test-tla: spy $(TLA_JAR) tla-coverage
-	python3 tests/tla_check.py ./spy --java $(JAVA) --jar $(abspath $(TLA_JAR))
+test-tla: tests/run-spec $(TLA_JAR) tla-coverage
+	python3 tests/tla_check.py tests/run-spec --java $(JAVA) --jar $(abspath $(TLA_JAR))
 
 # The replays validated against the pinned CPython oracle as well.
-test-tla-oracle: spy $(TLA_JAR) tla-coverage
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py ./spy --java $(JAVA) --jar $(abspath $(TLA_JAR)) --oracle $(CPYTHON)
+test-tla-oracle: tests/run-spec $(TLA_JAR) tla-coverage
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py tests/run-spec --java $(JAVA) --jar $(abspath $(TLA_JAR)) --oracle $(CPYTHON)
 
 # Every section of docs/standards/3_15.md is mapped to the models covering it
 # (tests/tla/coverage.txt) or to a stated exclusion; a TODO entry fails.
@@ -139,10 +143,10 @@ check-unicode:
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
 
-test: all tests/api run-cython check-intrinsics
+test: all tests/api tests/run-spec run-cython check-intrinsics
 	./tests/api
 	python3 tests/spec_coverage.py
-	python3 tests/spec_runner.py ./spy --strict
+	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
 	$(PYTHON) tests/executable.py
 
@@ -183,5 +187,5 @@ sanitize:
 	ASAN_OPTIONS=detect_stack_use_after_return=0 $(MAKE) CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer' LDFLAGS='-fsanitize=$(SANITIZERS)' test
 
 clean:
-	rm -f spy spyc run-cython *.o *.a tests/*.o tests/api bench/*.o bench/lifecycle $(FUZZERS)
+	rm -f spy spyc run-cython *.o *.a tests/*.o tests/api tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
 	rm -rf $(OBJDIR)

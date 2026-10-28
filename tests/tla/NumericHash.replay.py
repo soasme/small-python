@@ -5,14 +5,14 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 SOURCES = {
-    "hash_info": "import sys\nresult = (sys.hash_info.modulus == 2 ** 61 - 1, sys.hash_info.inf, sys.hash_info.imag, sys.hash_info.width)",
+    "hash_info": "result = (hash(2 ** 61 - 1) == 0, hash(float('inf')), hash(1j))",
     "inf": "result = (hash(float('inf')), hash(float('-inf')))",
     "nan_identity": "x = float('nan')\ny = float('nan')\nresult = (hash(x) == hash(x), hash(x) == object.__hash__(x), hash(x) == hash(y))",
     "modulus": "P = 2 ** 61 - 1\nresult = (hash(P), hash(P + 1), hash(-P), hash(2 * P + 5), hash(P - 1) == P - 1)",
     "minus_one": "result = (hash(-1), hash(-1.0), hash(complex(-1, 0)), hash(-1) == hash(-2))",
     "bool": "result = (hash(True), hash(False), hash(True) == hash(1.0))",
     "complex_real": "result = all(hash(complex(x, 0)) == hash(x) for x in (0.5, -3.0, 7, 1e300))",
-    "complex_formula": "import sys\nz = complex(0.5, -2.25)\nM = 2 ** 63\nh = hash(0.5) + sys.hash_info.imag * hash(-2.25)\nh = (h & (M - 1)) - (h & M)\nresult = hash(z) == (-2 if h == -1 else h)",
+    "complex_formula": "z = complex(0.5, -2.25)\nM = 2 ** 63\nh = hash(0.5) + 1000003 * hash(-2.25)\nh = (h & (M - 1)) - (h & M)\nresult = hash(z) == (-2 if h == -1 else h)",
     "complex_imag_only": "result = hash(1j) == 1000003",
     "complex_inf": "result = hash(complex(float('inf'), 1)) == 314159 + 1000003",
     "equal_implies_hash": "xs = [0, 0.0, -0.0, 0j, False, 1, 1.0, True, 2 ** 70, float(2 ** 70), 0.5, complex(0.5)]\nresult = all(hash(a) == hash(b) for a in xs for b in xs if a == b)",

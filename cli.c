@@ -4,51 +4,6 @@
 
 #include <string.h>
 
-static int output(void *data, const char *s, size_t n) {
-    return fwrite(s, 1, n, data) == n ? 0 : -1;
-}
-static int flush_output(void *data) { return fflush(data); }
-/* One line of standard input for input(), or NULL at its end. */
-static char *read_line(void *data) {
-    size_t len = 0, size = 128;
-    char *line = malloc(size);
-    int ch;
-    while (line && (ch = fgetc(data)) != EOF) {
-        if (len + 2 > size) {
-            char *next = realloc(line, size *= 2);
-            if (!next) { free(line); return NULL; }
-            line = next;
-        }
-        line[len++] = (char)ch;
-        if (ch == '\n') break;
-    }
-    if (line && !len) { free(line); return NULL; }
-    if (line) line[len] = 0;
-    return line;
-}
-static void report(SPYContext *c) {
-    fprintf(stderr, "%s:%zu: %s: %s\n", spy_error_filename(c), spy_error_line(c),
-            spy_error_type(c), spy_error_display(c));
-}
-/* The process status for the pending error. SystemExit(code) exits with code
- * like CPython: None is success, an int is the status, anything else is
- * printed and fails. Returns -1 for any other error, after reporting it. */
-static int exit_status(SPYContext *c) {
-    if (strcmp(spy_error_type(c), "SystemExit")) { report(c); return -1; }
-    SPYValue *error = spy_error_value(c), *code = error ? spy_get_attr(c, error, "code") : NULL;
-    int64_t status = 1;
-    if (!code) report(c);
-    else if (spy_type(code) == SPY_NONE) status = 0;
-    else if (spy_type(code) == SPY_INT && !spy_as_int(c, code, &status)) status &= 0xff;
-    else {
-        SPYValue *text = spy_str(c, code);
-        const char *s = text ? spy_as_string(c, text, NULL) : NULL;
-        if (s) fprintf(stderr, "%s\n", s);
-        spy_release(text); status = 1;
-    }
-    spy_release(code); spy_release(error);
-    return (int)status;
-}
 static int repl(SPYContext *c) {
     char line[4096];
     char *source = NULL;
@@ -67,7 +22,7 @@ static int repl(SPYContext *c) {
         if (end && line[end - 1] == ':') compound = 1;
         if (compound && end) continue;
         SPYValue *v = spy_eval_interactive(c, source, "<stdin>");
-        int status = v ? -1 : exit_status(c);
+        int status = v ? -1 : host_exit_status(c);
         spy_release(v); spy_collect(c);
         if (status >= 0) { free(source); return status; }
         len = 0; compound = 0;
@@ -95,10 +50,10 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "-c")) return usage();
     SPYContext *c = spy_context_new();
     if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
-    spy_set_output(c, output, stdout);
-    spy_set_flush(c, flush_output);
-    spy_set_input(c, read_line, stdin);
-    if (spy_std_init(c)) { report(c); spy_context_free(c); return 1; }
+    spy_set_output(c, host_output, stdout);
+    spy_set_flush(c, host_flush);
+    spy_set_input(c, host_read_line, stdin);
+    if (spy_std_init(c)) { host_report(c); spy_context_free(c); return 1; }
     if (!mount_count) mounts[mount_count++] = ".";
     for (int i = 0; i < mount_count; i++)
         if (spy_mount(c, mounts[i], NULL, 0)) {
@@ -120,7 +75,7 @@ int main(int argc, char **argv) {
     int status;
     if (argc == 2 && !strcmp(argv[1], "-i")) status = repl(c);
     else if (argc == 3) {
-        status = spy_exec(c, argv[2], "<string>") ? exit_status(c) : 0;
+        status = spy_exec(c, argv[2], "<string>") ? host_exit_status(c) : 0;
         if (status < 0) status = 1;
     } else if (argc == 2 && argv[1][0] == '-' && strcmp(argv[1], "-")) status = usage();
     else {
@@ -136,7 +91,7 @@ int main(int argc, char **argv) {
                 SPYValue *file_name = from_stdin ? NULL : spy_string(c, filename, strlen(filename));
                 if (file_name) spy_set_global(c, "__file__", file_name);
                 spy_release(file_name);
-                status = spy_exec(c, source, from_stdin ? "<stdin>" : filename) ? exit_status(c) : 0;
+                status = spy_exec(c, source, from_stdin ? "<stdin>" : filename) ? host_exit_status(c) : 0;
                 if (status < 0) status = 1;
                 free(source);
             }

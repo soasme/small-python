@@ -37,7 +37,7 @@ SOURCES = {
     "gen_close": "g = (t(x) for x in range(5))\nnext(g)\ng.close()\nresult = list(g)",
     "gen_send_none": "g = (x for x in range(2))\nresult = (g.send(None), next(g))",
     "gen_name": "g = (x for x in [])\nresult = (g.__name__, g.__qualname__)",
-    "frame_name": "import sys\nresult = [sys._getframe().f_code.co_name for _ in [1]]",
+    "frame_name": "from harness import host\nresult = [host.frame().f_code.co_name for _ in [1]]",
     "unparenthesized_tuple": "[x, y for x in a]",
     "if_else_elem": "result = [x if x % 2 else -x for x in range(4)]",
     "if_without_else": "[x for x in a if x else 1]",

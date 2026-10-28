@@ -3,6 +3,7 @@
 /spy
 /spyc
 /tests/api
+/tests/run-spec
 /bench/lifecycle
 __pycache__/
 /tests/upstream/

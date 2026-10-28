@@ -26,8 +26,8 @@ def lookup(p):
         namespace["len"] = global_len
     name = p["name"]
     if name == "import":
-        exec("import sys as found", namespace)
-        return "builtin" if namespace["found"] is __import__("sys") else "other"
+        exec("import builtins as found", namespace)
+        return "builtin" if namespace["found"] is __import__("builtins") else "other"
     builtins.added_name = "added"
     try:
         found = eval({"len": "len", "added": "added_name"}[name], namespace)

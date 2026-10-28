@@ -7,21 +7,25 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
-    directory = Path(temp)
-    source = directory / "hello source.py"
-    generated = directory / "hello generated.c"
-    binary = directory / "hello program"
-    source.write_text("print('standalone', sum(range(10)))\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-o", str(generated), str(source)], check=True)
-    subprocess.run(
-        [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-O2", "-I", str(ROOT), str(generated), str(ROOT / "spy-std.c"), str(ROOT / "spy.c"), "-lm", "-o", str(binary)],
-        check=True,
-    )
-    source.unlink()
-    generated.unlink()
-    result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
-    assert result.stdout == "standalone 45\n", result
+# A program runs on the bare core unless spyc -M registers standard modules.
+PROGRAM = "try:\n    import sys\nexcept ImportError:\n    sys = None\nprint('standalone', sum(range(10)), sys is None)\n"
+for options, extra, expected in [([], [], "standalone 45 True\n"),
+                                 (["-M", "sys"], [str(ROOT / "spy-std.c")], "standalone 45 False\n")]:
+    with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+        directory = Path(temp)
+        source = directory / "hello source.py"
+        generated = directory / "hello generated.c"
+        binary = directory / "hello program"
+        source.write_text(PROGRAM, encoding="utf-8")
+        subprocess.run([str(ROOT / "spyc"), *options, "-o", str(generated), str(source)], check=True)
+        subprocess.run(
+            [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-O2", "-I", str(ROOT), str(generated), *extra, str(ROOT / "spy.c"), "-lm", "-o", str(binary)],
+            check=True,
+        )
+        source.unlink()
+        generated.unlink()
+        result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
+        assert result.stdout == expected, result
 print("Standalone C generation, compilation, and execution passed")
 
 repl = subprocess.run(

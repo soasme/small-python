@@ -2,13 +2,13 @@
 # by the globals x, y, and saved, and compares the __del__ calls each step
 # makes with the model's. Automatic collection is disabled so that only the
 # spec's Collect steps collect cycles.
-import gc
+from harness import host
 
 FIELDS = ("op", "out")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
-gc.disable()
+host.disable_automatic_collection()
 log = []
 x = y = saved = None
 
@@ -35,7 +35,7 @@ SOURCE = {
     "link": lambda v, f, w: f"{v}.{f} = {w}",
     "load": lambda v, w, f: f"{v} = {w}.{f}",
     "del": lambda v: f"{v} = None",
-    "collect": lambda: "gc.collect()",
+    "collect": lambda: "host.collect()",
 }
 CODE = {}
 
@@ -65,7 +65,7 @@ for walk in walks():
             print("MISMATCH after", recent[:-1], "at", state["op"], "expected", state["out"], "got", actual)
             break
     x = y = saved = None
-    gc.collect()
+    host.collect()
 if failures:
     print(failures, "mismatches")
 else:

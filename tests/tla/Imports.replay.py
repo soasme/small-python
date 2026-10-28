@@ -1,7 +1,7 @@
 # Replays Imports.tla: each case clears the fixture modules (Imports.files)
-# from sys.modules, runs the spec's import statements, and compares the
+# from the module cache, runs the spec's import statements, and compares the
 # result and the modules' run log with the model's.
-import sys
+from harness import host
 
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
@@ -15,14 +15,14 @@ SOURCES = {
     "from_missing": "from pkg import missing",
     "from_star": "from pkg import *\nresult = sorted(k for k in dir() if not k.startswith('__'))",
     "relative": "import pkg.inner\nresult = (pkg.inner.leaf.subx, pkg.inner.up.__name__)",
-    "broken": "import sys\ntry:\n    import pkg.broken\nexcept ValueError:\n"
-              "    result = ('pkg.broken' in sys.modules, 'pkg' in sys.modules, hasattr(sys.modules['pkg'], 'broken'))",
+    "broken": "from harness import host\ntry:\n    import pkg.broken\nexcept ValueError:\n"
+              "    result = ('pkg.broken' in host.module_cache(), 'pkg' in host.module_cache(), hasattr(host.module_cache()['pkg'], 'broken'))",
     "beyond": "import pkg.beyond",
     "no_parent": "import plain",
     "namespace": "import nspkg.mod\nresult = (nspkg.__file__, all(type(p) is str for p in nspkg.__path__), nspkg.mod.__package__)",
     "twice": "import pkg\nimport pkg\nimport pkg.sub\nimport pkg.sub\nresult = 'twice'",
-    "none_cached": "import sys\nsys.modules['pkg'] = None\nimport pkg",
-    "replaced": "import sys\nsys.modules['pkg'] = 5\nimport pkg\nresult = pkg",
+    "none_cached": "from harness import host\nhost.module_cache()['pkg'] = None\nimport pkg",
+    "replaced": "from harness import host\nhost.module_cache()['pkg'] = 5\nimport pkg\nresult = pkg",
     "cycle": "import cycle_a\nresult = cycle_a.cycle_b.B",
     "attributes": "import pkg.sub\nresult = (pkg.__name__, pkg.__package__, pkg.sub.__package__, hasattr(pkg, '__path__'),"
                   " hasattr(pkg.sub, '__path__'))",
@@ -34,9 +34,10 @@ SOURCES = {
 
 
 def clean():
-    for name in list(sys.modules):
+    modules = host.module_cache()
+    for name in list(modules):
         if name.split(".")[0] in FIXTURES:
-            del sys.modules[name]
+            del modules[name]
 
 
 def outcome(p):

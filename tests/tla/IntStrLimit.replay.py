@@ -3,7 +3,7 @@
 # message, a SyntaxError's without the location) with the model's.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
-import sys
+from harness import host
 
 LIMITS = [0, 640, 1000]
 DIGITS = [639, 640, 641, 999, 1000, 1001, 4300, 4301]
@@ -11,8 +11,8 @@ OPS = ["str", "neg_str", "int", "int_neg", "underscore", "int7", "int16"]
 
 
 def limited(limit, digits, op):
-    old = sys.get_int_max_str_digits()
-    sys.set_int_max_str_digits(limit)
+    old = host.int_max_str_digits()
+    host.set_int_max_str_digits(limit)
     try:
         if op == "str": return repr(len(str(10 ** (digits - 1))))
         if op == "neg_str": return repr(len(str(-10 ** (digits - 1))))
@@ -24,10 +24,10 @@ def limited(limit, digits, op):
     except ValueError as error:
         return "ValueError: %s" % error
     finally:
-        sys.set_int_max_str_digits(old)
+        host.set_int_max_str_digits(old)
 
 SOURCES = {
-    "default": 'import sys\nresult = (sys.get_int_max_str_digits(), sys.int_info.default_max_str_digits, sys.int_info.str_digits_check_threshold, sys.flags.int_max_str_digits)',
+    "default": 'from harness import host\nresult = host.int_max_str_digits()',
     "str_over": 'result = len(str(10 ** 4300))',
     "str_at_limit": 'result = len(str(10 ** 4299))',
     "int_over": "result = int('1' * 4301)",
@@ -39,12 +39,12 @@ SOURCES = {
     "base_10_explicit": "result = int('1' * 4301, 10)",
     "base_7_limited": "result = int('1' * 4301, 7)",
     "base_0": "result = int('1' * 4301, 0)",
-    "set_limit": 'import sys\nold = sys.get_int_max_str_digits()\nsys.set_int_max_str_digits(640)\ntry:\n    result = (len(str(10 ** 639)), sys.get_int_max_str_digits())\n    try:\n        str(10 ** 640)\n    except ValueError as e:\n        result += (str(e),)\nfinally:\n    sys.set_int_max_str_digits(old)',
-    "set_zero": 'import sys\nold = sys.get_int_max_str_digits()\nsys.set_int_max_str_digits(0)\ntry:\n    result = len(str(10 ** 10000))\nfinally:\n    sys.set_int_max_str_digits(old)',
-    "set_too_small": 'import sys\nsys.set_int_max_str_digits(639)',
-    "set_negative": 'import sys\nsys.set_int_max_str_digits(-1)',
-    "set_keyword": 'import sys\nold = sys.get_int_max_str_digits()\nsys.set_int_max_str_digits(maxdigits=1000)\nresult = sys.get_int_max_str_digits()\nsys.set_int_max_str_digits(old)',
-    "set_type": "import sys\nsys.set_int_max_str_digits('1000')",
+    "set_limit": 'from harness import host\nold = host.int_max_str_digits()\nhost.set_int_max_str_digits(640)\ntry:\n    result = (len(str(10 ** 639)), host.int_max_str_digits())\n    try:\n        str(10 ** 640)\n    except ValueError as e:\n        result += (str(e),)\nfinally:\n    host.set_int_max_str_digits(old)',
+    "set_zero": 'from harness import host\nold = host.int_max_str_digits()\nhost.set_int_max_str_digits(0)\ntry:\n    result = len(str(10 ** 10000))\nfinally:\n    host.set_int_max_str_digits(old)',
+    "set_too_small": 'from harness import host\nhost.set_int_max_str_digits(639)',
+    "set_negative": 'from harness import host\nhost.set_int_max_str_digits(-1)',
+    "set_keyword": 'from harness import host\nold = host.int_max_str_digits()\nhost.set_int_max_str_digits(maxdigits=1000)\nresult = host.int_max_str_digits()\nhost.set_int_max_str_digits(old)',
+    "set_type": "from harness import host\nhost.set_int_max_str_digits('1000')",
     "repr_over": 'result = repr(10 ** 4300)',
     "format_d_over": "result = '{:d}'.format(10 ** 4300)",
     "fstring_over": "x = 10 ** 4300\nresult = f'{x}'",
