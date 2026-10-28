@@ -14837,14 +14837,16 @@ static int assign(SPYContext *c, Frame *f, Node *n) {
         }
     }
     {
-        old = container ? (key ? get_index(c, container, key) : attribute(c, container, n->a->b->text)) : name_get(c, f->env, n->a->text);
+        SPYValue *local = container ? NULL : name_fast(f->env, n->a);
+        old = container ? (key ? get_index(c, container, key) : attribute(c, container, n->a->b->text)) :
+            local ? spy_retain(local) : name_find(c, f->env, node_name(n->a));
         if (!old) goto done;
         rhs = eval(c, f, n->b);
         if (!rhs) goto done;
         value = inplace(c, n->op, old, rhs);
     }
     if (!value) goto done;
-    if (!container) status = name_set(c, f->env, n->a->text, value);
+    if (!container) status = store_target(c, f, n->a, value);
     else if (key) status = set_index(c, container, key, value);
     else status = set_attribute(c, container, n->a->b->text, value);
 done:
