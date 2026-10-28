@@ -488,7 +488,7 @@ Class factories may return unrelated objects without calling `__init__`.
 Returned subclasses use their own initializer. `object.__new__`, `object.__init__`,
 and `BaseException.__new__` are available with allocation/type checks. Numeric,
 string, sequence, dictionary, and set subclasses retain an underlying builtin
-value. CPython's complete allocator-slot restoration behavior is not implemented.
+value.
 
 F-strings support expressions, debug fields, conversions, nested format
 specifications, raw literals, and generator suspension inside fields. String
@@ -928,8 +928,10 @@ is no error stream. Afterwards the instance is freed unless the finalizer
 resurrected it, and `__del__` never runs twice for the same object.
 `gc.collect()` collects again after running finalizers, so cyclic garbage with
 `__del__` is freed in the same call. Context teardown never runs finalizers.
-Automatic generator closing is not implemented; callers must explicitly close
-generators whose cleanup must run.
+A suspended generator or coroutine closes when it is released or collected,
+running its `finally` blocks and `__exit__` methods, as CPython's does. A
+suspended asynchronous generator is passed to the host's finalizer hook when
+one is installed, and is otherwise closed with `aclose()` (27.5.4).
 
 ### 4.5 Calls and scopes
 
@@ -951,7 +953,9 @@ and cleanup. A static symbol pass records local bindings and validates
 `global`/`nonlocal` declarations before execution. Captured environments retain
 the source units that own their symbol tables. Private identifiers are mangled
 in their defining class context; attribute lookup uses the spelling it receives.
-Annotation scopes and complete introspection remain work.
+Annotations, type parameters, and type aliases are evaluated lazily in
+annotation scopes (8.7, 16.6), which read a class body's names through its
+`__classdict__` cell.
 
 ### 4.6 Repository and toolchain
 
