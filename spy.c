@@ -44,7 +44,7 @@ typedef struct { size_t len; int sign; uint32_t digits[]; } BigInt;
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
 enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32 };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
-typedef struct { const char *name; unsigned flags; size_t line; Node *declared; } Symbol;
+typedef struct { const char *name; unsigned flags; size_t line; Node *declared; int64_t hash; } Symbol;
 struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap; int kind, tries; const char *within; };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
@@ -1580,16 +1580,20 @@ static int map_set(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value)
  * dict that class_cell holds for classes, as CPython's type slots do. */
 static int class_slot_name(const char *name) { return !strcmp(name, "__name__") || !strcmp(name, "__qualname__"); }
 /* The value stored under name in env's own entries, borrowed. */
-static SPYValue *env_entry(SPYValue *env, const char *name) {
+static Entry *env_find(SPYValue *env, const char *name) {
     size_t len = strlen(name);
     int64_t hash = text_hash(name, len);
     MapCursor cursor = map_cursor(env, hash);
     for (ptrdiff_t i; (i = map_next(env, hash, &cursor)) >= 0;) {
         Entry *e = &env->as.map.items[i];
         SPYValue *key = builtin_value(env->ctx, e->key, SPY_STRING);
-        if (key && key->as.string.len == len && !memcmp(key->as.string.data, name, len)) return e->value;
+        if (key && key->as.string.len == len && !memcmp(key->as.string.data, name, len)) return e;
     }
     return NULL;
+}
+static SPYValue *env_entry(SPYValue *env, const char *name) {
+    Entry *e = env_find(env, name);
+    return e ? e->value : NULL;
 }
 static SPYValue *name_local(SPYValue *env, const char *name) {
     if (env->type == SPY_CLASS && class_slot_name(name)) {
@@ -1771,8 +1775,10 @@ static const char *type_fqname(SPYValue *value, char *buffer, size_t size) {
     return buffer;
 }
 static Symbol *scope_symbol(Scope *scope, const char *name) {
-    if (scope) for (size_t i = 0; i < scope->len; i++)
-        if (!strcmp(scope->symbols[i].name, name)) return &scope->symbols[i];
+    if (!scope) return NULL;
+    int64_t hash = text_hash(name, strlen(name));
+    for (size_t i = 0; i < scope->len; i++)
+        if (scope->symbols[i].hash == hash && !strcmp(scope->symbols[i].name, name)) return &scope->symbols[i];
     return NULL;
 }
 static SPYValue *module_env(SPYContext *c, SPYValue *env) {
@@ -1889,9 +1895,18 @@ static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v)
         SPYValue *cell = env_entry(env, name);
         if (cell) return cell_set(c, cell, v->type == V_UNBOUND ? NULL : v);
     }
+    SPYValue *namespace = namespace_map(env);
+    /* Rebinding an exact str key is what map_set would do, without a new key. */
+    Entry *entry = namespace == env && env->type != SPY_FROZENDICT && !(env->type == V_ENV && env->as.map.flags == 3) ?
+        env_find(env, name) : NULL;
+    if (entry && entry->key->type == SPY_STRING) {
+        SPYValue *old = entry->value;
+        entry->value = spy_retain(v);
+        spy_release(old);
+        return 0;
+    }
     SPYValue *key = spy_string(c, name, strlen(name));
     if (!key) return -1;
-    SPYValue *namespace = namespace_map(env);
     if (env->type == V_ENV && env->as.map.flags == 3) {
         namespace = dictionary_value(c, namespace);
         if (namespace->type == SPY_FROZENDICT) {
@@ -6235,7 +6250,7 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
     if (!symbol) {
         if (grow(c, (void **)&scope->symbols, &scope->cap, scope->len + 1, sizeof(*scope->symbols))) return -1;
         symbol = &scope->symbols[scope->len++];
-        *symbol = (Symbol){n->text, 0, n->line, NULL};
+        *symbol = (Symbol){n->text, 0, n->line, NULL, text_hash(n->text, strlen(n->text))};
     }
     if (flags & (S_GLOBAL | S_NONLOCAL)) {
         const char *kind = flags & S_GLOBAL ? "global" : "nonlocal";
@@ -6258,7 +6273,7 @@ static int scope_bind(SPYContext *c, Scope *scope, Node *n, unsigned flags, Node
         if (top->kind == S_MODULE && !global) {
             if (grow(c, (void **)&top->symbols, &top->cap, top->len + 1, sizeof(*top->symbols))) return -1;
             global = &top->symbols[top->len++];
-            *global = (Symbol){n->text, 0, n->line, NULL};
+            *global = (Symbol){n->text, 0, n->line, NULL, text_hash(n->text, strlen(n->text))};
         }
         if (global) global->flags |= S_GLOBAL;
     }
