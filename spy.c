@@ -1599,26 +1599,29 @@ static int map_set(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value)
 /* A class keeps its __name__ and __qualname__ outside its __dict__, in the
  * dict that class_cell holds for classes, as CPython's type slots do. */
 static int class_slot_name(const char *name) { return !strcmp(name, "__name__") || !strcmp(name, "__qualname__"); }
-/* The value stored under name in env's own entries, borrowed. */
-static Entry *env_find_hash(SPYValue *env, const char *name, size_t len, int64_t hash) {
-    MapCursor cursor = map_cursor(env, hash);
-    for (ptrdiff_t i; (i = map_next(env, hash, &cursor)) >= 0;) {
+/* A name with its length and str hash, computed once per lookup. */
+typedef struct { const char *text; size_t len; int64_t hash; } Name;
+static Name name_of(const char *text) {
+    size_t len = strlen(text);
+    return (Name){text, len, text_hash(text, len)};
+}
+/* The entry stored under name in env's own entries. */
+static Entry *env_find(SPYValue *env, Name name) {
+    MapCursor cursor = map_cursor(env, name.hash);
+    for (ptrdiff_t i; (i = map_next(env, name.hash, &cursor)) >= 0;) {
         Entry *e = &env->as.map.items[i];
         SPYValue *key = builtin_value(env->ctx, e->key, SPY_STRING);
-        if (key && key->as.string.len == len && !memcmp(key->as.string.data, name, len)) return e;
+        if (key && key->as.string.len == name.len && !memcmp(key->as.string.data, name.text, name.len)) return e;
     }
     return NULL;
 }
-static Entry *env_find(SPYValue *env, const char *name) {
-    size_t len = strlen(name);
-    return env_find_hash(env, name, len, text_hash(name, len));
-}
+/* The value stored under name in env's own entries, borrowed. */
 static SPYValue *env_entry(SPYValue *env, const char *name) {
-    Entry *e = env_find(env, name);
+    Entry *e = env_find(env, name_of(name));
     return e ? e->value : NULL;
 }
-static SPYValue *name_local(SPYValue *env, const char *name) {
-    if (env->type == SPY_CLASS && class_slot_name(name)) {
+static SPYValue *local_value(SPYValue *env, Name name) {
+    if (env->type == SPY_CLASS && class_slot_name(name.text)) {
         if (!env->as.map.class_cell) return NULL;
         env = env->as.map.class_cell;
     }
@@ -1626,13 +1629,15 @@ static SPYValue *name_local(SPYValue *env, const char *name) {
         env = dictionary_value(env->ctx, env->as.map.namespace);
         if (!env) return NULL;
     }
-    SPYValue *value = env_entry(env, name);
+    Entry *entry = env_find(env, name);
+    SPYValue *value = entry ? entry->value : NULL;
     if (value && env->type == V_ENV && env->as.map.flags == ENV_FORWARD) {
         value = cell_contents(value);
         return value ? value : env->ctx->unbound;
     }
     return value;
 }
+static SPYValue *name_local(SPYValue *env, const char *name) { return local_value(env, name_of(name)); }
 /* CPython's types for builtin methods: most unbound dunders of builtin types
  * are slot wrappers, a few are method descriptors, and binding a slot wrapper
  * gives a method-wrapper. Other natives are builtin_function_or_method. */
@@ -1796,27 +1801,26 @@ static const char *type_fqname(SPYValue *value, char *buffer, size_t size) {
     snprintf(buffer, size, "%s.%s", module->as.string.data, name->as.string.data);
     return buffer;
 }
-static Symbol *scope_symbol(Scope *scope, const char *name) {
-    if (!scope) return NULL;
-    int64_t hash = text_hash(name, strlen(name));
-    for (size_t i = 0; i < scope->len; i++)
-        if (scope->symbols[i].hash == hash && !strcmp(scope->symbols[i].name, name)) return &scope->symbols[i];
+static Symbol *scope_find(Scope *scope, Name name) {
+    if (scope) for (size_t i = 0; i < scope->len; i++)
+        if (scope->symbols[i].hash == name.hash && !strcmp(scope->symbols[i].name, name.text)) return &scope->symbols[i];
     return NULL;
 }
+static Symbol *scope_symbol(Scope *scope, const char *name) { return scope ? scope_find(scope, name_of(name)) : NULL; }
 static SPYValue *module_env(SPYContext *c, SPYValue *env) {
     while (env->as.map.parent && env->as.map.parent != c->builtins &&
            !(env->type == V_ENV && env->as.map.flags == 3)) env = env->as.map.parent;
     return env;
 }
-static SPYValue *binding_env(SPYContext *c, SPYValue *env, const char *name) {
-    Symbol *symbol = env->type == V_ENV ? scope_symbol(env->as.map.scope, name) : NULL;
+static SPYValue *binding_env(SPYContext *c, SPYValue *env, Name name) {
+    Symbol *symbol = env->type == V_ENV ? scope_find(env->as.map.scope, name) : NULL;
     if (!symbol) return env;
     if (symbol->flags & S_GLOBAL) return module_env(c, env);
     if (symbol->flags & S_NONLOCAL) {
         for (SPYValue *e = env->as.map.parent; e && e != c->builtins; e = e->as.map.parent) {
             if (e->type != V_ENV || e->as.map.flags == 1) continue;
-            if (e->as.map.flags == 4 && !strcmp(name, "__class__")) return e;
-            Symbol *s = scope_symbol(e->as.map.scope, name);
+            if (e->as.map.flags == 4 && !strcmp(name.text, "__class__")) return e;
+            Symbol *s = scope_find(e->as.map.scope, name);
             if (s && (s->flags & (S_LOCAL | S_PARAM)) && !(s->flags & (S_GLOBAL | S_NONLOCAL))) return e;
         }
     }
@@ -1833,19 +1837,19 @@ static int annotation_env(SPYValue *e) {
 /* The value of the key name in a dict namespace, borrowed: a key that is
  * not a str but equal to name is found by comparison, as a dict lookup
  * finds it. NULL for a missing key, with an error if a comparison raised. */
-static SPYValue *dict_name(SPYContext *c, SPYValue *dict, const char *name) {
-    SPYValue *value = name_local(dict, name), *map = dictionary_value(c, dict);
+static SPYValue *dict_name(SPYContext *c, SPYValue *dict, Name name) {
+    SPYValue *value = local_value(dict, name), *map = dictionary_value(c, dict);
     if (value || !map) return value;
     size_t i = 0;
     while (i < map->as.map.len && builtin_value(c, map->as.map.items[i].key, SPY_STRING)) i++;
     if (i == map->as.map.len) return NULL;
-    SPYValue *key = spy_string(c, name, strlen(name));
+    SPYValue *key = spy_string(c, name.text, name.len);
     ptrdiff_t at = key ? map_find(map, key) : -1;
     spy_release(key);
     return at >= 0 ? map->as.map.items[at].value : NULL;
 }
 /* Return an owned local value, or NULL without an error for a missing key. */
-static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
+static SPYValue *name_lookup(SPYContext *c, SPYValue *env, Name name) {
     SPYValue *namespace = env->as.map.namespace;
     /* A class body with a __classdict__ cell reads the mapping in it. */
     SPYValue *classdict = env->type == V_ENV && env->as.map.flags == 1 && env->as.map.base ? cell_contents(env->as.map.base) : NULL;
@@ -1854,18 +1858,19 @@ static SPYValue *name_lookup(SPYContext *c, SPYValue *env, const char *name) {
         namespace = classdict;
     }
     if (namespace && namespace->type != SPY_DICT) {
-        SPYValue *key = spy_string(c, name, strlen(name));
+        SPYValue *key = spy_string(c, name.text, name.len);
         SPYValue *value = key ? get_index(c, namespace, key) : NULL;
         spy_release(key);
         if (!value && error_is(c, "KeyError")) spy_clear_error(c);
         return value;
     }
     if (env->type == SPY_DICT || (namespace && namespace->type == SPY_DICT)) return spy_retain(dict_name(c, namespace ? namespace : env, name));
-    return spy_retain(name_local(env, name));
+    return spy_retain(local_value(env, name));
 }
 static SPYValue *lazy_reify(SPYContext *, SPYValue *, const char *, SPYValue *);
 static int inlined_comprehension(SPYValue *);
-static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
+static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) {
+    Name name = name_of(text);
     int annotation = 1;
     for (SPYValue *e = env; e; e = e->as.map.parent) {
         e = binding_env(c, e, name);
@@ -1879,9 +1884,9 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
         }
         annotation = annotation && annotation_env(e);
         if (!v && e->type == V_ENV && e->as.map.scope && e->as.map.scope->kind == S_CLASS) {
-            Symbol *symbol = scope_symbol(e->as.map.scope, name);
+            Symbol *symbol = scope_find(e->as.map.scope, name);
             if (symbol && (symbol->flags & S_LOCAL) && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)))
-                return name_get(c, module_env(c, e), name);
+                return name_get(c, module_env(c, e), text);
         }
         if (v) {
             if (v->type == V_UNBOUND) {
@@ -1889,33 +1894,34 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *name) {
                 if (e->type == V_ENV && e->as.map.flags == 1) {
                     /* A class-local name that has not been assigned falls back
                      * to globals, not a same-named enclosing function cell. */
-                    return name_get(c, module_env(c, e), name);
+                    return name_get(c, module_env(c, e), text);
                 }
                 /* List, set, and dict comprehensions are inlined into their
                  * function (PEP 709), so its locals are theirs too. */
                 SPYValue *inner = env;
                 while (inner != e && inlined_comprehension(inner)) inner = inner->as.map.parent;
-                if (inner != e) return name_error(c, name, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
-                return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", name);
+                if (inner != e) return name_error(c, text, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
+                return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", text);
             }
             /* Global and class namespaces resolve lazy imports; function locals do not. */
             if (v->type == SPY_LAZY_IMPORT && (e->type != V_ENV || !e->as.map.scope || e->as.map.scope->kind == S_MODULE ||
                                                e->as.map.scope->kind == S_CLASS))
-                return lazy_reify(c, e, name, v);
+                return lazy_reify(c, e, text, v);
             return v;
         }
     }
-    return name_error(c, name, "name '%s' is not defined");
+    return name_error(c, text, "name '%s' is not defined");
 }
-static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v) {
-    if (env->type == SPY_CLASS && class_slot_name(name)) {
+static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v) {
+    Name name = name_of(text);
+    if (env->type == SPY_CLASS && class_slot_name(text)) {
         if (!env->as.map.class_cell && !(env->as.map.class_cell = value_new(c, SPY_DICT))) return -1;
         env = env->as.map.class_cell;
     }
     env = binding_env(c, env, name);
     if (env->type == V_ENV && env->as.map.flags == ENV_FORWARD) {
-        SPYValue *cell = env_entry(env, name);
-        if (cell) return cell_set(c, cell, v->type == V_UNBOUND ? NULL : v);
+        Entry *cell = env_find(env, name);
+        if (cell) return cell_set(c, cell->value, v->type == V_UNBOUND ? NULL : v);
     }
     SPYValue *namespace = namespace_map(env);
     if (env->type == V_ENV && env->as.map.flags == 3) {
@@ -1923,10 +1929,8 @@ static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v)
         if (namespace->type == SPY_FROZENDICT) { spy_error(c, "TypeError", "frozendict object does not support item assignment"); return -1; }
     }
     int own = namespace == env && env->type != SPY_FROZENDICT;
-    size_t len = strlen(name);
-    int64_t hash = text_hash(name, len);
     /* Rebinding an exact str key is what map_set would do, without a new key. */
-    Entry *entry = own ? env_find_hash(env, name, len, hash) : NULL;
+    Entry *entry = own ? env_find(env, name) : NULL;
     if (entry && entry->key->type == SPY_STRING) {
         SPYValue *old = entry->value;
         class_changed(env);
@@ -1934,9 +1938,9 @@ static int name_set(SPYContext *c, SPYValue *env, const char *name, SPYValue *v)
         spy_release(old);
         return 0;
     }
-    SPYValue *key = spy_string(c, name, len);
+    SPYValue *key = spy_string(c, text, name.len);
     if (!key) return -1;
-    int status = own ? map_set_hash(c, env, key, v, hash) : set_index(c, namespace, key, v);
+    int status = own ? map_set_hash(c, env, key, v, name.hash) : set_index(c, namespace, key, v);
     spy_release(key);
     return status;
 }
@@ -7394,7 +7398,7 @@ static int iterator_state_index(SPYContext *c, SPYValue *state, int64_t *index) 
 /* The builtins entry name, owned, as _PyEval_GetBuiltin finds it for the
  * iterators' __reduce__; an AttributeError if it is missing. */
 static SPYValue *builtin_entry(SPYContext *c, const char *name) {
-    SPYValue *value = c->builtins->type == SPY_DICT ? dict_name(c, c->builtins, name) : name_local(c->builtins, name);
+    SPYValue *value = c->builtins->type == SPY_DICT ? dict_name(c, c->builtins, name_of(name)) : name_local(c->builtins, name);
     if (!value && !c->error_type[0]) errorf(c, "AttributeError", "%s", name);
     return spy_retain(value);
 }
@@ -14344,10 +14348,10 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
 }
 /* Resolve a placeholder read from env's binding of name and replace the
  * binding, unless it has meanwhile been rebound. Takes ownership. */
-static SPYValue *name_lookup(SPYContext *, SPYValue *, const char *);
+static SPYValue *name_lookup(SPYContext *, SPYValue *, Name);
 static SPYValue *lazy_reify(SPYContext *c, SPYValue *env, const char *name, SPYValue *placeholder) {
     SPYValue *value = lazy_resolve(c, placeholder);
-    SPYValue *current = value ? name_lookup(c, env, name) : NULL;
+    SPYValue *current = value ? name_lookup(c, env, name_of(name)) : NULL;
     if (current == placeholder && name_set(c, env, name, value)) { spy_release(value); value = NULL; }
     spy_release(current); spy_release(placeholder);
     if (c->error_type[0]) { spy_release(value); return NULL; }
@@ -15461,7 +15465,7 @@ static SPYValue *build_class_builtin(SPYContext *, size_t, SPYValue *const *, SP
 static SPYValue *class_statement(SPYContext *c, Frame *f, Node *n, SPYValue *name, SPYValue *bases,
                                  SPYValue *arguments, SPYValue *type_params) {
     SPYValue *builtins = module_env(c, f->env)->as.map.parent;
-    SPYValue *builder = builtins ? name_lookup(c, builtins, "__build_class__") : NULL;
+    SPYValue *builder = builtins ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
     if (!builder) return c->error_type[0] ? NULL : spy_error(c, "NameError", "__build_class__ not found");
     if (builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin) {
         spy_release(builder);
@@ -16279,7 +16283,7 @@ static void delete_name(SPYValue *env, const char *name) {
     }
 }
 static int clear_binding(SPYContext *c, SPYValue *env, const char *name) {
-    env = binding_env(c, env, name);
+    env = binding_env(c, env, name_of(name));
     if (env->type == V_ENV && env->as.map.flags == 3 && builtin_value(c, namespace_map(env), SPY_FROZENDICT)) {
         spy_error(c, "TypeError", "frozendict object does not support item deletion"); return -1;
     }
@@ -16401,7 +16405,7 @@ static int delete_target(SPYContext *c, Frame *f, Node *n) {
         return 0;
     }
     if (n->kind == N_NAME) {
-        SPYValue *owner = binding_env(c, f->env, n->text);
+        SPYValue *owner = binding_env(c, f->env, name_of(n->text));
         if (owner->as.map.namespace && owner->as.map.namespace->type != SPY_DICT && owner->as.map.flags != 3) {
             int status = clear_binding(c, owner, n->text);
             if (status) {
