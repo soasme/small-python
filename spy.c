@@ -150,6 +150,7 @@ struct SPYValue {
  * to the class (20.2.8), not by binding it in the class body. */
 enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64, CLASS_OWN_DICT = 128, CLASS_OWN_WEAKREF = 256 };
 typedef struct { SPYValue *cls, *value; size_t epoch; int64_t hash; char name[24]; } ClassLookup;
+typedef struct { SPYValue *cls, *init; size_t epoch; } PlainClass;
 struct SPYContext {
     SPYValue *values, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
@@ -159,6 +160,7 @@ struct SPYContext {
      * release, advances it. Results are borrowed, with no value edges. */
     ClassLookup lookups[256]; /* Indexed by the top eight bits of a mixed key. */
     size_t classes_changed;
+    PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     int compile_flags; /* compile()'s future flags while it parses. */
@@ -10211,6 +10213,17 @@ static int default_hook(SPYValue *definition, int object_id, int type_id) {
 static int plain_instance(SPYValue *v) {
     return v->type == SPY_INSTANCE && !v->as.map.namespace && !v->as.map.base;
 }
+/* Whether cls has an MRO of watched Python classes and object, whose
+ * entries alone decide what its instances do until classes_changed moves. */
+static int plain_mro(SPYContext *c, SPYValue *cls) {
+    SPYValue *mro = cls->as.map.mro;
+    if (!mro) return 0;
+    for (size_t i = 0; i < mro->as.seq.len; i++) {
+        SPYValue *base = mro->as.seq.items[i];
+        if (!class_watched(base) || (base != c->object && (base->as.map.native || base->as.map.flags == 2))) return 0;
+    }
+    return 1;
+}
 enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD, ATTR_READ = 3, ATTR_WRITE = 4 };
 /* How cls's plain instances answer a read of name: from their own entries
  * (ATTR_OWN), else by binding the Python function *method (ATTR_METHOD),
@@ -10219,12 +10232,8 @@ enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD, ATTR_READ = 3, ATTR_WRITE = 4 };
  * does: every class in the MRO is watched, and none is a builtin class
  * whose slots could precede the class entries. */
 static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYValue **method) {
-    SPYValue *mro = cls->as.map.mro, *hook;
-    if (!mro || (name[0] == '_' && name[1] == '_')) return ATTR_SLOW;
-    for (size_t i = 0; i < mro->as.seq.len; i++) {
-        SPYValue *base = mro->as.seq.items[i];
-        if (!class_watched(base) || (base != c->object && (base->as.map.native || base->as.map.flags == 2))) return ATTR_SLOW;
-    }
+    SPYValue *hook;
+    if (!plain_mro(c, cls) || (name[0] == '_' && name[1] == '_')) return ATTR_SLOW;
     int read = ATTR_SLOW;
     if (!(hook = class_lookup(cls, "__getattribute__")) || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         if (!(*method = class_lookup(cls, name))) read = class_lookup(cls, "__getattr__") ? ATTR_SLOW : ATTR_OWN;
@@ -13884,8 +13893,24 @@ static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *a
     return plain_method(c, argv[1], argv[0]);
 }
 /* type.__call__: allocate with __new__, then initialize with __init__. */
+/* The Python __init__ function of cls when calling cls is just object.__new__
+ * and that __init__: a plain MRO, neither abstract nor an exception, and
+ * object.__new__ as both its allocator and its slot, so that object.__new__
+ * accepts the arguments. Borrowed. */
+static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
+    PlainClass *hit = &c->plain[(uintptr_t)cls / sizeof(SPYValue) % 16];
+    if (hit->cls != cls || hit->epoch != c->classes_changed) {
+        SPYValue *init = class_lookup(cls, "__init__");
+        int plain = plain_mro(c, cls) && !(cls->as.map.flags & CLASS_ABSTRACT) &&
+            !subclass(cls, name_local(c->classes, "BaseException")) && init && init->type == SPY_FUNCTION &&
+            slot_new(c, cls) == name_local(c->object, "__new__") && native_slot_new(c, cls) == name_local(c->object, "__new__");
+        if (c->error_type[0]) return NULL;
+        *hit = (PlainClass){cls, plain ? init : NULL, c->classes_changed};
+    }
+    return hit->init;
+}
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    SPYValue *result = NULL;
+    SPYValue *result = NULL, *plain;
     if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
     if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
@@ -13905,6 +13930,14 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         /* The singletons' tp_new names the C type: ellipsis is EllipsisType. */
         else if (singleton) errorf(c, "TypeError", "%s takes no arguments", fn == c->types[SPY_ELLIPSIS] ? "EllipsisType" : name_local(fn, "__name__")->as.string.data);
         else errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
+    } else if (argc < 8 && (plain = plain_init(c, fn))) {
+        /* object.__new__ then a Python __init__, called directly. */
+        SPYValue *args[8], *value;
+        if (!(args[0] = result = new_instance(c, fn))) return NULL;
+        memcpy(args + 1, argv, argc * sizeof(*argv));
+        value = call_keywords(c, plain, argc + 1, args, keywords);
+        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+        spy_release(value);
     } else {
         SPYValue *allocator = slot_new(c, fn);
         SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
