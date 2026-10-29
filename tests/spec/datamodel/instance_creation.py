@@ -16,6 +16,12 @@ assert_eq(log, [("new", "C", (1,), {"k": 2}), ("init", (1,), {"k": 2})])
 assert_is(type(1), int)
 e = assert_raises(TypeError, type, 1, 2)
 assert_eq(str(e), "type() takes 1 or 3 arguments")
+# Keywords are refused only beside one argument; other counts fail first.
+e = assert_raises(TypeError, type, 1, x=2)
+assert_eq(str(e), "type() takes no keyword arguments")
+for args in [(), (1, 2)]:
+    e = assert_raises(TypeError, type, *args, name=1)
+    assert_eq(str(e), "type() takes 1 or 3 arguments")
 # A metaclass subclass of type with one argument is not the shortcut.
 class Meta(type): pass
 assert_raises(TypeError, Meta, 1)

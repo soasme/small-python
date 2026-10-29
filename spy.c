@@ -23982,7 +23982,9 @@ static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const 
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, const char *name) {
     switch (id) {
     case B_TYPE: {
-        if (argc != 3) break;
+        /* Only type(object) refuses keywords; other counts but 3 are wrong first. */
+        if (argc == 1) break;
+        if (argc != 3) return builtin(c, argc, argv, (void *)(intptr_t)id);
         SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords);
         /* type.__call__ initializes the result with its own metaclass. */
         SPYValue *init = cls && cls->type == SPY_CLASS && cls->as.map.meta ? special_method(c, cls, "__init__") : NULL;
