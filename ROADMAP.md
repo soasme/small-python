@@ -25,6 +25,14 @@ their current behavior.
 Expected gain: 20 to 30 percent on call-heavy programs (`fib`, `classes`,
 `generators`).
 
+Measured so far: a fresh environment already places parameters first and
+then the other locals in symbol order, and each name node caches its entry
+position, so reads are nearly array reads. The cost is in building and
+releasing the environment value per call: in `fib(32)`, call setup and
+teardown take about a fifth of the time and name resolution about a sixth.
+Writing entries directly instead of through `map_append` gained nothing; the
+win needs the environment itself to stop being a full map value per call.
+
 ### Compiled dispatch
 
 Ordinary code is evaluated by `eval`, a switch over node kinds called
@@ -38,6 +46,15 @@ source unit.
 
 Expected gain: two to three times on interpreter-bound programs. Largest and
 riskiest change; measure it separately from the steps above.
+
+First stage done: nodes marked `F_OPERATOR` at compile time (arithmetic, a
+single comparison or an index on literal or name operands) skip dispatch
+when `tick` has only the line to record, which took `fib` down 9 percent and
+`nbody` 10. Extending the operands to attributes of plain instances helped
+`classes` (6 percent) but slowed `nbody` and `fib` by 2 to 5 percent through
+code layout, so it was left out. Any handler added to `eval` must keep its
+stack frame small: `eval` sits on every level of Python recursion, and the
+recursion spec test runs within 4 MiB of native stack under ASan.
 
 ### Smaller values
 
