@@ -897,7 +897,7 @@ be installed beyond a C11 compiler; MSVC is not one.
 
 ```sh
 make test-rust
-cd examples/todo && cargo run    # an axum application with its rules in Python
+cd examples/todo && cargo run    # a Flask-style Python application served by axum
 ```
 
 ## 4 Internals

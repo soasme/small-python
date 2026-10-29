@@ -253,18 +253,21 @@ checked.
 ## 5 The todo example
 
 `examples/todo`, beside the C examples and outside the crates' workspace,
-serves a todo list over HTTP with axum and tokio. The
-rules live in `app.py`: validating titles, updating and filtering todos, and
-counting them; Rust parses JSON with serde_json, converts it with the `serde`
-feature, calls the Python function, and maps `ValueError` to 400 and
-`KeyError` to 404. One `Runtime` behind a `Mutex` holds the todos and serves
-every request in turn. A Rust host function, `now()`, gives the Python code
-the time.
+is a todo list written like a Flask application (`app.py`) and served by a
+Rust host that knows nothing about todos. The host supplies what the engine
+lacks: axum and tokio serve and route, serde_json becomes the module `json`
+(`loads` and `dumps`, through the `serde` feature), and `app.py`'s directory
+is mounted read-only for `open()`. `web.py`, built into the host and
+registered with `register_module`, turns these into `App` with route
+decorators, `request`, and `abort`. After running `app.py` the host reads
+`web.routes` and gives each method and path an axum route calling
+`web.dispatch`, which returns the status, content type, and text. One
+`Runtime` behind a `Mutex` serves every request in turn.
 
 ```sh
 cd examples/todo
-cargo run                  # http://127.0.0.1:3000; set ADDRESS to change it
-curl -d '{"title":"write docs"}' -H 'content-type: application/json' localhost:3000/todos
+cargo run                  # http://127.0.0.1:3000; APP_DIR and ADDRESS change the app and address
+curl -d '{"title":"write docs"}' localhost:3000/todos
 ```
 
 ## 6 Building, testing, publishing
@@ -280,7 +283,8 @@ output, limits, values of another runtime, moving a runtime between threads,
 and serde round trips; for the worker, nested callbacks, causes, object
 operations and handle release, a timeout that excludes host time, workers
 killed by `SIGSEGV`, `SIGABRT`, and `SIGKILL`, a panicking host function,
-and the sealed sandbox on macOS; and the todo application's routes.
+and the sealed sandbox on macOS; and the todo application's routes, aborts,
+and page.
 
 The crates share the engine's version. Pushing a version tag runs the
 `crates` job of `.github/workflows/publish.yml`: it checks the tag against

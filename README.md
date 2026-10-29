@@ -126,7 +126,7 @@ source with `cc` during `cargo build`, so there is nothing to install.
 `small-python` runs the engine in your process with a safe API (and serde
 conversions); `small-python-worker` runs each runtime in a sandboxed worker
 process, as the Python package does. [`examples/todo`](examples/todo)
-is an axum web application whose rules are written in Python.
+is a Flask-style Python application served by axum, with JSON from serde.
 
 ```rust
 let rt = small_python::Runtime::new()?;

@@ -1,69 +1,76 @@
-"""The todo application's rules, run by Small Python inside the Rust server.
+"""A todo list in the style of Flask, served by the Rust host with axum."""
+from web import App, abort, request
 
-Rust owns HTTP and JSON; this module owns the todos. Each function takes and
-returns plain data, which crosses as JSON. ValueError is a bad request and
-KeyError a missing todo. now() is a host function written in Rust.
-"""
-
+app = App()
 todos = []
 next_id = 1
 
 
-def _title(title):
+def title_of(data):
+    title = data.get("title") if isinstance(data, dict) else None
     if not isinstance(title, str) or not title.strip():
-        raise ValueError("title must be a non-empty string")
+        abort(400, "title must be a non-empty string")
     if len(title) > 200:
-        raise ValueError("title must be at most 200 characters")
+        abort(400, "title must be at most 200 characters")
     return title.strip()
 
 
-def _find(id):
+def find(id):
     for todo in todos:
-        if todo["id"] == id:
+        if str(todo["id"]) == id:
             return todo
-    raise KeyError(id)
+    abort(404, f"no todo {id}")
 
 
-def list_todos(show="all"):
+@app.get("/")
+def index():
+    with open("index.html") as page:
+        return page.read()
+
+
+@app.get("/todos")
+def list_todos():
+    show = request.args.get("show", "all")
     if show == "all":
         return todos
     if show not in ("active", "done"):
-        raise ValueError(f"show must be all, active, or done, not {show!r}")
+        abort(400, f"show must be all, active, or done, not {show!r}")
     return [todo for todo in todos if todo["done"] == (show == "done")]
 
 
-def add(data):
+@app.post("/todos")
+def add():
     global next_id
-    if not isinstance(data, dict):
-        raise ValueError("expected an object")
-    todo = {"id": next_id, "title": _title(data.get("title")), "done": False, "created": now()}
+    todo = {"id": next_id, "title": title_of(request.json), "done": False}
     next_id += 1
     todos.append(todo)
-    return todo
+    return todo, 201
 
 
-def update(id, data):
-    todo = _find(id)
+@app.patch("/todos/{id}")
+def update(id):
+    todo = find(id)
+    data = request.json
     if not isinstance(data, dict):
-        raise ValueError("expected an object")
+        abort(400, "expected an object")
     changes = {}
     for key, value in data.items():
         if key == "title":
-            changes["title"] = _title(value)
+            changes["title"] = title_of(data)
         elif key == "done" and isinstance(value, bool):
             changes["done"] = value
-        elif key == "done":
-            raise ValueError("done must be true or false")
         else:
-            raise ValueError(f"unknown field {key!r}")
+            abort(400, f"invalid field {key!r}")
     todo.update(changes)
     return todo
 
 
+@app.delete("/todos/{id}")
 def remove(id):
-    todos.remove(_find(id))
+    todos.remove(find(id))
 
 
+@app.get("/stats")
 def stats():
     done = sum(1 for todo in todos if todo["done"])
     return {"total": len(todos), "done": done, "active": len(todos) - done}
