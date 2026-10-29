@@ -180,7 +180,8 @@ struct SPYContext {
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     int compile_flags; /* compile()'s future flags while it parses. */
-    int optimize; /* compile(optimize>=1) while it parses: no asserts, __debug__ is False. */
+    int optimize; /* The level the parser applies (spy_set_optimize, compile(optimize=)):
+                   * 1 drops asserts and makes __debug__ False, 2 also drops docstrings. */
     int string_source; /* compile(), exec(), or eval() is parsing a string. */
     int eval_input; /* The source is eval input: one expression list. */
     const char *node_start, *node_end; /* The source a compile-time SyntaxError covers. */
@@ -6526,6 +6527,10 @@ static int validate_named(SPYContext *c, Node *n, NamedScope *comps, size_t coun
     c->depth--;
     return status ? -1 : 0;
 }
+/* Optimization level 2 keeps no docstrings: each becomes pass, so __doc__ is None. */
+static void drop_docstring(Node *body) {
+    if (body && body->kind == N_EXPR && body->a->kind == N_STRING) { body->kind = N_PASS; body->a = NULL; }
+}
 static int compile_generator(SPYContext *, Node *);
 static int compile_comprehension(SPYContext *, Node *);
 static int validate_yields(SPYContext *c, Node *n, int comp) {
@@ -7101,6 +7106,11 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         unit->as.unit.future_flags = (p.barry ? 0x400000 : 0) | (p.future_annotations ? 0x1000000 : 0);
         c->node_start = c->node_end = NULL;
         if (!c->error_type[0]) body_annotations(&p, NULL, unit->as.unit.body, &unit->as.unit.annotate);
+        if (c->optimize > 1) {
+            drop_docstring(unit->as.unit.body);
+            for (Node *n = unit->as.unit.nodes; n; n = n->allocated)
+                if (n->kind == N_DEF || n->kind == N_CLASS) drop_docstring(n->b);
+        }
         NamedScope comps[128];
         if (!c->error_type[0]) validate_named(c, unit->as.unit.body, comps, 0, 0, 0);
         if (!c->error_type[0]) validate_yields(c, unit->as.unit.body, 0);
@@ -23953,8 +23963,8 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
 }
 /* compile(source, filename, mode, flags=0, dont_inherit=False, optimize=-1, *,
  * module=None, _feature_version=-1), validated as builtin_compile_impl. Future
- * flags do not change the code spy produces; optimize>=1 drops asserts and
- * makes __debug__ False. */
+ * flags do not change the code spy produces; optimize=-1 keeps the context's
+ * level (spy_set_optimize). */
 enum { CF_ONLY_AST = 0x400, CF_FUTURE_MASK = 0x20000 | 0x40000 | 0x80000 | 0x100000 | 0x200000 | 0x400000 | 0x800000 | 0x1000000,
        CF_ALLOWED = CF_FUTURE_MASK | 0x10 | CF_ONLY_AST | 0x1000 | 0x200 | 0x4000 | 0x8000 };
 static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -23983,7 +23993,7 @@ static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *ar
     int saved = c->compile_flags, inherit = !args[4] || !spy_truth(args[4]);
     c->compile_flags = (int)(flags & CF_FUTURE_MASK) | (inherit ? caller_future_flags(c) : 0);
     int optimized = c->optimize;
-    c->optimize = optimize > 0;
+    if (optimize >= 0) c->optimize = (int)optimize;
     SPYValue *code = builtin(c, 3, args, (void *)(intptr_t)B_COMPILE);
     c->compile_flags = saved; c->optimize = optimized;
     return code;
@@ -25926,6 +25936,7 @@ void spy_set_flush(SPYContext *c, SPYFlush flush) { c->flush = flush; }
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; }
+void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c); c->steps = 0;
     SPYValue *unit = parse(c, source, filename ? filename : "<string>");

@@ -79,6 +79,9 @@ int spy_exec_module(SPYContext *, SPYValue *, const char *source, const char *fi
 enum { SPY_MOUNT_READ_ONLY = 1 };
 int spy_mount(SPYContext *, const char *directory, const char *path, int flags);
 void spy_set_step_limit(SPYContext *, size_t);
+/* Optimization level, as python -O (1: no asserts, __debug__ is False) and
+ * -OO (2: no docstrings either); compile(optimize=-1) uses it. Default 0. */
+void spy_set_optimize(SPYContext *, int level);
 size_t spy_collect(SPYContext *);
 size_t spy_live_values(const SPYContext *);
 

@@ -31,18 +31,23 @@ static int repl(SPYContext *c) {
     return 0;
 }
 static int usage(void) {
-    fputs("usage: spy [--mount dir]... [-c source | -i | --version | file.py | -]\n", stderr);
+    fputs("usage: spy [--mount dir]... [-O | -OO] [-c source | -i | --version | file.py | -]\n", stderr);
     return 2;
 }
 int main(int argc, char **argv) {
     /* open() reaches only mounted directories: the current one at its own
-     * path unless --mount names others, each mounted at its own path. */
+     * path unless --mount names others, each mounted at its own path.
+     * -O and -OO set the optimization level, as python's do. */
     const char *mounts[64];
-    int mount_count = 0, at = 1;
-    while (at < argc && !strcmp(argv[at], "--mount")) {
-        if (at + 1 >= argc || mount_count == 64) return usage();
-        mounts[mount_count++] = argv[at + 1];
-        at += 2;
+    int mount_count = 0, at = 1, optimize = 0;
+    for (;;) {
+        if (at < argc && !strcmp(argv[at], "--mount")) {
+            if (at + 1 >= argc || mount_count == 64) return usage();
+            mounts[mount_count++] = argv[at + 1];
+            at += 2;
+        } else if (at < argc && (!strcmp(argv[at], "-O") || !strcmp(argv[at], "-OO"))) {
+            optimize = (int)strlen(argv[at++]) - 1;
+        } else break;
     }
     argv[at - 1] = argv[0]; argv += at - 1; argc -= at - 1;
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts("spy " SPY_VERSION); return 0; }
@@ -53,6 +58,7 @@ int main(int argc, char **argv) {
     spy_set_output(c, host_output, stdout);
     spy_set_flush(c, host_flush);
     spy_set_input(c, host_read_line, stdin);
+    spy_set_optimize(c, optimize);
     if (spy_std_init(c)) { host_report(c); spy_context_free(c); return 1; }
     if (!mount_count) mounts[mount_count++] = ".";
     for (int i = 0; i < mount_count; i++)

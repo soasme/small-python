@@ -71,6 +71,10 @@ ns = {}
 exec(compile("assert False\nok = 1", "<x>", "exec", optimize=1), ns)
 assert_eq(ns["ok"], 1)
 assert_eq(eval(compile("__debug__", "<x>", "eval", optimize=1)), False)
+# Level 2 also keeps no docstrings: __doc__ is None, and the bodies still run.
+ns = {}
+exec(compile('"m"\ndef f():\n    "d"\n    return 5\nclass C:\n    "c"\n', "<x>", "exec", optimize=2), ns)
+assert_eq(("__doc__" in ns, ns["f"].__doc__, ns["f"](), ns["C"].__doc__), (False, None, 5, None))
 assert_raises(ValueError, compile, "1", "<x>", "eval", flags=1 << 30)
 # Source with a null byte is rejected.
 assert_raises(SyntaxError, compile, "a\0", "<x>", "exec")

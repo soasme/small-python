@@ -605,6 +605,12 @@ int main(void) {
         assert(spy_live_values(c) == display_baseline);
     }
 
+    /* -OO: no asserts, __debug__ False, no docstrings; compile(optimize=-1) inherits it. */
+    spy_set_optimize(c, 2);
+    execute(c, "def documented():\n    'doc'\n    return 1\nassert 0\n"
+               "optimized = (__debug__, documented.__doc__, documented(), eval(compile('__debug__', '', 'eval')))");
+    spy_set_optimize(c, 0);
+    assert(integer(c, spy_eval(c, "optimized == (False, None, 1, False) and __debug__", "optimize.py")) == 1);
     spy_set_step_limit(c, 100);
     assert(spy_exec(c, "while True:\n    pass\n", "loop.py") == -1);
     assert(!strcmp(spy_error_type(c), "RuntimeError"));
