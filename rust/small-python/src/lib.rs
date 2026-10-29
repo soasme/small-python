@@ -338,3 +338,7 @@ pub(crate) fn c_name(name: &str) -> Result<CString> {
 fn c_source(source: &str) -> Result<CString> {
     CString::new(source).map_err(|_| Error::new("SyntaxError", "source code string cannot contain null bytes"))
 }
+
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;

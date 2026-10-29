@@ -99,10 +99,10 @@ impl Value {
 }
 
 macro_rules! from {
-    ($($t:ty => $v:ident $(as $as:ty)?),*) => {$(
+    ($($t:ty => $v:ident),*) => {$(
         impl From<$t> for Value {
             fn from(value: $t) -> Value {
-                Value::$v(value $(as $as)?.into())
+                Value::$v(value.into())
             }
         }
     )*};
@@ -1063,3 +1063,7 @@ fn cache_dir() -> PathBuf {
     }
     .unwrap_or_else(std::env::temp_dir)
 }
+
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;

@@ -119,6 +119,24 @@ with small_python.Runtime() as rt:
     print(rt.eval("lookup('answer') * 2"))  # 84
 ```
 
+## From Rust
+
+The crates in [`rust/`](docs/packaging/rust.md) compile the engine from
+source with `cc` during `cargo build`, so there is nothing to install.
+`small-python` runs the engine in your process with a safe API (and serde
+conversions); `small-python-worker` runs each runtime in a sandboxed worker
+process, as the Python package does. [`rust/examples/todo`](rust/examples/todo)
+is an axum web application whose rules are written in Python.
+
+```rust
+let rt = small_python::Runtime::new()?;
+rt.define("add", |rt, args| {
+    let (a, b): (i64, i64) = args.extract()?;
+    rt.to_py(a + b)
+})?;
+let n: i64 = rt.eval("add(40, 2)")?;  // 42
+```
+
 ## Testing
 
 ```sh
@@ -126,6 +144,7 @@ make test         # C API tests and the specification suite
 make test-spec    # specification tests only
 make sanitize     # AddressSanitizer build
 make bench        # startup benchmark
+make test-rust    # the Rust crates and the todo example
 ```
 
 ## Documentation

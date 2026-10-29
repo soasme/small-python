@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Todos</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+  form { display: flex; gap: .5rem; }
+  input[type=text] { flex: 1; padding: .4rem; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; gap: .5rem; align-items: center; padding: .25rem 0; }
+  li span { flex: 1; }
+  li.done span { text-decoration: line-through; color: #888; }
+  #error { color: #b00; min-height: 1.5em; }
+</style>
+<h1>Todos</h1>
+<form id="add"><input type="text" name="title" placeholder="What needs doing?" autofocus><button>Add</button></form>
+<p id="error"></p>
+<ul id="todos"></ul>
+<p id="stats"></p>
+<script>
+async function api(method, path, body) {
+  const response = await fetch(path, {
+    method, headers: { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = response.status === 204 ? null : await response.json();
+  document.getElementById("error").textContent = response.ok ? "" : data.error;
+  return response.ok ? data : null;
+}
+
+async function render() {
+  const list = document.getElementById("todos");
+  list.replaceChildren(...(await api("GET", "/todos")).map(todo => {
+    const item = document.createElement("li");
+    item.className = todo.done ? "done" : "";
+    const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: todo.done });
+    box.onchange = () => api("PATCH", `/todos/${todo.id}`, { done: box.checked }).then(render);
+    const title = Object.assign(document.createElement("span"), { textContent: todo.title });
+    const remove = Object.assign(document.createElement("button"), { textContent: "×" });
+    remove.onclick = () => api("DELETE", `/todos/${todo.id}`).then(render);
+    item.append(box, title, remove);
+    return item;
+  }));
+  const stats = await api("GET", "/stats");
+  document.getElementById("stats").textContent = `${stats.active} left, ${stats.done} done`;
+}
+
+document.getElementById("add").onsubmit = async event => {
+  event.preventDefault();
+  const title = event.target.title;
+  if (await api("POST", "/todos", { title: title.value })) title.value = "";
+  render();
+};
+render();
+</script>

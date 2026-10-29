@@ -1,7 +1,8 @@
 # Worker protocol
 
-Status: specification. The packages in `python.md` and `javascript.md` run
-the engine through this protocol; neither links the engine into its host.
+Status: specification. The packages in `python.md` and `javascript.md`, and
+the `small-python-worker` crate in `rust.md`, run the engine through this
+protocol; none links the engine into its host.
 
 ## 1 Purpose
 
@@ -14,6 +15,7 @@ run each runtime in a *worker*, a separate address space that owns exactly one
 | Package | Worker | Stream | Separation |
 |---|---|---|---|
 | Python | `spy-worker` executable, one process per runtime | the worker's stdin and stdout pipes | OS process |
+| Rust (`small-python-worker`) | as Python | as Python | OS process |
 | JavaScript | `spy-worker.wasm` in a Worker thread, one per runtime | `postMessage` out, a `SharedArrayBuffer` in | WebAssembly sandbox and a Worker thread |
 
 Both workers are built from the same C file, `spy-worker.c`, with only the
@@ -288,7 +290,7 @@ objects from the runtime, raises the same kind of error. Releasing handles of
 a lost runtime does nothing. Nothing is restarted: the state of a lost runtime
 is gone, and a new runtime must be made.
 
-## 9 Process hygiene (Python worker)
+## 9 Process hygiene (native worker)
 
 The worker is started with an empty environment, working directory `/`, no
 inherited descriptors besides 0, 1, and 2, and in its own process group, so a

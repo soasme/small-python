@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer test-rust rust-vendor
 all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -201,6 +201,17 @@ test-binding: spy-worker
 	cp -R python/src/small_python $(OBJDIR)/binding/
 	cp spy-worker $(OBJDIR)/binding/small_python/
 	PYTHONPATH=$(OBJDIR)/binding python3 -m unittest discover -s python/tests
+
+# The Rust crates (rust/, docs/packaging/rust.md) compile the engine with cc themselves.
+test-rust:
+	cd rust && cargo test --workspace --all-features
+
+# A published small-python-src carries the sources and licenses in csrc/.
+RUST_CSRC = rust/small-python-src/csrc
+rust-vendor:
+	mkdir -p $(RUST_CSRC)/licenses
+	cp spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-intrinsics.h spy-unicode.h spy-worker.c $(RUST_CSRC)/
+	cp LICENSE docs/licenses/python.txt docs/licenses/unicode.txt $(RUST_CSRC)/licenses/
 
 # libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.
 # Apple clang lacks libFuzzer; on macOS use FUZZ_CC=$$(brew --prefix llvm)/bin/clang.

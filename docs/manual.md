@@ -20,6 +20,7 @@ Version 0.2.0
   - [3.3 Standard library and host services](#33-standard-library-and-host-services)
   - [3.4 C API](#34-c-api)
   - [3.5 Python binding](#35-python-binding)
+  - [3.6 Rust crates](#36-rust-crates)
 - [4 Internals](#4-internals)
   - [4.1 Source representation](#41-source-representation)
   - [4.2 Executable generation](#42-executable-generation)
@@ -881,6 +882,23 @@ passing back through a host function re-raises its original exception. Host
 functions cannot call `eval`, `exec`, or `close` on their own runtime; they may
 call engine functions they receive. A runtime belongs to one thread at a time;
 other threads are refused while it runs.
+
+### 3.6 Rust crates
+
+The crates in `rust/` are specified in
+[packaging/rust.md](packaging/rust.md). `small-python-src` carries the C
+sources for build scripts; `small-python-sys` compiles `spy.c` and
+`spy-std.c` with the `cc` crate and binds `spy.h` by hand; `small-python`
+wraps it in a safe API in which every value borrows its runtime, with an
+optional `serde` feature; `small-python-worker` compiles and embeds
+`spy-worker` and speaks [packaging/protocol.md](packaging/protocol.md) to it,
+with the Python package's limits, timeout, and loss rules. Nothing needs to
+be installed beyond a C11 compiler; MSVC is not one.
+
+```sh
+make test-rust
+cd rust && cargo run -p todo     # an axum application with its rules in Python
+```
 
 ## 4 Internals
 

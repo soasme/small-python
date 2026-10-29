@@ -42,6 +42,7 @@ jobs:
           echo "WASI_SDK=$PWD/wasi-sdk-34.0-$asset" >> "$GITHUB_ENV"
       - run: make test-binding
       - run: make test-javascript
+      - run: make test-rust
 
   # The Python package on Windows; its worker is built with the runner's
   # MinGW-w64 GCC (python/setup.py).

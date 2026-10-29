@@ -10,7 +10,7 @@ fn int(n: i64) -> Value {
 #[test]
 fn evaluates_and_converts() {
     let mut rt = Runtime::new().unwrap();
-    assert_eq!(rt.version(), small_python_worker_version());
+    assert_eq!(rt.version(), env!("CARGO_PKG_VERSION"), "the crates share the engine's version");
     assert_eq!(rt.eval("6 * 7").unwrap(), int(42));
     assert_eq!(rt.eval("2 ** 64").unwrap(), Value::BigInt("0x10000000000000000".into()));
     assert_eq!(rt.eval("-2 ** 63").unwrap(), int(i64::MIN));
@@ -31,11 +31,6 @@ fn evaluates_and_converts() {
     );
     rt.set("big", Value::BigInt("-0x10000000000000000".into())).unwrap();
     assert_eq!(rt.eval("big == -2 ** 64").unwrap(), Value::Bool(true));
-}
-
-fn small_python_worker_version() -> String {
-    let header = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../spy.h")).unwrap();
-    header.lines().find_map(|l| l.strip_prefix("#define SPY_VERSION \"")).unwrap().trim_end_matches('"').to_owned()
 }
 
 #[test]

@@ -194,3 +194,8 @@ fn serde_round_trip() {
     let error = rt.from_value::<Doc>(&rt.eval("{'title': 1}").unwrap()).unwrap_err();
     assert_eq!(error.type_name, "ValueError");
 }
+
+#[test]
+fn floats_accept_ints() {
+    assert_eq!(Runtime::new().unwrap().eval::<f64>("2").unwrap(), 2.0);
+}
