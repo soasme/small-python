@@ -89,6 +89,9 @@ int main(void) {
 
 See [`examples/embed.c`](examples/embed.c) for the version with error
 handling, and the [manual](docs/manual.md#34-c-api) for the full API.
+[`examples/pong`](examples/pong) is a raylib game whose logic is Python,
+calling a `raylib` module the host registers with `spy_new_module`
+(`brew install raylib`, then `make -C examples/pong run`).
 
 ## From Python
 

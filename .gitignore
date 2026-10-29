@@ -25,3 +25,4 @@ leak-*
 timeout-*
 oom-*
 slow-unit-*
+/examples/pong/pong
