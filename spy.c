@@ -7323,6 +7323,13 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
 }
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
+    /* A forward iterator over a list or tuple reads the next item directly. */
+    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done &&
+        (v->as.iterator.source->type == SPY_LIST || v->as.iterator.source->type == SPY_TUPLE)) {
+        SPYValue *source = v->as.iterator.source;
+        if (v->as.iterator.index < source->as.seq.len) return spy_retain(source->as.seq.items[v->as.iterator.index++]);
+        v->as.iterator.done = 1; return NULL;
+    }
     if (v->type == SPY_GENERATOR) return generator_next(c, v);
     if (v->type == SPY_COROUTINE_ITERATOR) return generator_next(c, v->as.iterator.source);
     SPYValue *base = v->type == SPY_INSTANCE ? builtin_base(c, v, "__next__", NULL) : NULL;
@@ -12359,6 +12366,12 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     }
 }
 static void compile_body(SPYContext *, Program *, Node *);
+static void compile_target(SPYContext *, Program *, Node *);
+/* Store the value on top of the stack in target n, then pop it. */
+static void compile_store(SPYContext *c, Program *p, Node *n, Node *at) {
+    if (!suspends(n)) emit(c, p, BC_STORE, n, 1);
+    else { compile_target(c, p, n); emit(c, p, BC_POP, at, 0); }
+}
 static void compile_target(SPYContext *c, Program *p, Node *n) {
     if (!suspends(n)) { emit(c, p, BC_STORE, n, 0); return; }
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
@@ -12368,8 +12381,7 @@ static void compile_target(SPYContext *c, Program *p, Node *n) {
     } else {
         emit(c, p, BC_UNPACK, n, 0);
         for (Node *item = n->args; item; item = item->next) {
-            compile_target(c, p, item->kind == N_STAR ? item->a : item);
-            emit(c, p, BC_POP, item, 0);
+            compile_store(c, p, item->kind == N_STAR ? item->a : item, item);
         }
     }
 }
@@ -12406,7 +12418,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
     if (clause != n->a) compile_expr(c, p, clause->a);
     size_t loop = emit(c, p, BC_LOOP, clause, clause == n->a ? 3 : clause->op ? 2 : 1);
     size_t start = p->len, end = emit(c, p, BC_NEXT, clause, clause->op);
-    compile_target(c, p, clause->args); emit(c, p, BC_POP, clause, 0);
+    compile_store(c, p, clause->args, clause);
     compile_comprehension_clause(c, p, n, clause->b);
     patch(p, emit(c, p, BC_JUMP, clause, 0), start);
     patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, clause, 0); patch(p, loop, p->len);
@@ -12473,15 +12485,14 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
                     emit(c, p, BC_LOAD_TARGET, target, 0);
                 }
                 compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
-                if (target->kind == N_NAME) {
-                    emit(c, p, BC_STORE, target, 0); emit(c, p, BC_POP, n, 0);
-                } else emit(c, p, BC_SAVE_TARGET, target, 0);
+                if (target->kind == N_NAME) emit(c, p, BC_STORE, target, 1);
+                else emit(c, p, BC_SAVE_TARGET, target, 0);
                 break;
             }
             compile_expr(c, p, n->b);
-            compile_target(c, p, n->a);
-            for (Node *a = n->args; a; a = a->next) compile_target(c, p, a);
-            emit(c, p, BC_POP, n, 0); break;
+            Node *target = n->a;
+            for (Node *next = n->args; next; target = next, next = next->next) compile_target(c, p, target);
+            compile_store(c, p, target, n); break;
         case N_DEF:
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
             if (n->params) {
@@ -12496,9 +12507,9 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
                 }
             }
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
-            emit(c, p, BC_STORE, n->a, 0); emit(c, p, BC_POP, n, 0); break;
+            emit(c, p, BC_STORE, n->a, 1); break;
         case N_ANNASSIGN:
-            compile_expr(c, p, n->c); compile_target(c, p, n->a); emit(c, p, BC_POP, n, 0); break;
+            compile_expr(c, p, n->c); compile_store(c, p, n->a, n); break;
         case N_MATCH: {
             /* The subject stays on the stack until a case is chosen. */
             size_t exits = SIZE_MAX;
@@ -12540,7 +12551,7 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
             if (loop != SIZE_MAX) p->items[loop].other = start;
             if (n->kind == N_FOR) {
                 branch = emit(c, p, BC_NEXT, n, n->op);
-                compile_target(c, p, n->args); emit(c, p, BC_POP, n, 0);
+                compile_store(c, p, n->args, n);
             }
             else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
             compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, n, 0), start);
@@ -12615,7 +12626,7 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
             }
             emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
-            emit(c, p, BC_STORE, n->a, 0); emit(c, p, BC_POP, n, 0); break;
+            emit(c, p, BC_STORE, n->a, 1); break;
         }
         default: spy_error(c, "NotImplementedError", "yield in this statement is not implemented"); break;
         }
@@ -18823,7 +18834,10 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             b = machine_pop(m); a = machine_pop(m); value = machine_pop(m);
             machine_push(c, m, call_keywords(c, value, a->as.seq.len, a->as.seq.items, b));
             spy_release(value); break;
-        case BC_STORE: store_target(c, &f, n, m->stack[m->len - 1]); break;
+        case BC_STORE:
+            store_target(c, &f, n, m->stack[m->len - 1]);
+            if (ins->arg) a = machine_pop(m);
+            break;
         case BC_UNPACK:
             a = unpack_target(c, &f, n, m->stack[m->len - 1]);
             if (a) for (size_t i = a->as.seq.len; i; i--)
@@ -18926,7 +18940,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             } else {
                 a = iterator_next(c, m->blocks[m->block_len - 1].value);
                 if (!a) m->pc = ins->target;
-                else machine_push(c, m, spy_retain(a));
+                else { machine_push(c, m, a); a = NULL; }
             }
             break;
         case BC_POP_BLOCK: pop_block(c, m, &f); break;
@@ -19065,7 +19079,8 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             spy_release(value); break;
         }
         }
-        spy_release(a); spy_release(b);
+        if (a) spy_release(a);
+        if (b) spy_release(b);
     }
 }
 static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent, SPYValue *thrown,
