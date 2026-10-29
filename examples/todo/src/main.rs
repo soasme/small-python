@@ -2,7 +2,7 @@
 //! app.py, which Small Python runs inside this process.
 //!
 //! ```sh
-//! cargo run -p todo            # then open http://127.0.0.1:3000
+//! cargo run                   # then open http://127.0.0.1:3000
 //! curl -d '{"title":"write docs"}' -H 'content-type: application/json' localhost:3000/todos
 //! ```
 

@@ -205,6 +205,7 @@ test-binding: spy-worker
 # The Rust crates (rust/, docs/packaging/rust.md) compile the engine with cc themselves.
 test-rust:
 	cd rust && cargo test --workspace --all-features
+	cd examples/todo && cargo test
 
 # A published small-python-src carries the sources and licenses in csrc/.
 RUST_CSRC = rust/small-python-src/csrc

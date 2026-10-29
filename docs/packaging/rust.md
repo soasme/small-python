@@ -34,7 +34,6 @@ small-python-worker ─────────────────build─�
 | `small-python-sys` | Raw bindings to `spy.h` and `spy-std.h`, written by hand. Its build script compiles `spy.c` and `spy-std.c` into a static library; `links = "spy"`. |
 | `small-python` | A safe API over `small-python-sys`: the engine in this process. |
 | `small-python-worker` | The parent side of the worker protocol. Its build script compiles and links `spy-worker`, which the crate embeds. |
-| `examples/todo` | A todo web application on axum, tokio, and serde_json whose rules are Python. Not published. |
 
 `small-python-src` finds the sources in the repository checkout two
 directories up; a published crate carries a copy in `csrc/` instead, with
@@ -253,7 +252,8 @@ checked.
 
 ## 5 The todo example
 
-`rust/examples/todo` serves a todo list over HTTP with axum and tokio. The
+`examples/todo`, beside the C examples and outside the crates' workspace,
+serves a todo list over HTTP with axum and tokio. The
 rules live in `app.py`: validating titles, updating and filtering todos, and
 counting them; Rust parses JSON with serde_json, converts it with the `serde`
 feature, calls the Python function, and maps `ValueError` to 400 and
@@ -262,15 +262,15 @@ every request in turn. A Rust host function, `now()`, gives the Python code
 the time.
 
 ```sh
-cd rust
-cargo run -p todo          # http://127.0.0.1:3000; set ADDRESS to change it
+cd examples/todo
+cargo run                  # http://127.0.0.1:3000; set ADDRESS to change it
 curl -d '{"title":"write docs"}' -H 'content-type: application/json' localhost:3000/todos
 ```
 
 ## 6 Building, testing, publishing
 
 ```sh
-make test-rust             # cargo test --workspace --all-features in rust/
+make test-rust             # cargo test in rust/ (all features) and examples/todo
 make rust-vendor           # copy the C sources into rust/small-python-src/csrc
 ```
 

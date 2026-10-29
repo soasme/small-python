@@ -5,7 +5,6 @@ members = [
     "small-python-sys",
     "small-python",
     "small-python-worker",
-    "examples/todo",
 ]
 
 [workspace.package]
