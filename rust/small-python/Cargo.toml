@@ -1,0 +1,25 @@
+[package]
+name = "small-python"
+description = "Embed Small Python, a small Python engine written in C11, in Rust"
+readme = "README.md"
+keywords = ["python", "embedded", "scripting", "interpreter"]
+categories = ["api-bindings"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+ffi = { package = "small-python-sys", version = "0.2.0", path = "../small-python-sys" }
+serde = { version = "1", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[package.metadata.docs.rs]
+all-features = true

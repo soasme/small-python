@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "small-python-src",
+    "small-python-sys",
+    "small-python",
+    # "small-python-worker",
+    # "examples/todo",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/soasme/small-python"
+authors = ["Ju Lin <soasme@gmail.com>"]

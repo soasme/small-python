@@ -1,0 +1,17 @@
+[package]
+name = "small-python-src"
+description = "The C sources of Small Python, and how to compile them, for build scripts"
+readme = "README.md"
+keywords = ["python", "embedded", "interpreter", "build-dependencies"]
+categories = ["development-tools::build-utils"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# csrc/ is ignored by git and filled by `make rust-vendor` before packaging.
+include = ["src/**", "csrc/**", "README.md"]
+
+[dependencies]
+cc = "1.1"

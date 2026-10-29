@@ -1,0 +1,17 @@
+[package]
+name = "small-python-sys"
+description = "Raw bindings to Small Python, a small embeddable Python engine, compiled from source"
+readme = "README.md"
+keywords = ["python", "embedded", "interpreter", "ffi"]
+categories = ["external-ffi-bindings"]
+links = "spy"
+build = "build.rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[build-dependencies]
+small-python-src = { version = "0.2.0", path = "../small-python-src" }
