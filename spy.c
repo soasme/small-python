@@ -8004,6 +8004,26 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
         }
         spy_release(items); return 0;
     }
+    if (s.step == 1) {
+        /* A contiguous slice moves only the entries after it. The removed
+         * entries are released last, with the list already consistent, and
+         * in reverse, as list_ass_slice does. */
+        size_t start = (size_t)s.start, removed = s.count, added = items->as.seq.len, len = v->as.seq.len;
+        if (added > removed && grow(c, (void **)&v->as.seq.items, &v->as.seq.cap, len - removed + added, sizeof(SPYValue *))) {
+            spy_release(items); return -1;
+        }
+        SPYValue **gone = removed ? allocate(c, removed * sizeof(SPYValue *)) : NULL;
+        if (removed && !gone) { spy_release(items); return -1; }
+        SPYValue **at = v->as.seq.items + start;
+        if (removed) memcpy(gone, at, removed * sizeof(*gone));
+        memmove(at + added, at + removed, (len - start - removed) * sizeof(*at));
+        for (size_t i = 0; i < added; i++) at[i] = spy_retain(items->as.seq.items[i]);
+        v->as.seq.len = len - removed + added;
+        spy_release(items);
+        while (removed) spy_release(gone[--removed]);
+        free(gone);
+        return 0;
+    }
     SPYValue *result = spy_list(c);
     if (!result) { spy_release(items); return -1; }
     size_t first = (size_t)s.start, step = s.step < 0 ? (size_t)(0 - (uint64_t)s.step) : (size_t)s.step;
