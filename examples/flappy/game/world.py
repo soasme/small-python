@@ -21,11 +21,13 @@ class World:
         self.clock = 0.0        # seconds in this state
         self.scroll = 0.0       # how far the ground has moved
         self.flash = 0.0        # the white flash of a crash, fading
+        self.events = []        # what happened this frame: "flap", "hit"
 
     def enter(self, state):
         self.state, self.clock = state, 0.0
 
     def update(self, dt, flapped):
+        self.events.clear()
         self.clock += dt
         self.flash = max(0.0, self.flash - dt * 3)
         bird = self.bird
@@ -35,11 +37,11 @@ class World:
                 bird.hover(self.clock)
                 if flapped:
                     self.enter("playing")
-                    bird.flap()
+                    self.flap()
             case "playing":
                 self.scroll += SPEED * dt
                 if flapped:
-                    bird.flap()
+                    self.flap()
                 bird.fall(dt)
                 if bird.y < HIT_RADIUS:
                     bird.y, bird.vy = HIT_RADIUS, 0.0
@@ -55,7 +57,12 @@ class World:
                 if flapped and self.clock > 0.6:
                     self.reset()
 
+    def flap(self):
+        self.bird.flap()
+        self.events.append("flap")
+
     def crash(self):
+        self.events.append("hit")
         self.flash = 1.0
         self.best = max(self.best, self.score)
         self.bird.vy = max(self.bird.vy, 0.0)

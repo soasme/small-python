@@ -41,9 +41,11 @@ static int args(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *kw,
     return status ? -1 : 0;
 }
 
-/* Textures the game loaded, by the index load_texture returns. */
+/* Textures and sounds the game loaded, by the index their load returns. */
 static Texture2D textures[8];
 static size_t texture_count;
+static Sound sounds[8];
+static size_t sound_count;
 
 static SPYValue *init_window(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *kw, void *data) {
     (void)data; double w, h; const char *title;
@@ -66,6 +68,8 @@ static SPYValue *close_window(SPYContext *c, size_t argc, SPYValue *const *argv,
     (void)data;
     if (args(c, argc, argv, kw, "")) return NULL;
     while (texture_count) UnloadTexture(textures[--texture_count]);
+    while (sound_count) UnloadSound(sounds[--sound_count]);
+    if (IsAudioDeviceReady()) CloseAudioDevice();
     CloseWindow();
     return spy_none(c);
 }
@@ -154,6 +158,31 @@ static SPYValue *draw_texture(SPYContext *c, size_t argc, SPYValue *const *argv,
     return spy_none(c);
 }
 
+static SPYValue *init_audio_device(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *kw, void *data) {
+    (void)data;
+    if (args(c, argc, argv, kw, "")) return NULL;
+    InitAudioDevice();
+    return spy_none(c);
+}
+/* load_sound(pcm, rate): a sound from 16-bit mono samples (little-endian). */
+static SPYValue *load_sound(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *kw, void *data) {
+    (void)data; size_t size; double rate;
+    if (kw || argc != 2) return spy_error(c, "TypeError", "load_sound takes the samples and their rate");
+    const unsigned char *pcm = spy_as_bytes(c, argv[0], &size);
+    if (!pcm || spy_as_float(c, argv[1], &rate)) return NULL;
+    if (sound_count == sizeof sounds / sizeof *sounds) return spy_error(c, "RuntimeError", "too many sounds");
+    Wave wave = {(unsigned)(size / 2), (unsigned)rate, 16, 1, (void *)pcm};
+    sounds[sound_count] = LoadSoundFromWave(wave);
+    return spy_int(c, (int64_t)sound_count++);
+}
+static SPYValue *play_sound(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *kw, void *data) {
+    (void)data; double index;
+    if (args(c, argc, argv, kw, "n", &index)) return NULL;
+    if (index < 0 || index >= (double)sound_count) return spy_error(c, "ValueError", "no such sound");
+    PlaySound(sounds[(size_t)index]);
+    return spy_none(c);
+}
+
 static const struct { const char *name; SPYNativeKeywords fn; } functions[] = {
     {"init_window", init_window}, {"set_target_fps", set_target_fps},
     {"window_should_close", window_should_close}, {"close_window", close_window},
@@ -163,6 +192,7 @@ static const struct { const char *name; SPYNativeKeywords fn; } functions[] = {
     {"clear_background", clear_background}, {"draw_rectangle", draw_rectangle},
     {"draw_circle", draw_circle}, {"draw_text", draw_text}, {"measure_text", measure_text},
     {"load_texture", load_texture}, {"draw_texture", draw_texture},
+    {"init_audio_device", init_audio_device}, {"load_sound", load_sound}, {"play_sound", play_sound},
 };
 static const struct { const char *name; int value; } constants[] = {
     {"KEY_SPACE", KEY_SPACE}, {"KEY_UP", KEY_UP}, {"KEY_W", KEY_W},

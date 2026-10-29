@@ -60,6 +60,7 @@ flowchart LR
 | `game/tuning.py` | A guarded import: `from .custom import *` inside `try`/`except ImportError`. Without `game/custom.py`, spyc leaves it out and the metafile records it as missing; add the file (say `GAP = 230`) and the next build bundles it. |
 | `game/themes/` | Dynamic imports. `for_score` computes `game.themes.<name>` for `__import__`, which spyc cannot follow; it warns at that line, and `-D 'game.themes.*'` includes every theme. A new theme is a new file in `NAMES`. |
 | `game/medals.py` | A lazy import (PEP 810): `render.py` says `lazy from . import medals`, so the module first runs at the first game over. |
+| `game/sounds.py` | The flap's chirp and the crash, synthesized as 16-bit PCM when the game starts, so no audio file ships either. The world reports `flap` and `hit` events; `flappy.py` plays them. |
 | `game/render.py` | Drawing with raylib, and the sprite from `assets.sprite`. |
 | `flappy.c` | The host: registers the `raylib` C module with `spy_new_module`, installs `flappy_load`, and runs `spy_flappy`. |
 
@@ -75,7 +76,7 @@ As in [pong](../pong), numbers may be `int` or `float`, and colors are
 | --- | --- |
 | `init_window(w, h, title)` | `InitWindow`, with MSAA and vsync |
 | `set_target_fps(fps)` | `SetTargetFPS` |
-| `window_should_close()`, `close_window()` | `WindowShouldClose`, `CloseWindow` (which also unloads textures) |
+| `window_should_close()`, `close_window()` | `WindowShouldClose`, `CloseWindow` (which also unloads textures and sounds) |
 | `get_frame_time()`, `get_random_value(lo, hi)` | `GetFrameTime`, `GetRandomValue` |
 | `is_key_pressed(key)`, `is_mouse_button_pressed(button)` | `IsKeyPressed`, `IsMouseButtonPressed` |
 | `begin_drawing()`, `end_drawing()`, `clear_background(color)` | `BeginDrawing`, `EndDrawing`, `ClearBackground` |
@@ -83,5 +84,8 @@ As in [pong](../pong), numbers may be `int` or `float`, and colors are
 | `draw_text(text, x, y, size, color)`, `measure_text(text, size)` | `DrawText`, `MeasureText` |
 | `load_texture(png)` | `LoadImageFromMemory` and `LoadTextureFromImage`: a texture from PNG bytes, as an index |
 | `draw_texture(texture, x, y, height, angle)` | `DrawTexturePro`, centered on `(x, y)`, scaled to `height`, turned `angle` degrees |
+| `init_audio_device()` | `InitAudioDevice` |
+| `load_sound(pcm, rate)` | `LoadSoundFromWave`: a sound from 16-bit little-endian mono samples, as an index |
+| `play_sound(sound)` | `PlaySound` |
 
 Constants: `KEY_SPACE`, `KEY_UP`, `KEY_W`, `MOUSE_BUTTON_LEFT`.
