@@ -465,7 +465,9 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     } else if (type != SPY_TUPLE && c->spare) {
         v = c->spare; c->spare = v->next; c->spares--;
     }
-    if (v) memset(v, 0, sizeof(*v));
+    /* Ints and floats, the most frequent results, read only their first
+     * union member: clearing the rest of a reused value is wasted. */
+    if (v) memset(v, 0, type == SPY_INT || type == SPY_FLOAT ? offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data) : sizeof(*v));
     else v = allocate(c, sizeof(*v));
     if (!v) return NULL;
     v->ctx = c;
