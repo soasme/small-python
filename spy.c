@@ -1091,6 +1091,19 @@ static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
     v->as.seq.items[v->as.seq.len++] = spy_retain(item);
     return 0;
 }
+/* Append n items of the list or tuple source, from start, to the list or
+ * tuple v, growing it once. source may be v: its items are read after the
+ * growth. */
+static int sequence_extend(SPYContext *c, SPYValue *v, SPYValue *source, size_t start, size_t n) {
+    if (!n) return 0;
+    if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
+    if (n > SIZE_MAX - v->as.seq.len) { spy_error(c, "MemoryError", "allocation too large"); return -1; }
+    if (grow(c, (void **)&v->as.seq.items, &v->as.seq.cap, v->as.seq.len + n, sizeof(SPYValue *))) return -1;
+    SPYValue **to = v->as.seq.items + v->as.seq.len, **from = source->as.seq.items + start;
+    for (size_t i = 0; i < n; i++) to[i] = spy_retain(from[i]);
+    v->as.seq.len += n;
+    return 0;
+}
 int spy_list_append(SPYContext *c, SPYValue *v, SPYValue *item) {
     if (!same_context(c, v)) return -1;
     if (v->type != SPY_LIST) { spy_error(c, "TypeError", "expected mutable list"); return -1; }
@@ -7951,11 +7964,9 @@ static SPYValue *get_slice(SPYContext *c, SPYValue *v, SPYValue *key) {
     }
     SPYValue *result = value_new(c, v->type);
     if (!result) return NULL;
-    int64_t index = s.start;
-    for (size_t i = 0; i < s.count; i++) {
+    if (s.step == 1) sequence_extend(c, result, v, (size_t)s.start, s.count);
+    else for (size_t i = 0, index = (size_t)s.start; i < s.count; i++, index += (size_t)s.step)
         if (sequence_append(c, result, v->as.seq.items[index])) break;
-        if (i + 1 < s.count) index += s.step;
-    }
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result;
 }
@@ -8480,11 +8491,8 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
         }
         SPYValue *v = value_new(c, a->type);
         if (!v) return NULL;
-        for (size_t i = 0; i < a->as.seq.len; i++) if (sequence_append(c, v, a->as.seq.items[i])) goto seq_fail;
-        for (size_t i = 0; i < b->as.seq.len; i++) if (sequence_append(c, v, b->as.seq.items[i])) goto seq_fail;
+        if (sequence_extend(c, v, a, 0, a->as.seq.len) || sequence_extend(c, v, b, 0, b->as.seq.len)) { spy_release(v); return NULL; }
         return v;
-seq_fail:
-        spy_release(v); return NULL;
     }
     if (op == '*' && is_int(b) && (sequence || text)) {
         if (b->as.integer_data.big) return errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(b));
@@ -8496,8 +8504,8 @@ seq_fail:
         SPYValue *v = value_new(c, a->type);
         if (!v) return NULL;
         if (sequence) {
-            for (uint64_t i = 0; i < count; i++) for (size_t j = 0; j < len; j++)
-                if (sequence_append(c, v, a->as.seq.items[j])) { spy_release(v); return NULL; }
+            for (uint64_t i = 0; i < count; i++)
+                if (sequence_extend(c, v, a, 0, len)) { spy_release(v); return NULL; }
         } else {
             v->as.string.len = (size_t)count * len;
             v->as.string.data = allocate(c, v->as.string.len + 1);
@@ -11630,8 +11638,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
                 if (map_append(c, copy, entry->key, entry->value, entry->hash)) { spy_release(copy); return NULL; }
             }
         } else {
-            for (size_t i = 0; i < self->as.seq.len; i++)
-                if (sequence_append(c, copy, self->as.seq.items[i])) { spy_release(copy); return NULL; }
+            if (sequence_extend(c, copy, self, 0, self->as.seq.len)) { spy_release(copy); return NULL; }
         }
         return copy;
     }
@@ -12745,6 +12752,9 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
         }
         return 0;
     }
+    /* A plain list or tuple copies its items at once when no step is counted. */
+    if ((result->type == SPY_LIST || result->type == SPY_TUPLE) && (source->type == SPY_LIST || source->type == SPY_TUPLE) && !c->step_limit)
+        return sequence_extend(c, result, source, 0, source->as.seq.len);
     SPYValue *iterator = get_iterator(c, source);
     if (!iterator && result->type != SPY_SET && result->type != SPY_FROZENSET && !iterable_type(source) && error_is(c, "TypeError")) {
         spy_clear_error(c);
@@ -15182,11 +15192,10 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     }
     if (old->type == SPY_DICT && token == '|') return dict_update(c, old, rhs) ? NULL : spy_retain(old);
     if (op == T_ADDEQ && old->type == SPY_LIST) {
-        SPYValue *iterator = rhs == old || length_hint_check(c, rhs) ? NULL : get_iterator(c, rhs);
-        if (rhs == old) {
-            size_t len = old->as.seq.len;
-            for (size_t i = 0; i < len; i++) if (sequence_append(c, old, old->as.seq.items[i])) return NULL;
+        if (rhs == old || ((rhs->type == SPY_LIST || rhs->type == SPY_TUPLE) && !c->step_limit)) {
+            if (sequence_extend(c, old, rhs, 0, rhs->as.seq.len)) return NULL;
         } else {
+            SPYValue *iterator = length_hint_check(c, rhs) ? NULL : get_iterator(c, rhs);
             if (!iterator) return NULL;
             SPYValue *item;
             while ((item = iterator_next(c, iterator))) {
@@ -23552,6 +23561,10 @@ execution_fail:
         if (argc > 1) goto arity;
         SPYValue *v = value_new(c, id == B_LIST ? SPY_LIST : SPY_TUPLE);
         if (!v) return NULL;
+        if (argc && (a->type == SPY_LIST || a->type == SPY_TUPLE) && !c->step_limit) {
+            if (sequence_extend(c, v, a, 0, a->as.seq.len)) { spy_release(v); return NULL; }
+            return v;
+        }
         SPYValue *iterator = argc && (id == B_TUPLE || !length_hint_check(c, a)) ? get_iterator(c, a) : NULL;
         if (iterator) for (;;) {
             if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
