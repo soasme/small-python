@@ -15113,12 +15113,8 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
     }
     return unpack_values(c, f, n, value, count, star);
 }
-static int assign_target(SPYContext *c, Frame *f, Node *n, SPYValue *value);
 static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
-    return tick(c, f, n) ? -1 : assign_target(c, f, n, value);
-}
-/* store_target once the line is recorded. */
-static int assign_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    if (tick(c, f, n)) return -1;
     if (n->kind == N_NAME) {
         Entry *entry = name_slot(f->env, n);
         if (!entry) return name_bind(c, f->env, node_name(n), value);
@@ -18839,7 +18835,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             machine_push(c, m, call_keywords(c, value, a->as.seq.len, a->as.seq.items, b));
             spy_release(value); break;
         case BC_STORE:
-            assign_target(c, &f, n, m->stack[m->len - 1]);
+            store_target(c, &f, n, m->stack[m->len - 1]);
             if (ins->arg) a = machine_pop(m);
             break;
         case BC_UNPACK:
