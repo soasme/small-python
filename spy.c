@@ -29,11 +29,14 @@
 #include "spy-intrinsics.h"
 /* Statement helpers called from one place in the recursive evaluator stay
  * out of line, as QuickJS's no_inline: inlined, their locals would enlarge
- * the frame of every nested call. */
+ * the frame of every nested call. The steps of a local name read are always
+ * inlined, as QuickJS's force_inline. */
 #if defined(__GNUC__)
 #define NO_INLINE __attribute__((noinline))
+#define ALWAYS_INLINE inline __attribute__((always_inline))
 #else
 #define NO_INLINE
+#define ALWAYS_INLINE inline
 #endif
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
@@ -1987,7 +1990,7 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { retu
  * key, NULL while never bound), passes over env to its parent, or something
  * else. The first environment's symbol is remembered by scope. */
 enum { NAME_HERE, NAME_PARENT, NAME_SLOW };
-static int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
+static ALWAYS_INLINE int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
     Scope *scope = env->type == V_ENV && !env->as.map.namespace ? env->as.map.scope : NULL;
     if (!scope) return NAME_SLOW;
     if ((env->as.map.flags || scope->kind != S_FUNCTION) && (env->as.map.flags != 2 || scope->kind != S_COMPREHENSION)) return NAME_SLOW;
@@ -2006,7 +2009,7 @@ static int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
 }
 /* The entry of a function local under its symbol's key: function
  * environments bind locals under those keys only. */
-static Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
+static ALWAYS_INLINE Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
     if (!key) return NULL;
     if (first && n->slot < map_used(env) && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
     Entry *entry = env_find(env, node_name(n));
