@@ -19389,7 +19389,7 @@ static int plain_less(SPYValue *a, SPYValue *b) {
 }
 /* Whether sort key a orders before b. Plain values, and tuples or lists of
  * them, which no callback can change, compare directly. */
-static int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
+static ALWAYS_INLINE int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
     int less = plain_less(a, b);
     if (less >= 0) return less;
     if ((a->type == SPY_TUPLE || a->type == SPY_LIST) && a->type == b->type) {
@@ -19414,7 +19414,9 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     if (len > SIZE_MAX / sizeof(SortItem)) { spy_error(c, "MemoryError", "list too large to sort"); return -1; }
     SortItem *items = allocate(c, len * sizeof(*items));
     SortItem *scratch = allocate(c, len * sizeof(*scratch));
-    if (!items || !scratch) { free(items); free(scratch); return -1; }
+    size_t *ends = allocate(c, len * sizeof(*ends));
+    if (!items || !scratch || !ends) { free(items); free(scratch); free(ends); return -1; }
+    SortItem *from = items, *to = scratch;
     size_t keys = 0;
     for (; keys < len; keys++) {
         items[keys].value = list->as.seq.items[keys];
@@ -19425,25 +19427,49 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     if (reverse) for (size_t i = 0; i < len / 2; i++) {
         SortItem swap = items[i]; items[i] = items[len - i - 1]; items[len - i - 1] = swap;
     }
-    /* Each key is evaluated once. The two reversals preserve stability. */
-    for (size_t width = 1; width < len && !c->error_type[0]; width *= 2) {
-        for (size_t start = 0; start < len; start += width * 2) {
-            size_t mid = start + width < len ? start + width : len;
-            size_t end = mid + width < len ? mid + width : len;
+    /* Each key is evaluated once. The two reversals preserve stability, as
+     * does reversing only strictly descending runs. Neighbouring runs then
+     * merge until one is left. */
+    size_t runs = 0;
+    for (size_t start = 0, end; start < len; start = end) {
+        end = start + 1;
+        if (end < len && !c->error_type[0] && sort_less(c, items[end].key, items[start].key)) {
+            while (++end < len && !c->error_type[0] && sort_less(c, items[end].key, items[end - 1].key));
+            for (size_t i = start, j = end - 1; i < j; i++, j--) { SortItem swap = items[i]; items[i] = items[j]; items[j] = swap; }
+        } else while (end < len && !c->error_type[0] && !sort_less(c, items[end].key, items[end - 1].key)) end++;
+        /* A short run grows to 32 items by binary insertion after its equals. */
+        for (size_t stop = len - start < 32 ? len : start + 32; end < stop && !c->error_type[0]; end++) {
+            SortItem item = items[end];
+            size_t lo = start, hi = end;
+            while (lo < hi && !c->error_type[0]) {
+                size_t m = lo + (hi - lo) / 2;
+                if (sort_less(c, item.key, items[m].key)) hi = m; else lo = m + 1;
+            }
+            if (c->error_type[0]) break;
+            memmove(items + lo + 1, items + lo, (end - lo) * sizeof(*items));
+            items[lo] = item;
+        }
+        ends[runs++] = end;
+    }
+    while (runs > 1) {
+        size_t merged = 0;
+        for (size_t r = 0, start = 0; r < runs; r += 2) {
+            size_t mid = ends[r], end = r + 1 < runs ? ends[r + 1] : mid;
             size_t left = start, right = mid;
             for (size_t out = start; out < end; out++) {
                 int take_right = left == mid;
-                if (left < mid && right < end && !c->error_type[0]) take_right = sort_less(c, items[right].key, items[left].key);
-                scratch[out] = take_right && right < end ? items[right++] : items[left++];
+                if (left < mid && right < end && !c->error_type[0]) take_right = sort_less(c, from[right].key, from[left].key);
+                to[out] = take_right && right < end ? from[right++] : from[left++];
             }
+            ends[merged++] = start = end;
         }
-        memcpy(items, scratch, len * sizeof(*scratch));
-        if (width > len / 2) break;
+        runs = merged;
+        SortItem *swap = from; from = to; to = swap;
     }
-    for (size_t i = 0; i < len; i++) list->as.seq.items[i] = items[reverse ? len - i - 1 : i].value;
+    for (size_t i = 0; i < len; i++) list->as.seq.items[i] = from[reverse ? len - i - 1 : i].value;
 done:
-    for (size_t i = 0; i < keys; i++) spy_release(items[i].key);
-    free(items); free(scratch); return c->error_type[0] ? -1 : 0;
+    for (size_t i = 0; i < keys; i++) spy_release(from[i].key);
+    free(items); free(scratch); free(ends); return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     (void)argv;
