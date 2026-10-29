@@ -167,6 +167,7 @@ struct SPYContext {
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *spare; size_t spares; /* Released allocations of other values, linked by next; no value edges. */
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
+    Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
     /* class_lookup results, valid while classes_changed holds the epoch they
      * were found in. A change to a class's entries or MRO, or a class's
      * release, advances it. Results are borrowed, with no value edges. */
@@ -494,7 +495,7 @@ static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type
 SPYValue *spy_retain(SPYValue *v) { if (v) v->refs++; return v; }
 typedef void (*Visit)(SPYValue *, void *);
 static void machine_edges(Machine *, Visit, void *);
-static void free_machine(Machine *);
+static void free_machine(SPYContext *, Machine *);
 static void free_program(Program *);
 static void scope_edges(Scope *scope, Visit visit, void *data) {
     for (size_t i = 0; scope && i < scope->len; i++)
@@ -681,7 +682,7 @@ static void free_value(SPYValue *v) {
             if (c->cells[i] == v) { c->cells[i] = c->cells[--c->cells_len]; break; }
         break;
     case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
-    case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(v->as.generator.machine); break;
+    case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(c, v->as.generator.machine); break;
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
@@ -2108,11 +2109,11 @@ static int name_bind(SPYContext *c, SPYValue *env, Name name, SPYValue *v) {
     return status;
 }
 static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v) { return name_bind(c, env, name_of(text), v); }
-/* Whether env is a plain function environment, whose locals bind under
- * their symbols' keys in its own entries. */
+/* Whether env is a plain function or comprehension environment, whose
+ * locals bind under their symbols' keys in its own entries. */
 static int fresh_locals(SPYValue *env) {
-    return env->type == V_ENV && !env->as.map.flags && !env->as.map.namespace && env->as.map.scope &&
-        env->as.map.scope->kind == S_FUNCTION;
+    Scope *scope = env->type == V_ENV && !env->as.map.namespace ? env->as.map.scope : NULL;
+    return scope && (env->as.map.flags ? env->as.map.flags == 2 && scope->kind == S_COMPREHENSION : scope->kind == S_FUNCTION);
 }
 /* Bind symbol, a local not yet in env, to v. */
 static int local_append(SPYContext *c, SPYValue *env, Symbol *symbol, SPYValue *v) {
@@ -2532,6 +2533,7 @@ static int bare_repr(Buffer *b, SPYValue *v) {
 }
 static int format_object(Buffer *, SPYValue *, int);
 /* As PyObject_Repr and PyObject_Str, bound by the native stack. */
+static int generator_names(SPYContext *, SPYValue *);
 static int format_value(Buffer *b, SPYValue *v, int repr) {
     if (deeper(b->ctx, repr ? " while getting the repr of an object" : " while getting the str of an object")) return -1;
     int status = format_object(b, v, repr);
@@ -2833,7 +2835,8 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR:
         snprintf(num, sizeof(num), " at %p>", (void *)v);
         return puts_buffer(b, v->type == SPY_COROUTINE ? "<coroutine object " : v->type == SPY_ASYNC_GENERATOR ? "<async_generator object " : "<generator object ") ||
-            puts_buffer(b, v->as.generator.qualname ? builtin_value(b->ctx, v->as.generator.qualname, SPY_STRING)->as.string.data : "<genexpr>") || puts_buffer(b, num);
+            generator_names(b->ctx, v) || puts_buffer(b, builtin_value(b->ctx, v->as.generator.qualname, SPY_STRING)->as.string.data) ||
+            puts_buffer(b, num);
     case SPY_PROPERTY:
         snprintf(num, sizeof(num), "<property object at %p>", (void *)v);
         return puts_buffer(b, num);
@@ -2850,7 +2853,7 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
             owner->type == V_UNIT ? owner : owner->as.generator.unit;
         Scope *scope = v->as.frame.env->type == V_ENV ? v->as.frame.env->as.map.scope : NULL;
         const char *code = owner->type == SPY_FUNCTION ? (owner->as.function.def ? source_name(owner->as.function.def->a) : "<module>") :
-            owner->type != V_UNIT && owner->as.generator.name ? builtin_value(b->ctx, owner->as.generator.name, SPY_STRING)->as.string.data :
+            owner->type != V_UNIT && !generator_names(b->ctx, owner) ? builtin_value(b->ctx, owner->as.generator.name, SPY_STRING)->as.string.data :
             scope && scope->kind == S_CLASS && scope->owner ? source_name(scope->owner->a) : "<module>";
         SPYValue *file = spy_string(b->ctx, unit->as.unit.filename, strlen(unit->as.unit.filename));
         snprintf(num, sizeof(num), "<frame at %p, file ", (void *)v);
@@ -9920,8 +9923,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_await")) ||
         (v->type == SPY_GENERATOR && !strcmp(name, "gi_yieldfrom"))) return suspended_delegate(c, v);
     if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
-        if (!strcmp(name, "__name__")) return spy_retain(v->as.generator.name);
-        if (!strcmp(name, "__qualname__")) return spy_retain(v->as.generator.qualname);
+        if (!strcmp(name, "__name__")) return generator_names(c, v) ? NULL : spy_retain(v->as.generator.name);
+        if (!strcmp(name, "__qualname__")) return generator_names(c, v) ? NULL : spy_retain(v->as.generator.qualname);
     }
     if (builtin_classmethod(v)) {
         /* A classmethod_descriptor describes its method and wraps nothing. */
@@ -12141,10 +12144,20 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->error && b->error->value) visit(b->error->value, data);
     }
 }
-static void free_machine(Machine *m) {
+/* Release m, whose values were released, keeping it as the spare when there is none. */
+static void free_machine(SPYContext *c, Machine *m) {
     if (!m) return;
     for (size_t i = 0; i < m->block_len; i++) free(m->blocks[i].error);
-    free(m->blocks); free(m->stack); free(m);
+    if (!c->spare_machine) {
+        *m = (Machine){.stack = m->stack, .cap = m->cap, .blocks = m->blocks, .block_cap = m->block_cap};
+        c->spare_machine = m;
+    } else { free(m->blocks); free(m->stack); free(m); }
+}
+static Machine *machine_new(SPYContext *c, Program *code) {
+    Machine *m = c->spare_machine ? c->spare_machine : allocate(c, sizeof(Machine));
+    c->spare_machine = NULL;
+    if (m) m->code = code;
+    return m;
 }
 static int suspends(Node *n);
 static int list_suspends(Node *n) {
@@ -12864,6 +12877,13 @@ static SPYValue *qualified_name(SPYContext *c, Scope *scope) {
     Buffer out = {.ctx = c};
     SPYValue *result = append_qualname(&out, scope) ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     free(out.data); return result;
+}
+/* A comprehension's generator names itself on first use: its __name__ is
+ * <genexpr> and its __qualname__ comes from the scope of its retained code. */
+static int generator_names(SPYContext *c, SPYValue *v) {
+    if (!v->as.generator.name && !(v->as.generator.name = spy_string(c, "<genexpr>", 9))) return -1;
+    if (!v->as.generator.qualname && !(v->as.generator.qualname = qualified_name(c, v->as.generator.code->as.unit.definition->scope))) return -1;
+    return 0;
 }
 /* Closures. As CPython's symtable, a name is free in a scope when it resolves
  * to a binding in an enclosing function (or, for __class__, a class); a
@@ -15049,12 +15069,8 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
         result->as.generator.unit = spy_retain(f->unit);
         result->as.generator.node = n;
         result->as.generator.code = definition_code(c, f->unit, n);
-        result->as.generator.name = spy_string(c, "<genexpr>", 9);
-        result->as.generator.qualname = qualified_name(c, n->scope);
-        result->as.generator.machine = allocate(c, sizeof(Machine));
-        Machine *m = result->as.generator.machine;
+        Machine *m = result->as.generator.machine = machine_new(c, n->code);
         if (m) {
-            m->code = n->code;
             if (n->op != N_TUPLE)
                 machine_push(c, m, value_new(c, n->op == N_DICT ? SPY_DICT : n->op == N_SET ? SPY_SET : SPY_LIST));
             if (!c->error_type[0]) machine_push(c, m, spy_retain(iterator));
@@ -15082,7 +15098,7 @@ static void release_owned(SPYValue *v, void *data) { (void)data; spy_release(v);
 static void generator_close(SPYValue *v) {
     if (v->as.generator.machine) {
         machine_edges(v->as.generator.machine, release_owned, NULL);
-        free_machine(v->as.generator.machine); v->as.generator.machine = NULL;
+        free_machine(v->ctx, v->as.generator.machine); v->as.generator.machine = NULL;
     }
     spy_release(v->as.generator.env); v->as.generator.env = NULL;
     spy_release(v->as.generator.unit); v->as.generator.unit = NULL;
@@ -18366,9 +18382,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     Node *n = function->as.function.def;
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
-    v->as.generator.machine = allocate(c, sizeof(Machine));
-    if (!v->as.generator.machine) { spy_release(v); return NULL; }
-    v->as.generator.machine->code = n->code;
+    if (!(v->as.generator.machine = machine_new(c, n->code))) { spy_release(v); return NULL; }
     v->as.generator.node = n;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
     v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
@@ -25691,6 +25705,7 @@ void spy_context_free(SPYContext *c) {
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
     while (c->spare) { SPYValue *next = c->spare->next; free(c->spare); c->spare = next; }
     while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
+    if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }
     free(c);
 }
 void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
