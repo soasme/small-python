@@ -1,64 +1,689 @@
+/* spyc: bundle a Python program and the modules it imports into one C
+ * translation unit (docs/build.md). As QuickJS's qjsc, it compiles with the
+ * engine (spy.c) so the build parses exactly what the program runs; a normal
+ * C compiler then links the result with libspy.a. No shell, compiler, or
+ * platform process API is hidden here.
+ *
+ * Modules are found as CPython's path finder finds them over the search
+ * roots, embedded byte for byte, and served at run time by a generated
+ * SPYModuleLoader whose keys are the names the engine probes:
+ * NAME.__init__ for a package, NAME for a module, NAME.__namespace__ for a
+ * namespace package. */
+#include "spy.c"
 #include "host.h"
-#include <string.h>
+#include <dirent.h>
 
-/* Generate a C translation unit. A normal C compiler then links the runtime;
- * no shell, compiler executable, or platform process API is hidden here. As
- * QuickJS's qjsc -M, each -M names a standard module (spy-std.c) the program
- * registers; without one it runs on the bare core. As qjsc -c, -c writes only
- * the source, as spy_<input name>, for a host's own main to run. */
+enum { NONE, MODULE, PACKAGE, NAMESPACE, EXTERNAL, REGISTERED };
+
+typedef struct { char **items; size_t len, cap; } Strings;
+typedef struct { char *path, *original; const char *kind; int flag; } Import;   /* flag: 1 external, 2 missing */
+typedef struct {
+    char *name, *path;      /* path: the source file, relative to the working directory */
+    int kind, queued, scanned;
+    Strings locations;      /* where a package's submodules are searched */
+    Strings all;            /* a literal __all__ */
+    char *source;           /* read once queued */
+    Import *imports; size_t imports_len, imports_cap;
+} Module;
+/* What a scan of one source reports against: its file, or a -D option. */
+typedef struct { const char *path, *option; size_t line; Module *owner; } Origin;
+typedef struct {
+    SPYContext *c;
+    Strings roots, externals, registered, aliases, stars;
+    Module **modules; size_t len, cap;
+    Module **queue; size_t queue_len, queue_cap, queue_at;
+    size_t errors, warnings;
+} Build;
+
+static void *need(void *p) {
+    if (!p) { fputs("spyc: out of memory\n", stderr); exit(1); }
+    return p;
+}
+static char *concat(const char *a, const char *b, const char *c) {
+    size_t la = strlen(a), lb = strlen(b), lc = strlen(c);
+    char *s = need(malloc(la + lb + lc + 1));
+    memcpy(s, a, la); memcpy(s + la, b, lb); memcpy(s + la + lb, c, lc + 1);
+    return s;
+}
+static char *slice(const char *s, size_t n) {
+    char *t = need(malloc(n + 1));
+    memcpy(t, s, n); t[n] = 0;
+    return t;
+}
+static void push(Strings *list, char *s) {
+    if (list->len == list->cap) list->items = need(realloc(list->items, (list->cap = list->cap ? list->cap * 2 : 8) * sizeof(char *)));
+    list->items[list->len++] = s;
+}
+static int listed(const Strings *list, const char *s) {
+    for (size_t i = 0; i < list->len; i++) if (!strcmp(list->items[i], s)) return 1;
+    return 0;
+}
+/* NAME or a submodule of it. */
+static int under(const char *prefix, const char *name) {
+    size_t n = strlen(prefix);
+    return !strncmp(prefix, name, n) && (!name[n] || name[n] == '.');
+}
+static int identifier_text(const char *s, size_t n) {
+    if (!n || isdigit((unsigned char)*s)) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!isalnum((unsigned char)s[i]) && s[i] != '_' && (unsigned char)s[i] < 128) return 0;
+    return 1;
+}
+static int dotted_name(const char *s) {
+    for (const char *dot; ; s = dot + 1) {
+        dot = strchr(s, '.');
+        if (!identifier_text(s, dot ? (size_t)(dot - s) : strlen(s))) return 0;
+        if (!dot) return 1;
+    }
+}
+static void report(Build *b, const Origin *o, const char *format, const char *name, const char *extra) {
+    if (o->option) fprintf(stderr, "spyc: error: %s: ", o->option);
+    else fprintf(stderr, "%s:%zu: error: ", o->path, o->line);
+    fprintf(stderr, format, name, extra);
+    fputc('\n', stderr);
+    b->errors++;
+}
+
+/* The file system, compared by exact spelling as FileFinder compares its
+ * directory listing, whatever the file system's case rules. */
+static int entry_kind(const char *directory, const char *name) {
+    DIR *dir = opendir(*directory ? directory : ".");
+    int found = 0;
+    for (struct dirent *e; dir && !found && (e = readdir(dir));) found = !strcmp(e->d_name, name);
+    if (dir) closedir(dir);
+    if (!found) return 0;
+    char *path = concat(directory, name, "");
+    struct stat info;
+    int kind = stat(path, &info) ? 0 : S_ISDIR(info.st_mode) ? 'd' : S_ISREG(info.st_mode) ? 'f' : 0;
+    free(path);
+    return kind;
+}
+
+static Module *find(Build *b, const char *name);
+/* FileFinder over each location in turn, keeping namespace portions
+ * (PathFinder); locations end in '/' or are empty for the working directory. */
+static void search(Module *m, const Strings *locations, const char *tail) {
+    char *file = concat(tail, ".py", "");
+    Strings portions = {0};
+    for (size_t i = 0; i < locations->len && !m->kind; i++) {
+        const char *d = locations->items[i];
+        char *package = concat(d, tail, "/");
+        if (entry_kind(d, tail) == 'd' && entry_kind(package, "__init__.py") == 'f') {
+            m->kind = PACKAGE; m->path = concat(package, "__init__.py", "");
+            push(&m->locations, package);
+            break;
+        }
+        if (entry_kind(d, file) == 'f') { m->kind = MODULE; m->path = concat(d, file, ""); }
+        else if (entry_kind(d, tail) == 'd') push(&portions, package), package = NULL;
+        free(package);
+    }
+    if (!m->kind && portions.len) { m->kind = NAMESPACE; m->locations = portions; }
+    else { for (size_t i = 0; i < portions.len; i++) free(portions.items[i]); free(portions.items); }
+    free(file);
+}
+static Module *find(Build *b, const char *name) {
+    for (size_t i = 0; i < b->len; i++) if (!strcmp(b->modules[i]->name, name)) return b->modules[i];
+    Module *m = need(calloc(1, sizeof(Module)));
+    m->name = concat(name, "", "");
+    if (b->len == b->cap) b->modules = need(realloc(b->modules, (b->cap = b->cap ? b->cap * 2 : 32) * sizeof(Module *)));
+    b->modules[b->len++] = m;
+    for (size_t i = 0; i < b->externals.len; i++) if (under(b->externals.items[i], name)) m->kind = EXTERNAL;
+    for (size_t i = 0; i < b->registered.len; i++) if (!strcmp(b->registered.items[i], name)) m->kind = REGISTERED;
+    if (m->kind) return m;
+    for (size_t i = 0; i < b->aliases.len; i += 2)
+        if (!strcmp(b->aliases.items[i], name)) {
+            Module *target = find(b, b->aliases.items[i + 1]);
+            if (target->kind == MODULE || target->kind == PACKAGE || target->kind == NAMESPACE) {
+                m->kind = target->kind;
+                m->path = target->path ? concat(target->path, "", "") : NULL;
+                for (size_t j = 0; j < target->locations.len; j++) push(&m->locations, concat(target->locations.items[j], "", ""));
+            }
+            return m;
+        }
+    const char *dot = strrchr(name, '.');
+    if (!dot) search(m, &b->roots, name);
+    else {
+        char *parent = slice(name, (size_t)(dot - name));
+        Module *p = find(b, parent);
+        free(parent);
+        if (p->kind == PACKAGE || p->kind == NAMESPACE) search(m, &p->locations, dot + 1);
+    }
+    return m;
+}
+static int found(const Module *m) { return m->kind == MODULE || m->kind == PACKAGE || m->kind == NAMESPACE; }
+
+static void record(Module *owner, const char *path, const char *original, const char *kind, int flag) {
+    if (!owner) return;
+    for (size_t i = 0; i < owner->imports_len; i++) {
+        Import *e = &owner->imports[i];
+        if (!strcmp(e->path, path) && !strcmp(e->original, original) && e->kind == kind) return;
+    }
+    if (owner->imports_len == owner->imports_cap)
+        owner->imports = need(realloc(owner->imports, (owner->imports_cap = owner->imports_cap ? owner->imports_cap * 2 : 8) * sizeof(Import)));
+    owner->imports[owner->imports_len++] = (Import){concat(path, "", ""), concat(original, "", ""), kind, flag};
+}
+static void enqueue(Build *b, Module *m) {
+    if (m->queued) return;
+    m->queued = 1;
+    if (b->queue_len == b->queue_cap) b->queue = need(realloc(b->queue, (b->queue_cap = b->queue_cap ? b->queue_cap * 2 : 32) * sizeof(Module *)));
+    b->queue[b->queue_len++] = m;
+}
+/* An import of NAME: a required one that does not resolve fails the build
+ * with CPython's message; a guarded one, or a from-import name that may be
+ * an attribute, is left out. */
+static void request(Build *b, const Origin *o, const char *name, int required, const char *kind) {
+    Module *m = find(b, name);
+    if (m->kind == EXTERNAL || m->kind == REGISTERED) { record(o->owner, name, name, kind, 1); return; }
+    if (found(m)) { enqueue(b, m); record(o->owner, m->path ? m->path : name, name, kind, 0); return; }
+    if (!required) { if (strcmp(kind, "maybe")) record(o->owner, name, name, kind, 2); return; }
+    /* The first part that is missing, or that is a module and not a package. */
+    for (const char *dot = strchr(name, '.'); dot; dot = strchr(dot + 1, '.')) {
+        char *prefix = slice(name, (size_t)(dot - name));
+        Module *p = find(b, prefix);
+        int stop = !found(p) || p->kind == MODULE;
+        if (stop && found(p)) report(b, o, "No module named '%s'; '%s' is not a package", name, prefix);
+        else if (stop) report(b, o, "No module named '%s'%s", prefix, "");
+        free(prefix);
+        if (stop) return;
+    }
+    report(b, o, "No module named '%s'%s", name, "");
+}
+
+/* The walk of one parsed source: the imports its statements and literal
+ * __import__ calls name, where each stands. */
+typedef struct { Build *b; Origin origin; const char *package; } Scan;
+static int catches_import(Node *handlers) {
+    static const char *const names[] = {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"};
+    for (Node *h = handlers; h; h = h->next) {
+        if (!h->a) return 1;
+        for (Node *t = h->a->kind == N_TUPLE ? h->a->args : h->a; t; t = h->a->kind == N_TUPLE ? t->next : NULL)
+            for (size_t i = 0; t->kind == N_NAME && i < sizeof(names) / sizeof(*names); i++)
+                if (!strcmp(source_name(t), names[i])) return 1;
+    }
+    return 0;
+}
+/* The absolute name of a relative import (PEP 328), or NULL with an error
+ * reported for a required one. */
+static char *absolute(Scan *s, int level, const char *name, int required) {
+    if (!level) return concat(name, "", "");
+    const char *package = s->package;
+    size_t parts = package && *package ? 1 : 0;
+    for (const char *p = package; parts && *p; p++) parts += *p == '.';
+    if (!parts || parts < (size_t)level) {
+        if (required) report(s->b, &s->origin, "%s%s", parts ? "attempted relative import beyond top-level package"
+                                                             : "attempted relative import with no known parent package", "");
+        return NULL;
+    }
+    size_t keep = strlen(package);
+    for (int i = 1; i < level; i++) while (package[--keep] != '.') {}
+    char *base = slice(package, keep);
+    if (!*name) return base;
+    char *full = concat(base, ".", name);
+    free(base);
+    return full;
+}
+static void walk(Scan *s, Node *n, int guarded);
+static void scan_from(Scan *s, Node *n, int guarded) {
+    const char *module = n->a ? source_name(n->a) : "";
+    if (!n->op && !strcmp(module, "__future__")) return;
+    const char *kind = n->flags & F_LAZY ? "lazy-import" : "from-statement";
+    char *base = absolute(s, n->op, module, !guarded);
+    if (!base) return;
+    request(s->b, &s->origin, base, !guarded, kind);
+    if (n->args && n->args->kind == N_STAR) push(&s->b->stars, concat(base, "", ""));
+    else for (Node *item = n->args; item; item = item->next) {
+        char *name = concat(base, ".", source_name(item->a));
+        request(s->b, &s->origin, name, 0, "maybe");
+        free(name);
+    }
+    free(base);
+}
+/* __import__("a.b", ..., fromlist) with string literals, as the statement. */
+static void import_call(Scan *s, Node *n, int guarded) {
+    Node *first = n->args, *fromlist = NULL;
+    for (Node *arg = n->args; arg; arg = arg->next)
+        if (arg->kind == N_KEYWORD && arg->text && !strcmp(arg->text, "fromlist")) fromlist = arg->a;
+    if (first && first->next && first->next->next && first->next->next->next && first->next->next->next->kind != N_KEYWORD)
+        fromlist = first->next->next->next;
+    if (!first || first->kind != N_STRING || !dotted_name(first->text)) {
+        fprintf(stderr, "%s:%zu: warning: __import__ of a computed name cannot be bundled; name its modules with -D\n",
+                s->origin.path, n->line);
+        s->b->warnings++;
+        return;
+    }
+    request(s->b, &s->origin, first->text, !guarded, "dynamic-import");
+    for (Node *item = fromlist && (fromlist->kind == N_TUPLE || fromlist->kind == N_LIST) ? fromlist->args : NULL; item; item = item->next)
+        if (item->kind == N_STRING && identifier_text(item->text, strlen(item->text))) {
+            char *name = concat(first->text, ".", item->text);
+            request(s->b, &s->origin, name, 0, "maybe");
+            free(name);
+        }
+}
+static void walk(Scan *s, Node *n, int guarded) {
+    for (; n; n = n->next) {
+        s->origin.line = n->line;
+        if (n->kind == N_IMPORT) {
+            for (Node *item = n->args; item; item = item->next)
+                request(s->b, &s->origin, source_name(item->a), !guarded, n->flags & F_LAZY ? "lazy-import" : "import-statement");
+            continue;
+        }
+        if (n->kind == N_FROM) { scan_from(s, n, guarded); continue; }
+        if (n->kind == N_TRY) {
+            walk(s, n->a, guarded || catches_import(n->args));
+            walk(s, n->args, guarded); walk(s, n->b, guarded); walk(s, n->c, guarded);
+            continue;
+        }
+        if (n->kind == N_CALL && n->a && n->a->kind == N_NAME && !strcmp(source_name(n->a), "__import__")) import_call(s, n, guarded);
+        walk(s, n->a, guarded); walk(s, n->b, guarded); walk(s, n->c, guarded);
+        walk(s, n->args, guarded); walk(s, n->decorators, guarded); walk(s, n->params, guarded);
+    }
+}
+/* A literal __all__ of a module, for from-imports of *. */
+static void literal_all(Module *m, Node *body) {
+    for (Node *n = body; n; n = n->next)
+        if (n->kind == N_ASSIGN && n->a && n->a->kind == N_NAME && !strcmp(n->a->text, "__all__") && n->b &&
+            (n->b->kind == N_LIST || n->b->kind == N_TUPLE))
+            for (Node *item = n->b->args; item; item = item->next)
+                if (item->kind == N_STRING) push(&m->all, concat(item->text, "", ""));
+}
+/* Read and walk one source; owner is NULL for an entry run as __main__. */
+static char *scan(Build *b, const char *path, const char *package, Module *owner, Module *module) {
+    FILE *file = fopen(path, "rb");
+    char *source = file ? host_read(file) : NULL;
+    if (file) fclose(file);
+    if (!source) { fprintf(stderr, "spyc: error: cannot read %s\n", path); b->errors++; return NULL; }
+    SPYValue *unit = parse(b->c, source, path);
+    if (!unit) {
+        fprintf(stderr, "%s:%zu: error: %s\n", path, spy_error_line(b->c), spy_error_display(b->c));
+        spy_clear_error(b->c);
+        b->errors++;
+        return source;
+    }
+    Scan s = {b, {path, NULL, 0, owner}, package};
+    walk(&s, unit->as.unit.body, 0);
+    if (module) literal_all(module, unit->as.unit.body);
+    spy_release(unit);
+    return source;
+}
+/* Visit queued modules until none is left, then the submodules named by the
+ * __all__ of modules imported with *, which may queue more. */
+static void discover(Build *b, Module *entry) {
+    for (size_t done = 0; !b->errors;) {
+        while (!b->errors && b->queue_at < b->queue_len) {
+            Module *m = b->queue[b->queue_at++];
+            const char *dot = strrchr(m->name, '.');
+            if (dot) {
+                char *parent = slice(m->name, (size_t)(dot - m->name));
+                enqueue(b, find(b, parent));
+                free(parent);
+            }
+            if (!m->path) continue;
+            char *package = m->kind == PACKAGE ? concat(m->name, "", "") : slice(m->name, dot ? (size_t)(dot - m->name) : 0);
+            m->source = scan(b, m->path, package, m, m);
+            m->scanned = 1;
+            free(package);
+        }
+        if (b->errors || done == b->stars.len) break;
+        for (; done < b->stars.len; done++) {
+            Module *base = find(b, b->stars.items[done]);
+            Origin o = {NULL, "from-import *", 0, entry};
+            for (size_t i = 0; i < base->all.len; i++) {
+                char *name = concat(base->name, ".", base->all.items[i]);
+                request(b, &o, name, 0, "maybe");
+                free(name);
+            }
+        }
+    }
+}
+/* -D PKG.*: every module and package below PKG, at any depth. */
+static void include_all(Build *b, const Origin *o, Module *package) {
+    for (size_t i = 0; i < package->locations.len; i++) {
+        const char *d = package->locations.items[i];
+        DIR *dir = opendir(*d ? d : ".");
+        Strings names = {0};
+        for (struct dirent *e; dir && (e = readdir(dir));) push(&names, concat(e->d_name, "", ""));
+        if (dir) closedir(dir);
+        qsort(names.items, names.len, sizeof(char *), (int (*)(const void *, const void *))strcmp);
+        for (size_t j = 0; j < names.len; j++) {
+            const char *e = names.items[j];
+            size_t n = strlen(e);
+            int py = n > 3 && !strcmp(e + n - 3, ".py");
+            if (!identifier_text(e, py ? n - 3 : n) || (py && n == 11 && !strncmp(e, "__init__", 8))) continue;
+            char *stem = slice(e, py ? n - 3 : n), *name = concat(package->name, ".", stem);
+            Module *m = find(b, name);
+            if (m->kind == MODULE || m->kind == PACKAGE) request(b, o, name, 1, "include");
+            if (m->kind == PACKAGE || m->kind == NAMESPACE) include_all(b, o, m);
+            free(stem); free(name);
+        }
+        for (size_t j = 0; j < names.len; j++) free(names.items[j]);
+        free(names.items);
+    }
+}
+
+/* Output, built in memory and written only when the build succeeds. */
+static void put(Buffer *out, const char *format, ...) {
+    char small[256];
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(small, sizeof small, format, args);
+    va_end(args);
+    char *text = (size_t)n < sizeof small ? small : need(malloc((size_t)n + 1));
+    if (text != small) {
+        va_start(args, format);
+        vsnprintf(text, (size_t)n + 1, format, args);
+        va_end(args);
+    }
+    if (append(out, text, (size_t)n)) need(NULL);
+    if (text != small) free(text);
+}
+static void put_bytes(Buffer *out, const char *s) {
+    for (size_t i = 0; s[i]; i++) put(out, i % 24 == 23 ? "%u,\n" : "%u,", (unsigned char)s[i]);
+    put(out, "0};\n");
+}
+/* A C string literal, escaping all but plain ASCII. */
+static void put_string(Buffer *out, const char *s) {
+    put(out, "\"");
+    for (; *s; s++) put(out, isalnum((unsigned char)*s) || *s == '_' || *s == '.' ? "%c" : "\\%03o", (unsigned char)*s);
+    put(out, "\"");
+}
+static void put_json(Buffer *out, const char *s) {
+    put(out, "\"");
+    for (; *s; s++) put(out, *s == '"' || *s == '\\' ? "\\%c" : (unsigned char)*s < 32 ? "\\u%04x" : "%c", (unsigned char)*s);
+    put(out, "\"");
+}
+static int by_key(const void *x, const void *y) {
+    const Module *a = *(Module *const *)x, *b = *(Module *const *)y;
+    char *ka = concat(a->name, a->kind == PACKAGE ? ".__init__" : a->kind == NAMESPACE ? ".__namespace__" : "", "");
+    char *kb = concat(b->name, b->kind == PACKAGE ? ".__init__" : b->kind == NAMESPACE ? ".__namespace__" : "", "");
+    int order = strcmp(ka, kb);
+    free(ka); free(kb);
+    return order;
+}
+/* A C identifier for an entry: spy_ and its name, as spyc -c names it. */
+static char *c_name(const char *entry, int module) {
+    const char *base = module ? entry : strrchr(entry, '/') ? strrchr(entry, '/') + 1 : entry;
+    char *name = concat("spy_", base, "");
+    char *end = module ? name + strlen(name) : name + 4 + strcspn(base, ".");
+    *end = 0;
+    for (char *p = name + 4; *p; p++) if (!isalnum((unsigned char)*p)) *p = '_';
+    return name;
+}
+
+/* An entry: its file, the __file__ and __package__ it runs with, its
+ * source, its C name, and the imports it names, for the metafile. */
+typedef struct { char *path, *file, *package, *source, *symbol; Module imports; } EntryPoint;
+
+static int usage(void) {
+    fputs("usage: spyc [options] -o program.c (input.py | -m module)\n"
+          "       spyc -c [options] -o modules.c (input.py | -m module)...\n"
+          "options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,\n"
+          "         --metafile file, --deps file, --analyze, -Werror\n", stderr);
+    return 2;
+}
 int main(int argc, char **argv) {
-    int bare = argc > 1 && !strcmp(argv[1], "-c"), at = 1 + bare;
-    while (at + 1 < argc && !strcmp(argv[at], "-M") && argv[at + 1][strspn(argv[at + 1], "._0123456789"
-           "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")] == 0) at += 2;
-    if (argc - at != 3 || strcmp(argv[at], "-o") || !strcmp(argv[at + 1], argv[at + 2]) || (bare && at > 2)) {
-        fputs("usage: spyc [-c | -M module...] -o program.c input.py\n", stderr); return 2;
+    Build b = {0};
+    Strings files = {0}, mains = {0}, includes = {0};
+    const char *output = NULL, *metafile = NULL, *deps = NULL, *loader_name = NULL;
+    int bare = 0, analyze = 0, werror = 0;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i], *value = i + 1 < argc ? argv[i + 1] : NULL;
+        int takes = !strcmp(a, "-o") || !strcmp(a, "-m") || !strcmp(a, "-M") || !strcmp(a, "-I") || !strcmp(a, "-x") ||
+                    !strcmp(a, "-D") || !strcmp(a, "-N") || !strcmp(a, "--alias") || !strcmp(a, "--metafile") || !strcmp(a, "--deps");
+        if (takes && !value) return usage();
+        if (takes) i++;
+        if (!strcmp(a, "-c")) bare = 1;
+        else if (!strcmp(a, "--analyze")) analyze = 1;
+        else if (!strcmp(a, "-Werror")) werror = 1;
+        else if (!strcmp(a, "-o")) output = value;
+        else if (!strcmp(a, "--metafile")) metafile = value;
+        else if (!strcmp(a, "--deps")) deps = value;
+        else if (!strcmp(a, "-I")) push(&b.roots, strlen(value) && value[strlen(value) - 1] != '/' ? concat(value, "/", "") : concat(value, "", ""));
+        else if (!strcmp(a, "-N")) {
+            if (!identifier_text(value, strlen(value))) return usage();
+            loader_name = value;
+        } else if (!strcmp(a, "--alias")) {
+            const char *equals = strchr(value, '=');
+            char *name = equals ? slice(value, (size_t)(equals - value)) : NULL;
+            if (!name || !dotted_name(name) || !dotted_name(equals + 1)) return usage();
+            push(&b.aliases, name); push(&b.aliases, concat(equals + 1, "", ""));
+        } else if (takes) {
+            size_t n = strlen(value);
+            int star = !strcmp(a, "-D") && n > 2 && !strcmp(value + n - 2, ".*");
+            char *name = slice(value, star ? n - 2 : n);
+            if (!dotted_name(name)) return usage();
+            push(!strcmp(a, "-m") ? &mains : !strcmp(a, "-M") ? &b.registered : !strcmp(a, "-x") ? &b.externals : &includes,
+                 star ? concat(name, ".*", "") : concat(name, "", ""));
+            free(name);
+        } else if (a[0] == '-') return usage();
+        else push(&files, concat(a, "", ""));
     }
-    const char *output = argv[at + 1], *input_name = argv[at + 2];
-    FILE *input = fopen(input_name, "rb");
-    if (!input) { perror(input_name); return 1; }
-    char *source = host_read(input);
-    fclose(input);
-    if (!source) { fputs("cannot read source\n", stderr); return 1; }
-    FILE *out = fopen(output, "w");
-    if (!out) { perror(output); free(source); return 1; }
-    if (bare) {
-        const char *base = strrchr(input_name, '/');
-        base = base ? base + 1 : input_name;
-        fputs("/* Generated by spyc -c. A host runs it with spy_exec. */\nconst char spy_", out);
-        for (size_t i = 0, n = strcspn(base, "."); i < n; i++) fputc(isalnum((unsigned char)base[i]) ? base[i] : '_', out);
-        fputs("[] = {\n", out);
-    } else {
-        fputs(at > 1 ? "/* Generated by spyc. Link with spy.c, spy-std.c, and the C math library. */\n"
-                       "#include \"spy.h\"\n#include \"spy-std.h\"\n#include <stdio.h>\n"
-                     : "/* Generated by spyc. Link with spy.c and the C math library. */\n"
-                       "#include \"spy.h\"\n#include <stdio.h>\n", out);
-        fputs("static const char source[] = {\n", out);
+    size_t entries = files.len + mains.len;
+    if (!output || !entries || (!bare && entries > 1) || (bare && b.registered.len)) return usage();
+    for (size_t i = 0; i < files.len; i++) if (!strcmp(files.items[i], output)) return usage();
+
+    /* The first root is the entry's directory, or the working directory for -m. */
+    const char *first = files.len ? files.items[0] : NULL, *slash = first ? strrchr(first, '/') : NULL;
+    Strings roots = {0};
+    push(&roots, slash ? slice(first, (size_t)(slash - first) + 1) : concat("", "", ""));
+    for (size_t i = 0; i < b.roots.len; i++) push(&roots, b.roots.items[i]);
+    free(b.roots.items);
+    b.roots = roots;
+    b.c = need(spy_context_new());
+
+    EntryPoint *list = need(calloc(entries, sizeof(EntryPoint)));
+    for (size_t i = 0; i < entries && !b.errors; i++) {
+        EntryPoint *e = &list[i];
+        if (i < files.len) {
+            e->path = files.items[i];
+            const char *base = strrchr(e->path, '/');
+            e->file = concat(base ? base + 1 : e->path, "", "");
+            e->symbol = c_name(e->path, 0);
+            e->source = scan(&b, e->path, NULL, &e->imports, NULL);
+            continue;
+        }
+        /* -m runs MODULE, or a package's __main__, with its package set. */
+        const char *name = mains.items[i - files.len];
+        Origin o = {NULL, "-m", 0, NULL};
+        Module *m = find(&b, name);
+        char *run = m->kind == PACKAGE ? concat(name, ".__main__", "") : concat(name, "", "");
+        Module *target = find(&b, run);
+        if (target->kind != MODULE) { report(&b, &o, "No module named '%s'%s", run, ""); free(run); break; }
+        const char *dot = strrchr(run, '.');
+        e->path = target->path;
+        e->file = concat(run, ".py", "");
+        for (char *p = e->file; *p != '.' || strcmp(p, ".py"); p++) if (*p == '.') *p = '/';
+        e->package = slice(run, dot ? (size_t)(dot - run) : 0);
+        e->symbol = c_name(name, 1);
+        if (*e->package) enqueue(&b, find(&b, e->package));
+        e->source = scan(&b, e->path, e->package, &e->imports, NULL);
+        free(run);
     }
-    for (size_t i = 0; source[i]; i++) {
-        fprintf(out, "%u,", (unsigned char)source[i]);
-        if (i % 24 == 23) fputc('\n', out);
+    for (size_t i = 0; i < includes.len && !b.errors; i++) {
+        char *option = concat("-D ", includes.items[i], "");
+        Origin o = {NULL, option, 0, &list[0].imports};
+        size_t n = strlen(includes.items[i]);
+        if (n > 2 && !strcmp(includes.items[i] + n - 2, ".*")) {
+            char *name = slice(includes.items[i], n - 2);
+            Module *package = find(&b, name);
+            if (package->kind == PACKAGE || package->kind == NAMESPACE) include_all(&b, &o, package);
+            else if (found(package)) report(&b, &o, "'%s' is not a package%s", name, "");
+            else request(&b, &o, name, 1, "include");
+            free(name);
+        } else request(&b, &o, includes.items[i], 1, "include");
+        free(option);
     }
-    fputs("0};\n", out);
+    if (!b.errors) discover(&b, &list[0].imports);
+    if (werror && b.warnings) b.errors++;
+    if (b.errors) return 1;
+
+    /* The table, sorted by the keys the loader answers. */
+    Module **table = need(calloc(b.len + 1, sizeof(Module *)));
+    size_t count = 0;
+    for (size_t i = 0; i < b.len; i++) if (b.modules[i]->queued && found(b.modules[i])) table[count++] = b.modules[i];
+    qsort(table, count, sizeof(Module *), by_key);
+    char *loader = loader_name ? concat(loader_name, "_load", "") : concat(list[0].symbol, "_load", "");
+
+    Buffer out = {.ctx = b.c};
+    if (bare) put(&out, "/* Generated by spyc -c. A host installs %s with spy_set_module_loader\n"
+                        " * and runs an entry with spy_exec. */\n#include \"spy.h\"\n#include <stdlib.h>\n#include <string.h>\n", loader);
+    else put(&out, "/* Generated by spyc. Link with %s and the C math library. */\n#include \"spy.h\"\n%s"
+                   "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n",
+             b.registered.len ? "libspy.a, libspy-std.a," : "libspy.a", b.registered.len ? "#include \"spy-std.h\"\n" : "");
+    for (size_t i = 0; i < entries; i++) {
+        put(&out, "%sconst char %s[] = {\n", bare ? "" : "static ", bare ? list[i].symbol : "source");
+        put_bytes(&out, list[i].source);
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (!table[i]->path) continue;
+        size_t e = 0;
+        while (e < entries && strcmp(list[e].path, table[i]->path)) e++;
+        if (e < entries) continue;
+        put(&out, "static const char module_%zu[] = { /* %s */\n", i, table[i]->path);
+        put_bytes(&out, table[i]->source);
+    }
+    put(&out, "static const struct { const char *name, *source; size_t size; } modules[] = {\n");
+    for (size_t i = 0; i < count; i++) {
+        Module *m = table[i];
+        size_t e = 0;
+        while (m->path && e < entries && strcmp(list[e].path, m->path)) e++;
+        char *array = !m->path ? concat("\"\"", "", "") : e < entries ? concat(bare ? list[e].symbol : "source", "", "")
+                    : need(malloc(32));
+        if (m->path && e == entries) snprintf(array, 32, "module_%zu", i);
+        put(&out, "    {");
+        put_string(&out, m->name);
+        if (m->kind != MODULE) put(&out, " \"%s\"", m->kind == PACKAGE ? ".__init__" : ".__namespace__");
+        put(&out, ", %s, sizeof %s},\n", array, array);
+        free(array);
+    }
+    put(&out, "    {NULL, NULL, 0}\n};\n");
+    put(&out, "/* A SPYModuleLoader over the bundled modules: a malloc copy of the\n"
+              " * source the engine asks for by name, or NULL. */\n"
+              "%schar *%s(void *data, const char *name) {\n"
+              "    size_t low = 0, high = sizeof modules / sizeof *modules - 1;\n"
+              "    (void)data;\n"
+              "    while (low < high) {\n"
+              "        size_t middle = low + (high - low) / 2;\n"
+              "        int order = strcmp(name, modules[middle].name);\n"
+              "        if (!order) {\n"
+              "            char *source = malloc(modules[middle].size);\n"
+              "            if (source) memcpy(source, modules[middle].source, modules[middle].size);\n"
+              "            return source;\n"
+              "        }\n"
+              "        if (order < 0) high = middle; else low = middle + 1;\n"
+              "    }\n"
+              "    return NULL;\n}\n", bare ? "" : "static ", bare ? loader : "load");
     if (!bare) {
-        fputs("static int output(void *p, const char *s, size_t n) {\n"
-              "    return fwrite(s, 1, n, (FILE *)p) == n ? 0 : -1;\n}\n"
-              "static int flush_output(void *p) { return fflush((FILE *)p); }\n"
-              "int main(void) {\n"
-              "    SPYContext *c = spy_context_new();\n"
-              "    if (!c) return 1;\n", out);
-        for (int i = 1; i < at; i += 2)
-            fprintf(out, "    if (spy_std_init_module(c, \"%s\")) return 1;\n", argv[i + 1]);
-        fputs("    spy_set_output(c, output, stdout);\n"
-              "    spy_set_flush(c, flush_output);\n"
-              "    int status = spy_exec(c, source, \"<embedded>\");\n"
-              "    if (status) fprintf(stderr, \"%s:%zu: %s: %s\\n\",\n"
-              "        spy_error_filename(c), spy_error_line(c), spy_error_type(c), spy_error_display(c));\n"
-              "    spy_context_free(c);\n"
-              "    return status ? 1 : 0;\n}\n", out);
+        EntryPoint *e = &list[0];
+        put(&out, "static int output(void *p, const char *s, size_t n) {\n"
+                  "    return fwrite(s, 1, n, (FILE *)p) == n ? 0 : -1;\n}\n"
+                  "static int flush_output(void *p) { return fflush((FILE *)p); }\n"
+                  "static int global(SPYContext *c, const char *name, const char *text) {\n"
+                  "    SPYValue *value = spy_string(c, text, strlen(text));\n"
+                  "    int status = !value || spy_set_global(c, name, value);\n"
+                  "    spy_release(value);\n"
+                  "    return status;\n}\n"
+                  "int main(void) {\n"
+                  "    SPYContext *c = spy_context_new();\n"
+                  "    if (!c) return 1;\n");
+        for (size_t i = 0; i < b.registered.len; i++)
+            put(&out, "    if (spy_std_init_module(c, \"%s\")) return 1;\n", b.registered.items[i]);
+        put(&out, "    spy_set_output(c, output, stdout);\n"
+                  "    spy_set_flush(c, flush_output);\n"
+                  "    spy_set_module_loader(c, load, NULL);\n"
+                  "    int status = global(c, \"__file__\", ");
+        put_string(&out, e->file);
+        put(&out, ");\n");
+        if (e->package) {
+            /* As python -m: the package is set, and imported first. */
+            put(&out, "    if (!status) status = global(c, \"__package__\", ");
+            put_string(&out, e->package);
+            put(&out, ");\n");
+            if (*e->package) {
+                char *import = concat("__import__('", e->package, "')");
+                put(&out, "    if (!status) {\n        spy_release(spy_eval(c, ");
+                put_string(&out, import);
+                put(&out, ", \"<spyc>\"));\n        status = spy_error_type(c)[0] != 0;\n    }\n");
+                free(import);
+            }
+        }
+        put(&out, "    if (!status) status = spy_exec(c, source, ");
+        put_string(&out, e->file);
+        put(&out, ");\n"
+                  "    if (status) fprintf(stderr, \"%%s:%%zu: %%s: %%s\\n\",\n"
+                  "        spy_error_filename(c), spy_error_line(c), spy_error_type(c), spy_error_display(c));\n"
+                  "    spy_context_free(c);\n"
+                  "    return status ? 1 : 0;\n}\n");
     }
-    int failed = ferror(out);
-    if (fclose(out)) failed = 1;
-    free(source);
-    if (failed) { fputs("cannot write generated C\n", stderr); return 1; }
+
+    FILE *file = fopen(output, "wb");
+    if (!file) { perror(output); return 1; }
+    int failed = fwrite(out.data, 1, out.len, file) != out.len;
+    if (fclose(file)) failed = 1;
+    if (failed) { fputs("spyc: error: cannot write generated C\n", stderr); return 1; }
+
+    /* The inputs: the entries, then the table in key order. */
+    Strings inputs = {0};
+    for (size_t i = 0; i < entries; i++) push(&inputs, list[i].path);
+    for (size_t i = 0; i < count; i++) if (table[i]->path && !listed(&inputs, table[i]->path)) push(&inputs, table[i]->path);
+    if (metafile) {
+        Buffer meta = {.ctx = b.c};
+        put(&meta, "{\n  \"inputs\": {");
+        for (size_t i = 0; i < inputs.len; i++) {
+            Module *owner = NULL;
+            const char *source = NULL;
+            for (size_t j = 0; j < count; j++) if (table[j]->path && !strcmp(table[j]->path, inputs.items[i])) owner = table[j], source = owner->source;
+            for (size_t j = 0; j < entries; j++) if (!strcmp(list[j].path, inputs.items[i])) owner = &list[j].imports, source = list[j].source;
+            put(&meta, "%s\n    ", i ? "," : "");
+            put_json(&meta, inputs.items[i]);
+            put(&meta, ": {\"bytes\": %zu, \"imports\": [", strlen(source));
+            size_t shown = 0;
+            for (size_t j = 0; j < owner->imports_len; j++) {
+                Import *imp = &owner->imports[j];
+                if (!strcmp(imp->kind, "maybe")) continue;
+                put(&meta, "%s\n      {\"path\": ", shown++ ? "," : "");
+                put_json(&meta, imp->path);
+                put(&meta, ", \"kind\": \"%s\", \"original\": ", imp->kind);
+                put_json(&meta, imp->original);
+                put(&meta, "%s}", imp->flag == 1 ? ", \"external\": true" : imp->flag == 2 ? ", \"missing\": true" : "");
+            }
+            put(&meta, "]}");
+        }
+        put(&meta, "\n  },\n  \"outputs\": {\n    ");
+        put_json(&meta, output);
+        put(&meta, ": {\"bytes\": %zu, \"entryPoint\": ", out.len);
+        put_json(&meta, list[0].path);
+        put(&meta, ", \"inputs\": {");
+        for (size_t i = 0; i < inputs.len; i++) {
+            const char *source = NULL;
+            for (size_t j = 0; j < count; j++) if (table[j]->path && !strcmp(table[j]->path, inputs.items[i])) source = table[j]->source;
+            for (size_t j = 0; j < entries; j++) if (!strcmp(list[j].path, inputs.items[i])) source = list[j].source;
+            put(&meta, "%s\n      ", i ? "," : "");
+            put_json(&meta, inputs.items[i]);
+            put(&meta, ": {\"bytesInOutput\": %zu}", strlen(source));
+        }
+        put(&meta, "}}\n  }\n}\n");
+        FILE *f = fopen(metafile, "wb");
+        if (!f || fwrite(meta.data, 1, meta.len, f) != meta.len || fclose(f)) { perror(metafile); return 1; }
+    }
+    if (deps) {
+        Buffer rule = {.ctx = b.c};
+        put(&rule, "%s:", output);
+        for (size_t i = 0; i < inputs.len; i++) {
+            put(&rule, " ");
+            for (const char *p = inputs.items[i]; *p; p++) put(&rule, *p == ' ' || *p == '#' ? "\\%c" : *p == '$' ? "$$" : "%c", *p);
+        }
+        put(&rule, "\n");
+        FILE *f = fopen(deps, "wb");
+        if (!f || fwrite(rule.data, 1, rule.len, f) != rule.len || fclose(f)) { perror(deps); return 1; }
+    }
+    if (analyze) {
+        fprintf(stderr, "  %s  %zu bytes\n", output, out.len);
+        for (size_t i = 0; i < inputs.len; i++) {
+            const char *source = "";
+            for (size_t j = 0; j < count; j++) if (table[j]->path && !strcmp(table[j]->path, inputs.items[i])) source = table[j]->source;
+            for (size_t j = 0; j < entries; j++) if (!strcmp(list[j].path, inputs.items[i])) source = list[j].source;
+            fprintf(stderr, "    %s  %zu\n", inputs.items[i], strlen(source));
+        }
+    }
     return 0;
 }

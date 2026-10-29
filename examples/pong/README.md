@@ -16,7 +16,8 @@ make -C examples/pong run
 ```
 
 `make` builds `libspy.a` and `spyc` first if they are missing, then
-`spyc -c -o pong_py.c pong.py` and links `pong.c`, `pong_py.c`, `libspy.a`
+`spyc -c -x raylib -o pong_py.c pong.py` (raylib is the C module `pong.c`
+registers, so spyc leaves it out) and links `pong.c`, `pong_py.c`, `libspy.a`
 and raylib. Edit `pong.py` and run `make run` again to rebuild.
 
 ## Play

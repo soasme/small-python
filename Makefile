@@ -59,8 +59,9 @@ wasm: javascript/spy-worker.wasm
 test-javascript: javascript/spy-worker.wasm
 	cd javascript && node --test test/*.test.js
 
+# spyc parses with the engine itself, as qjsc compiles with quickjs.c.
 spyc: $(OBJDIR)/spyc.o
-	$(CC) $(LDFLAGS) $^ -o $@
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^
@@ -74,7 +75,8 @@ $(OBJDIR)/%.o: %.c spy.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
-$(OBJDIR)/spy.o: spy-unicode.h spy-intrinsics.h
+$(OBJDIR)/spy.o $(OBJDIR)/spyc.o: spy-unicode.h spy-intrinsics.h
+$(OBJDIR)/spyc.o: spy.c
 $(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o: spy-std.h
 $(OBJDIR)/spy-std.o: spy-std-modules.h
 
