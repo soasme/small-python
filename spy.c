@@ -20282,6 +20282,19 @@ static int lower_at(Units *out, int type, const Units *text, size_t at) {
 }
 enum { TEXT_LOWER, TEXT_UPPER, TEXT_FOLD, TEXT_TITLE, TEXT_CAPITALIZE, TEXT_SWAPCASE };
 static SPYValue *text_case(SPYContext *c, SPYValue *self, int operation) {
+    /* ASCII letters, all that bytes ever map, change case by themselves. */
+    if (operation == TEXT_UPPER || operation == TEXT_LOWER || operation == TEXT_FOLD) {
+        const char *data = self->as.string.data;
+        size_t len = self->as.string.len, i = 0;
+        while (self->type == SPY_STRING && i < len && !(data[i] & 0x80)) i++;
+        if (self->type != SPY_STRING || i == len) {
+            SPYValue *result = self->type == SPY_BYTEARRAY ? bytearray_new(c, data, len) :
+                self->type == SPY_STRING ? spy_string(c, data, len) : spy_bytes(c, data, len);
+            for (char *at = result ? result->as.string.data : NULL; at && at < result->as.string.data + len; at++)
+                if (operation == TEXT_UPPER ? *at >= 'a' && *at <= 'z' : *at >= 'A' && *at <= 'Z') *at ^= 0x20;
+            return result;
+        }
+    }
     Units text, out = {.ctx = c};
     if (units_from(c, self, &text)) return NULL;
     int previous_cased = 0;
@@ -20380,6 +20393,30 @@ static int optional_size(SPYContext *c, SPYValue *value, int64_t fallback, int64
     *out = fallback;
     return value && index_value(c, value, out);
 }
+/* The first occurrence of needle in [at, end), or NULL. */
+static const char *bytes_find(const char *at, const char *end, SPYValue *needle) {
+    size_t width = needle->as.string.len;
+    for (; (size_t)(end - at) >= width; at++) {
+        if (!(at = memchr(at, needle->as.string.data[0], (size_t)(end - at) - width + 1))) return NULL;
+        if (!memcmp(at, needle->as.string.data, width)) return at;
+    }
+    return NULL;
+}
+/* text.split(sep, limit) on the bytes of exact strs or bytes, as bytes_replace. */
+static SPYValue *bytes_split(SPYContext *c, SPYValue *text, SPYValue *sep, int64_t limit) {
+    SPYValue *list = spy_list(c);
+    const char *from = text->as.string.data, *end = from + text->as.string.len, *found;
+    for (int64_t count = 0; list && (limit < 0 || count < limit) && (found = bytes_find(from, end, sep)); count++) {
+        SPYValue *part = text->type == SPY_STRING ? spy_string(c, from, (size_t)(found - from)) : spy_bytes(c, from, (size_t)(found - from));
+        if (!part || sequence_append(c, list, part)) { spy_release(part); spy_release(list); return NULL; }
+        spy_release(part);
+        from = found + sep->as.string.len;
+    }
+    SPYValue *part = !list ? NULL : text->type == SPY_STRING ? spy_string(c, from, (size_t)(end - from)) : spy_bytes(c, from, (size_t)(end - from));
+    if (!part || sequence_append(c, list, part)) { spy_release(list); list = NULL; }
+    spy_release(part);
+    return list;
+}
 static SPYValue *text_split(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)((intptr_t)data >> 8), reverse = (int)((intptr_t)data & 1);
     const char *name = reverse ? "rsplit" : "split";
@@ -20388,6 +20425,8 @@ static SPYValue *text_split(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (!self || parse_arguments(c, name, argc - 1, argv + 1, keywords, names, 2, 0, 0, args)) return NULL;
     int64_t limit;
     if (optional_size(c, args[1], -1, &limit)) return NULL;
+    if (!reverse && (self->type == SPY_STRING || self->type == SPY_BYTES) && args[0] && args[0]->type == self->type &&
+        args[0]->as.string.len) return bytes_split(c, self, args[0], limit);
     Units text, sep = {0};
     if (units_from(c, self, &text)) return NULL;
     SPYValue *list = spy_list(c);
@@ -20481,6 +20520,23 @@ static SPYValue *text_strip(SPYContext *c, size_t argc, SPYValue *const *argv, S
     free(text.items); free(chars.items);
     return result;
 }
+/* text.replace(old, new, limit) on the bytes of exact strs or bytes, with old
+ * nonempty: UTF-8 is self-synchronizing, so the matches are the same. */
+static SPYValue *bytes_replace(SPYContext *c, SPYValue *text, SPYValue *old, SPYValue *new, int64_t limit) {
+    Buffer out = {.ctx = c};
+    const char *from = text->as.string.data, *end = from + text->as.string.len, *at = from;
+    size_t width = old->as.string.len;
+    for (int64_t count = 0; (limit < 0 || count < limit) && (size_t)(end - at) >= width; count++) {
+        const char *found = bytes_find(at, end, old);
+        if (!found) break;
+        if (append(&out, from, (size_t)(found - from)) || append(&out, new->as.string.data, new->as.string.len)) break;
+        from = at = found + width;
+    }
+    SPYValue *result = c->error_type[0] || append(&out, from, (size_t)(end - from)) ? NULL :
+        text->type == SPY_STRING ? spy_string(c, out.data, out.len) : spy_bytes(c, out.data, out.len);
+    free(out.data);
+    return result;
+}
 static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     static const char *const names[] = {"old", "new", "count"};
@@ -20488,6 +20544,8 @@ static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv,
     if (!self || parse_arguments(c, "replace", argc - 1, argv + 1, keywords, names, 3, 2, 2, args)) return NULL;
     int64_t limit;
     if (optional_size(c, args[2], -1, &limit)) return NULL;
+    if ((self->type == SPY_STRING || self->type == SPY_BYTES) && args[0]->type == self->type && args[1]->type == self->type &&
+        args[0]->as.string.len) return bytes_replace(c, self, args[0], args[1], limit);
     Units text, old = {0}, replacement = {0}, out = {.ctx = c};
     if (units_from(c, self, &text)) return NULL;
     SPYValue *result = NULL;
