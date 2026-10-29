@@ -1005,31 +1005,52 @@ static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **qu
     IntView x, y; integer_view(a, &x); integer_view(b, &y);
     *quotient = *remainder = NULL;
     if (!y.len) { spy_error(c, "ZeroDivisionError", "division by zero"); return -1; }
-    BigInt *q = integer_alloc(c, x.len), *r = integer_alloc(c, y.len + 1);
-    if (!q || !r) { free(q); free(r); return -1; }
-    r->len = 0;
-    for (size_t bit = integer_bits(&x); bit; bit--) {
+    /* Knuth's algorithm D (TAOCP 4.3.1) on 32-bit digits: shift both so the
+     * divisor's top digit has its high bit set, estimate each quotient digit
+     * from the top two remainder digits, subtract, and add back when the
+     * estimate was one too large. */
+    size_t n = y.len, m = x.len >= n ? x.len - n : 0;
+    BigInt *q = integer_alloc(c, m + 1), *r = integer_alloc(c, x.len + 1);
+    uint32_t *divisor = allocate(c, n * sizeof(*divisor));
+    if (!q || !r || !divisor) { free(q); free(r); free(divisor); return -1; }
+    int shift = 0;
+    while (!(y.digits[n - 1] << shift & UINT32_C(0x80000000))) shift++;
+    for (size_t i = n; i--;) divisor[i] = y.digits[i] << shift | (shift && i ? y.digits[i - 1] >> (32 - shift) : 0);
+    uint32_t *u = r->digits;
+    u[x.len] = shift && x.len ? x.digits[x.len - 1] >> (32 - shift) : 0;
+    for (size_t i = x.len; i--;) u[i] = x.digits[i] << shift | (shift && i ? x.digits[i - 1] >> (32 - shift) : 0);
+    q->digits[m] = 0;
+    for (size_t j = m + 1; x.len >= n && j--;) {
         if (c->step_limit && ++c->steps > c->step_limit) {
-            free(q); free(r); spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
+            free(q); free(r); free(divisor); spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
         }
-        uint64_t carry = (unsigned)magnitude_bit(&x, bit - 1);
-        for (size_t i = 0; i < r->len; i++) {
-            uint64_t shifted = ((uint64_t)r->digits[i] << 1) | carry;
-            r->digits[i] = (uint32_t)shifted; carry = shifted >> 32;
+        uint64_t top = (uint64_t)u[j + n] << 32 | u[j + n - 1];
+        uint64_t estimate = top / divisor[n - 1], rest = top % divisor[n - 1];
+        while (estimate >> 32 || (n > 1 && estimate * divisor[n - 2] > (rest << 32 | u[j + n - 2]))) {
+            estimate--; rest += divisor[n - 1];
+            if (rest >> 32) break;
         }
-        if (carry) r->digits[r->len++] = (uint32_t)carry;
-        IntView current = {.digits = r->digits, .len = r->len};
-        if (magnitude_compare(&current, &y) >= 0) {
-            uint64_t borrow = 0;
-            for (size_t i = 0; i < r->len; i++) {
-                uint64_t amount = (i < y.len ? y.digits[i] : 0) + borrow;
-                uint32_t digit = r->digits[i];
-                r->digits[i] = (uint32_t)(digit - amount); borrow = digit < amount;
+        uint64_t carry = 0, borrow = 0;
+        for (size_t i = 0; i < n; i++) {
+            uint64_t product = estimate * divisor[i] + carry;
+            uint64_t difference = (uint64_t)u[i + j] - (uint32_t)product - borrow;
+            carry = product >> 32; u[i + j] = (uint32_t)difference; borrow = difference >> 63;
+        }
+        uint64_t difference = (uint64_t)u[j + n] - carry - borrow;
+        u[j + n] = (uint32_t)difference;
+        if (difference >> 63) {
+            estimate--; carry = 0;
+            for (size_t i = 0; i < n; i++) {
+                uint64_t sum = (uint64_t)u[i + j] + divisor[i] + carry;
+                u[i + j] = (uint32_t)sum; carry = sum >> 32;
             }
-            integer_trim(r);
-            q->digits[(bit - 1) / 32] |= UINT32_C(1) << ((bit - 1) % 32);
+            u[j + n] += (uint32_t)carry;
         }
+        q->digits[j] = (uint32_t)estimate;
     }
+    r->len = x.len < n ? x.len : n;
+    for (size_t i = 0; i < r->len; i++) u[i] = u[i] >> shift | (shift ? u[i + 1] << (32 - shift) : 0);
+    free(divisor);
     q->sign = x.sign * y.sign; r->sign = x.sign;
     SPYValue *qv = integer_finish(c, q), *rv = integer_finish(c, r);
     if (qv && rv && integer_sign(rv) && x.sign != y.sign) {
