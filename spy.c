@@ -60,7 +60,7 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024 };
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048 };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -6897,6 +6897,17 @@ static void invalid_expression_error(Parser *p) {
     spy_error(c, "SyntaxError", message);
     c->line = head->line; p->error_start = head->start; p->error_end = last->start + last->len;
 }
+static int at_hand(Node *n) {
+    return n->kind == N_NAME || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
+}
+/* The right operand of n when n is arithmetic, a single comparison or an
+ * index whose operands are literals or names, else NULL. The compiler marks
+ * such nodes F_OPERATOR. */
+static Node *operator_right(Node *n) {
+    Node *right = n->kind == N_INDEX ? n->b : n->kind == N_COMPARE && !n->args->next ? n->args->a :
+        n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
+    return right && at_hand(n->a) && at_hand(right) ? right : NULL;
+}
 static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
@@ -6997,6 +7008,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 c->line = n->line;
                 n->constant = number_literal(c, n);
             }
+            if (operator_right(n)) n->flags |= F_OPERATOR;
         }
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
@@ -12758,11 +12770,15 @@ static int tick_full(SPYContext *c, Frame *f, Node *n) {
     }
     return 0;
 }
+/* Whether tick has nothing to do but record the line. */
+static int quiet(SPYContext *c, Frame *f) {
+    return !c->error_type[0] && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit &&
+        c->filename_from == f->unit->as.unit.filename;
+}
+static void relocate(SPYContext *, Node *);
 static int tick(SPYContext *c, Frame *f, Node *n) {
-    if (c->error_type[0] || c->weak_calls_len || c->finalize_calls_len || c->step_limit ||
-        c->filename_from != f->unit->as.unit.filename) return tick_full(c, f, n);
-    c->line = n->line;
-    if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
+    if (!quiet(c, f)) return tick_full(c, f, n);
+    relocate(c, n);
     return 0;
 }
 static SPYValue *number_literal(SPYContext *c, Node *n) {
@@ -13339,6 +13355,35 @@ container_fail:
     spy_release(a); spy_release(b);
     return result;
 }
+static int ordering(int op) { return op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE; }
+/* A literal's value or a name found along the fast path, borrowed. */
+static SPYValue *operand(Frame *f, Node *n) {
+    return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
+}
+/* Operator node n on its operands x and y, both borrowed, when they are
+ * exact small ints, floats, lists and tuples it computes without running
+ * Python code or raising anything but MemoryError; else NULL. */
+static SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
+    if (n->kind == N_INDEX) {
+        if ((x->type != SPY_LIST && x->type != SPY_TUPLE) || y->type != SPY_INT || y->as.integer_data.big) return NULL;
+        int64_t i = y->as.integer_data.small, len = (int64_t)x->as.seq.len;
+        if (i < 0) i += len;
+        return i >= 0 && i < len ? spy_retain(x->as.seq.items[i]) : NULL;
+    }
+    if (x->type != y->type || (x->type != SPY_FLOAT && (x->type != SPY_INT || x->as.integer_data.big || y->as.integer_data.big)) ||
+        (n->kind == N_COMPARE ? !ordering(n->args->op) : n->op != '+' && n->op != '-' && n->op != '*')) return NULL;
+    relocate(c, n);
+    return n->kind == N_BINARY ? binary(c, n->op, x, y) : comparison(c, n->args->op, x, y);
+}
+/* Operator node n on its operands x and y, as eval_inner computes it. */
+static SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
+    relocate(c, n);
+    spy_retain(x); spy_retain(y);
+    SPYValue *result = n->kind == N_INDEX ? get_index(c, x, y) : n->kind == N_COMPARE ? comparison(c, n->args->op, x, y) :
+        binary(c, n->op, x, y);
+    spy_release(x); spy_release(y);
+    return result;
+}
 static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     /* A literal made once, or a name found along the fast path, cannot
      * fail, so it skips the step bookkeeping. */
@@ -13347,10 +13392,22 @@ static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
         SPYValue *value = name_fast(f->env, n);
         if (value) return spy_retain(value);
     }
+    /* An operator whose operands are found along the fast path, while tick
+     * has only the line to record, takes them as they are. */
+    SPYValue *x = NULL, *y = NULL;
+    if ((n->flags & F_OPERATOR) && quiet(c, f)) {
+        x = operand(f, n->a);
+        y = x ? operand(f, operator_right(n)) : NULL;
+        if (!y) n->flags &= ~F_OPERATOR; /* An operand the fast path misses usually always will. */
+        else {
+            SPYValue *v = operator_fast(c, n, x, y);
+            if (v || c->error_type[0]) return v;
+        }
+    }
     if (deeper(c, "")) return NULL;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
-    SPYValue *v = eval_inner(c, f, n);
+    SPYValue *v = y ? operate(c, n, x, y) : eval_inner(c, f, n);
     c->eval_env = outer;
     c->depth--;
     return v;
