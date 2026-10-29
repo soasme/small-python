@@ -1982,14 +1982,15 @@ static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
     return name_error(c, text, "name '%s' is not defined");
 }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
-/* What the full lookup of name node n does at env, a plain function
- * environment: binds the name there (with *key its symbol's key, NULL while
- * never bound), passes over env to its parent, or something else. The first
- * environment's symbol is remembered by scope. */
+/* What the full lookup of name node n does at env, a plain function or
+ * comprehension environment: binds the name there (with *key its symbol's
+ * key, NULL while never bound), passes over env to its parent, or something
+ * else. The first environment's symbol is remembered by scope. */
 enum { NAME_HERE, NAME_PARENT, NAME_SLOW };
 static int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
-    Scope *scope = env->type == V_ENV && !env->as.map.flags && !env->as.map.namespace ? env->as.map.scope : NULL;
-    if (!scope || scope->kind != S_FUNCTION) return NAME_SLOW;
+    Scope *scope = env->type == V_ENV && !env->as.map.namespace ? env->as.map.scope : NULL;
+    if (!scope) return NAME_SLOW;
+    if ((env->as.map.flags || scope->kind != S_FUNCTION) && (env->as.map.flags != 2 || scope->kind != S_COMPREHENSION)) return NAME_SLOW;
     Symbol *symbol;
     if (first && n->slot_scope == scope) symbol = n->slot_symbol < scope->len ? &scope->symbols[n->slot_symbol] : NULL;
     else symbol = scope_find(scope, node_name(n));
