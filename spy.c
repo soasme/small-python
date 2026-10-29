@@ -17358,6 +17358,7 @@ static NO_INLINE Result execute_try(SPYContext *c, Frame *f, Node *n) {
         int caught = 0;
         c->handled = spy_retain(error.value);
         for (Node *h = n->args; h && !c->error_type[0]; h = h->next) {
+            if (h->a) relocate(c, h->a); /* The frame is at the handler even when its type is found without a step. */
             SPYValue *type = h->a ? eval(c, f, h->a) : NULL;
             int match = !h->a ? 1 : type && error.value ? exception_matches(c, error.value, type) : -1;
             spy_release(type);
