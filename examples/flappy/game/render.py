@@ -38,12 +38,15 @@ class Renderer:
         for x, y, size in self.stars[:theme.STARS]:
             rl.draw_circle(x, y, size, (255, 255, 230))
         # Far things move slower: clouds at a fifth of the speed, hills at a third.
+        # A cloud reaches 1.8 radii (at most 62 pixels) from its center, so it
+        # wraps around 70 pixels off screen, where the jump cannot be seen.
         for x, y, r in self.clouds:
-            x = (x - scroll * 0.2) % (WIDTH + 120) - 60
+            x = (x - scroll * 0.2) % (WIDTH + 140) - 70
             for dx, dy, k in ((0, 0, 1.0), (r, 6, 0.8), (-r, 8, 0.7)):
                 rl.draw_circle(x + dx, y + dy, r * k, theme.CLOUD)
-        offset = scroll / 3 % 160
-        for i in range(-1, WIDTH // 160 + 2):
+        # Hills alternate small and large, so the row repeats every two hills.
+        offset = scroll / 3 % 320
+        for i in range(-1, WIDTH // 160 + 3):
             rl.draw_circle(i * 160 - offset + 80, GROUND + 10, 90 + 20 * (i % 2), theme.HILLS)
 
     def pipe(self, theme, *rects):
