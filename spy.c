@@ -2017,8 +2017,9 @@ static ALWAYS_INLINE Entry *function_slot(SPYValue *env, Node *n, SPYValue *key,
     if (first) n->slot = (size_t)(entry - env->as.map.items);
     return entry;
 }
-/* The entry for name node n in an exact dictionary, or NULL when it has none.
- * An entry whose key is n's retained exact str is that entry. */
+/* The entry for name node n in an exact dictionary or a plain instance's
+ * attributes, or NULL when there is none. An entry whose key is n's
+ * retained exact str is that entry. */
 static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
     SPYValue *key = n->global_key;
     if (key && n->global_slot < map_used(dict) && dict->as.map.items[n->global_slot].key == key)
@@ -10332,7 +10333,7 @@ static int node_access(SPYContext *c, SPYValue *v, Node *n) {
 static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
     int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
     if (kind != ATTR_SLOW) {
-        Entry *e = env_find(v, node_name(n->b));
+        Entry *e = dict_slot(v, n->b);
         if (e) return spy_retain(e->value);
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
@@ -10343,7 +10344,7 @@ static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
 static int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
     if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->text, value);
     Name name = node_name(n->b);
-    Entry *e = env_find(v, name);
+    Entry *e = dict_slot(v, n->b);
     if (e && e->key->type == SPY_STRING) {
         SPYValue *old = e->value;
         e->value = spy_retain(value);
