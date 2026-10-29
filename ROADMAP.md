@@ -5,7 +5,7 @@ Planned work, not implemented features. The manual describes what exists;
 
 ## Performance
 
-spy is up to 2.5 times slower than CPython 3.15 on the core-language
+spy is up to 2.4 times slower than CPython 3.15 on the core-language
 benchmarks. Profiles of `fib`, `classes`, `generators` and `nbody` show the
 time spread across the evaluator rather than in one operation, so the
 remaining work is structural. Each step must keep `make test`, the spec
