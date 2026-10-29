@@ -13173,16 +13173,25 @@ static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self
         return spy_retain(n->attr_method);
     }
     /* A builtin type's methods do not depend on the value: the lookup's
-     * answer, its own function bound to the object, is kept for the type. */
+     * answer is kept for the type, either its own function bound to the
+     * object or, in attr_kind as -1 - id, a native method of the object. */
     SPYValue *type = builtin_receiver(object) ? c->types[object->type] : NULL;
     if (type && n->attr_class == type && n->attr_epoch == c->classes_changed) {
-        *self = object;
-        return spy_retain(n->attr_method);
+        if (n->attr_kind >= 0) { *self = object; return spy_retain(n->attr_method); }
+        SPYValue *bound = bound_method(c, object, -1 - n->attr_kind);
+        if (bound) bound->as.bound.name = spy_retain(n->b->global_key);
+        spy_release(object);
+        return bound;
     }
     SPYValue *callee = node_attribute(c, object, n);
+    int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
-        !(n->b->text[0] == '_' && n->b->text[1] == '_') && callee->as.method.function == class_lookup(type, n->b->text)) {
-        n->attr_class = type; n->attr_method = callee->as.method.function; n->attr_epoch = c->classes_changed;
+        !dunder && callee->as.method.function == class_lookup(type, n->b->text)) {
+        n->attr_class = type; n->attr_method = callee->as.method.function; n->attr_kind = 0; n->attr_epoch = c->classes_changed;
+    } else if (type && callee && callee->type == SPY_BOUND_METHOD && callee->as.bound.self == object && !callee->as.bound.module &&
+               !dunder && callee->as.bound.name && !strcmp(callee->as.bound.name->as.string.data, n->b->text) &&
+               (n->b->global_key || (n->b->global_key = spy_retain(callee->as.bound.name)))) {
+        n->attr_class = type; n->attr_method = NULL; n->attr_kind = -1 - callee->as.bound.method; n->attr_epoch = c->classes_changed;
     }
     spy_release(object);
     return callee;
