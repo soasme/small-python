@@ -21667,14 +21667,27 @@ static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other)
         }
         return 0;
     }
-    for (size_t i = 0; i < result->as.map.len;) {
-        Entry *entry = &map_items(result)[i];
-        int found = set_contains(c, other, entry->key, entry->hash);
-        if (found < 0) return -1;
-        if (found == (op == SET_DIFFERENCE)) set_remove_at(result, i);
-        else i++;
+    /* Decide every entry before removing any: a removal leaves a hole that
+     * the next positional read would compact. */
+    Entry *gone = NULL;
+    size_t count = 0, cap = 0;
+    int status = 0;
+    for (size_t i = 0; i < result->as.map.len && !status; i++) {
+        Entry entry = map_items(result)[i];
+        spy_retain(entry.key);
+        int found = set_contains(c, other, entry.key, entry.hash);
+        if (found == (op == SET_DIFFERENCE) && !grow(c, (void **)&gone, &cap, count + 1, sizeof(*gone))) gone[count++] = entry;
+        else spy_release(entry.key);
+        status = c->error_type[0] ? -1 : 0;
     }
-    return 0;
+    for (size_t i = 0; i < count; i++) {
+        ptrdiff_t at = status ? -1 : map_find_hash(result, gone[i].key, gone[i].hash);
+        if (at >= 0) set_remove_at(result, (size_t)at);
+        status = c->error_type[0] ? -1 : status;
+        spy_release(gone[i].key);
+    }
+    free(gone);
+    return status;
 }
 static SPYValue *set_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int which = op == '|' ? SET_UNION : op == '&' ? SET_INTERSECTION : op == '-' ? SET_DIFFERENCE : SET_SYMMETRIC;
