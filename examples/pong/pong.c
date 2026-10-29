@@ -128,7 +128,7 @@ static const struct { const char *name; SPYNativeKeywords fn; } functions[] = {
 };
 static const struct { const char *name; int value; } keys[] = {
     {"KEY_W", KEY_W}, {"KEY_S", KEY_S}, {"KEY_UP", KEY_UP}, {"KEY_DOWN", KEY_DOWN},
-    {"KEY_SPACE", KEY_SPACE}, {"KEY_P", KEY_P},
+    {"KEY_SPACE", KEY_SPACE},
 };
 
 static int set_owned(SPYContext *c, SPYValue *module, const char *name, SPYValue *v) {
