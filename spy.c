@@ -29,7 +29,7 @@
 #include "spy-intrinsics.h"
 /* Statement helpers called from one place in the recursive evaluator stay
  * out of line, as QuickJS's no_inline: inlined, their locals would enlarge
- * the frame of every nested call. The steps of a local name read are always
+ * the frame of every nested call. The steps of a fast name read are always
  * inlined, as QuickJS's force_inline. */
 #if defined(__GNUC__)
 #define NO_INLINE __attribute__((noinline))
@@ -2019,7 +2019,7 @@ static ALWAYS_INLINE Entry *function_slot(SPYValue *env, Node *n, SPYValue *key,
 }
 /* The entry for name node n in an exact dictionary, or NULL when it has none.
  * An entry whose key is n's retained exact str is that entry. */
-static Entry *dict_slot(SPYValue *dict, Node *n) {
+static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
     SPYValue *key = n->global_key;
     if (key && n->global_slot < map_used(dict) && dict->as.map.items[n->global_slot].key == key)
         return &dict->as.map.items[n->global_slot];
