@@ -650,6 +650,8 @@ static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
         if (drop) { memmove(e, e + 1, (c->weak_len - i - 1) * sizeof(*e)); c->weak_len--; }
     }
 }
+/* The allocation holding a map's entries, which start front entries in. */
+static Entry *map_storage(SPYValue *map) { return map->as.map.items ? map->as.map.items - map->as.map.front : NULL; }
 static void free_value(SPYValue *v) {
     SPYContext *c = v->ctx;
     if (v->weak) weak_dead(c, v, 0);
@@ -671,8 +673,8 @@ static void free_value(SPYValue *v) {
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
         if (v->as.map.cap + v->as.map.front == 8 && c->spare_entries_len < 16)
-            c->spare_entries[c->spare_entries_len++] = v->as.map.items - v->as.map.front;
-        else free(v->as.map.items - v->as.map.front);
+            c->spare_entries[c->spare_entries_len++] = map_storage(v);
+        else free(map_storage(v));
         free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
@@ -11543,12 +11545,12 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     case M_CLEAR:
         if (argc) break;
         if (self->type == SPY_DICT) {
-            Entry *items = map_items(self);
-            size_t len = self->as.map.len, front = self->as.map.front;
+            Entry *items = map_items(self), *storage = map_storage(self);
+            size_t len = self->as.map.len;
             map_unindex(self);
             self->as.map.items = NULL; self->as.map.len = self->as.map.cap = self->as.map.front = 0;
             for (size_t i = 0; i < len; i++) { spy_release(items[i].key); spy_release(items[i].value); }
-            free(items - front);
+            free(storage);
         } else if (self->as.seq.len) {
             SPYValue **items = self->as.seq.items;
             size_t len = self->as.seq.len;
@@ -11809,7 +11811,7 @@ static int module_set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
     }
     SPYValue *base = object->as.map.base, *parent = object->as.map.parent, *namespace = object->as.map.namespace;
     if (object->as.map.len) { spy_error(c, "TypeError", "__class__ assignment: 'module' object layout differs"); return -1; }
-    free(object->as.map.items - object->as.map.front);
+    free(map_storage(object));
     object->as.map = base->as.map;
     memset(&base->as.map, 0, sizeof(base->as.map));
     object->type = SPY_MODULE;
