@@ -15141,6 +15141,7 @@ static void generator_close(SPYValue *v) {
     v->as.generator.done = 1;
 }
 static int bytearray_exported(SPYContext *, SPYValue *);
+static int bytearray_resize(SPYContext *, SPYValue *, size_t);
 static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     const Operator *operation = &operators[op - T_ADDEQ];
     /* Exact ints and floats have no in-place methods: an operator both
@@ -15161,6 +15162,20 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         return result;
     }
     /* Mutable sets, dicts, and bytearrays update in place. */
+    SPYValue *bytes = old->type == SPY_BYTEARRAY && token == '+' ? builtin_value(c, rhs, SPY_BYTES) : NULL;
+    if (old->type == SPY_BYTEARRAY && token == '+' && !bytes) bytes = builtin_value(c, rhs, SPY_BYTEARRAY);
+    if (bytes) {
+        /* bytearray_iconcat holds a buffer of the added bytes while it
+         * resizes, so old += old is a resize of an exported bytearray. */
+        size_t len = old->as.string.len, added = bytes->as.string.len;
+        if (added > SIZE_MAX - len - 1) return spy_error(c, "MemoryError", "bytearray is too large");
+        old->as.string.exports += bytes == old;
+        int status = bytearray_resize(c, old, len + added);
+        old->as.string.exports -= bytes == old;
+        if (status) return NULL;
+        memcpy(old->as.string.data + len, bytes->as.string.data, added);
+        return spy_retain(old);
+    }
     if ((old->type == SPY_SET && is_set(rhs) && (token == '|' || token == '&' || token == '-' || token == '^')) ||
         (old->type == SPY_BYTEARRAY && (token == '+' || token == '*'))) {
         SPYValue *fresh = binary(c, token, old, rhs);

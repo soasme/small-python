@@ -61,6 +61,17 @@ b *= 2
 assert_is(b, same)
 assert_eq(b, bytearray(b"abcabc"))
 
+# b += b holds an export of b while resizing it; an empty b is not resized.
+b = bytearray(b"ab")
+e = assert_raises(BufferError, b.__iadd__, b)
+assert_eq(str(e), "Existing exports of data: object cannot be re-sized")
+assert_eq(b, bytearray(b"ab"))
+b += bytearray(b"cd")
+assert_eq(b, bytearray(b"abcd"))
+b = bytearray()
+b += b
+assert_eq(b, bytearray())
+
 # Resizing is refused while an export is held; same-length writes are allowed.
 b = bytearray(b"abc")
 view = memoryview(b)
