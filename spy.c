@@ -2043,7 +2043,12 @@ static SPYValue *name_fast(SPYValue *env, Node *n) {
         } else {
             SPYValue *key = NULL;
             int binding = function_binding(e, n, e == env, &key);
-            if (binding == NAME_SLOW) return NULL;
+            if (binding == NAME_SLOW) {
+                /* A method's class cell environment binds only __class__ and
+                 * a few such names: others pass over it. */
+                if (e->type != V_ENV || e->as.map.flags != 4 || env_find(e, node_name(n))) return NULL;
+                continue;
+            }
             if (binding == NAME_PARENT) continue;
             if (!(entry = function_slot(e, n, key, e == env))) return NULL;
         }
