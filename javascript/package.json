@@ -1,6 +1,6 @@
 {
   "name": "small-python",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run Small Python, a small embeddable Python engine, from JavaScript in a WebAssembly worker.",
   "type": "module",
   "exports": {

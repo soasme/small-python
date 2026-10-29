@@ -1,6 +1,6 @@
 # Small Python
 
-Version 0.1.0 — development edition
+Version 0.2.0
 
 ## Table of Contents
 

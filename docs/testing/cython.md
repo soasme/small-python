@@ -1,6 +1,6 @@
 # Cython upstream baseline
 
-Engine: 0.1.0 development. This report measures the current
+Engine: 0.2.0. This report measures the current
 partial engine; it is not a full Cython-suite compatibility claim.
 
 ## Sources inspected
