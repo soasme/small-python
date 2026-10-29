@@ -1,5 +1,6 @@
 /* A raylib host for Small Python: the game is pong.py, and this file only
- * registers a "raylib" C module, as a QuickJS host would with JS_NewCModule. */
+ * registers a "raylib" C module, as a QuickJS host would with JS_NewCModule,
+ * and runs the game's source, compiled in by spyc -c. */
 #include "spy.h"
 #include "host.h"
 
@@ -144,19 +145,16 @@ static int raylib_init(SPYContext *c, SPYValue *module) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    const char *filename = argc > 1 ? argv[1] : "pong.py";
-    FILE *file = fopen(filename, "rb");
-    if (!file) { perror(filename); return 1; }
-    char *source = host_read(file);
-    fclose(file);
-    SPYContext *c = source ? spy_context_new() : NULL;
-    if (!c) { free(source); fputs("cannot start\n", stderr); return 1; }
+/* The game, embedded by spyc -c from pong.py. */
+extern const char spy_pong[];
+
+int main(void) {
+    SPYContext *c = spy_context_new();
+    if (!c) { fputs("cannot start\n", stderr); return 1; }
     spy_set_output(c, host_output, stdout);
     spy_set_flush(c, host_flush);
-    int status = spy_new_module(c, "raylib", raylib_init) || spy_exec(c, source, filename) ? host_exit_status(c) : 0;
+    int status = spy_new_module(c, "raylib", raylib_init) || spy_exec(c, spy_pong, "pong.py") ? host_exit_status(c) : 0;
     if (IsWindowReady()) CloseWindow();
-    free(source);
     spy_context_free(c);
     return status < 0 ? 1 : status;
 }

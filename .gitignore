@@ -26,3 +26,4 @@ timeout-*
 oom-*
 slow-unit-*
 /examples/pong/pong
+/examples/pong/pong_py.c

@@ -3,7 +3,8 @@
 A [raylib](https://www.raylib.com/) game whose logic is Python. `pong.py`
 holds the game; `pong.c` is the host. It registers a `raylib` C module with
 `spy_new_module`, as a QuickJS host registers one with `JS_NewCModule`, then
-runs the script.
+runs the script. `spyc -c` compiles `pong.py` into the program as a C array,
+so `pong` runs anywhere without the Python file.
 
 ## Run
 
@@ -14,8 +15,9 @@ brew install raylib pkg-config    # Debian/Ubuntu: apt install libraylib-dev pkg
 make -C examples/pong run
 ```
 
-`make` builds `libspy.a` first if it is missing. To run a different script
-on the same host, pass it: `examples/pong/pong path/to/game.py`.
+`make` builds `libspy.a` and `spyc` first if they are missing, then
+`spyc -c -o pong_py.c pong.py` and links `pong.c`, `pong_py.c`, `libspy.a`
+and raylib. Edit `pong.py` and run `make run` again to rebuild.
 
 ## Play
 

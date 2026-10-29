@@ -158,14 +158,18 @@ arbitrary CPython switches are not implemented.
 #### 2.3.2 `spyc` program generator
 
 ```text
-usage: spyc [-M module]... -o program.c input.py
+usage: spyc [-c | -M module...] -o program.c input.py
 ```
 
 `spyc` writes a C translation unit containing source bytes and a small `main`
 function. As QuickJS's `qjsc -M`, each `-M` names a module of the standard
 layer for the program to register; the program then links `spy-std.c` too.
-Without one it runs on the bare core. The user invokes the C compiler explicitly. The generator does not
-invoke a shell or a compiler internally. It does not bundle imported modules,
+Without one it runs on the bare core. As `qjsc -c`, `-c` writes only the
+source, as `const char spy_name[]` named after the input file (`game.py` gives
+`spy_game`), for a host whose own `main` registers its C modules and passes it
+to `spy_exec`; [`examples/pong`](../examples/pong) is one. The user invokes
+the C compiler explicitly. The generator does not invoke a shell or a
+compiler internally. It does not bundle imported modules,
 produce native code for individual Python functions, or emit bytecode yet.
 
 ### 2.4 Local tests
@@ -887,7 +891,8 @@ optimizer or stable serialized-program format.
 ### 4.2 Executable generation
 
 `spyc` emits source bytes as a C array and adds a small embedding entry point,
-which registers the standard modules named with `-M`. The C compiler links it
+which registers the standard modules named with `-M`; with `-c` it emits the
+array alone. The C compiler links it
 with `spy.c` or `libspy.a`, and with `spy-std.c` when it names any. The program
 still parses source at startup. Imported modules are not bundled. Source
 embedding is deliberately described separately from native Python compilation.
