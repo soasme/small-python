@@ -105,8 +105,9 @@ struct SPYValue {
         double real;
         double complex number;
         /* exports: live memoryviews of a bytearray; chars: a str's code
-         * point count plus one, once counted (str values are immutable). */
-        struct { char *data; size_t len, exports, chars; } string;
+         * point count plus one, once counted (str values are immutable);
+         * cursor: a character index of a str and its byte offset. */
+        struct { char *data; size_t len, exports, chars, cursor[2]; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; size_t changes; int odd_keys; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
@@ -7219,22 +7220,29 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     return v;
 }
 static SPYValue *iterator_next(SPYContext *, SPYValue *);
-/* The character at index of str s, moving cursor (a character index and
- * its byte offset) there: an ASCII str, or reads in order, take constant
- * time. NULL past the end. */
-static SPYValue *string_char(SPYContext *c, SPYValue *s, size_t index, size_t cursor[2]) {
+/* The width in bytes of the character at byte offset at of str s. */
+static size_t string_width(SPYValue *s, size_t at) {
+    size_t width = utf8_width((unsigned char)s->as.string.data[at]);
+    return width > s->as.string.len - at ? 1 : width;
+}
+/* The byte offset of character index (at most its length) of str s,
+ * moving cursor (a character index and its byte offset) there: in an ASCII
+ * str, or near the cursor or the start, this takes constant time. */
+static size_t string_offset(SPYValue *s, size_t index, size_t cursor[2]) {
+    if (string_length(s) == s->as.string.len) return index;
     const unsigned char *data = (const unsigned char *)s->as.string.data;
-    size_t len = s->as.string.len, i = cursor[0], at = cursor[1];
-    if (string_length(s) == len) i = at = index < len ? index : len;
-    while (i < index && at < len) {
-        size_t width = utf8_width(data[at]);
-        at += width > len - at ? 1 : width; i++;
-    }
-    while (i > index) { do at--; while (at && (data[at] & 192) == 128); i--; }
+    size_t i = cursor[0], at = cursor[1];
+    if (index < i && index < i - index) i = at = 0;
+    for (; i < index; i++) at += string_width(s, at);
+    for (; i > index; i--) do at--; while (at && (data[at] & 192) == 128);
     cursor[0] = i; cursor[1] = at;
-    if (i != index || at >= len) return NULL;
-    size_t width = utf8_width(data[at]);
-    return spy_string(c, s->as.string.data + at, width > len - at ? 1 : width);
+    return at;
+}
+/* The character at index of str s, NULL past its end; see string_offset. */
+static SPYValue *string_char(SPYContext *c, SPYValue *s, size_t index, size_t cursor[2]) {
+    if (index >= string_length(s)) return NULL;
+    size_t at = string_offset(s, index, cursor);
+    return spy_string(c, s->as.string.data + at, string_width(s, at));
 }
 static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     switch (v->type) {
@@ -7255,10 +7263,7 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
     case SPY_BYTES: case SPY_BYTEARRAY:
         return index < v->as.string.len ? spy_int(c, (unsigned char)v->as.string.data[index]) : NULL;
-    case SPY_STRING: {
-        size_t cursor[2] = {0, 0};
-        return string_char(c, v, index, cursor);
-    }
+    case SPY_STRING: return string_char(c, v, index, v->as.string.cursor);
     default: return spy_error(c, "TypeError", "object is not iterable");
     }
 }
@@ -7920,45 +7925,26 @@ static SPYValue *get_slice(SPYContext *c, SPYValue *v, SPYValue *key) {
     size_t len = text ? string_length(v) : v->as.seq.len;
     Slice s;
     if (slice_adjust(c, &bounds, len, &s)) return NULL;
-    if (text && len == v->as.string.len) {
-        /* Bytes and ASCII text slice their bytes directly. */
+    if (text) {
+        /* Bytes and ASCII text slice their bytes directly; other text finds
+         * each character's bytes along its cursor (string_offset). */
         Buffer out = {.ctx = c};
+        size_t *cursor = v->as.string.cursor;
         if (s.step == 1 && s.count) {
-            if (append(&out, v->as.string.data + s.start, s.count)) return NULL;
+            size_t from = string_offset(v, (size_t)s.start, cursor), to = string_offset(v, (size_t)s.start + s.count, cursor);
+            if (append(&out, v->as.string.data + from, to - from)) return NULL;
         } else {
             int64_t index = s.start;
             for (size_t i = 0; i < s.count; i++) {
-                if (append(&out, v->as.string.data + index, 1)) break;
+                size_t at = string_offset(v, (size_t)index, cursor);
+                if (append(&out, v->as.string.data + at, v->type == SPY_STRING ? string_width(v, at) : 1)) break;
                 if (i + 1 < s.count) index += s.step;
             }
         }
         SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
         if (result) result->type = v->type;
-        if (result && result->type == SPY_STRING) result->as.string.chars = out.len + 1;
+        if (result && result->type == SPY_STRING) result->as.string.chars = s.count + 1;
         free(out.data); return result;
-    }
-    if (text) {
-        if (len >= SIZE_MAX / sizeof(size_t)) return spy_error(c, "MemoryError", "string is too large");
-        size_t *offsets = allocate(c, (len + 1) * sizeof(*offsets));
-        if (!offsets) return NULL;
-        size_t pos = 0;
-        for (size_t i = 0; i < len; i++) {
-            offsets[i] = pos;
-            if (pos < v->as.string.len) {
-                size_t width = v->type != SPY_STRING ? 1 : utf8_width((unsigned char)v->as.string.data[pos]);
-                pos += width <= v->as.string.len - pos ? width : 1;
-            }
-        }
-        offsets[len] = v->as.string.len;
-        Buffer out = {.ctx = c};
-        int64_t index = s.start;
-        for (size_t i = 0; i < s.count; i++) {
-            if (append(&out, v->as.string.data + offsets[index], offsets[index + 1] - offsets[index])) break;
-            if (i + 1 < s.count) index += s.step;
-        }
-        SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-        if (result) result->type = v->type;
-        free(out.data); free(offsets); return result;
     }
     SPYValue *result = value_new(c, v->type);
     if (!result) return NULL;
