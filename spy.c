@@ -10633,7 +10633,20 @@ static char *float_digits(SPYContext *c, double d, int mode, int precision, int 
     if (mode == 0)
         for (;; digits++) {
             snprintf(probe, sizeof(probe), "%.*e", digits, magnitude);
-            if (digits == 16 || strtod(probe, NULL) == magnitude) break;
+            double value = strtod(probe, NULL);
+            if (digits == 16 || value == magnitude) break;
+            if (digits == 15) {
+                /* Doubles are twice as dense below a power of two, so the
+                 * nearest 16 digits can miss while the 16 digits on the other
+                 * side still read back, as _Py_dg_dtoa finds. */
+                const int64_t base = INT64_C(1000000000000000);
+                int exponent = atoi(strchr(probe, 'e') + 1);
+                int64_t m = (probe[0] - '0') * base + strtoll(probe + 2, NULL, 10) + (value < magnitude ? 1 : -1);
+                if (m == 10 * base) { m = base; exponent++; }
+                else if (m < base) { m = 10 * base - 1; exponent--; }
+                snprintf(probe, sizeof(probe), "%d.%015" PRId64 "e%+03d", (int)(m / base), m % base, exponent);
+                if (strtod(probe, NULL) == magnitude) break;
+            }
         }
     const char *format = mode == 3 ? "%.*f" : "%.*e";
     int count = mode ? snprintf(NULL, 0, format, mode == 3 ? precision : digits, magnitude) : (int)strlen(probe);
