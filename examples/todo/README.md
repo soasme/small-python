@@ -2,7 +2,9 @@
 
 A todo list written like a Flask application, [`app.py`](app.py), served by
 a small Rust host. The host knows nothing about todos: it supplies what
-Small Python lacks, and the application does the rest.
+Small Python lacks, and the application does the rest. It uses the
+[`small-python`](https://crates.io/crates/small-python) crate from
+crates.io, as any program would.
 
 | Layer | Supplies |
 |---|---|

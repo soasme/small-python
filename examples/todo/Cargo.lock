@@ -363,6 +363,8 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "small-python"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d8276bc5b1c80d813487060844e563665d3239e40ffbe55eaf3e7956bcdb3be"
 dependencies = [
  "serde",
  "small-python-sys",
@@ -371,6 +373,8 @@ dependencies = [
 [[package]]
 name = "small-python-src"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6beb11969244bec903958386088b95f2488b506ac7de474ce2cc77f0576dc07a"
 dependencies = [
  "cc",
 ]
@@ -378,6 +382,8 @@ dependencies = [
 [[package]]
 name = "small-python-sys"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27042664d9764bef7969dfa546215c061dfff5fa2e17169a593c38c4798bad4e"
 dependencies = [
  "small-python-src",
 ]

@@ -253,7 +253,7 @@ checked.
 ## 5 The todo example
 
 `examples/todo`, beside the C examples and outside the crates' workspace,
-is a todo list written like a Flask application (`app.py`) and served by a
+uses the published `small-python` from crates.io. It is a todo list written like a Flask application (`app.py`) and served by a
 Rust host that knows nothing about todos. The host supplies what the engine
 lacks: axum and tokio serve and route, serde_json becomes the module `json`
 (`loads` and `dumps`, through the `serde` feature), and `app.py`'s directory
