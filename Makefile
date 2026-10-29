@@ -126,7 +126,7 @@ test-spec-oracle: tests/run-spec
 # these fail. test-build-oracle also runs each test unbundled on the pinned
 # CPython; tests/build_runner.py --oracle-only runs that phase alone.
 test-build: spyc libspy.a libspy-std.a
-	python3 tests/build_runner.py ./spyc
+	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
 
 test-build-oracle: spyc libspy.a libspy-std.a
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/build_runner.py ./spyc --oracle $(CPYTHON)
@@ -193,7 +193,7 @@ test: all tests/api tests/run-spec run-cython check-intrinsics
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
 	$(PYTHON) tests/executable.py
-	python3 tests/build_runner.py ./spyc
+	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.
 test-binding: spy-worker

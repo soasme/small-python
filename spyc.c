@@ -57,6 +57,17 @@ static void push(Strings *list, char *s) {
     if (list->len == list->cap) list->items = need(realloc(list->items, (list->cap = list->cap ? list->cap * 2 : 8) * sizeof(char *)));
     list->items[list->len++] = s;
 }
+static void free_strings(Strings *list) {
+    for (size_t i = 0; i < list->len; i++) free(list->items[i]);
+    free(list->items);
+}
+/* All a module owns but its path, which an entry borrows. */
+static void free_module(Module *m) {
+    free_strings(&m->locations); free_strings(&m->all);
+    free(m->source); free(m->array);
+    for (size_t i = 0; i < m->imports_len; i++) free(m->imports[i].path), free(m->imports[i].original);
+    free(m->imports);
+}
 /* NAME or a submodule of it. */
 static int under(const char *prefix, const char *name) {
     size_t n = strlen(prefix);
@@ -521,12 +532,17 @@ int main(int argc, char **argv) {
     Build b = {0};
     Strings files = {0}, mains = {0}, includes = {0};
     const char *output = NULL, *metafile = NULL, *deps = NULL, *loader_name = NULL;
-    int bare = 0, analyze = 0, werror = 0, optimize = 0;
+    int bare = 0, analyze = 0, werror = 0, optimize = 0, status = 0;
+    EntryPoint *list = NULL;
+    size_t entries = 0, sources = 0;
+    Module **table = NULL, **inputs = NULL;
+    char *loader = NULL;
+    Buffer out = {0}, meta = {0}, rule = {0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *value = i + 1 < argc ? argv[i + 1] : NULL;
         int takes = !strcmp(a, "-o") || !strcmp(a, "-m") || !strcmp(a, "-M") || !strcmp(a, "-I") || !strcmp(a, "-x") ||
                     !strcmp(a, "-D") || !strcmp(a, "-N") || !strcmp(a, "--alias") || !strcmp(a, "--metafile") || !strcmp(a, "--deps");
-        if (takes && !value) return usage();
+        if (takes && !value) { status = usage(); goto done; }
         if (takes) i++;
         if (!strcmp(a, "-c")) bare = 1;
         else if (!strcmp(a, "--analyze")) analyze = 1;
@@ -538,27 +554,27 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--deps")) deps = value;
         else if (!strcmp(a, "-I")) push(&b.roots, strlen(value) && value[strlen(value) - 1] != '/' ? concat(value, "/", "") : concat(value, "", ""));
         else if (!strcmp(a, "-N")) {
-            if (!identifier_text(value, strlen(value))) return usage();
+            if (!identifier_text(value, strlen(value))) { status = usage(); goto done; }
             loader_name = value;
         } else if (!strcmp(a, "--alias")) {
             const char *equals = strchr(value, '=');
             char *name = equals ? slice(value, (size_t)(equals - value)) : NULL;
-            if (!name || !dotted_name(name) || !dotted_name(equals + 1)) return usage();
+            if (!name || !dotted_name(name) || !dotted_name(equals + 1)) { free(name); status = usage(); goto done; }
             push(&b.aliases, name); push(&b.aliases, concat(equals + 1, "", ""));
         } else if (takes) {
             size_t n = strlen(value);
             int star = !strcmp(a, "-D") && n > 2 && !strcmp(value + n - 2, ".*");
             char *name = slice(value, star ? n - 2 : n);
-            if (!dotted_name(name)) return usage();
+            if (!dotted_name(name)) { free(name); status = usage(); goto done; }
             push(!strcmp(a, "-m") ? &mains : !strcmp(a, "-M") ? &b.registered : !strcmp(a, "-x") ? &b.externals : &includes,
                  star ? concat(name, ".*", "") : concat(name, "", ""));
             free(name);
-        } else if (a[0] == '-') return usage();
+        } else if (a[0] == '-') { status = usage(); goto done; }
         else push(&files, concat(a, "", ""));
     }
-    size_t entries = files.len + mains.len;
-    if (!output || !entries || (!bare && entries > 1) || (bare && (b.registered.len || optimize))) return usage();
-    for (size_t i = 0; i < files.len; i++) if (!strcmp(files.items[i], output)) return usage();
+    entries = files.len + mains.len;
+    if (!output || !entries || (!bare && entries > 1) || (bare && (b.registered.len || optimize))) { status = usage(); goto done; }
+    for (size_t i = 0; i < files.len; i++) if (!strcmp(files.items[i], output)) { status = usage(); goto done; }
 
     /* The first root is the entry's directory, or the working directory for -m. */
     const char *first = files.len ? files.items[0] : NULL, *slash = first ? strrchr(first, '/') : NULL;
@@ -569,7 +585,7 @@ int main(int argc, char **argv) {
     b.roots = roots;
     b.c = need(spy_context_new());
 
-    EntryPoint *list = need(calloc(entries, sizeof(EntryPoint)));
+    list = need(calloc(entries, sizeof(EntryPoint)));
     for (size_t i = 0; i < entries && !b.errors; i++) {
         EntryPoint *e = &list[i];
         if (i < files.len) {
@@ -613,13 +629,14 @@ int main(int argc, char **argv) {
     }
     if (!b.errors) discover(&b, &list[0].module);
     if (werror && b.warnings) b.errors++;
-    if (b.errors) return 1;
+    if (b.errors) { status = 1; goto done; }
 
     /* The table, sorted by the keys the loader answers; the inputs, the
  * entries and then the table's other files, each with the C array holding
  * its source. A module that is also an entry shares the entry's array. */
-    Module **table = need(calloc(b.len + 1, sizeof(Module *))), **inputs = need(calloc(b.len + entries, sizeof(Module *)));
-    size_t count = 0, sources = 0;
+    table = need(calloc(b.len + 1, sizeof(Module *)));
+    inputs = need(calloc(b.len + entries, sizeof(Module *)));
+    size_t count = 0;
     for (size_t i = 0; i < b.len; i++) if (b.modules[i]->queued && found(b.modules[i])) table[count++] = b.modules[i];
     qsort(table, count, sizeof(Module *), by_key);
     for (size_t i = 0; i < entries; i++) {
@@ -638,9 +655,9 @@ int main(int argc, char **argv) {
             inputs[sources++] = m;
         }
     }
-    char *loader = loader_name ? concat(loader_name, "_load", "") : concat(list[0].symbol, "_load", "");
+    loader = loader_name ? concat(loader_name, "_load", "") : concat(list[0].symbol, "_load", "");
 
-    Buffer out = {.ctx = b.c};
+    out.ctx = meta.ctx = rule.ctx = b.c;
     if (bare) put(&out, "/* Generated by spyc -c. A host installs %s with spy_set_module_loader\n"
                         " * and runs an entry with spy_exec. */\n#include \"spy.h\"\n#include <stdlib.h>\n#include <string.h>\n", loader);
     else put(&out, "/* Generated by spyc. Link with %s and the C math library. */\n#include \"spy.h\"\n%s"
@@ -720,10 +737,9 @@ int main(int argc, char **argv) {
                   "    return status ? 1 : 0;\n}\n");
     }
 
-    if (write_file(output, &out)) return 1;
+    if (write_file(output, &out)) { status = 1; goto done; }
 
     if (metafile) {
-        Buffer meta = {.ctx = b.c};
         put(&meta, "{\n  \"inputs\": {");
         for (size_t i = 0; i < sources; i++) {
             Module *m = inputs[i];
@@ -753,17 +769,16 @@ int main(int argc, char **argv) {
             put(&meta, ": {\"bytesInOutput\": %zu}", strlen(inputs[i]->source));
         }
         put(&meta, "}}\n  }\n}\n");
-        if (write_file(metafile, &meta)) return 1;
+        if (write_file(metafile, &meta)) { status = 1; goto done; }
     }
     if (deps) {
-        Buffer rule = {.ctx = b.c};
         put(&rule, "%s:", output);
         for (size_t i = 0; i < sources; i++) {
             put(&rule, " ");
             for (const char *p = inputs[i]->path; *p; p++) put(&rule, *p == ' ' || *p == '#' ? "\\%c" : *p == '$' ? "$$" : "%c", *p);
         }
         put(&rule, "\n");
-        if (write_file(deps, &rule)) return 1;
+        if (write_file(deps, &rule)) { status = 1; goto done; }
     }
     if (analyze) {
         /* The inputs, largest in the output first. */
@@ -771,5 +786,19 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  %s  %zu bytes\n", output, out.len);
         for (size_t i = 0; i < sources; i++) fprintf(stderr, "    %s  %zu\n", inputs[i]->path, strlen(inputs[i]->source));
     }
-    return 0;
+done:
+    for (size_t i = 0; list && i < entries; i++) {
+        free(list[i].file); free(list[i].package); free(list[i].symbol);
+        free_module(&list[i].module);
+    }
+    for (size_t i = 0; i < b.len; i++) {
+        free(b.modules[i]->name); free(b.modules[i]->path);
+        free_module(b.modules[i]); free(b.modules[i]);
+    }
+    free(b.modules); free(b.queue); free(list); free(table); free(inputs); free(loader);
+    free(out.data); free(meta.data); free(rule.data);
+    free_strings(&b.roots); free_strings(&b.externals); free_strings(&b.registered); free_strings(&b.aliases); free_strings(&b.stars);
+    free_strings(&files); free_strings(&mains); free_strings(&includes);
+    if (b.c) spy_context_free(b.c);
+    return status;
 }

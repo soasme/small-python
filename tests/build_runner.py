@@ -175,7 +175,7 @@ def build_phase(path, fields, spyc, cc):
         libraries = [str(ROOT / "libspy-std.a")] if "-M" in flags else []
         binary = Path(temp) / "program"
         code, output = run([*cc, "-std=c11", "-O0", "-I", str(ROOT), *map(str, sources), *libraries,
-                            str(ROOT / "libspy.a"), "-lm", "-o", str(binary)], directory)
+                            str(ROOT / "libspy.a"), "-lm", *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary)], directory)
         if code != 0:
             return False, f"cc: {output[-1500:]}"
         empty = Path(temp) / "empty"
