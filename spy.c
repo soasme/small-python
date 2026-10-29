@@ -15239,6 +15239,16 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     }
     return result;
 }
+static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {
+    size_t len = s->as.string.len, added = tail->as.string.len;
+    if (added >= SIZE_MAX - len) return spy_error(c, "MemoryError", "string is too large");
+    char *data = realloc(s->as.string.data, len + added + 1);
+    if (!data) return spy_error(c, "MemoryError", "allocation failed");
+    memcpy(data + len, tail->as.string.data, added); data[len + added] = 0;
+    s->as.string.data = data; s->as.string.len = len + added;
+    s->as.string.chars = s->as.string.chars && tail->as.string.chars ? s->as.string.chars + tail->as.string.chars - 1 : 0;
+    return spy_retain(s);
+}
 static int assign(SPYContext *c, Frame *f, Node *n) {
     if (n->op == '=') {
         SPYValue *value = eval(c, f, n->b);
@@ -15266,7 +15276,15 @@ static int assign(SPYContext *c, Frame *f, Node *n) {
         if (!old) goto done;
         rhs = eval(c, f, n->b);
         if (!rhs) goto done;
-        value = inplace(c, n->op, old, rhs);
+        /* A str or bytes that only this function's local holds grows in
+         * place, as in CPython: storing it back to the slot cannot fail. */
+        SPYValue *env = f->env;
+        Node *t = n->a;
+        if ((old->type == SPY_STRING || old->type == SPY_BYTES) && rhs->type == old->type && n->op == T_ADDEQ && local == old &&
+            old->refs == 2 && !old->as.string.exports && env->type == V_ENV && !env->as.map.namespace &&
+            t->slot_scope == env->as.map.scope && t->slot < map_used(env) && env->as.map.items[t->slot].value == old)
+            value = string_append(c, old, rhs);
+        else value = inplace(c, n->op, old, rhs);
     }
     if (!value) goto done;
     if (!container) status = store_target(c, f, n->a, value);
