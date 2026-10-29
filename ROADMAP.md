@@ -56,17 +56,6 @@ code layout, so it was left out. Any handler added to `eval` must keep its
 stack frame small: `eval` sits on every level of Python recursion, and the
 recursion spec test runs within 4 MiB of native stack under ASan.
 
-### Builtin dispatch
-
-`builtin` and `builtin_keywords` find a builtin's code by testing its id
-in a chain of `if` statements, about 130 in `builtin`; `len` is near the
-end of both. Bypassing the chains for `len` on a str took a loop of 20
-million `len` calls from 2.56 to 2.29 seconds, about 13 ns per call.
-Dispatch on the id with a `switch`, or give each builtin its own native
-function as CPython's method tables do. Compound tests such as
-`id == B_LEN && argc == 1 && ...` must keep their order relative to the
-plain ones.
-
 ### Smaller values
 
 Every value has one size, 216 bytes, large enough for a dictionary, class or

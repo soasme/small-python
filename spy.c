@@ -22841,8 +22841,10 @@ static SPYValue *exception_reduce(SPYContext *c, int id, size_t argc, SPYValue *
 }
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
-    if (id == B_MIN || id == B_MAX) return min_max(c, id == B_MAX, argc, argv, NULL);
-    if (id == B_TYPE_SUBCLASSES) {
+    SPYValue *a = argc ? argv[0] : NULL;
+    switch (id) {
+    case B_MIN: case B_MAX: return min_max(c, id == B_MAX, argc, argv, NULL);
+    case B_TYPE_SUBCLASSES: {
         /* The live classes naming argv[0] as a direct base, oldest first;
          * values are listed newest first. */
         if (!argc || argv[0]->type != SPY_CLASS)
@@ -22863,13 +22865,13 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         return list;
     }
-    if (id == B_TYPE_MRO) {
+    case B_TYPE_MRO: {
         if (argc != 1 || argv[0]->type != SPY_CLASS) return spy_error(c, "TypeError", "mro requires a type");
         SPYValue *list = default_mro(c, argv[0], argv[0]->as.map.bases);
         if (list) list->type = SPY_LIST;
         return list;
     }
-    if (id == B_OBJECT_REDUCE || id == B_OBJECT_REDUCE_EX || id == B_OBJECT_GETSTATE) {
+    case B_OBJECT_REDUCE: case B_OBJECT_REDUCE_EX: case B_OBJECT_GETSTATE: {
         /* The protocol itself is Python code in the intrinsics module. */
         size_t expected = id == B_OBJECT_REDUCE_EX ? 2 : 1;
         const char *method = id == B_OBJECT_REDUCE ? "__reduce__" : id == B_OBJECT_REDUCE_EX ? "__reduce_ex__" : "__getstate__";
@@ -22900,7 +22902,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         return call_intrinsic(c, "_object_getstate_default", 2, args);
     }
-    if (id == B_OBJECT_GETATTRIBUTE || id == B_OBJECT_SETATTR || id == B_OBJECT_DELATTR) {
+    case B_OBJECT_GETATTRIBUTE: case B_OBJECT_SETATTR: case B_OBJECT_DELATTR: {
         if (argc != (id == B_OBJECT_SETATTR ? 3u : 2u) || argv[1]->type != SPY_STRING)
             return spy_error(c, "TypeError", "object attribute operation requires a string name");
         const char *name = argv[1]->as.string.data;
@@ -22913,7 +22915,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         int status = id == B_OBJECT_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name);
         return status ? NULL : spy_none(c);
     }
-    if (id == B_TYPE_GETATTRIBUTE || id == B_TYPE_SETATTR || id == B_TYPE_DELATTR) {
+    case B_TYPE_GETATTRIBUTE: case B_TYPE_SETATTR: case B_TYPE_DELATTR: {
         const char *method = id == B_TYPE_GETATTRIBUTE ? "__getattribute__" : id == B_TYPE_SETATTR ? "__setattr__" : "__delattr__";
         if (argc && argv[0]->type != SPY_CLASS)
             return errorf(c, "TypeError", "descriptor '%s' requires a 'type' object but received a '%s'", method, type_name(argv[0]));
@@ -22924,25 +22926,25 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         int status = id == B_TYPE_SETATTR ? set_attribute_default(c, argv[0], name, argv[2]) : delete_attribute_default(c, argv[0], name);
         return status ? NULL : spy_none(c);
     }
-    if (id == B_SUPER) {
+    case B_SUPER: {
         if (argc > 2) return spy_error(c, "TypeError", "super() expected at most 2 arguments");
         return argc ? super_new(c, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c);
     }
-    if (id >= B_EXCEPTION_REDUCE && id <= B_EXCEPTION_SETSTATE) return exception_reduce(c, id, argc, argv);
-    if (id == B_WITH_TRACEBACK) {
+    case B_EXCEPTION_REDUCE: case B_OSERROR_REDUCE: case B_IMPORT_REDUCE: case B_ATTRIBUTE_REDUCE:
+    case B_ATTRIBUTE_GETSTATE: case B_EXCEPTION_SETSTATE: return exception_reduce(c, id, argc, argv);
+    case B_WITH_TRACEBACK: {
         if (!argc || argv[0]->type != SPY_INSTANCE || !subclass(argv[0]->as.map.parent, name_local(c->classes, "BaseException")))
             return spy_error(c, "TypeError", "descriptor 'with_traceback' for 'BaseException' objects needs an exception");
         if (argc != 2) return errorf(c, "TypeError", "BaseException.with_traceback() takes exactly one argument (%zu given)", argc - 1);
         return set_attribute_default(c, argv[0], "__traceback__", argv[1]) ? NULL : spy_retain(argv[0]);
     }
-    if (id == B_ADD_NOTE) {
+    case B_ADD_NOTE: {
         if (argc != 2 || argv[0]->type != SPY_INSTANCE ||
             !subclass(argv[0]->as.map.parent, name_local(c->classes, "BaseException")))
             return spy_error(c, "TypeError", "add_note requires an exception and a string");
         return exception_add_note(c, argv[0], argv[1]) ? NULL : spy_none(c);
     }
-    SPYValue *a = argc ? argv[0] : NULL;
-    if (id == B_IMPORT) {
+    case B_IMPORT: {
         if (!argc || argc > 5) goto arity;
         if (a->type != SPY_STRING) return spy_error(c, "TypeError", "module name must be a string");
         if (strlen(a->as.string.data) != a->as.string.len) return spy_error(c, "ValueError", "module name contains a null character");
@@ -22968,7 +22970,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (c->error_type[0]) { spy_release(module); return NULL; }
         return module;
     }
-    if (id == B_BYTEARRAY) {
+    case B_BYTEARRAY: {
         if (argc > 3) goto arity;
         if (argc > 1 && codec_argument_types(c, "bytearray", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
         SPYValue *bytes = !argc ? spy_bytes(c, "", 0) :
@@ -22978,7 +22980,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         spy_release(bytes);
         return array;
     }
-    if (id == B_BYTES) {
+    case B_BYTES: {
         if (argc > 3) goto arity;
         if (!argc) return spy_bytes(c, "", 0);
         if (a->type == SPY_STRING) {
@@ -23000,7 +23002,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         return bytes_from_object(c, a, "bytes");
     }
-    if (id == B_BIN || id == B_OCT || id == B_HEX) {
+    case B_BIN: case B_OCT: case B_HEX: {
         if (argc != 1) goto arity;
         SPYValue *integer = index_object(c, a);
         if (!integer) return NULL;
@@ -23009,7 +23011,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             NULL : spy_string(c, out.data, out.len);
         free(out.data); spy_release(integer); return result;
     }
-    if (id == B_POW) {
+    case B_POW: {
         if (argc < 2 || argc > 3) goto arity;
         SPYValue *b = argv[1], *modulus = argc == 3 && argv[2]->type != SPY_NONE ? argv[2] : NULL;
         if (!modulus) return binary(c, T_POW, a, b);
@@ -23035,7 +23037,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         return errorf(c, "TypeError", "unsupported operand type(s) for ** or pow(): '%s', '%s', '%s'",
                       type_name(operands[0]), type_name(operands[1]), type_name(operands[2]));
     }
-    if (id == B_DIVMOD) {
+    case B_DIVMOD: {
         if (argc != 2) goto arity;
         SPYValue *b = argv[1], *quotient = NULL, *remainder = NULL, *left = a, *right = b;
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
@@ -23057,8 +23059,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         spy_release(quotient); spy_release(remainder); return result;
     }
-    if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, "compile");
-    if (id == B_COMPILE || id == B_EVAL || id == B_EXEC || id == B_EXEC_CLOSURE) {
+    case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
+        if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, "compile");
         SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
         if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
         if (id == B_COMPILE ? argc != 3 : argc < 1 || argc > 3) goto arity;
@@ -23172,16 +23174,16 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
 execution_fail:
         spy_release(env); spy_release(unit); return NULL;
     }
-    if (id == B_TYPE) {
+    case B_TYPE: {
         if (argc != 1) return spy_error(c, "TypeError", "type() takes 1 or 3 arguments");
         return spy_retain(value_class(c, a));
     }
-    if (id == B_ISINSTANCE || id == B_ISSUBCLASS) {
+    case B_ISINSTANCE: case B_ISSUBCLASS: {
         if (argc != 2) goto arity;
         int result = instance_check(c, a, argv[1], id == B_ISSUBCLASS, 0);
         return result < 0 ? NULL : spy_bool(c, result);
     }
-    if (id == B_GETATTR || id == B_SETATTR || id == B_HASATTR || id == B_DELATTR) {
+    case B_GETATTR: case B_SETATTR: case B_HASATTR: case B_DELATTR: {
         if (argc < 2 || argc > 3 || (id == B_SETATTR && argc != 3) || ((id == B_HASATTR || id == B_DELATTR) && argc != 2)) goto arity;
         /* A str subclass names the attribute by its string value. */
         SPYValue *text = builtin_value(c, argv[1], SPY_STRING);
@@ -23199,18 +23201,18 @@ execution_fail:
         if (value && id == B_HASATTR) { spy_release(value); return spy_bool(c, 1); }
         return value;
     }
-    if (id == B_CALLABLE) {
+    case B_CALLABLE: {
         if (argc != 1) goto arity;
         int result = callable_value(c, a);
         return c->error_type[0] ? NULL : spy_bool(c, result);
     }
-    if (id == B_ID) {
+    case B_ID: {
         if (argc != 1) goto arity;
         uintptr_t address = (uintptr_t)a;
         if (address > INT64_MAX) return spy_error(c, "OverflowError", "object address exceeds signed 64-bit limit");
         return spy_int(c, (int64_t)address);
     }
-    if (id == B_FILTER) {
+    case B_FILTER: {
         if (argc != 2) return errorf(c, "TypeError", "filter expected 2 arguments, got %zu", argc);
         SPYValue *iterator = get_iterator(c, argv[1]);
         SPYValue *source = iterator ? value_new(c, SPY_TUPLE) : NULL;
@@ -23222,7 +23224,7 @@ execution_fail:
         v->as.iterator.kind = I_FILTER;
         return v;
     }
-    if (id == B_VARS) {
+    case B_VARS: {
         if (argc > 1) goto arity;
         if (!argc) return builtin(c, 0, NULL, (void *)(intptr_t)B_LOCALS);
         SPYValue *dict = attribute(c, a, "__dict__");
@@ -23232,7 +23234,7 @@ execution_fail:
         }
         return dict;
     }
-    if (id == B_FROZENSET) {
+    case B_FROZENSET: {
         if (argc > 1) goto arity;
         if (argc && a->type == SPY_FROZENSET) return spy_retain(a);
         SPYValue *v = value_new(c, SPY_FROZENSET);
@@ -23240,14 +23242,14 @@ execution_fail:
         if (argc && extend_display(c, v, a)) { spy_release(v); return NULL; }
         return v;
     }
-    if (id == B_SET) {
+    case B_SET: {
         if (argc > 1) goto arity;
         SPYValue *v = value_new(c, SPY_SET);
         if (!v) return NULL;
         if (argc && extend_display(c, v, a)) { spy_release(v); return NULL; }
         return v;
     }
-    if (id == B_ORD) {
+    case B_ORD: {
         if (argc != 1) goto arity;
         if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
         if (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) {
@@ -23263,7 +23265,7 @@ execution_fail:
         for (size_t i = 1; i < width; i++) n = (n << 6) | (s[i] & 63);
         return spy_int(c, n);
     }
-    if (id == B_CHR) {
+    case B_CHR: {
         if (argc != 1) goto arity;
         /* An __index__ value too big for a C long is out of range too. */
         SPYValue *index = index_object(c, a);
@@ -23278,7 +23280,7 @@ execution_fail:
         else { s[0] = (char)(0xf0 | (n >> 18)); s[1] = (char)(0x80 | ((n >> 12) & 63)); s[2] = (char)(0x80 | ((n >> 6) & 63)); s[3] = (char)(0x80 | (n & 63)); len = 4; }
         return spy_string(c, s, len);
     }
-    if (id == B_ITER) {
+    case B_ITER: {
         if (argc < 1 || argc > 2) return errorf(c, "TypeError", argc ? "iter expected at most 2 arguments, got %zu" : "iter expected at least 1 argument, got %zu", argc);
         if (argc == 1) return get_iterator(c, a);
         if (!callable_value(c, a)) return c->error_type[0] ? NULL : spy_error(c, "TypeError", "iter(v, w): v must be callable");
@@ -23289,7 +23291,7 @@ execution_fail:
         v->as.iterator.counter = spy_retain(argv[1]);
         return v;
     }
-    if (id == B_NEXT) {
+    case B_NEXT: {
         if (argc < 1 || argc > 2) goto arity;
         /* An iterator subclass's instance without its own __next__. */
         SPYValue *carried = a->type == SPY_INSTANCE ? builtin_base(c, a, "__next__", NULL) : NULL;
@@ -23305,11 +23307,11 @@ execution_fail:
         if (value || c->error_type[0]) return value;
         return argc == 2 ? spy_retain(argv[1]) : spy_error(c, "StopIteration", "");
     }
-    if (id == B_AITER) {
+    case B_AITER: {
         if (argc != 1) goto arity;
         return async_iterator(c, a, 0);
     }
-    if (id == B_ANEXT) {
+    case B_ANEXT: {
         if (argc < 1 || argc > 2) goto arity;
         SPYValue *value = call_special(c, a, "__anext__", 0, NULL);
         if (!value || argc == 1) return value;
@@ -23319,7 +23321,7 @@ execution_fail:
         wrapper->as.iterator.counter = spy_retain(argv[1]);
         return wrapper;
     }
-    if (id == B_ZIP || id == B_ENUMERATE || id == B_REVERSED || id == B_MAP) {
+    case B_ZIP: case B_ENUMERATE: case B_REVERSED: case B_MAP: {
         if (id == B_ENUMERATE && !argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
         if (id == B_ENUMERATE && argc > 2) return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", argc);
         if (id == B_REVERSED && argc != 1) return errorf(c, "TypeError", "reversed expected 1 argument, got %zu", argc);
@@ -23383,18 +23385,18 @@ execution_fail:
             (a->type == SPY_STRING || a->type == SPY_BYTES) ? string_length(a) : a->as.seq.len;
         return v;
     }
-    if (id == B_DIR) {
+    case B_DIR: {
         if (argc > 1) goto arity;
         return directory(c, argc ? a : NULL);
     }
-    if (id == B_LOCALS || id == B_GLOBALS) {
+    case B_LOCALS: case B_GLOBALS: {
         if (argc) goto arity;
         SPYValue *env = c->eval_env ? c->eval_env : c->globals;
         if (id == B_GLOBALS) return spy_retain(namespace_map(module_env(c, env)));
         if (env->type == SPY_DICT || env->as.map.namespace) return spy_retain(namespace_map(env));
         return local_snapshot(c, env);
     }
-    if (id == B_EXCEPTION_INIT || id == B_SYNTAX_INIT) {
+    case B_EXCEPTION_INIT: case B_SYNTAX_INIT: {
         if (!argc) goto arity;
         if (a->type != SPY_INSTANCE || !subclass(a->as.map.parent, name_local(c->classes, id == B_SYNTAX_INIT ? "SyntaxError" : "BaseException")))
             return spy_error(c, "TypeError", "BaseException.__init__ requires an exception instance");
@@ -23424,38 +23426,38 @@ execution_fail:
         }
         return spy_none(c);
     }
-    if (id == B_COMPLEX) {
+    case B_COMPLEX: {
         if (argc > 2) goto arity;
         if (!argc) return complex_new(c, complex_parts(0, 0));
         return complex_construct(c, a, argc == 2 ? argv[1] : NULL, argc == 2);
     }
-    if (id == B_ASCII) {
+    case B_ASCII: {
         if (argc != 1) goto arity;
         return ascii_repr(c, a);
     }
-    if (id == B_FORMAT) {
+    case B_FORMAT: {
         if (argc < 1 || argc > 2) goto arity;
         if (argc == 2 && argv[1]->type != SPY_STRING) return errorf(c, "TypeError", "format() argument 2 must be str, not %s", type_name(argv[1]));
         return format_field(c, a, argc == 2 ? argv[1] : NULL);
     }
-    if (id == B_PROPERTY) {
+    case B_PROPERTY: {
         SPYValue *args[4];
         if (property_arguments(c, argc, argv, NULL, args)) return NULL;
         SPYValue *v = property_new(c, c->none, c->none, c->none, c->none);
         if (v && property_init(c, v, v, args)) { spy_release(v); return NULL; }
         return v;
     }
-    if (id == B_STATICMETHOD || id == B_CLASSMETHOD) {
+    case B_STATICMETHOD: case B_CLASSMETHOD: {
         if (argc != 1) return errorf(c, "TypeError", "%s expected 1 argument, got %zu", id == B_STATICMETHOD ? "staticmethod" : "classmethod", argc);
         SPYValue *wrapper = method_wrapper(c, a, id == B_STATICMETHOD ? SPY_STATICMETHOD : SPY_CLASSMETHOD);
         if (wrapper) wrapper->as.wrapper.user = 1;
         return wrapper;
     }
-    if (id == B_SLICE) {
+    case B_SLICE: {
         if (argc < 1 || argc > 3) goto arity;
         return slice_new(c, argc == 1 ? c->none : argv[0], argv[argc == 1 ? 0 : 1], argc == 3 ? argv[2] : c->none);
     }
-    if (id == B_RANGE) {
+    case B_RANGE: {
         if (!argc) return spy_error(c, "TypeError", "range expected at least 1 argument, got 0");
         if (argc > 3) return errorf(c, "TypeError", "range expected at most 3 arguments, got %zu", argc);
         SPYValue *start = argc > 1 ? index_object(c, argv[0]) : spy_int(c, 0);
@@ -23464,7 +23466,7 @@ execution_fail:
         SPYValue *range = step ? range_new(c, start, stop, step) : NULL;
         spy_release(start); spy_release(stop); spy_release(step); return range;
     }
-    if (id == B_DICT) {
+    case B_DICT: {
         if (argc > 1) goto arity;
         SPYValue *dict = value_new(c, SPY_DICT);
         if (!dict || !argc) return dict;
@@ -23472,7 +23474,7 @@ execution_fail:
         if (c->error_type[0]) { spy_release(dict); return NULL; }
         return dict;
     }
-    if (id == B_LIST || id == B_TUPLE) {
+    case B_LIST: case B_TUPLE: {
         if (argc > 1) goto arity;
         SPYValue *v = value_new(c, id == B_LIST ? SPY_LIST : SPY_TUPLE);
         if (!v) return NULL;
@@ -23488,8 +23490,8 @@ execution_fail:
         if (c->error_type[0]) { spy_release(v); return NULL; }
         return v;
     }
-    if (id == B_SUM || id == B_ALL || id == B_ANY || id == B_MIN || id == B_MAX) {
-        if (!argc || (argc > 1 && id != B_MIN && id != B_MAX && (id != B_SUM || argc != 2))) goto arity;
+    case B_SUM: case B_ALL: case B_ANY: {
+        if (!argc || (argc > 1 && (id != B_SUM || argc != 2))) goto arity;
         if (id == B_SUM && argc == 2) {
             SPYValue *start = argv[1];
             if (builtin_value(c, start, SPY_STRING)) return spy_error(c, "TypeError", "sum() can't sum strings [use ''.join(seq) instead]");
@@ -23497,15 +23499,14 @@ execution_fail:
             if (builtin_value(c, start, SPY_BYTEARRAY)) return spy_error(c, "TypeError", "sum() can't sum bytearray [use b''.join(seq) instead]");
         }
         SPYValue *result = id == B_SUM ? (argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)) : NULL;
-        int multiple = argc > 1 && (id == B_MIN || id == B_MAX);
-        SPYValue *iterator = multiple ? NULL : get_iterator(c, a);
+        SPYValue *iterator = get_iterator(c, a);
         /* A float total accumulates with Neumaier's compensation, as CPython's sum. */
         int compensating = 0;
         double total = 0, compensation = 0;
-        for (size_t i = 0;; i++) {
+        for (;;) {
             if (c->error_type[0]) break;
             if (c->step_limit && ++c->steps > c->step_limit) { spy_error(c, "RuntimeError", "execution step limit exceeded"); break; }
-            SPYValue *item = multiple ? (i < argc ? spy_retain(argv[i]) : NULL) : iterator_next(c, iterator);
+            SPYValue *item = iterator_next(c, iterator);
             if (id == B_SUM && result && result->type == SPY_FLOAT && item && !c->error_type[0] &&
                 (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
                 if (!compensating) { total = result->as.real; compensation = 0; compensating = 1; }
@@ -23527,32 +23528,22 @@ execution_fail:
             if (id == B_ALL || id == B_ANY) {
                 int truth = spy_truth(item); spy_release(item);
                 if ((id == B_ALL && !truth) || (id == B_ANY && truth)) { spy_release(iterator); return spy_bool(c, truth); }
-            } else if (id == B_SUM) {
+            } else {
                 SPYValue *next = result ? binary(c, '+', result, item) : NULL;
                 spy_release(result); spy_release(item); result = next;
                 if (!result) break;
-            } else {
-                if (!result) result = spy_retain(item);
-                else {
-                    SPYValue *cmp = comparison(c, id == B_MIN ? '<' : '>', item, result);
-                    if (cmp && spy_truth(cmp)) { spy_release(result); result = spy_retain(item); }
-                    spy_release(cmp);
-                }
-                spy_release(item);
-                if (c->error_type[0]) break;
             }
         }
         spy_release(iterator);
         if (c->error_type[0]) { spy_release(result); return NULL; }
         if (id == B_ALL || id == B_ANY) return spy_bool(c, id == B_ALL);
-        if (!result) return spy_error(c, "ValueError", "empty sequence");
         return result;
     }
-    if (id == B_BOOL) {
+    case B_BOOL: {
         if (argc > 1) goto arity;
         return spy_bool(c, argc && spy_truth(a));
     }
-    if (id == B_STR) {
+    case B_STR: {
         if (argc > 3) goto arity;
         if (argc > 1) {
             if (codec_argument_types(c, "str", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
@@ -23565,7 +23556,7 @@ execution_fail:
         /* An exact str is its own str(). */
         return argc ? a->type == SPY_STRING ? spy_retain(a) : stringify(c, a, 0) : spy_string(c, "", 0);
     }
-    if (id == B_INT || id == B_FLOAT) {
+    case B_INT: case B_FLOAT: {
         if (argc > (id == B_INT ? 2u : 1u)) goto arity;
         if (!argc) return id == B_INT ? spy_int(c, 0) : spy_float(c, 0);
         SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", NULL);
@@ -23627,6 +23618,8 @@ execution_fail:
         }
         if (id == B_INT) return int_from_text(c, a, 10);
         return float_from_text(c, a, a);
+    }
+    default: break;
     }
     if (argc != 1) goto arity;
     if (id == B_REPR) return spy_repr(c, a);
@@ -23987,7 +23980,9 @@ static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const 
     return fn;
 }
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, const char *name) {
-    if (id == B_TYPE && argc == 3) {
+    switch (id) {
+    case B_TYPE: {
+        if (argc != 3) break;
         SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords);
         /* type.__call__ initializes the result with its own metaclass. */
         SPYValue *init = cls && cls->type == SPY_CLASS && cls->as.map.meta ? special_method(c, cls, "__init__") : NULL;
@@ -24000,12 +23995,12 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (c->error_type[0]) { spy_release(cls); return NULL; }
         return cls;
     }
-    if (id == B_SUBCLASSHOOK) {
+    case B_SUBCLASSHOOK: {
         if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "object.__subclasshook__() takes no keyword arguments");
         if (argc != 2) return errorf(c, "TypeError", "object.__subclasshook__() takes exactly one argument (%zu given)", argc ? argc - 1 : 0);
         return spy_retain(c->not_implemented);
     }
-    if (id == B_INIT_SUBCLASS) {
+    case B_INIT_SUBCLASS: {
         /* A METH_NOARGS class method, named by the class it is bound to. */
         SPYValue *qualname = argc && argv[0]->type == SPY_CLASS ? name_local(argv[0], "__qualname__") : NULL;
         const char *owner = qualname && qualname->type == SPY_STRING ? qualname->as.string.data : "object";
@@ -24013,13 +24008,13 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (argc != 1) return errorf(c, "TypeError", "%s.__init_subclass__() takes no arguments (%zu given)", owner, argc ? argc - 1 : 0);
         return spy_none(c);
     }
-    if (id == B_ROUND) {
+    case B_ROUND: {
         static const char *const names[] = {"number", "ndigits"};
         SPYValue *args[2];
         if (parse_arguments(c, "round", argc, argv, keywords, names, 2, 1, 0, args)) return NULL;
         return round_value(c, args[0], args[1]);
     }
-    if (id == B_HASH || id == B_OBJECT_HASH) {
+    case B_HASH: case B_OBJECT_HASH: {
         if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "hash() takes no keyword arguments");
         if (argc != 1) return errorf(c, "TypeError", "hash() takes exactly one argument (%zu given)", argc);
         int64_t hash;
@@ -24027,7 +24022,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         else if (hash_value(c, argv[0], &hash)) return NULL;
         return spy_int(c, hash);
     }
-    if (id == B_OBJECT_NEW || id == B_OBJECT_INIT || id == B_EXCEPTION_NEW) {
+    case B_OBJECT_NEW: case B_OBJECT_INIT: case B_EXCEPTION_NEW: {
         if (!argc) return spy_error(c, "TypeError", id == B_OBJECT_NEW ? "object.__new__(): not enough arguments" :
                                     id == B_EXCEPTION_NEW ? "BaseException.__new__(): not enough arguments" :
                                     "descriptor '__init__' of 'object' object needs an argument");
@@ -24060,94 +24055,10 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (id == B_OBJECT_NEW && abstract_instance_error(c, cls)) return NULL;
         return id == B_OBJECT_NEW ? new_instance(c, cls) : spy_none(c);
     }
-    if (id == B_PRINT) return print_values(c, argc, argv, keywords);
-    if (id == B_MIN || id == B_MAX) return min_max(c, id == B_MAX, argc, argv, keywords);
-    if (id == B_COMPILE) return compile_builtin(c, argc, argv, keywords);
-    if ((id == B_EVAL || id == B_EXEC) && keywords && keywords->as.map.len) {
-        static const char *const names[] = {"source", "globals", "locals", "closure"};
-        SPYValue *args[4];
-        const char *function = id == B_EVAL ? "eval" : "exec";
-        if (argc > 3) return errorf(c, "TypeError", "%s expected at most 3 arguments, got %zu", function, argc);
-        if (parse_arguments(c, function, argc, argv, keywords, names, id == B_EVAL ? 3 : 4, 1, 1, args)) return NULL;
-        for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
-        return builtin(c, id == B_EXEC && args[3] != c->none ? 4 : 3, args, (void *)(intptr_t)(id == B_EXEC ? B_EXEC_CLOSURE : id));
-    }
-    if (id == B_COMPLEX && keywords && keywords->as.map.len) {
-        static const char *const names[] = {"real", "imag"};
-        SPYValue *args[2];
-        if (parse_arguments(c, "complex", argc, argv, keywords, names, 2, 0, 0, args)) return NULL;
-        if (!args[0] && !args[1]) return builtin(c, 0, args, (void *)(intptr_t)id);
-        SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
-        if (!args[0]) { if (!zero) return NULL; args[0] = zero; }
-        SPYValue *result = complex_construct(c, args[0], args[1], 1);
-        spy_release(zero);
-        return result;
-    }
-    if ((id == B_SUM || id == B_STR || id == B_BYTES || id == B_BYTEARRAY) && keywords && keywords->as.map.len) {
-        static const char *const sum_names[] = {"iterable", "start"}, *const str_names[] = {"object", "encoding", "errors"},
-                                 *const bytes_names[] = {"source", "encoding", "errors"};
-        const char *const *names = id == B_SUM ? sum_names : id == B_STR ? str_names : bytes_names;
-        const char *function = id == B_SUM ? "sum" : id == B_STR ? "str" : id == B_BYTES ? "bytes" : "bytearray";
-        SPYValue *args[3];
-        size_t count = id == B_SUM ? 2 : 3;
-        if (parse_arguments(c, function, argc, argv, keywords, names, count, id == B_SUM, id == B_SUM, args)) return NULL;
-        if (id != B_SUM && !args[0]) args[0] = id == B_STR ? spy_string(c, "", 0) : spy_bytes(c, "", 0);
-        else if (args[0]) spy_retain(args[0]);
-        if (!args[0]) return NULL;
-        size_t used = count;
-        while (used > 1 && !args[used - 1]) used--;
-        SPYValue *call[3] = {args[0], args[1] ? args[1] : NULL, args[2] ? args[2] : NULL};
-        if ((id == B_BYTES || id == B_BYTEARRAY) && args[2] && !args[1]) {
-            int text = args[0]->type == SPY_STRING;
-            spy_release(args[0]);
-            return spy_error(c, "TypeError", text ? "string argument without an encoding" : "errors without a string argument");
-        }
-        if (id != B_SUM && args[2] && !args[1]) {
-            SPYValue *utf8 = spy_string(c, "utf-8", 5);
-            call[1] = utf8;
-            SPYValue *result = utf8 ? builtin(c, 3, call, (void *)(intptr_t)id) : NULL;
-            spy_release(utf8); spy_release(args[0]);
-            return result;
-        }
-        SPYValue *result = builtin(c, used, call, (void *)(intptr_t)id);
-        spy_release(args[0]);
-        return result;
-    }
-    if ((id == B_ZIP || id == B_MAP) && keywords && keywords->as.map.len) {
-        int strict = 0;
-        for (size_t i = 0; i < keywords->as.map.len; i++) {
-            const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
-            if (strcmp(key, "strict")) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", id == B_MAP ? "map" : "zip", key);
-            strict = spy_truth(map_items(keywords)[i].value);
-            if (c->error_type[0]) return NULL;
-        }
-        SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)id);
-        if (result && strict) result->as.iterator.size = 1;
-        return result;
-    }
-    if (id == B_ENUMERATE && keywords && keywords->as.map.len) {
-        /* enumerate_vectorcall's keyword handling. */
-        size_t count = keywords->as.map.len, total = argc + count;
-        const char *first = builtin_value(c, map_items(keywords)[0].key, SPY_STRING)->as.string.data;
-        const char *second = count > 1 ? builtin_value(c, map_items(keywords)[1].key, SPY_STRING)->as.string.data : NULL;
-        SPYValue *args[2] = {argc ? argv[0] : NULL, NULL};
-        if (total == 2 && count == 1) {
-            if (strcmp(first, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
-            args[1] = map_items(keywords)[0].value;
-        } else if (total == 2) {
-            int swapped = !strcmp(first, "start");
-            if (swapped ? strcmp(second, "iterable") : strcmp(first, "iterable"))
-                return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", swapped ? second : first);
-            if (!swapped && strcmp(second, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", second);
-            args[0] = map_items(keywords)[swapped].value; args[1] = map_items(keywords)[!swapped].value;
-        } else if (total == 1) {
-            if (strcmp(first, "iterable")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
-            args[0] = map_items(keywords)[0].value;
-        } else if (!argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
-        else return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", total);
-        return builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
-    }
-    if (id == B_SORTED) {
+    case B_PRINT: return print_values(c, argc, argv, keywords);
+    case B_MIN: case B_MAX: return min_max(c, id == B_MAX, argc, argv, keywords);
+    case B_COMPILE: return compile_builtin(c, argc, argv, keywords);
+    case B_SORTED: {
         if (argc != 1) return errorf(c, "TypeError", "sorted expected 1 argument, got %zu", argc);
         SPYValue *list = value_new(c, SPY_LIST);
         if (!list) return NULL;
@@ -24157,62 +24068,154 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         spy_release(result);
         return list;
     }
-    if (id == B_IMPORT && keywords && keywords->as.map.len) {
-        if (argc > 5) return spy_error(c, "TypeError", "__import__() takes at most 5 arguments");
-        SPYValue *args[5] = {NULL, NULL, NULL, NULL, NULL};
-        const char *names[] = {"name", "globals", "locals", "fromlist", "level"};
-        for (size_t i = 0; i < argc; i++) args[i] = argv[i];
-        for (size_t i = 0; i < keywords->as.map.len; i++) {
-            Entry *entry = &map_items(keywords)[i];
-            size_t at;
-            for (at = 0; at < 5; at++) if (!strcmp(builtin_value(c, entry->key, SPY_STRING)->as.string.data, names[at])) break;
-            if (at == 5) return spy_error(c, "TypeError", "invalid keyword argument for __import__()");
-            if (args[at]) return spy_error(c, "TypeError", "duplicate argument for __import__()");
-            args[at] = entry->value;
-        }
-        if (!args[0]) return spy_error(c, "TypeError", "__import__() requires name");
-        for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
-        return builtin(c, args[4] ? 5 : 4, args, (void *)(intptr_t)id);
-    }
-    if (id == B_POW && keywords && keywords->as.map.len) {
-        static const char *const names[] = {"base", "exp", "mod"};
-        SPYValue *args[3];
-        if (parse_arguments(c, "pow", argc, argv, keywords, names, 3, 2, 0, args)) return NULL;
-        return builtin(c, args[2] && args[2]->type != SPY_NONE ? 3 : 2, args, (void *)(intptr_t)id);
-    }
-    if (id == B_PROPERTY && keywords && keywords->as.map.len) {
-        SPYValue *args[4];
-        return property_arguments(c, argc, argv, keywords, args) ? NULL : builtin(c, 4, args, (void *)(intptr_t)id);
-    }
-    if (id == B_INT && keywords && keywords->as.map.len) {
-        static const char *const names[] = {"x", "base"};
-        SPYValue *args[2];
-        if (argc > 2) return errorf(c, "TypeError", "int() takes at most 2 arguments (%zu given)", argc);
-        if (parse_arguments(c, "int", argc, argv, keywords, names, 2, 0, 1, args)) return NULL;
-        if (!args[0]) return spy_error(c, "TypeError", "int() missing string argument");
-        return builtin(c, 2, args, (void *)(intptr_t)id);
-    }
-    if (id == B_FROZENDICT) {
+    case B_FROZENDICT: {
         if (argc == 1 && argv[0]->type == SPY_FROZENDICT && (!keywords || !keywords->as.map.len)) return spy_retain(argv[0]);
         return frozendict_construct(c, argc, argv, keywords);
     }
-    if (id == B_EXCEPTION_INIT && argc && argv[0]->type == SPY_INSTANCE && keywords && keywords->as.map.len) {
-        SPYValue *cls = argv[0]->as.map.parent;
-        const char *const *fields = subclass(cls, name_local(c->classes, "BaseException")) ? exception_keywords(c, cls) : NULL;
-        const char *owner = name_local(cls, "__name__")->as.string.data;
-        if (!fields) return errorf(c, "TypeError", "%s() takes no keyword arguments", owner);
-        for (size_t i = 0; i < keywords->as.map.len; i++) {
-            const char *key = map_items(keywords)[i].key->as.string.data;
-            size_t k = 0;
-            while (fields[k] && strcmp(fields[k], key)) k++;
-            if (!fields[k]) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", owner, key);
-        }
-        SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
-        for (size_t i = 0; value && i < keywords->as.map.len; i++)
-            if (set_hidden_field(c, argv[0], map_items(keywords)[i].key->as.string.data, map_items(keywords)[i].value)) { spy_release(value); value = NULL; }
-        return value;
+    default: break;
     }
-    if (keywords && keywords->as.map.len && id != B_DICT) return errorf(c, "TypeError", "%s() takes no keyword arguments", name);
+    if (keywords && keywords->as.map.len) {
+        switch (id) {
+        case B_EVAL: case B_EXEC: {
+            static const char *const names[] = {"source", "globals", "locals", "closure"};
+            SPYValue *args[4];
+            const char *function = id == B_EVAL ? "eval" : "exec";
+            if (argc > 3) return errorf(c, "TypeError", "%s expected at most 3 arguments, got %zu", function, argc);
+            if (parse_arguments(c, function, argc, argv, keywords, names, id == B_EVAL ? 3 : 4, 1, 1, args)) return NULL;
+            for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
+            return builtin(c, id == B_EXEC && args[3] != c->none ? 4 : 3, args, (void *)(intptr_t)(id == B_EXEC ? B_EXEC_CLOSURE : id));
+        }
+        case B_COMPLEX: {
+            static const char *const names[] = {"real", "imag"};
+            SPYValue *args[2];
+            if (parse_arguments(c, "complex", argc, argv, keywords, names, 2, 0, 0, args)) return NULL;
+            if (!args[0] && !args[1]) return builtin(c, 0, args, (void *)(intptr_t)id);
+            SPYValue *zero = args[0] ? NULL : spy_int(c, 0);
+            if (!args[0]) { if (!zero) return NULL; args[0] = zero; }
+            SPYValue *result = complex_construct(c, args[0], args[1], 1);
+            spy_release(zero);
+            return result;
+        }
+        case B_SUM: case B_STR: case B_BYTES: case B_BYTEARRAY: {
+            static const char *const sum_names[] = {"iterable", "start"}, *const str_names[] = {"object", "encoding", "errors"},
+                                     *const bytes_names[] = {"source", "encoding", "errors"};
+            const char *const *names = id == B_SUM ? sum_names : id == B_STR ? str_names : bytes_names;
+            const char *function = id == B_SUM ? "sum" : id == B_STR ? "str" : id == B_BYTES ? "bytes" : "bytearray";
+            SPYValue *args[3];
+            size_t count = id == B_SUM ? 2 : 3;
+            if (parse_arguments(c, function, argc, argv, keywords, names, count, id == B_SUM, id == B_SUM, args)) return NULL;
+            if (id != B_SUM && !args[0]) args[0] = id == B_STR ? spy_string(c, "", 0) : spy_bytes(c, "", 0);
+            else if (args[0]) spy_retain(args[0]);
+            if (!args[0]) return NULL;
+            size_t used = count;
+            while (used > 1 && !args[used - 1]) used--;
+            SPYValue *call[3] = {args[0], args[1] ? args[1] : NULL, args[2] ? args[2] : NULL};
+            if ((id == B_BYTES || id == B_BYTEARRAY) && args[2] && !args[1]) {
+                int text = args[0]->type == SPY_STRING;
+                spy_release(args[0]);
+                return spy_error(c, "TypeError", text ? "string argument without an encoding" : "errors without a string argument");
+            }
+            if (id != B_SUM && args[2] && !args[1]) {
+                SPYValue *utf8 = spy_string(c, "utf-8", 5);
+                call[1] = utf8;
+                SPYValue *result = utf8 ? builtin(c, 3, call, (void *)(intptr_t)id) : NULL;
+                spy_release(utf8); spy_release(args[0]);
+                return result;
+            }
+            SPYValue *result = builtin(c, used, call, (void *)(intptr_t)id);
+            spy_release(args[0]);
+            return result;
+        }
+        case B_ZIP: case B_MAP: {
+            int strict = 0;
+            for (size_t i = 0; i < keywords->as.map.len; i++) {
+                const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
+                if (strcmp(key, "strict")) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", id == B_MAP ? "map" : "zip", key);
+                strict = spy_truth(map_items(keywords)[i].value);
+                if (c->error_type[0]) return NULL;
+            }
+            SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)id);
+            if (result && strict) result->as.iterator.size = 1;
+            return result;
+        }
+        case B_ENUMERATE: {
+            /* enumerate_vectorcall's keyword handling. */
+            size_t count = keywords->as.map.len, total = argc + count;
+            const char *first = builtin_value(c, map_items(keywords)[0].key, SPY_STRING)->as.string.data;
+            const char *second = count > 1 ? builtin_value(c, map_items(keywords)[1].key, SPY_STRING)->as.string.data : NULL;
+            SPYValue *args[2] = {argc ? argv[0] : NULL, NULL};
+            if (total == 2 && count == 1) {
+                if (strcmp(first, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
+                args[1] = map_items(keywords)[0].value;
+            } else if (total == 2) {
+                int swapped = !strcmp(first, "start");
+                if (swapped ? strcmp(second, "iterable") : strcmp(first, "iterable"))
+                    return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", swapped ? second : first);
+                if (!swapped && strcmp(second, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", second);
+                args[0] = map_items(keywords)[swapped].value; args[1] = map_items(keywords)[!swapped].value;
+            } else if (total == 1) {
+                if (strcmp(first, "iterable")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
+                args[0] = map_items(keywords)[0].value;
+            } else if (!argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
+            else return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", total);
+            return builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
+        }
+        case B_IMPORT: {
+            if (argc > 5) return spy_error(c, "TypeError", "__import__() takes at most 5 arguments");
+            SPYValue *args[5] = {NULL, NULL, NULL, NULL, NULL};
+            const char *names[] = {"name", "globals", "locals", "fromlist", "level"};
+            for (size_t i = 0; i < argc; i++) args[i] = argv[i];
+            for (size_t i = 0; i < keywords->as.map.len; i++) {
+                Entry *entry = &map_items(keywords)[i];
+                size_t at;
+                for (at = 0; at < 5; at++) if (!strcmp(builtin_value(c, entry->key, SPY_STRING)->as.string.data, names[at])) break;
+                if (at == 5) return spy_error(c, "TypeError", "invalid keyword argument for __import__()");
+                if (args[at]) return spy_error(c, "TypeError", "duplicate argument for __import__()");
+                args[at] = entry->value;
+            }
+            if (!args[0]) return spy_error(c, "TypeError", "__import__() requires name");
+            for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
+            return builtin(c, args[4] ? 5 : 4, args, (void *)(intptr_t)id);
+        }
+        case B_POW: {
+            static const char *const names[] = {"base", "exp", "mod"};
+            SPYValue *args[3];
+            if (parse_arguments(c, "pow", argc, argv, keywords, names, 3, 2, 0, args)) return NULL;
+            return builtin(c, args[2] && args[2]->type != SPY_NONE ? 3 : 2, args, (void *)(intptr_t)id);
+        }
+        case B_PROPERTY: {
+            SPYValue *args[4];
+            return property_arguments(c, argc, argv, keywords, args) ? NULL : builtin(c, 4, args, (void *)(intptr_t)id);
+        }
+        case B_INT: {
+            static const char *const names[] = {"x", "base"};
+            SPYValue *args[2];
+            if (argc > 2) return errorf(c, "TypeError", "int() takes at most 2 arguments (%zu given)", argc);
+            if (parse_arguments(c, "int", argc, argv, keywords, names, 2, 0, 1, args)) return NULL;
+            if (!args[0]) return spy_error(c, "TypeError", "int() missing string argument");
+            return builtin(c, 2, args, (void *)(intptr_t)id);
+        }
+        case B_EXCEPTION_INIT: {
+            if (!argc || argv[0]->type != SPY_INSTANCE) break;
+            SPYValue *cls = argv[0]->as.map.parent;
+            const char *const *fields = subclass(cls, name_local(c->classes, "BaseException")) ? exception_keywords(c, cls) : NULL;
+            const char *owner = name_local(cls, "__name__")->as.string.data;
+            if (!fields) return errorf(c, "TypeError", "%s() takes no keyword arguments", owner);
+            for (size_t i = 0; i < keywords->as.map.len; i++) {
+                const char *key = map_items(keywords)[i].key->as.string.data;
+                size_t k = 0;
+                while (fields[k] && strcmp(fields[k], key)) k++;
+                if (!fields[k]) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", owner, key);
+            }
+            SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
+            for (size_t i = 0; value && i < keywords->as.map.len; i++)
+                if (set_hidden_field(c, argv[0], map_items(keywords)[i].key->as.string.data, map_items(keywords)[i].value)) { spy_release(value); value = NULL; }
+            return value;
+        }
+        default: break;
+        }
+        if (id != B_DICT) return errorf(c, "TypeError", "%s() takes no keyword arguments", name);
+    }
     SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
     if (value && id == B_DICT && keywords && extend_display(c, value, keywords)) { spy_release(value); return NULL; }
     return value;
