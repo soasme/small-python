@@ -576,5 +576,5 @@ TEXT` marks a build that must fail with an error containing `TEXT`.
 `make test-build-oracle` adds the oracle phase. Until the bundler exists, the
 build phase fails and the runner reports that for each test.
 `tests/build_runner.py ./spyc --oracle-only PYTHON` runs the oracle phase
-alone, which validates the tests before the bundler exists. All of them pass
-on the pinned CPython 3.15.
+alone, which validates the tests before the bundler exists. On the pinned
+CPython 3.15, 27 of the 28 tests pass and the `--alias` test is skipped.

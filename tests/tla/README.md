@@ -114,6 +114,7 @@ and tied to real implementations by replaying them.
 | `IntrinsicTypes.tla` | every name of the standard interpreter types against the type of a sample object; constructors of methods, modules, cells, functions, and mapping proxies; singleton types; method, class-method, getset, and member descriptors; tracebacks and frames | yes |
 | `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
 | `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
+| `SpyBuild.tla` | spyc's bundler (docs/build.md): resolution over search roots, discovery in any order, guarded, relative, external, and `-D` imports, and the loader's answers to the engine's probes, checked against CPython's path finder | no; the bundler is not implemented yet. TLC rejects a bundler that forgets parent packages, skips from-import submodules, keys namespace packages as modules, stops early, or loses a failure |
 
 Each `NAME.tla` has a `NAME.cfg` naming its invariants and properties, which
 restate what the Language Reference says (the finally clause always runs, a
