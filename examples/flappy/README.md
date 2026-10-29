@@ -25,10 +25,18 @@ or 40 points earns a medal.
 
 ## How it is built
 
-```text
-python.png ──pack.py (run by spy)──> assets/sprite.py ─┐
-flappy.py, game/, game/themes/ ────────────────────────┴─ spyc ─> flappy_py.c ─┐
-flappy.c (registers raylib) + libspy.a + libraylib.a ───────────────────────── cc ─> flappy
+```mermaid
+flowchart LR
+    png[python.png] -- "pack.py, run by spy" --> sprite[assets/sprite.py]
+    entry[flappy.py] --> spyc
+    game["game/ and game/themes/"] --> spyc
+    sprite --> spyc
+    spyc --> bundle[flappy_py.c]
+    spyc -.-> meta["flappy.json, flappy_py.d"]
+    host["flappy.c: registers raylib"] --> cc
+    bundle --> cc
+    libs["libspy.a, libraylib.a"] --> cc
+    cc --> exe((flappy))
 ```
 
 1. `pack.py` turns the sprite into a module, `assets/sprite.py`, holding its
