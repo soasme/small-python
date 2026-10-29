@@ -888,24 +888,79 @@ static SPYValue *integer_add(SPYContext *c, SPYValue *a, SPYValue *b, int subtra
     result->sign = sign ? sign : y.sign;
     return integer_finish(c, result);
 }
-static SPYValue *integer_multiply(SPYContext *c, SPYValue *a, SPYValue *b) {
-    IntView x, y; integer_view(a, &x); integer_view(b, &y);
-    if (!x.len || !y.len) return spy_int(c, 0);
-    if (x.len > SIZE_MAX - y.len) return spy_error(c, "MemoryError", "integer too large");
-    BigInt *result = integer_alloc(c, x.len + y.len);
-    if (!result) return NULL;
-    for (size_t i = 0; i < x.len; i++) {
-        if (c->step_limit && ++c->steps > c->step_limit) {
-            free(result); return spy_error(c, "RuntimeError", "execution step limit exceeded");
-        }
-        uint64_t carry = 0;
-        for (size_t j = 0; j < y.len; j++) {
-            uint64_t product = (uint64_t)x.digits[i] * y.digits[j] + result->digits[i + j] + carry;
-            result->digits[i + j] = (uint32_t)product; carry = product >> 32;
-        }
-        result->digits[i + y.len] = (uint32_t)carry;
+/* a[0, an) += b[0, bn), bn <= an; the sum fits. */
+static void magnitude_add(uint32_t *a, size_t an, const uint32_t *b, size_t bn) {
+    uint64_t carry = 0;
+    for (size_t i = 0; i < an && (i < bn || carry); i++) {
+        uint64_t sum = (uint64_t)a[i] + (i < bn ? b[i] : 0) + carry;
+        a[i] = (uint32_t)sum; carry = sum >> 32;
     }
-    result->sign = x.sign * y.sign;
+}
+/* a[0, an) -= b[0, bn), bn <= an; a is not smaller. */
+static void magnitude_subtract(uint32_t *a, size_t an, const uint32_t *b, size_t bn) {
+    uint64_t borrow = 0;
+    for (size_t i = 0; i < an && (i < bn || borrow); i++) {
+        uint64_t difference = (uint64_t)a[i] - (i < bn ? b[i] : 0) - borrow;
+        a[i] = (uint32_t)difference; borrow = difference >> 63;
+    }
+}
+/* out[0, xn + yn) = x * y, digit by digit: the first row assigns and each
+ * later row adds to the ones before. */
+static void magnitude_schoolbook(uint32_t *out, const uint32_t *x, size_t xn, const uint32_t *y, size_t yn) {
+    for (size_t i = 0; i < xn; i++) {
+        uint64_t carry = 0, digit = x[i];
+        for (size_t j = 0; j < yn; j++) {
+            uint64_t product = digit * y[j] + (i ? out[i + j] : 0) + carry;
+            out[i + j] = (uint32_t)product; carry = product >> 32;
+        }
+        out[i + yn] = (uint32_t)carry;
+    }
+}
+enum { KARATSUBA_CUTOFF = 40 };
+/* out[0, xn + yn) = x * y for xn >= yn, with scratch for 4 xn + 1024 digits.
+ * Short operands multiply digit by digit. A lopsided x is cut into pieces of
+ * yn digits. Otherwise Karatsuba: with x = x1 B^h + x0 and y = y1 B^h + y0,
+ * x y = x1 y1 B^2h + ((x0 + x1)(y0 + y1) - x0 y0 - x1 y1) B^h + x0 y0. */
+static void magnitude_multiply(uint32_t *out, const uint32_t *x, size_t xn, const uint32_t *y, size_t yn, uint32_t *scratch) {
+    if (yn < KARATSUBA_CUTOFF) { magnitude_schoolbook(out, x, xn, y, yn); return; }
+    if (xn >= 2 * yn) {
+        memset(out, 0, (xn + yn) * sizeof(*out));
+        for (size_t at = 0; at < xn; at += yn) {
+            size_t n = xn - at < yn ? xn - at : yn;
+            if (n == yn) magnitude_multiply(scratch, x + at, n, y, yn, scratch + 2 * yn);
+            else magnitude_multiply(scratch, y, yn, x + at, n, scratch + 2 * yn);
+            magnitude_add(out + at, xn + yn - at, scratch, n + yn);
+        }
+        return;
+    }
+    size_t h = (xn + 1) / 2;
+    magnitude_multiply(out, x, h, y, h, scratch);
+    magnitude_multiply(out + 2 * h, x + h, xn - h, y + h, yn - h, scratch);
+    uint32_t *sx = scratch, *sy = sx + h + 1, *middle = sy + h + 1;
+    memcpy(sx, x, h * sizeof(*sx)); sx[h] = 0; magnitude_add(sx, h + 1, x + h, xn - h);
+    memcpy(sy, y, h * sizeof(*sy)); sy[h] = 0; magnitude_add(sy, h + 1, y + h, yn - h);
+    magnitude_multiply(middle, sx, h + 1, sy, h + 1, middle + 2 * h + 2);
+    magnitude_subtract(middle, 2 * h + 2, out, 2 * h);
+    magnitude_subtract(middle, 2 * h + 2, out + 2 * h, xn + yn - 2 * h);
+    magnitude_add(out + h, xn + yn - h, middle, 2 * h + 2 < xn + yn - h ? 2 * h + 2 : xn + yn - h);
+}
+static SPYValue *integer_multiply(SPYContext *c, SPYValue *a, SPYValue *b) {
+    IntView views[2]; integer_view(a, &views[0]); integer_view(b, &views[1]);
+    /* The longer operand comes first; a view may point into itself. */
+    const IntView *x = &views[views[0].len < views[1].len], *y = &views[views[0].len >= views[1].len];
+    if (!y->len) return spy_int(c, 0);
+    if (x->len > SIZE_MAX / 8 - 1024) return spy_error(c, "MemoryError", "integer too large");
+    if (c->step_limit && (c->steps += y->len) > c->step_limit) return spy_error(c, "RuntimeError", "execution step limit exceeded");
+    BigInt *result = integer_alloc(c, x->len + y->len);
+    if (!result) return NULL;
+    if (y->len < KARATSUBA_CUTOFF) magnitude_schoolbook(result->digits, x->digits, x->len, y->digits, y->len);
+    else {
+        uint32_t *scratch = allocate(c, (4 * x->len + 1024) * sizeof(*scratch));
+        if (!scratch) { free(result); return NULL; }
+        magnitude_multiply(result->digits, x->digits, x->len, y->digits, y->len, scratch);
+        free(scratch);
+    }
+    result->sign = x->sign * y->sign;
     return integer_finish(c, result);
 }
 static size_t integer_bits(const IntView *view) {
