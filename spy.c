@@ -8856,18 +8856,15 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             SPYValue view = *b;
             view.type = SPY_BYTES;
             return comparison(c, op, a->type == SPY_BYTEARRAY ? &(SPYValue){.type = SPY_BYTES, .as.string = a->as.string} : a, &view);
-        } else if (b->type == SPY_BYTES && a->type == SPY_BYTEARRAY) {
-            SPYValue view = *a;
-            view.type = SPY_BYTES;
-            return comparison(c, op, &view, b);
         } else if (b->type == SPY_BYTES && is_int(a)) {
             if (a->as.integer_data.big || a->as.integer_data.small < 0 || a->as.integer_data.small > 255)
                 return spy_error(c, "ValueError", "byte must be in range(0, 256)");
             result = memchr(b->as.string.data, (int)a->as.integer_data.small, b->as.string.len) != NULL;
-        } else if (b->type == SPY_BYTES && a->type == SPY_BYTES) {
-            result = find_bytes(b->as.string.data, b->as.string.len, a->as.string.data, a->as.string.len, 0) != SIZE_MAX;
         } else if (b->type == SPY_BYTES) {
-            return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
+            SPYValue *copy, *needle = buffer_bytes(c, a, &copy);
+            if (!needle) return c->error_type[0] ? NULL : errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
+            result = find_bytes(b->as.string.data, b->as.string.len, needle->as.string.data, needle->as.string.len, 0) != SIZE_MAX;
+            spy_release(copy);
         } else if (b->type == SPY_STRING) {
             if (a->type != SPY_STRING) return errorf(c, "TypeError", "'in <string>' requires string as left operand, not %s", type_name(a));
             /* UTF-8 bytes match only at character boundaries. */

@@ -28,6 +28,10 @@ assert_eq(str(e), "startswith first arg must be bytes or a tuple of bytes, not s
 e = assert_raises(TypeError, b"abc".endswith, 1)
 assert_eq(str(e), "endswith first arg must be bytes or a tuple of bytes, not int")
 assert_raises(TypeError, lambda: "a" in b"abc")
+assert_true(memoryview(b"bc") in b"abc" and bytearray(b"c") in b"abc" and memoryview(b"bd") not in bytearray(b"abc"))
+class Exporter:
+    def __buffer__(self, flags): return memoryview(b"bu")
+assert_true(Exporter() in b"xbuf")
 
 # ASCII semantics.
 assert_eq(b"\xe9a".upper(), b"\xe9A")
