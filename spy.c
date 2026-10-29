@@ -7227,9 +7227,12 @@ static size_t string_width(SPYValue *s, size_t at) {
 }
 /* The byte offset of character index (at most its length) of str s,
  * moving cursor (a character index and its byte offset) there: in an ASCII
- * str, or near the cursor or the start, this takes constant time. */
+ * str, at either end, or near the cursor or the start, this takes constant
+ * time. */
 static size_t string_offset(SPYValue *s, size_t index, size_t cursor[2]) {
-    if (string_length(s) == s->as.string.len) return index;
+    size_t length = string_length(s);
+    if (length == s->as.string.len || !index) return index;
+    if (index >= length) return s->as.string.len;
     const unsigned char *data = (const unsigned char *)s->as.string.data;
     size_t i = cursor[0], at = cursor[1];
     if (index < i && index < i - index) i = at = 0;
@@ -11144,15 +11147,8 @@ search:;
     int valid = start <= end;
     size_t first = 0, last = 0;
     if (valid) {
-        /* Bytes and ASCII text index their bytes directly. */
-        if (self->type == SPY_BYTES || length == self->as.string.len) { first = (size_t)start; last = (size_t)end; }
-        else for (size_t offset = 0, index = 0; index <= (size_t)end; index++) {
-            if (index == (size_t)start) first = offset;
-            if (index == (size_t)end) { last = offset; break; }
-            size_t width;
-            utf8_decode(self->as.string.data + offset, self->as.string.len - offset, &width);
-            offset += width;
-        }
+        first = string_offset(self, (size_t)start, self->as.string.cursor);
+        last = string_offset(self, (size_t)end, self->as.string.cursor);
     }
     SPYValue *sub = argv[0];
     size_t count = tail && sub->type == SPY_TUPLE ? sub->as.seq.len : 1;
@@ -11204,9 +11200,15 @@ search:;
             return spy_int(c, -1);
         }
         if (self->type == SPY_BYTES || length == self->as.string.len) return spy_int(c, start + (int64_t)found);
-        for (size_t offset = 0; offset < found; offset++)
-            if (((unsigned char)self->as.string.data[first + offset] & 192) != 128) start++;
-        return spy_int(c, start);
+        /* Count the characters from the nearer end of the searched range. */
+        const unsigned char *data = (const unsigned char *)self->as.string.data;
+        int64_t chars = 0;
+        if (found <= (last - first) / 2) {
+            for (size_t at = first; at < first + found; at++) chars += (data[at] & 192) != 128;
+            return spy_int(c, start + chars);
+        }
+        for (size_t at = first + found; at < last; at++) chars += (data[at] & 192) != 128;
+        return spy_int(c, end - chars);
     }
     return spy_bool(c, 0);
 }
@@ -11214,8 +11216,9 @@ static SPYValue *string_search_method(SPYContext *c, size_t argc, SPYValue *cons
     int descriptor = (int)(intptr_t)data, type = descriptor >> 16, method = descriptor & 65535;
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
     if (!self) return spy_error(c, "TypeError", "string method requires an instance of its type");
+    if (self->type != SPY_BYTEARRAY) return string_search(c, self, method, argc - 1, argv + 1);
     SPYValue view = *self;
-    if (view.type == SPY_BYTEARRAY) view.type = SPY_BYTES;
+    view.type = SPY_BYTES;
     return string_search(c, &view, method, argc - 1, argv + 1);
 }
 /* CPython's arity errors: METH_NOARGS and METH_O methods name their type,
