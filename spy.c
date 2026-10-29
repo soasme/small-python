@@ -27,6 +27,14 @@
 #endif
 #include "spy-unicode.h"
 #include "spy-intrinsics.h"
+/* Statement helpers called from one place in the recursive evaluator stay
+ * out of line, as QuickJS's no_inline: inlined, their locals would enlarge
+ * the frame of every nested call. */
+#if defined(__GNUC__)
+#define NO_INLINE __attribute__((noinline))
+#else
+#define NO_INLINE
+#endif
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
@@ -13068,7 +13076,7 @@ static int function_default(SPYContext *c, SPYValue *fn, Node *arg, SPYValue *va
     }
     return arg->op == P_KWONLY ? name_set(c, defaults, arg->text, value) : sequence_append(c, defaults, value);
 }
-static SPYValue *make_function(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE SPYValue *make_function(SPYContext *c, Frame *f, Node *n) {
     SPYValue *fn = function_new(c, f, n);
     if (!fn) return NULL;
     for (Node *arg = n->args; arg; arg = arg->next) {
@@ -14750,7 +14758,7 @@ static SPYValue *lazy_reify(SPYContext *c, SPYValue *env, const char *name, SPYV
 }
 /* Bind each name of a lazy import statement, as _PyImport_LazyImportModuleLevelObject
  * and _PyEval_LazyImportFrom: a loaded module's concrete attribute binds directly. */
-static int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only) {
+static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only) {
     SPYValue *globals = module_env(c, f->env);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
     if (n->kind == N_IMPORT) {
@@ -14804,7 +14812,7 @@ static int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only) {
 }
 /* Whether __lazy_modules__ of a module-level frame names the module of an
  * import (ITEM of an import statement), by its absolute name. */
-static int lazy_listed(SPYContext *c, Frame *f, Node *n, Node *item) {
+static NO_INLINE int lazy_listed(SPYContext *c, Frame *f, Node *n, Node *item) {
     SPYValue *globals = module_env(c, f->env);
     SPYValue *listed = (n->flags & F_LAZY_COMPAT) && namespace_map(f->env) == namespace_map(globals) ? name_local(globals, "__lazy_modules__") : NULL;
     if (!listed) return 0;
@@ -14815,7 +14823,7 @@ static int lazy_listed(SPYContext *c, Frame *f, Node *n, Node *item) {
     free(name); spy_release(text);
     return result;
 }
-static int import_star(SPYContext *c, Frame *f, SPYValue *module) {
+static NO_INLINE int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     if (module->type != SPY_MODULE && module->type != SPY_INSTANCE && module->type != SPY_CLASS)
         return spy_error(c, "TypeError", "import * requires a module namespace"), -1;
     SPYValue *all = name_local(module, "__all__");
@@ -14849,7 +14857,7 @@ static int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *local_snapshot(SPYContext *, SPYValue *);
-static SPYValue *call_import(SPYContext *c, Frame *f, const char *name, SPYValue *fromlist, int level) {
+static NO_INLINE SPYValue *call_import(SPYContext *c, Frame *f, const char *name, SPYValue *fromlist, int level) {
     SPYValue *globals = module_env(c, f->env);
     SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
     SPYValue *function = spy_retain(name_local(builtins, "__import__"));
@@ -15339,7 +15347,7 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
     if (cls && bases->as.seq.len && set_class_bases(c, cls, bases)) { spy_release(cls); return NULL; }
     return cls;
 }
-static SPYValue *eval_decorators(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE SPYValue *eval_decorators(SPYContext *c, Frame *f, Node *n) {
     SPYValue *values = spy_list(c);
     if (!values) return NULL;
     for (Node *d = n->decorators; d; d = d->next) {
@@ -16031,7 +16039,7 @@ static SPYValue *generic_env(SPYContext *c, Frame *f, Node *generic, SPYValue **
 }
 /* Defaults are evaluated in the enclosing scope, before the type parameters. */
 static SPYValue *generic_function_with(SPYContext *, Frame *, Node *, SPYValue *);
-static SPYValue *generic_function(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE SPYValue *generic_function(SPYContext *c, Frame *f, Node *n) {
     SPYValue *defaults = spy_list(c);
     for (Node *arg = n->args; defaults && arg && !c->error_type[0]; arg = arg->next) {
         if (!arg->a) continue;
@@ -16068,7 +16076,7 @@ static SPYValue *generic_class(SPYContext *c, Frame *f, Node *n) {
     spy_release(base); spy_release(params); spy_release(env);
     return cls;
 }
-static void execute_class(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE void execute_class(SPYContext *c, Frame *f, Node *n) {
     SPYValue *decorators = eval_decorators(c, f, n);
     if (!decorators) return;
     SPYValue *cls = apply_decorators(c, decorators, n->params ? generic_class(c, f, n) : build_class(c, f, n, NULL, NULL));
@@ -16076,7 +16084,7 @@ static void execute_class(SPYContext *c, Frame *f, Node *n) {
     spy_release(cls); spy_release(decorators);
 }
 /* type NAME[params] = value creates a lazily evaluated TypeAliasType. */
-static void execute_type_alias(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE void execute_type_alias(SPYContext *c, Frame *f, Node *n) {
     SPYValue *params = NULL, *env = n->params ? generic_env(c, f, n->params, &params) : NULL;
     if (n->params && !env) return;
     if (!params && !(params = value_new(c, SPY_TUPLE))) return;
@@ -16800,7 +16808,7 @@ static int delete_attribute(SPYContext *c, SPYValue *object, const char *name) {
 }
 static int delete_index(SPYContext *, SPYValue *, SPYValue *);
 static void delete_evaluated(SPYContext *, Node *, SPYValue *, SPYValue *);
-static int delete_target(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE int delete_target(SPYContext *c, Frame *f, Node *n) {
     if (n->kind == N_LIST || n->kind == N_TUPLE) {
         for (Node *item = n->args; item; item = item->next)
             if (delete_target(c, f, item)) return -1;
@@ -16912,7 +16920,7 @@ static SPYValue *manager_error(SPYContext *c, SPYValue *manager, int async, int 
                   !other ? "" : async ? " but it supports the context manager protocol. Did you mean to use 'with'?" :
                   " but it supports the asynchronous context manager protocol. Did you mean to use 'async with'?");
 }
-static Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
+static NO_INLINE Result execute_with(SPYContext *c, Frame *f, Node *item, Node *body) {
     if (!item) return execute(c, f, body);
     if (deeper(c, "")) return (Result){FLOW_ERROR, NULL};
     SPYValue *manager = eval(c, f, item->a);
@@ -17256,7 +17264,7 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
     }
     return r;
 }
-static Result execute_try(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE Result execute_try(SPYContext *c, Frame *f, Node *n) {
     if (n->flags & F_STAR) {
         Result r = execute_try_star(c, f, n);
         if (!n->c) return r;
@@ -17365,7 +17373,7 @@ static SPYValue *conditional_set(SPYContext *c, Frame *f) {
         }
     return name_get(c, f->env, "__conditional_annotations__");
 }
-static void annotated_assign(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
     if (n->c) {
         SPYValue *value = eval(c, f, n->c);
         if (value) store_target(c, f, n->a, value);
@@ -17390,7 +17398,7 @@ static void annotated_assign(SPYContext *c, Frame *f, Node *n) {
         spy_release(index); spy_release(executed);
     }
 }
-static SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
     SPYValue *format = name_get(c, f->env, "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
     SPYValue *unsupported = format ? comparison(c, '>', format, &two) : NULL;
     int raise = unsupported && spy_truth(unsupported);
@@ -18110,7 +18118,7 @@ static int match_case(SPYContext *c, Frame *f, Node *item, SPYValue *subject) {
     spy_release(bindings);
     return result;
 }
-static Result execute_match(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE Result execute_match(SPYContext *c, Frame *f, Node *n) {
     SPYValue *subject = eval(c, f, n->a);
     if (!subject) return (Result){FLOW_ERROR, NULL};
     for (Node *item = n->args; item; item = item->next) {
