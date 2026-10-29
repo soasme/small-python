@@ -198,7 +198,7 @@ def main():
         raise SystemExit(f"no build tests in {TESTS}")
     if not args.oracle_only and not (ROOT / "libspy.a").exists():
         raise SystemExit("libspy.a not found; run make")
-    failures = 0
+    failures = skipped = 0
     for path in tests:
         fields = metadata(path)
         results = []
@@ -210,10 +210,11 @@ def main():
             results.append(("bundle", ok, detail))
         failed = [(label, detail) for label, ok, detail in results if not ok]
         failures += bool(failed)
+        skipped += not results
         print(f"{path.stem}: " + (", ".join(f"{label} {'passed' if ok else 'FAILED'}" for label, ok, _ in results) or "skipped"))
         for label, detail in failed:
             print("    " + f"{label}: {detail}".replace("\n", "\n    "))
-    print(f"{len(tests) - failures} of {len(tests)} build tests passed")
+    print(f"{len(tests) - failures - skipped} of {len(tests)} build tests passed, {skipped} skipped, {failures} failed")
     raise SystemExit(1 if failures else 0)
 
 
