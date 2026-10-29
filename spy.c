@@ -97,7 +97,7 @@ struct SPYValue {
          * point count plus one, once counted (str values are immutable). */
         struct { char *data; size_t len, exports, chars; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
-        struct { Entry *items; size_t len, cap, front; uint32_t *index; size_t index_cap, index_dead, changes; int odd_keys; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
+        struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; size_t changes; int odd_keys; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
@@ -505,7 +505,8 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         for (i = 0; i < v->as.seq.len; i++) visit(v->as.seq.items[i], data);
         break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
-        for (i = 0; i < v->as.map.len; i++) {
+        for (i = 0; i < v->as.map.len + v->as.map.holes; i++) {
+            if (!v->as.map.items[i].key) continue;
             visit(v->as.map.items[i].key, data);
             visit(v->as.map.items[i].value, data);
         }
@@ -1182,6 +1183,7 @@ static int numeric_order(SPYValue *a, SPYValue *b) {
 }
 static int equal(SPYValue *, SPYValue *, size_t);
 static ptrdiff_t map_find(SPYValue *, SPYValue *);
+static Entry *map_items(SPYValue *);
 static int is_view(SPYValue *);
 static int set_view(SPYValue *);
 static ptrdiff_t map_find_hash(SPYValue *, SPYValue *, int64_t);
@@ -1232,12 +1234,12 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
         for (int side = 0; side < 2; side++) {
             SPYValue *x = side ? b->as.unit.replaced : a->as.unit.replaced, *y = side ? a->as.unit.replaced : b->as.unit.replaced;
             for (size_t i = 0; x && i < x->as.map.len; i++) {
-                const char *name = x->as.map.items[i].key->as.string.data;
+                const char *name = map_items(x)[i].key->as.string.data;
                 size_t skip = 0;
                 while (skip < sizeof(ignored) / sizeof(*ignored) && strcmp(ignored[skip], name)) skip++;
                 if (skip < sizeof(ignored) / sizeof(*ignored)) continue;
                 SPYValue *other = y ? name_local(y, name) : NULL;
-                if (!other || !equal(x->as.map.items[i].value, other, depth + 1)) return 0;
+                if (!other || !equal(map_items(x)[i].value, other, depth + 1)) return 0;
             }
         }
         return 1;
@@ -1256,9 +1258,9 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
         if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
         if (a->as.map.len != b->as.map.len) return 0;
         for (size_t i = 0; i < a->as.map.len; i++) {
-            SPYValue *key = spy_retain(a->as.map.items[i].key);
-            SPYValue *left = spy_retain(a->as.map.items[i].value);
-            ptrdiff_t j = map_find_hash(b, key, a->as.map.items[i].hash);
+            SPYValue *key = spy_retain(map_items(a)[i].key);
+            SPYValue *left = spy_retain(map_items(a)[i].value);
+            ptrdiff_t j = map_find_hash(b, key, map_items(a)[i].hash);
             SPYValue *right = j >= 0 ? spy_retain(b->as.map.items[j].value) : NULL;
             int matches = j >= 0 && (ta == SPY_SET || left == right || equal(left, right, depth + 1));
             spy_release(key); spy_release(left); spy_release(right);
@@ -1432,11 +1434,11 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         if (value->type == SPY_FROZENDICT && value->as.map.flags) { *result = value->as.map.hash; return 0; }
         uint64_t hash = 0;
         for (size_t i = 0; i < value->as.map.len; i++) {
-            uint64_t h = (uint64_t)value->as.map.items[i].hash;
+            uint64_t h = (uint64_t)map_items(value)[i].hash;
             if (value->type == SPY_FROZENDICT) {
                 int64_t part;
-                if (hash_value(c, value->as.map.items[i].value, &part)) return -1;
-                h = hash_lane(hash_lane(UINT64_C(2870177450012600261), value->as.map.items[i].hash), part);
+                if (hash_value(c, map_items(value)[i].value, &part)) return -1;
+                h = hash_lane(hash_lane(UINT64_C(2870177450012600261), map_items(value)[i].hash), part);
                 h += 2 ^ (UINT64_C(2870177450012600261) ^ 3527539);
                 if (h == UINT64_MAX) h = 1546275796;
             }
@@ -1466,16 +1468,22 @@ static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
 static SPYValue *namespace_map(SPYValue *value) {
     return value->as.map.namespace ? value->as.map.namespace : value;
 }
-/* A map with more than MAP_INDEXED entries also keeps an open-addressed
- * index by hash. A slot holds an entry's number plus one: the position the
- * entry would have if nothing had been removed since the index was built.
- * map_remove marks the slot INDEX_DEAD, so probes continue past it, and adds
- * the number to the sorted list after the slots; a position is its number
- * less the removed numbers below it. Appending and map_remove keep the index
- * current; any other change to the entries drops it, as do removals
- * outnumbering the entries, and the next lookup rebuilds it. changes counts
- * rebuilt and dropped indexes, so a search that ran a comparison callback can
- * tell that its index is gone. */
+/* A map keeps its len entries in insertion order in items. Removing an entry
+ * from the middle leaves a hole, an entry with no key, that holes counts;
+ * removing the first or last entry, or a hole's neighbour at either end,
+ * shortens the array instead, so neither end is ever a hole. Lookups,
+ * insertion and removal accept holes; every other reader takes the entries
+ * through map_items, which closes them up first.
+ *
+ * A map with more than MAP_INDEXED entries also keeps an open-addressed
+ * index by hash. A slot holds an entry's distance from the start of its
+ * allocation plus one, so removing the first entry leaves the others' slots
+ * valid. map_remove marks the slot INDEX_DEAD, so probes continue past it;
+ * dead slots are counted. Appending and map_remove keep the index current;
+ * any other change to the entries drops it, as do dead slots outnumbering
+ * the entries, and the next lookup rebuilds it. changes counts rebuilt and
+ * dropped indexes, so a search that ran a comparison callback can tell that
+ * its index is gone. */
 enum { MAP_INDEXED = 8 };
 #define INDEX_DEAD UINT32_MAX
 static size_t index_slot(int64_t hash, size_t cap) {
@@ -1490,71 +1498,62 @@ static void map_unindex(SPYValue *map) {
     free(map->as.map.index);
     map->as.map.index = NULL; map->as.map.index_cap = map->as.map.index_dead = 0; map->as.map.changes++;
 }
-/* How many removed numbers are below number. */
-static size_t removed_below(SPYValue *map, uint32_t number) {
-    const uint32_t *removed = map->as.map.index + map->as.map.index_cap;
-    size_t low = 0, high = map->as.map.index_dead;
-    while (low < high) {
-        size_t middle = low + (high - low) / 2;
-        if (removed[middle] < number) low = middle + 1; else high = middle;
-    }
-    return low;
+/* The number of entries in items, holes included. */
+static size_t map_used(SPYValue *map) { return map->as.map.len + map->as.map.holes; }
+static void map_compact(SPYValue *map) {
+    Entry *items = map->as.map.items;
+    size_t to = 0;
+    for (size_t i = 0; i < map_used(map); i++) if (items[i].key) items[to++] = items[i];
+    map->as.map.holes = 0;
+    map_unindex(map);
 }
-/* The number of the entry at position i: i plus the removed numbers below
- * it, which are the k with removed[k] - k <= i. */
-static uint32_t index_number(SPYValue *map, size_t i) {
-    const uint32_t *removed = map->as.map.index + map->as.map.index_cap;
-    size_t low = 0, high = map->as.map.index_dead;
-    while (low < high) {
-        size_t middle = low + (high - low) / 2;
-        if (removed[middle] - middle <= i) low = middle + 1; else high = middle;
-    }
-    return (uint32_t)(i + low);
+/* The entries of map, without holes. */
+static Entry *map_items(SPYValue *map) {
+    if (map->as.map.holes) map_compact(map);
+    return map->as.map.items;
 }
-/* Remove entry i, returning it with its references for the caller to release.
- * The shorter side moves: entries before i shift up into a free front, which
- * keeps removal from either end of a large map cheap. */
+/* Remove entry i, returning it with its references for the caller to release. */
 static Entry map_remove(SPYValue *map, size_t i) {
-    Entry *items = map->as.map.items, old = items[i];
+    Entry old = map->as.map.items[i];
     class_changed(map);
-    if (map->as.map.index && map->as.map.index_dead + 1 > map->as.map.len - 1) map_unindex(map);
     if (map->as.map.index) {
-        uint32_t *index = map->as.map.index, *removed = index + map->as.map.index_cap, number = index_number(map, i);
-        size_t slot = index_slot(old.hash, map->as.map.index_cap), at = removed_below(map, number);
-        while (index[slot] != number + 1) slot = (slot + 1) & (map->as.map.index_cap - 1);
-        index[slot] = INDEX_DEAD;
-        memmove(removed + at + 1, removed + at, (map->as.map.index_dead - at) * sizeof(*removed));
-        removed[at] = number; map->as.map.index_dead++;
+        uint32_t *index = map->as.map.index, number = (uint32_t)(map->as.map.front + i) + 1;
+        size_t slot = index_slot(old.hash, map->as.map.index_cap);
+        while (index[slot] != number) slot = (slot + 1) & (map->as.map.index_cap - 1);
+        index[slot] = INDEX_DEAD; map->as.map.index_dead++;
     }
-    if (i < map->as.map.len / 2) {
-        memmove(items + 1, items, i * sizeof(*items));
-        map->as.map.items++; map->as.map.front++; map->as.map.cap--;
-    } else memmove(items + i, items + i + 1, (map->as.map.len - i - 1) * sizeof(*items));
-    map->as.map.len--;
+    map->as.map.items[i] = (Entry){0};
+    map->as.map.len--; map->as.map.holes++;
+    while (map->as.map.holes && !map->as.map.items[map_used(map) - 1].key) map->as.map.holes--;
+    while (map->as.map.holes && !map->as.map.items[0].key) {
+        map->as.map.items++; map->as.map.front++; map->as.map.cap--; map->as.map.holes--;
+    }
+    if (map->as.map.holes > map->as.map.len) map_compact(map);
+    else if (map->as.map.index_dead > map->as.map.len) map_unindex(map);
     return old;
 }
 /* Index the entry just appended at position i. */
 static void index_insert(SPYValue *map, size_t i) {
     size_t slot = index_slot(map->as.map.items[i].hash, map->as.map.index_cap);
     while (map->as.map.index[slot]) slot = (slot + 1) & (map->as.map.index_cap - 1);
-    map->as.map.index[slot] = (uint32_t)(i + map->as.map.index_dead) + 1;
+    map->as.map.index[slot] = (uint32_t)(map->as.map.front + i) + 1;
 }
 /* Whether map has an index, building one when the map is large enough. */
 static int map_indexed(SPYValue *map) {
     if (map->as.map.index) return 1;
     size_t len = map->as.map.len, cap = 32;
-    if (len <= MAP_INDEXED || len >= UINT32_MAX / 4) return 0;
+    if (len <= MAP_INDEXED || map->as.map.front + map_used(map) >= UINT32_MAX / 4) return 0;
     while (cap < len * 2) cap *= 2;
-    if (!(map->as.map.index = calloc(cap * 2, sizeof(*map->as.map.index)))) return 0;
-    map->as.map.index_cap = cap; map->as.map.changes++;
-    for (size_t i = 0; i < len; i++) index_insert(map, i);
+    if (!(map->as.map.index = calloc(cap, sizeof(*map->as.map.index)))) return 0;
+    map->as.map.index_cap = (uint32_t)cap; map->as.map.changes++;
+    for (size_t i = 0; i < map_used(map); i++) if (map->as.map.items[i].key) index_insert(map, i);
     return 1;
 }
 /* A search yields the positions of the entries with one hash, in insertion
  * order: by probing the index, or by scanning a map too small for one. */
 typedef struct { size_t at, changes; int indexed; } MapCursor;
 static MapCursor map_cursor(SPYValue *map, int64_t hash) {
-    int indexed = map_indexed(map);
+    int indexed = map->as.map.index || (map->as.map.len > MAP_INDEXED && map_indexed(map));
     return (MapCursor){indexed ? index_slot(hash, map->as.map.index_cap) : 0, map->as.map.changes, indexed};
 }
 static ptrdiff_t map_next(SPYValue *map, int64_t hash, MapCursor *cursor) {
@@ -1562,13 +1561,15 @@ static ptrdiff_t map_next(SPYValue *map, int64_t hash, MapCursor *cursor) {
         for (uint32_t slot; (slot = map->as.map.index[cursor->at]);) {
             cursor->at = (cursor->at + 1) & (map->as.map.index_cap - 1);
             if (slot == INDEX_DEAD) continue;
-            size_t i = slot - 1 - removed_below(map, slot - 1);
+            size_t i = slot - 1 - map->as.map.front;
             if (map->as.map.items[i].hash == hash) return (ptrdiff_t)i;
         }
         return -1;
     }
-    while (cursor->at < map->as.map.len)
-        if (map->as.map.items[cursor->at++].hash == hash) return (ptrdiff_t)cursor->at - 1;
+    while (cursor->at < map_used(map)) {
+        Entry *e = &map->as.map.items[cursor->at++];
+        if (e->key && e->hash == hash) return (ptrdiff_t)cursor->at - 1;
+    }
     return -1;
 }
 static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
@@ -1578,7 +1579,7 @@ static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
     for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
         SPYValue *candidate = spy_retain(map->as.map.items[i].key);
         int matches = candidate == key || equal(candidate, key, 0);
-        int unchanged = (size_t)i < map->as.map.len && map->as.map.items[i].key == candidate &&
+        int unchanged = (size_t)i < map_used(map) && map->as.map.items[i].key == candidate &&
             (!cursor.indexed || cursor.changes == map->as.map.changes);
         spy_release(candidate);
         if (!pending_error && map->ctx->error_type[0]) return -1;
@@ -1610,19 +1611,21 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
         map->as.map.items = map->ctx->spare_entries[--map->ctx->spare_entries_len];
         map->as.map.cap = 8;
     }
-    if (map->as.map.front && map->as.map.len == map->as.map.cap) {
+    size_t used = map_used(map);
+    if (map->as.map.front && used == map->as.map.cap) {
         Entry *items = map->as.map.items - map->as.map.front;
-        memmove(items, map->as.map.items, map->as.map.len * sizeof(*items));
+        memmove(items, map->as.map.items, used * sizeof(*items));
         map->as.map.items = items; map->as.map.cap += map->as.map.front; map->as.map.front = 0;
+        map_unindex(map);
     }
-    if (grow(c, (void **)&map->as.map.items, &map->as.map.cap,
-             map->as.map.len + 1, sizeof(Entry))) return -1;
-    Entry *entry = &map->as.map.items[map->as.map.len++];
+    if (grow(c, (void **)&map->as.map.items, &map->as.map.cap, used + 1, sizeof(Entry))) return -1;
+    Entry *entry = &map->as.map.items[used];
+    map->as.map.len++;
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
     map->as.map.odd_keys |= key->type != SPY_STRING;
     class_changed(map);
-    if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
-    else if (map->as.map.index) index_insert(map, map->as.map.len - 1);
+    if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > (size_t)map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
+    else if (map->as.map.index) index_insert(map, used);
     return 0;
 }
 static int map_set_hash(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *value, int64_t hash) {
@@ -1895,7 +1898,7 @@ static SPYValue *dict_name(SPYContext *c, SPYValue *dict, Name name) {
     SPYValue *value = local_value(dict, name), *map = dictionary_value(c, dict);
     if (value || !map) return value;
     size_t i = 0;
-    while (i < map->as.map.len && builtin_value(c, map->as.map.items[i].key, SPY_STRING)) i++;
+    while (i < map->as.map.len && builtin_value(c, map_items(map)[i].key, SPY_STRING)) i++;
     if (i == map->as.map.len) return NULL;
     SPYValue *key = spy_string(c, name.text, name.len);
     ptrdiff_t at = key ? map_find(map, key) : -1;
@@ -1992,7 +1995,7 @@ static int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
  * environments bind locals under those keys only. */
 static Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
     if (!key) return NULL;
-    if (first && n->slot < env->as.map.len && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
+    if (first && n->slot < map_used(env) && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
     Entry *entry = env_find(env, node_name(n));
     if (!entry || entry->key != key) return NULL;
     if (first) n->slot = (size_t)(entry - env->as.map.items);
@@ -2002,7 +2005,7 @@ static Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
  * An entry whose key is n's retained exact str is that entry. */
 static Entry *dict_slot(SPYValue *dict, Node *n) {
     SPYValue *key = n->global_key;
-    if (key && n->global_slot < dict->as.map.len && dict->as.map.items[n->global_slot].key == key)
+    if (key && n->global_slot < map_used(dict) && dict->as.map.items[n->global_slot].key == key)
         return &dict->as.map.items[n->global_slot];
     Entry *entry = env_find(dict, node_name(n));
     if (entry && entry->key->type == SPY_STRING) {
@@ -2609,7 +2612,7 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         for (size_t i = 0; !status && i < (dict ? v->as.map.len : v->as.seq.len); i++) {
             if (i && puts_buffer(b, ", ")) { status = -1; break; }
             if (dict) {
-                SPYValue *key = spy_retain(v->as.map.items[i].key), *value = spy_retain(v->as.map.items[i].value);
+                SPYValue *key = spy_retain(map_items(v)[i].key), *value = spy_retain(map_items(v)[i].value);
                 status = format_value(b, key, 1) || (is_dict(v) && (puts_buffer(b, ": ") || format_value(b, value, 1)));
                 spy_release(key); spy_release(value);
             } else {
@@ -7185,11 +7188,11 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     case SPY_LIST: case SPY_TUPLE:
         return index < v->as.seq.len ? spy_retain(v->as.seq.items[index]) : NULL;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: case SPY_FROZENSET:
-        return index < v->as.map.len ? spy_retain(v->as.map.items[index].key) : NULL;
+        return index < v->as.map.len ? spy_retain(map_items(v)[index].key) : NULL;
     case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: {
         SPYValue *map = v->as.bound.self;
         if (index >= map->as.map.len) return NULL;
-        Entry *e = &map->as.map.items[index];
+        Entry *e = &map_items(map)[index];
         if (v->type != SPY_DICT_ITEMS) return spy_retain(v->type == SPY_DICT_KEYS ? e->key : e->value);
         SPYValue *pair = value_new(c, SPY_TUPLE);
         if (pair && (sequence_append(c, pair, e->key) || sequence_append(c, pair, e->value))) { spy_release(pair); return NULL; }
@@ -7278,14 +7281,14 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
             spy_error(c, "RuntimeError", sized->type == SPY_DICT ? "dictionary changed size during iteration" : "Set changed size during iteration");
             v->as.iterator.done = 1;
         } else if (sized->type == SPY_DICT && !reversed && at && v->as.iterator.last &&
-                   (at > sized->as.map.len || (const void *)sized->as.map.items[at - 1].key != v->as.iterator.last)) {
+                   (at > sized->as.map.len || (const void *)map_items(sized)[at - 1].key != v->as.iterator.last)) {
             /* The key last produced has moved: keys were removed and added
              * (26.1.4). It is compared by identity only, never used. */
             spy_error(c, "RuntimeError", "dictionary keys changed during iteration");
             v->as.iterator.done = 1;
         } else if (!reversed) {
             result = iter_at(c, source, v->as.iterator.index++);
-            if (result && sized->type == SPY_DICT && at < sized->as.map.len) v->as.iterator.last = sized->as.map.items[at].key;
+            if (result && sized->type == SPY_DICT && at < sized->as.map.len) v->as.iterator.last = map_items(sized)[at].key;
         }
         else if (v->as.iterator.index && source->type == SPY_INSTANCE) {
             /* reversed_next over a sequence: stop at IndexError or StopIteration. */
@@ -9046,7 +9049,7 @@ static int property_arguments(SPYContext *c, size_t argc, SPYValue *const *argv,
     if (count > 4) { errorf(c, "TypeError", "property() takes at most 4 arguments (%zu given)", count); return -1; }
     for (size_t i = 0; i < 4; i++) args[i] = i < argc ? argv[i] : c->none;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        Entry *entry = &keywords->as.map.items[i];
+        Entry *entry = &map_items(keywords)[i];
         const char *key = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
         size_t at = 0;
         while (at < 4 && strcmp(key, names[at])) at++;
@@ -9421,7 +9424,7 @@ static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *nam
     if (!c->lazy_modules || !module_name || module_name->type != SPY_STRING) return NULL;
     size_t prefix = module_name->as.string.len, length = strlen(name);
     for (size_t i = 0; i < c->lazy_modules->as.map.len; i++) {
-        SPYValue *key = c->lazy_modules->as.map.items[i].key;
+        SPYValue *key = map_items(c->lazy_modules)[i].key;
         const char *text = key->as.string.data;
         if (key->as.string.len < prefix + 1 + length || strncmp(text, module_name->as.string.data, prefix) ||
             text[prefix] != '.' || strncmp(text + prefix + 1, name, length) ||
@@ -9498,7 +9501,7 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
         SPYValue *dict = value_new(c, SPY_DICT);
         if (!dict) return NULL;
         map_unindex(v);
-        dict->as.map.items = v->as.map.items; dict->as.map.len = v->as.map.len; dict->as.map.cap = v->as.map.cap; dict->as.map.front = v->as.map.front;
+        dict->as.map.items = map_items(v); dict->as.map.len = v->as.map.len; dict->as.map.cap = v->as.map.cap; dict->as.map.front = v->as.map.front;
         dict->as.map.odd_keys = v->as.map.odd_keys;
         v->as.map.items = NULL; v->as.map.len = v->as.map.cap = v->as.map.front = 0;
         v->as.map.namespace = dict;
@@ -9514,7 +9517,7 @@ static SPYValue *class_namespace(SPYContext *, SPYValue *);
 static SPYValue *instance_dict_search(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *dict = v->type == SPY_INSTANCE && v->as.map.namespace ? dictionary_value(c, v->as.map.namespace) : NULL;
     int other = 0;
-    for (size_t i = 0; dict && i < dict->as.map.len; i++) other |= dict->as.map.items[i].key->type != SPY_STRING;
+    for (size_t i = 0; dict && i < dict->as.map.len; i++) other |= map_items(dict)[i].key->type != SPY_STRING;
     if (!other) return NULL;
     SPYValue *key = spy_string(c, name, strlen(name));
     ptrdiff_t at = key ? map_find(dict, key) : -1;
@@ -11231,7 +11234,7 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
     SPYValue *values[FIELDS] = {0}, *base = NULL, *copy = NULL, *replaced = NULL;
     int64_t numbers[7] = {0};
     for (size_t i = 0; changes && i < changes->as.map.len; i++) {
-        const char *name = changes->as.map.items[i].key->as.string.data;
+        const char *name = map_items(changes)[i].key->as.string.data;
         size_t known = 0;
         while (known < FIELDS && strcmp(names[known], name)) known++;
         if (known == FIELDS) return errorf(c, "TypeError", "replace() got an unexpected keyword argument '%s'", name);
@@ -11540,7 +11543,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     case M_CLEAR:
         if (argc) break;
         if (self->type == SPY_DICT) {
-            Entry *items = self->as.map.items;
+            Entry *items = map_items(self);
             size_t len = self->as.map.len, front = self->as.map.front;
             map_unindex(self);
             self->as.map.items = NULL; self->as.map.len = self->as.map.cap = self->as.map.front = 0;
@@ -11561,7 +11564,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (!copy) return NULL;
         if (self->type == SPY_DICT) {
             for (size_t i = 0; i < self->as.map.len; i++) {
-                Entry *entry = &self->as.map.items[i];
+                Entry *entry = &map_items(self)[i];
                 if (map_append(c, copy, entry->key, entry->value, entry->hash)) { spy_release(copy); return NULL; }
             }
         } else {
@@ -11593,13 +11596,13 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     case M_POPITEM: {
         if (argc) break;
         if (!self->as.map.len) return spy_error(c, "KeyError", "popitem(): dictionary is empty");
-        Entry *entry = &self->as.map.items[self->as.map.len - 1];
+        Entry *entry = &map_items(self)[self->as.map.len - 1];
         SPYValue *pair = value_new(c, SPY_TUPLE);
         if (!pair) return NULL;
         if (sequence_append(c, pair, entry->key) || sequence_append(c, pair, entry->value)) {
             spy_release(pair); return NULL;
         }
-        Entry old = map_remove(self, self->as.map.len - 1);
+        Entry old = map_remove(self, map_used(self) - 1);
         spy_release(old.key); spy_release(old.value);
         return pair;
     }
@@ -11760,9 +11763,9 @@ static SPYValue *slots_base(SPYValue *);
 static SPYValue *next_slot(SPYValue *cls, size_t *i) {
     SPYValue *dict = namespace_map(cls);
     for (; *i < dict->as.map.len; (*i)++) {
-        SPYValue *value = dict->as.map.items[*i].value;
+        SPYValue *value = map_items(dict)[*i].value;
         if (value && value->type == SPY_MEMBER_DESCRIPTOR && (value->as.member.flags & DESC_SLOT) && value->as.member.owner == cls)
-            return dict->as.map.items[(*i)++].key;
+            return map_items(dict)[(*i)++].key;
     }
     return NULL;
 }
@@ -12660,7 +12663,7 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
         if (source == result && !callable) return 0;
         size_t size = source->as.map.len;
         for (size_t i = 0; i < source->as.map.len; i++) {
-            Entry entry = source->as.map.items[i];
+            Entry entry = map_items(source)[i];
             spy_retain(entry.key); spy_retain(entry.value);
             int status = callable ? merge_keyword(c, result, entry.key, entry.value, callable) :
                 map_set_hash(c, result, entry.key, entry.value, entry.hash);
@@ -13733,7 +13736,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
     }
     /* Validate keywords in call order before argument counts or defaults. */
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        Entry *entry = &keywords->as.map.items[i];
+        Entry *entry = &map_items(keywords)[i];
         const char *keyword = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
         Node *arg;
         for (arg = params; arg && !c->error_type[0]; arg = arg->next)
@@ -13797,13 +13800,13 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
     for (Node *arg = fn->as.function.signature; arg; arg = arg->next, at++) {
         slots[at] = -1;
         for (size_t i = 0; arg->local && i < env->as.map.len && slots[at] < 0; i++)
-            if (env->as.map.items[i].key->type == SPY_STRING && !strcmp(env->as.map.items[i].key->as.string.data, arg->text))
+            if (map_items(env)[i].key->type == SPY_STRING && !strcmp(map_items(env)[i].key->as.string.data, arg->text))
                 slots[at] = (ptrdiff_t)i;
     }
     at = 0;
     for (Node *arg = fn->as.function.signature; arg && !c->error_type[0]; arg = arg->next, at++) {
         if (slots[at] < 0) continue;
-        Entry *entry = &env->as.map.items[slots[at]];
+        Entry *entry = &map_items(env)[slots[at]];
         SPYValue *key = spy_string(c, arg->local, strlen(arg->local));
         map_unindex(env);
         if (key && !hash_value(c, key, &entry->hash)) { spy_release(entry->key); entry->key = key; }
@@ -13818,7 +13821,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     if (!same_context(c, fn)) return NULL;
     for (size_t i = 0; i < argc; i++) if (!same_context(c, argv[i])) return NULL;
     if (keywords) for (size_t i = 0; i < keywords->as.map.len; i++)
-        if (!builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)) return spy_error(c, "TypeError", "keywords must be strings");
+        if (!builtin_value(c, map_items(keywords)[i].key, SPY_STRING)) return spy_error(c, "TypeError", "keywords must be strings");
     if (deeper(c, " while calling a Python object")) return NULL;
     SPYValue *result = NULL;
     if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
@@ -13920,11 +13923,11 @@ static int module_init(SPYContext *c, SPYValue *module, size_t argc, SPYValue *c
     SPYValue *args[2] = {argc > 0 ? argv[0] : NULL, argc > 1 ? argv[1] : NULL};
     static const char *const names[] = {"name", "doc"};
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        SPYValue *key = keywords->as.map.items[i].key;
+        SPYValue *key = map_items(keywords)[i].key;
         int slot = key->type != SPY_STRING ? -1 : !strcmp(key->as.string.data, "name") ? 0 : !strcmp(key->as.string.data, "doc") ? 1 : -1;
         if (slot < 0) { errorf(c, "TypeError", "module() got an unexpected keyword argument '%s'", key->type == SPY_STRING ? key->as.string.data : ""); return -1; }
         if (args[slot]) { errorf(c, "TypeError", "argument for module() given by name ('%s') and position (%d)", names[slot], slot + 1); return -1; }
-        args[slot] = keywords->as.map.items[i].value;
+        args[slot] = map_items(keywords)[i].value;
     }
     if (!args[0]) { spy_error(c, "TypeError", "module() missing required argument 'name' (pos 1)"); return -1; }
     if (args[0]->type != SPY_STRING) { errorf(c, "TypeError", "module() argument 'name' must be str, not %s", type_name(args[0])); return -1; }
@@ -14199,7 +14202,7 @@ static int gc_tracked(SPYContext *c, SPYValue *v) {
         for (size_t i = 0; i < v->as.seq.len; i++) if (gc_tracked(c, v->as.seq.items[i])) return 1;
         return 0;
     case SPY_FROZENSET:
-        for (size_t i = 0; i < v->as.map.len; i++) if (gc_tracked(c, v->as.map.items[i].key)) return 1;
+        for (size_t i = 0; i < v->as.map.len; i++) if (gc_tracked(c, map_items(v)[i].key)) return 1;
         return 0;
     case SPY_INSTANCE: return v->as.map.parent != c->object;
     default: return 1;
@@ -14313,11 +14316,11 @@ static SPYValue *sys_set_int_max_str_digits(SPYContext *c, size_t argc, SPYValue
     (void)data;
     SPYValue *value = argc ? argv[0] : NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        SPYValue *key = keywords->as.map.items[i].key;
+        SPYValue *key = map_items(keywords)[i].key;
         if (strcmp(key->as.string.data, "maxdigits"))
             return errorf(c, "TypeError", "set_int_max_str_digits() got an unexpected keyword argument '%s'", key->as.string.data);
         if (value) return spy_error(c, "TypeError", "argument for set_int_max_str_digits() given by name ('maxdigits') and position (1)");
-        value = keywords->as.map.items[i].value;
+        value = map_items(keywords)[i].value;
     }
     if (argc > 1) return errorf(c, "TypeError", "set_int_max_str_digits() takes at most 1 argument (%zu given)", argc);
     if (!value) return spy_error(c, "TypeError", "set_int_max_str_digits() missing required argument 'maxdigits' (pos 1)");
@@ -14476,7 +14479,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     }
     /* A module being imported is no longer a pending lazy submodule. */
     for (size_t i = 0; c->lazy_modules && i < c->lazy_modules->as.map.len; i++)
-        if (!strcmp(c->lazy_modules->as.map.items[i].key->as.string.data, name)) { set_remove_at(c->lazy_modules, i); break; }
+        if (!strcmp(map_items(c->lazy_modules)[i].key->as.string.data, name)) { set_remove_at(c->lazy_modules, i); break; }
     spy_release(module_name);
     Result result = {FLOW_NORMAL, NULL};
     if (init) {
@@ -14494,7 +14497,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     if (result.flow == FLOW_ERROR) {
         /* A failed import must not leave a half-initialized cached module. */
         for (size_t i = 0; i < c->modules->as.map.len; i++) {
-            Entry *e = &c->modules->as.map.items[i];
+            Entry *e = &map_items(c->modules)[i];
             if (!strcmp(e->key->as.string.data, name)) {
                 Entry old = map_remove(c->modules, i);
                 spy_release(old.key); spy_release(old.value);
@@ -14824,7 +14827,7 @@ static int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     } else {
         SPYValue *names = namespace_map(module);
         for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++) {
-            Entry *entry = &names->as.map.items[i];
+            Entry *entry = &map_items(names)[i];
             if (entry->key->type == SPY_STRING && entry->key->as.string.data[0] != '_')
                 name_set(c, f->env, entry->key->as.string.data, entry->value);
         }
@@ -15623,7 +15626,7 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     if (!cls) return NULL;
     SPYValue *classdict = NULL;
     for (size_t i = 0; i < namespace->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &namespace->as.map.items[i];
+        Entry *entry = &map_items(namespace)[i];
         if (entry->value->type == V_UNBOUND) continue;
         if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__qualname__")) name_set(c, cls, "__qualname__", entry->value);
         else if (entry->key->type == SPY_STRING && (!strcmp(entry->key->as.string.data, "__classcell__") ||
@@ -15687,7 +15690,7 @@ static SPYValue *static_attributes(SPYContext *c, SPYValue *unit, Scope *scope) 
         if (node->static_owner == scope->owner)
             name_set(c, names, source_name(node->b), c->none);
     for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++)
-        sequence_append(c, result, names->as.map.items[i].key);
+        sequence_append(c, result, map_items(names)[i].key);
     spy_release(names);
     if (c->error_type[0] || sort_list(c, result, NULL, 0)) { spy_release(result); return NULL; }
     result->type = SPY_TUPLE;
@@ -15789,7 +15792,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
     /* The metaclass keyword selects the metaclass; the rest go to it. */
     SPYValue *meta = NULL;
     for (size_t i = 0; i < arguments->as.map.len; i++) {
-        Entry *entry = &arguments->as.map.items[i];
+        Entry *entry = &map_items(arguments)[i];
         SPYValue *key = builtin_value(c, entry->key, SPY_STRING);
         if (!key) { spy_error(c, "TypeError", "keywords must be strings"); goto done; }
         if (!strcmp(key->as.string.data, "metaclass")) meta = entry->value;
@@ -15904,12 +15907,12 @@ static SPYValue *lazy_import_builtin(SPYContext *c, size_t argc, SPYValue *const
     if (argc > 5) return errorf(c, "TypeError", "__lazy_import__() takes at most 5 arguments (%zu given)", argc);
     for (size_t i = 0; i < argc; i++) args[i] = argv[i];
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        SPYValue *key = keywords->as.map.items[i].key;
+        SPYValue *key = map_items(keywords)[i].key;
         size_t slot = 0;
         while (slot < 5 && strcmp(key->as.string.data, names[slot])) slot++;
         if (slot == 5) return errorf(c, "TypeError", "__lazy_import__() got an unexpected keyword argument '%s'", key->as.string.data);
         if (args[slot]) return errorf(c, "TypeError", "argument for __lazy_import__() given by name ('%s') and position (%zu)", names[slot], slot + 1);
-        args[slot] = keywords->as.map.items[i].value;
+        args[slot] = map_items(keywords)[i].value;
     }
     if (!args[0]) return spy_error(c, "TypeError", "__lazy_import__() missing required argument 'name' (pos 1)");
     int64_t level = 0;
@@ -15967,11 +15970,11 @@ static SPYValue *exit_builtin(SPYContext *c, size_t argc, SPYValue *const *argv,
     SPYValue *code = argc ? argv[0] : NULL;
     if (argc > 1) return errorf(c, "TypeError", "Quitter.__call__() takes from 1 to 2 positional arguments but %zu were given", argc + 1);
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        SPYValue *key = keywords->as.map.items[i].key;
+        SPYValue *key = map_items(keywords)[i].key;
         if (strcmp(key->as.string.data, "code"))
             return errorf(c, "TypeError", "Quitter.__call__() got an unexpected keyword argument '%s'", key->as.string.data);
         if (code) return spy_error(c, "TypeError", "Quitter.__call__() got multiple values for argument 'code'");
-        code = keywords->as.map.items[i].value;
+        code = map_items(keywords)[i].value;
     }
     SPYValue *exception = spy_call(c, name_local(c->classes, "SystemExit"), code ? 1 : 0, &code);
     if (exception) raise_value(c, exception);
@@ -16601,11 +16604,11 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
     SPYValue *snapshot = value_new(c, SPY_DICT), *dict = namespace_map(cls);
     if (!snapshot) return -1;
     for (size_t i = 0; i < dict->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &dict->as.map.items[i];
+        Entry *entry = &map_items(dict)[i];
         map_append(c, snapshot, entry->key, entry->value, entry->hash);
     }
     for (size_t i = 0; i < snapshot->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &snapshot->as.map.items[i];
+        Entry *entry = &map_items(snapshot)[i];
         SPYValue *method = special_method(c, entry->value, "__set_name__");
         if (!method) continue;
         SPYValue *args[] = {cls, entry->key};
@@ -17831,7 +17834,7 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
  * only after the whole pattern succeeds, before any guard runs. */
 static void bindings_truncate(SPYValue *bindings, size_t len) {
     while (bindings->as.map.len > len) {
-        Entry old = map_remove(bindings, bindings->as.map.len - 1);
+        Entry old = map_remove(bindings, map_used(bindings) - 1);
         spy_release(old.key); spy_release(old.value);
     }
 }
@@ -18089,7 +18092,7 @@ static int match_case(SPYContext *c, Frame *f, Node *item, SPYValue *subject) {
     if (!bindings) return -1;
     int result = match_pattern(c, f, item->a, subject, bindings);
     for (size_t i = 0; result > 0 && i < bindings->as.map.len; i++)
-        if (name_set(c, f->env, bindings->as.map.items[i].key->as.string.data, bindings->as.map.items[i].value)) result = -1;
+        if (name_set(c, f->env, map_items(bindings)[i].key->as.string.data, map_items(bindings)[i].value)) result = -1;
     spy_release(bindings);
     return result;
 }
@@ -19286,7 +19289,7 @@ static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValu
     SPYValue *key = keywords ? name_local(keywords, "key") : NULL;
     SPYValue *reverse = keywords ? name_local(keywords, "reverse") : NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        const char *name = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
+        const char *name = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         if (strcmp(name, "key") && strcmp(name, "reverse")) return errorf(c, "TypeError", "sort() got an unexpected keyword argument '%s'", name);
     }
     int descending = reverse ? spy_truth(reverse) : 0;
@@ -19310,7 +19313,7 @@ static SPYValue *local_snapshot(SPYContext *c, SPYValue *env) {
     SPYValue *result = value_new(c, SPY_DICT);
     if (!result) return NULL;
     for (size_t i = 0; i < env->as.map.len; i++) {
-        Entry *entry = &env->as.map.items[i];
+        Entry *entry = &map_items(env)[i];
         if (entry->value->type != V_UNBOUND && map_set(c, result, entry->key, entry->value)) break;
     }
     Scope *scope = env->as.map.scope;
@@ -19393,7 +19396,7 @@ static SPYValue *frame_contents(SPYContext *c, SPYValue *frame, int what) {
     for (int source = 0; source < 2 && names && !c->error_type[0]; source++) {
         SPYValue *map = source ? extra : names;
         for (size_t i = 0; map && i < map->as.map.len && !c->error_type[0]; i++) {
-            Entry *entry = &map->as.map.items[i];
+            Entry *entry = &map_items(map)[i];
             if (what == FRAME_DICT) { map_set(c, result, entry->key, entry->value); continue; }
             SPYValue *item = what == FRAME_KEYS ? spy_retain(entry->key) : what == FRAME_VALUES ? spy_retain(entry->value) : value_new(c, SPY_TUPLE);
             if (item && what == FRAME_ITEMS && (sequence_append(c, item, entry->key) || sequence_append(c, item, entry->value))) { spy_release(item); item = NULL; }
@@ -19513,8 +19516,8 @@ static int frame_locals_merge(SPYContext *c, SPYValue *frame, SPYValue *other) {
     if (other->type != SPY_DICT && !keys) return -1;
     size_t n = keys ? keys->as.seq.len : other->as.map.len;
     for (size_t i = 0; i < n; i++) {
-        SPYValue *key = keys ? keys->as.seq.items[i] : other->as.map.items[i].key;
-        SPYValue *value = keys ? frame_local_get(c, other->as.bound.self, key) : spy_retain(other->as.map.items[i].value);
+        SPYValue *key = keys ? keys->as.seq.items[i] : map_items(other)[i].key;
+        SPYValue *value = keys ? frame_local_get(c, other->as.bound.self, key) : spy_retain(map_items(other)[i].value);
         if (!value && !c->error_type[0]) missing_key(c, key);
         int status = !value || frame_local_set(c, frame, key, value);
         spy_release(value);
@@ -19684,7 +19687,7 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
             SPYValue *own = attribute(c, source, "__dict__");
             if (!own && error_is(c, "AttributeError")) spy_clear_error(c);
             for (size_t i = 0; own && own->type == SPY_DICT && i < own->as.map.len && !c->error_type[0]; i++)
-                if (own->as.map.items[i].key->type == SPY_STRING) map_set(c, names, own->as.map.items[i].key, c->none);
+                if (map_items(own)[i].key->type == SPY_STRING) map_set(c, names, map_items(own)[i].key, c->none);
             spy_release(own);
             source = value_class(c, source);
         }
@@ -19702,14 +19705,14 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
                 break;
             }
             for (size_t i = 0; i < bindings->as.map.len; i++) {
-                Entry *entry = &bindings->as.map.items[i];
+                Entry *entry = &map_items(bindings)[i];
                 if (entry->value->type == V_UNBOUND || entry->key->type != SPY_STRING) continue;
                 if (map_set(c, names, entry->key, c->none)) break;
             }
             spy_release(bindings);
         }
         for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++)
-            sequence_append(c, result, names->as.map.items[i].key);
+            sequence_append(c, result, map_items(names)[i].key);
     }
     spy_release(names);
     if (c->error_type[0] || (!plain && sort_list(c, result, NULL, 0))) { spy_release(result); return NULL; }
@@ -19868,7 +19871,7 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
     for (size_t i = 0; i < count; i++) out[i] = i < argc ? argv[i] : NULL;
     const char *unknown = NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        const char *key = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
+        const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         size_t at = keyword_start;
         while (at < count && strcmp(names[at], key)) at++;
         if (at == count) { if (!unknown) unknown = key; continue; }
@@ -19876,7 +19879,7 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
             errorf(c, "TypeError", "argument for %s() given by name ('%s') and position (%zu)", function, key, at + 1);
             return -1;
         }
-        out[at] = keywords->as.map.items[i].value;
+        out[at] = map_items(keywords)[i].value;
     }
     for (size_t i = 0; i < required; i++)
         if (!out[i]) {
@@ -19947,7 +19950,7 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
             copy = value_new(c, SPY_DICT);
             if (!copy) return NULL;
             for (size_t i = 0; i < mapping->as.map.len; i++) {
-                Entry *entry = &mapping->as.map.items[i];
+                Entry *entry = &map_items(mapping)[i];
                 if (map_append(c, copy, entry->key, entry->value, entry->hash)) { spy_release(copy); return NULL; }
             }
         }
@@ -21043,7 +21046,7 @@ static SPYValue *str_maketrans(SPYContext *c, size_t argc, SPYValue *const *argv
     if (!args[1]) {
         if (args[0]->type != SPY_DICT) { spy_release(table); return spy_error(c, "TypeError", "if you give only one argument to maketrans it must be a dict"); }
         for (size_t i = 0; i < args[0]->as.map.len && !c->error_type[0]; i++) {
-            Entry *entry = &args[0]->as.map.items[i];
+            Entry *entry = &map_items(args[0])[i];
             SPYValue *key = NULL;
             if (entry->key->type == SPY_STRING) {
                 if (string_length(entry->key) != 1) { spy_error(c, "ValueError", "string keys in translatetable must be of length 1"); break; }
@@ -21424,7 +21427,7 @@ static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv
     if (is_dict(dict) && (is_dict(args[0]) || is_set(args[0]))) {
         SPYValue *source = args[0];
         for (size_t i = 0; i < source->as.map.len && !c->error_type[0]; i++) {
-            Entry entry = source->as.map.items[i];
+            Entry entry = map_items(source)[i];
             spy_retain(entry.key);
             map_set_hash(c, dict, entry.key, value, entry.hash);
             spy_release(entry.key);
@@ -21485,7 +21488,7 @@ static SPYValue *set_operand(SPYContext *c, SPYValue *value, int any_iterable) {
 static SPYValue *set_copy_type(SPYContext *c, SPYValue *source, int type) {
     SPYValue *copy = value_new(c, type);
     for (size_t i = 0; copy && i < source->as.map.len; i++) {
-        Entry *entry = &source->as.map.items[i];
+        Entry *entry = &map_items(source)[i];
         if (map_append(c, copy, entry->key, c->none, entry->hash)) { spy_release(copy); return NULL; }
     }
     return copy;
@@ -21495,7 +21498,7 @@ enum { SET_UNION, SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC };
 static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other) {
     if (op == SET_UNION) {
         for (size_t i = 0; i < other->as.map.len; i++) {
-            Entry *entry = &other->as.map.items[i];
+            Entry *entry = &map_items(other)[i];
             int found = set_contains(c, result, entry->key, entry->hash);
             if (found < 0 || (!found && map_append(c, result, entry->key, c->none, entry->hash))) return -1;
         }
@@ -21503,7 +21506,7 @@ static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other)
     }
     if (op == SET_SYMMETRIC) {
         for (size_t i = 0; i < other->as.map.len; i++) {
-            Entry *entry = &other->as.map.items[i];
+            Entry *entry = &map_items(other)[i];
             ptrdiff_t found = map_find_hash(result, entry->key, entry->hash);
             if (c->error_type[0]) return -1;
             if (found >= 0) set_remove_at(result, (size_t)found);
@@ -21512,7 +21515,7 @@ static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other)
         return 0;
     }
     for (size_t i = 0; i < result->as.map.len;) {
-        Entry *entry = &result->as.map.items[i];
+        Entry *entry = &map_items(result)[i];
         int found = set_contains(c, other, entry->key, entry->hash);
         if (found < 0) return -1;
         if (found == (op == SET_DIFFERENCE)) set_remove_at(result, i);
@@ -21581,7 +21584,7 @@ static SPYValue *set_intersect_iterable(SPYContext *c, SPYValue *set, SPYValue *
 static int set_subset(SPYContext *c, SPYValue *a, SPYValue *b) {
     if (a->as.map.len > b->as.map.len) return 0;
     for (size_t i = 0; i < a->as.map.len; i++) {
-        Entry *entry = &a->as.map.items[i];
+        Entry *entry = &map_items(a)[i];
         int found = set_contains(c, b, entry->key, entry->hash);
         if (found <= 0) return found;
     }
@@ -21611,7 +21614,7 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
         else {
             result = 1;
             for (size_t i = 0; i < self->as.map.len && result > 0; i++) {
-                int found = set_contains(c, other, self->as.map.items[i].key, self->as.map.items[i].hash);
+                int found = set_contains(c, other, map_items(self)[i].key, map_items(self)[i].hash);
                 result = found < 0 ? -1 : !found;
             }
         }
@@ -21669,12 +21672,12 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
     }
     case SET_POP: {
         if (!self->as.map.len) return spy_error(c, "KeyError", "pop from an empty set");
-        SPYValue *item = spy_retain(self->as.map.items[0].key);
+        SPYValue *item = spy_retain(map_items(self)[0].key);
         set_remove_at(self, 0);
         return item;
     }
     case SET_CLEAR:
-        while (self->as.map.len) set_remove_at(self, self->as.map.len - 1);
+        while (self->as.map.len) set_remove_at(self, map_used(self) - 1);
         return spy_none(c);
     default:
         if (self->type == SPY_FROZENSET && argv[0]->type == SPY_FROZENSET) return spy_retain(self);
@@ -22247,9 +22250,9 @@ static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const 
     if (argc != 1) return errorf(c, "TypeError", "sentinel() takes exactly 1 positional argument (%zu given)", argc);
     SPYValue *repr = NULL;
     if (keywords && keywords->as.map.len) {
-        const char *keyword = keywords->as.map.items[0].key->as.string.data;
+        const char *keyword = map_items(keywords)[0].key->as.string.data;
         if (strcmp(keyword, "repr")) return errorf(c, "TypeError", "sentinel() got an unexpected keyword argument '%s'", keyword);
-        repr = keywords->as.map.items[0].value;
+        repr = map_items(keywords)[0].value;
         if (repr->type == SPY_NONE) repr = NULL;
         else if (!builtin_value(c, repr, SPY_STRING))
             return errorf(c, "TypeError", "sentinel() argument 'repr' must be str or None, not %s", type_name(repr));
@@ -22653,10 +22656,10 @@ static SPYValue *min_max(SPYContext *c, int maximum, size_t argc, SPYValue *cons
     const char *name = maximum ? "max" : "min";
     SPYValue *options[2] = {NULL, NULL};
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
-        const char *key = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
+        const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         size_t at = !strcmp(key, names[0]) ? 0 : !strcmp(key, names[1]) ? 1 : 2;
         if (at == 2) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key);
-        options[at] = keywords->as.map.items[i].value;
+        options[at] = map_items(keywords)[i].value;
     }
     if (!argc) return errorf(c, "TypeError", "%s expected at least 1 argument, got 0", name);
     if (argc > 1 && options[1]) return errorf(c, "TypeError", "Cannot specify a default for %s() with multiple positional arguments", name);
@@ -22704,7 +22707,7 @@ static SPYValue *exception_reduce(SPYContext *c, int id, size_t argc, SPYValue *
         SPYValue *state = builtin_value(c, argv[1], SPY_DICT);
         if (!state) return spy_error(c, "TypeError", "state is not a dictionary");
         for (size_t i = 0; i < state->as.map.len; i++) {
-            SPYValue *key = state->as.map.items[i].key, *value = state->as.map.items[i].value;
+            SPYValue *key = map_items(state)[i].key, *value = map_items(state)[i].value;
             SPYValue *text = builtin_value(c, key, SPY_STRING);
             if (!text) return errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(key));
             spy_retain(key); spy_retain(value);
@@ -23594,7 +23597,7 @@ static int print_text(SPYContext *c, SPYValue *file, SPYValue *text) {
 static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *sep = NULL, *end = NULL, *file = NULL, *flush = NULL;
     if (keywords) for (size_t i = 0; i < keywords->as.map.len; i++) {
-        Entry *entry = &keywords->as.map.items[i];
+        Entry *entry = &map_items(keywords)[i];
         const char *name = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
         if (!strcmp(name, "sep")) sep = entry->value;
         else if (!strcmp(name, "end")) end = entry->value;
@@ -23747,7 +23750,7 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
     Node *def = fn->as.function.def;
     if (def && def->kind == N_COMPREHENSION) {
         if (keywords && keywords->as.map.len) {
-            SPYValue *key = keywords->as.map.items[0].key;
+            SPYValue *key = map_items(keywords)[0].key;
             return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
         }
         if (argc > 1) return errorf(c, "TypeError", "%s() takes 1 positional argument but %zu were given", name, argc);
@@ -23765,7 +23768,7 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
     }
     if (argc) return errorf(c, "TypeError", "%s() takes 0 positional arguments but %zu %s given", name, argc, argc == 1 ? "was" : "were");
     if (keywords && keywords->as.map.len) {
-        SPYValue *key = keywords->as.map.items[0].key;
+        SPYValue *key = map_items(keywords)[0].key;
         return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
     }
     SPYValue *global = module_env(c, fn->as.function.env), *unit = fn->as.function.unit, *env;
@@ -24021,9 +24024,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
     if ((id == B_ZIP || id == B_MAP) && keywords && keywords->as.map.len) {
         int strict = 0;
         for (size_t i = 0; i < keywords->as.map.len; i++) {
-            const char *key = builtin_value(c, keywords->as.map.items[i].key, SPY_STRING)->as.string.data;
+            const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
             if (strcmp(key, "strict")) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", id == B_MAP ? "map" : "zip", key);
-            strict = spy_truth(keywords->as.map.items[i].value);
+            strict = spy_truth(map_items(keywords)[i].value);
             if (c->error_type[0]) return NULL;
         }
         SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)id);
@@ -24033,21 +24036,21 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
     if (id == B_ENUMERATE && keywords && keywords->as.map.len) {
         /* enumerate_vectorcall's keyword handling. */
         size_t count = keywords->as.map.len, total = argc + count;
-        const char *first = builtin_value(c, keywords->as.map.items[0].key, SPY_STRING)->as.string.data;
-        const char *second = count > 1 ? builtin_value(c, keywords->as.map.items[1].key, SPY_STRING)->as.string.data : NULL;
+        const char *first = builtin_value(c, map_items(keywords)[0].key, SPY_STRING)->as.string.data;
+        const char *second = count > 1 ? builtin_value(c, map_items(keywords)[1].key, SPY_STRING)->as.string.data : NULL;
         SPYValue *args[2] = {argc ? argv[0] : NULL, NULL};
         if (total == 2 && count == 1) {
             if (strcmp(first, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
-            args[1] = keywords->as.map.items[0].value;
+            args[1] = map_items(keywords)[0].value;
         } else if (total == 2) {
             int swapped = !strcmp(first, "start");
             if (swapped ? strcmp(second, "iterable") : strcmp(first, "iterable"))
                 return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", swapped ? second : first);
             if (!swapped && strcmp(second, "start")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", second);
-            args[0] = keywords->as.map.items[swapped].value; args[1] = keywords->as.map.items[!swapped].value;
+            args[0] = map_items(keywords)[swapped].value; args[1] = map_items(keywords)[!swapped].value;
         } else if (total == 1) {
             if (strcmp(first, "iterable")) return errorf(c, "TypeError", "'%s' is an invalid keyword argument for enumerate()", first);
-            args[0] = keywords->as.map.items[0].value;
+            args[0] = map_items(keywords)[0].value;
         } else if (!argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
         else return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", total);
         return builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
@@ -24068,7 +24071,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         const char *names[] = {"name", "globals", "locals", "fromlist", "level"};
         for (size_t i = 0; i < argc; i++) args[i] = argv[i];
         for (size_t i = 0; i < keywords->as.map.len; i++) {
-            Entry *entry = &keywords->as.map.items[i];
+            Entry *entry = &map_items(keywords)[i];
             size_t at;
             for (at = 0; at < 5; at++) if (!strcmp(builtin_value(c, entry->key, SPY_STRING)->as.string.data, names[at])) break;
             if (at == 5) return spy_error(c, "TypeError", "invalid keyword argument for __import__()");
@@ -24107,14 +24110,14 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         const char *owner = name_local(cls, "__name__")->as.string.data;
         if (!fields) return errorf(c, "TypeError", "%s() takes no keyword arguments", owner);
         for (size_t i = 0; i < keywords->as.map.len; i++) {
-            const char *key = keywords->as.map.items[i].key->as.string.data;
+            const char *key = map_items(keywords)[i].key->as.string.data;
             size_t k = 0;
             while (fields[k] && strcmp(fields[k], key)) k++;
             if (!fields[k]) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", owner, key);
         }
         SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
         for (size_t i = 0; value && i < keywords->as.map.len; i++)
-            if (set_hidden_field(c, argv[0], keywords->as.map.items[i].key->as.string.data, keywords->as.map.items[i].value)) { spy_release(value); value = NULL; }
+            if (set_hidden_field(c, argv[0], map_items(keywords)[i].key->as.string.data, map_items(keywords)[i].value)) { spy_release(value); value = NULL; }
         return value;
     }
     if (keywords && keywords->as.map.len && id != B_DICT) return errorf(c, "TypeError", "%s() takes no keyword arguments", name);
@@ -24300,7 +24303,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     if (!fresh) return NULL;
     if (type == SPY_DICT) {
         for (size_t i = 0; i < fresh->as.map.len; i++)
-            if (map_set(c, self, fresh->as.map.items[i].key, fresh->as.map.items[i].value)) break;
+            if (map_set(c, self, map_items(fresh)[i].key, map_items(fresh)[i].value)) break;
     } else {
         unsigned char swap[sizeof(self->as)];
         memcpy(swap, &self->as, sizeof(swap));
@@ -24637,7 +24640,7 @@ static SPYValue *class_namespace(SPYContext *c, SPYValue *cls) {
     SPYValue *view = value_new(c, SPY_DICT);
     if (!view) return NULL;
     for (size_t i = 0; i < bindings->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &bindings->as.map.items[i];
+        Entry *entry = &map_items(bindings)[i];
         if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__module__")) continue;
         map_set(c, view, entry->key, entry->value);
     }
@@ -25187,7 +25190,7 @@ static int register_type_methods(SPYContext *c) {
 static int name_natives(SPYContext *c, SPYValue *namespace, SPYValue *owner) {
     (void)c;
     for (size_t i = 0; i < namespace->as.map.len; i++) {
-        Entry *e = &namespace->as.map.items[i];
+        Entry *e = &map_items(namespace)[i];
         SPYValue *v = e->value;
         if (v->type == SPY_STATICMETHOD || v->type == SPY_CLASSMETHOD) v = v->as.wrapper.function;
         if (v->type != SPY_NATIVE || v->as.native.name || e->key->type != SPY_STRING) continue;
@@ -25544,7 +25547,7 @@ SPYContext *spy_context_new(void) {
     if (name_natives(c, c->builtins, NULL)) goto fail;
     for (int t = 0; t <= SPY_LAST_TYPE; t++) if (name_natives(c, c->types[t], c->types[t])) goto fail;
     for (size_t i = 0; i < c->classes->as.map.len; i++)
-        if (name_natives(c, c->classes->as.map.items[i].value, c->classes->as.map.items[i].value)) goto fail;
+        if (name_natives(c, map_items(c->classes)[i].value, map_items(c->classes)[i].value)) goto fail;
     /* B.1.3: the module cache holds builtins before the main module runs. */
     SPYValue *builtins_module = load_source_module(c, "builtins");
     if (!builtins_module) goto fail;
