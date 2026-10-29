@@ -129,6 +129,7 @@ make bench        # startup benchmark
 - [Manual](docs/manual.md): usage, embedding, internals, benchmarks
 - [Benchmarks](docs/benchmark.md): comparison with other Python engines
 - [PLS-315](docs/standards/3_15.md): the language specification
+- [Building programs](docs/build.md): the `spyc` bundler (work in progress)
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)
 - [Contributing](AGENTS.md): architecture and code style

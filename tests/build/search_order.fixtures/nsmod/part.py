@@ -1,0 +1,1 @@
+KIND = "namespace portion"

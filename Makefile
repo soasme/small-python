@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer
 all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -119,6 +119,15 @@ test-spec: tests/run-spec
 # The same tests validated against the pinned CPython oracle as well.
 test-spec-oracle: tests/run-spec
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/spec_runner.py tests/run-spec --strict --oracle $(CPYTHON)
+
+# The bundler tests (docs/build.md 10.2). The bundler is not written yet, so
+# these fail. test-build-oracle also runs each test unbundled on the pinned
+# CPython; tests/build_runner.py --oracle-only runs that phase alone.
+test-build: spyc libspy.a libspy-std.a
+	python3 tests/build_runner.py ./spyc
+
+test-build-oracle: spyc libspy.a libspy-std.a
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/build_runner.py ./spyc --oracle $(CPYTHON)
 
 # TLA+ tools 1.7.4 (TLC 2.19), pinned by checksum; TLC needs a Java runtime.
 TLA_JAR = $(OBJDIR)/tla/tla2tools.jar

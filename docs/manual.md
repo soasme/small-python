@@ -171,6 +171,8 @@ to `spy_exec`; [`examples/pong`](../examples/pong) is one. The user invokes
 the C compiler explicitly. The generator does not invoke a shell or a
 compiler internally. It does not bundle imported modules,
 produce native code for individual Python functions, or emit bytecode yet.
+[Building programs](build.md) specifies the bundler that is planned, with
+its model and tests. It is not implemented.
 
 ### 2.4 Local tests
 
@@ -894,7 +896,9 @@ optimizer or stable serialized-program format.
 which registers the standard modules named with `-M`; with `-c` it emits the
 array alone. The C compiler links it
 with `spy.c` or `libspy.a`, and with `spy-std.c` when it names any. The program
-still parses source at startup. Imported modules are not bundled. Source
+still parses source at startup. Imported modules are not bundled yet;
+[build.md](build.md) describes the planned bundle, a module table behind a
+`SPYModuleLoader`. Source
 embedding is deliberately described separately from native Python compilation.
 
 ### 4.3 Runtime values
