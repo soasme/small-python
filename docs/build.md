@@ -48,10 +48,11 @@ the command-line features that fit a Python program, as
   plus `libspy-std.a` when `-M` names a standard module.
 - Import semantics identical to the unbundled program run by the pinned
   CPython 3.15 with the same search path: the same modules found, the same
-  failures, and the same `__name__`, `__package__`, and `__path__`. The engine
-  derives `__file__` from the module name, so `__file__` is the module's
-  path relative to its search root, as it is under `spy` (CPython gives the
-  absolute path).
+  failures, the same `__name__` and `__package__`, and `__path__` on the same
+  modules. The engine derives `__file__` from the module name, so `__file__`
+  is the module's path relative to its search root, as it is under `spy`
+  (CPython gives the absolute path), and a package's `__path__` is empty, as
+  it is for every package the engine loads through a loader.
 - A failed build for a missing module. A build that succeeds does not hide a
   missing module that only fails at run time, except where the program itself
   handles the `ImportError` ([3.4](#34-guarded-imports)).
