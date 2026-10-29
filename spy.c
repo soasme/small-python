@@ -8791,6 +8791,7 @@ static SPYValue *sequence_order(SPYContext *c, int op, SPYValue *a, SPYValue *b)
 /* x op y for an ordering or equality operator. */
 #define COMPARE(op, x, y) ((op) == '<' ? (x) < (y) : (op) == T_LE ? (x) <= (y) : (op) == '>' ? (x) > (y) : \
                           (op) == T_GE ? (x) >= (y) : (op) == T_EQ ? (x) == (y) : (x) != (y))
+static size_t find_bytes(const char *, size_t, const char *, size_t, int);
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
@@ -8882,15 +8883,13 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
                 return spy_error(c, "ValueError", "byte must be in range(0, 256)");
             result = memchr(b->as.string.data, (int)a->as.integer_data.small, b->as.string.len) != NULL;
         } else if (b->type == SPY_BYTES && a->type == SPY_BYTES) {
-            for (size_t i = 0; i <= b->as.string.len; i++)
-                if (a->as.string.len <= b->as.string.len - i && !memcmp(b->as.string.data + i, a->as.string.data, a->as.string.len)) { result = 1; break; }
+            result = find_bytes(b->as.string.data, b->as.string.len, a->as.string.data, a->as.string.len, 0) != SIZE_MAX;
         } else if (b->type == SPY_BYTES) {
             return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
         } else if (b->type == SPY_STRING) {
             if (a->type != SPY_STRING) return errorf(c, "TypeError", "'in <string>' requires string as left operand, not %s", type_name(a));
-            if (a->as.string.len <= b->as.string.len)
-                for (size_t i = 0; i <= b->as.string.len - a->as.string.len; i++)
-                    if (!memcmp(b->as.string.data + i, a->as.string.data, a->as.string.len)) { result = 1; break; }
+            /* UTF-8 bytes match only at character boundaries. */
+            result = find_bytes(b->as.string.data, b->as.string.len, a->as.string.data, a->as.string.len, 0) != SIZE_MAX;
         } else {
             SPYValue *iterator = get_iterator(c, b);
             if (!iterator) {
@@ -11080,7 +11079,7 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
         for (size_t i = size - 1; i; i--) shift[(unsigned char)needle[i]] = i;
         size_t position = length - size;
         for (;;) {
-            if (!memcmp(text + position, needle, size)) return position;
+            if (text[position] == *needle && !memcmp(text + position, needle, size)) return position;
             size_t step = shift[(unsigned char)text[position]];
             if (step > position) break;
             position -= step;
@@ -11089,7 +11088,7 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
         for (size_t i = 0; i + 1 < size; i++) shift[(unsigned char)needle[i]] = size - i - 1;
         size_t position = 0;
         while (position <= length - size) {
-            if (!memcmp(text + position, needle, size)) return position;
+            if (text[position + size - 1] == needle[size - 1] && !memcmp(text + position, needle, size)) return position;
             size_t step = shift[(unsigned char)text[position + size - 1]];
             if (step > length - size - position) break;
             position += step;
