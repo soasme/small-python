@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <complex.h>
 #include <errno.h>
+#include <float.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
@@ -2398,46 +2399,9 @@ static int unicode_escape(Buffer *out, unsigned code) {
     int len = snprintf(text, sizeof(text), code <= 255 ? "\\x%02x" : code <= 65535 ? "\\u%04x" : "\\U%08x", code);
     return append(out, text, (size_t)len);
 }
-static void format_float(char *out, size_t size, double value) {
-    if (isnan(value)) { snprintf(out, size, "nan"); return; }
-    if (!isfinite(value)) { snprintf(out, size, "%g", value); return; }
-    char scientific[64], digits[24];
-    for (int precision = 0; precision <= 16; precision++) {
-        snprintf(scientific, sizeof(scientific), "%.*e", precision, value);
-        if (strtod(scientific, NULL) == value) break;
-    }
-    const char *p = scientific;
-    const char *exponent_start = strchr(scientific, 'e');
-    if (!exponent_start) { snprintf(out, size, "%g", value); return; }
-    size_t at = 0, n = 0;
-    if (*p == '-') { out[at++] = *p++; }
-    while (p < exponent_start) { if (*p != '.') digits[n++] = *p; p++; }
-    if (!n) { snprintf(out, size, "%g", value); return; }
-    int exponent = atoi(exponent_start + 1);
-    if (exponent < -4 || exponent >= 16) {
-        out[at++] = digits[0];
-        if (n > 1) { out[at++] = '.'; memcpy(out + at, digits + 1, n - 1); at += n - 1; }
-        snprintf(out + at, size - at, "e%+03d", exponent);
-    } else if (exponent < 0) {
-        out[at++] = '0'; out[at++] = '.';
-        for (int i = -1; i > exponent; i--) out[at++] = '0';
-        memcpy(out + at, digits, n); at += n; out[at] = 0;
-    } else {
-        size_t whole = (size_t)exponent + 1;
-        for (size_t i = 0; i < whole; i++) out[at++] = i < n ? digits[i] : '0';
-        out[at++] = '.';
-        if (n > whole) { memcpy(out + at, digits + whole, n - whole); at += n - whole; }
-        else out[at++] = '0';
-        out[at] = 0;
-    }
-}
-static int format_complex_part(Buffer *out, double value) {
-    char text[96];
-    format_float(text, sizeof(text), value);
-    size_t len = strlen(text);
-    if (len >= 2 && text[len - 2] == '.' && text[len - 1] == '0') len -= 2;
-    return append(out, text, len);
-}
+enum { DTSF_SIGN = 1, DTSF_ADD_DOT_0 = 2, DTSF_ALT = 4, DTSF_NO_NEG_0 = 8 };
+static int double_to_string(Buffer *, double, int, int, int);
+static int format_complex_part(Buffer *out, double value) { return double_to_string(out, value, 'r', 0, 0); }
 static SPYValue *mappingproxy_new(SPYContext *c, SPYValue *mapping) {
     if (!mapping_type(c, mapping) || builtin_value(c, mapping, SPY_LIST) || builtin_value(c, mapping, SPY_TUPLE))
         return errorf(c, "TypeError", "mappingproxy() argument must be a mapping, not %s", type_name(mapping));
@@ -2616,8 +2580,7 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         snprintf(num, sizeof(num), "%" PRId64, v->as.integer_data.small);
         return puts_buffer(b, num);
     case SPY_FLOAT:
-        format_float(num, sizeof(num), v->as.real);
-        return puts_buffer(b, num);
+        return double_to_string(b, v->as.real, 'r', 0, DTSF_ADD_DOT_0);
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: {
         int bytes = v->type != SPY_STRING;
         if (!repr && !bytes) return append(b, v->as.string.data, v->as.string.len);
@@ -10663,17 +10626,21 @@ static int format_number(Buffer *out, const FormatSpec *f, unsigned fill, int si
 static char *float_digits(SPYContext *c, double d, int mode, int precision, int *decpt, size_t *len) {
     double magnitude = fabs(d);
     if (magnitude == 0) { char *zero = allocate(c, 2); if (zero) { zero[0] = '0'; zero[1] = 0; *decpt = 1; *len = 1; } return zero; }
-    int digits = mode == 2 ? precision - 1 : 0;
+    /* A normal double is within 1.2e-16 of its shortest decimal; when that
+     * has at most 15 digits, the 15-digit rounding is it with zeros added. */
+    int digits = mode == 2 ? precision - 1 : magnitude >= DBL_MIN ? 14 : 0;
+    char probe[40];
     if (mode == 0)
-        for (; digits < 17; digits++) {
-            char probe[40]; snprintf(probe, sizeof(probe), "%.*e", digits, magnitude);
-            if (strtod(probe, NULL) == magnitude) break;
+        for (;; digits++) {
+            snprintf(probe, sizeof(probe), "%.*e", digits, magnitude);
+            if (digits == 16 || strtod(probe, NULL) == magnitude) break;
         }
     const char *format = mode == 3 ? "%.*f" : "%.*e";
-    int count = snprintf(NULL, 0, format, mode == 3 ? precision : digits, magnitude);
+    int count = mode ? snprintf(NULL, 0, format, mode == 3 ? precision : digits, magnitude) : (int)strlen(probe);
     char *text = count < 0 ? NULL : allocate(c, (size_t)count + 1);
     if (!text) return NULL;
-    snprintf(text, (size_t)count + 1, format, mode == 3 ? precision : digits, magnitude);
+    if (mode) snprintf(text, (size_t)count + 1, format, mode == 3 ? precision : digits, magnitude);
+    else memcpy(text, probe, (size_t)count + 1);
     size_t n = 0, at = 0; int point = 0;
     if (mode == 3) {
         while (text[at] && text[at] != '.') text[n++] = text[at++];
@@ -10693,7 +10660,6 @@ static char *float_digits(SPYContext *c, double d, int mode, int precision, int 
     }
     text[n] = 0; *decpt = point; *len = n; return text;
 }
-enum { DTSF_SIGN = 1, DTSF_ADD_DOT_0 = 2, DTSF_ALT = 4, DTSF_NO_NEG_0 = 8 };
 /* PyOS_double_to_string for codes e E f F g G r. */
 static int double_to_string(Buffer *out, double d, int code, int precision, int flags) {
     SPYContext *c = out->ctx;
