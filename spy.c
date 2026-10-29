@@ -146,7 +146,8 @@ struct SPYValue {
          * DESC_ flags; values live in the instance's hidden fields. */
         struct { SPYValue *name, *owner; int flags; } member;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
-        struct { SPYValue *source, *counter; size_t index, size; int kind, done; const void *last; } iterator;
+        /* cursor: over a str, a character index and its byte offset. */
+        struct { SPYValue *source, *counter; size_t index, size, cursor[2]; int kind, done; const void *last; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
         struct {
             SPYValue *env, *unit, *name, *qualname, *code, *frame; /* frame: gi_frame, once read */
@@ -7218,6 +7219,23 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     return v;
 }
 static SPYValue *iterator_next(SPYContext *, SPYValue *);
+/* The character at index of str s, moving cursor (a character index and
+ * its byte offset) there: an ASCII str, or reads in order, take constant
+ * time. NULL past the end. */
+static SPYValue *string_char(SPYContext *c, SPYValue *s, size_t index, size_t cursor[2]) {
+    const unsigned char *data = (const unsigned char *)s->as.string.data;
+    size_t len = s->as.string.len, i = cursor[0], at = cursor[1];
+    if (string_length(s) == len) i = at = index < len ? index : len;
+    while (i < index && at < len) {
+        size_t width = utf8_width(data[at]);
+        at += width > len - at ? 1 : width; i++;
+    }
+    while (i > index) { do at--; while (at && (data[at] & 192) == 128); i--; }
+    cursor[0] = i; cursor[1] = at;
+    if (i != index || at >= len) return NULL;
+    size_t width = utf8_width(data[at]);
+    return spy_string(c, s->as.string.data + at, width > len - at ? 1 : width);
+}
 static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     switch (v->type) {
     case SPY_TEMPLATE_ITERATOR: case SPY_ITERATOR: case SPY_INSTANCE: case SPY_GENERATOR: case SPY_COROUTINE_ITERATOR:
@@ -7237,14 +7255,10 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
     case SPY_BYTES: case SPY_BYTEARRAY:
         return index < v->as.string.len ? spy_int(c, (unsigned char)v->as.string.data[index]) : NULL;
-    case SPY_STRING:
-        for (size_t i = 0; i < v->as.string.len;) {
-            size_t width = utf8_width((unsigned char)v->as.string.data[i]);
-            if (width > v->as.string.len - i) width = 1;
-            if (!index--) return spy_string(c, v->as.string.data + i, width);
-            i += width;
-        }
-        return NULL;
+    case SPY_STRING: {
+        size_t cursor[2] = {0, 0};
+        return string_char(c, v, index, cursor);
+    }
     default: return spy_error(c, "TypeError", "object is not iterable");
     }
 }
@@ -7324,7 +7338,8 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
             spy_error(c, "RuntimeError", "dictionary keys changed during iteration");
             v->as.iterator.done = 1;
         } else if (!reversed) {
-            result = iter_at(c, source, v->as.iterator.index++);
+            result = source->type == SPY_STRING ? string_char(c, source, v->as.iterator.index++, v->as.iterator.cursor) :
+                iter_at(c, source, v->as.iterator.index++);
             if (result && sized->type == SPY_DICT && at < sized->as.map.len) v->as.iterator.last = map_items(sized)[at].key;
         }
         else if (v->as.iterator.index && source->type == SPY_INSTANCE) {
@@ -7338,7 +7353,8 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
                 if (error_is(c, "IndexError") || error_is(c, "StopIteration")) spy_clear_error(c);
             }
         }
-        else if (v->as.iterator.index) result = iter_at(c, source, --v->as.iterator.index);
+        else if (v->as.iterator.index) result = source->type == SPY_STRING ? string_char(c, source, --v->as.iterator.index, v->as.iterator.cursor) :
+            iter_at(c, source, --v->as.iterator.index);
         break;
     }
     case I_ZIP: case I_MAP:
