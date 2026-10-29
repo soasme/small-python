@@ -13,6 +13,8 @@ says where the engine stands today, so the first step is clear.
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
 - [Development](#development): hot module reload
+- [Long-term maintenance](#long-term-maintenance): memory safety,
+  refactoring, performance, tracking CPython
 - [Performance](#performance)
 
 ## Distribution
@@ -198,6 +200,53 @@ functions and classes are rebound, and live instances move to the new class.
 For game developers it means editing code and seeing the result in the next
 frame. It builds on the import system's loader and on the virtual file
 system's change notifications.
+
+## Long-term maintenance
+
+Work that is never finished, done alongside every item above rather than
+after it.
+
+### Memory safety of the C code
+
+Everything is C, so every tool and every program it produces must be
+memory safe, not only the engine. `make sanitize` runs the C API tests, the
+specification suite and the bundler tests under AddressSanitizer,
+UndefinedBehaviorSanitizer and, on Linux, LeakSanitizer; `fuzz/` has
+libFuzzer targets for evaluation and compilation. Continue with:
+
+- every executable in the repository, `spyc` and `spy-worker` included,
+  freeing what it allocates, so leak checks stay meaningful and a tool can
+  later become a library;
+- fuzzing run continuously, with targets for the bundler, the module loader,
+  the wire protocol of the bindings and, once they exist, the policy and
+  snapshot formats;
+- MemorySanitizer and ThreadSanitizer where they apply, and a static
+  analyzer in CI;
+- an ownership test for each new C API function, as the existing ones have.
+
+A memory-safety bug in the sandboxed runtime is a sandbox escape, so this
+work gates that section.
+
+### Refactoring
+
+Keep the code small as it grows: rewrite a part once a better shape is
+clear, remove what no longer earns its place, and keep `spy.c` readable as
+one file. A refactor changes no behavior and is measured as a performance
+change is.
+
+### Performance
+
+The [Performance](#performance) section below lists the current structural
+work. Beyond it, every change keeps its benchmark numbers and the benchmark
+report is refreshed before each release.
+
+### Tracking CPython
+
+The target is CPython 3.15, pinned as the development oracle. Follow its
+patch releases, then move to 3.16 when it is released: update PLS-315 (or
+write its successor), the specification tests and the TLA+ models, and the
+ported standard-library modules, with a script that reports what changed
+upstream since the pinned commit.
 
 ## Performance
 
