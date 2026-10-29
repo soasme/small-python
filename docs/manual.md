@@ -216,7 +216,8 @@ no test needs it to run.
 
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
 properties for all 1,114,112 code points, plus 297,124 source/NFKC cases against
-the pinned oracle. These checks pass; they do not
+the pinned oracle, and resolves all 160,282 character names and aliases
+through `\N{...}`. These checks pass; they do not
 establish complete Unicode or unittest compatibility.
 
 On the initial macOS host, both installed AddressSanitizer runtimes hung in
@@ -1003,15 +1004,20 @@ to the TLA+ models that cover it.
 
 `make unicode-data` regenerates the checked-in Unicode property table with the
 pinned oracle; `make check-unicode` verifies it. Ordinary C builds need neither
-the oracle nor the generator.
+the oracle nor the generator. The tables use QuickJS's libunicode encodings:
+properties are run lengths with a sparse block index, case mappings are runs
+of equal offsets, and decompositions are single-level and expanded
+recursively. Character names share leading words with the preceding name.
 
 ## 5 Sources and licenses
 
 The architectural reference is QuickJS commit
 `7d1c13c5d8f8c6b32893786ed35cdcebd88194d2`, version `2026-06-04`.
 Its core/host/compiler separation, Makefile workflow, manual structure, and
-external-suite reporting informed this repository. QuickJS implementation code
-has not been copied into the engine.
+external-suite reporting informed this repository. The Unicode property
+encoding and its lookup follow QuickJS's libunicode (`build_prop_table` and
+`lre_is_in_table`) under its [MIT license](licenses/quickjs.txt); no other
+QuickJS implementation code has been copied into the engine.
 
 The language standard contains derived Python 3.15.0 documentation under its
 original PSF license, with copyright notices and complete license text included

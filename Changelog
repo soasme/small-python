@@ -927,3 +927,13 @@
   lacked __reduce__ and __setstate__, and the callable iterator
   __reduce__ (27.1.2, 27.1.3). builtins/iter_state and three new
   BuiltinsIter cases test them.
+- The generated Unicode tables use QuickJS's libunicode encodings (MIT
+  notice in docs/licenses/quickjs.txt): properties are compressed run
+  lengths behind a block index, case mappings are runs of equal offsets
+  with title case and case folding stored only where they differ from
+  upper and lower case, and NFKC decompositions are single-level UTF-8
+  runs expanded recursively, with compositions derived from them.
+  Character names share leading words with the preceding name. The data
+  shrinks from 732 KB to 343 KB; the stripped spy binary goes from
+  1,756,360 to 1,360,072 bytes. make test-unicode now also resolves all
+  160,282 character names and aliases through \N{...}.

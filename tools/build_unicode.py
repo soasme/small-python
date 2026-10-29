@@ -1,4 +1,8 @@
-"""Generate locale-independent Unicode properties with the pinned oracle."""
+"""Generate locale-independent Unicode properties with the pinned oracle.
+
+The encodings follow QuickJS's libunicode: properties are run lengths with a
+sparse index, mappings are runs of equal offsets, and decompositions are
+single-level, so the engine expands them recursively."""
 
 import argparse
 from pathlib import Path
@@ -21,26 +25,154 @@ def ranges(predicate):
     return result
 
 
-def table(name, rows):
-    return f'static const uint32_t {name}[][{len(rows[0])}] = {{\n' + ''.join(
-        '    {' + ', '.join(f'0x{value:x}' for value in row) + '},\n' for row in rows) + '};\n'
+def array(kind, name, values, width=16):
+    return f'static const {kind} {name}[] = {{\n' + ''.join(
+        '    ' + ','.join(map(str, values[start:start + width])) + ',\n'
+        for start in range(0, len(values), width)) + '};\n'
+
+
+def property_table(name, predicate):
+    """QuickJS's compressed run lengths, alternating false and true from U+0000:
+    00..3F two packed 3-bit lengths, 40..5F 13 bits, 60..7F 21 bits and
+    80..FF 7 bits; lengths are stored minus one. Every 32 bytes the index
+    holds the code point of the first false run starting there (21 bits) and
+    its distance past the block boundary (3 bits); its last entry ends the
+    table."""
+    runs, code = [], 0
+    for start, end in ranges(predicate):
+        runs += [start - code - 1, end - start]
+        code = end + 1
+    data, index, code, at = bytearray(), bytearray(), 0, 0
+    while at < len(runs):
+        due = len(data) >= 32 * (len(index) // 3 + 1)
+        if due and at % 2 == 0:
+            offset = len(data) - 32 * (len(index) // 3 + 1)
+            assert offset <= 7
+            index += (code | offset << 21).to_bytes(3, 'little')
+            due = False
+        value = runs[at]
+        code += value + 1
+        # A due entry waits for a false run, so it does not pack two runs.
+        if value < 8 and at + 1 < len(runs) and runs[at + 1] < 8 and not due:
+            code += runs[at + 1] + 1
+            data.append(value << 3 | runs[at + 1])
+            at += 2
+            continue
+        if value < 128:
+            data.append(0x80 + value)
+        elif value < 1 << 13:
+            data += bytes([0x40 + (value >> 8), value & 255])
+        else:
+            data += bytes([0x60 + (value >> 16), value >> 8 & 255, value & 255])
+        at += 1
+    index += code.to_bytes(3, 'little')
+    return array('uint8_t', f'unicode_prop_{name}', list(data), 32) + array('uint8_t', f'unicode_prop_{name}_index', list(index), 30)
+
+
+def mapping_table(name, mapping, data):
+    """Rows of start << 11 | count << 2 | kind and then a value. Kind 0 maps a run
+    of count code points by an offset, kind 1 maps every second one, and kind
+    2 maps one code point to count characters at value in the data."""
+    rows = []
+    for code in sorted(mapping):
+        mapped = mapping[code]
+        if len(mapped) != 1:
+            rows.append([code, len(mapped), 2, len(data)])
+            data.extend(map(ord, mapped))
+            continue
+        offset = (ord(mapped) - code) & 0xffffffff
+        if rows and rows[-1][2] != 2 and rows[-1][3] == offset and rows[-1][1] < 511:
+            start, count, kind, _ = rows[-1]
+            if count == 1 and (code == start + 1 or code == start + 2 and code - 1 not in mapping):
+                rows[-1][1:3] = [2, code - start - 1]
+                continue
+            if count > 1 and code == start + count * (kind + 1) and (kind == 0 or code - 1 not in mapping):
+                rows[-1][1] += 1
+                continue
+        rows.append([code, 1, 0, offset])
+    assert all(count < 512 and code < 1 << 21 and (kind != 2 or count <= 3) for code, count, kind, _ in rows)
+    return f'static const uint32_t {name}[] = {{\n' + ''.join(
+        f'    0x{code << 11 | count << 2 | kind:x}, 0x{value:x},\n' for code, count, kind, value in rows) + '};\n'
+
+
+def case_tables():
+    """Full case mappings above ASCII; title case is stored where it differs
+    from upper case and case folding where it differs from lower case."""
+    mappings = {kind: {} for kind in ('lower', 'upper', 'title', 'casefold')}
+    for code in range(128, 0x110000):
+        char = chr(code)
+        for kind, mapping in mappings.items():
+            mapped = getattr(char, kind)()
+            if mapped != char:
+                mapping[code] = mapped
+
+    def differences(mapping, base):
+        return {code: mapping.get(code, chr(code)) for code in mapping.keys() | base.keys()
+                if mapping.get(code, chr(code)) != base.get(code, chr(code))}
+
+    data = []
+    content = mapping_table('unicode_to_lower', mappings['lower'], data)
+    content += mapping_table('unicode_to_upper', mappings['upper'], data)
+    content += mapping_table('unicode_to_title', differences(mappings['title'], mappings['upper']), data)
+    content += mapping_table('unicode_to_fold', differences(mappings['casefold'], mappings['lower']), data)
+    return content + array('uint32_t', 'unicode_case_data', data, 12)
+
+
+def normalization_tables():
+    """Single-level canonical and compatibility decompositions as runs of
+    start << 8 | count. A run's characters are UTF-8 from its offset to the
+    next one; the first is advanced by the code point's position in the run.
+    Hangul syllables are algorithmic. Compositions list the composite
+    characters ordered by their canonical pair."""
+    decompositions, compositions = {}, []
+    for code in range(0x110000):
+        if 0xac00 <= code < 0xd7a4:
+            continue
+        parts = unicodedata.decomposition(chr(code)).split()
+        if not parts:
+            continue
+        if not parts[0].startswith('<') and len(parts) == 2 and unicodedata.normalize('NFC', chr(code)) == chr(code):
+            compositions.append(code)
+        decompositions[code] = [int(part, 16) for part in parts if not part.startswith('<')]
+        assert len(decompositions[code]) <= 18
+    rows, offsets, data = [], [], bytearray()
+    for code, parts in sorted(decompositions.items()):
+        if rows and len(parts) == 1 and rows[-1][0] + rows[-1][1] == code and rows[-1][1] < 255:
+            first = decompositions[rows[-1][0]]
+            if len(first) == 1 and first[0] - rows[-1][0] == parts[0] - code:
+                rows[-1][1] += 1
+                continue
+        rows.append([code, 1])
+        offsets.append(len(data))
+        data += ''.join(map(chr, parts)).encode()
+    offsets.append(len(data))
+    assert len(data) < 1 << 16
+    compositions.sort(key=lambda code: decompositions[code])
+    combining, previous = [], 0
+    for code in range(0x110000):
+        order = unicodedata.combining(chr(code))
+        if order != previous:
+            combining.append(code << 8 | order)
+            previous = order
+    return (array('uint32_t', 'unicode_combining', combining, 12) +
+            array('uint32_t', 'unicode_decompositions', [code << 8 | count for code, count in rows], 12) +
+            array('uint16_t', 'unicode_decomposition_offsets', offsets) +
+            array('uint8_t', 'unicode_decomposed', list(data), 32) +
+            array('uint32_t', 'unicode_compositions', compositions, 12))
 
 
 DERIVED_PREFIXES = ("HANGUL SYLLABLE ", "CJK UNIFIED IDEOGRAPH-", "TANGUT IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-",
                     "EGYPTIAN HIEROGLYPH-", "KHITAN SMALL SCRIPT CHARACTER-", "NUSHU CHARACTER-")
 
 
-def byte_array(name, data):
-    return f'static const unsigned char {name}[] = {{\n' + ''.join(
-        '    ' + ','.join(map(str, data[start:start + 32])) + ',\n' for start in range(0, len(data), 32)) + '};\n'
-
-
 def name_tables():
     """Character names and aliases for \\N{...}, as a word dictionary.
 
-    Each record is the code point's delta from the previous record (LEB128),
-    the length of its encoded words, and the words: ids below 128 take one
-    byte, others two (0x80 | high, low). Words are numbered by frequency."""
+    Words are length-prefixed and numbered by frequency. Each record is the
+    code point's delta from the previous record (LEB128), a byte holding the
+    number of leading words shared with the previous record and the number
+    of words that follow, and those words: ids below 128 take one byte,
+    others two (0x80 | high, low)."""
     derived, entries = [], []
     for code in range(0x110000):
         name = unicodedata.name(chr(code), None)
@@ -67,11 +199,8 @@ def name_tables():
             counts[word] = counts.get(word, 0) + 1
     words = sorted(counts, key=lambda word: (-counts[word], word))
     ids = {word: index for index, word in enumerate(words)}
-    text, offsets = bytearray(), []
-    for word in words:
-        offsets.append(len(text))
-        text += word.encode('ascii') + b'\0'
-    records, previous = bytearray(), 0
+    text = b''.join(bytes([len(word)]) + word.encode('ascii') for word in words)
+    records, previous, before = bytearray(), 0, []
     for code, name in entries:
         delta = code - previous
         previous = code
@@ -80,20 +209,20 @@ def name_tables():
             delta >>= 7
             if not delta:
                 break
-        encoded = bytearray()
-        for word in name.split(' '):
+        current = name.split(' ')
+        shared = 0
+        while shared < min(len(current), len(before)) and current[shared] == before[shared]:
+            shared += 1
+        assert len(current) < 16
+        records.append(shared << 4 | len(current) - shared)
+        for word in current[shared:]:
             index = ids[word]
-            encoded += bytes([index]) if index < 128 else bytes([128 | index >> 8, index & 255])
-        records.append(len(encoded))
-        records += encoded
-    order = sorted(range(len(words)), key=lambda index: words[index])
-    content = byte_array('unicode_name_words', text)
-    content += 'static const uint32_t unicode_name_word_offsets[] = {\n' + ''.join(
-        '    ' + ','.join(map(str, offsets[start:start + 16])) + ',\n' for start in range(0, len(offsets), 16)) + '};\n'
-    content += 'static const uint16_t unicode_name_word_order[] = {\n' + ''.join(
-        '    ' + ','.join(map(str, order[start:start + 16])) + ',\n' for start in range(0, len(order), 16)) + '};\n'
-    content += byte_array('unicode_names', records)
-    content += table('unicode_derived_names', derived)
+            records += bytes([index]) if index < 128 else bytes([128 | index >> 8, index & 255])
+        before = current
+    content = array('uint8_t', 'unicode_name_words', list(text), 32)
+    content += array('uint8_t', 'unicode_names', list(records), 32)
+    content += f'static const uint32_t unicode_derived_names[][3] = {{\n' + ''.join(
+        f'    {{0x{start:x}, 0x{end:x}, {prefix}}},\n' for start, end, prefix in derived) + '};\n'
     return content, len(entries), len(words)
 
 
@@ -103,43 +232,11 @@ def main():
     args = parser.parse_args()
     if sys.version_info[:3] != (3, 15, 0) or unicodedata.unidata_version != "17.0.0":
         raise SystemExit("Use the pinned Python 3.15.0 oracle with Unicode 17.0.0")
-    nonprintable = ranges(lambda char: not char.isprintable())
-    starts = ranges(str.isidentifier)
-    continues = ranges(lambda char: ('A' + char).isidentifier())
-    combining, decompositions, compositions, data = [], [], [], []
-    for code in range(0x110000):
-        char = chr(code)
-        order = unicodedata.combining(char)
-        if order:
-            combining.append((code, order))
-        # Hangul syllables use the algorithmic Unicode decomposition.
-        if not 0xac00 <= code < 0xd7a4:
-            decomposed = unicodedata.normalize('NFKD', char)
-            if decomposed != char:
-                decompositions.append((code, len(data), len(decomposed)))
-                data.extend(map(ord, decomposed))
-        canonical = unicodedata.decomposition(char).split()
-        if len(canonical) == 2 and not canonical[0].startswith('<'):
-            pair = [int(part, 16) for part in canonical]
-            if unicodedata.normalize('NFC', ''.join(map(chr, pair))) == char:
-                compositions.append((*pair, code))
-    compositions.sort()
-    # Case mappings are full mappings; final sigma is handled by the engine.
-    cases, case_data = {}, []
-    for kind in ('lower', 'upper', 'title', 'casefold'):
-        rows = []
-        for code in range(0x110000):
-            char = chr(code)
-            mapped = getattr(char, kind)()
-            if mapped != char:
-                rows.append((code, len(case_data), len(mapped)))
-                case_data.extend(map(ord, mapped))
-        cases[kind] = rows
     sigma_cased = lambda char: char.isupper() or char.islower() or unicodedata.category(char) == 'Lt'
     def case_ignorable(char):
         if sigma_cased(char):
-            return ('A\u03a3' + char).lower()[1] == '\u03c2'
-        return ('A' + char + '\u03a3').lower()[-1] == '\u03c2'
+            return ('AΣ' + char).lower()[1] == 'ς'
+        return ('A' + char + 'Σ').lower()[-1] == 'ς'
     decimal_runs = []
     for start, end in ranges(str.isdecimal):
         code = start
@@ -155,26 +252,17 @@ def main():
         " * Unicode 17.0.0, Python 3.15.0 properties, case mappings, normalization and names.\n"
         " * Unicode data license: docs/licenses/unicode.txt. */\n"
     )
-    for name, rows in [('unicode_nonprintable', nonprintable), ('unicode_identifier_start', starts),
-                       ('unicode_identifier_continue', continues), ('unicode_combining', combining),
-                       ('unicode_decompositions', decompositions), ('unicode_compositions', compositions),
-                       ('unicode_alpha', ranges(str.isalpha)), ('unicode_decimal', decimal_runs),
-                       ('unicode_digit', ranges(str.isdigit)), ('unicode_numeric', ranges(str.isnumeric)),
-                       ('unicode_space', ranges(str.isspace)), ('unicode_upper', ranges(str.isupper)),
-                       ('unicode_lower', ranges(str.islower)),
-                       ('unicode_titlecase', ranges(lambda char: unicodedata.category(char) == 'Lt')),
-                       ('unicode_cased', ranges(sigma_cased)), ('unicode_case_ignorable', ranges(case_ignorable)),
-                       ('unicode_to_lower', cases['lower']), ('unicode_to_upper', cases['upper']),
-                       ('unicode_to_title', cases['title']), ('unicode_to_fold', cases['casefold'])]:
-        content += table(name, rows)
-    content += 'static const uint32_t unicode_decomposed[] = {\n'
-    for start in range(0, len(data), 12):
-        content += '    ' + ', '.join(f'0x{code:x}' for code in data[start:start + 12]) + ',\n'
-    content += '};\n'
-    content += 'static const uint32_t unicode_case_data[] = {\n'
-    for start in range(0, len(case_data), 12):
-        content += '    ' + ', '.join(f'0x{code:x}' for code in case_data[start:start + 12]) + ',\n'
-    content += '};\n'
+    for name, predicate in [('printable', str.isprintable), ('identifier_start', str.isidentifier),
+                            ('identifier_continue', lambda char: ('A' + char).isidentifier()),
+                            ('alpha', str.isalpha), ('digit', str.isdigit), ('numeric', str.isnumeric),
+                            ('space', str.isspace), ('upper', str.isupper), ('lower', str.islower),
+                            ('titlecase', lambda char: unicodedata.category(char) == 'Lt'),
+                            ('cased', sigma_cased), ('case_ignorable', case_ignorable)]:
+        content += property_table(name, predicate)
+    content += 'static const uint32_t unicode_decimal[][3] = {\n' + ''.join(
+        f'    {{0x{start:x}, 0x{end:x}, {value}}},\n' for start, end, value in decimal_runs) + '};\n'
+    content += case_tables()
+    content += normalization_tables()
     names, name_count, word_count = name_tables()
     content += names
     path = ROOT / "spy-unicode.h"
@@ -183,10 +271,7 @@ def main():
             raise SystemExit("spy-unicode.h is out of date")
     else:
         path.write_text(content)
-    print(f'Unicode 17.0.0: {len(nonprintable)} non-printable ranges, '
-          f'{len(starts)}/{len(continues)} identifier ranges, '
-          f'{len(decompositions)} decompositions, {len(compositions)} compositions, '
-          f'{name_count} names in {word_count} words')
+    print(f'Unicode 17.0.0: {name_count} names in {word_count} words')
 
 
 if __name__ == "__main__":

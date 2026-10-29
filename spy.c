@@ -2345,32 +2345,80 @@ static unsigned utf8_decode(const char *text, size_t len, size_t *width) {
     }
     return code;
 }
-static int unicode_in_ranges(unsigned code, const uint32_t ranges[][2], size_t end) {
+typedef struct { SPYContext *ctx; uint32_t *items; size_t len, cap; } Units;
+static int units_push(Units *u, uint32_t code) {
+    if (grow(u->ctx, (void **)&u->items, &u->cap, u->len + 1, sizeof(*u->items))) return -1;
+    u->items[u->len++] = code;
+    return 0;
+}
+static int units_extend(Units *u, const uint32_t *items, size_t len) {
+    if (len > SIZE_MAX / sizeof(*items) - u->len || grow(u->ctx, (void **)&u->items, &u->cap, u->len + len, sizeof(*u->items))) return -1;
+    if (len) memcpy(u->items + u->len, items, len * sizeof(*items));
+    u->len += len;
+    return 0;
+}
+/* The generated tables use QuickJS's libunicode encodings; see
+ * tools/build_unicode.py. A property is a run-length stream of alternating
+ * false and true runs, entered through an index of 32-byte blocks. */
+static uint32_t le24(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16; }
+static int unicode_has(uint32_t code, const uint8_t *table, const uint8_t *index, size_t entries) {
+    if (code >= le24(index + 3 * (entries - 1))) return 0;
+    size_t block = 0, end = entries - 1;
+    while (block < end) {
+        size_t mid = block + (end - block) / 2;
+        if ((le24(index + 3 * mid) & 0x1fffff) <= code) block = mid + 1;
+        else end = mid;
+    }
+    uint32_t at = block ? le24(index + 3 * (block - 1)) & 0x1fffff : 0;
+    const uint8_t *p = table + (block ? 32 * block + (le24(index + 3 * (block - 1)) >> 21) : 0);
+    for (int bit = 0;; bit ^= 1) {
+        uint32_t b = *p++;
+        if (b < 0x40) {
+            at += (b >> 3) + 1;
+            if (code < at) return bit;
+            bit ^= 1;
+            at += (b & 7) + 1;
+        } else if (b >= 0x80) at += b - 0x80 + 1;
+        else if (b < 0x60) { at += ((b - 0x40) << 8 | p[0]) + 1; p++; }
+        else { at += ((b - 0x60) << 16 | (uint32_t)p[0] << 8 | p[1]) + 1; p += 2; }
+        if (code < at) return bit;
+    }
+}
+#define UNICODE_HAS(name, code) unicode_has(code, unicode_prop_##name, unicode_prop_##name##_index, sizeof(unicode_prop_##name##_index) / 3)
+static int unicode_printable(unsigned code) { return UNICODE_HAS(printable, code); }
+static int identifier_character(unsigned code, int first) {
+    return first ? UNICODE_HAS(identifier_start, code) : UNICODE_HAS(identifier_continue, code);
+}
+/* Index of the last row of a sorted table whose start (row >> shift) is at
+ * most code, plus one; zero when every row starts after code. */
+static size_t unicode_row(const uint32_t *rows, size_t stride, size_t end, int shift, uint32_t code) {
     size_t first = 0;
     while (first < end) {
         size_t mid = first + (end - first) / 2;
-        if (code < ranges[mid][0]) end = mid;
-        else if (code > ranges[mid][1]) first = mid + 1;
-        else return 1;
+        if (rows[mid * stride] >> shift <= code) first = mid + 1;
+        else end = mid;
     }
-    return 0;
+    return first;
 }
-static int unicode_printable(unsigned code) {
-    return !unicode_in_ranges(code, unicode_nonprintable, sizeof(unicode_nonprintable) / sizeof(*unicode_nonprintable));
-}
-static int identifier_character(unsigned code, int first) {
-    return first ? unicode_in_ranges(code, unicode_identifier_start, sizeof(unicode_identifier_start) / sizeof(*unicode_identifier_start)) :
-        unicode_in_ranges(code, unicode_identifier_continue, sizeof(unicode_identifier_continue) / sizeof(*unicode_identifier_continue));
-}
+/* Combining classes are rows of start << 8 | class, each up to the next. */
 static unsigned combining_class(unsigned code) {
-    size_t first = 0, end = sizeof(unicode_combining) / sizeof(*unicode_combining);
-    while (first < end) {
-        size_t mid = first + (end - first) / 2;
-        if (code < unicode_combining[mid][0]) end = mid;
-        else if (code > unicode_combining[mid][0]) first = mid + 1;
-        else return unicode_combining[mid][1];
+    size_t row = unicode_row(unicode_combining, 1, sizeof(unicode_combining) / sizeof(*unicode_combining), 8, code);
+    return row ? unicode_combining[row - 1] & 255 : 0;
+}
+/* Single-level decomposition of code, or 0 parts. Rows are start << 8 |
+ * count; a run of count characters advances its first part with the code. */
+static size_t decomposition(unsigned code, uint32_t parts[18]) {
+    size_t row = unicode_row(unicode_decompositions, 1, sizeof(unicode_decompositions) / sizeof(*unicode_decompositions), 8, code);
+    if (!row || code - (unicode_decompositions[row - 1] >> 8) >= (unicode_decompositions[row - 1] & 255)) return 0;
+    const char *text = (const char *)unicode_decomposed + unicode_decomposition_offsets[row - 1];
+    const char *stop = (const char *)unicode_decomposed + unicode_decomposition_offsets[row];
+    size_t count = 0;
+    for (unsigned shift = code - (unicode_decompositions[row - 1] >> 8); text < stop; shift = 0) {
+        size_t width;
+        parts[count++] = utf8_decode(text, (size_t)(stop - text), &width) + shift;
+        text += width;
     }
-    return 0;
+    return count;
 }
 static unsigned compose_character(unsigned first, unsigned second) {
     /* Unicode's algorithmic Hangul composition (L + V, then LV + T). */
@@ -2381,10 +2429,32 @@ static unsigned compose_character(unsigned first, unsigned second) {
     size_t lo = 0, hi = sizeof(unicode_compositions) / sizeof(*unicode_compositions);
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
-        const uint32_t *pair = unicode_compositions[mid];
+        uint32_t pair[18];
+        decomposition(unicode_compositions[mid], pair);
         if (first < pair[0] || (first == pair[0] && second < pair[1])) hi = mid;
         else if (first > pair[0] || second > pair[1]) lo = mid + 1;
-        else return pair[2];
+        else return unicode_compositions[mid];
+    }
+    return 0;
+}
+/* Append the full compatibility decomposition of code in canonical order. */
+static int decompose(Units *codes, unsigned code) {
+    uint32_t parts[18];
+    size_t count = 0;
+    if (code >= 0xac00 && code < 0xd7a4) {
+        unsigned syllable = code - 0xac00;
+        parts[count++] = 0x1100 + syllable / 588;
+        parts[count++] = 0x1161 + syllable % 588 / 28;
+        if (syllable % 28) parts[count++] = 0x11a7 + syllable % 28;
+    } else count = decomposition(code, parts);
+    for (size_t i = 0; i < count; i++)
+        if (decompose(codes, parts[i])) return -1;
+    if (count) return 0;
+    if (units_push(codes, code)) return -1;
+    unsigned order = combining_class(code);
+    for (size_t pos = codes->len - 1; order && pos && combining_class(codes->items[pos - 1]) > order; pos--) {
+        codes->items[pos] = codes->items[pos - 1];
+        codes->items[pos - 1] = code;
     }
     return 0;
 }
@@ -2393,43 +2463,16 @@ static char *normalize_identifier(SPYContext *c, const char *text, size_t length
     size_t at;
     for (at = 0; at < length && (unsigned char)text[at] < 128; at++) {}
     if (at == length) return copy_text(c, text, length);
-    uint32_t *codes = NULL;
-    size_t len = 0, cap = 0;
+    Units decomposed = {.ctx = c};
     Buffer out = {.ctx = c};
     for (at = 0; at < length;) {
         size_t width;
         unsigned code = utf8_decode(text + at, length - at, &width);
         at += width;
-        uint32_t hangul[3];
-        const uint32_t *parts = &code;
-        size_t count = 1;
-        if (code >= 0xac00 && code < 0xd7a4) {
-            unsigned syllable = code - 0xac00;
-            hangul[0] = 0x1100 + syllable / 588;
-            hangul[1] = 0x1161 + syllable % 588 / 28;
-            hangul[2] = 0x11a7 + syllable % 28;
-            parts = hangul; count = syllable % 28 ? 3 : 2;
-        } else {
-            size_t lo = 0, hi = sizeof(unicode_decompositions) / sizeof(*unicode_decompositions);
-            while (lo < hi) {
-                size_t mid = lo + (hi - lo) / 2;
-                const uint32_t *entry = unicode_decompositions[mid];
-                if (code < entry[0]) hi = mid;
-                else if (code > entry[0]) lo = mid + 1;
-                else { parts = unicode_decomposed + entry[1]; count = entry[2]; break; }
-            }
-        }
-        if (count > SIZE_MAX - len) { spy_error(c, "MemoryError", "identifier is too long"); goto done; }
-        if (grow(c, (void **)&codes, &cap, len + count, sizeof(*codes))) goto done;
-        for (size_t i = 0; i < count; i++) {
-            unsigned order = combining_class(parts[i]);
-            size_t pos = len++;
-            while (order && pos && combining_class(codes[pos - 1]) > order) {
-                codes[pos] = codes[pos - 1]; pos--;
-            }
-            codes[pos] = parts[i];
-        }
+        if (decompose(&decomposed, code)) goto done;
     }
+    uint32_t *codes = decomposed.items;
+    size_t len = decomposed.len;
     size_t used = 0, starter = SIZE_MAX;
     unsigned previous_order = 0;
     for (at = 0; at < len; at++) {
@@ -2445,7 +2488,7 @@ static char *normalize_identifier(SPYContext *c, const char *text, size_t length
     }
     for (at = 0; at < used; at++) if (append_codepoint(&out, codes[at])) break;
 done:
-    free(codes);
+    free(decomposed.items);
     if (c->error_type[0]) { free(out.data); return NULL; }
     return out.data;
 }
@@ -4092,15 +4135,9 @@ static int hangul_part(const char **s, int count, int column) {
     return found;
 }
 static int unicode_name_word(const char *word, size_t len) {
-    size_t low = 0, high = sizeof(unicode_name_word_order) / sizeof(*unicode_name_word_order);
-    while (low < high) {
-        size_t middle = (low + high) / 2;
-        const char *candidate = (const char *)unicode_name_words + unicode_name_word_offsets[unicode_name_word_order[middle]];
-        int order = strncmp(candidate, word, len);
-        if (!order && !candidate[len]) return unicode_name_word_order[middle];
-        if (order < 0) low = middle + 1;
-        else high = middle;
-    }
+    int id = 0;
+    for (const uint8_t *s = unicode_name_words; s < unicode_name_words + sizeof(unicode_name_words); s += 1 + *s, id++)
+        if (*s == len && !memcmp(s + 1, word, len)) return id;
     return -1;
 }
 static int unicode_lookup(const char *name, size_t len, unsigned *code) {
@@ -4135,19 +4172,19 @@ static int unicode_lookup(const char *name, size_t len, unsigned *code) {
                 return unicode_derived_names[i][2] == prefix ? (*code = value, 1) : 0;
         return 0;
     }
-    unsigned char encoded[512];
+    /* Records share leading words with the previous one (see build_unicode.py),
+     * so a record matches as many leading words as the previous one did. */
+    int wanted[15];
     size_t size = 0;
     for (const char *word = upper; ; ) {
         const char *stop = strchr(word, ' ');
         size_t length = stop ? (size_t)(stop - word) : strlen(word);
-        int id = unicode_name_word(word, length);
-        if (id < 0) return 0;
-        if (id < 128) encoded[size++] = (unsigned char)id;
-        else { encoded[size++] = (unsigned char)(128 | id >> 8); encoded[size++] = (unsigned char)(id & 255); }
+        if (size == 15 || (wanted[size++] = unicode_name_word(word, length)) < 0) return 0;
         if (!stop) break;
         word = stop + 1;
     }
     unsigned current = 0;
+    size_t matched = 0;
     for (size_t at = 0; at < sizeof(unicode_names);) {
         unsigned delta = 0;
         for (unsigned shift = 0; ; shift += 7) {
@@ -4156,9 +4193,14 @@ static int unicode_lookup(const char *name, size_t len, unsigned *code) {
             if (!(byte & 128)) break;
         }
         current += delta;
-        size_t length = unicode_names[at++];
-        if (length == size && !memcmp(unicode_names + at, encoded, size)) { *code = current; return 1; }
-        at += length;
+        size_t count = unicode_names[at] >> 4;
+        if (matched > count) matched = count;
+        for (size_t added = unicode_names[at++] & 15; added; added--, count++) {
+            int id = unicode_names[at++];
+            if (id >= 128) id = (id & 127) << 8 | unicode_names[at++];
+            if (matched == count && count < size && id == wanted[count]) matched++;
+        }
+        if (matched == size && count == size) { *code = current; return 1; }
     }
     return 0;
 }
@@ -20301,18 +20343,6 @@ static SPYValue *method_self(SPYContext *c, size_t argc, SPYValue *const *argv, 
 }
 
 /* Text operations decode str into code points and bytes into byte values. */
-typedef struct { SPYContext *ctx; uint32_t *items; size_t len, cap; } Units;
-static int units_push(Units *u, uint32_t code) {
-    if (grow(u->ctx, (void **)&u->items, &u->cap, u->len + 1, sizeof(*u->items))) return -1;
-    u->items[u->len++] = code;
-    return 0;
-}
-static int units_extend(Units *u, const uint32_t *items, size_t len) {
-    if (len > SIZE_MAX / sizeof(*items) - u->len || grow(u->ctx, (void **)&u->items, &u->cap, u->len + len, sizeof(*u->items))) return -1;
-    if (len) memcpy(u->items + u->len, items, len * sizeof(*items));
-    u->len += len;
-    return 0;
-}
 static int units_from(SPYContext *c, SPYValue *v, Units *u) {
     *u = (Units){.ctx = c};
     const char *text = v->as.string.data;
@@ -20342,7 +20372,6 @@ static SPYValue *units_value(SPYContext *c, int type, const uint32_t *items, siz
 }
 
 enum { C_ALPHA, C_DECIMAL, C_DIGIT, C_NUMERIC, C_SPACE, C_UPPER, C_LOWER, C_TITLE, C_CASED, C_IGNORABLE, C_ALNUM };
-#define UNICODE_HAS(table, code) unicode_in_ranges(code, table, sizeof(table) / sizeof(*table))
 /* Bytes classify ASCII only; text uses the generated Unicode 17 properties. */
 static int character_is(int type, int property, uint32_t code) {
     if (type != SPY_STRING) {
@@ -20373,7 +20402,7 @@ static int character_is(int type, int property, uint32_t code) {
         }
     }
     switch (property) {
-    case C_ALPHA: return UNICODE_HAS(unicode_alpha, code);
+    case C_ALPHA: return UNICODE_HAS(alpha, code);
     case C_DECIMAL: {
         size_t first = 0, end = sizeof(unicode_decimal) / sizeof(*unicode_decimal);
         while (first < end) {
@@ -20384,14 +20413,14 @@ static int character_is(int type, int property, uint32_t code) {
         }
         return 0;
     }
-    case C_DIGIT: return UNICODE_HAS(unicode_digit, code);
-    case C_NUMERIC: return UNICODE_HAS(unicode_numeric, code);
-    case C_SPACE: return UNICODE_HAS(unicode_space, code);
-    case C_UPPER: return UNICODE_HAS(unicode_upper, code);
-    case C_LOWER: return UNICODE_HAS(unicode_lower, code);
-    case C_TITLE: return UNICODE_HAS(unicode_titlecase, code);
-    case C_CASED: return UNICODE_HAS(unicode_cased, code);
-    case C_IGNORABLE: return UNICODE_HAS(unicode_case_ignorable, code);
+    case C_DIGIT: return UNICODE_HAS(digit, code);
+    case C_NUMERIC: return UNICODE_HAS(numeric, code);
+    case C_SPACE: return UNICODE_HAS(space, code);
+    case C_UPPER: return UNICODE_HAS(upper, code);
+    case C_LOWER: return UNICODE_HAS(lower, code);
+    case C_TITLE: return UNICODE_HAS(titlecase, code);
+    case C_CASED: return UNICODE_HAS(cased, code);
+    case C_IGNORABLE: return UNICODE_HAS(case_ignorable, code);
     default:
         return character_is(type, C_ALPHA, code) || character_is(type, C_DECIMAL, code) ||
                character_is(type, C_DIGIT, code) || character_is(type, C_NUMERIC, code);
@@ -20513,6 +20542,26 @@ static SPYValue *float_from_text(SPYContext *c, SPYValue *value, SPYValue *shown
     return spy_float(c, d);
 }
 enum { CASE_LOWER, CASE_UPPER, CASE_TITLE, CASE_FOLD };
+/* Mapping rows are start << 11 | count << 2 | kind, then a value: kind 0 offsets
+ * a run of count code points by value, kind 1 every second one, and kind 2
+ * maps its start to count characters at value in unicode_case_data. Title
+ * case and case folding list only where they differ from upper and lower
+ * case. Returns the mapped length, or 0 when code is not mapped. */
+static size_t unicode_map(const uint32_t *rows, size_t end, uint32_t code, uint32_t out[3]) {
+    size_t row = unicode_row(rows, 2, end, 11, code);
+    if (!row) return 0;
+    uint32_t start = rows[2 * row - 2] >> 11, count = rows[2 * row - 2] >> 2 & 511, kind = rows[2 * row - 2] & 3;
+    uint32_t value = rows[2 * row - 1], at = code - start;
+    if (kind == 2) {
+        if (at) return 0;
+        memcpy(out, unicode_case_data + value, count * sizeof(*out));
+        return count;
+    }
+    if (at % (kind + 1) || at / (kind + 1) >= count) return 0;
+    out[0] = code + value;
+    return 1;
+}
+#define UNICODE_MAP(rows, code, out) unicode_map(rows, sizeof(rows) / sizeof(*rows) / 2, code, out)
 /* Full case mapping of one character into out (at most three characters). */
 static size_t case_map(int type, int kind, uint32_t code, uint32_t out[3]) {
     out[0] = code;
@@ -20521,22 +20570,12 @@ static size_t case_map(int type, int kind, uint32_t code, uint32_t out[3]) {
         if ((kind == CASE_UPPER || kind == CASE_TITLE) && code >= 'a' && code <= 'z') out[0] = code - 32;
         return 1;
     }
-    const uint32_t (*rows)[3] = kind == CASE_LOWER ? unicode_to_lower : kind == CASE_UPPER ? unicode_to_upper :
-                                kind == CASE_TITLE ? unicode_to_title : unicode_to_fold;
-    size_t first = 0, end = kind == CASE_LOWER ? sizeof(unicode_to_lower) / sizeof(*unicode_to_lower) :
-                            kind == CASE_UPPER ? sizeof(unicode_to_upper) / sizeof(*unicode_to_upper) :
-                            kind == CASE_TITLE ? sizeof(unicode_to_title) / sizeof(*unicode_to_title) :
-                            sizeof(unicode_to_fold) / sizeof(*unicode_to_fold);
-    while (first < end) {
-        size_t mid = first + (end - first) / 2;
-        if (code < rows[mid][0]) end = mid;
-        else if (code > rows[mid][0]) first = mid + 1;
-        else {
-            for (size_t i = 0; i < rows[mid][2]; i++) out[i] = unicode_case_data[rows[mid][1] + i];
-            return rows[mid][2];
-        }
-    }
-    return 1;
+    size_t count = 0;
+    if (kind == CASE_TITLE) count = UNICODE_MAP(unicode_to_title, code, out);
+    if (kind == CASE_FOLD) count = UNICODE_MAP(unicode_to_fold, code, out);
+    if (!count) count = kind == CASE_LOWER || kind == CASE_FOLD ? UNICODE_MAP(unicode_to_lower, code, out) :
+                                                                   UNICODE_MAP(unicode_to_upper, code, out);
+    return count ? count : 1;
 }
 /* Lowercase one character of text, applying the final-sigma rule. */
 static int lower_at(Units *out, int type, const Units *text, size_t at) {

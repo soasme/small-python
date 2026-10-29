@@ -52,7 +52,7 @@ javascript/spy-worker.wasm: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std
 	$(WASM_CC) $(WASM_LDFLAGS) $(OBJDIR)/wasm/engine.o $(OBJDIR)/wasm/worker.o -lm -o $@
 	mkdir -p javascript/licenses
 	cp LICENSE javascript/LICENSE
-	cp docs/licenses/python.txt docs/licenses/unicode.txt javascript/licenses/
+	cp docs/licenses/python.txt docs/licenses/unicode.txt docs/licenses/quickjs.txt javascript/licenses/
 
 wasm: javascript/spy-worker.wasm
 
@@ -154,7 +154,7 @@ install: all
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
 	install -m644 docs/testing/cython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -d "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
-	install -m644 docs/licenses/unicode.txt docs/licenses/python.txt "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
+	install -m644 docs/licenses/unicode.txt docs/licenses/python.txt docs/licenses/quickjs.txt "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
 
 docs:
 	$(PYTHON) tools/check_docs.py

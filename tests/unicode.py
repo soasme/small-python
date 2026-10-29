@@ -3,6 +3,7 @@
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unicodedata
 
 
@@ -35,8 +36,30 @@ for code in range(0x110000):
             ascii(('A\u03a3' + value).lower())))).encode()
         if lines[2 * code + 1] != expected:
             raise AssertionError(f"U+{code:04X}: {lines[2 * code + 1]!r} != {expected!r}")
+    check_names(engine)
     print("Unicode 17.0.0: repr, ascii, isprintable, chr/ord, identifier start/continue, case mappings, final sigma, "
-          "and character classes passed for all 1,114,112 code points")
+          "and character classes passed for all 1,114,112 code points; "
+          "every character name and alias resolves through \\N{...}")
+
+
+def check_names(engine):
+    names = [(code, unicodedata.name(chr(code))) for code in range(0x110000) if unicodedata.name(chr(code), None)]
+    for line in (Path(__file__).resolve().parent.parent / "tools" / "NameAliases.txt").read_text().splitlines():
+        if line and not line.startswith("#"):
+            code, alias, _ = line.split(";")
+            names.append((int(code, 16), alias))
+    source = "for name in %r:\n    print(ord(eval('\"\\\\N{' + name + '}\"')))\n" % [name.lower() for _, name in names]
+    with tempfile.NamedTemporaryFile("w", suffix=".py") as script:
+        script.write(source)
+        script.flush()
+        actual = subprocess.run([engine, script.name], capture_output=True, timeout=3600)
+    if actual.returncode or actual.stderr:
+        raise AssertionError(actual.stderr.decode("utf-8", "replace"))
+    for (code, name), line in zip(names, actual.stdout.split(b"\n"), strict=False):
+        if int(line) != code:
+            raise AssertionError(f"\\N{{{name}}}: {int(line):04X} != {code:04X}")
+    if actual.stdout.count(b"\n") != len(names):
+        raise AssertionError("missing name lookups")
 
 
 if __name__ == "__main__":
