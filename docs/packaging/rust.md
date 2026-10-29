@@ -1,7 +1,7 @@
 # Rust crates
 
-Status: specification and implementation for the crates in `rust/`, not yet
-published on crates.io.
+Status: specification and implementation for the crates in `rust/`,
+published to crates.io by `.github/workflows/publish.yml`.
 
 ## 1 Goals
 
@@ -282,9 +282,16 @@ operations and handle release, a timeout that excludes host time, workers
 killed by `SIGSEGV`, `SIGABRT`, and `SIGKILL`, a panicking host function,
 and the sealed sandbox on macOS; and the todo application's routes.
 
-Publish in dependency order after `make rust-vendor`: `small-python-src`,
-`small-python-sys`, `small-python`, `small-python-worker`. The crates share
-the engine's version.
+The crates share the engine's version. Pushing a version tag runs the
+`crates` job of `.github/workflows/publish.yml`: it checks the tag against
+the crate version, runs `make test-rust` and `make rust-vendor`, and publishes
+`small-python-src`, `small-python-sys`, `small-python`, and
+`small-python-worker` in that order, skipping any version already on
+crates.io. It authenticates with the `CARGO_REGISTRY_TOKEN` secret of the
+`crates-io` environment when one is set, which the first release needs
+because crates.io trusts a workflow only for crates that exist, and with
+trusted publishing otherwise. `cargo publish --workspace --dry-run` checks
+the packages locally.
 
 ## 7 Alternatives considered
 
