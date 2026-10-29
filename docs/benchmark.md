@@ -55,7 +55,7 @@ idle machine.
 
 | Engine | Version | Build | Executable |
 | --- | --- | --- | --- |
-| spy | commit `14f4566` | `make`, Apple Clang 17, `-O2` | 1.8 MB |
+| spy | commit `14f4566` | `make`, Apple Clang 17, `-O2` | 1.8 MB (1.4 MB from `c3bd2c1`) |
 | CPython 3.15 | 3.15.0 (the pinned oracle) | `configure --without-ensurepip`, `-O3`, no PGO/LTO | 6.3 MB, plus `Lib/` |
 | CPython 3.14 | 3.14.3 | Homebrew bottle | Homebrew framework |
 | PyPy | 8.0.1, Python 3.11.17 | Homebrew bottle, JIT | 33 MB `libpypy3.11-c` |
@@ -159,7 +159,9 @@ the context, 20,000 times. On the build above it reports **261 µs of CPU time
 per lifecycle** (three runs: 261.03, 259.69, 261.24 µs). The build at
 `756991b`, which reported 255 µs earlier, measured 258.8 µs on the same
 day, so the difference is the machine rather than the engine. The Mach-O
-`__TEXT` segment of `spy` is 1,671,168 bytes.
+`__TEXT` segment of `spy` is 1,671,168 bytes. At `c3bd2c1`, whose Unicode
+tables use libunicode's encodings, it is 1,277,952 bytes and the executable
+1,390,208 bytes; the lifecycle measured 261 µs (264.63, 257.55, 261.12 µs).
 
 ## Reproducing
 
