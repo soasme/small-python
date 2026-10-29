@@ -504,7 +504,7 @@ spyc keeps it apart from the engine.
 `--minify` runs the engine's tokenizer over the decoded source and writes the
 tokens back, carrying each comment that stays from the gap before the next
 token. It then tokenizes its result and compares kind, spelling, and line of
-every token, `INDENT` and `DEDENT` included. Over the 2052 files of CPython's
+every token, `INDENT` and `DEDENT` included. Over the 2040 files of CPython's
 `Lib` that the engine parses, no result differs, and the specification tests
 (`tests/spec`) pass with each test file minified.
 
