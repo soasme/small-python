@@ -27,3 +27,8 @@ oom-*
 slow-unit-*
 /examples/pong/pong
 /examples/pong/pong_py.c
+/examples/flappy/flappy
+/examples/flappy/flappy_py.c
+/examples/flappy/flappy_py.d
+/examples/flappy/flappy.json
+/examples/flappy/assets/
