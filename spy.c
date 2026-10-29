@@ -12733,7 +12733,10 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
     }
     return dict;
 }
-static int tick(SPYContext *c, Frame *f, Node *n) {
+/* The bookkeeping before evaluating node n: tick for the common case, and
+ * tick_full when an error, a queued callback, a step limit or a new source
+ * file needs attention. */
+static int tick_full(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
@@ -12745,6 +12748,13 @@ static int tick(SPYContext *c, Frame *f, Node *n) {
     if (c->step_limit && ++c->steps > c->step_limit) {
         spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
     }
+    return 0;
+}
+static int tick(SPYContext *c, Frame *f, Node *n) {
+    if (c->error_type[0] || c->weak_calls_len || c->finalize_calls_len || c->step_limit ||
+        c->filename_from != f->unit->as.unit.filename) return tick_full(c, f, n);
+    c->line = n->line;
+    if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
     return 0;
 }
 static SPYValue *number_literal(SPYContext *c, Node *n) {
