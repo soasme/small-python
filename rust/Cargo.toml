@@ -4,7 +4,7 @@ members = [
     "small-python-src",
     "small-python-sys",
     "small-python",
-    # "small-python-worker",
+    "small-python-worker",
     # "examples/todo",
 ]
 

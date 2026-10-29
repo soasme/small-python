@@ -95,6 +95,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "small-python-worker"
+version = "0.2.0"
+dependencies = [
+ "small-python-src",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
