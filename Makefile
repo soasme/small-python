@@ -193,6 +193,7 @@ test: all tests/api tests/run-spec run-cython check-intrinsics
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
 	$(PYTHON) tests/executable.py
+	python3 tests/build_runner.py ./spyc
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.
 test-binding: spy-worker

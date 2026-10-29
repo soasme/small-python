@@ -137,12 +137,13 @@ libraries. Static linking depends on the target platform.
 #### 2.3.1 `spy` interpreter
 
 ```text
-usage: spy [--mount dir]... [-c source | -i | --version | file.py | -]
+usage: spy [--mount dir]... [-O | -OO] [-c source | -i | --version | file.py | -]
 ```
 
 | Option | Effect |
 | --- | --- |
 | `--mount dir` | Let `open` reach `dir` at its own resolved path; repeatable, and replaces the default mount of the current directory |
+| `-O`, `-OO` | Set the optimization level to 1 (no `assert`, `__debug__` is `False`) or 2 (no docstrings either), as Python's options do |
 | `-c source` | Execute the supplied text |
 | `-i` | Start the interactive shell |
 | `--version` | Print the engine version |
@@ -158,21 +159,26 @@ arbitrary CPython switches are not implemented.
 #### 2.3.2 `spyc` program generator
 
 ```text
-usage: spyc [-c | -M module...] -o program.c input.py
+usage: spyc [options] -o program.c (input.py | -m module)
+       spyc -c [options] -o modules.c (input.py | -m module)...
 ```
 
-`spyc` writes a C translation unit containing source bytes and a small `main`
-function. As QuickJS's `qjsc -M`, each `-M` names a module of the standard
-layer for the program to register; the program then links `spy-std.c` too.
-Without one it runs on the bare core. As `qjsc -c`, `-c` writes only the
-source, as `const char spy_name[]` named after the input file (`game.py` gives
-`spy_game`), for a host whose own `main` registers its C modules and passes it
-to `spy_exec`; [`examples/pong`](../examples/pong) is one. The user invokes
-the C compiler explicitly. The generator does not invoke a shell or a
-compiler internally. It does not bundle imported modules,
-produce native code for individual Python functions, or emit bytecode yet.
-[Building programs](build.md) specifies the bundler that is planned, with
-its model and tests. It is not implemented.
+`spyc` bundles a program and the modules it imports into one C translation
+unit, as esbuild bundles JavaScript: it finds each import as CPython's path
+finder would over the entry's directory and each `-I` root, embeds the
+sources, and serves them through a generated `SPYModuleLoader`. A missing
+import fails the build unless the program guards it with `try`/`except
+ImportError`. `-x` leaves a module to the host, `-D` adds modules that only
+dynamic imports name, as `qjsc -D` does, and `-M` registers a module of the
+standard layer, which the program then links (`spy-std.c`). `-O`, `-OO`,
+`--minify`, `--metafile`, `--deps`, and `--analyze` complete the options.
+Without `-c` the file has a `main` that runs the entry. With `-c` (as
+`qjsc -c`) it holds each entry's source as `const char spy_name[]` (`game.py`
+gives `spy_game`) and the loader `spy_name_load`, for a host whose own `main`
+registers its C modules; [`examples/pong`](../examples/pong) is one. The user
+invokes the C compiler; spyc runs no shell or compiler, and produces no
+native code or bytecode for Python functions. [Building programs](build.md)
+is the full reference.
 
 ### 2.4 Local tests
 
@@ -797,6 +803,10 @@ malloc-allocated UTF-8 line, with or without its line ending, or NULL at the
 end of input. Without a reader, `input()` raises `EOFError`; the `spy` command
 reads standard input.
 
+`spy_set_optimize` sets the optimization level (PLS-315 B.6), as `python -O`
+and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
+`False`, at 2 docstrings are not kept either. `compile(optimize=-1)` uses it.
+
 `spy_set_step_limit` bounds evaluated nodes and iterator/loop work; zero means
 unlimited. It is not a memory or wall-time quota and cannot interrupt native
 callbacks. This experimental runtime is not an isolation boundary for untrusted
@@ -894,11 +904,11 @@ optimizer or stable serialized-program format.
 
 `spyc` emits source bytes as a C array and adds a small embedding entry point,
 which registers the standard modules named with `-M`; with `-c` it emits the
-array alone. The C compiler links it
-with `spy.c` or `libspy.a`, and with `spy-std.c` when it names any. The program
-still parses source at startup. Imported modules are not bundled yet;
-[build.md](build.md) describes the planned bundle, a module table behind a
-`SPYModuleLoader`. Source
+arrays and the loader alone. Imported modules are bundled in a table sorted by
+the names the engine probes, behind a generated `SPYModuleLoader`
+([build.md](build.md)). The C compiler links it with `spy.c` or `libspy.a`,
+and with `spy-std.c` when it names any. The program still parses source at
+startup. Source
 embedding is deliberately described separately from native Python compilation.
 
 ### 4.3 Runtime values
