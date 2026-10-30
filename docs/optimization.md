@@ -93,6 +93,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A builtin name remembers it is not a global](#a-builtin-name-remembers-it-is-not-a-global) | `len(l)`: -18% |
 | [A call node is evaluated in its own function](#a-call-node-is-evaluated-in-its-own-function) | M2 time: loop -3.4%, classes -3.3% |
 | [A str keeps its hash](#a-str-keeps-its-hash) | -2.8% (strings), `d["a"]`: -10% |
+| [A name store skips the step bookkeeping](#a-name-store-skips-the-step-bookkeeping) | -1.1% to -4.3%; M2 time: nbody -4.0% |
 
 ### Releasing a number or string frees it at once
 
@@ -480,6 +481,21 @@ place clears it. Two exact str values compare their bytes directly:
 neither can run Python code. A loop of `x = d["a"]` takes 10% fewer
 instructions; `strings` 2.8% and `dicts` 0.9% fewer, the rest within
 0.2%.
+
+### A name store skips the step bookkeeping
+
+Every assignment target recorded its line and checked for pending work,
+as a statement does, before the general target code; a loop that binds
+its variable and one local paid that twice an iteration. A name whose
+slot is remembered, a local in its function's environment or a global
+in its dictionary, cannot fail to store, so `store_target` is now an
+inline test for that case, as `eval`'s names are, and everything else
+goes to `store_slow`, which records the line first. A trace function
+still sees every target. A machine-integer `range` likewise steps at
+the top of `iterator_next`, before the generic iterator tests and the
+recursion check. Instructions: loop -4.3%, generators -3.3%, nbody
+-2.9%, the rest -1.1% to -1.8%, fib unchanged; on the M2 nbody -4.0%,
+loop -2.5%, generators -2.2%, sort and fib within noise.
 
 ## Tried and left out
 

@@ -2277,14 +2277,19 @@ static ALWAYS_INLINE Entry *function_slot(SPYValue *env, Node *n, SPYValue *key,
     if (first) { n->slot = (size_t)(entry - env->as.map.items); n->slot_key = key; }
     return entry;
 }
-/* The entry for name node n in an exact dictionary or a plain instance's
- * attributes, or NULL when there is none. An entry whose key is n's
- * retained exact str is that entry. */
-static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
+/* The entry of name node n in a dictionary when n's retained exact str
+ * still keys the entry it was last found at. */
+static ALWAYS_INLINE Entry *remembered_global(SPYValue *dict, Node *n) {
     SPYValue *key = n->global_key;
-    if (key && n->global_slot < map_used(dict) && dict->as.map.items[n->global_slot].key == key)
-        return &dict->as.map.items[n->global_slot];
-    Entry *entry = env_find(dict, node_name(n));
+    return key && n->global_slot < map_used(dict) && dict->as.map.items[n->global_slot].key == key ? &dict->as.map.items[n->global_slot] : NULL;
+}
+/* The entry for name node n in an exact dictionary or a plain instance's
+ * attributes, or NULL when there is none. */
+static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
+    Entry *entry = remembered_global(dict, n);
+    if (entry) return entry;
+    SPYValue *key = n->global_key;
+    entry = env_find(dict, node_name(n));
     if (entry && entry->key->type == SPY_STRING) {
         if (entry->key != key) { n->global_key = spy_retain(entry->key); spy_release(key); }
         n->global_slot = (size_t)(entry - dict->as.map.items);
@@ -7546,6 +7551,21 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         if (v->as.iterator.index < source->as.seq.len) return spy_retain(source->as.seq.items[v->as.iterator.index++]);
         v->as.iterator.done = 1; return NULL;
     }
+    /* A range steps a machine-integer counter without arbitrary-precision
+     * arithmetic while the next counter fits. */
+    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_RANGE && !v->as.iterator.done) {
+        SPYValue *counter = v->as.iterator.counter, *stop = v->as.iterator.source->as.range.stop, *step = v->as.iterator.source->as.range.step;
+        int64_t at = counter->as.integer_data.small, end = stop->as.integer_data.small, by = step->as.integer_data.small;
+        if (!counter->as.integer_data.big && !stop->as.integer_data.big && !step->as.integer_data.big) {
+            if (by > 0 ? at >= end : at <= end) { v->as.iterator.done = 1; return NULL; }
+            if (by > 0 ? at <= INT64_MAX - by : at >= INT64_MIN - by) {
+                SPYValue *next = spy_int(c, at + by);
+                if (!next) return NULL;
+                v->as.iterator.counter = next;
+                return counter;
+            }
+        }
+    }
     if (v->type == SPY_GENERATOR) return generator_next(c, v);
     if (v->type == SPY_COROUTINE_ITERATOR) return generator_next(c, v->as.iterator.source);
     SPYValue *base = v->type == SPY_INSTANCE ? builtin_base(c, v, "__next__", NULL) : NULL;
@@ -7600,18 +7620,6 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     }
     case I_RANGE: {
         SPYValue *counter = v->as.iterator.counter, *stop = source->as.range.stop, *step = source->as.range.step, *next;
-        if (!counter->as.integer_data.big && !stop->as.integer_data.big && !step->as.integer_data.big) {
-            /* Machine integers step without arbitrary-precision arithmetic
-             * while the next counter fits. */
-            int64_t at = counter->as.integer_data.small, end = stop->as.integer_data.small, by = step->as.integer_data.small;
-            if (by > 0 ? at >= end : at <= end) break;
-            if (by > 0 ? at <= INT64_MAX - by : at >= INT64_MIN - by) {
-                if (!(next = spy_int(c, at + by))) break;
-                v->as.iterator.counter = next;
-                result = counter;
-                break;
-            }
-        }
         int order = integer_compare(counter, stop);
         if (integer_sign(step) > 0 ? order >= 0 : order <= 0) break;
         result = spy_retain(counter);
@@ -12958,7 +12966,6 @@ static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPY
 static SPYValue *frame_module_name(SPYContext *, size_t);
 static const char *const *exception_keywords(SPYContext *, SPYValue *);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
-static int store_target(SPYContext *, Frame *, Node *, SPYValue *);
 static SPYValue *eval_comprehension(SPYContext *, Frame *, Node *);
 static SPYValue *new_generator(SPYContext *, Frame *, SPYValue *);
 static SPYValue *display_new(SPYContext *c, Node *node, int type) {
@@ -15550,7 +15557,21 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
     }
     return unpack_values(c, f, n, value, count, star);
 }
-static int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value);
+/* A name stored in its remembered slot cannot fail, so it skips the step
+ * bookkeeping unless a trace function watches, as eval's names do. */
+static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    SPYValue *env = f->env;
+    Entry *entry = n->kind != N_NAME || c->settings[SET_TRACE] ? NULL :
+        env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+    if (!entry) return store_slow(c, f, n, value);
+    class_changed(env);
+    SPYValue *old = entry->value;
+    entry->value = spy_retain(value);
+    spy_release(old);
+    return 0;
+}
+static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     if (tick(c, f, n)) return -1;
     if (n->kind == N_NAME) {
         Entry *entry = name_slot(f->env, n);
