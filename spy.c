@@ -2852,6 +2852,14 @@ static int bare_repr(Buffer *b, SPYValue *v) {
     snprintf(text, sizeof(text), " object at %p>", (void *)v);
     return puts_buffer(b, "<") || puts_buffer(b, type_name(v)) || puts_buffer(b, text) ? -1 : 0;
 }
+/* The decimal digits of a machine integer, written from the last. */
+static int format_small(Buffer *b, int64_t n) {
+    char text[24], *p = text + sizeof text;
+    uint64_t m = n < 0 ? -(uint64_t)n : (uint64_t)n;
+    do *--p = (char)('0' + m % 10); while (m /= 10);
+    if (n < 0) *--p = '-';
+    return append(b, p, (size_t)(text + sizeof text - p));
+}
 static int format_object(Buffer *, SPYValue *, int);
 /* As PyObject_Repr and PyObject_Str, bound by the native stack. */
 static int generator_names(SPYContext *, SPYValue *);
@@ -2898,8 +2906,7 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
     case SPY_BOOL: return puts_buffer(b, v->as.integer_data.small ? "True" : "False");
     case SPY_INT:
         if (v->as.integer_data.big) return integer_format(b, v, 10, 0, '-', 0);
-        snprintf(num, sizeof(num), "%" PRId64, v->as.integer_data.small);
-        return puts_buffer(b, num);
+        return format_small(b, v->as.integer_data.small);
     case SPY_FLOAT:
         return double_to_string(b, v->as.real, 'r', 0, DTSF_ADD_DOT_0);
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: {
@@ -3234,10 +3241,8 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
 }
 static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
     Buffer b = { .ctx = c };
-    SPYValue *result = NULL;
-    if (!format_value(&b, v, repr)) result = spy_string(c, b.data ? b.data : "", b.len);
-    free(b.data);
-    return result;
+    if (format_value(&b, v, repr)) { free(b.data); return NULL; }
+    return buffer_text(&b, SPY_STRING);
 }
 SPYValue *spy_repr(SPYContext *c, SPYValue *v) { return stringify(c, v, 1); }
 

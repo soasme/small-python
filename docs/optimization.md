@@ -102,6 +102,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A float result takes a dying operand's place](#a-float-result-takes-a-dying-operands-place) | -10.1% (nbody), others +0.1% to +0.3% |
 | [An operator reads list items in place](#an-operator-reads-list-items-in-place) | -6.4% (nbody), others 0% to +0.3% |
 | [A built string keeps its storage](#a-built-string-keeps-its-storage) | -3.6% (dicts), -1.4% (strings); `s + s`: -27% |
+| [`str` of an int writes its digits](#str-of-an-int-writes-its-digits) | -8.9% (dicts), -2.2% (strings) |
 
 ### Releasing a number or string frees it at once
 
@@ -618,6 +619,15 @@ Concatenating two strs grew such a buffer through several reallocations
 for a length known from the start; `text_concat` allocates exactly once,
 as CPython does. Instructions: dicts -3.6%, strings -1.4%, the rest
 unchanged; a loop of `x = s + s` -27%.
+
+### `str` of an int writes its digits
+
+`str(i)` formatted a machine integer with `snprintf` into a scratch
+array, appended that to a buffer, then copied the buffer into a new str.
+`format_small` now writes the digits from the last into the buffer
+directly, and `stringify`, which serves `str`, `repr` and `format`,
+hands its buffer to the str through `buffer_text`. Instructions: dicts
+-8.9%, strings -2.2%, the rest unchanged.
 
 ## Tried and left out
 
