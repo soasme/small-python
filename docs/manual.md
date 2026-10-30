@@ -252,8 +252,8 @@ runs is leak-checked in every other program.
 `FUZZ_SECONDS` each, seeded from the examples and the specification tests.
 
 These tools report the memory errors that the tests and fuzzed inputs reach;
-they cannot show that code nothing executes is free of them. Linux CI runs all
-three. On the initial macOS host, AddressSanitizer hung during its own
+they cannot show that code nothing executes is free of them. Linux CI runs
+`make sanitize`. On the initial macOS host, AddressSanitizer hung during its own
 initialization; `make SANITIZERS=undefined sanitize` passed there.
 
 ### 2.5 Upstream Cython tests
