@@ -110,6 +110,9 @@ struct Node {
      * traced. */
     Scope *slot_scope; size_t slot_symbol, slot; int slot_kind; SPYValue *slot_key;
     SPYValue *global_key; size_t global_slot;
+    /* A dictionary the name was missing from while the context's dict_keys
+     * was absent_keys (name_fast); borrowed. */
+    SPYValue *absent; size_t absent_keys;
     /* How an attribute read answers for instances of attr_class while
      * classes_changed is attr_epoch (node_attribute); all borrowed. */
     SPYValue *attr_class, *attr_method; size_t attr_epoch; int attr_kind;
@@ -197,6 +200,7 @@ struct SPYContext {
      * were found in. A change to a class's entries or MRO, or a class's
      * release, advances it. Results are borrowed, with no value edges. */
     size_t classes_changed;
+    size_t dict_keys; /* Advances whenever a dict gains a key: a key missing before is missing while it holds. */
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     /* Released allocations of other values, linked by next, by size (small_value); no value edges. */
     SPYValue *spare[2]; size_t spares[2];
@@ -1861,6 +1865,7 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
     map->as.map.len++;
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
     map->as.map.odd_keys |= key->type != SPY_STRING;
+    if (map->type == SPY_DICT) c->dict_keys++;
     class_changed(map);
     if (map->as.map.index && (map->as.map.len + map->as.map.index_dead) * 3 > (size_t)map->as.map.index_cap * 2) { map_unindex(map); map_indexed(map); }
     else if (map->as.map.index) index_insert(map, used);
@@ -2299,9 +2304,11 @@ static SPYValue *name_fast(SPYValue *env, Node *n) {
     for (; e; e = e->as.map.parent) {
         Entry *entry;
         if (e->type == SPY_DICT) {
+            /* Usually the module's globals, before the builtins. */
+            if (e == n->absent && n->absent_keys == e->ctx->dict_keys) continue;
             /* A missing str may still equal another kind of key. */
             if (!(entry = dict_slot(e, n)) && e->as.map.odd_keys) return NULL;
-            if (!entry) continue;
+            if (!entry) { n->absent = e; n->absent_keys = e->ctx->dict_keys; continue; }
         } else {
             SPYValue *key = NULL;
             int binding = function_binding(e, n, e == env, &key);
@@ -9827,6 +9834,7 @@ static SPYValue *instance_dict(SPYContext *c, SPYValue *v) {
         v->as.map.items = NULL; v->as.map.len = v->as.map.cap = v->as.map.front = 0;
         v->as.map.namespace = dict;
         dict->watched = v->type == SPY_CLASS;
+        c->dict_keys++;
     }
     return spy_retain(v->as.map.namespace);
 }

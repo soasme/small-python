@@ -75,6 +75,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A tick compares units; a push grows only when full](#a-tick-compares-units-a-push-grows-only-when-full) | -0.2% to -3.2% |
 | [Class and small-map lookups skip hashing](#class-and-small-map-lookups-skip-hashing) | -2.6% (classes) |
 | [A builtin method is called without a bound method](#a-builtin-method-is-called-without-a-bound-method) | -3.0% (strings) |
+| [A builtin name remembers it is not a global](#a-builtin-name-remembers-it-is-not-a-global) | `len(l)`: -18% |
 
 ### Releasing a number or string frees it at once
 
@@ -414,6 +415,22 @@ An `l.append(i)` loop fell from 1,334 to 928 instructions an iteration.
 | dicts | 166.8 M | 164.6 M | -1.3% |
 
 Wall time: strings -4.0%, the others within noise.
+
+### A builtin name remembers it is not a global
+
+Reading `len` inside a function searched the module's globals, missed,
+and found it in the builtins. The miss cost a search of the globals' hash
+index on every read, about 125 instructions. The context now counts the
+keys dictionaries gain (an insertion, or an instance's attributes becoming
+a dictionary), and a name node remembers the dictionary it was missing
+from and the count at that time: while the count holds, no dictionary has
+gained a key, so the name is still missing and the read passes to the
+builtins directly. A dictionary that gains any key moves the count, so
+the remembered miss can never outlive a binding of the name; a new
+dictionary at a freed one's address gains its keys the same way.
+
+A `len(l)` call in a function fell from 690 to 564 instructions. The
+suite, whose loops call few builtins, moved by -0.7% to +0.8%.
 
 ## Tried and left out
 
