@@ -203,8 +203,8 @@ struct SPYContext {
     size_t classes_changed;
     size_t dict_keys; /* Advances whenever a dict gains a key: a key missing before is missing while it holds. */
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
-    /* Released allocations of other values, linked by next, by size (small_value); no value edges. */
-    SPYValue *spare[2]; size_t spares[2];
+    /* Released allocations of other values, linked by next, by size_class; no value edges. */
+    SPYValue *spare[3]; size_t spares[3];
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
@@ -563,12 +563,12 @@ static int append(Buffer *b, const char *s, size_t n) {
 static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
 static SPYValue *value_new(SPYContext *, int);
 /* A str or bytes (type) of the text built in b, taking b's storage rather
- * than copying it, or NULL after an error; b is empty afterwards. Storage
- * more than 64 bytes too large shrinks to fit. */
-static SPYValue *buffer_text(Buffer *b, int type) {
+ * than copying it, or NULL when building it failed; b is empty afterwards.
+ * Storage more than 64 bytes too large shrinks to fit. */
+static SPYValue *buffer_text(Buffer *b, int type, int failed) {
     SPYContext *c = b->ctx;
-    if (!b->data && !c->error_type[0]) append(b, "", 0);
-    SPYValue *v = c->error_type[0] ? NULL : value_new(c, type);
+    if (!failed && !b->data) failed = append(b, "", 0);
+    SPYValue *v = failed ? NULL : value_new(c, type);
     if (v) {
         char *fit = b->cap - b->len > 64 ? realloc(b->data, b->len + 1) : NULL;
         v->as.string.data = fit ? fit : b->data; v->as.string.len = b->len;
@@ -578,14 +578,22 @@ static SPYValue *buffer_text(Buffer *b, int type) {
     *b = (Buffer){.ctx = c};
     return v;
 }
-/* Numbers and strings end with their union member, and their allocations
- * stop there: a value never changes into a type of another size. */
-enum { SMALL_VALUE = offsetof(SPYValue, as) + sizeof(((SPYValue *)0)->as.string) };
-static ALWAYS_INLINE int small_value(int type) {
+/* Numbers and bytearrays end with their union member, and their
+ * allocations stop there; a str or bytes also has room after it for text
+ * shorter than SHORT_TEXT, saving the text its own allocation. A value
+ * never changes into a type of another size. */
+enum { SMALL_VALUE = offsetof(SPYValue, as) + sizeof(((SPYValue *)0)->as.string), SHORT_TEXT = 16 };
+/* The size of a value of type: 0 whole, 1 small, 2 small with short text. */
+static ALWAYS_INLINE int size_class(int type) {
+    if (type == SPY_STRING || type == SPY_BYTES) return 2;
     return (UINT64_C(1) << type & (UINT64_C(1) << SPY_INT | UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_COMPLEX |
-        UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BYTEARRAY)) != 0;
+        UINT64_C(1) << SPY_BYTEARRAY)) != 0;
 }
-static size_t value_size(int type) { return small_value(type) ? SMALL_VALUE : sizeof(SPYValue); }
+static size_t value_size(int type) {
+    int size = size_class(type);
+    return size == 2 ? SMALL_VALUE + SHORT_TEXT : size ? SMALL_VALUE : sizeof(SPYValue);
+}
+static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
 /* Value v, its fields cleared, as a new value of type in c. */
 static ALWAYS_INLINE SPYValue *value_link(SPYContext *c, SPYValue *v, int type) {
     v->ctx = c;
@@ -599,18 +607,18 @@ static ALWAYS_INLINE SPYValue *value_link(SPYContext *c, SPYValue *v, int type) 
 }
 static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     SPYValue *v = NULL;
-    int small = small_value(type);
+    int size = size_class(type);
     if (type == SPY_TUPLE && tuple_size < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache)) {
         v = c->tuple_cache[tuple_size];
         c->tuple_cache[tuple_size] = NULL;
         if (v) cache_take(v, sizeof(*v));
-    } else if (type != SPY_TUPLE && c->spare[small]) {
-        v = c->spare[small]; cache_take(v, value_size(type)); c->spare[small] = v->next; c->spares[small]--;
+    } else if (type != SPY_TUPLE && c->spare[size]) {
+        v = c->spare[size]; cache_take(v, value_size(type)); c->spare[size] = v->next; c->spares[size]--;
     }
     /* Each size is a constant, so the compiler clears in place. */
-    if (v && small) memset(v, 0, SMALL_VALUE);
+    if (v && size) memset(v, 0, SMALL_VALUE);
     else if (v) memset(v, 0, sizeof(*v));
-    else v = allocate(c, small ? SMALL_VALUE : sizeof(*v));
+    else v = allocate(c, value_size(type));
     return v ? value_link(c, v, type) : NULL;
 }
 static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type, 0); }
@@ -822,7 +830,7 @@ static void free_value(SPYValue *v) {
     value_unlink(c, v);
     switch (v->type) {
     case SPY_INT: if (v->as.integer_data.big) free(v->as.integer_data.big); break;
-    case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: free(v->as.string.data); break;
+    case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: if (v->as.string.data != short_text(v)) free(v->as.string.data); break;
     case SPY_MEMORYVIEW: free(v->as.memory.layout); break;
     case SPY_CELL:
         for (size_t i = 0; v->as.cell.env && i < c->cells_len; i++)
@@ -855,9 +863,9 @@ static void free_value(SPYValue *v) {
         cache_put(v, sizeof(*v));
         return;
     }
-    int small = small_value(v->type);
-    if (v->type != SPY_TUPLE && c->spares[small] < 64) {
-        v->next = c->spare[small]; c->spare[small] = v; c->spares[small]++; cache_put(v, value_size(v->type)); return;
+    int size = size_class(v->type);
+    if (v->type != SPY_TUPLE && c->spares[size] < 64) {
+        v->next = c->spare[size]; c->spare[size] = v; c->spares[size]++; cache_put(v, value_size(v->type)); return;
     }
     free(v);
 }
@@ -1316,18 +1324,27 @@ static SPYValue *complex_new(SPYContext *c, double complex number) {
     if (value) value->as.number = number;
     return value;
 }
-SPYValue *spy_string(SPYContext *c, const char *s, size_t n) {
-    SPYValue *v = value_new(c, SPY_STRING);
+/* A str, bytes or bytearray (type) of n units, unset but terminated. A
+ * short str or bytes keeps them in its own allocation; a bytearray, which
+ * resizes, never does. */
+static SPYValue *text_new(SPYContext *c, int type, size_t n) {
+    if (n == SIZE_MAX) return spy_error(c, "MemoryError", "string is too large");
+    SPYValue *v = value_new(c, type);
     if (!v) return NULL;
-    v->as.string.data = copy_text(c, s, n);
+    v->as.string.data = n < SHORT_TEXT && type != SPY_BYTEARRAY ? short_text(v) : allocate(c, n + 1);
     if (!v->as.string.data) { spy_release(v); return NULL; }
-    v->as.string.len = n;
+    v->as.string.data[n] = 0; v->as.string.len = n;
+    return v;
+}
+SPYValue *spy_string(SPYContext *c, const char *s, size_t n) {
+    SPYValue *v = text_new(c, SPY_STRING, n);
+    if (v && n) memcpy(v->as.string.data, s, n);
     return v;
 }
 SPYValue *spy_bytes(SPYContext *c, const void *data, size_t len) {
-    SPYValue *value = spy_string(c, data, len);
-    if (value) value->type = SPY_BYTES;
-    return value;
+    SPYValue *v = text_new(c, SPY_BYTES, len);
+    if (v && len) memcpy(v->as.string.data, data, len);
+    return v;
 }
 SPYValue *spy_list(SPYContext *c) { return value_new(c, SPY_LIST); }
 static int same_context(SPYContext *c, SPYValue *v) {
@@ -2748,11 +2765,8 @@ static SPYValue *template_new(SPYContext *c) {
 static SPYValue *text_concat(SPYContext *c, int type, SPYValue *a, SPYValue *b) {
     size_t len = a->as.string.len, added = b->as.string.len;
     if (added >= SIZE_MAX - len) return spy_error(c, "MemoryError", "string is too large");
-    SPYValue *v = value_new(c, type);
-    char *data = v ? allocate(c, len + added + 1) : NULL;
-    if (!data) { spy_release(v); return NULL; }
-    memcpy(data, a->as.string.data, len); memcpy(data + len, b->as.string.data, added); data[len + added] = 0;
-    v->as.string.data = data; v->as.string.len = len + added;
+    SPYValue *v = text_new(c, type, len + added);
+    if (v) { memcpy(v->as.string.data, a->as.string.data, len); memcpy(v->as.string.data + len, b->as.string.data, added); }
     return v;
 }
 static SPYValue *concat_text(SPYContext *c, SPYValue *a, SPYValue *b) {
@@ -3241,8 +3255,8 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
 }
 static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
     Buffer b = { .ctx = c };
-    if (format_value(&b, v, repr)) { free(b.data); return NULL; }
-    return buffer_text(&b, SPY_STRING);
+    /* A host may ask while an error is pending. */
+    return buffer_text(&b, SPY_STRING, format_value(&b, v, repr));
 }
 SPYValue *spy_repr(SPYContext *c, SPYValue *v) { return stringify(c, v, 1); }
 
@@ -11910,7 +11924,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             spy_release(item);
         }
         spy_release(iterator);
-        return buffer_text(&out, SPY_STRING);
+        return buffer_text(&out, SPY_STRING, c->error_type[0] != 0);
     }
     case M_FORMAT: return string_format(c, self, argc, argv, NULL, 1);
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
@@ -13740,7 +13754,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
             if (text) append(&out, text->as.string.data, text->as.string.len);
             spy_release(text);
         }
-        return buffer_text(&out, SPY_STRING);
+        return buffer_text(&out, SPY_STRING, c->error_type[0] != 0);
     }
     case N_FORMAT:
         a = eval(c, f, n->a);
@@ -15894,8 +15908,9 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
 static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {
     size_t len = s->as.string.len, added = tail->as.string.len;
     if (added >= SIZE_MAX - len) return spy_error(c, "MemoryError", "string is too large");
-    char *data = realloc(s->as.string.data, len + added + 1);
+    char *own = s->as.string.data == short_text(s) ? NULL : s->as.string.data, *data = realloc(own, len + added + 1);
     if (!data) return spy_error(c, "MemoryError", "allocation failed");
+    if (!own) memcpy(data, s->as.string.data, len);
     memcpy(data + len, tail->as.string.data, added); data[len + added] = 0;
     s->as.string.data = data; s->as.string.len = len + added; s->as.string.hash = 0;
     s->as.string.chars = s->as.string.chars && tail->as.string.chars ? s->as.string.chars + tail->as.string.chars - 1 : 0;
@@ -21039,10 +21054,9 @@ static int units_from(SPYContext *c, SPYValue *v, Units *u) {
 static SPYValue *units_value(SPYContext *c, int type, const uint32_t *items, size_t len) {
     size_t size = 0;
     for (size_t i = 0; i < len; i++) size += type != SPY_STRING || items[i] < 0x80 ? 1 : items[i] < 0x800 ? 2 : items[i] < 0x10000 ? 3 : 4;
-    SPYValue *v = value_new(c, SPY_STRING);
-    char *data = v ? allocate(c, size + 1) : NULL;
-    if (!data) { spy_release(v); return NULL; }
-    v->type = type; v->as.string.data = data; v->as.string.len = size;
+    SPYValue *v = text_new(c, type, size);
+    if (!v) return NULL;
+    char *data = v->as.string.data;
     for (size_t i = 0; i < len; i++) {
         if (type == SPY_STRING) data += utf8_encode(data, items[i]);
         else *data++ = (char)items[i];
@@ -21523,8 +21537,7 @@ static SPYValue *bytes_replace(SPYContext *c, SPYValue *text, SPYValue *old, SPY
         if (append(&out, from, (size_t)(found - from)) || append(&out, new->as.string.data, new->as.string.len)) break;
         from = at = found + width;
     }
-    append(&out, from, (size_t)(end - from));
-    return buffer_text(&out, text->type);
+    return buffer_text(&out, text->type, append(&out, from, (size_t)(end - from)) || c->error_type[0]);
 }
 static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
@@ -23439,9 +23452,9 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
 }
 /* bytearray stores mutable bytes in the string representation. */
 static SPYValue *bytearray_new(SPYContext *c, const void *data, size_t len) {
-    SPYValue *value = spy_bytes(c, data, len);
-    if (value) value->type = SPY_BYTEARRAY;
-    return value;
+    SPYValue *v = text_new(c, SPY_BYTEARRAY, len);
+    if (v && len) memcpy(v->as.string.data, data, len);
+    return v;
 }
 static int bytearray_resize(SPYContext *c, SPYValue *array, size_t len) {
     if (len != array->as.string.len && bytearray_exported(c, array)) return -1;
@@ -26593,10 +26606,10 @@ void spy_context_free(SPYContext *c) {
 #endif
     free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
-    for (int small = 0; small < 2; small++)
-        while (c->spare[small]) {
-            SPYValue *v = c->spare[small];
-            cache_take(v, small ? SMALL_VALUE : sizeof(*v)); c->spare[small] = v->next; free(v);
+    for (int size = 0; size < 3; size++)
+        while (c->spare[size]) {
+            SPYValue *v = c->spare[size];
+            cache_take(v, size == 2 ? SMALL_VALUE + SHORT_TEXT : size ? SMALL_VALUE : sizeof(*v)); c->spare[size] = v->next; free(v);
         }
     while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
     if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }
