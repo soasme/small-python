@@ -3,7 +3,7 @@ This module provides access to some objects used or maintained by the
 interpreter and to functions that interact strongly with the interpreter.
 
 Small Python's standard layer (spy-std.c) provides this module as
-docs/std.md specifies it, after CPython 3.15's sys module. Runtime state
+docs/standards/std.md specifies it, after CPython 3.15's sys module. Runtime state
 (modules, the handled exception, recursion and integer conversion limits,
 host output, and the engine settings behind the lazy-import, asynchronous
 generator, coroutine origin, and unraisable hooks) is native; the remaining

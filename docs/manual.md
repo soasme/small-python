@@ -681,7 +681,7 @@ host output. Hosts register it as `_spy`; a context where none did has no such
 module. A standard layer, `spy-std.c` (`libspy-std.a`, declared in
 `spy-std.h`), plays the role of QuickJS's `quickjs-libc`: it supplies the host
 modules `sys` and `gc`, written on those primitives and specified, after
-CPython 3.15, by [PLS-STD-315](std.md). `spy_std_init_module` registers one
+CPython 3.15, by [PLS-STD-315](standards/std.md). `spy_std_init_module` registers one
 of them and `spy_std_init` all of them. The `spy` command calls `spy_std_init`, `spyc -M`
 names the modules a generated program registers, and the conformance driver
 `tests/run-spec` registers none, only `_spy`. Their Python sources live in
@@ -699,7 +699,7 @@ host output and error callbacks; `implementation.name` is `smallpython`. `_getfr
 returns frame objects for running calls (functions, generators, class
 bodies, and modules); a function frame's `f_locals` is a write-through
 `FrameLocalsProxy` as in PEP 667, and line numbers are those of the executing
-statement. [PLS-STD-315](std.md) specifies every name of both modules after
+statement. [PLS-STD-315](standards/std.md) specifies every name of both modules after
 CPython 3.15 and lists those not provided: `sys.monitoring`, audit hooks, and the thread
 and extension-module interfaces, among others. The lazy-import mode and
 filter, the asynchronous-generator hooks, coroutine origin tracking, the
@@ -1061,7 +1061,7 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `docs/manual.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
-| `docs/std.md` | Specification of the standard modules `sys` and `gc` |
+| `docs/standards/std.md` | Specification of the standard modules `sys` and `gc` |
 | `AGENTS.md` | Architecture, naming, evidence, and code-taste requirements |
 
 The build remains a direct C toolchain with an ordinary Makefile. There is no

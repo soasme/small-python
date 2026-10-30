@@ -11,7 +11,7 @@ defines behaves as CPython's does, with CPython's signatures, results, and
 error messages. Where CPython's behaviour depends on the process, the platform,
 or the build, this document says so and lets the host choose.
 
-The language itself is specified by [PLS-315](standards/3_15.md), which
+The language itself is specified by [PLS-315](3_15.md), which
 depends on no library module. Its Annex B defines the host hooks that these
 modules expose, and its Annex C.5 records how `sys` names correspond to
 language facilities. This document specifies the modules themselves.

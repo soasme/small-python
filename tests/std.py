@@ -1,4 +1,4 @@
-"""The sys and gc modules against CPython 3.15 (docs/std.md).
+"""The sys and gc modules against CPython 3.15 (docs/standards/std.md).
 
 tests/std_probe.py prints what the specification states about each name; it
 must print the same under the spy command and under the Python 3.15 running

@@ -1,4 +1,4 @@
-"""The behaviour of sys and gc that docs/std.md specifies, printed so that
+"""The behaviour of sys and gc that docs/standards/std.md specifies, printed so that
 tests/std.py can compare spy with the pinned CPython 3.15 oracle. Values the
 specification leaves to the host (sizes, paths, hash algorithm, streams) are
 not printed."""

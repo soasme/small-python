@@ -1,7 +1,7 @@
 """This module provides access to the garbage collector for reference cycles.
 
 Small Python's standard layer (spy-std.c) provides this module as
-docs/std.md specifies it, after CPython 3.15's gc module. Reference counting
+docs/standards/std.md specifies it, after CPython 3.15's gc module. Reference counting
 frees most values at once; collect() runs the engine's cycle collector,
 which has a single generation; freeze() makes the values it tracks roots
 of every collection. Automatic collection happens between host runs, so
