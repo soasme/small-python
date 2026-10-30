@@ -98,6 +98,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call releases its own environment](#a-call-releases-its-own-environment) | -3.8% (fib), -1.8% (classes); M2: fib -4.5% |
 | [A remembered name is read inline](#a-remembered-name-is-read-inline) | -0.6% to -4.8% |
 | [Each call depth keeps an environment](#each-call-depth-keeps-an-environment) | -4.7% (fib), -0.6% (sort) |
+| [A jump in a generator ticks only when there is work](#a-jump-in-a-generator-ticks-only-when-there-is-work) | -3.7% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -562,7 +563,21 @@ other call of a recursion and replacing the kept environment on each
 return cost more than it saved (fib +10%). Instructions: fib -4.7%,
 sort -0.6%, generators +0.3%, the rest within 0.1%.
 
+### A jump in a generator ticks only when there is work
+
+A suspendable body's instructions without a node of their own, its
+jumps and stack operations, ticked on the function's definition and then
+put back the line the definition's tick had overwritten. When tick has
+only the line to record, such an instruction now does nothing; otherwise
+it still ticks and restores the line, so pending work and trace
+functions see every jump as before. Instructions: generators -3.7%,
+strings -0.6%, sort -0.4%, the rest unchanged.
+
 ## Tried and left out
+
+- **An attribute of a name on the operator fast path.** Reading `self.x`
+  without evaluating `self` through `eval` saved 1.0% on classes, but
+  every other program took up to 0.5% more instructions.
 
 - **Keeping every freed value for reuse.** Released values beyond 64 go
   back to `malloc`. With no limit, `dicts` took 21% longer and `sort`

@@ -19431,10 +19431,15 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (c->error_type[0]) continue;
         }
         Instruction *ins = &m->code->items[m->pc++];
-        Node *n = ins->node ? ins->node : generator->as.generator.node;
-        size_t line = !ins->node && c->py_depth ? c->frames[c->py_depth - 1].line : 0;
-        if (tick(c, &f, n)) continue;
-        if (!ins->node && line) c->line = c->frames[c->py_depth - 1].line = line;
+        Node *n = ins->node;
+        if (n) { if (tick(c, &f, n)) continue; }
+        else if (n = generator->as.generator.node, !quiet(c, &f)) {
+            /* An instruction of no node ticks on the definition, keeping the
+             * frame's line; while only a line would be recorded, it need not. */
+            size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
+            if (tick(c, &f, n)) continue;
+            if (line) c->line = c->frames[c->py_depth - 1].line = line;
+        }
         SPYValue *a = NULL, *b = NULL, *value = NULL;
         switch (ins->op) {
         case BC_EVAL:
