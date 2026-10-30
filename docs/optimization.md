@@ -50,6 +50,7 @@ Each change below removes work from one of those steps.
 | --- | --- |
 | [Releasing a number or string frees it at once](#releasing-a-number-or-string-frees-it-at-once) | -1.6% to -9.7% |
 | [A name remembers what it is in its function](#a-name-remembers-what-it-is-in-its-function) | -5.2% (nbody) to +0.4% |
+| [A call opens all its locals at once](#a-call-opens-all-its-locals-at-once) | -7.3% (classes), -6.5% (fib) |
 
 ### Releasing a number or string frees it at once
 
@@ -99,3 +100,30 @@ answer differently.
 
 `loop` runs at module level, where names are found in the globals
 dictionary and the new test only adds a comparison.
+
+### A call opens all its locals at once
+
+A call made its environment one entry at a time: each parameter went
+through the general map append (find spare storage, grow, retain the key
+and value, keep the index), and then each other local was appended the
+same way, unbound. A function's locals are the same names on every call,
+so the scope now computes their order once, on its first call, and each
+new environment takes storage for all of them and fills it in one loop:
+the symbol's key and hash, and the unbound marker. A call that passes
+exactly the positional parameters then stores each argument in its
+entry, which is the parameter's position.
+
+The order is CPython's `co_varnames` order: positional and keyword-only
+parameters, `*args`, `**kwargs`, then the other locals in order of first
+appearance. Before, a call that bound parameters by keyword left them in
+the environment in binding order, so `locals()` listed them in the order
+the call happened to give them; it now lists them as CPython does. A
+`code.replace()` copy that renames parameters still binds under its new
+names first and declares the body's locals after them, as before.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| fib | 120.8 M | 113.0 M | -6.5% |
+| classes | 396.7 M | 367.8 M | -7.3% |
+| sort | 147.2 M | 145.8 M | -0.9% |
+| strings | 304.9 M | 303.8 M | -0.3% |
