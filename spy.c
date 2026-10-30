@@ -104,7 +104,7 @@ struct Node {
     /* A name's symbol in the scope it last ran in, its entry position in
      * that function environment, and the str key and position it was last
      * found under in a dictionary (name_fast); global_key is traced. */
-    Scope *slot_scope; size_t slot_symbol, slot;
+    Scope *slot_scope; size_t slot_symbol, slot; int slot_kind;
     SPYValue *global_key; size_t global_slot;
     /* How an attribute read answers for instances of attr_class while
      * classes_changed is attr_epoch (node_attribute); all borrowed. */
@@ -2171,22 +2171,38 @@ static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { retu
  * key, NULL while never bound), passes over env to its parent, or something
  * else. The first environment's symbol is remembered by scope. */
 enum { NAME_HERE, NAME_PARENT, NAME_SLOW };
+/* Remember on name node n its symbol in scope, and what that makes of n in a
+ * plain function environment of scope. */
+static Symbol *remember_symbol(Node *n, Scope *scope, Symbol *symbol) {
+    n->slot_scope = scope; n->slot = 0;
+    n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
+    n->slot_kind = !symbol ? NAME_PARENT : symbol->flags & (S_GLOBAL | S_NONLOCAL) ? NAME_SLOW :
+        symbol->flags & (S_LOCAL | S_PARAM) ? NAME_HERE : NAME_PARENT;
+    return symbol;
+}
+/* Whether env, an environment running scope, is a plain function or
+ * comprehension environment, whose locals bind under their symbols' keys
+ * in its own entries. */
+static ALWAYS_INLINE int plain_locals(SPYValue *env, Scope *scope) {
+    return env->type == V_ENV && !env->as.map.namespace &&
+        (env->as.map.flags ? env->as.map.flags == 2 && scope->kind == S_COMPREHENSION : scope->kind == S_FUNCTION);
+}
 static ALWAYS_INLINE int function_binding(SPYValue *env, Node *n, int first, SPYValue **key) {
-    Scope *scope = env->type == V_ENV && !env->as.map.namespace ? env->as.map.scope : NULL;
-    if (!scope) return NAME_SLOW;
-    if ((env->as.map.flags || scope->kind != S_FUNCTION) && (env->as.map.flags != 2 || scope->kind != S_COMPREHENSION)) return NAME_SLOW;
-    Symbol *symbol;
-    if (first && n->slot_scope == scope) symbol = n->slot_symbol < scope->len ? &scope->symbols[n->slot_symbol] : NULL;
-    else symbol = scope_find(scope, node_name(n));
-    if (first && n->slot_scope != scope) {
-        n->slot_scope = scope; n->slot = 0;
-        n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
+    Scope *scope = env->type == V_ENV ? env->as.map.scope : NULL;
+    if (!scope || !plain_locals(env, scope)) return NAME_SLOW;
+    if (!first || n->slot_scope != scope) {
+        Symbol *symbol = scope_find(scope, node_name(n));
+        if (!first) {
+            if (!symbol) return NAME_PARENT;
+            if (symbol->flags & (S_GLOBAL | S_NONLOCAL)) return NAME_SLOW;
+            if (!(symbol->flags & (S_LOCAL | S_PARAM))) return NAME_PARENT;
+            *key = symbol->key;
+            return NAME_HERE;
+        }
+        remember_symbol(n, scope, symbol);
     }
-    if (!symbol) return NAME_PARENT;
-    if (symbol->flags & (S_GLOBAL | S_NONLOCAL)) return NAME_SLOW;
-    if (!(symbol->flags & (S_LOCAL | S_PARAM))) return NAME_PARENT;
-    *key = symbol->key;
-    return NAME_HERE;
+    if (n->slot_kind == NAME_HERE) *key = scope->symbols[n->slot_symbol].key;
+    return n->slot_kind;
 }
 /* The entry of a function local under its symbol's key: function
  * environments bind locals under those keys only. */
@@ -2216,7 +2232,17 @@ static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
  * environments and exact dictionaries the full lookup (name_find) would
  * walk, or NULL to take that path. */
 static SPYValue *name_fast(SPYValue *env, Node *n) {
-    for (SPYValue *e = env; e; e = e->as.map.parent) {
+    SPYValue *e = env;
+    Scope *scope = n->slot_scope;
+    /* What n was last found to be in the running function's scope. */
+    if (scope && env->as.map.scope == scope && plain_locals(env, scope)) {
+        if (n->slot_kind == NAME_HERE && n->slot < map_used(env) && env->as.map.items[n->slot].key == scope->symbols[n->slot_symbol].key) {
+            SPYValue *value = env->as.map.items[n->slot].value;
+            return value->type == V_UNBOUND || value->type == SPY_LAZY_IMPORT ? NULL : value;
+        }
+        if (n->slot_kind == NAME_PARENT) e = env->as.map.parent;
+    }
+    for (; e; e = e->as.map.parent) {
         Entry *entry;
         if (e->type == SPY_DICT) {
             /* A missing str may still equal another kind of key. */
@@ -2292,8 +2318,7 @@ static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v)
 /* Whether env is a plain function or comprehension environment, whose
  * locals bind under their symbols' keys in its own entries. */
 static int fresh_locals(SPYValue *env) {
-    Scope *scope = env->type == V_ENV && !env->as.map.namespace ? env->as.map.scope : NULL;
-    return scope && (env->as.map.flags ? env->as.map.flags == 2 && scope->kind == S_COMPREHENSION : scope->kind == S_FUNCTION);
+    return env->type == V_ENV && env->as.map.scope && plain_locals(env, env->as.map.scope);
 }
 /* Bind symbol, a local not yet in env, to v. */
 static int local_append(SPYContext *c, SPYValue *env, Symbol *symbol, SPYValue *v) {
@@ -2304,11 +2329,7 @@ static int local_append(SPYContext *c, SPYValue *env, Symbol *symbol, SPYValue *
 }
 /* The symbol node n names in scope, remembered on n. */
 static Symbol *node_symbol(Scope *scope, Node *n) {
-    if (n->slot_scope != scope) {
-        Symbol *symbol = scope_find(scope, node_name(n));
-        n->slot_scope = scope; n->slot = 0;
-        n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
-    }
+    if (n->slot_scope != scope) return remember_symbol(n, scope, scope_find(scope, node_name(n)));
     return n->slot_symbol < scope->len ? &scope->symbols[n->slot_symbol] : NULL;
 }
 SPYValue *spy_get_global(SPYContext *c, const char *name) { return name_get(c, c->globals, name); }

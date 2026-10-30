@@ -49,6 +49,7 @@ Each change below removes work from one of those steps.
 | Change | Suite instructions |
 | --- | --- |
 | [Releasing a number or string frees it at once](#releasing-a-number-or-string-frees-it-at-once) | -1.6% to -9.7% |
+| [A name remembers what it is in its function](#a-name-remembers-what-it-is-in-its-function) | -5.2% (nbody) to +0.4% |
 
 ### Releasing a number or string frees it at once
 
@@ -72,3 +73,29 @@ is unchanged.
 | dicts | 212.3 M | 203.4 M | -4.2% |
 | sort | 151.8 M | 148.0 M | -2.5% |
 | bigint | 31.7 M | 30.9 M | -2.6% |
+
+### A name remembers what it is in its function
+
+A name node already remembered its symbol in the scope it last ran in and
+the entry it was last found at. Each read still walked the full decision:
+is the environment a plain function environment, is the remembered scope
+its scope, is the symbol global, nonlocal, local or free, and only then
+the entry. The node now also remembers the outcome, *here* (a local of
+that scope) or *further out* (free or global), when it remembers the
+symbol. A read in an environment of the remembered scope tests that the
+environment keeps its locals in its own entries and that the entry at the
+remembered position still has the symbol's key, and returns its value; a
+name found further out starts at the parent environment. Every other
+case, and every miss, takes the full lookup as before, so no lookup can
+answer differently.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| fib | 124.9 M | 120.8 M | -3.3% |
+| nbody | 928.3 M | 879.9 M | -5.2% |
+| classes | 404.6 M | 396.7 M | -2.0% |
+| generators | 444.5 M | 433.0 M | -2.6% |
+| loop | 683.5 M | 686.1 M | +0.4% |
+
+`loop` runs at module level, where names are found in the globals
+dictionary and the new test only adds a comparison.
