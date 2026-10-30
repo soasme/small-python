@@ -12538,7 +12538,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
                 size_t loop = emit(c, p, BC_LOOP, item, 1), start = p->len;
                 size_t end = emit(c, p, BC_NEXT, item, 0);
                 emit(c, p, BC_YIELD, item, 0); emit(c, p, BC_POP, item, 0);
-                patch(p, emit(c, p, BC_JUMP, item, 0), start);
+                patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
                 patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, item, 0);
                 patch(p, loop, p->len);
             } else {
@@ -12563,7 +12563,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
     size_t start = p->len, end = emit(c, p, BC_NEXT, clause, clause->op);
     compile_store(c, p, clause->args, clause);
     compile_comprehension_clause(c, p, n, clause->b);
-    patch(p, emit(c, p, BC_JUMP, clause, 0), start);
+    patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
     patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, clause, 0); patch(p, loop, p->len);
 }
 static int compile_comprehension(SPYContext *c, Node *n) {
@@ -12697,7 +12697,7 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
                 compile_store(c, p, n->args, n);
             }
             else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
-            compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, n, 0), start);
+            compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
             patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
             compile_body(c, p, n->c); patch(p, loop, p->len); break;
         case N_TRY: {
@@ -13015,8 +13015,8 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
     return dict;
 }
 /* The bookkeeping before evaluating node n: tick for the common case, and
- * tick_full when an error, a queued callback, a step limit or a new source
- * file needs attention. */
+ * tick_full when an error, a queued callback, a step limit, a new source
+ * file or a trace function needs attention. */
 static int tick_full(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
@@ -13035,7 +13035,9 @@ static int tick_full(SPYContext *c, Frame *f, Node *n) {
     }
     if (c->filename_from != f->unit->as.unit.filename) {
         snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
-        c->filename_from = f->unit->as.unit.filename;
+        /* While a trace function watches, no filename is recorded as copied,
+         * so that every tick takes this path. */
+        c->filename_from = c->settings[SET_TRACE] ? NULL : f->unit->as.unit.filename;
     }
     if (c->step_limit && ++c->steps > c->step_limit) {
         spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
@@ -13044,7 +13046,7 @@ static int tick_full(SPYContext *c, Frame *f, Node *n) {
 }
 /* Whether tick has nothing to do but record the line. */
 static int quiet(SPYContext *c, Frame *f) {
-    return !c->error_type[0] && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit && !c->settings[SET_TRACE] &&
+    return !c->error_type[0] && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit &&
         c->filename_from == f->unit->as.unit.filename;
 }
 static void relocate(SPYContext *, Node *);
@@ -13676,11 +13678,10 @@ static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     /* A literal made once, or a name found along the fast path, cannot
      * fail, so it skips the step bookkeeping, unless a trace function
      * watches for its line. */
-    if (c->settings[SET_TRACE] && tick(c, f, n)) return NULL;
-    if (n->constant) return c->error_type[0] ? NULL : spy_retain(n->constant);
+    if (n->constant) return c->error_type[0] || (c->settings[SET_TRACE] && tick(c, f, n)) ? NULL : spy_retain(n->constant);
     if (n->kind == N_NAME && !c->error_type[0]) {
         SPYValue *value = name_fast(f->env, n);
-        if (value) return spy_retain(value);
+        if (value) return c->settings[SET_TRACE] && tick(c, f, n) ? NULL : spy_retain(value);
     }
     /* An operator whose operands are found along the fast path, while tick
      * has only the line to record, takes them as they are. */
@@ -14784,6 +14785,7 @@ static SPYValue *setting_native(SPYContext *c, size_t argc, SPYValue *const *arg
     if (argc == 1) return spy_retain(c->settings[i] ? c->settings[i] : c->none);
     SPYValue *old = c->settings[i];
     c->settings[i] = argv[1]->type == SPY_NONE ? NULL : spy_retain(argv[1]);
+    c->filename_from = NULL; /* tick sees a new trace function. */
     spy_release(old);
     return spy_none(c);
 }
@@ -16661,7 +16663,7 @@ static void attribute_details(SPYContext *c, SPYValue *error, SPYValue *object, 
 static void trace_exception(SPYContext *);
 static ErrorState take_error(SPYContext *c) {
     ErrorState state;
-    trace_exception(c);
+    if (c->settings[SET_TRACE]) trace_exception(c);
     traceback_here(c);
     SPYValue *traceback = c->traceback;
     c->traceback = NULL;
@@ -16770,7 +16772,7 @@ static int trace_event(SPYContext *c, int event, SPYValue *arg) {
     return failed ? -1 : 0;
 }
 /* The 'call' event of a frame just entered, at its definition line. */
-static int trace_call(SPYContext *c) {
+static NO_INLINE int trace_call(SPYContext *c) {
     struct ActiveFrame *top = &c->frames[c->py_depth - 1];
     SPYValue *owner = top->owner;
     if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->line;
@@ -16783,13 +16785,13 @@ static int trace_call(SPYContext *c) {
 }
 /* An exception passing through the innermost frame is its 'exception'
  * event, once per frame, as its traceback gains the frame's entry. */
-static void trace_exception(SPYContext *c) {
+static NO_INLINE void trace_exception(SPYContext *c) {
     if (c->error_type[0] && c->settings[SET_TRACE] && !c->tracing && c->py_depth &&
         c->traceback_frame != c->frames[c->py_depth - 1].serial)
         trace_event(c, TRACE_EXCEPTION, NULL);
 }
 /* The events of a frame being left: its exception, then its return. */
-static void trace_leave(SPYContext *c, SPYValue *value) {
+static NO_INLINE void trace_leave(SPYContext *c, SPYValue *value) {
     trace_exception(c);
     trace_event(c, TRACE_RETURN, c->error_type[0] ? NULL : value);
 }
@@ -18767,7 +18769,7 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             int broke = 0;
             for (size_t i = 0; !c->error_type[0]; i++) {
                 /* Each pass jumps back: a trace function sees the loop's line again. */
-                if (i && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
+                if (i && c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
                 if (tick(c, f, n)) break;
                 if (iterable) {
                     SPYValue *item = iter_at(c, iterable, i);
@@ -18923,6 +18925,7 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
         if (b->kind == BLOCK_LOOP && (r->flow == FLOW_BREAK || r->flow == FLOW_CONTINUE)) {
             m->pc = r->flow == FLOW_BREAK ? b->target : b->other;
             if (r->flow == FLOW_BREAK) pop_block(c, m, f);
+            else if (c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0; /* Back to the loop's line. */
             r->flow = FLOW_NORMAL; return 1;
         }
         if (b->kind == BLOCK_EXCEPT && r->flow == FLOW_ERROR) {
@@ -19122,7 +19125,6 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
     /* A BC_SHORT that jumps knows its value's truth; the test it lands on
      * uses that rather than calling __bool__ again, as CPython's jumps do. */
     int known = 0;
-    size_t last = m->pc;
     for (;;) {
         int truth_known = known;
         known = 0;
@@ -19131,9 +19133,6 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (!machine_unwind(c, m, &f, &flow)) return flow;
             if (c->error_type[0]) continue;
         }
-        /* A backward jump shows a trace function its line again. */
-        if (m->pc < last && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
-        last = m->pc;
         Instruction *ins = &m->code->items[m->pc++];
         Node *n = ins->node ? ins->node : generator->as.generator.node;
         size_t line = !ins->node && c->py_depth ? c->frames[c->py_depth - 1].line : 0;
@@ -19254,7 +19253,10 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_COMPREHENSION:
             a = machine_pop(m); machine_push(c, m, comprehension_from(c, &f, n, a)); break;
         case BC_NAMED: name_set(c, f.env, n->text, m->stack[m->len - 1]); break;
-        case BC_JUMP: m->pc = ins->target; break;
+        case BC_JUMP:
+            /* A backward jump shows a trace function its line again. */
+            if (c->settings[SET_TRACE] && ins->target < m->pc && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
+            m->pc = ins->target; break;
         case BC_PATTERN:
             if (!match_case(c, &f, n, m->stack[m->len - 1])) m->pc = ins->target;
             break;

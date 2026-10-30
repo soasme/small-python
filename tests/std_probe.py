@@ -422,6 +422,14 @@ def traced_loop(x):
 def traced_generator():
     yield 1
     yield 2
+    i = 0
+    while i < 3:
+        i += 1
+        if i == 2:
+            continue
+        yield i
+    for j in range(2):
+        yield j
 
 
 def traced_raise():
