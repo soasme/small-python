@@ -9232,14 +9232,20 @@ static SPYValue *sequence_order(SPYContext *c, int op, SPYValue *a, SPYValue *b)
 /* x op y for an ordering or equality operator. */
 #define COMPARE(op, x, y) ((op) == '<' ? (x) < (y) : (op) == T_LE ? (x) <= (y) : (op) == '>' ? (x) > (y) : \
                           (op) == T_GE ? (x) >= (y) : (op) == T_EQ ? (x) == (y) : (x) != (y))
+/* The truth of ordering op on two machine ints or two floats, or -1 when
+ * the general comparison must decide. */
+static ALWAYS_INLINE int number_order(int op, SPYValue *a, SPYValue *b) {
+    if (a->type != b->type) return -1;
+    if (a->type == SPY_INT) return a->as.integer_data.big || b->as.integer_data.big ? -1 : COMPARE(op, a->as.integer_data.small, b->as.integer_data.small);
+    return a->type == SPY_FLOAT ? COMPARE(op, a->as.real, b->as.real) : -1;
+}
 static size_t find_bytes(const char *, size_t, const char *, size_t, int);
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
     if (a->type == b->type && (op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE)) {
-        if (a->type == SPY_INT && !a->as.integer_data.big && !b->as.integer_data.big)
-            return spy_bool(c, COMPARE(op, a->as.integer_data.small, b->as.integer_data.small));
-        if (a->type == SPY_FLOAT) return spy_bool(c, COMPARE(op, a->as.real, b->as.real));
+        int truth = number_order(op, a, b);
+        if (truth >= 0) return spy_bool(c, truth);
         if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && op != T_EQ && op != T_NE) return sequence_order(c, op, a, b);
     }
     if ((special_dispatch(a) || special_dispatch(b)) &&
@@ -13104,15 +13110,7 @@ static SPYValue *eval_tested(SPYContext *c, Frame *f, Node *n, int *truth) {
     spy_release(a);
     return eval_tested(c, f, n->b, truth);
 }
-/* The truth of a condition: 1, 0, or -1 with an error set. */
-static int condition(SPYContext *c, Frame *f, Node *n) {
-    int truth;
-    SPYValue *value = eval_tested(c, f, n, &truth);
-    if (!value) return -1;
-    if (truth < 0) truth = !!spy_truth(value);
-    spy_release(value);
-    return c->error_type[0] ? -1 : truth;
-}
+static int condition(SPYContext *, Frame *, Node *);
 static Result execute(SPYContext *, Frame *, Node *);
 static Result execute_module(SPYContext *, Frame *);
 static int start_annotations(SPYContext *, Frame *, Node *, const char *);
@@ -13965,16 +13963,29 @@ static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
 static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
     return n->kind == N_INDEX ? item_operand(f, n) : leaf_operand(f, n);
 }
+/* The truth of a condition: 1, 0, or -1 with an error set. */
+static int condition(SPYContext *c, Frame *f, Node *n) {
+    /* A comparison of two numbers on the operator fast path is its own truth. */
+    if (n->kind == N_COMPARE && (n->flags & F_OPERATOR) && ordering(n->args->op) && quiet(c, f)) {
+        SPYValue *x = operand(f, n->a), *y = x ? operand(f, n->args->a) : NULL;
+        int truth = y ? number_order(n->args->op, x, y) : -1;
+        if (truth >= 0) return truth;
+    }
+    int truth;
+    SPYValue *value = eval_tested(c, f, n, &truth);
+    if (!value) return -1;
+    if (truth < 0) truth = !!spy_truth(value);
+    spy_release(value);
+    return c->error_type[0] ? -1 : truth;
+}
 /* Operator node n on its operands x and y, both borrowed, when they are
  * exact small ints, floats, lists and tuples it computes without running
  * Python code or raising anything but MemoryError; else NULL. */
 static SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
     if (n->kind == N_INDEX) return spy_retain(sequence_item(x, y));
     if (n->kind == N_BINARY) return number_fast(c, n->op, x, y, 0);
-    if (x->type != y->type || (x->type != SPY_FLOAT && (x->type != SPY_INT || x->as.integer_data.big || y->as.integer_data.big)) ||
-        !ordering(n->args->op)) return NULL;
-    relocate(c, n);
-    return comparison(c, n->args->op, x, y);
+    int truth = ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
+    return truth < 0 ? NULL : spy_bool(c, truth);
 }
 /* Operator node n on its operands x and y, as eval_inner computes it. */
 static SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {

@@ -110,6 +110,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Numbers stay off the value list](#numbers-stay-off-the-value-list) | -1.5% (dicts), -1.2% (nbody), -1.0% (loop, sort) |
 | [A release inlines its common case](#a-release-inlines-its-common-case) | -10.1% (loop), -7.5% (nbody), -6.8% (classes), -6.3% (generators), -5.5% (fib); M2: loop -17%, nbody -13.5% |
 | [Arithmetic on numbers skips the dispatch](#arithmetic-on-numbers-skips-the-dispatch) | -11.7% (loop), -7.8% (fib), -6.2% (generators), -5.9% (nbody), -4.6% (classes) |
+| [A test of two numbers makes no bool](#a-test-of-two-numbers-makes-no-bool) | -10.3% (fib), -8.6% (loop); M2: loop -15%, fib -8.8% |
 
 ### Releasing a number or string frees it at once
 
@@ -742,6 +743,23 @@ fast path, which borrows its operands, always makes a new float.
 | nbody | -5.9% | 382.0 → 355.8 ms (-6.8%) |
 | classes | -4.6% | 183.5 → 175.0 ms (-4.6%) |
 | strings, dicts, sort, bigint | -1.0% to -1.9% | |
+
+### A test of two numbers makes no bool
+
+`if n < 2` evaluated the comparison to a bool, retained it, asked
+`spy_truth` for its truth and released it. `condition`, which serves
+`if`, `while`, `elif`, `assert` and pattern guards, now answers a single
+comparison on the operator fast path with `number_order` when both
+operands are machine ints or floats, without a value. The operator fast
+path and `comparison` share `number_order` for the same case.
+
+| Program | Instructions | M2 time |
+| --- | ---: | ---: |
+| fib | -10.3% | 66.1 → 60.3 ms (-8.8%) |
+| loop | -8.6% | 333.0 → 283.1 ms (-15.0%) |
+| generators | -1.6% | 208.9 → 201.4 ms (-3.6%) |
+| dicts | +0.3% | |
+| the rest | 0% | |
 
 ## Tried and left out
 
