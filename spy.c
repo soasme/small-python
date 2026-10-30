@@ -2316,15 +2316,20 @@ static ALWAYS_INLINE Entry *remembered_local(SPYValue *env, Node *n) {
     SPYValue *key = n->slot_key;
     return key && env->type == V_ENV && n->slot < map_used(env) && env->as.map.items[n->slot].key == key ? &env->as.map.items[n->slot] : NULL;
 }
-static SPYValue *name_fast(SPYValue *env, Node *n) {
+static SPYValue *name_outer(SPYValue *env, Node *n);
+static ALWAYS_INLINE SPYValue *name_fast(SPYValue *env, Node *n) {
+    /* A remembered local, or at module level a remembered global. */
+    Entry *entry = env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+    if (entry) return entry->value->type == V_UNBOUND || entry->value->type == SPY_LAZY_IMPORT ? NULL : entry->value;
+    return name_outer(env, n);
+}
+/* name_fast past the remembered entry. */
+static NO_INLINE SPYValue *name_outer(SPYValue *env, Node *n) {
     SPYValue *e = env;
     Scope *scope = n->slot_scope;
-    if (scope && env->type == V_ENV) {
-        Entry *local = remembered_local(env, n);
-        if (local) return local->value->type == V_UNBOUND || local->value->type == SPY_LAZY_IMPORT ? NULL : local->value;
-        /* A name last found further out than the running function's scope. */
-        if (n->slot_kind == NAME_PARENT && env->as.map.scope == scope && plain_locals(env, scope)) e = env->as.map.parent;
-    }
+    /* A name last found further out than the running function's scope. */
+    if (scope && n->slot_kind == NAME_PARENT && env->type == V_ENV && env->as.map.scope == scope && plain_locals(env, scope))
+        e = env->as.map.parent;
     for (; e; e = e->as.map.parent) {
         Entry *entry;
         if (e->type == SPY_DICT) {

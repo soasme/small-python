@@ -96,6 +96,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A name store skips the step bookkeeping](#a-name-store-skips-the-step-bookkeeping) | -1.1% to -4.3%; M2 time: nbody -4.0% |
 | [Numbers have their own allocation path](#numbers-have-their-own-allocation-path) | -2.4% (fib) to +0.5% |
 | [A call releases its own environment](#a-call-releases-its-own-environment) | -3.8% (fib), -1.8% (classes); M2: fib -4.5% |
+| [A remembered name is read inline](#a-remembered-name-is-read-inline) | -0.6% to -4.8% |
 
 ### Releasing a number or string frees it at once
 
@@ -528,6 +529,19 @@ call now releases the locals itself, from the last as CPython clears a
 frame, then the parent and the unit. Anything else falls back to
 `spy_release`. Instructions: fib -3.8%, classes -1.8%, sort -0.5%, the
 rest unchanged; on the M2 fib -4.5%, classes -3.6%.
+
+### A remembered name is read inline
+
+`name_fast` held the remembered-local test and the walk out through
+enclosing environments and dictionaries, so even a local read paid the
+walk's register saves. The test for the entry a name was last found at,
+a local in its function's environment or, in module code, a global in
+the module's dictionary, is now inline wherever a name is read, and the
+walk is `name_outer`. Testing only locals inline had sped nbody up 3.7%
+but slowed loop 0.6%, whose module-level names then always took the
+call. Instructions: loop -4.8%, classes and generators -2.7%, nbody
+-3.0%, dicts -2.1%, the rest -0.6% to -1.2%; on the M2 loop and classes
+-3.6%, nbody -1.5%, fib and sort within noise.
 
 ## Tried and left out
 
