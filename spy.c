@@ -795,8 +795,11 @@ static int finalize_later(SPYValue *v) {
     return 1;
 }
 void spy_release(SPYValue *v) {
-    SPYValue *pending = NULL;
-    if (v) release_edge(v, &pending);
+    if (!v || --v->refs) return;
+    /* Numbers and strings, most of what dies, hold no edges and need no finalizer. */
+    if (v->type == SPY_INT || v->type == SPY_FLOAT || v->type == SPY_STRING) { free_value(v); return; }
+    SPYValue *pending = v;
+    v->pending = NULL;
     while (pending) {
         v = pending; pending = v->pending;
         if (finalize_later(v)) { v->refs = 1; continue; }
