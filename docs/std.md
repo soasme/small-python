@@ -125,10 +125,13 @@ The pending names of lazy imports, %LazyModules% of PLS-315 17.5, as a
 `get_lazy_imports()` returns the global lazy-imports mode, a `str`. `mode` is
 `'normal'` (only `lazy import` statements are lazy) or `'all'` (every eligible
 import is lazy). Any other value raises a `ValueError` exception ("mode must
-be 'normal' or 'all'"). The initial mode is `'normal'`, unless the host sets
-it from its command line or environment.
+be 'normal' or 'all'"), and one that is not a `str` a `TypeError` exception
+("mode must be a string: 'normal' or 'all'"). The initial mode is `'normal'`,
+unless the host sets it from its command line or environment. Under `'all'`,
+HostLazyImportPolicy (PLS-315 B.1.4) makes every ordinary import it is
+consulted for lazy.
 
-*Status:* not provided.
+*Status:* provided.
 
 #### 5.1.4 `get_lazy_imports_filter()`, `set_lazy_imports_filter(filter)`
 
@@ -136,9 +139,11 @@ The filter is `None` or a callable that decides, for each potentially lazy
 import, whether it is made lazy. `set_lazy_imports_filter(None)` removes it.
 A filter that is not callable raises a `ValueError` exception ("filter
 provided but is not callable"). `get_lazy_imports_filter()` returns the
-current filter or `None`.
+current filter or `None`. HostLazyImportPolicy calls a filter for each
+import it would make lazy, as *filter*(*importer*, *name*, *fromlist*), and
+the import stays lazy when the result is true.
 
-*Status:* not provided.
+*Status:* provided.
 
 #### 5.1.5 `builtin_module_names`, `stdlib_module_names`
 
@@ -366,17 +371,20 @@ takes either or both, by position or keyword; an omitted one is unchanged,
 `None` removes it, and any other value that is not callable raises a
 `TypeError` exception ("callable *name* expected, got *T*"). More than two
 arguments raise a `TypeError` exception ("function takes at most 2 arguments
-(*n* given)").
+(*n* given)"). The type of the result has `__module__` `'builtins'` and is
+constructible.
 
-*Status:* not provided.
+*Status:* provided.
 
 #### 5.8.2 `get_coroutine_origin_tracking_depth()`, `set_coroutine_origin_tracking_depth(depth)`
 
 The number of frames recorded in a new coroutine's `cr_origin`, initially 0
-(no tracking). A negative *depth* raises a `ValueError` exception ("depth
-must be >= 0").
+(no tracking). *depth* is taken as an index that fits a C `int`, by position
+or keyword. A negative *depth* raises a `ValueError` exception ("depth must
+be >= 0"). `cr_origin` is a `tuple` of (*filename*, *line*, *function name*)
+tuples, innermost frame first.
 
-*Status:* not provided.
+*Status:* provided.
 
 ### 5.9 Interpreter description
 
@@ -447,8 +455,10 @@ bits, 0 seed bits, and cutoff 0.
   `version`.
 - `platlibdir`: the name of the platform library directory, such as `'lib'`.
 
-*Status:* provided, except `thread_info`: a context has no threads of its
-own to describe.
+*Host choice:* the values of `thread_info`.
+
+*Status:* provided; `thread_info` is `(None, None, None)`, since a context
+runs on its host's thread and has no lock of its own.
 
 #### 5.9.4 Installation and command line
 
@@ -541,7 +551,11 @@ version 3.15.
 *Host choice:* whether to provide them. A host that provides one provides it
 as CPython specifies.
 
-*Status:* not provided.
+*Status:* `call_tracing` and `is_remote_debug_enabled` are provided; the
+latter returns `False`. The others are not: the engine reports no execution
+events to trace, profile, monitor, or audit, and has no stack trampolines or
+remote debugger. Audit hooks that the engine never called would promise a
+watch it does not keep.
 
 ### 5.13 Dynamic loading
 
@@ -739,13 +753,15 @@ deviation.
 
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
-| `sys` | every name of clause 5 not listed in the other columns | none | `get_lazy_imports`, `set_lazy_imports`, `get_lazy_imports_filter`, `set_lazy_imports_filter` (5.1.3, 5.1.4); `excepthook`, `unraisablehook` (5.6.2, 5.6.3); `get_asyncgen_hooks`, `set_asyncgen_hooks`, `get_coroutine_origin_tracking_depth`, `set_coroutine_origin_tracking_depth` (5.8); `thread_info` (5.9.3); the interfaces of 5.12 to 5.14 |
+| `sys` | every name of clause 5 not listed in the other columns | none | `excepthook`, `unraisablehook` (5.6.2, 5.6.3); the interfaces of 5.12 other than `call_tracing` and `is_remote_debug_enabled`; those of 5.13 and 5.14 |
 | `gc` | every name of clause 6 | none | none |
 
-The unbound names need the engine to call them or to keep new state: a
-traceback display for `excepthook`, reports of ignored exceptions for
-`unraisablehook`, the hooks of PLS-315 27.5.4, the global lazy-import mode,
-coroutine origins, and line events for tracing.
+The engine keeps the state behind 5.1.3, 5.1.4, and 5.8 as settings of the
+`_spy` primitives, which the core consults through the host hooks of PLS-315
+B.1.4 and B.5.1 and the origin tracking of 27.4.4; without the standard layer
+they keep their initial values. The unbound names need a traceback display
+for `excepthook`, reports of ignored exceptions for `unraisablehook`, and
+execution events for tracing.
 
 ## Annex B (informative) Verification
 

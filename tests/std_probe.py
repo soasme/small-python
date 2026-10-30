@@ -244,3 +244,83 @@ errors, sys.stderr = sys.stderr, sys.__stderr__
 lines = "".join(errors.text).splitlines()
 show("debug stats", lambda: (lines[0], lines[1].split(":")[0], lines[2].split(":")[0], lines[-1].split(",")[0]))
 show("debug collectable", lambda: any(line.startswith("gc: collectable <Node 0x") for line in lines))
+
+# 5.1.3, 5.1.4
+calls(sys, ["sys.get_lazy_imports()", "sys.get_lazy_imports(1)", "sys.set_lazy_imports('x')",
+            "sys.set_lazy_imports(1)", "sys.set_lazy_imports()", "sys.set_lazy_imports('all', 1)",
+            "sys.get_lazy_imports_filter()", "sys.get_lazy_imports_filter(1)", "sys.set_lazy_imports_filter(1)",
+            "sys.set_lazy_imports_filter()", "sys.set_lazy_imports_filter(filter=None)"])
+filtered = []
+sys.set_lazy_imports_filter(lambda *args: filtered.append(args) or args[1] != "_probe_eager")
+sys.set_lazy_imports("all")
+import _probe_lazy
+from _probe_lazy import name
+try:
+    import _probe_eager
+except ImportError:
+    pass
+
+
+def imports_in_function():
+    try:
+        import _probe_inner
+    except ImportError:
+        return "eager"
+
+
+show("lazy mode", lambda: (sys.get_lazy_imports(), type(globals()["_probe_lazy"]).__name__,
+                           type(globals()["name"]).__name__, filtered, imports_in_function()))
+sys.set_lazy_imports("normal")
+sys.set_lazy_imports_filter(None)
+del _probe_lazy, name
+
+# 5.8
+calls(sys, ["sys.get_asyncgen_hooks()", "sys.get_asyncgen_hooks(1)", "sys.set_asyncgen_hooks(1)",
+            "sys.set_asyncgen_hooks(None, 1)", "sys.set_asyncgen_hooks(1, 2, 3)", "sys.set_asyncgen_hooks(x=1)",
+            "type(sys.get_asyncgen_hooks())((1,))", "type(sys.get_asyncgen_hooks())((1, 2))",
+            "sys.get_coroutine_origin_tracking_depth()", "sys.get_coroutine_origin_tracking_depth(1)",
+            "sys.set_coroutine_origin_tracking_depth(-1)", "sys.set_coroutine_origin_tracking_depth(1.5)",
+            "sys.set_coroutine_origin_tracking_depth(2**70)", "sys.set_coroutine_origin_tracking_depth()"])
+hooked = []
+
+
+async def agen():
+    yield 1
+
+
+sys.set_asyncgen_hooks(firstiter=lambda g: hooked.append(("firstiter", g.__name__)),
+                       finalizer=lambda g: hooked.append(("finalizer", g.__name__)))
+running = agen()
+step = running.__anext__()
+try:
+    step.send(None)
+except StopIteration:
+    pass
+del running, step
+gc.collect()
+show("asyncgen hooks", lambda: hooked)
+sys.set_asyncgen_hooks(None, None)
+
+
+async def coroutine():
+    pass
+
+
+def make_coroutine():
+    return coroutine()
+
+
+sys.set_coroutine_origin_tracking_depth(depth=2)
+made = make_coroutine()
+show("cr_origin", lambda: [(line, name) for _, line, name in made.cr_origin])
+made.close()
+sys.set_coroutine_origin_tracking_depth(0)
+made = make_coroutine()
+show("cr_origin off", lambda: (made.cr_origin, sys.get_coroutine_origin_tracking_depth()))
+made.close()
+
+# 5.9.3, 5.12
+show("thread_info", lambda: (type(sys.thread_info).n_fields, type(sys.thread_info)((1, 2, 3))))
+calls(sys, ["sys.call_tracing(len, ([1],))", "sys.call_tracing(len, [1])", "sys.call_tracing(len)",
+            "sys.call_tracing(f=len, args=())", "type(sys.is_remote_debug_enabled())",
+            "sys.is_remote_debug_enabled(1)"])

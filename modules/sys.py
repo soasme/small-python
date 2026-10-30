@@ -14,7 +14,7 @@ provided.
 from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,
                   set_int_max_str_digits, modules, maxsize, byteorder, platform, _getframe, lazy_modules,
                   getrefcount, getallocatedblocks,
-                  _write, _flush, _frame_module, _tracked)
+                  _write, _flush, _frame_module, _tracked, _setting)
 
 
 def _c_function(arity):
@@ -34,22 +34,24 @@ def _c_function(arity):
     return wrap
 
 
-def _structseq(name, fields, doc, instantiable=False, values=None, hidden=()):
+def _structseq(name, fields, doc, instantiable=False, values=None, hidden=(), module="sys"):
     # A tuple type with named fields, as CPython's PyStructSequence; hidden
     # fields are reachable only by name.
+    title = name if module == "builtins" else f"{module}.{name}"
+
     def __new__(cls, sequence, dict=None):
         sequence = tuple(sequence)
         if len(sequence) != len(fields):
-            raise TypeError(f"sys.{name}() takes a {len(fields)}-sequence ({len(sequence)}-sequence given)")
+            raise TypeError(f"{title}() takes a {len(fields)}-sequence ({len(sequence)}-sequence given)")
         return tuple.__new__(cls, sequence)
 
     def __repr__(self):
-        return f"sys.{name}(" + ", ".join(f"{field}={value!r}" for field, value in zip(fields, self)) + ")"
+        return f"{title}(" + ", ".join(f"{field}={value!r}" for field, value in zip(fields, self)) + ")"
 
     def __reduce__(self):
         return type(self), (tuple(self),)
 
-    namespace = {"__slots__": (), "__module__": "sys", "__doc__": doc, "__repr__": __repr__,
+    namespace = {"__slots__": (), "__module__": module, "__doc__": doc, "__repr__": __repr__,
                  "__reduce__": __reduce__, "__match_args__": fields, "n_fields": len(fields) + len(hidden),
                  "n_sequence_fields": len(fields), "n_unnamed_fields": 0}
     if instantiable:
@@ -61,9 +63,9 @@ def _structseq(name, fields, doc, instantiable=False, values=None, hidden=()):
     cls = type(name, (tuple,), namespace)
     if not instantiable:
         def __new__(cls, *args, **kwargs):
-            raise TypeError(f"cannot create 'sys.{name}' instances")
+            raise TypeError(f"cannot create '{title}' instances")
         cls.__new__ = __new__
-    return tuple.__new__(cls, values)
+    return cls if values is None else tuple.__new__(cls, values)
 
 
 version_info = _structseq("version_info", ("major", "minor", "micro", "releaselevel", "serial"),
@@ -98,6 +100,10 @@ flags = _structseq("flags", ("debug", "inspect", "interactive", "optimize", "don
                    values=(0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, False, 1, 0, True, 4300),
                    hidden=(("gil", 1), ("thread_inherit_context", 0), ("context_aware_warnings", 0),
                            ("lazy_imports", -1)))
+# A context runs on its host's thread and has no lock of its own.
+thread_info = _structseq("thread_info", ("name", "lock", "version"),
+                         "sys.thread_info\n\nA named tuple holding information about the thread implementation.",
+                         True, (None, None, None))
 
 
 class _Namespace:
@@ -243,6 +249,148 @@ def getfilesystemencodeerrors():
     return "surrogateescape"
 
 
+def call_tracing(*args, **kwargs):
+    """Call func(*args), while tracing is enabled.
+
+The tracing state is saved, and restored afterwards.  This is intended
+to be called from a debugger from a checkpoint, to recursively debug
+some other code."""
+    if kwargs:
+        raise TypeError("sys.call_tracing() takes no keyword arguments")
+    if len(args) != 2:
+        raise TypeError(f"call_tracing expected 2 arguments, got {len(args)}")
+    if not isinstance(args[1], tuple):
+        raise TypeError(f"call_tracing() argument 2 must be tuple, not {type(args[1]).__name__}")
+    return args[0](*args[1])
+
+
+@_c_function(0)
+def is_remote_debug_enabled():
+    """Return True if remote debugging is enabled, False otherwise."""
+    return False
+
+
+def _one_argument(name, keyword, args, kwargs):
+    # A required argument given by position or keyword, as CPython's clinic parses it.
+    if len(args) + len(kwargs) > 1:
+        raise TypeError(f"{name}() takes at most 1 argument ({len(args) + len(kwargs)} given)")
+    for key in kwargs:
+        if key != keyword:
+            raise TypeError(f"{name}() got an unexpected keyword argument '{key}'")
+    if not args and not kwargs:
+        raise TypeError(f"{name}() missing required argument '{keyword}' (pos 1)")
+    return args[0] if args else kwargs[keyword]
+
+
+def _settings(setting, structseq, one_argument, c_function):
+    # Functions over the engine settings (_spy._setting).
+    @c_function(0)
+    def get_lazy_imports():
+        """Gets the global lazy imports mode.
+
+Returns "all" if all top level imports are potentially lazy.
+Returns "normal" if only explicitly marked imports are potentially lazy."""
+        return "normal" if setting("lazy_imports") is None else "all"
+
+    def set_lazy_imports(*args, **kwargs):
+        """Sets the global lazy imports mode.
+
+The mode parameter must be one of the following strings:
+- "all": All top-level imports become potentially lazy
+- "normal": Only explicitly marked imports (with 'lazy' keyword) are lazy
+
+In addition to the mode, lazy imports can be controlled via the filter
+provided to sys.set_lazy_imports_filter"""
+        mode = one_argument("set_lazy_imports", "mode", args, kwargs)
+        if not isinstance(mode, str):
+            raise TypeError("mode must be a string: 'normal' or 'all'")
+        if mode not in ("normal", "all"):
+            raise ValueError("mode must be 'normal' or 'all'")
+        setting("lazy_imports", True if mode == "all" else None)
+
+    @c_function(0)
+    def get_lazy_imports_filter():
+        """Get the current lazy imports filter function.
+
+Returns the filter function if set, None otherwise."""
+        return setting("lazy_imports_filter")
+
+    def set_lazy_imports_filter(*args, **kwargs):
+        """Set the lazy imports filter callback.
+
+The filter is a callable which disables lazy imports when they
+would otherwise be enabled. Returns True if the import is still enabled
+or False to disable it. The callable is called with:
+
+(importing_module_name, resolved_imported_module_name, [fromlist])
+
+The first argument is the name of the module performing the import, the
+second argument is the fully resolved name of the module being imported,
+and the third argument is the list of names being imported (for 'from'
+imports) or None (for regular 'import' statements)."""
+        function = one_argument("set_lazy_imports_filter", "filter", args, kwargs)
+        if function is not None and not callable(function):
+            raise ValueError("filter provided but is not callable")
+        setting("lazy_imports_filter", function)
+
+    asyncgen_hooks = structseq("asyncgen_hooks", ("firstiter", "finalizer"), None, True, module="builtins")
+
+    @c_function(0)
+    def get_asyncgen_hooks():
+        """Return the installed asynchronous generators hooks.
+
+This returns a namedtuple of the form (firstiter, finalizer)."""
+        return asyncgen_hooks((setting("firstiter"), setting("finalizer")))
+
+    def set_asyncgen_hooks(*args, **kwargs):
+        """set_asyncgen_hooks([firstiter] [, finalizer])
+
+Set a finalizer for async generators objects."""
+        if len(args) + len(kwargs) > 2:
+            raise TypeError(f"function takes at most 2 arguments ({len(args) + len(kwargs)} given)")
+        hooks = dict(zip(("firstiter", "finalizer"), args))
+        for key, value in kwargs.items():
+            if key not in ("firstiter", "finalizer"):
+                raise TypeError(f"this function got an unexpected keyword argument '{key}'")
+            if key in hooks:
+                raise TypeError(f"argument for function given by name ('{key}') and position ({len(hooks)})")
+            hooks[key] = value
+        for key in ("finalizer", "firstiter"):
+            if key in hooks and hooks[key] is not None and not callable(hooks[key]):
+                raise TypeError(f"callable {key} expected, got {type(hooks[key]).__name__}")
+        for key, value in hooks.items():
+            setting(key, value)
+
+    @c_function(0)
+    def get_coroutine_origin_tracking_depth():
+        """Check status of origin tracking for coroutine objects in this thread."""
+        return setting("coroutine_origin_tracking_depth") or 0
+
+    def set_coroutine_origin_tracking_depth(*args, **kwargs):
+        """Enable or disable origin tracking for coroutine objects in this thread.
+
+Coroutine objects will track 'depth' frames of traceback information
+about where they came from, available in their cr_origin attribute.
+
+Set a depth of 0 to disable."""
+        depth = one_argument("set_coroutine_origin_tracking_depth", "depth", args, kwargs)
+        if not isinstance(depth, int) and not hasattr(type(depth), "__index__"):
+            raise TypeError(f"'{type(depth).__name__}' object cannot be interpreted as an integer")
+        depth = range(depth).stop
+        if not -2**31 <= depth < 2**31:
+            raise OverflowError("Python int too large to convert to C int")
+        if depth < 0:
+            raise ValueError("depth must be >= 0")
+        setting("coroutine_origin_tracking_depth", depth or None)
+    return (get_lazy_imports, set_lazy_imports, get_lazy_imports_filter, set_lazy_imports_filter, get_asyncgen_hooks,
+            set_asyncgen_hooks, get_coroutine_origin_tracking_depth, set_coroutine_origin_tracking_depth)
+
+
+(get_lazy_imports, set_lazy_imports, get_lazy_imports_filter, set_lazy_imports_filter, get_asyncgen_hooks,
+ set_asyncgen_hooks, get_coroutine_origin_tracking_depth,
+ set_coroutine_origin_tracking_depth) = _settings(_setting, _structseq, _one_argument, _c_function)
+
+
 @_c_function(0)
 def is_finalizing():
     """Return True if Python is exiting."""
@@ -371,7 +519,9 @@ __breakpointhook__ = breakpointhook
 # Functions made inside the factories above are named as CPython's are.
 for _function in (_getframemodulename, intern, getunicodeinternedsize, getswitchinterval, setswitchinterval,
                   getsizeof, exc_info, displayhook, getdefaultencoding, getfilesystemencoding,
-                  getfilesystemencodeerrors, is_finalizing):
+                  getfilesystemencodeerrors, is_finalizing, is_remote_debug_enabled, get_lazy_imports,
+                  get_lazy_imports_filter, get_asyncgen_hooks, get_coroutine_origin_tracking_depth, set_lazy_imports,
+                  set_lazy_imports_filter, set_asyncgen_hooks, set_coroutine_origin_tracking_depth, call_tracing):
     _function.__qualname__ = _function.__name__
-del _function, _c_function, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
-del _write, _flush, _frame_module, _tracked
+del _function, _c_function, _one_argument, _settings, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
+del _write, _flush, _frame_module, _tracked, _setting

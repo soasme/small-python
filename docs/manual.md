@@ -664,8 +664,9 @@ Python 3.15 lazy imports (`lazy import`, `lazy from ... import`) bind
 placeholder through a module global, class namespace, or module attribute
 calls `__import__` and replaces the binding; a failure is chained to an
 ImportError cause naming the lazy import. `from` imports of an already-loaded
-module bind the attribute directly. The global lazy-import filter and
-`sys.set_lazy_imports` are not provided.
+module bind the attribute directly. `sys.set_lazy_imports('all')` makes every
+eligible module-level import lazy, and `sys.set_lazy_imports_filter` may keep
+any of them eager (PLS-315 B.1.4).
 
 ### 3.3 Standard library and host services
 
@@ -700,8 +701,10 @@ bodies, and modules); a function frame's `f_locals` is a write-through
 `FrameLocalsProxy` as in PEP 667, and line numbers are those of the executing
 statement. [PLS-STD-315](std.md) specifies every name of both modules after
 CPython 3.15 and lists those not yet provided, among them `excepthook`,
-`unraisablehook`, the asynchronous-generator hooks, the lazy-import controls,
-tracing, profiling, and audit hooks; `tests/std.py` checks the rest against
+`unraisablehook`, tracing, profiling, and audit hooks. The lazy-import mode
+and filter, the asynchronous-generator hooks, and coroutine origin tracking
+are settings the engine keeps and `sys` changes through the `_spy._setting`
+primitive; `tests/std.py` checks the rest against
 CPython.
 
 No `weakref` module is built in. The engine keeps weak references for its

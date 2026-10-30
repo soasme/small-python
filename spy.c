@@ -172,9 +172,10 @@ struct SPYValue {
         struct { SPYValue *generator, *args; int method, state; } async_operation;
         struct {
             SPYValue *env, *unit, *name, *qualname, *code, *frame; /* frame: gi_frame, once read */
+            SPYValue *origin; /* cr_origin, or an asynchronous generator's finalizer hook */
             Node *node;
             Machine *machine;
-            int running, done, started, returned, async_running, async_closed;
+            int running, done, started, returned, async_running, async_closed, hooked;
             size_t line; /* where a suspended generator resumes, 0 before it starts */
         } generator;
     } as;
@@ -198,6 +199,8 @@ struct SPYContext {
     PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
+    /* Settings a host module changes through _spy._setting; owned, NULL for None. */
+    SPYValue *settings[6];
     int compile_flags; /* compile()'s future flags while it parses. */
     int optimize; /* The level the parser applies (spy_set_optimize, compile(optimize=)):
                    * 1 drops asserts and makes __debug__ False, 2 also drops docstrings. */
@@ -277,6 +280,11 @@ struct SPYContext {
     char *error_display; /* spy_error_display's result, owned. */
     size_t line;
 };
+/* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
+ * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
+ * coroutine records as cr_origin, and the hook that receives unraisable
+ * exceptions (18.1.4) as (type, value, traceback, message, object). */
+enum { SET_LAZY_IMPORTS, SET_LAZY_FILTER, SET_FIRSTITER, SET_FINALIZER, SET_ORIGIN_DEPTH, SET_UNRAISABLE };
 static SPYValue *special_method(SPYContext *, SPYValue *, const char *);
 static SPYValue *special_method_maybe(SPYContext *, SPYValue *, const char *);
 static SPYValue *intrinsic(SPYContext *, const char *);
@@ -667,6 +675,7 @@ static void edges(SPYValue *v, Visit visit, void *data) {
         VISIT(v->as.generator.name);
         VISIT(v->as.generator.qualname);
         VISIT(v->as.generator.frame);
+        VISIT(v->as.generator.origin);
         if (v->as.generator.machine) machine_edges(v->as.generator.machine, visit, data);
         VISIT(v->as.generator.env);
         VISIT(v->as.generator.unit);
@@ -762,7 +771,8 @@ static void memory_unexport(SPYValue *);
 static int finalize_later(SPYValue *v) {
     if (v->finalized) return 0;
     if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
-        if (!v->as.generator.started || v->as.generator.running || v->as.generator.done) return 0;
+        int hooked = v->type == SPY_ASYNC_GENERATOR && v->as.generator.origin && !v->as.generator.async_closed;
+        if (!(v->as.generator.started || hooked) || v->as.generator.running || v->as.generator.done) return 0;
     } else if (v->type == SPY_MEMORYVIEW) {
         if (!v->as.memory.view || v->as.memory.released) return 0;
     } else if (v->type != SPY_INSTANCE || !class_lookup(v->as.map.parent, "__del__")) return 0;
@@ -10095,7 +10105,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type == SPY_COROUTINE && !strcmp(name, "cr_suspended"))
         return spy_bool(c, v->as.generator.started && !v->as.generator.running && !v->as.generator.done);
     /* Origin tracking is off unless sys.set_coroutine_origin_tracking_depth enables it. */
-    if (v->type == SPY_COROUTINE && !strcmp(name, "cr_origin")) return spy_none(c);
+    if (v->type == SPY_COROUTINE && !strcmp(name, "cr_origin")) return spy_retain(v->as.generator.origin ? v->as.generator.origin : c->none);
     if ((v->type == SPY_COROUTINE && !strcmp(name, "cr_await")) ||
         (v->type == SPY_ASYNC_GENERATOR && !strcmp(name, "ag_await")) ||
         (v->type == SPY_GENERATOR && !strcmp(name, "gi_yieldfrom"))) return suspended_delegate(c, v);
@@ -11640,6 +11650,16 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         int method = bound->as.bound.method;
         if ((method == M_ASEND && argc != 1) || (method == M_ATHROW && (argc < 1 || argc > 3)) ||
             ((method == M_ANEXT || method == M_ACLOSE) && argc)) break;
+        /* The first operation keeps the finalizer hook and calls firstiter (27.5.4). */
+        if (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.hooked) {
+            self->as.generator.hooked = 1;
+            self->as.generator.origin = spy_retain(c->settings[SET_FINALIZER]);
+            if (c->settings[SET_FIRSTITER]) {
+                SPYValue *result = spy_call(c, c->settings[SET_FIRSTITER], 1, &self);
+                if (!result) return NULL;
+                spy_release(result);
+            }
+        }
         SPYValue *args = value_new(c, SPY_TUPLE);
         if (!args) return NULL;
         for (size_t i = 0; i < argc && !c->error_type[0]; i++) sequence_append(c, args, argv[i]);
@@ -14426,7 +14446,9 @@ static void weak_callbacks(SPYContext *c) {
         SPYValue *method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
         if (method) spy_release(spy_call(c, method, 0, NULL));
         else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
-        else if (self->type == SPY_ASYNC_GENERATOR) {
+        else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
+            spy_release(spy_call(c, self->as.generator.origin, 1, &self));
+        } else if (self->type == SPY_ASYNC_GENERATOR) {
             /* No host finalizer (27.5.4): drive aclose() to completion. */
             SPYValue *closing = value_new(c, SPY_ASYNC_GENERATOR_ATHROW), *step;
             if (closing) {
@@ -14696,7 +14718,23 @@ static SPYValue *lazy_registry(SPYContext *c) {
     if (!c->lazy_modules) c->lazy_modules = value_new(c, SPY_SET);
     return c->lazy_modules;
 }
+/* _setting(name[, value]) reads a setting or replaces it; None clears it. */
+static SPYValue *setting_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    static const char *const names[] = {"lazy_imports", "lazy_imports_filter", "firstiter", "finalizer",
+                                        "coroutine_origin_tracking_depth", "unraisablehook"};
+    size_t i = 0, count = sizeof(names) / sizeof(*names);
+    if (argc < 1 || argc > 2 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "_setting expects a name and a value");
+    while (i < count && strcmp(names[i], argv[0]->as.string.data)) i++;
+    if (i == count) return errorf(c, "ValueError", "no setting '%s'", argv[0]->as.string.data);
+    if (argc == 1) return spy_retain(c->settings[i] ? c->settings[i] : c->none);
+    SPYValue *old = c->settings[i];
+    c->settings[i] = argv[1]->type == SPY_NONE ? NULL : spy_retain(argv[1]);
+    spy_release(old);
+    return spy_none(c);
+}
 static int sys_natives(SPYContext *c, SPYValue *module) {
+    if (define_native(c, module, "_setting", setting_native, NULL)) return -1;
     static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits", "_write", "_flush", "_getframe", "_frame_module",
                                         "getrefcount", "getallocatedblocks"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
@@ -15138,18 +15176,37 @@ static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only
     free(name); spy_release(text); spy_release(fromlist); spy_release(root);
     return c->error_type[0] ? -1 : 0;
 }
-/* Whether __lazy_modules__ of a module-level frame names the module of an
- * import (ITEM of an import statement), by its absolute name. */
-static NO_INLINE int lazy_listed(SPYContext *c, Frame *f, Node *n, Node *item) {
+/* Whether an import is lazy (17.5): ITEM of an import statement, or a whole
+ * from-import. A lazy statement is, and so, at module level outside try,
+ * is an import the lazy-import mode or __lazy_modules__ names; the filter may
+ * then make it eager, given the importer, the absolute module name, and the
+ * from-list. Returns 1, 0, or -1 with an error set. */
+static NO_INLINE int lazy_import(SPYContext *c, Frame *f, Node *n, Node *item) {
     SPYValue *globals = module_env(c, f->env);
-    SPYValue *listed = (n->flags & F_LAZY_COMPAT) && namespace_map(f->env) == namespace_map(globals) ? name_local(globals, "__lazy_modules__") : NULL;
-    if (!listed) return 0;
+    int module_level = (n->flags & F_LAZY_COMPAT) && namespace_map(f->env) == namespace_map(globals);
+    SPYValue *listed = module_level ? name_local(globals, "__lazy_modules__") : NULL;
+    if (!(n->flags & F_LAZY) && !listed && !(module_level && c->settings[SET_LAZY_IMPORTS])) return 0;
     char *name = item ? copy_text(c, source_name(item->a), strlen(source_name(item->a))) :
         absolute_name(c, n->a ? source_name(n->a) : "", namespace_map(globals), n->op);
     SPYValue *text = name ? spy_string(c, name, strlen(name)) : NULL;
-    int result = text ? contains(c, listed, text) : -1;
-    free(name); spy_release(text);
-    return result;
+    free(name);
+    int lazy = !text ? -1 : (n->flags & F_LAZY) || (module_level && c->settings[SET_LAZY_IMPORTS]) ? 1 : contains(c, listed, text);
+    SPYValue *filter = c->settings[SET_LAZY_FILTER];
+    if (lazy > 0 && filter) {
+        SPYValue *fromlist = item ? spy_retain(c->none) : value_new(c, SPY_TUPLE);
+        for (Node *each = item ? NULL : n->args; fromlist && each && !c->error_type[0]; each = each->next) {
+            SPYValue *part = spy_string(c, source_name(each->a), strlen(source_name(each->a)));
+            if (part) sequence_append(c, fromlist, part);
+            spy_release(part);
+        }
+        SPYValue *importer = name_local(namespace_map(globals), "__name__");
+        SPYValue *args[] = {importer ? importer : c->none, text, fromlist};
+        SPYValue *verdict = fromlist && !c->error_type[0] ? spy_call(c, filter, 3, args) : NULL;
+        lazy = verdict && spy_truth(verdict) ? 1 : c->error_type[0] ? -1 : 0;
+        spy_release(verdict); spy_release(fromlist);
+    }
+    spy_release(text);
+    return lazy;
 }
 static NO_INLINE int import_star(SPYContext *c, Frame *f, SPYValue *module) {
     if (module->type != SPY_MODULE && module->type != SPY_INSTANCE && module->type != SPY_CLASS)
@@ -18589,10 +18646,9 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             break;
         }
         case N_IMPORT: case N_FROM: {
-            if (n->flags & F_LAZY) { lazy_statement(c, f, n, NULL); break; }
             if (n->kind == N_FROM) {
-                int listed = lazy_listed(c, f, n, NULL);
-                if (listed) { if (listed > 0) lazy_statement(c, f, n, NULL); break; }
+                int lazy = lazy_import(c, f, n, NULL);
+                if (lazy) { if (lazy > 0) lazy_statement(c, f, n, NULL); break; }
             }
             SPYValue *fromlist = n->kind == N_FROM ? value_new(c, SPY_TUPLE) : NULL;
             if (n->kind == N_FROM && !fromlist) break;
@@ -18611,8 +18667,8 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             if (n->kind == N_FROM && !module) break;
             for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
                 if (module && item->kind == N_STAR) { import_star(c, f, module); continue; }
-                int listed = module ? 0 : lazy_listed(c, f, n, item);
-                if (listed) { if (listed > 0) lazy_statement(c, f, n, item); continue; }
+                int lazy = module ? 0 : lazy_import(c, f, n, item);
+                if (lazy) { if (lazy > 0) lazy_statement(c, f, n, item); continue; }
                 Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
                 SPYValue *value = module ? import_from(c, module, source_name(item->a), 1) : call_import(c, f, source_name(item->a), NULL, 0);
                 if (value && !module && item->b && item->a->a) {
@@ -18642,6 +18698,25 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
 static Result execute(SPYContext *c, Frame *f, Node *body) {
     return execute_statements(c, f, body, 0);
 }
+/* cr_origin: (filename, line, function name) of the frames creating a
+ * coroutine, innermost first, as many as the origin tracking depth. */
+static SPYValue *coroutine_origin(SPYContext *c) {
+    int64_t depth = 0;
+    spy_as_int(c, c->settings[SET_ORIGIN_DEPTH], &depth);
+    SPYValue *origin = value_new(c, SPY_TUPLE);
+    for (size_t i = c->py_depth; origin && i-- && (int64_t)origin->as.seq.len < depth && !c->error_type[0];) {
+        if (intrinsic_frame(&c->frames[i])) continue;
+        SPYValue *frame = frame_object(c, i), *code = frame ? attribute(c, frame, "f_code") : NULL;
+        SPYValue *items[3] = {code ? attribute(c, code, "co_filename") : NULL, frame ? spy_int(c, (int64_t)frame_line(c, frame)) : NULL,
+                              code ? attribute(c, code, "co_name") : NULL};
+        SPYValue *entry = items[0] && items[1] && items[2] ? spy_tuple(c, 3, items) : NULL;
+        if (entry) sequence_append(c, origin, entry);
+        spy_release(entry); spy_release(frame); spy_release(code);
+        for (int k = 0; k < 3; k++) spy_release(items[k]);
+    }
+    if (c->error_type[0]) { spy_release(origin); return NULL; }
+    return origin;
+}
 static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     Node *n = function->as.function.def;
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
@@ -18655,6 +18730,9 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     if (!v->as.generator.name || !v->as.generator.qualname || !v->as.generator.code) { spy_release(v); return NULL; }
     v->as.generator.env = spy_retain(f->env);
     v->as.generator.unit = spy_retain(f->unit);
+    if (v->type == SPY_COROUTINE && c->settings[SET_ORIGIN_DEPTH] && !(v->as.generator.origin = coroutine_origin(c))) {
+        spy_release(v); return NULL;
+    }
     return v;
 }
 /* push takes ownership, including on failure. */
