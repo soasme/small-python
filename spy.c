@@ -2246,17 +2246,21 @@ static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
 /* The value name node n reads, borrowed, along the plain function
  * environments and exact dictionaries the full lookup (name_find) would
  * walk, or NULL to take that path. */
+/* The entry of name node n in env when n was last found a local of its
+ * scope at that position and env binds it there: only an environment of
+ * that scope holds the symbol's own key in its entries. */
+static ALWAYS_INLINE Entry *remembered_local(SPYValue *env, Node *n) {
+    Scope *scope = n->slot_scope;
+    SPYValue *key = scope && n->slot_kind == NAME_HERE ? scope->symbols[n->slot_symbol].key : NULL;
+    return key && env->type == V_ENV && n->slot < map_used(env) && env->as.map.items[n->slot].key == key ? &env->as.map.items[n->slot] : NULL;
+}
 static SPYValue *name_fast(SPYValue *env, Node *n) {
     SPYValue *e = env;
     Scope *scope = n->slot_scope;
-    /* What n was last found to be in the running function's scope. Only an
-     * environment of that scope binds the symbol's own key in its entries. */
     if (scope && env->type == V_ENV) {
-        SPYValue *key = n->slot_kind == NAME_HERE ? scope->symbols[n->slot_symbol].key : NULL;
-        if (key && n->slot < map_used(env) && env->as.map.items[n->slot].key == key) {
-            SPYValue *value = env->as.map.items[n->slot].value;
-            return value->type == V_UNBOUND || value->type == SPY_LAZY_IMPORT ? NULL : value;
-        }
+        Entry *local = remembered_local(env, n);
+        if (local) return local->value->type == V_UNBOUND || local->value->type == SPY_LAZY_IMPORT ? NULL : local->value;
+        /* A name last found further out than the running function's scope. */
         if (n->slot_kind == NAME_PARENT && env->as.map.scope == scope && plain_locals(env, scope)) e = env->as.map.parent;
     }
     for (; e; e = e->as.map.parent) {
@@ -2289,6 +2293,8 @@ static Entry *name_slot(SPYValue *env, Node *n) {
         Entry *entry = dict_slot(env, n);
         return entry && entry->key->type == SPY_STRING ? entry : NULL;
     }
+    Entry *local = remembered_local(env, n);
+    if (local) return local;
     SPYValue *key = NULL;
     return function_binding(env, n, 1, &key) == NAME_HERE ? function_slot(env, n, key, 1) : NULL;
 }
