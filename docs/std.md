@@ -149,8 +149,8 @@ standard library's top-level modules, including those the host lacks.
 *Host choice:* both list the host's modules; CPython's lists are those of a
 CPython build. `builtin_module_names` includes `'sys'` and `'builtins'`.
 
-*Status:* `builtin_module_names` is `('_spy', 'builtins', 'gc', 'sys')`;
-`stdlib_module_names` is not provided.
+*Status:* provided; `builtin_module_names` is `('_spy', 'builtins', 'gc',
+'sys')`, and `stdlib_module_names` is CPython 3.15.0's.
 
 #### 5.1.6 `path`, `meta_path`, `path_hooks`, `path_importer_cache`
 
@@ -173,7 +173,8 @@ they are written.
 *Host choice:* a host that writes no bytecode binds `dont_write_bytecode` to
 `True`.
 
-*Status:* `dont_write_bytecode` is `True`; `pycache_prefix` is not provided.
+*Status:* provided; `dont_write_bytecode` is `True` and `pycache_prefix` is
+`None`.
 
 ### 5.2 The handled exception
 
@@ -192,8 +193,7 @@ Returns `(type(e), e, e.__traceback__)` for the handled exception *e*, or
 `(None, None, None)`. Called with any argument it raises a `TypeError`
 exception ("sys.exc_info() takes no arguments (*n* given)").
 
-*Status:* provided; called with arguments, the message is "exc_info() takes 0
-positional arguments but *n* was given".
+*Status:* provided.
 
 ### 5.3 Execution limits
 
@@ -236,7 +236,7 @@ number, not *T*").
 *Host choice:* a host that runs one thread per context records the interval
 and does not otherwise use it.
 
-*Status:* not provided.
+*Status:* provided; the interval is recorded only.
 
 ### 5.4 Frames
 
@@ -299,8 +299,7 @@ Otherwise sets `builtins._` to `None`, writes `repr(object)` and `"\n"` to
 arguments other than one, it raises a `TypeError` exception
 ("sys.displayhook() takes exactly one argument (*n* given)").
 
-*Status:* provided; with a wrong number of arguments, the message is the
-generic one for a Python function.
+*Status:* provided.
 
 #### 5.6.2 `excepthook(exctype, value, traceback, /)`
 
@@ -335,8 +334,7 @@ otherwise it calls `pdb.set_trace(*args, **kwargs)`.
 *Host choice:* a host without a debugger or environment binds a default that
 returns `None`.
 
-*Status:* not provided; `breakpoint` calls `sys.breakpointhook` when a
-program binds one.
+*Status:* provided; the default returns `None`.
 
 ### 5.7 Exiting
 
@@ -349,10 +347,7 @@ How the program then ends is PLS-315 B.4.4. Called with more than one
 argument, it raises a `TypeError` exception ("exit expected at most 1
 argument, got *n*").
 
-*Status:* provided; `sys.exit()` and `sys.exit(None)` raise
-`SystemExit(None)`, whose `args` is `(None,)` and whose `str` is `'None'`,
-and with too many arguments the message is the generic one for a Python
-function.
+*Status:* provided.
 
 #### 5.7.2 `is_finalizing()`
 
@@ -435,10 +430,9 @@ is `None`, and its version is the language version.
 `hash_info` (`algorithm`, `hash_bits`, `seed_bits`, `cutoff`), as PLS-315
 Annex D allows.
 
-*Status:* provided, except that `int_info` and `hash_info` are not
-constructible. `int_info` reports 32-bit digits in 4 bytes, and `hash_info`
-the algorithm `'fnv'` (64-bit FNV-1a, unseeded) with 64 hash bits, 0 seed
-bits, and cutoff 0.
+*Status:* provided. `int_info` reports 32-bit digits in 4 bytes, and
+`hash_info` the algorithm `'fnv'` (64-bit FNV-1a, unseeded) with 64 hash
+bits, 0 seed bits, and cutoff 0.
 
 #### 5.9.3 Platform
 
@@ -453,8 +447,8 @@ bits, and cutoff 0.
   `version`.
 - `platlibdir`: the name of the platform library directory, such as `'lib'`.
 
-*Status:* `byteorder` and `platform` are provided; `abiflags`, `abi_info`,
-`thread_info`, and `platlibdir` are not.
+*Status:* provided, except `thread_info`: a context has no threads of its
+own to describe.
 
 #### 5.9.4 Installation and command line
 
@@ -482,8 +476,7 @@ environment; a host without them binds empty values and the flags of an
 isolated interpreter.
 
 *Status:* provided, with empty strings and lists; `flags` reports an
-isolated interpreter that writes no bytecode, but lacks the four named-only
-fields, so its `n_fields` is 18.
+isolated interpreter that writes no bytecode.
 
 ### 5.10 Text
 
@@ -507,20 +500,32 @@ the error handler for file names (`'surrogateescape'` on POSIX hosts).
 ### 5.11 Memory and object introspection
 
 - `getrefcount(object, /)`: the reference count of *object*, an `int`
-  (including the temporary reference of the argument).
-- `getsizeof(object[, default])`: the size of *object* in bytes as its
-  `__sizeof__` reports it, plus the collector's header for tracked objects;
-  when `__sizeof__` cannot report it, *default* if given. More than two
-  arguments raise a `TypeError` exception ("getsizeof() takes at most 2
-  arguments (*n* given)").
+  (including the temporary reference of the argument). Called with a number
+  of arguments other than one, it raises a `TypeError` exception
+  ("sys.getrefcount() takes exactly one argument (*n* given)").
+- `getsizeof(object, default=...)`: the size of *object* in bytes as its
+  type's `__sizeof__` reports it, plus the collector's header (16 bytes) for
+  tracked objects. If `__sizeof__` is missing, raises a `TypeError`, or
+  returns a non-`int` (a `TypeError` exception, "an integer is required"),
+  the result is *default* when given and the `TypeError` otherwise; other
+  exceptions propagate. A result above `maxsize` raises an `OverflowError`
+  exception ("Python int too large to convert to C ssize_t"), and a negative
+  one a `ValueError` exception ("__sizeof__() should return >= 0"). Both
+  parameters may be given by keyword; without *object* it raises a
+  `TypeError` exception ("getsizeof() missing required argument 'object'
+  (pos 1)"), and with more than two arguments a `TypeError` exception
+  ("getsizeof() takes at most 2 arguments (*n* given)").
 - `getallocatedblocks()`: the number of memory blocks the allocator has in
-  use.
-- `getunicodeinternedsize()`: the number of interned strings.
+  use. Called with any argument it raises a `TypeError` exception
+  ("sys.getallocatedblocks() takes no arguments (*n* given)").
+- `getunicodeinternedsize()`: the number of interned strings. Called with a
+  positional argument it raises a `TypeError` exception
+  ("getunicodeinternedsize() takes no positional arguments").
 
 *Host choice:* the sizes and counts, as PLS-315 Annex D allows for
 `__sizeof__`.
 
-*Status:* not provided.
+*Status:* provided; `getallocatedblocks()` counts the context's live values.
 
 ### 5.12 Tracing, profiling, monitoring, and auditing
 
@@ -565,9 +570,7 @@ CPython also binds `_base_executable`, `_baserepl`, `_clear_internal_caches`,
 `_stdlib_dir`. They describe or control CPython's own build and runtime; this
 document does not specify them, and a host need not bind them.
 
-*Status:* none is bound. The module does bind private helpers of its own
-(`_HostStream`, `_Implementation`, `_flush`, `_frame_module`, `_interned`,
-`_make`, `_structseq`, `_write`), contrary to clause 2.
+*Status:* none is bound.
 
 ## 6 The `gc` module
 
@@ -617,8 +620,7 @@ Setting *threshold0* to 0 disables automatic collection. Any other number of
 arguments raises a `TypeError` exception ("gc.set_threshold requires 1 to 3
 arguments").
 
-*Status:* provided, recorded only; values too large for a C `long` are
-accepted.
+*Status:* provided, recorded only.
 
 #### 6.2.3 `get_count()`
 
@@ -636,8 +638,8 @@ collected), `'uncollectable'` (the objects found uncollectable),
 `'candidates'` (the objects considered), and `'duration'` (the total time
 spent, in seconds, a `float`).
 
-*Status:* provided without the keys `'candidates'` and `'duration'`; the
-counts of every collection are in the last dictionary.
+*Status:* provided; `'candidates'` counts the context's live values, and
+`'duration'` is 0.0 where the C library lacks `timespec_get`.
 
 #### 6.3.2 `callbacks`
 
@@ -648,7 +650,7 @@ a collection and `'stop'` after it, and *info* is a `dict` with the keys
 `'duration'` (a `float`, in seconds); the last four are 0 in the `'start'`
 call.
 
-*Status:* provided; *info* lacks `'candidates'` and `'duration'`.
+*Status:* provided.
 
 ### 6.4 Object queries
 
@@ -662,9 +664,7 @@ should be integer or None, not '*T*'"), and a value of 3 or more raises a
 of available generations (3)"). A negative value returns the objects of all
 generations.
 
-*Status:* provided; a negative *generation* raises a `ValueError` exception
-("generation parameter cannot be negative"), and a non-integer gives the
-message of clause 4 for an index.
+*Status:* provided; the single generation holds every tracked object.
 
 #### 6.4.2 `get_referents(*objs)`, `get_referrers(*objs)`
 
@@ -687,16 +687,14 @@ given)").
 
 *Host choice:* which values are tracked, beyond what CPython's rule implies.
 
-*Status:* provided; static types such as `type` report `True`, and with a
-wrong number of arguments the message is the generic one for a Python
-function.
+*Status:* provided.
 
 #### 6.4.4 `is_finalized(obj, /)`
 
 Returns whether the collector has run *obj*'s finalizer (PEP 442), which
 happens at most once.
 
-*Status:* provided; always `False`.
+*Status:* provided.
 
 ### 6.5 Debugging and garbage
 
@@ -710,15 +708,16 @@ statistics), `DEBUG_COLLECTABLE` (2, print collectable objects found),
 freeing them), and `DEBUG_LEAK` (38, the last three together). Printed
 information goes to `sys.stderr`.
 
-*Status:* provided, recorded only: no statistics are printed and
-`DEBUG_SAVEALL` saves nothing.
+*Status:* provided, except that `DEBUG_STATS`, `DEBUG_COLLECTABLE`, and
+`DEBUG_UNCOLLECTABLE` print nothing.
 
 #### 6.5.2 `garbage`
 
 A `list` of objects the collector found unreachable but could not free, and,
 under `DEBUG_SAVEALL`, of every unreachable object found.
 
-*Status:* provided; always empty.
+*Status:* provided; no object is uncollectable, so it holds only what
+`DEBUG_SAVEALL` saves.
 
 ### 6.6 Freezing
 
@@ -733,16 +732,18 @@ generation. `freeze()` and `unfreeze()` return `None`.
 
 The status of Small Python's standard layer against this document, as of the
 date of this edition. "Deviates" means the name is bound but differs as its
-clause's status note states.
+clause's status note states; a host choice the document allows is not a
+deviation.
 
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
-| `sys` | `modules`, `lazy_modules`, `getrecursionlimit`, `setrecursionlimit`, `get_int_max_str_digits`, `set_int_max_str_digits`, `exception`, `_getframe`, `_getframemodulename`, `__stdin__`, `__stdout__`, `__stderr__`, `intern`, `getdefaultencoding`, `getfilesystemencoding`, `getfilesystemencodeerrors`, `version_info`, `hexversion`, `version`, `api_version`, `implementation`, `copyright`, `maxsize`, `maxunicode`, `float_info`, `float_repr_style`, `byteorder`, `platform`, `executable`, `prefix`, `exec_prefix`, `base_prefix`, `base_exec_prefix`, `argv`, `orig_argv`, `warnoptions`, `_xoptions`, `dont_write_bytecode`, `path`, `meta_path`, `path_hooks`, `path_importer_cache`, `is_finalizing` | `exc_info`, `exit`, `displayhook`, `stdout`, `stderr`, `stdin`, `flags`, `int_info`, `hash_info`, `builtin_module_names`, the private helpers of 5.15 | `get_lazy_imports`, `set_lazy_imports`, `get_lazy_imports_filter`, `set_lazy_imports_filter`, `stdlib_module_names`, `pycache_prefix`, `getswitchinterval`, `setswitchinterval`, `excepthook`, `unraisablehook`, `breakpointhook`, `get_asyncgen_hooks`, `set_asyncgen_hooks`, `get_coroutine_origin_tracking_depth`, `set_coroutine_origin_tracking_depth`, `abiflags`, `abi_info`, `thread_info`, `platlibdir`, `getrefcount`, `getsizeof`, `getallocatedblocks`, `getunicodeinternedsize`, the interfaces of 5.12 and 5.13 |
-| `gc` | `collect`, `get_referents`, `get_referrers`, `DEBUG_*` constants | `enable`, `disable`, `isenabled`, `get_threshold`, `set_threshold`, `get_count`, `get_stats`, `callbacks`, `get_objects`, `is_tracked`, `is_finalized`, `get_debug`, `set_debug`, `garbage`, `freeze`, `unfreeze`, `get_freeze_count` | none |
+| `sys` | every name of clause 5 not listed in the other columns | none | `get_lazy_imports`, `set_lazy_imports`, `get_lazy_imports_filter`, `set_lazy_imports_filter` (5.1.3, 5.1.4); `excepthook`, `unraisablehook` (5.6.2, 5.6.3); `get_asyncgen_hooks`, `set_asyncgen_hooks`, `get_coroutine_origin_tracking_depth`, `set_coroutine_origin_tracking_depth` (5.8); `thread_info` (5.9.3); the interfaces of 5.12 to 5.14 |
+| `gc` | every name of clause 6 not listed in the other columns | `get_count` (6.2.3); `set_debug` (6.5.1); `freeze`, `unfreeze`, `get_freeze_count` (6.6) | none |
 
-Some deviations follow from host choices this document allows (a single
-generation, collection only on request, no process streams). Those whose
-status notes describe a different message or result are gaps.
+The unbound names need the engine to call them or to keep new state: a
+traceback display for `excepthook`, reports of ignored exceptions for
+`unraisablehook`, the hooks of PLS-315 27.5.4, the global lazy-import mode,
+coroutine origins, and line events for tracing.
 
 ## Annex B (informative) Verification
 
@@ -751,5 +752,9 @@ pinned CPython 3.15.0 build (`make oracle`, `tests/upstream/cpython-build`),
 on 64-bit Linux, by calling the name from Python and reading the result or
 the exception. Values that depend on the build (`version`, paths,
 `builtin_module_names`, `thread_info.version`) are described rather than
-quoted. Small Python's status notes were checked the same way against the
-`spy` command.
+quoted.
+
+`tests/std.py`, part of `make test`, keeps the two in step: it runs
+`tests/std_probe.py`, which prints what this document states about each name
+Small Python binds, under the `spy` command and under the Python 3.15 running
+it, and fails unless the outputs are identical.

@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if defined(__unix__) || defined(__APPLE__)
 #define SPY_FILES 1
 #include <fcntl.h>
@@ -780,7 +781,11 @@ static void release_live_edge(SPYValue *v, void *unused) {
     (void)unused;
     if (v->marked) v->refs--;
 }
-static size_t collect_once(SPYContext *c) {
+static int sequence_append(SPYContext *, SPYValue *, SPYValue *);
+static int gc_public(SPYValue *);
+/* One collection. With save (gc.DEBUG_SAVEALL), the unreachable values left
+ * after finalization are appended to it instead of freed. */
+static size_t collect_once(SPYContext *c, SPYValue *save) {
     if (!c->live) return 0;
     Work work = { malloc(c->live * sizeof(SPYValue *)), 0 };
     if (!work.items) return 0;
@@ -797,6 +802,12 @@ static size_t collect_once(SPYContext *c) {
         if (!v->marked && finalize_later(v)) { v->refs++; v->marked = 1; work.items[work.len++] = v; }
     for (size_t i = finalizing; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     free(work.items);
+    if (save) {
+        size_t saved = 0;
+        for (SPYValue *v = c->values; v; v = v->next)
+            if (!v->marked && gc_public(v) && !sequence_append(c, save, v)) saved++;
+        return saved;
+    }
     /* Inspect edges while every dead object still exists, then free storage. */
     for (SPYValue *v = c->values; v; v = v->next) {
         if (!v->marked && v->weak) weak_dead(c, v, 1);
@@ -814,14 +825,15 @@ static size_t collect_once(SPYContext *c) {
 static void weak_callbacks(SPYContext *);
 /* A pass that finds garbage awaiting finalizers only finalizes it; collect
  * again to free what the finalizers left unreachable. */
-size_t spy_collect(SPYContext *c) {
-    size_t count = collect_once(c);
+static size_t collect(SPYContext *c, SPYValue *save) {
+    size_t count = collect_once(c, save);
     while (c->finalize_calls_len && !c->weak_running) {
         weak_callbacks(c);
-        count += collect_once(c);
+        count += collect_once(c, save);
     }
     return count;
 }
+size_t spy_collect(SPYContext *c) { return collect(c, NULL); }
 size_t spy_live_values(const SPYContext *c) { return c->live; }
 SPYType spy_type(const SPYValue *v) { return (SPYType)v->type; }
 SPYValue *spy_none(SPYContext *c) { return spy_retain(c->none); }
@@ -14458,7 +14470,7 @@ static int weak_natives(SPYContext *c, SPYValue *module) {
 }
 /* The gc module's view of the collector. Engine-internal values (environments
  * and other private tags) are never exposed. */
-enum { GC_COLLECT, GC_REFERENTS, GC_REFERRERS, GC_TRACKED, GC_OBJECTS };
+enum { GC_COLLECT, GC_REFERENTS, GC_REFERRERS, GC_TRACKED, GC_OBJECTS, GC_FINALIZED };
 static int gc_public(SPYValue *v) { return v->type <= SPY_LAST_TYPE; }
 /* CPython tracks containers; tuples and frozensets only while an item is tracked. */
 static int gc_tracked(SPYContext *c, SPYValue *v) {
@@ -14472,6 +14484,7 @@ static int gc_tracked(SPYContext *c, SPYValue *v) {
         for (size_t i = 0; i < v->as.map.len; i++) if (gc_tracked(c, map_items(v)[i].key)) return 1;
         return 0;
     case SPY_INSTANCE: return v->as.map.parent != c->object;
+    case SPY_CLASS: return !static_type(c, v);
     default: return 1;
     }
 }
@@ -14484,11 +14497,30 @@ static void gc_referent(SPYValue *v, void *data) {
 static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     if (id == GC_COLLECT) {
-        return spy_int(c, (int64_t)spy_collect(c));
+        /* _collect([save]): (collected, candidates, seconds); save is None or gc.garbage. */
+        SPYValue *save = argc ? argv[0] : NULL;
+        if (argc > 1 || (save && save->type != SPY_NONE && save->type != SPY_LIST))
+            return spy_error(c, "TypeError", "_collect expects None or a list");
+        size_t candidates = c->live;
+        double seconds = 0.0;
+#ifdef TIME_UTC
+        struct timespec start, end;
+        int timed = timespec_get(&start, TIME_UTC) == TIME_UTC;
+#endif
+        SPYValue *items[3] = {spy_int(c, (int64_t)collect(c, save && save->type == SPY_LIST ? save : NULL)),
+                              spy_int(c, (int64_t)candidates), NULL};
+#ifdef TIME_UTC
+        if (timed && timespec_get(&end, TIME_UTC) == TIME_UTC)
+            seconds = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+#endif
+        items[2] = spy_float(c, seconds);
+        SPYValue *result = items[0] && items[1] && items[2] ? spy_tuple(c, 3, items) : NULL;
+        for (int i = 0; i < 3; i++) spy_release(items[i]);
+        return result;
     }
-    if (id == GC_TRACKED) {
-        if (argc != 1) return errorf(c, "TypeError", "is_tracked() takes exactly one argument (%zu given)", argc);
-        return spy_bool(c, gc_tracked(c, argv[0]));
+    if (id == GC_TRACKED || id == GC_FINALIZED) {
+        if (argc != 1) return spy_error(c, "TypeError", "expected one argument");
+        return spy_bool(c, id == GC_TRACKED ? gc_tracked(c, argv[0]) : argv[0]->finalized);
     }
     GCWalk walk = {c, value_new(c, SPY_LIST), NULL, 0, 0};
     if (!walk.out) return NULL;
@@ -14522,13 +14554,24 @@ static int gc_natives(SPYContext *c, SPYValue *module) {
         define_native(c, module, "get_referents", gc_native, (void *)(intptr_t)GC_REFERENTS) ||
         define_native(c, module, "get_referrers", gc_native, (void *)(intptr_t)GC_REFERRERS) ||
         define_native(c, module, "_tracked", gc_native, (void *)(intptr_t)GC_TRACKED) ||
-        define_native(c, module, "_objects", gc_native, (void *)(intptr_t)GC_OBJECTS);
+        define_native(c, module, "_objects", gc_native, (void *)(intptr_t)GC_OBJECTS) ||
+        define_native(c, module, "_finalized", gc_native, (void *)(intptr_t)GC_FINALIZED);
 }
 /* The sys module's runtime state. Constant metadata is Python in modules/sys.py. */
-enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH, SYS_GETFRAME, SYS_FRAME_MODULE };
+enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH, SYS_GETFRAME, SYS_FRAME_MODULE,
+       SYS_GETREFCOUNT, SYS_GETALLOCATEDBLOCKS };
 static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits"};
     int id = (int)(intptr_t)data;
+    /* The reference count, and the live values as the allocated blocks. */
+    if (id == SYS_GETREFCOUNT) {
+        if (argc != 1) return errorf(c, "TypeError", "sys.getrefcount() takes exactly one argument (%zu given)", argc);
+        return spy_int(c, (int64_t)argv[0]->refs);
+    }
+    if (id == SYS_GETALLOCATEDBLOCKS) {
+        if (argc) return errorf(c, "TypeError", "sys.getallocatedblocks() takes no arguments (%zu given)", argc);
+        return spy_int(c, (int64_t)c->live);
+    }
     if (id == SYS_SETRECURSIONLIMIT) {
         if (argc != 1) return errorf(c, "TypeError", "sys.setrecursionlimit() takes exactly one argument (%zu given)", argc);
         SPYValue *index = index_object(c, argv[0]);
@@ -14615,7 +14658,8 @@ static SPYValue *lazy_registry(SPYContext *c) {
     return c->lazy_modules;
 }
 static int sys_natives(SPYContext *c, SPYValue *module) {
-    static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits", "_write", "_flush", "_getframe", "_frame_module"};
+    static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits", "_write", "_flush", "_getframe", "_frame_module",
+                                        "getrefcount", "getallocatedblocks"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
         if (define_native(c, module, names[i], sys_native, (void *)(intptr_t)i)) return -1;
     if (define_native(c, module, "set_int_max_str_digits", NULL, NULL)) return -1;

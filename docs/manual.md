@@ -689,21 +689,20 @@ before the host loader, needs no loader, and parses them only on first use.
 `print` and interactive display write to `sys.stdout`, and `breakpoint` calls
 `sys.breakpointhook`, once a `sys` module is loaded; until then output goes to
 the host callback, display uses its default, and `breakpoint` returns `None`
-(PLS-315 Annex B). `gc.collect()` runs the cycle collector during execution.
-`gc` reports referents and referrers and CPython's tracking rules. Its enable,
-disable, threshold, and debug settings are recorded but schedule nothing.
-`sys` keeps the runtime state natively: `modules`, `exception()`, the
-recursion limit, the integer string-conversion limit, and `stdout`/`stderr`
-streams that write to the host output callback. It also provides `exc_info`, `exit`, `intern`, `displayhook`,
-and constant metadata (`version_info`, `float_info`, `int_info`, `hash_info`,
-`flags`, `implementation`, whose name is `smallpython`). `_getframe()` returns
-frame objects for running calls (functions, generators, class bodies, and
-modules) with `f_globals`, `f_locals`, `f_back`, `f_code`, `f_lineno`,
-`f_builtins`, and `f_generator`; a function frame's `f_locals` is a
-write-through `FrameLocalsProxy` as in PEP 667. Line numbers are those of the
-executing statement. `_getframemodulename()` is provided. Tracing, profiling,
-`f_lasti`, `frame.clear()`, reference counts, audit hooks, and a separate
-error stream are not provided.
+(PLS-315 Annex B). `gc.collect()` runs the cycle collector during execution; it has one
+generation, and runs automatically only when the host asks, so `gc`'s enable
+and threshold settings are recorded. `sys` keeps the runtime state natively:
+`modules`, `exception()`, the recursion and integer string-conversion
+limits, reference counts, and `stdout`/`stderr` streams that write to the
+host output callback; `implementation.name` is `smallpython`. `_getframe()`
+returns frame objects for running calls (functions, generators, class
+bodies, and modules); a function frame's `f_locals` is a write-through
+`FrameLocalsProxy` as in PEP 667, and line numbers are those of the executing
+statement. [PLS-STD-315](std.md) specifies every name of both modules after
+CPython 3.15 and lists those not yet provided, among them `excepthook`,
+`unraisablehook`, the asynchronous-generator hooks, the lazy-import controls,
+tracing, profiling, and audit hooks; `tests/std.py` checks the rest against
+CPython.
 
 No `weakref` module is built in. The engine keeps weak references for its
 hosts: the primitives `_weak_bind(target, reference, callback)` and

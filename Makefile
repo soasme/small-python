@@ -202,6 +202,7 @@ test: all tests/api tests/oom tests/threads tests/run-spec run-cython check-intr
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
+	$(PYTHON) tests/std.py ./spy
 	CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/executable.py
 	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
 
