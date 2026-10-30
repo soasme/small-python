@@ -185,9 +185,9 @@ code at run time, which an interpreter does not need.
 
 ### Game Platforms
 
-Wire Small Python into broader gaming toolchains, such as  Godot, Unity.
-Coming without standard libs means this Python can call Godot APIs
-just like c# or GDScript do.
+Wire Small Python into game toolchains such as Godot and Unity. Because it
+comes without a standard library, Python code can call the engine's APIs
+just as C# or GDScript do.
 
 ### Bare metal
 
