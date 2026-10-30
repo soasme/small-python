@@ -399,3 +399,62 @@ sys.unraisablehook = lambda args: 1 / 0
 show("failing unraisablehook", lambda: captured(drop_failing).splitlines()[0].split("<")[0])
 sys.unraisablehook = sys.__unraisablehook__
 show("default unraisablehook", lambda: captured(drop_failing).splitlines()[0].split("<")[0])
+
+# 5.12
+calls(sys, ["sys.settrace()", "sys.settrace(f=1)", "sys.gettrace()", "sys.setprofile()", "sys.getprofile()"])
+traced = []
+
+
+def tracer(frame, event, arg):
+    traced.append((frame.f_code.co_name, event, frame.f_lineno - frame.f_code.co_firstlineno,
+                   arg[0].__name__ if event == "exception" else arg))
+    return tracer
+
+
+def traced_loop(x):
+    y = x
+    for i in range(2):
+        y += i
+    return y
+
+
+def traced_generator():
+    yield 1
+    yield 2
+
+
+def traced_raise():
+    try:
+        raise ValueError("v")
+    except ValueError:
+        pass
+    raise KeyError("k")
+
+
+sys.settrace(tracer)
+traced_loop(1)
+list(traced_generator())
+try:
+    traced_raise()
+except KeyError:
+    pass
+sys.settrace(None)
+show("settrace", lambda: traced)
+profiled = []
+sys.setprofile(lambda frame, event, arg: profiled.append((frame.f_code.co_name, event, arg)))
+traced_loop(2)
+sys.setprofile(None)
+show("setprofile", lambda: [entry for entry in profiled if not entry[1].startswith("c_")])
+
+
+def failing_tracer(frame, event, arg):
+    if event == "line":
+        raise RuntimeError("tracer")
+    return failing_tracer
+
+
+sys.settrace(failing_tracer)
+try:
+    traced_loop(3)
+except RuntimeError as error:
+    show("failing tracer", lambda: (str(error), sys.gettrace()))

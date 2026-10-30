@@ -700,11 +700,13 @@ returns frame objects for running calls (functions, generators, class
 bodies, and modules); a function frame's `f_locals` is a write-through
 `FrameLocalsProxy` as in PEP 667, and line numbers are those of the executing
 statement. [PLS-STD-315](std.md) specifies every name of both modules after
-CPython 3.15 and lists those not yet provided: tracing, profiling, monitoring, and audit
-hooks, among others. The lazy-import mode and filter, the
-asynchronous-generator hooks, coroutine origin tracking, and the hook that
-receives unraisable exceptions are settings the engine keeps and `sys`
-changes through the `_spy._setting` primitive; `sys.excepthook` and
+CPython 3.15 and lists those not provided: `sys.monitoring`, audit hooks, and the thread
+and extension-module interfaces, among others. The lazy-import mode and
+filter, the asynchronous-generator hooks, coroutine origin tracking, the
+hook that receives unraisable exceptions, and the trace and profile
+functions are settings the engine keeps and `sys` changes through the
+`_spy._setting` primitive; trace functions see the 'call', 'line',
+'return', and 'exception' events of Python frames; `sys.excepthook` and
 `sys.unraisablehook` write CPython's traceback display without source lines; `tests/std.py` checks the rest against
 CPython.
 

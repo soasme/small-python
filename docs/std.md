@@ -583,11 +583,19 @@ version 3.15.
 *Host choice:* whether to provide them. A host that provides one provides it
 as CPython specifies.
 
-*Status:* `call_tracing` and `is_remote_debug_enabled` are provided; the
-latter returns `False`. The others are not: the engine reports no execution
-events to trace, profile, monitor, or audit, and has no stack trampolines or
-remote debugger. Audit hooks that the engine never called would promise a
-watch it does not keep.
+*Status:* `settrace`, `gettrace`, `setprofile`, `getprofile`,
+`call_tracing`, and `is_remote_debug_enabled` are provided; the last returns
+`False`. The engine delivers the 'call', 'line', 'return', and 'exception'
+events of Python frames, with a local trace function per frame (`f_trace`,
+`f_trace_lines`), as CPython does; it deviates in that builtins, the standard
+layer's own functions among them, raise no 'c_call', 'c_return', or
+'c_exception' events, no 'opcode' events are raised, a trace function cannot
+jump by assigning `f_lineno`, and a call such as `list(`*genexpr*`)`, which
+CPython 3.15 runs inline, gives no line events in the caller between the
+generator's steps. The others are not provided: `monitoring` needs code
+objects with bytecode, the engine raises no audit events (hooks it never
+called would promise a watch it does not keep), and there are no stack
+trampolines or remote debugger.
 
 ### 5.13 Dynamic loading
 
@@ -785,14 +793,15 @@ deviation.
 
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
-| `sys` | every name of clause 5 not listed in the other columns | none | the interfaces of 5.12 other than `call_tracing` and `is_remote_debug_enabled`; those of 5.13 and 5.14 |
+| `sys` | every name of clause 5 not listed in the other columns | `settrace`, `setprofile` (5.12) | `monitoring`, `addaudithook`, `audit`, the stack trampolines, and `remote_exec` (5.12); the names of 5.13 and 5.14 |
 | `gc` | every name of clause 6 | none | none |
 
-The engine keeps the state behind 5.1.3, 5.1.4, 5.6.3, and 5.8 as settings
-of the `_spy` primitives, which the core consults through the host hooks of
-PLS-315 B.1.4, B.4.3, and B.5.1 and the origin tracking of 27.4.4; without
-the standard layer they keep their initial values. The unbound names of 5.12
-need the engine to report execution events.
+The engine keeps the state behind 5.1.3, 5.1.4, 5.6.3, 5.8, and 5.12 as
+settings of the `_spy` primitives, which the core consults through the host
+hooks of PLS-315 B.1.4, B.4.3, and B.5.1, the origin tracking of 27.4.4, and
+the trace events of its frames; without the standard layer they keep their
+initial values. The names of 5.13 and 5.14 concern extension modules and
+threads, which a context does not have.
 
 ## Annex B (informative) Verification
 

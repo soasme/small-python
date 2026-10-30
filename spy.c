@@ -200,7 +200,8 @@ struct SPYContext {
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     /* Settings a host module changes through _spy._setting; owned, NULL for None. */
-    SPYValue *settings[6];
+    SPYValue *settings[8];
+    int tracing; /* A trace or profile function is running: no events reach either. */
     int compile_flags; /* compile()'s future flags while it parses. */
     int optimize; /* The level the parser applies (spy_set_optimize, compile(optimize=)):
                    * 1 drops asserts and makes __debug__ False, 2 also drops docstrings. */
@@ -258,8 +259,9 @@ struct SPYContext {
     /* The running Python frames, innermost last; py_depth entries. env and
      * owner are borrowed from the executing call, object is the frame
      * object once sys._getframe has materialized it, and serial tells
-     * frames apart over the context's lifetime. */
-    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial; } *frames;
+     * frames apart over the context's lifetime; traced is the line a trace
+     * function last saw, 0 when the next line is new to it. */
+    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial, traced; } *frames;
     size_t frames_cap, frame_serial;
     /* The pending error's traceback, innermost entry last, and the serial
      * of the frame its head entry belongs to (0 when none). */
@@ -284,9 +286,10 @@ struct SPYContext {
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
- * coroutine records as cr_origin, and the hook that receives unraisable
- * exceptions (18.1.4) as (type, value, traceback, message, object). */
-enum { SET_LAZY_IMPORTS, SET_LAZY_FILTER, SET_FIRSTITER, SET_FINALIZER, SET_ORIGIN_DEPTH, SET_UNRAISABLE };
+ * coroutine records as cr_origin, the hook that receives unraisable
+ * exceptions (18.1.4) as (type, value, traceback, message, object), and the
+ * trace and profile functions of sys.settrace and sys.setprofile. */
+enum { SET_LAZY_IMPORTS, SET_LAZY_FILTER, SET_FIRSTITER, SET_FINALIZER, SET_ORIGIN_DEPTH, SET_UNRAISABLE, SET_TRACE, SET_PROFILE };
 static SPYValue *special_method(SPYContext *, SPYValue *, const char *);
 static SPYValue *special_method_maybe(SPYContext *, SPYValue *, const char *);
 static SPYValue *intrinsic(SPYContext *, const char *);
@@ -392,6 +395,10 @@ static int deeper(SPYContext *c, const char *where) {
     errorf(c, "RecursionError", "Stack overflow (used %zu kB)%s", used / 1024, where);
     return -1;
 }
+static int trace_call(SPYContext *);
+static void leave_frame(SPYContext *, SPYValue *);
+enum { TRACE_CALL, TRACE_LINE, TRACE_RETURN, TRACE_EXCEPTION };
+static int trace_event(SPYContext *, int, SPYValue *);
 /* A Python frame, counted against sys.getrecursionlimit() as CPython's
  * _Py_CheckRecursiveCallPy. */
 static void *allocate(SPYContext *, size_t);
@@ -403,7 +410,8 @@ static int enter_frame(SPYContext *c, SPYValue *env, SPYValue *owner) {
         if (!frames) { errorf(c, "MemoryError", "out of memory"); return -1; }
         c->frames = frames; c->frames_cap = cap;
     }
-    c->frames[c->py_depth++] = (struct ActiveFrame){env, owner, NULL, c->line, ++c->frame_serial};
+    c->frames[c->py_depth++] = (struct ActiveFrame){env, owner, NULL, c->line, ++c->frame_serial, 0};
+    if ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) { leave_frame(c, NULL); return -1; }
     return 0;
 }
 static SPYValue *frame_object(SPYContext *, size_t);
@@ -439,9 +447,12 @@ static void traceback_here(SPYContext *c) {
     entry->as.traceback.line = top->line;
     c->traceback = entry; c->traceback_frame = top->serial;
 }
+static void trace_leave(SPYContext *, SPYValue *);
 /* A finished frame object keeps its last line and, like CPython's
- * take_ownership, its caller's frame object. */
-static void leave_frame(SPYContext *c) {
+ * take_ownership, its caller's frame object. value is what the frame returns
+ * or yields, for a trace function; NULL when it raises. */
+static void leave_frame(SPYContext *c, SPYValue *value) {
+    if (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) trace_leave(c, value);
     traceback_here(c);
     struct ActiveFrame *top = &c->frames[--c->py_depth];
     if (c->error_type[0] && c->py_depth && intrinsic_frame(top) && !intrinsic_frame(&c->frames[c->py_depth - 1])) {
@@ -13010,7 +13021,18 @@ static int tick_full(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
-    if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
+    if (c->py_depth) {
+        /* A new line is a trace function's 'line' event; a generator's own
+         * definition node only stands in for instructions without one. */
+        struct ActiveFrame *top = &c->frames[c->py_depth - 1];
+        top->line = n->line;
+        int stand_in = (top->owner->type == SPY_GENERATOR || top->owner->type == SPY_COROUTINE ||
+                        top->owner->type == SPY_ASYNC_GENERATOR) && top->owner->as.generator.node == n;
+        if (c->settings[SET_TRACE] && n->line != top->traced && !stand_in) {
+            top->traced = n->line;
+            if (trace_event(c, TRACE_LINE, NULL)) return -1;
+        }
+    }
     if (c->filename_from != f->unit->as.unit.filename) {
         snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
         c->filename_from = f->unit->as.unit.filename;
@@ -13022,7 +13044,7 @@ static int tick_full(SPYContext *c, Frame *f, Node *n) {
 }
 /* Whether tick has nothing to do but record the line. */
 static int quiet(SPYContext *c, Frame *f) {
-    return !c->error_type[0] && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit &&
+    return !c->error_type[0] && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit && !c->settings[SET_TRACE] &&
         c->filename_from == f->unit->as.unit.filename;
 }
 static void relocate(SPYContext *, Node *);
@@ -13652,7 +13674,9 @@ static SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
 }
 static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     /* A literal made once, or a name found along the fast path, cannot
-     * fail, so it skips the step bookkeeping. */
+     * fail, so it skips the step bookkeeping, unless a trace function
+     * watches for its line. */
+    if (c->settings[SET_TRACE] && tick(c, f, n)) return NULL;
     if (n->constant) return c->error_type[0] ? NULL : spy_retain(n->constant);
     if (n->kind == N_NAME && !c->error_type[0]) {
         SPYValue *value = name_fast(f->env, n);
@@ -14244,7 +14268,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
                     SPYValue *caller = c->caller_env;
                     c->caller_env = c->eval_env;
                     Result r = execute(c, &frame, def->b);
-                    c->caller_env = caller; leave_frame(c);
+                    c->caller_env = caller; leave_frame(c, r.flow == FLOW_RETURN ? r.value : r.flow == FLOW_NORMAL ? c->none : NULL);
                     if (r.flow == FLOW_RETURN) result = r.value;
                     else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
                 }
@@ -14752,7 +14776,7 @@ static SPYValue *lazy_registry(SPYContext *c) {
 static SPYValue *setting_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)data;
     static const char *const names[] = {"lazy_imports", "lazy_imports_filter", "firstiter", "finalizer",
-                                        "coroutine_origin_tracking_depth", "unraisablehook"};
+                                        "coroutine_origin_tracking_depth", "unraisablehook", "trace", "profile"};
     size_t i = 0, count = sizeof(names) / sizeof(*names);
     if (argc < 1 || argc > 2 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "_setting expects a name and a value");
     while (i < count && strcmp(names[i], argv[0]->as.string.data)) i++;
@@ -16214,7 +16238,7 @@ static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPY
     Frame frame = {env, unit, 0};
     if (enter_frame(c, env, unit)) return -1;
     Result r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
-    leave_frame(c);
+    leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     spy_release(r.value);
     if (r.flow != FLOW_NORMAL || c->error_type[0]) return -1;
     SPYValue *attributes = static_attributes(c, unit, n->scope);
@@ -16634,8 +16658,10 @@ static void attribute_details(SPYContext *c, SPYValue *error, SPYValue *object, 
     if (text && !set_hidden_field(c, error, "name", text)) set_hidden_field(c, error, "obj", object);
     spy_release(text);
 }
+static void trace_exception(SPYContext *);
 static ErrorState take_error(SPYContext *c) {
     ErrorState state;
+    trace_exception(c);
     traceback_here(c);
     SPYValue *traceback = c->traceback;
     c->traceback = NULL;
@@ -16684,6 +16710,88 @@ static void restore_error(SPYContext *c, ErrorState *state) {
         c->traceback = spy_retain(traceback);
         c->traceback_frame = c->py_depth ? c->frames[c->py_depth - 1].serial : 0;
     }
+}
+/* Deliver an event of the innermost frame to sys.setprofile's function,
+ * which sees calls and returns, and to sys.settrace's: the global function
+ * sees 'call' and its result becomes the frame's local trace function, which
+ * sees the other events and may replace itself. Frames of builtins written
+ * in Python (the intrinsics and the standard layer) are not traced, as
+ * CPython's C functions are not. A failing function is removed and its
+ * exception propagates. Returns 0, or -1 with an error set. */
+static int trace_event(SPYContext *c, int event, SPYValue *arg) {
+    static const char *const names[] = {"call", "line", "return", "exception"};
+    if (c->tracing || !c->py_depth) return 0;
+    struct ActiveFrame *top = &c->frames[c->py_depth - 1];
+    SPYValue *unit = frame_unit(top);
+    if (intrinsic_frame(top) || (unit && unit->as.unit.filename && !strncmp(unit->as.unit.filename, "<frozen ", 8))) return 0;
+    SPYValue *profile = event == TRACE_CALL || event == TRACE_RETURN ? c->settings[SET_PROFILE] : NULL;
+    SPYValue *trace = !c->settings[SET_TRACE] ? NULL : event == TRACE_CALL ? c->settings[SET_TRACE] :
+        top->object && !(event == TRACE_LINE && top->object->as.frame.trace_lines_off) ? top->object->as.frame.trace : NULL;
+    if (!profile && !trace) return 0;
+    SPYValue *frame = frame_object(c, c->py_depth - 1), *owner = top->owner;
+    if (!frame) return -1;
+    /* A generator's frame, and so its local trace function, lasts across resumptions. */
+    if ((owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) && !owner->as.generator.frame)
+        owner->as.generator.frame = spy_retain(frame);
+    c->tracing = 1;
+    int pending = c->error_type[0] != 0;
+    ErrorState saved = {.value = NULL};
+    if (pending) saved = take_error(c);
+    SPYValue *details = NULL;
+    if (event == TRACE_EXCEPTION && saved.value) {
+        SPYValue *traceback = attribute(c, saved.value, "__traceback__");
+        SPYValue *items[3] = {value_class(c, saved.value), saved.value, traceback ? traceback : c->none};
+        details = traceback ? spy_tuple(c, 3, items) : NULL;
+        spy_release(traceback);
+    }
+    SPYValue *name = spy_string(c, names[event], strlen(names[event]));
+    SPYValue *args[3] = {frame, name, details ? details : arg ? arg : c->none};
+    int failed = !name || (event == TRACE_EXCEPTION && !details);
+    if (!failed && profile) {
+        SPYValue *result = spy_call(c, profile, 3, args);
+        if (!result) { failed = 1; spy_release(c->settings[SET_PROFILE]); c->settings[SET_PROFILE] = NULL; }
+        spy_release(result);
+    }
+    if (!failed && trace) {
+        spy_retain(trace);
+        SPYValue *result = spy_call(c, trace, 3, args);
+        if (!result) {
+            failed = 1;
+            spy_release(c->settings[SET_TRACE]); c->settings[SET_TRACE] = NULL;
+            spy_release(frame->as.frame.trace); frame->as.frame.trace = NULL;
+        } else if (result->type != SPY_NONE) { spy_release(frame->as.frame.trace); frame->as.frame.trace = result; }
+        else spy_release(result);
+        spy_release(trace);
+    }
+    c->tracing = 0;
+    spy_release(name); spy_release(details); spy_release(frame);
+    if (pending && !failed) restore_error(c, &saved);
+    else spy_release(saved.value);
+    return failed ? -1 : 0;
+}
+/* The 'call' event of a frame just entered, at its definition line. */
+static int trace_call(SPYContext *c) {
+    struct ActiveFrame *top = &c->frames[c->py_depth - 1];
+    SPYValue *owner = top->owner;
+    if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->line;
+    else if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) {
+        /* A resumed generator continues the line where it was suspended. */
+        top->line = owner->as.generator.line ? owner->as.generator.line : owner->as.generator.node ? owner->as.generator.node->line : top->line;
+        if (owner->as.generator.line) top->traced = top->line;
+    }
+    return trace_event(c, TRACE_CALL, NULL);
+}
+/* An exception passing through the innermost frame is its 'exception'
+ * event, once per frame, as its traceback gains the frame's entry. */
+static void trace_exception(SPYContext *c) {
+    if (c->error_type[0] && c->settings[SET_TRACE] && !c->tracing && c->py_depth &&
+        c->traceback_frame != c->frames[c->py_depth - 1].serial)
+        trace_event(c, TRACE_EXCEPTION, NULL);
+}
+/* The events of a frame being left: its exception, then its return. */
+static void trace_leave(SPYContext *c, SPYValue *value) {
+    trace_exception(c);
+    trace_event(c, TRACE_RETURN, c->error_type[0] ? NULL : value);
 }
 /* Create the exception for an error raised while c->handled is still the
  * exception being handled, so that it becomes the new one's __context__. */
@@ -17731,7 +17839,10 @@ static NO_INLINE Result execute_try(SPYContext *c, Frame *f, Node *n) {
         int caught = 0;
         c->handled = spy_retain(error.value);
         for (Node *h = n->args; h && !c->error_type[0]; h = h->next) {
-            if (h->a) relocate(c, h->a); /* The frame is at the handler even when its type is found without a step. */
+            /* The frame is at the handler even when its type is found without
+             * a step; a trace function sees the handler's line. */
+            if (h->a && c->settings[SET_TRACE] && tick(c, f, h->a)) break;
+            if (h->a) relocate(c, h->a);
             SPYValue *type = h->a ? eval(c, f, h->a) : NULL;
             int match = !h->a ? 1 : type && error.value ? exception_matches(c, error.value, type) : -1;
             spy_release(type);
@@ -17909,7 +18020,8 @@ static Result execute_module(SPYContext *c, Frame *f) {
     if (enter_frame(c, f->env, f->unit)) return (Result){FLOW_ERROR, NULL};
     Result r = setup_annotations(c, f, f->unit->as.unit.setup_annotations) || start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
         (Result){FLOW_ERROR, NULL} : execute(c, f, f->unit->as.unit.body);
-    leave_frame(c);
+    leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
+    if (r.flow != FLOW_ERROR && c->error_type[0]) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
     return r;
 }
 /* CPython's argument-count errors for builtins, by their argument parser:
@@ -18654,6 +18766,8 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             if (n->kind == N_FOR && !iterable) break;
             int broke = 0;
             for (size_t i = 0; !c->error_type[0]; i++) {
+                /* Each pass jumps back: a trace function sees the loop's line again. */
+                if (i && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
                 if (tick(c, f, n)) break;
                 if (iterable) {
                     SPYValue *item = iter_at(c, iterable, i);
@@ -19008,6 +19122,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
     /* A BC_SHORT that jumps knows its value's truth; the test it lands on
      * uses that rather than calling __bool__ again, as CPython's jumps do. */
     int known = 0;
+    size_t last = m->pc;
     for (;;) {
         int truth_known = known;
         known = 0;
@@ -19016,6 +19131,9 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (!machine_unwind(c, m, &f, &flow)) return flow;
             if (c->error_type[0]) continue;
         }
+        /* A backward jump shows a trace function its line again. */
+        if (m->pc < last && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
+        last = m->pc;
         Instruction *ins = &m->code->items[m->pc++];
         Node *n = ins->node ? ins->node : generator->as.generator.node;
         size_t line = !ins->node && c->py_depth ? c->frames[c->py_depth - 1].line : 0;
@@ -19348,7 +19466,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
         size_t line = c->line;
         if (enter_frame(c, g->as.generator.env, g)) return NULL;
         c->frames[c->py_depth - 1].line = g->as.generator.node ? g->as.generator.node->line : line;
-        raise_value(c, thrown); leave_frame(c); c->line = line;
+        raise_value(c, thrown); leave_frame(c, NULL); c->line = line;
         generator_close(g); return NULL;
     }
     g->as.generator.started = 1;
@@ -19365,7 +19483,11 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     spy_release(m->handled); m->handled = c->handled; c->handled = outer;
     c->inherited_exception = inherited;
     g->as.generator.line = c->frames[c->py_depth - 1].line;
-    g->as.generator.running = 0; c->depth--; leave_frame(c);
+    g->as.generator.running = 0; c->depth--;
+    leave_frame(c, result.flow == FLOW_YIELD || result.flow == FLOW_RETURN ? result.value ? result.value : c->none : NULL);
+    if (c->error_type[0] && result.flow != FLOW_ERROR && result.flow != FLOW_HALT) {
+        spy_release(result.value); result = (Result){FLOW_ERROR, NULL};
+    }
     if (result.flow == FLOW_YIELD) return result.value;
     if (result.flow == FLOW_HALT) return NULL;
     g->as.generator.returned = result.flow == FLOW_RETURN;

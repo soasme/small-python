@@ -9,8 +9,8 @@ host output, and the engine settings behind the lazy-import, asynchronous
 generator, coroutine origin, and unraisable hooks) is native; the remaining
 names are constant metadata describing this engine. _getframe() returns the
 running frames; excepthook and unraisablehook write CPython's traceback
-display without source lines. Tracing, profiling, monitoring, and audit hooks
-are not provided.
+display without source lines; trace functions see the events of Python
+frames. Monitoring and audit hooks are not provided.
 """
 
 from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,
@@ -249,6 +249,43 @@ def getfilesystemencoding():
 def getfilesystemencodeerrors():
     """Return the error mode used Unicode to OS filename conversion."""
     return "surrogateescape"
+
+
+def _tracing(setting, c_function):
+    # Functions over the trace and profile settings (_spy._setting).
+    @c_function(1)
+    def settrace(function):
+        """Set the global debug tracing function.
+
+It will be called on each function call.  See the debugger chapter
+in the library manual."""
+        setting("trace", function)
+
+    @c_function(0)
+    def gettrace():
+        """Return the global debug tracing function set with sys.settrace.
+
+See the debugger chapter in the library manual."""
+        return setting("trace")
+
+    @c_function(1)
+    def setprofile(function):
+        """Set the profiling function.
+
+It will be called on each function call and return.  See the profiler
+chapter in the library manual."""
+        setting("profile", function)
+
+    @c_function(0)
+    def getprofile():
+        """Return the profiling function set with sys.setprofile.
+
+See the profiler chapter in the library manual."""
+        return setting("profile")
+    return settrace, gettrace, setprofile, getprofile
+
+
+settrace, gettrace, setprofile, getprofile = _tracing(_setting, _c_function)
 
 
 def call_tracing(*args, **kwargs):
@@ -747,7 +784,7 @@ for _function in (_getframemodulename, intern, getunicodeinternedsize, getswitch
                   getfilesystemencodeerrors, is_finalizing, is_remote_debug_enabled, get_lazy_imports,
                   get_lazy_imports_filter, get_asyncgen_hooks, get_coroutine_origin_tracking_depth, set_lazy_imports,
                   set_lazy_imports_filter, set_asyncgen_hooks, set_coroutine_origin_tracking_depth, call_tracing,
-                  excepthook, unraisablehook):
+                  excepthook, unraisablehook, settrace, gettrace, setprofile, getprofile):
     _function.__qualname__ = _function.__name__
-del _function, _c_function, _one_argument, _settings, _traceback_display, _reporting, _report_unraisable, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
+del _function, _c_function, _one_argument, _settings, _tracing, _traceback_display, _reporting, _report_unraisable, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
 del _write, _flush, _frame_module, _tracked, _setting
