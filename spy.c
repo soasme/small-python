@@ -79,7 +79,7 @@ enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 typedef struct { const char *name; unsigned flags; size_t line; Node *declared; int64_t hash; SPYValue *key; } Symbol;
 /* order: the symbols of a plain function environment's entries, in the
  * order the entries keep them, once its first environment is made. */
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len; int kind, tries; const char *within; };
+struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional; int kind, tries; const char *within; };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
@@ -13785,12 +13785,16 @@ static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
 }
 /* The symbols a plain function environment of scope binds in its own
  * entries, in co_varnames order: positional and keyword-only parameters,
- * *args, **kwargs, then the other locals as the scope found them. */
+ * *args, **kwargs, then the other locals as the scope found them; and the
+ * number of parameters when all are positional, else SIZE_MAX. */
 static int scope_order(SPYContext *c, Scope *scope) {
     if (scope->order) return 0;
     size_t *order = allocate(c, (scope->len + 1) * sizeof(*order)), len = 0;
     if (!order) return -1;
     Node *params = scope->kind == S_FUNCTION ? scope->owner->args : NULL;
+    scope->positional = 0;
+    for (Node *arg = params; arg; arg = arg->next)
+        scope->positional = arg->op == P_POSITIONAL || arg->op == P_POSONLY ? scope->positional + 1 : SIZE_MAX;
     for (int pass = 0; pass < 3; pass++)
         for (Node *arg = params; arg; arg = arg->next) {
             Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? node_symbol(scope, arg) : NULL;
@@ -13807,8 +13811,9 @@ static int scope_order(SPYContext *c, Scope *scope) {
     scope->order = order; scope->order_len = len;
     return 0;
 }
-/* Give a new plain function environment its scope's locals, unbound. */
-static int open_locals(SPYContext *c, SPYValue *env) {
+/* Give a new plain function environment its scope's locals: the first
+ * argc bound to argv, which are its first parameters, the rest unbound. */
+static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *const *argv) {
     Scope *scope = env->as.map.scope;
     if (scope_order(c, scope)) return -1;
     size_t len = scope->order_len, cap = len > 8 ? len : 8;
@@ -13818,13 +13823,13 @@ static int open_locals(SPYContext *c, SPYValue *env) {
     else if (!(items = allocate(c, cap * sizeof(Entry)))) return -1;
     for (size_t i = 0; i < len; i++) {
         Symbol *symbol = &scope->symbols[scope->order[i]];
-        items[i] = (Entry){spy_retain(symbol->key), spy_retain(c->unbound), symbol->hash};
+        items[i] = (Entry){spy_retain(symbol->key), spy_retain(i < argc ? argv[i] : c->unbound), symbol->hash};
     }
     env->as.map.items = items; env->as.map.cap = cap; env->as.map.len = len;
     return 0;
 }
 static int declare_locals(SPYContext *c, SPYValue *env) {
-    if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env);
+    if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env, 0, NULL);
     Scope *scope = env->as.map.scope;
     for (size_t i = 0; i < scope->len; i++)
         if ((scope->symbols[i].flags & S_LOCAL) && declare_name(c, env, scope->symbols[i].name)) return -1;
@@ -14184,16 +14189,6 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         Node *arg = params;
         for (; arg && (arg->op == P_POSITIONAL || arg->op == P_POSONLY) && !arg->local; arg = arg->next) count++;
         if (!arg && count == argc) {
-            /* Opened locals start with the positional parameters, in order. */
-            if (!fn->as.function.signature && fresh_locals(env) && env->as.map.len == env->as.map.scope->order_len) {
-                for (count = 0; count < argc; count++) {
-                    Entry *entry = &env->as.map.items[count];
-                    SPYValue *old = entry->value;
-                    entry->value = spy_retain(argv[count]);
-                    spy_release(old);
-                }
-                return 0;
-            }
             for (arg = params, count = 0; arg; arg = arg->next, count++)
                 if (name_set(c, env, arg->text, argv[count])) return -1;
             return 0;
@@ -14315,8 +14310,11 @@ static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     env->as.map.unit = spy_retain(fn->as.function.unit);
     /* A replace()d code's parameters bind under its names and then take
      * the body's: the body's locals are declared after them. */
+    Scope *scope = def->scope;
     int failed = fn->as.function.signature ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
-        declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
+        /* The common call passes exactly the parameters, by position. */
+        (!keywords || !keywords->as.map.len) && fresh_locals(env) && !scope_order(c, scope) && scope->positional == argc ?
+        open_locals(c, env, argc, argv) : declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
     Frame frame = {env, fn->as.function.unit, 0};
     if (!failed && def->code) result = new_generator(c, &frame, fn);
     else if (!failed && !enter_frame(c, env, fn)) {

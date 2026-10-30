@@ -70,6 +70,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A name keeps its local's key](#a-name-keeps-its-locals-key) | -2.3% (nbody) to 0% |
 | [The stack check and the right operand are inline](#the-stack-check-and-the-right-operand-are-inline) | -1.0% to -3.6% |
 | [Numbers and strings take half an allocation](#numbers-and-strings-take-half-an-allocation) | dicts -12%, sort -14% (time) |
+| [A call opens its locals with its arguments](#a-call-opens-its-locals-with-its-arguments) | -3.9% (fib), -3.3% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -320,6 +321,20 @@ allocations are kept in two spare lists, one per size.
 
 The instructions move by -3.7% (dicts) to +2.7% (nbody), the cost of
 choosing a spare list on every allocation and release.
+
+### A call opens its locals with its arguments
+
+A call that passes exactly a function's parameters by position opened
+its locals unbound and then replaced the first ones with the arguments,
+counting the positional parameters again on every call. The scope now
+counts them once, with the locals' order, and such a call fills the
+parameters' entries with the arguments as it opens the environment.
+Wall time: classes -4.0%, fib -2.6%.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| fib | 100.5 M | 96.6 M | -3.9% |
+| classes | 303.4 M | 293.4 M | -3.3% |
 
 ## Tried and left out
 
