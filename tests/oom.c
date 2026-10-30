@@ -19,6 +19,7 @@
 void *oom_malloc(size_t);
 void *oom_calloc(size_t, size_t);
 void *oom_realloc(void *, size_t);
+void *oom_aligned_alloc(size_t, size_t);
 void oom_free(void *);
 char *oom_realpath(const char *, char *);
 
@@ -32,6 +33,7 @@ char *oom_realpath(const char *, char *);
 #define malloc oom_malloc
 #define calloc oom_calloc
 #define realloc oom_realloc
+#define aligned_alloc oom_aligned_alloc
 #define free oom_free
 #define realpath oom_realpath
 #include "../spy.c"
@@ -39,6 +41,7 @@ char *oom_realpath(const char *, char *);
 #undef malloc
 #undef calloc
 #undef realloc
+#undef aligned_alloc
 #undef free
 #undef realpath
 
@@ -64,6 +67,12 @@ void *oom_realloc(void *p, size_t n) {
     if (!p) return oom_malloc(n);
     if (fails()) return NULL;
     return realloc(p, n ? n : 1);
+}
+void *oom_aligned_alloc(size_t alignment, size_t n) {
+    if (fails()) return NULL;
+    void *p = aligned_alloc(alignment, n);
+    if (p) live++;
+    return p;
 }
 void oom_free(void *p) {
     if (!p) return;

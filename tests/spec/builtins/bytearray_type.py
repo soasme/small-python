@@ -85,3 +85,10 @@ assert_eq(view.tobytes(), b"zyy")
 view.release()
 b.append(33)
 assert_eq(b, bytearray(b"zyy!"))
+
+# A slice is a bytearray of its own that grows like any other.
+for s in (bytearray(b"abcdef")[::2], bytearray(b"abcdef")[1:3]):
+    t = bytes(s)
+    s += b"x" * 40
+    s.extend(b"yz")
+    assert_eq(s, bytearray(t + b"x" * 40 + b"yz"))

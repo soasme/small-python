@@ -105,6 +105,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [`str` of an int writes its digits](#str-of-an-int-writes-its-digits) | -8.9% (dicts), -2.2% (strings) |
 | [Short text lives in its value](#short-text-lives-in-its-value) | -4.6% (bigint), -3.0% (strings), -2.0% (dicts) |
 | [A call without locals keeps its environment](#a-call-without-locals-keeps-its-environment) | `f()`: -12%; fib +0.3% |
+| [Values live in pools](#values-live-in-pools) | -15.7% (sort), -13.0% (dicts), -5.1% (bigint), -1.7% (fib) |
 
 ### Releasing a number or string frees it at once
 
@@ -652,6 +653,23 @@ scope's. One without locals holds nothing of its scope, so it is kept
 too, and a call to a function with neither parameters nor locals no
 longer allocates and frees a whole value. Instructions: a loop of
 `f()` -12% per call; fib +0.3%, the rest unchanged.
+
+### Values live in pools
+
+A released value waited in a spare list of 64 per size; past that, and
+for every value a growing program keeps, the system allocator served
+it, about 350 instructions per `l.append(i)` of a new int. Values are
+now carved from 16 KiB pools, each of one size class and aligned to its
+size so that a value's address names its pool, as CPython's pymalloc
+does. A pool keeps its released values in its own free list and goes
+back to the system once all are released, unless it is the last of its
+size with room. The 64 spares stay in front of the pools, as an
+allocator's thread cache: the steady churn of temporary numbers never
+reaches a pool. The size class comes from a table instead of a branch
+and a mask. Instructions: sort -15.7%, dicts -13.0%, bigint -5.1%, fib
+-1.7%, classes -1.1%, generators and loop -0.6%, nbody -0.4%, strings
++0.4%; peak memory of the sort program 83.4 to 80.5 MiB, the others
+unchanged.
 
 ## Tried and left out
 
