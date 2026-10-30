@@ -190,8 +190,11 @@ make sanitize
 
 `make test` builds everything, runs the C API tests (ownership, context
 isolation, error recovery, reference cycles, deep graph destruction, an
-execution budget), the host file and standalone-executable checks, and the
-language specification suite.
+execution budget), the allocation-failure test, the host file and
+standalone-executable checks, and the language specification suite.
+`tests/oom` runs a set of programs once per allocation each makes, with
+exactly that allocation failing, as SQLite's tests do; every run must end in
+a result or an exception and free everything it allocated.
 
 Conformance to PLS-315 rests on two kinds of evidence, and no other:
 
@@ -250,8 +253,8 @@ runs is leak-checked in every other program.
 
 `make fuzz` runs the libFuzzer targets ([fuzz/README](../fuzz/README)) for
 `FUZZ_SECONDS` each, seeded from the examples and the specification tests:
-the engine through `exec` and through `compile`, and `spyc`'s own bundling
-code. `make fuzz-replay` then runs every input the fuzzers kept under
+the engine through `exec`, through `compile`, and with one allocation
+failing, and `spyc`'s own bundling code. `make fuzz-replay` then runs every input the fuzzers kept under
 MemorySanitizer.
 
 These tools report the memory errors that the tests and fuzzed inputs reach;

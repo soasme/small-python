@@ -524,135 +524,138 @@ static void scope_edges(Scope *scope, Visit visit, void *data) {
         if (scope->symbols[i].key) visit(scope->symbols[i].key, data);
 }
 static void edges(SPYValue *v, Visit visit, void *data) {
+    /* A value released half-built, after a failed allocation, may hold NULL. */
+#define VISIT(e) do { SPYValue *e_ = (e); if (e_) visit(e_, data); } while (0)
     size_t i;
     switch (v->type) {
     case SPY_CODE:
-        if (v->as.unit.owner) visit(v->as.unit.owner, data);
-        if (v->as.unit.replaced) visit(v->as.unit.replaced, data);
+        VISIT(v->as.unit.owner);
+        VISIT(v->as.unit.replaced);
         for (Node *node = v->as.unit.nodes; node; node = node->allocated) {
-            if (node->code_value) visit(node->code_value, data);
-            if (node->constant) visit(node->constant, data);
-            if (node->global_key) visit(node->global_key, data);
+            VISIT(node->code_value);
+            VISIT(node->constant);
+            VISIT(node->global_key);
             scope_edges(node->scope, visit, data);
         }
         scope_edges(v->as.unit.scope, visit, data);
         break;
     case SPY_LIST: case SPY_TUPLE:
-        for (i = 0; i < v->as.seq.len; i++) visit(v->as.seq.items[i], data);
+        for (i = 0; i < v->as.seq.len; i++) VISIT(v->as.seq.items[i]);
         break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         for (i = 0; i < v->as.map.len + v->as.map.holes; i++) {
             if (!v->as.map.items[i].key) continue;
-            visit(v->as.map.items[i].key, data);
-            visit(v->as.map.items[i].value, data);
+            VISIT(v->as.map.items[i].key);
+            VISIT(v->as.map.items[i].value);
         }
-        if (v->as.map.parent) visit(v->as.map.parent, data);
-        if (v->as.map.unit) visit(v->as.map.unit, data);
-        if (v->as.map.namespace) visit(v->as.map.namespace, data);
-        if (v->as.map.class_cell) visit(v->as.map.class_cell, data);
-        if (v->as.map.bases) visit(v->as.map.bases, data);
-        if (v->as.map.mro) visit(v->as.map.mro, data);
-        if (v->as.map.base) visit(v->as.map.base, data);
-        if (v->as.map.meta) visit(v->as.map.meta, data);
+        VISIT(v->as.map.parent);
+        VISIT(v->as.map.unit);
+        VISIT(v->as.map.namespace);
+        VISIT(v->as.map.class_cell);
+        VISIT(v->as.map.bases);
+        VISIT(v->as.map.mro);
+        VISIT(v->as.map.base);
+        VISIT(v->as.map.meta);
         break;
     case SPY_FUNCTION:
-        visit(v->as.function.unit, data);
-        visit(v->as.function.env, data);
-        if (v->as.function.attributes) visit(v->as.function.attributes, data);
-        if (v->as.function.metadata) visit(v->as.function.metadata, data);
+        VISIT(v->as.function.unit);
+        VISIT(v->as.function.env);
+        VISIT(v->as.function.attributes);
+        VISIT(v->as.function.metadata);
         break;
     case SPY_MEMORYVIEW:
-        if (v->as.memory.obj) visit(v->as.memory.obj, data);
-        if (v->as.memory.source) visit(v->as.memory.source, data);
-        if (v->as.memory.view) visit(v->as.memory.view, data);
+        VISIT(v->as.memory.obj);
+        VISIT(v->as.memory.source);
+        VISIT(v->as.memory.view);
         break;
     case SPY_CELL:
-        if (v->as.cell.env) visit(v->as.cell.env, data);
-        if (v->as.cell.name) visit(v->as.cell.name, data);
-        if (v->as.cell.value) visit(v->as.cell.value, data);
+        VISIT(v->as.cell.env);
+        VISIT(v->as.cell.name);
+        VISIT(v->as.cell.value);
         break;
     case SPY_SENTINEL:
-        visit(v->as.sentinel.name, data);
-        if (v->as.sentinel.module) visit(v->as.sentinel.module, data);
-        if (v->as.sentinel.repr) visit(v->as.sentinel.repr, data);
+        VISIT(v->as.sentinel.name);
+        VISIT(v->as.sentinel.module);
+        VISIT(v->as.sentinel.repr);
         break;
     case SPY_TRACEBACK:
-        if (v->as.traceback.next) visit(v->as.traceback.next, data);
-        visit(v->as.traceback.frame, data);
+        VISIT(v->as.traceback.next);
+        VISIT(v->as.traceback.frame);
         break;
     case SPY_MEMBER_DESCRIPTOR: case SPY_GETSET_DESCRIPTOR:
-        visit(v->as.member.name, data);
-        visit(v->as.member.owner, data);
+        VISIT(v->as.member.name);
+        VISIT(v->as.member.owner);
         break;
     case SPY_FRAME:
-        if (v->as.frame.env) visit(v->as.frame.env, data);
-        if (v->as.frame.owner) visit(v->as.frame.owner, data);
-        if (v->as.frame.back) visit(v->as.frame.back, data);
-        if (v->as.frame.extra) visit(v->as.frame.extra, data);
-        if (v->as.frame.trace) visit(v->as.frame.trace, data);
+        VISIT(v->as.frame.env);
+        VISIT(v->as.frame.owner);
+        VISIT(v->as.frame.back);
+        VISIT(v->as.frame.extra);
+        VISIT(v->as.frame.trace);
         break;
     case SPY_MAPPINGPROXY: case SPY_BOUND_METHOD: case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: case SPY_FRAME_LOCALS:
-        visit(v->as.bound.self, data);
-        if (v->as.bound.name) visit(v->as.bound.name, data);
-        if (v->as.bound.module) visit(v->as.bound.module, data);
+        VISIT(v->as.bound.self);
+        VISIT(v->as.bound.name);
+        VISIT(v->as.bound.module);
         break;
     case SPY_NATIVE:
-        if (v->as.native.name) visit(v->as.native.name, data);
-        if (v->as.native.owner) visit(v->as.native.owner, data);
-        if (v->as.native.module) visit(v->as.native.module, data);
+        VISIT(v->as.native.name);
+        VISIT(v->as.native.owner);
+        VISIT(v->as.native.module);
         break;
     case SPY_TEMPLATE:
-        if (v->as.template.strings) visit(v->as.template.strings, data);
-        if (v->as.template.interpolations) visit(v->as.template.interpolations, data);
+        VISIT(v->as.template.strings);
+        VISIT(v->as.template.interpolations);
         break;
     case SPY_INTERPOLATION:
-        visit(v->as.interpolation.value, data); visit(v->as.interpolation.expression, data);
-        visit(v->as.interpolation.conversion, data); visit(v->as.interpolation.format_spec, data);
+        VISIT(v->as.interpolation.value); VISIT(v->as.interpolation.expression);
+        VISIT(v->as.interpolation.conversion); VISIT(v->as.interpolation.format_spec);
         break;
     case SPY_TEMPLATE_ITERATOR: case SPY_ITERATOR: case SPY_COROUTINE_ITERATOR: case SPY_ANEXT_AWAITABLE:
-        visit(v->as.iterator.source, data);
-        if (v->as.iterator.counter) visit(v->as.iterator.counter, data);
+        VISIT(v->as.iterator.source);
+        VISIT(v->as.iterator.counter);
         break;
     case SPY_ASYNC_GENERATOR_ASEND: case SPY_ASYNC_GENERATOR_ATHROW:
-        visit(v->as.async_operation.generator, data); visit(v->as.async_operation.args, data); break;
+        VISIT(v->as.async_operation.generator); VISIT(v->as.async_operation.args); break;
     case SPY_METHOD:
-        visit(v->as.method.self, data); visit(v->as.method.function, data);
-        if (v->as.method.module) visit(v->as.method.module, data);
+        VISIT(v->as.method.self); VISIT(v->as.method.function);
+        VISIT(v->as.method.module);
         break;
     case SPY_SUPER:
-        visit(v->as.super.type, data);
-        if (v->as.super.self) visit(v->as.super.self, data);
-        if (v->as.super.owner) visit(v->as.super.owner, data);
+        VISIT(v->as.super.type);
+        VISIT(v->as.super.self);
+        VISIT(v->as.super.owner);
         break;
     case SPY_SLICE:
-        visit(v->as.slice.start, data); visit(v->as.slice.stop, data); visit(v->as.slice.step, data); break;
+        VISIT(v->as.slice.start); VISIT(v->as.slice.stop); VISIT(v->as.slice.step); break;
     case SPY_LAZY_IMPORT:
-        visit(v->as.lazy.from, data); visit(v->as.lazy.attr, data);
-        if (v->as.lazy.builtins) visit(v->as.lazy.builtins, data);
+        VISIT(v->as.lazy.from); VISIT(v->as.lazy.attr);
+        VISIT(v->as.lazy.builtins);
         break;
     case SPY_RANGE:
-        visit(v->as.range.start, data); visit(v->as.range.stop, data); visit(v->as.range.step, data);
-        if (v->as.range.length) visit(v->as.range.length, data);
+        VISIT(v->as.range.start); VISIT(v->as.range.stop); VISIT(v->as.range.step);
+        VISIT(v->as.range.length);
         break;
     case SPY_STATICMETHOD: case SPY_CLASSMETHOD:
-        visit(v->as.wrapper.function, data);
-        if (v->as.wrapper.attributes) visit(v->as.wrapper.attributes, data);
+        VISIT(v->as.wrapper.function);
+        VISIT(v->as.wrapper.attributes);
         break;
     case SPY_PROPERTY:
-        visit(v->as.property.get, data); visit(v->as.property.set, data);
-        visit(v->as.property.del, data); visit(v->as.property.doc, data);
-        if (v->as.property.name) visit(v->as.property.name, data);
+        VISIT(v->as.property.get); VISIT(v->as.property.set);
+        VISIT(v->as.property.del); VISIT(v->as.property.doc);
+        VISIT(v->as.property.name);
         break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR:
-        if (v->as.generator.code) visit(v->as.generator.code, data);
-        if (v->as.generator.name) visit(v->as.generator.name, data);
-        if (v->as.generator.qualname) visit(v->as.generator.qualname, data);
-        if (v->as.generator.frame) visit(v->as.generator.frame, data);
+        VISIT(v->as.generator.code);
+        VISIT(v->as.generator.name);
+        VISIT(v->as.generator.qualname);
+        VISIT(v->as.generator.frame);
         if (v->as.generator.machine) machine_edges(v->as.generator.machine, visit, data);
-        if (v->as.generator.env) visit(v->as.generator.env, data);
-        if (v->as.generator.unit) visit(v->as.generator.unit, data);
+        VISIT(v->as.generator.env);
+        VISIT(v->as.generator.unit);
         break;
     }
+#undef VISIT
 }
 static void free_scope(Scope *scope) {
     if (scope) { free(scope->symbols); free(scope); }

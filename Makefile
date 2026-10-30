@@ -75,8 +75,8 @@ $(OBJDIR)/%.o: %.c spy.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
-$(OBJDIR)/spy.o $(OBJDIR)/spyc.o: spy-unicode.h spy-intrinsics.h
-$(OBJDIR)/spyc.o: spy.c
+$(OBJDIR)/spy.o $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy-unicode.h spy-intrinsics.h
+$(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy.c
 $(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o: spy-std.h
 $(OBJDIR)/spy-std.o: spy-std-modules.h
 
@@ -85,6 +85,10 @@ tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 
 # The conformance driver: the bare core, without the standard layer.
 tests/run-spec: $(OBJDIR)/tests/run-spec.o $(OBJDIR)/spy.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# Allocation failure: the engine compiled in, with a failing allocator.
+tests/oom: $(OBJDIR)/tests/oom.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 bench/lifecycle: $(OBJDIR)/bench/lifecycle.o $(OBJDIR)/spy.o
@@ -187,8 +191,9 @@ check-unicode:
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
 
-test: all tests/api tests/run-spec run-cython check-intrinsics
+test: all tests/api tests/oom tests/run-spec run-cython check-intrinsics
 	./tests/api
+	./tests/oom
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
@@ -220,7 +225,7 @@ FUZZ_CC ?= clang
 FUZZ_CFLAGS = -O1 -g -std=c11 -I. -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
 LIB_FUZZING_ENGINE ?= -fsanitize=fuzzer,address,undefined
 FUZZ_OBJS = $(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o $(OBJDIR)/fuzz/fuzz_common.o
-FUZZERS = fuzz/fuzz_eval fuzz/fuzz_compile fuzz/fuzz_spyc
+FUZZERS = fuzz/fuzz_eval fuzz/fuzz_compile fuzz/fuzz_spyc fuzz/fuzz_oom
 
 libfuzzer: $(FUZZERS)
 
@@ -240,8 +245,11 @@ fuzz: $(FUZZERS)
 fuzz/fuzz_eval fuzz/fuzz_compile: fuzz/%: $(OBJDIR)/fuzz/%.o $(FUZZ_OBJS)
 	$(FUZZ_CC) $^ $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
 
-# spyc includes the engine, so its fuzzer does too.
+# spyc and tests/oom include the engine, so their fuzzers do too.
 fuzz/fuzz_spyc: fuzz/fuzz_spyc.c spyc.c host.h spy.c spy.h spy-unicode.h spy-intrinsics.h
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $< $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
+
+fuzz/fuzz_oom: fuzz/fuzz_oom.c tests/oom.c spy.c spy.h spy-unicode.h spy-intrinsics.h
 	$(FUZZ_CC) $(FUZZ_CFLAGS) $< $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
 
 
@@ -251,7 +259,7 @@ fuzz/fuzz_spyc: fuzz/fuzz_spyc.c spyc.c host.h spy.c spy.h spy-unicode.h spy-int
 REPLAY_SANITIZERS ?= memory
 REPLAY_DIR = $(OBJDIR)/replay-$(REPLAY_SANITIZERS)
 REPLAY_CFLAGS = -O1 -g -std=c11 -I. -fsanitize=$(REPLAY_SANITIZERS) -fno-sanitize-recover=all -fno-omit-frame-pointer
-REPLAYS = $(REPLAY_DIR)/fuzz_eval $(REPLAY_DIR)/fuzz_compile $(REPLAY_DIR)/fuzz_spyc
+REPLAYS = $(REPLAY_DIR)/fuzz_eval $(REPLAY_DIR)/fuzz_compile $(REPLAY_DIR)/fuzz_spyc $(REPLAY_DIR)/fuzz_oom
 fuzz-replay: $(REPLAYS)
 	test -d $(FUZZ_CORPUS) || { echo "no corpus in $(FUZZ_CORPUS); run make fuzz"; exit 1; }
 	for replay in $(REPLAYS); do find $(FUZZ_CORPUS) -type f -exec $$replay {} + || exit 1; done
@@ -261,6 +269,10 @@ $(REPLAY_DIR)/fuzz_eval $(REPLAY_DIR)/fuzz_compile: $(REPLAY_DIR)/%: fuzz/%.c fu
 	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< fuzz/fuzz_common.c spy.c spy-std.c $(LDLIBS) -o $@
 
 $(REPLAY_DIR)/fuzz_spyc: fuzz/fuzz_spyc.c fuzz/replay.c spyc.c host.h spy.c spy.h spy-unicode.h spy-intrinsics.h
+	mkdir -p $(dir $@)
+	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< $(LDLIBS) -o $@
+
+$(REPLAY_DIR)/fuzz_oom: fuzz/fuzz_oom.c fuzz/replay.c tests/oom.c spy.c spy.h spy-unicode.h spy-intrinsics.h
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< $(LDLIBS) -o $@
 
@@ -305,11 +317,11 @@ coverage:
 		LDFLAGS='$(COVERAGE_PROFILE)' test test-binding
 	$(LLVM_PROFDATA) merge -o $(COVERAGE_DIR)/all.profdata $(COVERAGE_DIR)/*.profraw
 	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./spyc -object ./tests/run-spec \
-		-object ./tests/api -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
+		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
 	$(LLVM_COV) show -format=html -output-dir=$(COVERAGE_DIR)/html -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy \
-		-object ./spyc -object ./tests/run-spec -object ./tests/api -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
+		-object ./spyc -object ./tests/run-spec -object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
 	@echo "Annotated sources: $(COVERAGE_DIR)/html/index.html"
 
 clean:
-	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
+	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
 	rm -rf $(OBJDIR)

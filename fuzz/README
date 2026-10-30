@@ -11,6 +11,10 @@ libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
                 line "#--" (main.py, a.py, pkg/__init__.py, pkg/b.py),
                 written to a fresh directory under /tmp; the first byte
                 picks spyc's options.
+  fuzz_oom      runs the input as fuzz_eval does on the bare core, with one
+                allocation failing: the first two bytes pick which one after
+                context creation, as tests/oom does for each in turn. The
+                run must free everything it allocated.
 
 For fuzz_eval and fuzz_compile, each input gets a fresh context with the standard layer (spy_std_init), no
 output, no input, no module loader, and no mounts, and a step limit so loops
@@ -29,7 +33,7 @@ Where AddressSanitizer does not start (it hangs on recent macOS), build and
 run in Linux instead: docker run with python:3.14 and apt-get install clang,
 then plain make libfuzzer.
 
-make fuzz builds all three and runs each for FUZZ_SECONDS (default 60) on a corpus
+make fuzz builds all four and runs each for FUZZ_SECONDS (default 60) on a corpus
 seeded from the examples and language tests, in fork mode so out-of-memory
 and slow inputs are not reported as findings; crashes land in .obj/fuzz/.
 By hand:
