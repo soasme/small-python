@@ -7671,13 +7671,6 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
 }
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
-    /* A forward iterator over a list or tuple reads the next item directly. */
-    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done &&
-        (v->as.iterator.source->type == SPY_LIST || v->as.iterator.source->type == SPY_TUPLE)) {
-        SPYValue *source = v->as.iterator.source;
-        if (v->as.iterator.index < source->as.seq.len) return spy_retain(source->as.seq.items[v->as.iterator.index++]);
-        v->as.iterator.done = 1; return NULL;
-    }
     /* A range steps a machine-integer counter without arbitrary-precision
      * arithmetic while the next counter fits. */
     if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_RANGE && !v->as.iterator.done) {
@@ -7692,6 +7685,13 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
                 return counter;
             }
         }
+    }
+    /* A forward iterator over a list or tuple reads the next item directly. */
+    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done &&
+        (v->as.iterator.source->type == SPY_LIST || v->as.iterator.source->type == SPY_TUPLE)) {
+        SPYValue *source = v->as.iterator.source;
+        if (v->as.iterator.index < source->as.seq.len) return spy_retain(source->as.seq.items[v->as.iterator.index++]);
+        v->as.iterator.done = 1; return NULL;
     }
     if (v->type == SPY_GENERATOR) return generator_next(c, v);
     if (v->type == SPY_COROUTINE_ITERATOR) return generator_next(c, v->as.iterator.source);
@@ -19174,13 +19174,14 @@ static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single
             SPYValue *iterable = value ? get_iterator(c, value) : NULL;
             spy_release(value);
             if (n->kind == N_FOR && !iterable) break;
-            int broke = 0;
+            /* An iterator steps itself: its kind is fixed, so pass by iter_at's dispatch. */
+            int stepping = iterable && (iterable->type == SPY_ITERATOR || iterable->type == SPY_GENERATOR), broke = 0;
             for (size_t i = 0; !c->error_type[0]; i++) {
                 /* Each pass jumps back: a trace function sees the loop's line again. */
                 if (i && c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
                 if (tick(c, f, n)) break;
                 if (iterable) {
-                    SPYValue *item = iter_at(c, iterable, i);
+                    SPYValue *item = stepping ? iterator_next(c, iterable) : iter_at(c, iterable, i);
                     if (!item) break;
                     store_target(c, f, n->args, item);
                     spy_release(item);

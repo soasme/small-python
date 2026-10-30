@@ -106,6 +106,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Short text lives in its value](#short-text-lives-in-its-value) | -4.6% (bigint), -3.0% (strings), -2.0% (dicts) |
 | [A call without locals keeps its environment](#a-call-without-locals-keeps-its-environment) | `f()`: -12%; fib +0.3% |
 | [Values live in pools](#values-live-in-pools) | -15.7% (sort), -13.0% (dicts), -5.1% (bigint), -1.7% (fib) |
+| [A loop steps its iterator directly](#a-loop-steps-its-iterator-directly) | -0.9% (dicts), -0.6% (nbody), the rest -0.5% to 0% |
 
 ### Releasing a number or string frees it at once
 
@@ -670,6 +671,17 @@ and a mask. Instructions: sort -15.7%, dicts -13.0%, bigint -5.1%, fib
 -1.7%, classes -1.1%, generators and loop -0.6%, nbody -0.4%, strings
 +0.4%; peak memory of the sort program 83.4 to 80.5 MiB, the others
 unchanged.
+
+### A loop steps its iterator directly
+
+A `for` loop took each item through `iter_at`, which dispatches on the
+iterable's type to read a list in place or step an iterator. A loop's
+iterable keeps its type, so a loop over an iterator or a generator now
+calls `iterator_next` itself, and `iterator_next` tries a range, the
+most common iterator a loop steps, before the list iterator. The
+iterator itself still holds the position, since Python code may hold it
+and step it too. Instructions: dicts -0.9%, nbody -0.6%, the rest 0% to
+-0.5%.
 
 ## Tried and left out
 
