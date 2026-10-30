@@ -118,9 +118,8 @@ static const char *source_name(Node *n) { return n->original ? n->original : n->
 struct SPYValue {
     SPYContext *ctx;
     SPYValue *prev, *next, *pending;
-    size_t refs, trial;
-    int type;
-    unsigned char marked, weak; /* weak: a weak-table entry names this value. */
+    uint32_t refs, trial;
+    unsigned char type, marked, weak; /* weak: a weak-table entry names this value. */
     unsigned char finalized; /* __del__ has been queued for this instance. */
     unsigned char watched; /* A class's namespace: its changes are class changes. */
     unsigned char frozen; /* gc.freeze(): collections treat it as reachable. */
@@ -468,7 +467,7 @@ static void trace_leave(SPYContext *, SPYValue *);
  * or yields, for a trace function; NULL when it raises. */
 static void leave_frame(SPYContext *c, SPYValue *value) {
     if (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) trace_leave(c, value);
-    traceback_here(c);
+    if (c->error_type[0]) traceback_here(c);
     struct ActiveFrame *top = &c->frames[--c->py_depth];
     c->frame_line = c->py_depth ? &c->frames[c->py_depth - 1].line : &c->line;
     if (c->error_type[0] && c->py_depth && intrinsic_frame(top) && !intrinsic_frame(&c->frames[c->py_depth - 1])) {
@@ -819,13 +818,14 @@ static void memory_unexport(SPYValue *);
  * coroutine for its close(), or an exporter's memoryview for its
  * __release_buffer__, once per object. */
 static int finalize_later(SPYValue *v) {
-    if (v->finalized) return 0;
+    if (v->finalized || !(UINT64_C(1) << v->type & (UINT64_C(1) << SPY_GENERATOR | UINT64_C(1) << SPY_COROUTINE |
+        UINT64_C(1) << SPY_ASYNC_GENERATOR | UINT64_C(1) << SPY_MEMORYVIEW | UINT64_C(1) << SPY_INSTANCE))) return 0;
     if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
         int hooked = v->type == SPY_ASYNC_GENERATOR && v->as.generator.origin && !v->as.generator.async_closed;
         if (!(v->as.generator.started || hooked) || v->as.generator.running || v->as.generator.done) return 0;
     } else if (v->type == SPY_MEMORYVIEW) {
         if (!v->as.memory.view || v->as.memory.released) return 0;
-    } else if (v->type != SPY_INSTANCE || !class_lookup(v->as.map.parent, "__del__")) return 0;
+    } else if (!class_lookup(v->as.map.parent, "__del__")) return 0;
     SPYContext *c = v->ctx;
     if (weak_push(&c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
     attend(c);

@@ -71,6 +71,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [The stack check and the right operand are inline](#the-stack-check-and-the-right-operand-are-inline) | -1.0% to -3.6% |
 | [Numbers and strings take half an allocation](#numbers-and-strings-take-half-an-allocation) | dicts -12%, sort -14% (time) |
 | [A call opens its locals with its arguments](#a-call-opens-its-locals-with-its-arguments) | -3.9% (fib), -3.3% (classes) |
+| [A smaller value header](#a-smaller-value-header) | dicts memory -11% |
 
 ### Releasing a number or string frees it at once
 
@@ -336,11 +337,30 @@ Wall time: classes -4.0%, fib -2.6%.
 | fib | 100.5 M | 96.6 M | -3.9% |
 | classes | 303.4 M | 293.4 M | -3.3% |
 
+### A smaller value header
+
+Every value began with 64 bytes of bookkeeping. The reference count and
+the collector's trial count are now 32-bit (four billion references to
+one value would need 32 GB of pointers), and the type tag is a byte
+beside the other flags, so the header takes 48 bytes: a number or string
+96, any other value 200. Two small cuts went with it: a dying value whose
+type can never need a finalizer skips the finalizer probe, and a frame
+that returns without an error skips the traceback call.
+
+Peak memory of `dicts` fell from 53.8 to 47.7 MiB and `sort` from 86.4
+to 83.4 MiB; wall time moved between -2.4% (fib) and +1.5% (loop),
+instructions between -1.2% and +0.2%.
+
 ## Tried and left out
 
 - **Keeping every freed value for reuse.** Released values beyond 64 go
   back to `malloc`. With no limit, `dicts` took 21% longer and `sort`
   9% longer on the M2: a long last-in-first-out list hands back memory
   that has left the cache, and the system allocator is fast.
+- **A third allocation size for numbers.** Ints and floats fit 64 bytes
+  with the smaller header. Choosing among three sizes made the allocator
+  too large to inline into `spy_int` and `spy_float`, and forcing it
+  inline slowed the other callers: `sort` gained 6% but `nbody`, `loop`
+  and `generators` lost 3% to 10%.
 - **`-O3`.** Within 1% of `-O2` on every program but `generators` (-5.6%),
   so the build keeps `-O2`.
