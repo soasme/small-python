@@ -22,8 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "tests/spec"
-# A sanitizer build (make sanitize sets ASAN_OPTIONS) runs several times slower.
-TIMEOUT = 600 if "ASAN_OPTIONS" in os.environ else 60
+# A sanitizer build runs several times slower; make sanitize raises this.
+TIMEOUT = float(os.environ.get("SPY_TEST_TIMEOUT", 60))
 
 
 def metadata(path):
@@ -50,8 +50,10 @@ def run(command, directory):
 
 def outcome(code, output, negative):
     if negative:
-        if code == 0 or code is None:
-            return False, output if code is None else f"expected {negative}, the test ran"
+        if code is None or code < 0:
+            return False, output if code is None else f"{output}\nkilled by signal {-code}"
+        if code == 0:
+            return False, f"expected {negative}, the test ran"
         last = output.splitlines()[-1] if output else ""
         return negative in last, output
     return code == 0, output

@@ -23,7 +23,10 @@ Where AddressSanitizer does not start (it hangs on recent macOS), build and
 run in Linux instead: docker run with python:3.14 and apt-get install clang,
 then plain make libfuzzer.
 
-Running, seeded from the examples and language tests:
+make fuzz builds both and runs each for FUZZ_SECONDS (default 60) on a corpus
+seeded from the examples and language tests, in fork mode so out-of-memory
+and slow inputs are not reported as findings; crashes land in .obj/fuzz/.
+By hand:
 
   mkdir -p corpus
   for f in examples/*.py tests/spec/*/*.py; do cp $f corpus/$(echo $f | tr / _); done

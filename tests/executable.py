@@ -7,6 +7,15 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def build(*sources, binary):
+    """The sources with the engine, under the build's flags (a sanitizer build's included)."""
+    flags = shlex.split(os.environ.get("CFLAGS", "-O2 -std=c11 -Wall -Wextra -Wpedantic"))
+    subprocess.run([*shlex.split(os.environ.get("CC", "cc")), *flags, "-I", str(ROOT), *map(str, sources), str(ROOT / "spy.c"),
+                    *shlex.split(os.environ.get("LDFLAGS", "")), "-lm", "-o", str(binary)], check=True)
+
+
 # A program runs on the bare core unless spyc -M registers standard modules.
 PROGRAM = "try:\n    import sys\nexcept ImportError:\n    sys = None\nprint('standalone', sum(range(10)), sys is None)\n"
 for options, extra, expected in [([], [], "standalone 45 True\n"),
@@ -18,10 +27,7 @@ for options, extra, expected in [([], [], "standalone 45 True\n"),
         binary = directory / "hello program"
         source.write_text(PROGRAM, encoding="utf-8")
         subprocess.run([str(ROOT / "spyc"), *options, "-o", str(generated), str(source)], check=True)
-        subprocess.run(
-            [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-O2", "-I", str(ROOT), str(generated), *extra, str(ROOT / "spy.c"), "-lm", "-o", str(binary)],
-            check=True,
-        )
+        build(generated, *extra, binary=binary)
         source.unlink()
         generated.unlink()
         result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
@@ -53,10 +59,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     host.write_text(HOST, encoding="utf-8")
     subprocess.run([str(ROOT / "spyc"), "-c", "-o", str(generated), str(source)], check=True)
     assert "int main" not in generated.read_text(encoding="utf-8")
-    subprocess.run(
-        [*shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-O2", "-I", str(ROOT), str(host), str(generated), str(ROOT / "spy.c"), "-lm", "-o", str(binary)],
-        check=True,
-    )
+    build(host, generated, binary=binary)
     source.unlink()
     result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
     assert result.stdout == "hosted 42\n", result

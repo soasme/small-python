@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = ROOT / "tests/build"
-TIMEOUT = 600 if "ASAN_OPTIONS" in os.environ else 60
+TIMEOUT = float(os.environ.get("SPY_TEST_TIMEOUT", 60))
 
 
 def metadata(path):
