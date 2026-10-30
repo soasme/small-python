@@ -13,8 +13,9 @@ libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
                 picks spyc's options.
   fuzz_oom      runs the input as fuzz_eval does on the bare core, with one
                 allocation failing: the first two bytes pick which one after
-                context creation, as tests/oom does for each in turn. The
-                run must free everything it allocated.
+                context creation, and whether every later one fails too, as
+                tests/oom does for each in turn. The run must free
+                everything it allocated.
 
 For fuzz_eval and fuzz_compile, each input gets a fresh context with the standard layer (spy_std_init), no
 output, no input, no module loader, and no mounts, and a step limit so loops

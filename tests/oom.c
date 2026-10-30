@@ -1,7 +1,9 @@
 /* Allocation failure, SQLite style: each program runs once per allocation it
- * makes, with exactly that allocation failing. Every run must end cleanly, in
- * a result or an exception, and free everything it allocated: the engine
- * frees through this counter, so a leak is seen per run, not only at exit.
+ * makes with exactly that allocation failing, then once per allocation with
+ * it and every later one failing, as when memory stays exhausted. Every run
+ * must end cleanly, in a result or an exception, and free everything it
+ * allocated: the engine frees through this counter, so a leak is seen per
+ * run, not only at exit.
  * Run it under make sanitize so a bad cleanup path is also reported.
  *
  * usage: tests/oom [FILE...]  (each file a program; none: the built-in set) */
@@ -39,25 +41,27 @@ char *oom_realpath(const char *, char *);
 #undef free
 #undef realpath
 
-/* count: allocations so far; fail: the one that fails (0: none); live:
- * blocks not yet freed. */
+/* count: allocations so far; fail: the first that fails (0: none), and with
+ * lasting every one after it; live: blocks not yet freed. */
 static size_t count, fail, live;
+static int lasting;
 
+static int fails(void) { return ++count == fail || (lasting && fail && count > fail); }
 void *oom_malloc(size_t n) {
-    if (++count == fail) return NULL;
+    if (fails()) return NULL;
     void *p = malloc(n ? n : 1);
     if (p) live++;
     return p;
 }
 void *oom_calloc(size_t k, size_t n) {
-    if (++count == fail) return NULL;
+    if (fails()) return NULL;
     void *p = calloc(k ? k : 1, n ? n : 1);
     if (p) live++;
     return p;
 }
 void *oom_realloc(void *p, size_t n) {
     if (!p) return oom_malloc(n);
-    if (++count == fail) return NULL;
+    if (fails()) return NULL;
     return realloc(p, n ? n : 1);
 }
 void oom_free(void *p) {
@@ -173,18 +177,21 @@ static char *read_file(const char *path) {
     return s;
 }
 
-/* Fail each allocation of source after the first `from`, once. */
+/* Fail each allocation of source after the first `from`: once, then from
+ * there on. */
 static size_t check(const char *source, const char *name, size_t from) {
     int status;
     fail = 0;
-    size_t total = run(source, name, &status), failed = 0;
+    size_t total = run(source, name, &status), failed[2] = {0, 0};
     const char *ends = status ? "an exception" : "a result";
-    for (fail = from + 1; fail <= total; fail++) {
-        run(source, name, &status);
-        failed += status != 0;
-    }
-    printf("%s (ends in %s): allocations %zu to %zu each failed once; %zu runs ended in an exception\n",
-           name, ends, from + 1, total, failed);
+    for (lasting = 0; lasting < 2; lasting++)
+        for (fail = from + 1; fail <= total; fail++) {
+            run(source, name, &status);
+            failed[lasting] += status != 0;
+        }
+    lasting = 0;
+    printf("%s (ends in %s): allocations %zu to %zu failed; exceptions: %zu failing once, %zu failing from there on\n",
+           name, ends, from + 1, total, failed[0], failed[1]);
     return total;
 }
 

@@ -193,8 +193,9 @@ isolation, error recovery, reference cycles, deep graph destruction, an
 execution budget), the allocation-failure test, the host file and
 standalone-executable checks, and the language specification suite.
 `tests/oom` runs a set of programs once per allocation each makes, with
-exactly that allocation failing, as SQLite's tests do; every run must end in
-a result or an exception and free everything it allocated.
+exactly that allocation failing, then once per allocation with it and every
+later one failing, as SQLite's tests do; every run must end in a result or an
+exception and free everything it allocated.
 
 Conformance to PLS-315 rests on two kinds of evidence, and no other:
 
