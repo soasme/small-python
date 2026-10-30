@@ -154,6 +154,7 @@ make test-rust    # the Rust crates and the todo example
 - [Benchmarks](docs/benchmark.md): comparison with other Python engines
 - [PLS-315](docs/standards/3_15.md): the language specification
 - [Standard modules](docs/standards/std.md): the `sys` and `gc` modules, after CPython 3.15
+- [CPython's Lib](docs/python-lib.md): scope of running CPython's `Lib/` unchanged
 - [Building programs](docs/build.md): the `spyc` bundler
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)
