@@ -468,6 +468,15 @@ static void traceback_here(SPYContext *c) {
     c->traceback = entry; c->traceback_frame = top->serial;
 }
 static void trace_leave(SPYContext *, SPYValue *);
+/* Give a finished frame object its caller's frame object, keeping any
+ * pending error. */
+static NO_INLINE void frame_link_back(SPYContext *c, SPYValue *frame) {
+    char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
+    memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
+    c->error_type[0] = 0;
+    frame->as.frame.back = frame_object(c, c->py_depth - 1);
+    memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
+}
 /* A finished frame object keeps its last line and, like CPython's
  * take_ownership, its caller's frame object. value is what the frame returns
  * or yields, for a trace function; NULL when it raises. */
@@ -488,13 +497,7 @@ static void leave_frame(SPYContext *c, SPYValue *value) {
     frame->as.frame.line = top->line;
     SPYValue *owner = frame->as.frame.owner;
     int generator = owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR;
-    if (frame->refs > 1 && c->py_depth && !frame->as.frame.back && !generator) {
-        char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
-        memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
-        c->error_type[0] = 0;
-        frame->as.frame.back = frame_object(c, c->py_depth - 1);
-        memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-    }
+    if (frame->refs > 1 && c->py_depth && !frame->as.frame.back && !generator) frame_link_back(c, frame);
     top->object = NULL;
     spy_release(frame);
 }
@@ -8321,6 +8324,13 @@ static SPYValue *dict_subscript(SPYContext *c, SPYValue *dict, SPYValue *self, S
     }
     return c->error_type[0] ? NULL : missing_key(c, key);
 }
+/* v's special method name, or with v NULL the intrinsic name, called with
+ * x and y. A separate function, so that its argument array does not cost
+ * the callers' fast paths a guarded stack frame. */
+static NO_INLINE SPYValue *call_pair(SPYContext *c, SPYValue *v, const char *name, SPYValue *x, SPYValue *y) {
+    SPYValue *args[] = {x, y};
+    return v ? call_special(c, v, name, 2, args) : call_intrinsic(c, name, 2, args);
+}
 static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
     /* An exact list or tuple at a small int position in range comes first. */
     if ((v->type == SPY_LIST || v->type == SPY_TUPLE) && key->type == SPY_INT && !key->as.integer_data.big) {
@@ -8334,10 +8344,7 @@ static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
         if (method) { SPYValue *result = spy_call(c, method, 1, &key); spy_release(method); return result; }
         if (c->error_type[0]) return NULL;
     }
-    if (v == c->types[SPY_CLASS]) {
-        SPYValue *args[] = {v, key};
-        return call_intrinsic(c, "_class_getitem", 2, args);
-    }
+    if (v == c->types[SPY_CLASS]) return call_pair(c, NULL, "_class_getitem", v, key);
     if (v->type == SPY_CLASS) {
         SPYValue *method = attribute(c, v, "__class_getitem__");
         if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
@@ -8388,8 +8395,7 @@ static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) 
     SPYValue *base = builtin_base(c, v, "__setitem__", NULL);
     if (base) return set_index(c, base, key, item);
     if (v->type == SPY_INSTANCE || v->type == SPY_FRAME_LOCALS || v->type == SPY_MEMORYVIEW || meta_class(v)) {
-        SPYValue *args[] = {key, item};
-        SPYValue *result = call_special(c, v, "__setitem__", 2, args);
+        SPYValue *result = call_pair(c, v, "__setitem__", key, item);
         int status = result ? 0 : -1;
         spy_release(result); return status;
     }
@@ -14380,6 +14386,19 @@ static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     spy_release(env);
     return result;
 }
+/* function called with self before the arguments, as a method object
+ * calls it. */
+static NO_INLINE SPYValue *call_with_self(SPYContext *c, SPYValue *function, SPYValue *self, size_t argc, SPYValue *const *argv,
+                                          SPYValue *keywords) {
+    if (argc >= SIZE_MAX / sizeof(SPYValue *) - 1) return spy_error(c, "MemoryError", "too many arguments");
+    SPYValue *small[9], **args = argc < 9 ? small : allocate(c, (argc + 1) * sizeof(*args));
+    if (!args) return NULL;
+    args[0] = self;
+    for (size_t i = 0; i < argc; i++) args[i + 1] = argv[i];
+    SPYValue *result = call_keywords(c, function, argc + 1, args, keywords);
+    if (args != small) free(args);
+    return result;
+}
 /* A call's result as its caller sees it, leaving the call's depth. */
 static SPYValue *call_result(SPYContext *c, SPYValue *result) {
     c->depth--;
@@ -14421,16 +14440,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     } else if (builtin_classmethod(fn)) {
         result = classmethod_descriptor_call(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_METHOD) {
-        if (argc >= SIZE_MAX / sizeof(SPYValue *) - 1) spy_error(c, "MemoryError", "too many arguments");
-        else {
-            SPYValue *small[9], **args = argc < 9 ? small : allocate(c, (argc + 1) * sizeof(*args));
-            if (args) {
-                args[0] = fn->as.method.self;
-                for (size_t i = 0; i < argc; i++) args[i + 1] = argv[i];
-                result = call_keywords(c, fn->as.method.function, argc + 1, args, keywords);
-                if (args != small) free(args);
-            }
-        }
+        result = call_with_self(c, fn->as.method.function, fn->as.method.self, argc, argv, keywords);
     } else if (fn->type == SPY_CLASS && fn->as.map.meta &&
                class_lookup(fn->as.map.meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) {
         SPYValue *method = special_method(c, fn, "__call__");
@@ -14552,12 +14562,10 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         /* The singletons' tp_new names the C type: ellipsis is EllipsisType. */
         else if (singleton) errorf(c, "TypeError", "%s takes no arguments", fn == c->types[SPY_ELLIPSIS] ? "EllipsisType" : name_local(fn, "__name__")->as.string.data);
         else errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
-    } else if (argc < 8 && (plain = plain_init(c, fn))) {
+    } else if ((plain = plain_init(c, fn))) {
         /* object.__new__ then a Python __init__, called directly. */
-        SPYValue *args[8], *value;
-        if (!(args[0] = result = new_instance(c, fn))) return NULL;
-        for (size_t i = 0; i < argc; i++) args[i + 1] = argv[i];
-        value = call_keywords(c, plain, argc + 1, args, keywords);
+        if (!(result = new_instance(c, fn))) return NULL;
+        SPYValue *value = call_with_self(c, plain, result, argc, argv, keywords);
         if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
         spy_release(value);
     } else {
@@ -15624,6 +15632,35 @@ static void generator_close(SPYValue *v) {
 }
 static int bytearray_exported(SPYContext *, SPYValue *);
 static int bytearray_resize(SPYContext *, SPYValue *, size_t);
+/* list *= rhs, in place. */
+static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *rhs) {
+    int64_t count;
+    if (index_value(c, rhs, &count)) return NULL;
+    size_t len = old->as.seq.len;
+    if (count <= 0) {
+        old->as.seq.len = 0;
+        for (size_t i = 0; i < len; i++) spy_release(old->as.seq.items[i]);
+    } else if (len) {
+        if ((uint64_t)count > SIZE_MAX / len || (uint64_t)count * len > INT_MAX)
+            return spy_error(c, "MemoryError", "repeated list too large");
+        size_t total = (size_t)count * len;
+        if (grow(c, (void **)&old->as.seq.items, &old->as.seq.cap, total, sizeof(SPYValue *))) return NULL;
+        for (size_t i = len; i < total; i++) old->as.seq.items[i] = spy_retain(old->as.seq.items[i % len]);
+        old->as.seq.len = total;
+    }
+    return spy_retain(old);
+}
+/* An unsupported operation is reported with the augmented operator. */
+static NO_INLINE void augmented_error(SPYContext *c, int token, SPYValue *old, SPYValue *rhs) {
+    char expected[sizeof(c->error_message)];
+    const char *symbol = binary_symbol(token);
+    snprintf(expected, sizeof(expected), "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(old), type_name(rhs));
+    if (!strcmp(c->error_message, expected)) {
+        size_t len = strcspn(symbol, " ");
+        spy_clear_error(c);
+        errorf(c, "TypeError", "unsupported operand type(s) for %.*s=: '%s' and '%s'", (int)len, symbol, type_name(old), type_name(rhs));
+    }
+}
 static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     const Operator *operation = &operators[op - T_ADDEQ];
     /* Exact ints and floats have no in-place methods: an operator both
@@ -15693,35 +15730,9 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         }
         return spy_retain(old);
     }
-    if (op == T_MULEQ && old->type == SPY_LIST) {
-        int64_t count;
-        if (index_value(c, rhs, &count)) return NULL;
-        size_t len = old->as.seq.len;
-        if (count <= 0) {
-            old->as.seq.len = 0;
-            for (size_t i = 0; i < len; i++) spy_release(old->as.seq.items[i]);
-        } else if (len) {
-            if ((uint64_t)count > SIZE_MAX / len || (uint64_t)count * len > INT_MAX)
-                return spy_error(c, "MemoryError", "repeated list too large");
-            size_t total = (size_t)count * len;
-            if (grow(c, (void **)&old->as.seq.items, &old->as.seq.cap, total, sizeof(SPYValue *))) return NULL;
-            for (size_t i = len; i < total; i++) old->as.seq.items[i] = spy_retain(old->as.seq.items[i % len]);
-            old->as.seq.len = total;
-        }
-        return spy_retain(old);
-    }
+    if (op == T_MULEQ && old->type == SPY_LIST) return list_repeat(c, old, rhs);
     result = binary(c, token, old, rhs);
-    /* An unsupported operation is reported with the augmented operator. */
-    char expected[sizeof(c->error_message)];
-    if (!result && error_is(c, "TypeError")) {
-        const char *symbol = binary_symbol(token);
-        snprintf(expected, sizeof(expected), "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(old), type_name(rhs));
-        if (!strcmp(c->error_message, expected)) {
-            size_t len = strcspn(symbol, " ");
-            spy_clear_error(c);
-            errorf(c, "TypeError", "unsupported operand type(s) for %.*s=: '%s' and '%s'", (int)len, symbol, type_name(old), type_name(rhs));
-        }
-    }
+    if (!result && error_is(c, "TypeError")) augmented_error(c, token, old, rhs);
     return result;
 }
 static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {

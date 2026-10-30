@@ -445,6 +445,14 @@ without the cost, so the instruction counts there do not move; on the
 M2: loop -3.4%, classes -3.3%, nbody -2.0%, strings -1.9%, generators
 and fib within noise.
 
+The same rule moved the cold branches that declare arrays or take a
+local's address out of `call_keywords`, `get_index`, `set_index`,
+`leave_frame` and `inplace` (`call_with_self`, `call_pair`,
+`frame_link_back`, `list_repeat`, `augmented_error`); `type_call` now
+initializes a plain instance through `call_with_self` too. The wall time
+stayed within noise (-1.6% to +1.7% while the fuzzers ran), and the
+duplicate argument-shifting code is gone.
+
 ## Tried and left out
 
 - **Keeping every freed value for reuse.** Released values beyond 64 go
