@@ -3,12 +3,14 @@
 Small Python's standard layer (spy-std.c) provides this module as
 docs/std.md specifies it, after CPython 3.15's gc module. Reference counting
 frees most values at once; collect() runs the engine's cycle collector,
-which has a single generation. Automatic collection happens between host
-runs, so enable(), disable() and the thresholds are recorded but do not
-schedule collections.
+which has a single generation; freeze() makes the values it tracks roots
+of every collection. Automatic collection happens between host runs, so
+enable(), disable() and the thresholds are recorded but do not schedule
+collections. Debugging reports go to sys.stderr.
 """
 
-from _spy import get_referents, get_referrers, _collect, _tracked, _finalized, _objects
+from _spy import (get_referents, get_referrers, get_count, freeze, unfreeze, get_freeze_count, _collect, _tracked,
+                  _finalized, _objects)
 
 DEBUG_STATS = 1
 DEBUG_COLLECTABLE = 2
@@ -43,6 +45,11 @@ def _define(collect_now, tracked, finalized, objects):
             call.__name__, call.__doc__ = function.__name__, function.__doc__
             return call
         return wrap
+
+    def report(text):
+        # Debugging output, as CPython's PySys_WriteStderr.
+        import sys
+        sys.stderr.write(text)
 
     def at_most_one(name, keyword, args, kwargs):
         # An optional argument given by position or keyword, as CPython's clinic parses it.
@@ -82,7 +89,16 @@ The number of unreachable objects is returned."""
         info = {'generation': generation, 'collected': 0, 'uncollectable': 0, 'candidates': 0, 'duration': 0.0}
         for callback in list(callbacks):
             callback('start', info)
-        count, candidates, duration = collect_now(garbage if debug[0] & DEBUG_SAVEALL else None)
+        if debug[0] & DEBUG_STATS:
+            report(f"gc: collecting generation {generation}...\n"
+                   f"gc: objects in each generation: {get_count()[0]} 0 0\n"
+                   f"gc: objects in permanent generation: {get_freeze_count()}\n")
+        count, candidates, duration, collectable = collect_now(garbage if debug[0] & DEBUG_SAVEALL else None,
+                                                               debug[0] & DEBUG_COLLECTABLE)
+        if collectable:
+            report(collectable)
+        if debug[0] & DEBUG_STATS:
+            report(f"gc: done, {count} unreachable, 0 uncollectable, {duration:.4f}s elapsed\n")
         counts = stats[generation]
         counts['collections'] += 1
         counts['collected'] += count
@@ -92,11 +108,6 @@ The number of unreachable objects is returned."""
         for callback in list(callbacks):
             callback('stop', info)
         return count
-
-    @c_function(0)
-    def get_count():
-        """Return a three-tuple of the current collection counts."""
-        return (0, 0, 0)
 
     @c_function(0)
     def get_threshold():
@@ -171,27 +182,8 @@ Simple atomic objects will return false."""
         """Returns true if the object has been already finalized by the GC."""
         return finalized(obj)
 
-    @c_function(0)
-    def freeze():
-        """Freeze all current tracked objects and ignore them for future collections.
-
-This can be used before a POSIX fork() call to make the gc copy-on-write friendly.
-Note: collection before a POSIX fork() call may free pages for future allocation
-which can cause copy-on-write."""
-
-    @c_function(0)
-    def unfreeze():
-        """Unfreeze all objects in the permanent generation.
-
-Put all objects in the permanent generation back into oldest generation."""
-
-    @c_function(0)
-    def get_freeze_count():
-        """Return the number of objects in the permanent generation."""
-        return 0
-
     public = {name: value for name, value in locals().items()
-              if callable(value) and name not in ('c_function', 'at_most_one', 'collect_now', 'tracked',
+              if callable(value) and name not in ('c_function', 'at_most_one', 'report', 'collect_now', 'tracked',
                                                   'finalized', 'objects')}
     for function in public.values():
         function.__qualname__ = function.__name__

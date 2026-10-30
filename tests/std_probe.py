@@ -198,3 +198,49 @@ show("finalized before", lambda: gc.is_finalized(phoenix))
 del phoenix
 gc.collect()
 show("finalized after", lambda: (len(revived), gc.is_finalized(revived[0]), gc.is_finalized(Node())))
+
+ended = []
+
+
+class Mortal:
+    def __init__(self):
+        self.me = self
+
+    def __del__(self):
+        ended.append(1)
+
+
+gc.collect()
+before = gc.get_count()[0]
+cells = [[] for _ in range(50)]
+show("count grows", lambda: gc.get_count()[0] >= before + 50)
+mortal = Mortal()
+gc.freeze()
+show("frozen", lambda: (gc.get_freeze_count() > 0, any(x is mortal for x in gc.get_objects())))
+del mortal
+gc.collect()
+show("frozen survives", lambda: ended)
+gc.unfreeze()
+gc.collect()
+show("unfrozen", lambda: (ended, gc.get_freeze_count()))
+
+
+class Errors:
+    def __init__(self):
+        self.text = []
+
+    def write(self, text):
+        self.text.append(text)
+        return len(text)
+
+
+sys.stderr = Errors()
+node = Node()
+del node
+gc.set_debug(gc.DEBUG_STATS | gc.DEBUG_COLLECTABLE)
+gc.collect()
+gc.set_debug(0)
+errors, sys.stderr = sys.stderr, sys.__stderr__
+lines = "".join(errors.text).splitlines()
+show("debug stats", lambda: (lines[0], lines[1].split(":")[0], lines[2].split(":")[0], lines[-1].split(",")[0]))
+show("debug collectable", lambda: any(line.startswith("gc: collectable <Node 0x") for line in lines))

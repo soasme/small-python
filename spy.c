@@ -119,6 +119,7 @@ struct SPYValue {
     unsigned char marked, weak; /* weak: a weak-table entry names this value. */
     unsigned char finalized; /* __del__ has been queued for this instance. */
     unsigned char watched; /* A class's namespace: its changes are class changes. */
+    unsigned char frozen; /* gc.freeze(): collections treat it as reachable. */
     union {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
@@ -246,6 +247,7 @@ struct SPYContext {
     SPYValue *caller_env; /* Borrowed: where the running Python function was called. */
     SPYValue *inherited_exception; /* Borrowed from a suspended caller. */
     size_t live, steps, step_limit, depth;
+    size_t collected_live; /* live after the last collection, for gc.get_count(). */
     /* Python frames are limited by sys.setrecursionlimit; the engine's own C
      * recursion by the machine stack it has used since the outermost entry. */
     size_t py_depth, recursion_limit, int_max_str_digits, stack_size;
@@ -496,6 +498,15 @@ fail:
     spy_error(c, "MemoryError", "allocation too large");
     return -1;
 }
+typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
+static int append(Buffer *b, const char *s, size_t n) {
+    if (n > SIZE_MAX - b->len - 1 || grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1, 1)) return -1;
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+    return 0;
+}
+static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
 static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     SPYValue *v = NULL;
     if (type == SPY_TUPLE && tuple_size < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache)) {
@@ -783,15 +794,16 @@ static void release_live_edge(SPYValue *v, void *unused) {
 }
 static int sequence_append(SPYContext *, SPYValue *, SPYValue *);
 static int gc_public(SPYValue *);
+static int gc_tracked(SPYContext *, SPYValue *);
 /* One collection. With save (gc.DEBUG_SAVEALL), the unreachable values left
  * after finalization are appended to it instead of freed. */
-static size_t collect_once(SPYContext *c, SPYValue *save) {
+static size_t collect_once(SPYContext *c, SPYValue *save, Buffer *report) {
     if (!c->live) return 0;
     Work work = { malloc(c->live * sizeof(SPYValue *)), 0 };
     if (!work.items) return 0;
     for (SPYValue *v = c->values; v; v = v->next) { v->trial = v->refs; v->marked = 0; }
     for (SPYValue *v = c->values; v; v = v->next) edges(v, subtract_edge, NULL);
-    for (SPYValue *v = c->values; v; v = v->next) if (v->trial) mark_edge(v, &work);
+    for (SPYValue *v = c->values; v; v = v->next) if (v->trial || v->frozen) mark_edge(v, &work);
     for (size_t i = 0; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     /* Unreachable values awaiting a finalizer (__del__, or close() of a
      * suspended generator) survive with everything they reach; a later
@@ -802,6 +814,13 @@ static size_t collect_once(SPYContext *c, SPYValue *save) {
         if (!v->marked && finalize_later(v)) { v->refs++; v->marked = 1; work.items[work.len++] = v; }
     for (size_t i = finalizing; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     free(work.items);
+    /* gc.DEBUG_COLLECTABLE's lines, written before anything is freed. */
+    for (SPYValue *v = c->values; report && v; v = v->next)
+        if (!v->marked && gc_public(v) && gc_tracked(c, v)) {
+            char line[160];
+            snprintf(line, sizeof(line), "gc: collectable <%s %p>\n", type_name(v), (void *)v);
+            puts_buffer(report, line);
+        }
     if (save) {
         size_t saved = 0;
         for (SPYValue *v = c->values; v; v = v->next)
@@ -825,15 +844,16 @@ static size_t collect_once(SPYContext *c, SPYValue *save) {
 static void weak_callbacks(SPYContext *);
 /* A pass that finds garbage awaiting finalizers only finalizes it; collect
  * again to free what the finalizers left unreachable. */
-static size_t collect(SPYContext *c, SPYValue *save) {
-    size_t count = collect_once(c, save);
+static size_t collect(SPYContext *c, SPYValue *save, Buffer *report) {
+    size_t count = collect_once(c, save, report);
     while (c->finalize_calls_len && !c->weak_running) {
         weak_callbacks(c);
-        count += collect_once(c, save);
+        count += collect_once(c, save, report);
     }
+    c->collected_live = c->live;
     return count;
 }
-size_t spy_collect(SPYContext *c) { return collect(c, NULL); }
+size_t spy_collect(SPYContext *c) { return collect(c, NULL, NULL); }
 size_t spy_live_values(const SPYContext *c) { return c->live; }
 SPYType spy_type(const SPYValue *v) { return (SPYType)v->type; }
 SPYValue *spy_none(SPYContext *c) { return spy_retain(c->none); }
@@ -2280,15 +2300,6 @@ int spy_define(SPYContext *c, const char *name, SPYNative call, void *data) {
     return status;
 }
 
-typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
-static int append(Buffer *b, const char *s, size_t n) {
-    if (n > SIZE_MAX - b->len - 1 || grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1, 1)) return -1;
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = 0;
-    return 0;
-}
-static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
 static int integer_format(Buffer *out, SPYValue *value, unsigned base, int uppercase, int sign, int alternate) {
     IntView view; integer_view(value, &view);
     size_t capacity = view.len * 32 + 1;
@@ -14470,7 +14481,7 @@ static int weak_natives(SPYContext *c, SPYValue *module) {
 }
 /* The gc module's view of the collector. Engine-internal values (environments
  * and other private tags) are never exposed. */
-enum { GC_COLLECT, GC_REFERENTS, GC_REFERRERS, GC_TRACKED, GC_OBJECTS, GC_FINALIZED };
+enum { GC_COLLECT, GC_REFERENTS, GC_REFERRERS, GC_TRACKED, GC_OBJECTS, GC_FINALIZED, GC_GET_COUNT, GC_FREEZE, GC_UNFREEZE, GC_GET_FREEZE_COUNT };
 static int gc_public(SPYValue *v) { return v->type <= SPY_LAST_TYPE; }
 /* CPython tracks containers; tuples and frozensets only while an item is tracked. */
 static int gc_tracked(SPYContext *c, SPYValue *v) {
@@ -14497,26 +14508,49 @@ static void gc_referent(SPYValue *v, void *data) {
 static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     if (id == GC_COLLECT) {
-        /* _collect([save]): (collected, candidates, seconds); save is None or gc.garbage. */
-        SPYValue *save = argc ? argv[0] : NULL;
-        if (argc > 1 || (save && save->type != SPY_NONE && save->type != SPY_LIST))
-            return spy_error(c, "TypeError", "_collect expects None or a list");
+        /* _collect([save[, report]]): (collected, candidates, seconds, lines);
+         * save is None or gc.garbage, and lines, when report is true, the
+         * gc.DEBUG_COLLECTABLE report (else None). */
+        SPYValue *save = argc ? argv[0] : c->none;
+        if (argc > 2 || (save->type != SPY_NONE && save->type != SPY_LIST))
+            return spy_error(c, "TypeError", "_collect expects None or a list, and a flag");
         size_t candidates = c->live;
         double seconds = 0.0;
+        Buffer report = {.ctx = c};
 #ifdef TIME_UTC
         struct timespec start, end;
         int timed = timespec_get(&start, TIME_UTC) == TIME_UTC;
 #endif
-        SPYValue *items[3] = {spy_int(c, (int64_t)collect(c, save && save->type == SPY_LIST ? save : NULL)),
-                              spy_int(c, (int64_t)candidates), NULL};
+        size_t count = collect(c, save->type == SPY_LIST ? save : NULL, argc > 1 && spy_truth(argv[1]) ? &report : NULL);
 #ifdef TIME_UTC
         if (timed && timespec_get(&end, TIME_UTC) == TIME_UTC)
             seconds = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 #endif
-        items[2] = spy_float(c, seconds);
-        SPYValue *result = items[0] && items[1] && items[2] ? spy_tuple(c, 3, items) : NULL;
-        for (int i = 0; i < 3; i++) spy_release(items[i]);
+        SPYValue *items[4] = {spy_int(c, (int64_t)count), spy_int(c, (int64_t)candidates), spy_float(c, seconds),
+                              report.data ? spy_string(c, report.data, report.len) : spy_none(c)};
+        free(report.data);
+        SPYValue *result = items[0] && items[1] && items[2] && items[3] ? spy_tuple(c, 4, items) : NULL;
+        for (int i = 0; i < 4; i++) spy_release(items[i]);
         return result;
+    }
+    if (id == GC_GET_COUNT || id == GC_FREEZE || id == GC_UNFREEZE || id == GC_GET_FREEZE_COUNT) {
+        static const char *const names[] = {"get_count", "freeze", "unfreeze", "get_freeze_count"};
+        if (argc) return errorf(c, "TypeError", "gc.%s() takes no arguments (%zu given)", names[id - GC_GET_COUNT], argc);
+        if (id == GC_GET_COUNT) {
+            /* One generation: the values allocated, less those freed, since the last collection. */
+            SPYValue *items[3] = {spy_int(c, c->live > c->collected_live ? (int64_t)(c->live - c->collected_live) : 0), spy_int(c, 0), spy_int(c, 0)};
+            SPYValue *result = items[0] && items[1] && items[2] ? spy_tuple(c, 3, items) : NULL;
+            for (int i = 0; i < 3; i++) spy_release(items[i]);
+            return result;
+        }
+        /* The permanent generation: frozen values are roots of every collection. */
+        size_t frozen = 0;
+        for (SPYValue *v = c->values; v; v = v->next) {
+            if (id == GC_FREEZE && gc_public(v) && gc_tracked(c, v)) v->frozen = 1;
+            else if (id == GC_UNFREEZE) v->frozen = 0;
+            frozen += v->frozen;
+        }
+        return id == GC_GET_FREEZE_COUNT ? spy_int(c, (int64_t)frozen) : spy_none(c);
     }
     if (id == GC_TRACKED || id == GC_FINALIZED) {
         if (argc != 1) return spy_error(c, "TypeError", "expected one argument");
@@ -14538,6 +14572,7 @@ static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     } else {
         for (SPYValue *v = c->values; v && !walk.failed; v = v->next) {
             if (!gc_public(v) || v == walk.out || !gc_tracked(c, v)) continue;
+            if (id == GC_OBJECTS && v->frozen) continue;
             if (id == GC_OBJECTS) { walk.failed = sequence_append(c, walk.out, v) != 0; continue; }
             for (size_t i = 0; i < argc && !walk.failed; i++) {
                 GCWalk probe = {c, NULL, argv[i], 0, 0};
@@ -14555,7 +14590,11 @@ static int gc_natives(SPYContext *c, SPYValue *module) {
         define_native(c, module, "get_referrers", gc_native, (void *)(intptr_t)GC_REFERRERS) ||
         define_native(c, module, "_tracked", gc_native, (void *)(intptr_t)GC_TRACKED) ||
         define_native(c, module, "_objects", gc_native, (void *)(intptr_t)GC_OBJECTS) ||
-        define_native(c, module, "_finalized", gc_native, (void *)(intptr_t)GC_FINALIZED);
+        define_native(c, module, "_finalized", gc_native, (void *)(intptr_t)GC_FINALIZED) ||
+        define_native(c, module, "get_count", gc_native, (void *)(intptr_t)GC_GET_COUNT) ||
+        define_native(c, module, "freeze", gc_native, (void *)(intptr_t)GC_FREEZE) ||
+        define_native(c, module, "unfreeze", gc_native, (void *)(intptr_t)GC_UNFREEZE) ||
+        define_native(c, module, "get_freeze_count", gc_native, (void *)(intptr_t)GC_GET_FREEZE_COUNT);
 }
 /* The sys module's runtime state. Constant metadata is Python in modules/sys.py. */
 enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH, SYS_GETFRAME, SYS_FRAME_MODULE,

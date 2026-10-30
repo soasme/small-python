@@ -626,7 +626,8 @@ arguments").
 
 Returns the current collection counts as a `tuple` of three `int`s.
 
-*Status:* provided; always `(0, 0, 0)`.
+*Status:* provided; the single generation's count is the number of values
+allocated, less those freed, since the last collection, and the others are 0.
 
 ### 6.3 Statistics and callbacks
 
@@ -708,8 +709,8 @@ statistics), `DEBUG_COLLECTABLE` (2, print collectable objects found),
 freeing them), and `DEBUG_LEAK` (38, the last three together). Printed
 information goes to `sys.stderr`.
 
-*Status:* provided, except that `DEBUG_STATS`, `DEBUG_COLLECTABLE`, and
-`DEBUG_UNCOLLECTABLE` print nothing.
+*Status:* provided. `DEBUG_STATS` reports the single generation's count
+and `DEBUG_UNCOLLECTABLE` prints nothing, since no object is uncollectable.
 
 #### 6.5.2 `garbage`
 
@@ -726,7 +727,8 @@ collections ignore; `unfreeze()` returns them to the oldest generation;
 `get_freeze_count()` returns the number of objects in the permanent
 generation. `freeze()` and `unfreeze()` return `None`.
 
-*Status:* provided; nothing is frozen, and `get_freeze_count()` is 0.
+*Status:* provided; `freeze()` marks every tracked value, and a collection
+treats marked values as reachable.
 
 ## Annex A (informative) Implementation status
 
@@ -738,7 +740,7 @@ deviation.
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
 | `sys` | every name of clause 5 not listed in the other columns | none | `get_lazy_imports`, `set_lazy_imports`, `get_lazy_imports_filter`, `set_lazy_imports_filter` (5.1.3, 5.1.4); `excepthook`, `unraisablehook` (5.6.2, 5.6.3); `get_asyncgen_hooks`, `set_asyncgen_hooks`, `get_coroutine_origin_tracking_depth`, `set_coroutine_origin_tracking_depth` (5.8); `thread_info` (5.9.3); the interfaces of 5.12 to 5.14 |
-| `gc` | every name of clause 6 not listed in the other columns | `get_count` (6.2.3); `set_debug` (6.5.1); `freeze`, `unfreeze`, `get_freeze_count` (6.6) | none |
+| `gc` | every name of clause 6 | none | none |
 
 The unbound names need the engine to call them or to keep new state: a
 traceback display for `excepthook`, reports of ignored exceptions for
