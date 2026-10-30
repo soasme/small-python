@@ -92,6 +92,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A builtin method is called without a bound method](#a-builtin-method-is-called-without-a-bound-method) | -3.0% (strings) |
 | [A builtin name remembers it is not a global](#a-builtin-name-remembers-it-is-not-a-global) | `len(l)`: -18% |
 | [A call node is evaluated in its own function](#a-call-node-is-evaluated-in-its-own-function) | M2 time: loop -3.4%, classes -3.3% |
+| [A str keeps its hash](#a-str-keeps-its-hash) | -2.8% (strings), `d["a"]`: -10% |
 
 ### Releasing a number or string frees it at once
 
@@ -467,6 +468,18 @@ local's address out of `call_keywords`, `get_index`, `set_index`,
 initializes a plain instance through `call_with_self` too. The wall time
 stayed within noise (-1.6% to +1.7% while the fuzzers ran), and the
 duplicate argument-shifting code is gone.
+
+### A str keeps its hash
+
+A dictionary lookup hashed its key every time, walking every byte of a
+str, and compared the stored key through the general equality, which
+first asks whether either side has an `__eq__` to call. A str or bytes
+now keeps its hash once computed, as CPython's do, in the word a
+bytearray uses to count its exports; the one place that grows a str in
+place clears it. Two exact str values compare their bytes directly:
+neither can run Python code. A loop of `x = d["a"]` takes 10% fewer
+instructions; `strings` 2.8% and `dicts` 0.9% fewer, the rest within
+0.2%.
 
 ## Tried and left out
 

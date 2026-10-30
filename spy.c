@@ -130,10 +130,11 @@ struct SPYValue {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
         double complex number;
-        /* exports: live memoryviews of a bytearray; chars: a str's code
-         * point count plus one, once counted (str values are immutable);
-         * cursor: a character index of a str and its byte offset. */
-        struct { char *data; size_t len, exports, chars, cursor[2]; } string;
+        /* exports: live memoryviews of a bytearray; hash: a str's or
+         * bytes' hash once computed, else 0; chars: a str's code point
+         * count plus one, once counted (str values are immutable); cursor:
+         * a character index of a str and its byte offset. */
+        struct { char *data; size_t len; union { size_t exports; int64_t hash; }; size_t chars, cursor[2]; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; size_t changes; int odd_keys; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
@@ -1533,6 +1534,9 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
     }
 }
 static int equal(SPYValue *a, SPYValue *b, size_t depth) {
+    /* Two exact str values compare without a callback. */
+    if (a->type == SPY_STRING && b->type == SPY_STRING)
+        return a->as.string.len == b->as.string.len && !memcmp(a->as.string.data, b->as.string.data, a->as.string.len);
     spy_retain(a); spy_retain(b);
     int result = equal_value(a, b, depth);
     spy_release(a); spy_release(b); return result;
@@ -1624,7 +1628,9 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         *result = hash_signed((uint64_t)hash_double(value, creal(value->as.number)) +
                              UINT64_C(1000003) * (uint64_t)hash_double(value, cimag(value->as.number)));
         return 0;
-    case SPY_STRING: case SPY_BYTES: *result = text_hash(value->as.string.data, value->as.string.len); return 0;
+    case SPY_STRING: case SPY_BYTES:
+        if (!value->as.string.hash) value->as.string.hash = text_hash(value->as.string.data, value->as.string.len);
+        *result = value->as.string.hash; return 0;
     case SPY_TUPLE:
         if (!value->as.seq.hashed) {
             if (hash_items(c, value->as.seq.len, value->as.seq.items, 1, &value->as.seq.hash)) return -1;
@@ -15741,7 +15747,7 @@ static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {
     char *data = realloc(s->as.string.data, len + added + 1);
     if (!data) return spy_error(c, "MemoryError", "allocation failed");
     memcpy(data + len, tail->as.string.data, added); data[len + added] = 0;
-    s->as.string.data = data; s->as.string.len = len + added;
+    s->as.string.data = data; s->as.string.len = len + added; s->as.string.hash = 0;
     s->as.string.chars = s->as.string.chars && tail->as.string.chars ? s->as.string.chars + tail->as.string.chars - 1 : 0;
     return spy_retain(s);
 }
@@ -15777,7 +15783,7 @@ static int assign(SPYContext *c, Frame *f, Node *n) {
         SPYValue *env = f->env;
         Node *t = n->a;
         if ((old->type == SPY_STRING || old->type == SPY_BYTES) && rhs->type == old->type && n->op == T_ADDEQ && local == old &&
-            old->refs == 2 && !old->as.string.exports && env->type == V_ENV && !env->as.map.namespace &&
+            old->refs == 2 && env->type == V_ENV && !env->as.map.namespace &&
             t->slot_scope == env->as.map.scope && t->slot < map_used(env) && env->as.map.items[t->slot].value == old)
             value = string_append(c, old, rhs);
         else value = inplace(c, n->op, old, rhs);
