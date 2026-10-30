@@ -44,6 +44,21 @@ small steps:
 
 Each change below removes work from one of those steps.
 
+## No machine code
+
+spy will not compile Python to machine code. A just-in-time compiler is
+how PyPy runs `loop` 15 times and `nbody` 6 times faster than CPython: it
+keeps numbers in registers, removes objects that never leave a loop and
+inlines calls. It also emits code for each processor, needs writable
+executable memory that some hosts forbid, is far larger than the rest of
+the engine, and must undo its guesses whenever Python's dynamism breaks
+them. None of that fits a small, portable C11 engine.
+
+The goal is therefore the fastest interpreter the design allows: CPython's
+speed or better on every program, with PyPy's lead on loop-heavy code
+accepted. Each change must keep the engine portable C and the behavior
+unchanged.
+
 ## Measuring one feature
 
 The scaled programs mix many features. To find which feature costs most
