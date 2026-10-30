@@ -33,7 +33,7 @@ parentPort.once("message", ({ inbox }) => {
     parentPort.postMessage(frame);
   };
   receive();
-  send([0x40, 0x73, 5, 0, 0, 0, ...Buffer.from("0.2.0")]);
+  send([0x40, 0x73, 5, 0, 0, 0, ...Buffer.from("0.3.0")]);
   receive();
   if (which === "length over limit") parentPort.postMessage(new Uint8Array([0xff, 0xff, 0xff, 0xff]));
   else if (which === "zero length") parentPort.postMessage(new Uint8Array([0, 0, 0, 0]));

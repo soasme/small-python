@@ -1,6 +1,6 @@
 # Cython upstream baseline
 
-Engine: 0.2.0. This report measures the current
+Engine: 0.3.0. This report measures the current
 partial engine; it is not a full Cython-suite compatibility claim.
 
 ## Sources inspected
@@ -77,13 +77,13 @@ Limitations are explicit:
 | Files with attempted static doctests | 89 |
 | Adapter-ineligible files | 13 |
 | Discovered examples | 11,450 |
-| Passed examples | 343 |
-| Failed examples | 11,107 |
+| Passed examples | 383 |
+| Failed examples | 11,067 |
 | Upstream-directed skips | 0 |
 | Driver errors/timeouts | 0 |
 
 The additional dynamic-discovery run covers 11,543 examples in 90 files:
-367 pass and 11,176 fail. Twelve files remain adapter-ineligible. Oracle module
+407 pass and 11,136 fail. Twelve files remain adapter-ineligible. Oracle module
 initialization succeeds for 97 files and fails for four; one file cannot be
 parsed by the oracle. Those failures are recorded independently of engine
 outcomes. Reports are in `tests/results/cython-dynamic.json`.

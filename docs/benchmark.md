@@ -1,6 +1,6 @@
 # Benchmarks
 
-Engine: 0.2.0. This report compares wall time
+Engine: 0.3.0. This report compares wall time
 and peak memory of small programs on several Python implementations. It
 measures the current engine; it is not a compatibility claim.
 
@@ -55,7 +55,7 @@ idle machine.
 
 | Engine | Version | Build | Executable |
 | --- | --- | --- | --- |
-| spy | 0.2.0 | `make`, Apple Clang 17, `-O2` | 1.4 MB |
+| spy | 0.3.0 | `make`, Apple Clang 17, `-O2` | 1.4 MB |
 | CPython 3.15 | 3.15.0 (the pinned oracle) | `configure --without-ensurepip`, `-O3`, no PGO/LTO | 6.3 MB, plus `Lib/` |
 | CPython 3.14 | 3.14.3 | Homebrew bottle | Homebrew framework |
 | PyPy | 8.0.1, Python 3.11.17 | Homebrew bottle, JIT | 33 MB `libpypy3.11-c` |
@@ -64,9 +64,9 @@ idle machine.
 | Monty | 1.4.0, commit `f3fb8e9` | `cargo build --release -p monty-runtime`, rustc 1.99.1 | 25 MB |
 | MicroPython | 1.29.0, unix port | Homebrew bottle, `-X heapsize=512M` | 0.7 MB |
 
-The spy column was measured at 0.2.0 in the second of two runs of
+The spy column was measured at 0.3.0 in the second of two runs of
 `bench/compare.py` with CPython 3.15 as the reference; the two runs agreed
-within 6 ms (1.5%), and CPython's medians stayed within 4% of the column
+within 3 ms (1.3%), and CPython's medians stayed within 6% of the column
 below. The other engines' columns come from the first run, at `ea4d579`,
 on the same machine; their builds have not changed.
 
@@ -82,16 +82,16 @@ Median of the runs; lower is better.
 
 | Program | spy | CPython 3.15 | CPython 3.14 | PyPy | RustPython | PocketPy | Monty | MicroPython |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| startup | 3.1 ms | 11.1 ms | 18.9 ms | 17.2 ms | 27.8 ms | 2.9 ms | 4.0 ms | 3.1 ms |
-| fib | 73.2 ms | 30.5 ms | 43.6 ms | 27.5 ms | 99.1 ms | 38.7 ms | 65.2 ms | 38.3 ms |
-| loop | 393 ms | 395 ms | 370 ms | 25.8 ms | 634 ms | 218 ms | 368 ms | 233 ms |
-| nbody | 542 ms | 239 ms | 307 ms | 42.2 ms | 701 ms | 377 ms | 735 ms | 642 ms |
-| strings | 197 ms | 114 ms | 114 ms | 52.7 ms | 244 ms | 133 ms | 218 ms | 418 ms |
+| startup | 2.7 ms | 11.1 ms | 18.9 ms | 17.2 ms | 27.8 ms | 2.9 ms | 4.0 ms | 3.1 ms |
+| fib | 74.2 ms | 30.5 ms | 43.6 ms | 27.5 ms | 99.1 ms | 38.7 ms | 65.2 ms | 38.3 ms |
+| loop | 402 ms | 395 ms | 370 ms | 25.8 ms | 634 ms | 218 ms | 368 ms | 233 ms |
+| nbody | 543 ms | 239 ms | 307 ms | 42.2 ms | 701 ms | 377 ms | 735 ms | 642 ms |
+| strings | 195 ms | 114 ms | 114 ms | 52.7 ms | 244 ms | 133 ms | 218 ms | 418 ms |
 | dicts | 149 ms | 92.9 ms | 96.2 ms | 49.3 ms | 171 ms | 72.5 ms | 328 ms | 41.36 s |
-| sort | 187 ms | 133 ms | 145 ms | 220 ms | 260 ms | 409 ms | 175 ms | 279 ms |
+| sort | 192 ms | 133 ms | 145 ms | 220 ms | 260 ms | 409 ms | 175 ms | 279 ms |
 | classes | 214 ms | 98.4 ms | 99.4 ms | 23.2 ms | 299 ms | 140 ms | 345 ms | 134 ms |
-| generators | 234 ms | 112 ms | 121 ms | 40.6 ms | 292 ms | 141 ms | error | 109 ms |
-| bigint | 7.7 ms | 12.9 ms | 21.1 ms | 19.3 ms | 29.3 ms | wrong | 4.9 ms | 15.2 ms |
+| generators | 239 ms | 112 ms | 121 ms | 40.6 ms | 292 ms | 141 ms | error | 109 ms |
+| bigint | 7.0 ms | 12.9 ms | 21.1 ms | 19.3 ms | 29.3 ms | wrong | 4.9 ms | 15.2 ms |
 
 ### Peak memory
 
@@ -104,10 +104,10 @@ Largest peak resident set size of the runs, in MiB; lower is better.
 | loop | 3.3 | 13.5 | 14.6 | 31.3 | 31.7 | 3.5 | 10.1 | 7.6 |
 | nbody | 3.7 | 14.2 | 15.0 | 32.2 | 32.0 | 14.9 | 10.8 | 434.8 |
 | strings | 3.7 | 13.8 | 14.6 | 32.0 | 31.9 | 21.2 | 11.2 | 76.9 |
-| dicts | 97.6 | 46.2 | 46.9 | 70.8 | 82.9 | 19.2 | 30.1 | 36.7 |
-| sort | 108.2 | 37.1 | 38.3 | 48.4 | 90.3 | 229.2 | 42.2 | 89.5 |
+| dicts | 97.7 | 46.2 | 46.9 | 70.8 | 82.9 | 19.2 | 30.1 | 36.7 |
+| sort | 108.1 | 37.1 | 38.3 | 48.4 | 90.3 | 229.2 | 42.2 | 89.5 |
 | classes | 3.5 | 13.8 | 14.7 | 32.0 | 31.9 | 30.2 | 10.8 | 25.9 |
-| generators | 3.4 | 13.8 | 14.6 | 32.0 | 31.9 | 3.5 | — | 7.6 |
+| generators | 3.3 | 13.8 | 14.6 | 32.0 | 31.9 | 3.5 | — | 7.6 |
 | bigint | 3.7 | 13.6 | 14.6 | 31.7 | 32.0 | — | 11.1 | 8.6 |
 
 ### Failures
@@ -120,17 +120,15 @@ Largest peak resident set size of the runs, in MiB; lower is better.
 ## Reading the results
 
 **Start-up and memory.** spy starts a process, runs `print` and exits in
-3.1 ms and stays under 4 MiB for every program
+2.7 ms and stays under 4 MiB for every program
 that does not build large containers. PocketPy and MicroPython, the other
-two engines built for embedding, start in about the same time. The machine
-was slower on the day of this run: the `14f4566` build that reported 2.7 ms
-earlier took 3.5 ms, and MicroPython 3.0 ms. On `dicts` and `sort`
+two engines built for embedding, start in about the same time. On `dicts` and `sort`
 spy uses more memory than CPython: every spy value has the same size,
 216 bytes on this build, large enough for its biggest kind (a dictionary,
 class or instance), so 100,000 integers cost about 21 MiB.
 
 **Throughput.** In the same run, spy was faster than CPython 3.15 on
-`bigint`, matched it on `loop`, and was 1.4 to 2.4 times slower on the
+`bigint`, came within 5% of it on `loop`, and was 1.4 to 2.4 times slower on the
 other programs. spy has no
 bytecode compiler. Ordinary code is evaluated by walking the syntax tree
 (`eval` in `spy.c`); suspendable bodies run on an instruction list that
@@ -139,7 +137,7 @@ evaluations: a literal's value, a name's hash and the entry it was last
 found in, and how a class's instances answer an attribute read, an
 assignment or a method call.
 
-- `bigint` (0.6 times), `loop` (1.0 times), `sort` (1.4 times) and
+- `bigint` (0.6 times), `loop` (1.1 times), `sort` (1.4 times) and
   `dicts` (1.6 times) are closest. `loop` does a few operations per
   iteration on small integers; `bigint`, most of `sort` and the dictionary
   operations run in C. Big integers divide with Knuth's algorithm D and
@@ -157,9 +155,9 @@ These are implementation gaps, not language choices. MicroPython's 41 s on
 
 `make bench` measures the embedding path without a process: it creates a
 context, executes `print('Hello, world!')` with output discarded, and frees
-the context, 20,000 times. On the build above it reports **259 µs of CPU time
-per lifecycle** (three runs: 259.00, 261.11, 256.78 µs). The Mach-O
-`__TEXT` segment of `spy` is 1,277,952 bytes and the executable 1,390,208
+the context, 20,000 times. On the build above it reports **257 µs of CPU time
+per lifecycle** (three runs: 256.74, 256.76, 257.97 µs). The Mach-O
+`__TEXT` segment of `spy` is 1,294,336 bytes and the executable 1,407,056
 bytes, down from 1,671,168 and 1.8 MB before the Unicode tables took
 libunicode's encodings at `c3bd2c1`.
 

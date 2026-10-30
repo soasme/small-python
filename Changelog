@@ -1,3 +1,36 @@
+2026-10-31  0.3.0
+
+- Packages: Rust crates small-python-src, small-python-sys, small-python
+  (safe API with host functions, modules, loader, output, and serde) and
+  small-python-worker (the worker protocol's parent); a Go module with spy
+  (cgo, in-process) and worker (a sandboxed spy-worker process). The
+  publish workflow releases them to crates.io and as a go/vX.Y.Z tag.
+- spyc bundles a program's imported modules into its C output, found by
+  CPython's path finder rules, with -m, -I, -x, -D, -N, --alias,
+  --metafile, --deps, --analyze, -Werror, -O, -OO and --minify; spyc -c
+  writes only the source array for a host's own main.
+- spy_set_optimize sets the optimization level; level 2 drops docstrings,
+  and spy gains -O and -OO.
+- sys and gc follow CPython 3.15 for every name they bind, as PLS-STD-315
+  specifies and tests/std.py checks against the oracle (242 probes):
+  sys.excepthook and sys.unraisablehook report exceptions the engine
+  cannot propagate, sys.settrace and sys.setprofile receive call, line,
+  return and exception events, the lazy-import mode and filter, asyncgen
+  hooks and coroutine origin tracking are engine settings (PLS-315
+  B.1.4 HostLazyImportPolicy), and gc has real counts, freezing and
+  DEBUG_STATS/DEBUG_COLLECTABLE reports. spy_set_error_output gives
+  standard error its own host callback.
+- The weakref module is gone; the standard layer supplies sys and gc.
+- Memory checking: tests/oom fails each allocation in turn (it found a NULL
+  dereference releasing half-built values), tests/threads runs contexts
+  on four threads under ThreadSanitizer, stack use after return is
+  checked, spyc has a fuzzer, fuzz corpora replay under MemorySanitizer,
+  and make coverage reports what the tests never execute.
+- Examples: flappy and pong, raylib games bundled into one executable,
+  and todo, a web app on the small-python crate.
+- Cython baseline: 383 static and 407 dynamic examples pass (from 343
+  and 367).
+
 2026-10-29  0.2.0
 
 - Faster evaluation without a bytecode compiler: local, module and

@@ -74,7 +74,7 @@ def fake_worker(body):
         def send(payload):
             os.write(1, struct.pack("<I", len(payload)) + payload)
         receive()
-        send(b"\\x40s" + struct.pack("<I", 5) + b"0.2.0")
+        send(b"\\x40s" + struct.pack("<I", 5) + b"0.3.0")
         receive()
     """) + textwrap.dedent(body)
     handle, path = tempfile.mkstemp(suffix=".py")

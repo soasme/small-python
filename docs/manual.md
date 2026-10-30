@@ -1,6 +1,6 @@
 # Small Python
 
-Version 0.2.0
+Version 0.3.0
 
 ## Table of Contents
 
@@ -325,10 +325,10 @@ The lifecycle benchmark creates a context, parses and executes a hello-world
 program with discarded output, and destroys the context. It reports average CPU
 time across 20,000 iterations. It excludes process launch and terminal I/O.
 
-On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run at `c3bd2c1`
-measured 261 microseconds of CPU time per lifecycle (three runs: 264.63,
-257.55, 261.12 µs). The Mach-O `__TEXT` segment was 1,277,952 bytes; the
-executable file was 1,390,208 bytes. These measurements
+On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run at 0.3.0
+measured 257 microseconds of CPU time per lifecycle (three runs: 256.74,
+256.76, 257.97 µs). The Mach-O `__TEXT` segment was 1,294,336 bytes; the
+executable file was 1,407,056 bytes. These measurements
 apply to this build. They do not establish x86 performance, a worst-case
 latency bound, or the few-kilobyte size goal.
 
