@@ -28,6 +28,23 @@
 #endif
 #include "spy-unicode.h"
 #include "spy-intrinsics.h"
+/* AddressSanitizer sees an allocation held in one of the context's caches as
+ * freed until it is reused, so the caches hide no use after release. */
+#if defined(__SANITIZE_ADDRESS__)
+#define SPY_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define SPY_ASAN 1
+#endif
+#endif
+#ifdef SPY_ASAN
+#include <sanitizer/asan_interface.h>
+#define cache_put(p, n) ASAN_POISON_MEMORY_REGION(p, n)
+#define cache_take(p, n) ASAN_UNPOISON_MEMORY_REGION(p, n)
+#else
+#define cache_put(p, n) ((void)(p), (void)(n))
+#define cache_take(p, n) ((void)(p), (void)(n))
+#endif
 /* Statement helpers called from one place in the recursive evaluator stay
  * out of line, as QuickJS's no_inline: inlined, their locals would enlarge
  * the frame of every nested call. The steps of a fast name read are always
@@ -478,8 +495,9 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     if (type == SPY_TUPLE && tuple_size < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache)) {
         v = c->tuple_cache[tuple_size];
         c->tuple_cache[tuple_size] = NULL;
+        if (v) cache_take(v, sizeof(*v));
     } else if (type != SPY_TUPLE && c->spare) {
-        v = c->spare; c->spare = v->next; c->spares--;
+        v = c->spare; cache_take(v, sizeof(*v)); c->spare = v->next; c->spares--;
     }
     /* Ints and floats, the most frequent results, read only their first
      * union member: clearing the rest of a reused value is wasted. */
@@ -690,9 +708,10 @@ static void free_value(SPYValue *v) {
     case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
-        if (v->as.map.cap + v->as.map.front == 8 && c->spare_entries_len < 16)
+        if (v->as.map.cap + v->as.map.front == 8 && c->spare_entries_len < 16) {
             c->spare_entries[c->spare_entries_len++] = map_storage(v);
-        else free(map_storage(v));
+            cache_put(map_storage(v), 8 * sizeof(Entry));
+        } else free(map_storage(v));
         free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
@@ -706,9 +725,10 @@ static void free_value(SPYValue *v) {
     if (v->type == SPY_TUPLE && v->as.seq.len < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache) &&
         !c->tuple_cache[v->as.seq.len]) {
         c->tuple_cache[v->as.seq.len] = v;
+        cache_put(v, sizeof(*v));
         return;
     }
-    if (v->type != SPY_TUPLE && c->spares < 64) { v->next = c->spare; c->spare = v; c->spares++; return; }
+    if (v->type != SPY_TUPLE && c->spares < 64) { v->next = c->spare; c->spare = v; c->spares++; cache_put(v, sizeof(*v)); return; }
     free(v);
 }
 static void release_edge(SPYValue *v, void *data) {
@@ -1719,6 +1739,7 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
     if (!map->as.map.items && map->ctx->spare_entries_len) {
         map->as.map.items = map->ctx->spare_entries[--map->ctx->spare_entries_len];
         map->as.map.cap = 8;
+        cache_take(map->as.map.items, 8 * sizeof(Entry));
     }
     size_t used = map_used(map);
     if (map->as.map.front && used == map->as.map.cap) {
@@ -12291,12 +12312,18 @@ static void free_machine(SPYContext *c, Machine *m) {
     if (!c->spare_machine) {
         *m = (Machine){.stack = m->stack, .cap = m->cap, .blocks = m->blocks, .block_cap = m->block_cap};
         c->spare_machine = m;
+        cache_put(m->stack, m->cap * sizeof(*m->stack));
+        cache_put(m->blocks, m->block_cap * sizeof(*m->blocks));
     } else { free(m->blocks); free(m->stack); free(m); }
 }
 static Machine *machine_new(SPYContext *c, Program *code) {
     Machine *m = c->spare_machine ? c->spare_machine : allocate(c, sizeof(Machine));
     c->spare_machine = NULL;
-    if (m) m->code = code;
+    if (m) {
+        cache_take(m->stack, m->cap * sizeof(*m->stack));
+        cache_take(m->blocks, m->block_cap * sizeof(*m->blocks));
+        m->code = code;
+    }
     return m;
 }
 static int suspends(Node *n);
@@ -25926,7 +25953,7 @@ void spy_context_free(SPYContext *c) {
 #endif
     free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
-    while (c->spare) { SPYValue *next = c->spare->next; free(c->spare); c->spare = next; }
+    while (c->spare) { cache_take(c->spare, sizeof(*c->spare)); SPYValue *next = c->spare->next; free(c->spare); c->spare = next; }
     while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
     if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }
     free(c);

@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer test-rust rust-vendor
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz test-rust rust-vendor
 all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -192,7 +192,7 @@ test: all tests/api tests/run-spec run-cython check-intrinsics
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
-	$(PYTHON) tests/executable.py
+	CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/executable.py
 	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.
@@ -217,12 +217,25 @@ rust-vendor:
 # libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.
 # Apple clang lacks libFuzzer; on macOS use FUZZ_CC=$$(brew --prefix llvm)/bin/clang.
 FUZZ_CC ?= clang
-FUZZ_CFLAGS = -O1 -g -std=c11 -I. -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined
+FUZZ_CFLAGS = -O1 -g -std=c11 -I. -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
 LIB_FUZZING_ENGINE ?= -fsanitize=fuzzer,address,undefined
 FUZZ_OBJS = $(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o $(OBJDIR)/fuzz/fuzz_common.o
 FUZZERS = fuzz/fuzz_eval fuzz/fuzz_compile
 
 libfuzzer: $(FUZZERS)
+
+# Each fuzzer for FUZZ_SECONDS, seeded from the examples and language tests.
+# The engine has no memory limit, so out-of-memory and slow inputs are not
+# findings; any sanitizer report or crash is.
+FUZZ_SECONDS ?= 60
+FUZZ_CORPUS = $(OBJDIR)/fuzz/corpus
+fuzz: $(FUZZERS)
+	mkdir -p $(FUZZ_CORPUS)
+	for f in examples/*.py tests/spec/*/*.py; do cp $$f $(FUZZ_CORPUS)/$$(echo $$f | tr / _); done
+	for fuzzer in $(FUZZERS); do \
+		./$$fuzzer -dict=fuzz/fuzz.dict -fork=2 -ignore_ooms=1 -ignore_timeouts=1 -timeout=10 -rss_limit_mb=2048 \
+			-max_total_time=$(FUZZ_SECONDS) -artifact_prefix=$(OBJDIR)/fuzz/ $(FUZZ_CORPUS) || exit 1; \
+	done
 
 $(FUZZERS): fuzz/%: $(OBJDIR)/fuzz/%.o $(FUZZ_OBJS)
 	$(FUZZ_CC) $^ $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
@@ -239,10 +252,19 @@ bench: bench/lifecycle spy
 	./bench/lifecycle
 	size spy
 
+# Every test, the packages' worker and generated programs included, under
+# SANITIZERS: AddressSanitizer with leak checking and UndefinedBehaviorSanitizer
+# by default, or SANITIZERS=memory with clang for reads of uninitialized
+# memory. No report is recoverable, and every report lands in one file
+# (tests/sanitize.c), which must stay empty.
+SANITIZE_CFLAGS = -O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-sanitize-recover=all -fno-omit-frame-pointer
+SANITIZE_DIR = $(abspath $(OBJDIR))/sanitize
 sanitize:
 	$(MAKE) clean
-	# The native recursion guard measures the real stack, which ASan's fake frames hide.
-	ASAN_OPTIONS=detect_stack_use_after_return=0 $(MAKE) CFLAGS='-O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-omit-frame-pointer' LDFLAGS='-fsanitize=$(SANITIZERS)' test
+	mkdir -p $(SANITIZE_DIR)
+	$(CC) $(SANITIZE_CFLAGS) -DREPORT='"$(SANITIZE_DIR)/report"' -c tests/sanitize.c -o $(SANITIZE_DIR)/sanitize.o
+	SPY_TEST_TIMEOUT=600 $(MAKE) CFLAGS='$(SANITIZE_CFLAGS)' LDFLAGS='-fsanitize=$(SANITIZERS) $(SANITIZE_DIR)/sanitize.o' test test-binding; \
+	status=$$?; if [ -s $(SANITIZE_DIR)/report ]; then cat $(SANITIZE_DIR)/report; exit 1; fi; exit $$status
 
 clean:
 	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)

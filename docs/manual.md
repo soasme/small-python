@@ -233,16 +233,28 @@ the pinned oracle, and resolves all 160,282 character names and aliases
 through `\N{...}`. These checks pass; they do not
 establish complete Unicode or unittest compatibility.
 
-On the initial macOS host, both installed AddressSanitizer runtimes hung in
-their own initialization before `main`. The UndefinedBehaviorSanitizer run
-passed using:
+`make sanitize` rebuilds everything with AddressSanitizer, its leak checker,
+and UndefinedBehaviorSanitizer, then runs `make test` and the Python package's
+tests, so the engine, `spy`, `spyc`, the programs `spyc` generates, and the
+packages' sandboxed worker all run instrumented. `make CC=clang
+SANITIZERS=memory sanitize` runs the same tests under MemorySanitizer, which
+reports reads of uninitialized memory. No report is recoverable.
+`tests/sanitize.c`, linked into every instrumented program, compiles in the
+options and appends every report to one file that must stay empty, so a report
+fails the run even from a process whose status or output a test ignores.
+Under AddressSanitizer the context's allocation caches poison what they hold,
+so using a released value is reported even when its allocation is cached for
+reuse. The worker's own code is not leak-checked: leak checking needs
+`ptrace`, which the worker's sandbox refuses, but the engine code the worker
+runs is leak-checked in every other program.
 
-```sh
-make SANITIZERS=undefined sanitize
-```
+`make fuzz` runs the libFuzzer targets ([fuzz/README](../fuzz/README)) for
+`FUZZ_SECONDS` each, seeded from the examples and the specification tests.
 
-Linux CI is configured for AddressSanitizer and UndefinedBehaviorSanitizer. A
-configured job is not a claim that it has already run successfully.
+These tools report the memory errors that the tests and fuzzed inputs reach;
+they cannot show that code nothing executes is free of them. Linux CI runs all
+three. On the initial macOS host, AddressSanitizer hung during its own
+initialization; `make SANITIZERS=undefined sanitize` passed there.
 
 ### 2.5 Upstream Cython tests
 

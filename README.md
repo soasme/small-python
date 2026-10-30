@@ -142,7 +142,8 @@ let n: i64 = rt.eval("add(40, 2)")?;  // 42
 ```sh
 make test         # C API tests and the specification suite
 make test-spec    # specification tests only
-make sanitize     # AddressSanitizer build
+make sanitize     # AddressSanitizer, leak, and undefined-behavior checks
+make fuzz         # libFuzzer targets for FUZZ_SECONDS each
 make bench        # startup benchmark
 make test-rust    # the Rust crates and the todo example
 ```
