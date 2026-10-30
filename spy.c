@@ -563,6 +563,17 @@ static ALWAYS_INLINE int small_value(int type) {
         UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BYTEARRAY)) != 0;
 }
 static size_t value_size(int type) { return small_value(type) ? SMALL_VALUE : sizeof(SPYValue); }
+/* Value v, its fields cleared, as a new value of type in c. */
+static ALWAYS_INLINE SPYValue *value_link(SPYContext *c, SPYValue *v, int type) {
+    v->ctx = c;
+    v->refs = 1;
+    v->type = type;
+    v->next = c->values;
+    if (v->next) v->next->prev = v;
+    c->values = v;
+    c->live++;
+    return v;
+}
 static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     SPYValue *v = NULL;
     int small = small_value(type);
@@ -573,23 +584,22 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     } else if (type != SPY_TUPLE && c->spare[small]) {
         v = c->spare[small]; cache_take(v, value_size(type)); c->spare[small] = v->next; c->spares[small]--;
     }
-    /* Ints and floats, the most frequent results, read only their first
-     * union member: clearing the rest of a reused value is wasted. Each
-     * size is a constant, so the compiler clears in place. */
-    if (v && (type == SPY_INT || type == SPY_FLOAT)) memset(v, 0, offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data));
-    else if (v) memset(v, 0, small ? SMALL_VALUE : sizeof(*v));
+    /* Each size is a constant, so the compiler clears in place. */
+    if (v && small) memset(v, 0, SMALL_VALUE);
+    else if (v) memset(v, 0, sizeof(*v));
     else v = allocate(c, small ? SMALL_VALUE : sizeof(*v));
-    if (!v) return NULL;
-    v->ctx = c;
-    v->refs = 1;
-    v->type = type;
-    v->next = c->values;
-    if (v->next) v->next->prev = v;
-    c->values = v;
-    c->live++;
-    return v;
+    return v ? value_link(c, v, type) : NULL;
 }
 static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type, 0); }
+/* An int or float, the most frequent results: a spare value reads only
+ * its first union member, so clearing the rest is wasted. */
+static ALWAYS_INLINE SPYValue *number_new(SPYContext *c, int type) {
+    SPYValue *v = c->spare[1];
+    if (!v) return value_new(c, type);
+    cache_take(v, SMALL_VALUE); c->spare[1] = v->next; c->spares[1]--;
+    memset(v, 0, offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data));
+    return value_link(c, v, type);
+}
 /* Exchange the contents of a and b, two values of one type. */
 static void swap_contents(SPYValue *a, SPYValue *b) {
     unsigned char swap[sizeof(a->as)];
@@ -935,7 +945,7 @@ SPYType spy_type(const SPYValue *v) { return (SPYType)v->type; }
 SPYValue *spy_none(SPYContext *c) { return spy_retain(c->none); }
 SPYValue *spy_int(SPYContext *c, int64_t i) {
     if (i >= -5 && i <= 256 && c->small_ints[i + 5]) return spy_retain(c->small_ints[i + 5]);
-    SPYValue *v = value_new(c, SPY_INT);
+    SPYValue *v = number_new(c, SPY_INT);
     if (v) v->as.integer_data.small = i;
     return v;
 }
@@ -1259,7 +1269,7 @@ SPYValue *spy_bool(SPYContext *c, int i) {
     return spy_retain(c->booleans[!!i]);
 }
 SPYValue *spy_float(SPYContext *c, double d) {
-    SPYValue *v = value_new(c, SPY_FLOAT);
+    SPYValue *v = number_new(c, SPY_FLOAT);
     if (v) v->as.real = d;
     return v;
 }
@@ -14421,7 +14431,6 @@ static SPYValue *call_result(SPYContext *c, SPYValue *result) {
 }
 static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (!same_context(c, fn)) return NULL;
-    for (size_t i = 0; i < argc; i++) if (!same_context(c, argv[i])) return NULL;
     if (keywords) for (size_t i = 0; i < keywords->as.map.len; i++)
         if (!builtin_value(c, map_items(keywords)[i].key, SPY_STRING)) return spy_error(c, "TypeError", "keywords must be strings");
     if (deeper(c, " while calling a Python object")) return NULL;
@@ -14602,8 +14611,14 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     }
     return result;
 }
+/* Arguments from the embedder may belong to another context; the engine's
+ * own never do. */
+static int same_contexts(SPYContext *c, size_t argc, SPYValue *const *argv) {
+    for (size_t i = 0; i < argc; i++) if (!same_context(c, argv[i])) return 0;
+    return 1;
+}
 SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) {
-    return call_keywords(c, fn, argc, argv, NULL);
+    return same_contexts(c, argc, argv) ? call_keywords(c, fn, argc, argv, NULL) : NULL;
 }
 /* Weak references, the engine primitives _weak_bind and _weak_get: a
  * reference object is any instance registered here with a borrowed target,
@@ -26504,6 +26519,7 @@ SPYValue *spy_native(SPYContext *c, const char *name, SPYNativeKeywords call, vo
 }
 SPYValue *spy_call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (keywords && (!same_context(c, keywords) || !is_dict(keywords))) return spy_error(c, "TypeError", "keywords must be a dict");
+    if (!same_contexts(c, argc, argv)) return NULL;
     return call_keywords(c, fn, argc, argv, keywords && keywords->as.map.len ? keywords : NULL);
 }
 SPYValue *spy_tuple(SPYContext *c, size_t n, SPYValue *const *items) {

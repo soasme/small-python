@@ -94,6 +94,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call node is evaluated in its own function](#a-call-node-is-evaluated-in-its-own-function) | M2 time: loop -3.4%, classes -3.3% |
 | [A str keeps its hash](#a-str-keeps-its-hash) | -2.8% (strings), `d["a"]`: -10% |
 | [A name store skips the step bookkeeping](#a-name-store-skips-the-step-bookkeeping) | -1.1% to -4.3%; M2 time: nbody -4.0% |
+| [Numbers have their own allocation path](#numbers-have-their-own-allocation-path) | -2.4% (fib) to +0.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -496,6 +497,23 @@ the top of `iterator_next`, before the generic iterator tests and the
 recursion check. Instructions: loop -4.3%, generators -3.3%, nbody
 -2.9%, the rest -1.1% to -1.8%, fib unchanged; on the M2 nbody -4.0%,
 loop -2.5%, generators -2.2%, sort and fib within noise.
+
+### Numbers have their own allocation path
+
+A reused value was cleared with `memset` of a size chosen at run time,
+so a function's environment, 200 bytes, paid a call into the C library
+on every call. Clearing each size separately lets the compiler store
+the zeros in place, but made `value_alloc` too large for the compiler to
+inline into `spy_int` and `spy_float`, and every float operation then
+paid a call: nbody took 4.4% more instructions. Ints and floats now take
+a spare value through their own small inline `number_new`, which clears
+only the header and the first union member, and `value_alloc` clears
+every other value at its constant size. The check that each argument
+belongs to the calling context moved from every call to the public
+`spy_call` and `spy_call_keywords`: the engine's own values never
+cross contexts. Instructions: fib -2.4%, classes -1.1%, loop and nbody
+-0.4%, dicts and bigint +0.4% to +0.5%; the M2's times stayed within
+noise but for loop (-2.1%) and classes (-1.6%).
 
 ## Tried and left out
 
