@@ -957,8 +957,8 @@ static int finalize_later(SPYValue *v) {
     v->finalized = 1;
     return 1;
 }
-void spy_release(SPYValue *v) {
-    if (!v || --v->refs) return;
+/* v, whose last reference was just released. */
+static NO_INLINE void release_dead(SPYValue *v) {
     /* Numbers and strings, most of what dies, hold no edges and need no finalizer. */
     if (v->type == SPY_INT || v->type == SPY_FLOAT || v->type == SPY_STRING) { free_value(v); return; }
     SPYValue *pending = v;
@@ -971,6 +971,8 @@ void spy_release(SPYValue *v) {
         free_value(v);
     }
 }
+/* Small enough to inline, as CPython's Py_DECREF is. */
+void spy_release(SPYValue *v) { if (v && !--v->refs) release_dead(v); }
 static void subtract_edge(SPYValue *v, void *unused) { (void)unused; v->trial--; }
 typedef struct { SPYValue **items; size_t len; } Work;
 static void mark_edge(SPYValue *v, void *data) {

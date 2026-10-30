@@ -108,6 +108,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Values live in pools](#values-live-in-pools) | -15.7% (sort), -13.0% (dicts), -5.1% (bigint), -1.7% (fib) |
 | [A loop steps its iterator directly](#a-loop-steps-its-iterator-directly) | -0.9% (dicts), -0.6% (nbody), the rest -0.5% to 0% |
 | [Numbers stay off the value list](#numbers-stay-off-the-value-list) | -1.5% (dicts), -1.2% (nbody), -1.0% (loop, sort) |
+| [A release inlines its common case](#a-release-inlines-its-common-case) | -10.1% (loop), -7.5% (nbody), -6.8% (classes), -6.3% (generators), -5.5% (fib); M2: loop -17%, nbody -13.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -697,6 +698,27 @@ longer find them, frees every pool whole, so the pools are listed too.
 Instructions: dicts -1.5%, nbody -1.2%, loop and sort -1.0%, classes
 and generators -0.6%, fib +0.1%; a collection walks only the values
 that can form cycles.
+
+### A release inlines its common case
+
+`spy_release`, called at more than a thousand places, held both the
+decrement and the work of freeing a value and its edges, so the compiler
+never inlined it: every release of a value that stayed alive paid a
+call. It is now the decrement and a test, which the compiler inlines
+within `spy.c`, as CPython's `Py_DECREF` is a macro; `release_dead`,
+out of line, frees. The text section grows by 30.8 KB (4%).
+
+| Program | Instructions | M2 time |
+| --- | ---: | ---: |
+| loop | -10.1% | 440.6 → 365.6 ms (-17.0%) |
+| nbody | -7.5% | 438.4 → 379.4 ms (-13.5%) |
+| classes | -6.8% | 201.5 → 182.8 ms (-9.3%) |
+| generators | -6.3% | 241.3 → 215.2 ms (-10.8%) |
+| fib | -5.5% | 73.1 → 69.1 ms (-5.6%) |
+| strings | -4.3% | |
+| dicts | -4.6% | |
+| sort | -2.8% | |
+| bigint | -1.7% | |
 
 ## Tried and left out
 
