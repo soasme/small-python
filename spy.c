@@ -10543,7 +10543,7 @@ static int builtin_receiver(SPYValue *v) {
     }
 }
 /* An instance of a plain object layout, its attributes in its own entries. */
-static int plain_instance(SPYValue *v) {
+static ALWAYS_INLINE int plain_instance(SPYValue *v) {
     return v->type == SPY_INSTANCE && !v->as.map.namespace && !v->as.map.base;
 }
 /* Whether cls has an MRO of watched Python classes and object, whose
@@ -10576,13 +10576,15 @@ static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYVa
         (!(hook = class_lookup(cls, "__setattr__")) || default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR));
     return read | (write ? ATTR_WRITE : 0);
 }
+static NO_INLINE int node_access_refresh(SPYContext *c, SPYValue *cls, Node *n) {
+    n->attr_kind = instance_access(c, cls, n->b->text, &n->attr_method);
+    n->attr_class = cls; n->attr_epoch = c->classes_changed;
+    return n->attr_kind;
+}
 /* n's answer for v, a plain instance, refreshed when v's class or any class changed. */
-static int node_access(SPYContext *c, SPYValue *v, Node *n) {
+static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     SPYValue *cls = v->as.map.parent;
-    if (cls != n->attr_class || n->attr_epoch != c->classes_changed) {
-        n->attr_kind = instance_access(c, cls, n->b->text, &n->attr_method);
-        n->attr_class = cls; n->attr_epoch = c->classes_changed;
-    }
+    if (cls != n->attr_class || n->attr_epoch != c->classes_changed) return node_access_refresh(c, cls, n);
     return n->attr_kind;
 }
 /* The attribute node n read from v, with n remembering how v's class answers. */
@@ -10599,7 +10601,6 @@ static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
  * new entry takes is kept on the name node. */
 static int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
     if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->text, value);
-    Name name = node_name(n->b);
     Entry *e = dict_slot(v, n->b);
     if (e && e->key->type == SPY_STRING) {
         SPYValue *old = e->value;
@@ -10608,6 +10609,7 @@ static int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *val
         return 0;
     }
     if (e) return set_attribute(c, v, n->b->text, value);
+    Name name = node_name(n->b);
     if (!n->b->global_key && !(n->b->global_key = spy_string(c, name.text, name.len))) return -1;
     return map_append(c, v, n->b->global_key, value, name.hash);
 }

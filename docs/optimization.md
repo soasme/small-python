@@ -66,6 +66,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A range steps in machine integers](#a-range-steps-in-machine-integers) | -8.2% (dicts) to -1.7% |
 | [The context's hot fields come first](#the-contexts-hot-fields-come-first) | -0.3% to -1.5% |
 | [A tick is inline; a new number is cleared in place](#a-tick-is-inline-a-new-number-is-cleared-in-place) | -2.8% to -9.2% |
+| [An attribute's remembered answer is checked inline](#an-attributes-remembered-answer-is-checked-inline) | -2.0% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -242,6 +243,16 @@ The M2 gains less in time (loop -3.2%, fib -2.5%, generators -1.4%,
 the rest within noise): it runs this interpreter at about six
 instructions a cycle, so its time follows chains of dependent loads more
 than the count of instructions. The executable's text did not grow.
+
+### An attribute's remembered answer is checked inline
+
+An attribute node remembers how its last instance's class answers it and
+under which class epoch. The check that the answer still holds was a
+call, which also recomputed the answer when it did not; the check is now
+inline and the recomputation a separate call. An assignment to an
+existing attribute no longer hashes the name before it looks at the
+remembered entry. A plain read `y = o.x` fell from 400 to 359
+instructions, a store `o.x = i` from 353 to 319, and classes by 2.0%.
 
 ## Tried and left out
 
