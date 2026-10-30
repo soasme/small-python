@@ -4,6 +4,7 @@
 /spyc
 /spy-worker
 /tests/api
+/tests/oom
 /tests/run-spec
 /bench/lifecycle
 __pycache__/
@@ -20,6 +21,8 @@ libspy-std.a
 *.so
 /fuzz/fuzz_eval
 /fuzz/fuzz_compile
+/fuzz/fuzz_spyc
+/fuzz/fuzz_oom
 crash-*
 leak-*
 timeout-*
