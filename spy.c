@@ -256,7 +256,6 @@ struct SPYContext {
     SPYValue *small_ints[262]; /* -5 through 256, shared as in CPython. */
     SPYValue *unbound; /* What a forwarded empty cell reads as. */
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
-    SPYValue *caller_env; /* Borrowed: where the running Python function was called. */
     SPYValue *inherited_exception; /* Borrowed from a suspended caller. */
     size_t live, steps, step_limit, depth;
     size_t collected_live; /* live after the last collection, for gc.get_count(). */
@@ -516,8 +515,10 @@ static void *allocate(SPYContext *c, size_t n) {
 }
 static char *copy_text(SPYContext *c, const char *s, size_t n) {
     if (n == SIZE_MAX) { spy_error(c, "MemoryError", "string is too large"); return NULL; }
-    char *p = allocate(c, n + 1);
-    if (p && n) memcpy(p, s, n);
+    char *p = malloc(n + 1);
+    if (!p) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
+    if (n) memcpy(p, s, n);
+    p[n] = 0;
     return p;
 }
 static int grow(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) {
@@ -14328,10 +14329,7 @@ static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     Frame frame = {env, fn->as.function.unit, 0};
     if (!failed && def->code) result = new_generator(c, &frame, fn);
     else if (!failed && !enter_frame(c, env, fn)) {
-        SPYValue *caller = c->caller_env;
-        c->caller_env = c->eval_env;
         Result r = execute(c, &frame, def->b);
-        c->caller_env = caller;
         leave_frame(c, r.flow == FLOW_RETURN ? r.value : r.flow == FLOW_NORMAL ? c->none : NULL);
         if (r.flow == FLOW_RETURN) result = r.value;
         else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
