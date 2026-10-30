@@ -249,10 +249,15 @@ reuse. The worker's own code is not leak-checked: leak checking needs
 runs is leak-checked in every other program.
 
 `make fuzz` runs the libFuzzer targets ([fuzz/README](../fuzz/README)) for
-`FUZZ_SECONDS` each, seeded from the examples and the specification tests.
+`FUZZ_SECONDS` each, seeded from the examples and the specification tests:
+the engine through `exec` and through `compile`, and `spyc`'s own bundling
+code. `make fuzz-replay` then runs every input the fuzzers kept under
+MemorySanitizer.
 
 These tools report the memory errors that the tests and fuzzed inputs reach;
-they cannot show that code nothing executes is free of them. Linux CI runs
+they cannot show that code nothing executes is free of them. `make coverage`
+(clang) measures what `make test` and the package tests execute, with an
+annotated copy of every source under `.obj/coverage/html`. Linux CI runs
 `make sanitize`. On the initial macOS host, AddressSanitizer hung during its own
 initialization; `make SANITIZERS=undefined sanitize` passed there.
 

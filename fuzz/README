@@ -5,8 +5,14 @@ libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
   fuzz_compile  passes the input to compile() as bytes without running it:
                 source decoding, lexer, parser, and compiler. The first byte
                 picks the mode (exec, eval, or single).
+  fuzz_spyc     bundles the input with spyc's own code: import discovery,
+                the module search, --minify, and the generated C, metafile,
+                and dependency rule. The input is a small tree split at each
+                line "#--" (main.py, a.py, pkg/__init__.py, pkg/b.py),
+                written to a fresh directory under /tmp; the first byte
+                picks spyc's options.
 
-Each input gets a fresh context with the standard layer (spy_std_init), no
+For fuzz_eval and fuzz_compile, each input gets a fresh context with the standard layer (spy_std_init), no
 output, no input, no module loader, and no mounts, and a step limit so loops
 end. The context is collected and freed after every input, so AddressSanitizer
 reports leaks and use-after-free per input.
@@ -23,7 +29,7 @@ Where AddressSanitizer does not start (it hangs on recent macOS), build and
 run in Linux instead: docker run with python:3.14 and apt-get install clang,
 then plain make libfuzzer.
 
-make fuzz builds both and runs each for FUZZ_SECONDS (default 60) on a corpus
+make fuzz builds all three and runs each for FUZZ_SECONDS (default 60) on a corpus
 seeded from the examples and language tests, in fork mode so out-of-memory
 and slow inputs are not reported as findings; crashes land in .obj/fuzz/.
 By hand:
@@ -32,6 +38,10 @@ By hand:
   for f in examples/*.py tests/spec/*/*.py; do cp $f corpus/$(echo $f | tr / _); done
   ./fuzz/fuzz_eval -dict=fuzz/fuzz.dict -timeout=10 -rss_limit_mb=2048 corpus
   ./fuzz/fuzz_compile -dict=fuzz/fuzz.dict corpus
+
+make fuzz-replay runs that corpus again through fuzz/replay.c, a driver
+without libFuzzer, under REPLAY_SANITIZERS (default memory), so every kept
+input is also checked for reads of uninitialized memory. It needs clang.
 
 Reproduce a crash with ./fuzz/fuzz_eval crash-<hash>. Regenerate fuzz.dict
 from the engine's builtins after `make spy` with python3 fuzz/generate_dict.py.

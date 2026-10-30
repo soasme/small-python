@@ -20,6 +20,7 @@ libspy-std.a
 *.so
 /fuzz/fuzz_eval
 /fuzz/fuzz_compile
+/fuzz/fuzz_spyc
 crash-*
 leak-*
 timeout-*
