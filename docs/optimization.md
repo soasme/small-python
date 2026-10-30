@@ -98,7 +98,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call releases its own environment](#a-call-releases-its-own-environment) | -3.8% (fib), -1.8% (classes); M2: fib -4.5% |
 | [A remembered name is read inline](#a-remembered-name-is-read-inline) | -0.6% to -4.8% |
 | [Each call depth keeps an environment](#each-call-depth-keeps-an-environment) | -4.7% (fib), -0.6% (sort) |
-| [A jump in a generator ticks only when there is work](#a-jump-in-a-generator-ticks-only-when-there-is-work) | -3.7% (generators) |
+| [A jump in a generator ticks only when there is work](#a-jump-in-a-generator-ticks-only-when-there-is-work) | -3.7% (generators); inline push -2.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -572,6 +572,9 @@ only the line to record, such an instruction now does nothing; otherwise
 it still ticks and restores the line, so pending work and trace
 functions see every jump as before. Instructions: generators -3.7%,
 strings -0.6%, sort -0.4%, the rest unchanged.
+
+Pushing onto a machine's operand stack is likewise inline now, with the
+stack's growth in `machine_grow`: generators -2.5%, strings -0.4%.
 
 ## Tried and left out
 

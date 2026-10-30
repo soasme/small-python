@@ -19178,10 +19178,14 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     }
     return v;
 }
+static NO_INLINE int machine_grow(SPYContext *c, Machine *m, SPYValue *v) {
+    if (grow(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) { spy_release(v); return -1; }
+    m->stack[m->len++] = v; return 0;
+}
 /* push takes ownership, including on failure. */
-static int machine_push(SPYContext *c, Machine *m, SPYValue *v) {
+static ALWAYS_INLINE int machine_push(SPYContext *c, Machine *m, SPYValue *v) {
     if (!v) return -1;
-    if (m->len == m->cap && grow(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) { spy_release(v); return -1; }
+    if (m->len == m->cap) return machine_grow(c, m, v);
     m->stack[m->len++] = v; return 0;
 }
 static SPYValue *machine_pop(Machine *m) { return m->stack[--m->len]; }
