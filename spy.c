@@ -286,7 +286,7 @@ struct SPYContext {
     SPYReadLine read_line;
     void *read_data;
     char error_message[256], filename[256];
-    const char *filename_from; /* The unit filename tick last copied into filename, or NULL. */
+    SPYValue *filename_from; /* The unit whose filename tick last copied into filename, or NULL; borrowed. */
     /* A pending AttributeError's name and object, attached when it is materialized. */
     char error_name[256];
     SPYValue *error_object;
@@ -792,7 +792,7 @@ static void free_value(SPYValue *v) {
         Node *n = v->as.unit.nodes;
         while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
         free_scope(v->as.unit.scope);
-        if (c->filename_from == v->as.unit.filename) c->filename_from = NULL;
+        if (c->filename_from == v) c->filename_from = NULL;
         free(v->as.unit.filename);
         break;
     }
@@ -13107,11 +13107,11 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
             if (trace_event(c, TRACE_LINE, NULL)) return -1;
         }
     }
-    if (c->filename_from != f->unit->as.unit.filename) {
+    if (c->filename_from != f->unit) {
         snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
         /* While a trace function watches, no filename is recorded as copied,
          * so that every tick takes this path. */
-        c->filename_from = c->settings[SET_TRACE] ? NULL : f->unit->as.unit.filename;
+        c->filename_from = c->settings[SET_TRACE] ? NULL : f->unit;
     }
     if (c->step_limit && ++c->steps > c->step_limit) {
         spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
@@ -13120,7 +13120,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
 }
 /* Whether tick has nothing to do but record the line. */
 static int quiet(SPYContext *c, Frame *f) {
-    return !c->error_type[0] && !c->attention && c->filename_from == f->unit->as.unit.filename;
+    return !c->error_type[0] && !c->attention && c->filename_from == f->unit;
 }
 static void relocate(SPYContext *, Node *);
 static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, Node *n) {
@@ -19009,7 +19009,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
 /* push takes ownership, including on failure. */
 static int machine_push(SPYContext *c, Machine *m, SPYValue *v) {
     if (!v) return -1;
-    if (grow(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) { spy_release(v); return -1; }
+    if (m->len == m->cap && grow(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) { spy_release(v); return -1; }
     m->stack[m->len++] = v; return 0;
 }
 static SPYValue *machine_pop(Machine *m) { return m->stack[--m->len]; }

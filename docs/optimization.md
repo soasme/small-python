@@ -72,6 +72,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Numbers and strings take half an allocation](#numbers-and-strings-take-half-an-allocation) | dicts -12%, sort -14% (time) |
 | [A call opens its locals with its arguments](#a-call-opens-its-locals-with-its-arguments) | -3.9% (fib), -3.3% (classes) |
 | [A smaller value header](#a-smaller-value-header) | dicts memory -11% |
+| [A tick compares units; a push grows only when full](#a-tick-compares-units-a-push-grows-only-when-full) | -0.2% to -3.2% |
 
 ### Releasing a number or string frees it at once
 
@@ -350,6 +351,23 @@ that returns without an error skips the traceback call.
 Peak memory of `dicts` fell from 53.8 to 47.7 MiB and `sort` from 86.4
 to 83.4 MiB; wall time moved between -2.4% (fib) and +1.5% (loop),
 instructions between -1.2% and +0.2%.
+
+### A tick compares units; a push grows only when full
+
+`tick` copies the running unit's file name into the context when the
+running unit changes, and its quiet test compared the name it last
+copied with the frame's unit's name, a load through the unit. It now
+remembers and compares the unit itself. A generator's machine called
+`grow` on every push of its operand stack; the push now calls it only
+when the stack is full.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| generators | 348.5 M | 337.4 M | -3.2% |
+| loop | 580.4 M | 577.7 M | -0.5% |
+| nbody | 719.1 M | 716.1 M | -0.4% |
+
+Wall time: generators -1.4%, nbody -0.7%.
 
 ## Tried and left out
 
