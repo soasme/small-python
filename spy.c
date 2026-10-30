@@ -14004,7 +14004,7 @@ static void drop_kept(struct ActiveFrame *frame) {
 static SPYValue *kept_env(SPYContext *c, Scope *scope) {
     SPYValue *env = c->py_depth < c->frames_cap ? c->frames[c->py_depth].kept : NULL;
     if (!env || env->as.map.scope != scope || env->as.map.len != scope->order_len ||
-        env->as.map.items[0].key != scope->symbols[scope->order[0]].key) return NULL;
+        (env->as.map.len && env->as.map.items[0].key != scope->symbols[scope->order[0]].key)) return NULL;
     c->frames[c->py_depth].kept = NULL;
     memset(env, 0, offsetof(SPYValue, as));
     return value_link(c, env, V_ENV);
@@ -14021,7 +14021,7 @@ static void release_locals(SPYValue *env) {
     Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
     struct ActiveFrame *slot = c->py_depth < c->frames_cap ? &c->frames[c->py_depth] : NULL;
-    int keep = slot && !slot->kept && !env->as.map.flags && !env->as.map.holes && env->as.map.len && env->as.map.len == scope->order_len;
+    int keep = slot && !slot->kept && !env->as.map.flags && !env->as.map.holes && env->as.map.len == scope->order_len;
     for (size_t i = 0; keep && i < env->as.map.len; i++) keep = items[i].key == scope->symbols[scope->order[i]].key;
     for (size_t i = map_used(env); i--;)
         if (items[i].key) { if (!keep) spy_release(items[i].key); spy_release(items[i].value); }

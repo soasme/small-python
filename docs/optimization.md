@@ -104,6 +104,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A built string keeps its storage](#a-built-string-keeps-its-storage) | -3.6% (dicts), -1.4% (strings); `s + s`: -27% |
 | [`str` of an int writes its digits](#str-of-an-int-writes-its-digits) | -8.9% (dicts), -2.2% (strings) |
 | [Short text lives in its value](#short-text-lives-in-its-value) | -4.6% (bigint), -3.0% (strings), -2.0% (dicts) |
+| [A call without locals keeps its environment](#a-call-without-locals-keeps-its-environment) | `f()`: -12%; fib +0.3% |
 
 ### Releasing a number or string frees it at once
 
@@ -642,6 +643,15 @@ its text apart. The one in-place growth of a str, `s += t` on an
 unshared `s`, moves short text out before it reallocates. Instructions:
 bigint -4.6%, strings -3.0%, dicts -2.0%, fib -0.8%, loop +0.3%, the
 rest within 0.4%.
+
+### A call without locals keeps its environment
+
+An environment was kept at its call's depth only when it had a local,
+since the kept one's first key tells its scope's address from a later
+scope's. One without locals holds nothing of its scope, so it is kept
+too, and a call to a function with neither parameters nor locals no
+longer allocates and frees a whole value. Instructions: a loop of
+`f()` -12% per call; fib +0.3%, the rest unchanged.
 
 ## Tried and left out
 
