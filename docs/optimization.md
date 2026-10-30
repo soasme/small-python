@@ -590,6 +590,10 @@ invisible. Other callers of `binary` and `inplace` pass borrowed
 operands and keep allocating. Instructions: nbody -10.1%, the others
 +0.1% to +0.3% for the type test.
 
+With the local read inline, GCC split `operand`, the fast path's
+reading of a literal or name, into an out-of-line part; it is now always
+inline: -0.1% to -1.1%.
+
 ## Tried and left out
 
 - **An attribute of a name on the operator fast path.** Reading `self.x`

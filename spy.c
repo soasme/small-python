@@ -13828,7 +13828,7 @@ container_fail:
 }
 static int ordering(int op) { return op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE; }
 /* A literal's value or a name found along the fast path, borrowed. */
-static SPYValue *operand(Frame *f, Node *n) {
+static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
     return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
 }
 /* Operator node n on its operands x and y, both borrowed, when they are
