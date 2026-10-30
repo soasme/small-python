@@ -1,8 +1,9 @@
 # Worker protocol
 
-Status: specification. The packages in `python.md` and `javascript.md`, and
-the `small-python-worker` crate in `rust.md`, run the engine through this
-protocol; none links the engine into its host.
+Status: specification. The packages in `python.md` and `javascript.md`, the
+`small-python-worker` crate in `rust.md`, and the Go package `worker` in
+`go.md` run the engine through this protocol; none links the engine into
+its host.
 
 ## 1 Purpose
 
@@ -16,6 +17,7 @@ run each runtime in a *worker*, a separate address space that owns exactly one
 |---|---|---|---|
 | Python | `spy-worker` executable, one process per runtime | the worker's stdin and stdout pipes | OS process |
 | Rust (`small-python-worker`) | as Python | as Python | OS process |
+| Go (`worker`) | as Python | as Python | OS process |
 | JavaScript | `spy-worker.wasm` in a Worker thread, one per runtime | `postMessage` out, a `SharedArrayBuffer` in | WebAssembly sandbox and a Worker thread |
 
 Both workers are built from the same C file, `spy-worker.c`, with only the

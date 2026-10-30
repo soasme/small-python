@@ -1,0 +1,6 @@
+# Filled by `make go-vendor`; committed only in the go/v* release tags.
+/LICENSE
+/licenses/
+/spy/*.c
+/spy/*.h
+!/spy/bridge.c

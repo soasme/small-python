@@ -137,6 +137,23 @@ rt.define("add", |rt, args| {
 let n: i64 = rt.eval("add(40, 2)")?;  // 42
 ```
 
+## From Go
+
+The module in [`go/`](docs/packaging/go.md) follows the same split. `spy`
+compiles the engine with cgo and runs it in your process; `worker` runs each
+runtime in a sandboxed `spy-worker` process, in pure Go.
+
+```go
+rt, _ := spy.New()
+defer rt.Close()
+rt.Define("add", func(rt *spy.Runtime, args spy.Args) (any, error) {
+	var a, b int
+	err := args.Scan(&a, &b)
+	return a + b, err
+})
+n, _ := spy.As[int](rt.Eval("add(40, 2)"))  // 42
+```
+
 ## Testing
 
 ```sh
@@ -146,6 +163,7 @@ make sanitize     # AddressSanitizer, leak, and undefined-behavior checks
 make fuzz         # libFuzzer targets for FUZZ_SECONDS each
 make bench        # startup benchmark
 make test-rust    # the Rust crates and the todo example
+make test-go      # the Go module
 ```
 
 ## Documentation

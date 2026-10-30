@@ -20,7 +20,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor
 all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -166,7 +166,7 @@ tla-coverage:
 
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
-	install -m755 spy spyc "$(DESTDIR)$(PREFIX)/bin"
+	install -m755 spy spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h spy-std.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
 	install -m644 docs/manual.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
@@ -224,6 +224,22 @@ rust-vendor:
 	mkdir -p $(RUST_CSRC)/licenses
 	cp spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-intrinsics.h spy-unicode.h spy-worker.c $(RUST_CSRC)/
 	cp LICENSE docs/licenses/python.txt docs/licenses/unicode.txt $(RUST_CSRC)/licenses/
+
+# The Go module (go/, docs/packaging/go.md): cgo compiles the engine copied
+# into go/spy, which the go/v* release tags commit.
+GO_SPY = go/spy
+GO_SOURCES = spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-intrinsics.h spy-unicode.h
+go-vendor: $(addprefix $(GO_SPY)/,$(GO_SOURCES)) go/LICENSE go/licenses/python.txt go/licenses/unicode.txt
+$(GO_SPY)/%: %
+	cp $< $@
+go/LICENSE: LICENSE
+	cp $< $@
+go/licenses/%: docs/licenses/%
+	mkdir -p go/licenses
+	cp $< $@
+
+test-go: go-vendor spy-worker
+	cd go && go vet ./... && go test ./...
 
 # libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.
 # Apple clang lacks libFuzzer; on macOS use FUZZ_CC=$$(brew --prefix llvm)/bin/clang.

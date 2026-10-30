@@ -933,6 +933,20 @@ make test-rust
 cd examples/todo && cargo run    # a Flask-style Python application served by axum
 ```
 
+### 3.7 Go module
+
+The module in `go/` is specified in [packaging/go.md](packaging/go.md).
+`spy` compiles `spy.c` and `spy-std.c`, copied beside it by `make
+go-vendor`, with cgo, and wraps them in a Go API that converts by reflection
+and releases values the garbage collector drops on the runtime's next call;
+`worker` runs a `spy-worker` executable and speaks
+[packaging/protocol.md](packaging/protocol.md) to it, with the Python
+package's limits, timeout, and loss rules.
+
+```sh
+make test-go
+```
+
 ## 4 Internals
 
 ### 4.1 Source representation
