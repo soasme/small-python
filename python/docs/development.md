@@ -14,7 +14,6 @@ python/
   csrc/                   engine sources copied in at build time (ignored by git)
   docs/                   this documentation
   tests/                  unittest suite for the package
-  scripts/bumpversion.py  release helper
 ```
 
 The package is pure Python plus one executable, `small_python/spy-worker`,
@@ -67,22 +66,25 @@ current release lacks, such as the wheels of a newly supported platform.
 To prepare a release, preview the version bump:
 
 ```sh
-cd python
-uv run python scripts/bumpversion.py patch
+python3 tools/bumpversion.py patch
 ```
 
-Use `major`, `minor`, or `patch`. The script clones `origin` into a temporary
-directory, bumps the version and lockfile in `python/` and the version in
-`javascript/package.json`, builds and checks the
-distributions, and shows the change. Add `-y` to commit, tag, and push:
+Use `major`, `minor`, or `patch`. Every package shares the engine's
+version, so the script clones `origin` into a temporary directory and bumps
+`VERSION`, `spy.h`, the manual, the Python and npm packages, the Rust crates
+and the todo example's dependency on them, with their lockfiles and the
+tests' version fixtures. It builds and checks the Python distributions,
+dry-runs `cargo publish --workspace`, and shows the change. Add `-y` to
+commit, tag, and push:
 
 ```sh
-uv run python scripts/bumpversion.py patch -y
+python3 tools/bumpversion.py patch -y
 git pull --ff-only
 ```
 
 Releases are cut from the remote `main` branch, so push your changes first. The
 working checkout is not modified.
 
-The package version (`small_python.__version__`) is independent of the engine
-version (`small_python.SPY_VERSION`, from `spy.h`).
+The package version (`small_python.__version__`) and the engine version
+(`small_python.SPY_VERSION`, from `spy.h`) are separate values; the release
+bump keeps them equal.

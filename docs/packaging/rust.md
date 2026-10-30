@@ -253,7 +253,8 @@ checked.
 ## 5 The todo example
 
 `examples/todo`, beside the C examples and outside the crates' workspace,
-uses the published `small-python` from crates.io. It is a todo list written like a Flask application (`app.py`) and served by a
+uses the published `small-python` from crates.io, at the version the
+release bump gives every package. It is a todo list written like a Flask application (`app.py`) and served by a
 Rust host that knows nothing about todos. The host supplies what the engine
 lacks: axum and tokio serve and route, serde_json becomes the module `json`
 (`loads` and `dumps`, through the `serde` feature), and `app.py`'s directory
@@ -273,7 +274,7 @@ curl -d '{"title":"write docs"}' localhost:3000/todos
 ## 6 Building, testing, publishing
 
 ```sh
-make test-rust             # cargo test in rust/ (all features) and examples/todo
+make test-rust             # cargo test in rust/ (all features), and examples/todo on these crates
 make rust-vendor           # copy the C sources into rust/small-python-src/csrc
 ```
 
@@ -288,10 +289,12 @@ and page.
 
 The crates share the engine's version. Pushing a version tag runs the
 `crates` job of `.github/workflows/publish.yml`: it checks the tag against
-the crate version, runs `make test-rust` and `make rust-vendor`, and publishes
+the crate version, runs `make test-rust` and `make rust-vendor`, publishes
 `small-python-src`, `small-python-sys`, `small-python`, and
 `small-python-worker` in that order, skipping any version already on
-crates.io. It authenticates with the `CARGO_REGISTRY_TOKEN` secret of the
+crates.io, and then tests `examples/todo` on the published crates. Before
+the release, only the checkout satisfies the example's dependency, so
+`make test-rust` patches it in, and the example commits no `Cargo.lock`. It authenticates with the `CARGO_REGISTRY_TOKEN` secret of the
 `crates-io` environment when one is set, which the first release needs
 because crates.io trusts a workflow only for crates that exist, and with
 trusted publishing otherwise. `cargo publish --workspace --dry-run` checks

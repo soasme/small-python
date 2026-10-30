@@ -176,7 +176,8 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
-      # The tests build from the checkout; small-python-src then carries a copy.
+      # The tests build from the checkout, the todo example included through a
+      # patch; small-python-src then carries a copy of the C sources.
       - name: Test the crates and the todo example
         run: make test-rust
 
@@ -202,6 +203,12 @@ jobs:
               cargo publish -p "$crate"
             fi
           done
+
+      # cargo publish waits until each crate is in the index, so the example
+      # now resolves the release itself.
+      - name: Test the todo example on the published crates
+        working-directory: examples/todo
+        run: cargo test
 
   # The module in go/ (docs/packaging/go.md). Go fetches a module in a
   # subdirectory from a go/vX.Y.Z tag, so this commits the C sources

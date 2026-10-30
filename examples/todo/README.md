@@ -38,10 +38,10 @@ curl -d '{"title":"write docs"}' localhost:3000/todos
 
 ## Against unreleased crates
 
-The example builds on the published `small-python`, so changes in
-[`rust/`](../../rust) reach it only after a release and a version bump in
-`Cargo.toml`. To run it on the checkout instead, patch the crate for one
-command:
+The example builds on the published `small-python` at the version every
+package shares, which the release bump also sets here. Between the bump and
+the publication, and for changes in [`rust/`](../../rust) not yet released,
+patch the checkout's crate in for one command, as `make test-rust` does:
 
 ```sh
 cargo test --config 'patch.crates-io.small-python.path="../../rust/small-python"'
@@ -49,5 +49,4 @@ cargo run  --config 'patch.crates-io.small-python.path="../../rust/small-python"
 ```
 
 `small-python-sys` and `small-python-src` follow from the checkout too.
-Cargo records the patch in `Cargo.lock`; restore it with
-`git checkout Cargo.lock` before committing.
+`Cargo.lock` is not committed, so the patch leaves nothing to restore.

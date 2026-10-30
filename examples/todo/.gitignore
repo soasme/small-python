@@ -1,1 +1,4 @@
 /target/
+# Resolved at build time: before a release publishes the crates, only the
+# checkout patched in by make test-rust can satisfy the dependency.
+/Cargo.lock
