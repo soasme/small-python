@@ -561,6 +561,23 @@ static int append(Buffer *b, const char *s, size_t n) {
     return 0;
 }
 static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
+static SPYValue *value_new(SPYContext *, int);
+/* A str or bytes (type) of the text built in b, taking b's storage rather
+ * than copying it, or NULL after an error; b is empty afterwards. Storage
+ * more than 64 bytes too large shrinks to fit. */
+static SPYValue *buffer_text(Buffer *b, int type) {
+    SPYContext *c = b->ctx;
+    if (!b->data && !c->error_type[0]) append(b, "", 0);
+    SPYValue *v = c->error_type[0] ? NULL : value_new(c, type);
+    if (v) {
+        char *fit = b->cap - b->len > 64 ? realloc(b->data, b->len + 1) : NULL;
+        v->as.string.data = fit ? fit : b->data; v->as.string.len = b->len;
+        b->data = NULL;
+    }
+    free(b->data);
+    *b = (Buffer){.ctx = c};
+    return v;
+}
 /* Numbers and strings end with their union member, and their allocations
  * stop there: a value never changes into a type of another size. */
 enum { SMALL_VALUE = offsetof(SPYValue, as) + sizeof(((SPYValue *)0)->as.string) };
@@ -2726,12 +2743,20 @@ static SPYValue *template_new(SPYContext *c) {
     }
     return result;
 }
+/* A value of type, a str or bytes, of the text of a followed by b's, in
+ * storage of its exact size. */
+static SPYValue *text_concat(SPYContext *c, int type, SPYValue *a, SPYValue *b) {
+    size_t len = a->as.string.len, added = b->as.string.len;
+    if (added >= SIZE_MAX - len) return spy_error(c, "MemoryError", "string is too large");
+    SPYValue *v = value_new(c, type);
+    char *data = v ? allocate(c, len + added + 1) : NULL;
+    if (!data) { spy_release(v); return NULL; }
+    memcpy(data, a->as.string.data, len); memcpy(data + len, b->as.string.data, added); data[len + added] = 0;
+    v->as.string.data = data; v->as.string.len = len + added;
+    return v;
+}
 static SPYValue *concat_text(SPYContext *c, SPYValue *a, SPYValue *b) {
-    a = builtin_value(c, a, SPY_STRING); b = builtin_value(c, b, SPY_STRING);
-    Buffer out = {.ctx = c};
-    SPYValue *result = append(&out, a->as.string.data, a->as.string.len) ||
-        append(&out, b->as.string.data, b->as.string.len) ? NULL : spy_string(c, out.data, out.len);
-    free(out.data); return result;
+    return text_concat(c, SPY_STRING, builtin_value(c, a, SPY_STRING), builtin_value(c, b, SPY_STRING));
 }
 /* Keep one string on either side of each interpolation, including empty ones.
  * Single string subclasses retain their identity; concatenation makes a str. */
@@ -8795,14 +8820,7 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
         spy_release(count); return result;
     }
     if (op == '+' && a->type == b->type && (sequence || text)) {
-        if (text) {
-            Buffer out = { .ctx = c };
-            SPYValue *v = NULL;
-            if (!append(&out, a->as.string.data, a->as.string.len) && !append(&out, b->as.string.data, b->as.string.len))
-                v = spy_string(c, out.data, out.len);
-            if (v) v->type = a->type;
-            free(out.data); return v;
-        }
+        if (text) return text_concat(c, a->type, a, b);
         SPYValue *v = value_new(c, a->type);
         if (!v) return NULL;
         if (sequence_extend(c, v, a, 0, 1, a->as.seq.len) || sequence_extend(c, v, b, 0, 1, b->as.seq.len)) { spy_release(v); return NULL; }
@@ -11887,8 +11905,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             spy_release(item);
         }
         spy_release(iterator);
-        SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-        free(out.data); return result;
+        return buffer_text(&out, SPY_STRING);
     }
     case M_FORMAT: return string_format(c, self, argc, argv, NULL, 1);
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
@@ -13718,8 +13735,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
             if (text) append(&out, text->as.string.data, text->as.string.len);
             spy_release(text);
         }
-        result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-        free(out.data); return result;
+        return buffer_text(&out, SPY_STRING);
     }
     case N_FORMAT:
         a = eval(c, f, n->a);
@@ -21502,10 +21518,8 @@ static SPYValue *bytes_replace(SPYContext *c, SPYValue *text, SPYValue *old, SPY
         if (append(&out, from, (size_t)(found - from)) || append(&out, new->as.string.data, new->as.string.len)) break;
         from = at = found + width;
     }
-    SPYValue *result = c->error_type[0] || append(&out, from, (size_t)(end - from)) ? NULL :
-        text->type == SPY_STRING ? spy_string(c, out.data, out.len) : spy_bytes(c, out.data, out.len);
-    free(out.data);
-    return result;
+    append(&out, from, (size_t)(end - from));
+    return buffer_text(&out, text->type);
 }
 static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;

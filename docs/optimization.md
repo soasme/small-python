@@ -101,6 +101,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A jump in a generator ticks only when there is work](#a-jump-in-a-generator-ticks-only-when-there-is-work) | -3.7% (generators); inline push -2.5% |
 | [A float result takes a dying operand's place](#a-float-result-takes-a-dying-operands-place) | -10.1% (nbody), others +0.1% to +0.3% |
 | [An operator reads list items in place](#an-operator-reads-list-items-in-place) | -6.4% (nbody), others 0% to +0.3% |
+| [A built string keeps its storage](#a-built-string-keeps-its-storage) | -3.6% (dicts), -1.4% (strings); `s + s`: -27% |
 
 ### Releasing a number or string frees it at once
 
@@ -606,6 +607,17 @@ an index whose own operands are literals or names, read in
 `item_operand`, out of line so that the common operands stay as cheap
 as before (inline, it cost the other programs up to 0.6%). Instructions:
 nbody -6.4%, the others 0% to +0.3%.
+
+### A built string keeps its storage
+
+`str.join`, f-strings and `replace` build their text in a growing buffer
+and then made the str by copying it: one more allocation, copy and free
+per result. `buffer_text` now gives the buffer's storage to the new str
+or bytes, shrinking it only when more than 64 bytes would go unused.
+Concatenating two strs grew such a buffer through several reallocations
+for a length known from the start; `text_concat` allocates exactly once,
+as CPython does. Instructions: dicts -3.6%, strings -1.4%, the rest
+unchanged; a loop of `x = s + s` -27%.
 
 ## Tried and left out
 
