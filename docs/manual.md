@@ -679,8 +679,9 @@ integer-string limits, the handled exception, collection, the weak table, and
 host output. Hosts register it as `_spy`; a context where none did has no such
 module. A standard layer, `spy-std.c` (`libspy-std.a`, declared in
 `spy-std.h`), plays the role of QuickJS's `quickjs-libc`: it supplies the host
-modules `sys` and `gc`, written on those primitives. `spy_std_init_module` registers one of them and
-`spy_std_init` all of them. The `spy` command calls `spy_std_init`, `spyc -M`
+modules `sys` and `gc`, written on those primitives and specified, after
+CPython 3.15, by [PLS-STD-315](std.md). `spy_std_init_module` registers one
+of them and `spy_std_init` all of them. The `spy` command calls `spy_std_init`, `spyc -M`
 names the modules a generated program registers, and the conformance driver
 `tests/run-spec` registers none, only `_spy`. Their Python sources live in
 `modules/` and are embedded into `spy-std-modules.h`; an import finds them
@@ -1050,6 +1051,7 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `docs/manual.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
+| `docs/std.md` | Specification of the standard modules `sys` and `gc` |
 | `AGENTS.md` | Architecture, naming, evidence, and code-taste requirements |
 
 The build remains a direct C toolchain with an ordinary Makefile. There is no
