@@ -9044,6 +9044,16 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     return sequence_binary(c, op, a, b);
 }
+/* Operator op on two floats the caller owns, its result taking the place
+ * of an operand nothing else holds, as CPython's float operations reuse a
+ * dying operand; NULL when it cannot. */
+static ALWAYS_INLINE SPYValue *float_in_place(int op, SPYValue *a, SPYValue *b) {
+    SPYValue *spare = a->type != SPY_FLOAT || b->type != SPY_FLOAT ? NULL : a->refs == 1 ? a : b->refs == 1 ? b : NULL;
+    if (!spare || !(op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real))) return NULL;
+    spare->as.real = op == '+' ? a->as.real + b->as.real : op == '-' ? a->as.real - b->as.real :
+        op == '*' ? a->as.real * b->as.real : a->as.real / b->as.real;
+    return spy_retain(spare);
+}
 static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
 static SPYValue *iterator_next(SPYContext *, SPYValue *);
@@ -13776,10 +13786,8 @@ container_fail:
         }
         a = eval(c, f, n->a);
         if (!a) break;
-        {
-            b = eval(c, f, n->b);
-            if (b) { relocate(c, n); result = binary(c, n->op, a, b); }
-        }
+        b = eval(c, f, n->b);
+        if (b && !(result = float_in_place(n->op, a, b))) { relocate(c, n); result = binary(c, n->op, a, b); }
         break;
     case N_COMPARE:
         a = eval(c, f, n->a);
@@ -15893,7 +15901,7 @@ static int assign(SPYContext *c, Frame *f, Node *n) {
             old->refs == 2 && env->type == V_ENV && !env->as.map.namespace &&
             t->slot_scope == env->as.map.scope && t->slot < map_used(env) && env->as.map.items[t->slot].value == old)
             value = string_append(c, old, rhs);
-        else value = inplace(c, n->op, old, rhs);
+        else if (!(value = float_in_place(operators[n->op - T_ADDEQ].token, old, rhs))) value = inplace(c, n->op, old, rhs);
     }
     if (!value) goto done;
     if (!container) status = store_target(c, f, n->a, value);

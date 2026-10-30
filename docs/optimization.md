@@ -99,6 +99,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A remembered name is read inline](#a-remembered-name-is-read-inline) | -0.6% to -4.8% |
 | [Each call depth keeps an environment](#each-call-depth-keeps-an-environment) | -4.7% (fib), -0.6% (sort) |
 | [A jump in a generator ticks only when there is work](#a-jump-in-a-generator-ticks-only-when-there-is-work) | -3.7% (generators); inline push -2.5% |
+| [A float result takes a dying operand's place](#a-float-result-takes-a-dying-operands-place) | -10.1% (nbody), others +0.1% to +0.3% |
 
 ### Releasing a number or string frees it at once
 
@@ -575,6 +576,19 @@ strings -0.6%, sort -0.4%, the rest unchanged.
 
 Pushing onto a machine's operand stack is likewise inline now, with the
 stack's growth in `machine_grow`: generators -2.5%, strings -0.4%.
+
+### A float result takes a dying operand's place
+
+In `dx * dx + dy * dy`, the products are new floats that the addition
+reads once and releases: the sum allocated a third float while two died.
+When an arithmetic node or an augmented assignment owns two float
+operands and nothing else holds one of them, the result of `+`, `-`,
+`*` or `/` (by a nonzero divisor) is written into that operand, as
+CPython's float operations reuse a dying operand. A value that only the
+evaluation holds cannot be seen by anyone else, so the reuse is
+invisible. Other callers of `binary` and `inplace` pass borrowed
+operands and keep allocating. Instructions: nbody -10.1%, the others
++0.1% to +0.3% for the type test.
 
 ## Tried and left out
 
