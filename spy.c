@@ -241,6 +241,9 @@ struct SPYContext {
      * boundary, after which an unresurrected instance is freed. */
     SPYValue **finalize_calls;
     size_t finalize_calls_len, finalize_calls_cap;
+    /* Whether a tick has more to do than record its line: callbacks wait in
+     * either queue, or steps are counted (attend keeps it current). */
+    int attention;
     /* The live cells of variables, borrowed: each variable has one cell,
      * shared by every closure over it (9.1); a cell leaves when freed. */
     SPYValue **cells;
@@ -715,6 +718,7 @@ static int weak_push(SPYValue ***items, size_t *len, size_t *cap, SPYValue *valu
  * liveness is the collector's mark; otherwise a reference with a zero count is
  * already queued to be freed by the running release. */
 static SPYValue *name_local(SPYValue *, const char *);
+static void attend(SPYContext *c) { c->attention = c->weak_calls_len || c->finalize_calls_len || c->step_limit; }
 static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
     v->weak = 0;
     for (size_t i = c->weak_len; i--;) {
@@ -725,7 +729,7 @@ static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
             drop = collecting ? !e->ref->marked : !e->ref->refs;
             SPYValue *callback = drop ? NULL : name_local(e->ref, "__callback__");
             if (callback && callback->type != SPY_NONE &&
-                !weak_push(&c->weak_calls, &c->weak_calls_len, &c->weak_calls_cap, e->ref)) spy_retain(e->ref);
+                !weak_push(&c->weak_calls, &c->weak_calls_len, &c->weak_calls_cap, e->ref)) { spy_retain(e->ref); attend(c); }
         } else if (!drop) continue;
         if (drop) { memmove(e, e + 1, (c->weak_len - i - 1) * sizeof(*e)); c->weak_len--; }
     }
@@ -793,6 +797,7 @@ static int finalize_later(SPYValue *v) {
     } else if (v->type != SPY_INSTANCE || !class_lookup(v->as.map.parent, "__del__")) return 0;
     SPYContext *c = v->ctx;
     if (weak_push(&c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
+    attend(c);
     v->finalized = 1;
     return 1;
 }
@@ -2236,13 +2241,15 @@ static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
 static SPYValue *name_fast(SPYValue *env, Node *n) {
     SPYValue *e = env;
     Scope *scope = n->slot_scope;
-    /* What n was last found to be in the running function's scope. */
-    if (scope && env->as.map.scope == scope && plain_locals(env, scope)) {
-        if (n->slot_kind == NAME_HERE && n->slot < map_used(env) && env->as.map.items[n->slot].key == scope->symbols[n->slot_symbol].key) {
+    /* What n was last found to be in the running function's scope. Only an
+     * environment of that scope binds the symbol's own key in its entries. */
+    if (scope && env->type == V_ENV) {
+        SPYValue *key = n->slot_kind == NAME_HERE ? scope->symbols[n->slot_symbol].key : NULL;
+        if (key && n->slot < map_used(env) && env->as.map.items[n->slot].key == key) {
             SPYValue *value = env->as.map.items[n->slot].value;
             return value->type == V_UNBOUND || value->type == SPY_LAZY_IMPORT ? NULL : value;
         }
-        if (n->slot_kind == NAME_PARENT) e = env->as.map.parent;
+        if (n->slot_kind == NAME_PARENT && env->as.map.scope == scope && plain_locals(env, scope)) e = env->as.map.parent;
     }
     for (; e; e = e->as.map.parent) {
         Entry *entry;
@@ -13065,8 +13072,7 @@ static int tick_full(SPYContext *c, Frame *f, Node *n) {
 }
 /* Whether tick has nothing to do but record the line. */
 static int quiet(SPYContext *c, Frame *f) {
-    return !c->error_type[0] && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit &&
-        c->filename_from == f->unit->as.unit.filename;
+    return !c->error_type[0] && !c->attention && c->filename_from == f->unit->as.unit.filename;
 }
 static void relocate(SPYContext *, Node *);
 static int tick(SPYContext *c, Frame *f, Node *n) {
@@ -14604,6 +14610,7 @@ static void weak_callbacks(SPYContext *c) {
         spy_release(callback); spy_release(ref);
     }
     c->weak_running = 0;
+    attend(c);
 }
 static int file_natives(SPYContext *, SPYValue *);
 static SPYValue *open_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -17212,6 +17219,7 @@ const char *spy_error_display(SPYContext *c) {
         memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
         memcpy(c->filename, file, sizeof(file)); c->filename_from = NULL;
         c->line = line; c->exception = exception; c->steps = steps; c->step_limit = limit;
+        attend(c);
     }
     if (!text && (text = malloc(strlen(c->error_message) + 1))) strcpy(text, c->error_message);
     free(c->error_display);
@@ -26325,7 +26333,7 @@ void spy_set_flush(SPYContext *c, SPYFlush flush) { c->flush = flush; }
 void spy_set_error_output(SPYContext *c, SPYWrite write, void *data) { c->error_write = write; c->error_data = data; }
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
-void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; }
+void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; attend(c); }
 void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c); c->steps = 0;

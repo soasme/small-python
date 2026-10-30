@@ -51,6 +51,7 @@ Each change below removes work from one of those steps.
 | [Releasing a number or string frees it at once](#releasing-a-number-or-string-frees-it-at-once) | -1.6% to -9.7% |
 | [A name remembers what it is in its function](#a-name-remembers-what-it-is-in-its-function) | -5.2% (nbody) to +0.4% |
 | [A call opens all its locals at once](#a-call-opens-all-its-locals-at-once) | -7.3% (classes), -6.5% (fib) |
+| [A local is known by its key; one word says a tick has work](#a-local-is-known-by-its-key-one-word-says-a-tick-has-work) | -0.3% to -4.0% |
 
 ### Releasing a number or string frees it at once
 
@@ -127,3 +128,30 @@ names first and declares the body's locals after them, as before.
 | classes | 396.7 M | 367.8 M | -7.3% |
 | sort | 147.2 M | 145.8 M | -0.9% |
 | strings | 304.9 M | 303.8 M | -0.3% |
+
+### A local is known by its key; one word says a tick has work
+
+Two smaller cuts of per-node work.
+
+A name read in its function's environment tested that the environment
+was a plain function environment of the remembered scope before it
+compared the remembered entry's key. Only an environment of that scope
+holds the symbol's own key object in its entries (other environments
+make their keys from text, or keep their bindings in a separate
+mapping), so the key comparison alone now decides, after a check that
+the environment is one at all.
+
+`tick`, which runs for every statement and every node evaluated off the
+fast paths, asked five questions before recording the line: an error
+pending, weak-reference callbacks queued, finalizers queued, a step
+limit set, a new source file. The three rare ones are now one word,
+`attention`, which the code that queues callbacks, runs them or sets the
+step limit keeps current (CPython's eval breaker plays the same part).
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| nbody | 879.9 M | 845.1 M | -4.0% |
+| generators | 433.0 M | 420.2 M | -3.0% |
+| loop | 686.1 M | 678.0 M | -1.2% |
+| classes | 367.8 M | 364.4 M | -0.9% |
+| fib | 113.0 M | 112.1 M | -0.7% |
