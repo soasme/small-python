@@ -81,7 +81,8 @@ for args, stdin, status, stdout, stderr in [
     (["-c", "raise SystemExit(3)"], "", 3, "", ""),
     (["-c", "raise SystemExit('bye')"], "", 1, "", "bye\n"),
     (["-c", "raise SystemExit()"], "", 0, "", ""),
-    (["-c", "1/0"], "", 1, "", "<string>:1: ZeroDivisionError: division by zero\n"),
+    (["-c", "1/0"], "", 1, "", 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
+                               "ZeroDivisionError: division by zero\n"),
     (["-c", "print(input('> '), flush=True)"], "abc\n", 0, "> abc\n", ""),
     (["--bogus"], "", 2, "", "usage:"),
     (["-c"], "", 2, "", "usage:"),

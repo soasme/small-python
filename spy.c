@@ -268,6 +268,8 @@ struct SPYContext {
     SPYWrite write;
     SPYFlush flush;
     void *write_data;
+    SPYWrite error_write; /* For the error stream; NULL shares the output. */
+    void *error_data;
     SPYModuleLoader loader;
     void *loader_data;
     SPYReadLine read_line;
@@ -14431,11 +14433,31 @@ static SPYValue *weak_get(SPYContext *c, size_t argc, SPYValue *const *argv, voi
     return spy_retain(value ? value : c->none);
 }
 static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+/* Pass the pending error, which cannot propagate (18.1.4), to the host's
+ * unraisable hook as (type, value, traceback, message, object): message is
+ * text followed by the repr of subject, or None without text. Without a hook,
+ * or when the hook fails, the error is discarded. */
+static void report_unraisable(SPYContext *c, const char *text, SPYValue *subject, SPYValue *object) {
+    SPYValue *hook = spy_retain(c->settings[SET_UNRAISABLE]), *error = hook ? spy_error_value(c) : NULL;
+    spy_clear_error(c);
+    if (error) {
+        SPYValue *repr = subject ? spy_repr(c, subject) : NULL;
+        Buffer message = {.ctx = c};
+        if (text) { puts_buffer(&message, text); if (repr) append(&message, repr->as.string.data, repr->as.string.len); }
+        spy_clear_error(c);
+        SPYValue *traceback = attribute(c, error, "__traceback__");
+        SPYValue *args[5] = {value_class(c, error), error, traceback ? traceback : c->none,
+                             message.data ? spy_string(c, message.data, message.len) : spy_none(c), object ? object : c->none};
+        if (args[3]) spy_release(spy_call(c, hook, 5, args));
+        spy_clear_error(c);
+        spy_release(repr); spy_release(traceback); spy_release(args[3]); free(message.data);
+    }
+    spy_release(error); spy_release(hook);
+}
 /* Run __del__ of dead instances and close dead suspended generators and
  * asynchronous generators, then
- * callbacks of references whose targets died, at a statement boundary. CPython reports their exceptions as
- * unraisable; spy has no error stream, so they are discarded without
- * disturbing the interrupted code. */
+ * callbacks of references whose targets died, at a statement boundary. Their
+ * exceptions are unraisable, reported without disturbing the interrupted code. */
 static void weak_callbacks(SPYContext *c) {
     if (c->weak_running) return;
     c->weak_running = 1;
@@ -14444,10 +14466,14 @@ static void weak_callbacks(SPYContext *c) {
         memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
         size_t waiting = c->finalize_calls_len;
         SPYValue *method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
-        if (method) spy_release(spy_call(c, method, 0, NULL));
-        else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
+        const char *failure = "Exception ignored while closing generator ";
+        if (method) {
+            spy_release(spy_call(c, method, 0, NULL));
+            if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
+        } else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
         else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
             spy_release(spy_call(c, self->as.generator.origin, 1, &self));
+            failure = "Exception ignored while finalizing generator ";
         } else if (self->type == SPY_ASYNC_GENERATOR) {
             /* No host finalizer (27.5.4): drive aclose() to completion. */
             SPYValue *closing = value_new(c, SPY_ASYNC_GENERATOR_ATHROW), *step;
@@ -14459,6 +14485,7 @@ static void weak_callbacks(SPYContext *c) {
             while (closing && (step = awaitable_method(c, closing, M_SEND, 1, &c->none))) spy_release(step);
             spy_release(closing);
         } else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
+        if (c->error_type[0] && self->type != SPY_MEMORYVIEW) report_unraisable(c, failure, self, NULL);
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
         /* CPython finalizes what an object's destruction frees before moving
@@ -14479,7 +14506,7 @@ static void weak_callbacks(SPYContext *c) {
         memmove(c->weak_calls, c->weak_calls + 1, --c->weak_calls_len * sizeof(*c->weak_calls));
         if (callback && callback->type != SPY_NONE && !name_set(c, ref, "__callback__", c->none))
             spy_release(spy_call(c, callback, 1, &ref));
-        if (c->error_type[0]) spy_clear_error(c);
+        if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling weakref callback ", callback, NULL);
         spy_release(callback); spy_release(ref);
     }
     c->weak_running = 0;
@@ -14649,11 +14676,14 @@ static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, v
         return spy_none(c);
     }
     if (id == SYS_WRITE || id == SYS_FLUSH) {
-        /* Host output for sys.stdout and sys.stderr; text is already a str. */
+        /* Host output for sys.stdout, and with a true second argument the
+         * error stream for sys.stderr; text is already a str. */
         if (id == SYS_FLUSH) return c->flush && c->flush(c->write_data) ? spy_error(c, "OSError", "output flush failed") : spy_none(c);
-        if (argc != 1 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "write() argument must be str");
-        if (!c->write) return spy_error(c, "OSError", "no output callback installed");
-        if (c->write(c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
+        if (argc < 1 || argc > 2 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "write() argument must be str");
+        int error = argc == 2 && spy_truth(argv[1]) && c->error_write;
+        SPYWrite write = error ? c->error_write : c->write;
+        if (!write) return spy_error(c, "OSError", "no output callback installed");
+        if (write(error ? c->error_data : c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
         return spy_none(c);
     }
     if (id == SYS_FRAME_MODULE) {
@@ -18857,8 +18887,11 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
         int closing = subclass(thrown->as.map.parent, name_local(c->classes, "GeneratorExit"));
         SPYValue *method = attribute(c, iterator, closing ? "close" : "throw");
         /* A missing close or throw passes the exception on; any other error
-         * getting close is unraisable (13.16.3), which spy discards. */
-        if (!method && (closing || error_is(c, "AttributeError"))) { spy_clear_error(c); return raise_value(c, thrown); }
+         * getting close is unraisable (13.16.3). */
+        if (!method && (closing || error_is(c, "AttributeError"))) {
+            if (closing && !error_is(c, "AttributeError")) report_unraisable(c, "Exception ignored while closing generator ", iterator, NULL);
+            spy_clear_error(c); return raise_value(c, thrown);
+        }
         if (!method) { if (halt) *halt = 1; return NULL; }
         SPYValue *result = spy_call(c, method, closing ? 0 : argc, argv);
         spy_release(method);
@@ -26096,6 +26129,7 @@ void spy_context_free(SPYContext *c) {
 }
 void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
 void spy_set_flush(SPYContext *c, SPYFlush flush) { c->flush = flush; }
+void spy_set_error_output(SPYContext *c, SPYWrite write, void *data) { c->error_write = write; c->error_data = data; }
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; }

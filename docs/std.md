@@ -280,7 +280,8 @@ errors `'surrogateescape'` for `stdin` and `stdout` and `'backslashreplace'`
 for `stderr`. A host may bind any objects with those methods, or `None` for a
 stream it lacks.
 
-*Status:* `stdout` and `stderr` write to the host output callback, with
+*Status:* `stdout` writes to the host output callback and `stderr` to its
+error callback (`spy_set_error_output`, the output callback until set), with
 encoding `'utf-8'` and errors `'strict'`; `stdin` is `None` (`input` reads
 through the host's input callback instead).
 
@@ -312,21 +313,52 @@ Implements HostReportException (PLS-315 B.4.2): writes the traceback display
 of *value* (PLS-315 18.1.2, 18.1.3) to `sys.stderr`. The display uses
 *traceback*, or *value*`.__traceback__` when *traceback* is `None`. Called
 with a number of arguments other than three, it raises a `TypeError`
-exception ("excepthook expected 3 arguments, got *n*").
+exception ("excepthook expected 3 arguments, got *n*"). A *value* of `None`
+writes "NoneType: None", and one that is not an exception writes
+"TypeError: print_exception(): Exception expected for value, *T* found".
 
-*Status:* not provided; the host reports uncaught exceptions itself.
+The traceback display is CPython's: each chained exception (PLS-315 18.1.2)
+before the one it led to, joined by "The above exception was the direct cause
+of the following exception:" or "During handling of the above exception,
+another exception occurred:"; for each, "Traceback (most recent call last):"
+and a line `  File "`*filename*`", line `*n*`, in `*name* per traceback entry,
+with a run of more than three identical entries cut to three and "[Previous
+line repeated *k* more times]"; then the exception line, *T*`: `*message*
+(*T* alone when the message is empty), where *T* is the class's qualified
+name, prefixed by its module unless that is `builtins` or `__main__`; then
+each note on its own lines. A `SyntaxError` shows its file, line, text, and
+carets instead of a traceback entry; an exception group shows its members in
+numbered, indented boxes, at most 15 per group and 10 groups deep.
+
+*Host choice:* the source line under each traceback entry, and the
+suggestions CPython appends to some messages ("Did you mean ...?").
+
+*Status:* provided, without source lines or suggestions. The `spy` command
+reports uncaught exceptions through it (`spy_std_report`).
 
 #### 5.6.3 `unraisablehook(unraisable, /)`
 
 Implements HostReportUnraisable (PLS-315 B.4.3). *unraisable* is an
 `UnraisableHookArgs` structseq with the fields `exc_type`, `exc_value`,
-`exc_traceback`, `err_msg`, and `object`. The default writes *err_msg* (or
-"Exception ignored in: " followed by the repr of *object*) and a line
-terminator, then the traceback display of the exception, to `sys.stderr`. For
+`exc_traceback`, `err_msg`, and `object`. The default writes to `sys.stderr`
+*err_msg* (or "Exception ignored in" when it is `None`), ": ", and the repr of
+*object* when *object* is not `None`, or else *err_msg* and ":"; then a line
+terminator and the traceback display of the exception (5.6.2). For
 an exception raised by `__del__`, *err_msg* is "Exception ignored while
 calling deallocator " followed by the repr of the `__del__` function.
 
-*Status:* not provided; the engine reports ignored exceptions itself.
+When the hook raises, the default reports that exception with *err_msg*
+"Exception ignored in sys.unraisablehook" and *object* the hook. Called with
+an argument that is not an `UnraisableHookArgs`, the default raises a
+`TypeError` exception ("sys.unraisablehook argument type must be
+UnraisableHookArgs"). Other messages are "Exception ignored while closing
+generator " and "Exception ignored while finalizing generator " followed by
+the generator's repr, and "Exception ignored while calling weakref callback "
+followed by the callback's repr.
+
+*Status:* provided. The engine reports exceptions from `__del__`, generator
+finalization, and weak-reference callbacks; `__release_buffer__` errors are
+discarded.
 
 #### 5.6.4 `breakpointhook(*args, **kwargs)`
 
@@ -753,15 +785,14 @@ deviation.
 
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
-| `sys` | every name of clause 5 not listed in the other columns | none | `excepthook`, `unraisablehook` (5.6.2, 5.6.3); the interfaces of 5.12 other than `call_tracing` and `is_remote_debug_enabled`; those of 5.13 and 5.14 |
+| `sys` | every name of clause 5 not listed in the other columns | none | the interfaces of 5.12 other than `call_tracing` and `is_remote_debug_enabled`; those of 5.13 and 5.14 |
 | `gc` | every name of clause 6 | none | none |
 
-The engine keeps the state behind 5.1.3, 5.1.4, and 5.8 as settings of the
-`_spy` primitives, which the core consults through the host hooks of PLS-315
-B.1.4 and B.5.1 and the origin tracking of 27.4.4; without the standard layer
-they keep their initial values. The unbound names need a traceback display
-for `excepthook`, reports of ignored exceptions for `unraisablehook`, and
-execution events for tracing.
+The engine keeps the state behind 5.1.3, 5.1.4, 5.6.3, and 5.8 as settings
+of the `_spy` primitives, which the core consults through the host hooks of
+PLS-315 B.1.4, B.4.3, and B.5.1 and the origin tracking of 27.4.4; without
+the standard layer they keep their initial values. The unbound names of 5.12
+need the engine to report execution events.
 
 ## Annex B (informative) Verification
 

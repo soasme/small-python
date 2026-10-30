@@ -50,6 +50,9 @@ void spy_set_output(SPYContext *, SPYWrite, void *);
 /* Optional flush for the current output callback; shares its data pointer.
  * Without it the output callback is treated as unbuffered. */
 void spy_set_flush(SPYContext *, SPYFlush);
+/* Output for error text (the standard layer's sys.stderr); shares the output
+ * callback until set. */
+void spy_set_error_output(SPYContext *, SPYWrite, void *);
 void spy_set_module_loader(SPYContext *, SPYModuleLoader, void *);
 /* Return a malloc-allocated, NUL-terminated UTF-8 line for input(), with or
  * without its line ending, or NULL at the end of input (EOFError). Without a

@@ -695,16 +695,17 @@ generation, and runs automatically only when the host asks, so `gc`'s enable
 and threshold settings are recorded. `sys` keeps the runtime state natively:
 `modules`, `exception()`, the recursion and integer string-conversion
 limits, reference counts, and `stdout`/`stderr` streams that write to the
-host output callback; `implementation.name` is `smallpython`. `_getframe()`
+host output and error callbacks; `implementation.name` is `smallpython`. `_getframe()`
 returns frame objects for running calls (functions, generators, class
 bodies, and modules); a function frame's `f_locals` is a write-through
 `FrameLocalsProxy` as in PEP 667, and line numbers are those of the executing
 statement. [PLS-STD-315](std.md) specifies every name of both modules after
-CPython 3.15 and lists those not yet provided, among them `excepthook`,
-`unraisablehook`, tracing, profiling, and audit hooks. The lazy-import mode
-and filter, the asynchronous-generator hooks, and coroutine origin tracking
-are settings the engine keeps and `sys` changes through the `_spy._setting`
-primitive; `tests/std.py` checks the rest against
+CPython 3.15 and lists those not yet provided: tracing, profiling, monitoring, and audit
+hooks, among others. The lazy-import mode and filter, the
+asynchronous-generator hooks, coroutine origin tracking, and the hook that
+receives unraisable exceptions are settings the engine keeps and `sys`
+changes through the `_spy._setting` primitive; `sys.excepthook` and
+`sys.unraisablehook` write CPython's traceback display without source lines; `tests/std.py` checks the rest against
 CPython.
 
 No `weakref` module is built in. The engine keeps weak references for its
@@ -822,7 +823,12 @@ or -1 with an error set to fail the import. An init that sets `__path__` makes
 a package, whose submodules register under dotted names.
 `spy_set_flush` optionally supplies a flush callback using the output callback's
 data pointer. Otherwise output is treated as unbuffered. Replacing the output
-callback clears the flush callback. `print(file=...)` uses the Python object's
+callback clears the flush callback. `spy_set_error_output` gives error text
+(the standard layer's `sys.stderr`) its own callback; without it, error text
+shares the output callback.
+`spy_std_report` reports the pending exception through `sys.excepthook`,
+which writes CPython's traceback display to `sys.stderr`; the `spy` command
+reports uncaught exceptions with it, on standard error. `print(file=...)` uses the Python object's
 `write` and `flush` methods.
 `spy_set_input` installs the line reader behind `input()`: it returns a
 malloc-allocated UTF-8 line, with or without its line ending, or NULL at the

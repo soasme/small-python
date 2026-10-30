@@ -49,3 +49,17 @@ int spy_std_init(SPYContext *c) {
         if (spy_std_init_module(c, std_modules[i].name)) return -1;
     return 0;
 }
+/* Report the pending exception through sys.excepthook(type, value,
+ * traceback), as CPython's PyErr_Print does (PLS-315 B.4.2). */
+int spy_std_report(SPYContext *c) {
+    SPYValue *error = spy_error_value(c);
+    if (!error) return -1;
+    spy_clear_error(c);
+    SPYValue *hook = spy_eval(c, "__import__('sys').excepthook", "<excepthook>");
+    SPYValue *args[3] = {spy_get_attr(c, error, "__class__"), error, spy_get_attr(c, error, "__traceback__")};
+    SPYValue *result = hook && args[0] && args[2] ? spy_call(c, hook, 3, args) : NULL;
+    spy_release(result); spy_release(hook); spy_release(args[0]); spy_release(args[2]);
+    if (!result) spy_raise(c, error);
+    spy_release(error);
+    return result ? 0 : -1;
+}

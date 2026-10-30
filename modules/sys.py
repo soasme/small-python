@@ -5,10 +5,12 @@ interpreter and to functions that interact strongly with the interpreter.
 Small Python's standard layer (spy-std.c) provides this module as
 docs/std.md specifies it, after CPython 3.15's sys module. Runtime state
 (modules, the handled exception, recursion and integer conversion limits,
-host output) is native; the remaining names are constant metadata
-describing this engine. _getframe() returns the running frames. Tracing,
-profiling, reference counts, audit hooks, and interpreter switching are not
-provided.
+host output, and the engine settings behind the lazy-import, asynchronous
+generator, coroutine origin, and unraisable hooks) is native; the remaining
+names are constant metadata describing this engine. _getframe() returns the
+running frames; excepthook and unraisablehook write CPython's traceback
+display without source lines. Tracing, profiling, monitoring, and audit hooks
+are not provided.
 """
 
 from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,
@@ -474,7 +476,7 @@ def _host_stream(write, flush):
         def write(self, text, /):
             if not isinstance(text, str):
                 raise TypeError(f"write() argument must be str, not {type(text).__name__}")
-            write(text)
+            write(text, self.name == "<stderr>")
             return len(text)
 
         def flush(self):
@@ -507,6 +509,227 @@ def displayhook(value):
     builtins._ = value
 
 
+def _traceback_display(value):
+    # The traceback display of an exception, as CPython's traceback module
+    # writes it; the host keeps no source lines to show beneath each frame.
+    def safe(obj, what, function=str):
+        try:
+            return function(obj)
+        except BaseException:
+            return f"<{what} {function.__name__}() failed>"
+
+    def stack(tb):
+        lines, last, count = [], None, 0
+        while tb is not None:
+            code = tb.tb_frame.f_code
+            entry = (code.co_filename, tb.tb_lineno, code.co_name)
+            if entry != last:
+                lines += repeated(count)
+                last, count = entry, 0
+            count += 1
+            if count <= 3:
+                lines.append(f'  File "{entry[0]}", line {entry[1]}, in {entry[2]}\n')
+            tb = tb.tb_next
+        return lines + repeated(count)
+
+    def repeated(count):
+        count -= 3
+        return [f'  [Previous line repeated {count} more time{"s" if count > 1 else ""}]\n'] if count > 0 else []
+
+    def type_name(cls):
+        name, module = cls.__qualname__, cls.__module__
+        if module in ("__main__", "builtins"):
+            return name
+        return f"{module if isinstance(module, str) else '<unknown>'}.{name}"
+
+    def syntax_error(exc, name):
+        lineno = None if exc.lineno is None else str(exc.lineno)
+        end_lineno = None if exc.end_lineno is None else str(exc.end_lineno)
+        suffix = ""
+        if lineno is not None:
+            yield f'  File "{exc.filename or "<string>"}", line {lineno}\n'
+        elif exc.filename is not None:
+            suffix = f" ({exc.filename})"
+        text = exc.text
+        if isinstance(text, str):
+            rtext = text.rstrip("\n")
+            ltext = rtext.lstrip(" \n\f")
+            spaces = len(rtext) - len(ltext)
+            offset = exc.offset
+            if offset is None:
+                yield f"    {ltext}\n"
+            elif isinstance(offset, int):
+                if lineno == end_lineno:
+                    end = exc.end_offset if isinstance(exc.end_offset, int) and exc.end_offset != 0 else offset
+                else:
+                    end = len(rtext) + 1
+                if text and offset > len(text):
+                    offset = len(rtext) + 1
+                if text and end > len(text):
+                    end = len(rtext) + 1
+                if offset >= end or end < 0:
+                    end = offset + 1
+                column, end_column = offset - 1 - spaces, end - 1 - spaces
+                yield f"    {ltext}\n"
+                if column >= 0:
+                    yield "    " + " " * column + "^" * (end_column - column) + "\n"
+        yield f"{name}: {exc.msg or '<no detail available>'}{suffix}\n"
+
+    def exception_only(exc):
+        name = type_name(type(exc))
+        if isinstance(exc, SyntaxError):
+            yield from syntax_error(exc, name)
+        else:
+            text = safe(exc, "exception")
+            yield f"{name}: {text}\n" if text else f"{name}\n"
+        try:
+            notes = getattr(exc, "__notes__", None)
+        except Exception as error:
+            notes = [f"Ignored error getting __notes__: {safe(error, '__notes__', repr)}"]
+        if isinstance(notes, (str, bytes)) or notes is not None and not (
+                hasattr(type(notes), "__getitem__") and hasattr(type(notes), "__len__")) or isinstance(notes, dict):
+            notes = [safe(notes, "__notes__", repr)]
+        for note in notes or ():
+            for line in safe(note, "note").split("\n"):
+                yield line + "\n"
+
+    def chain(exc, seen):
+        # (message, exception) pairs, outermost first: the message introduces
+        # the exception that follows it in the display.
+        pairs = []
+        while exc is not None:
+            seen.add(id(exc))
+            message, following = None, None
+            if exc.__cause__ is not None and id(exc.__cause__) not in seen:
+                message, following = cause, exc.__cause__
+            elif exc.__context__ is not None and not exc.__suppress_context__ and id(exc.__context__) not in seen:
+                message, following = context, exc.__context__
+            pairs.append((message, exc))
+            exc = following
+        return pairs
+
+    cause = "\nThe above exception was the direct cause of the following exception:\n\n"
+    context = "\nDuring handling of the above exception, another exception occurred:\n\n"
+    lines, state = [], {"depth": 0, "close": False}
+
+    def emit(texts, margin="|"):
+        prefix = "  " * state["depth"] + (margin + " " if state["depth"] else "")
+        for text in [texts] if isinstance(texts, str) else texts:
+            lines.extend(prefix + line for line in text.splitlines(True))
+
+    def display(exc, seen):
+        for message, exc in reversed(chain(exc, seen)):
+            if message:
+                emit(message)
+            if not isinstance(exc, BaseExceptionGroup):
+                if exc.__traceback__ is not None:
+                    emit("Traceback (most recent call last):\n")
+                    emit(stack(exc.__traceback__))
+                emit(exception_only(exc))
+            elif state["depth"] > 10:
+                emit("... (max_group_depth is 10)\n")
+            else:
+                top = state["depth"] == 0
+                state["depth"] += top
+                if exc.__traceback__ is not None:
+                    emit("Exception Group Traceback (most recent call last):\n", "+" if top else "|")
+                    emit(stack(exc.__traceback__))
+                emit(exception_only(exc))
+                count = len(exc.exceptions)
+                shown = count if count <= 15 else 16
+                state["close"] = False
+                for index in range(shown):
+                    last = index == shown - 1
+                    state["close"] = state["close"] or last
+                    title = str(index + 1) if index < 15 else "..."
+                    lines.append("  " * state["depth"] + ("+-" if index == 0 else "  ") +
+                                 f"+---------------- {title} ----------------\n")
+                    state["depth"] += 1
+                    if index < 15:
+                        display(exc.exceptions[index], seen)
+                    else:
+                        emit(f"and {count - 15} more exception{'s' if count - 15 > 1 else ''}\n")
+                    if last and state["close"]:
+                        lines.append("  " * state["depth"] + "+------------------------------------\n")
+                        state["close"] = False
+                    state["depth"] -= 1
+                if top:
+                    state["depth"] = 0
+
+    display(value, set())
+    return "".join(lines)
+
+
+def _reporting(display):
+    # The hooks that report exceptions, and the engine's way into the
+    # unraisable one.
+    UnraisableHookArgs = _structseq(
+        "UnraisableHookArgs", ("exc_type", "exc_value", "exc_traceback", "err_msg", "object"),
+        "UnraisableHookArgs\n\nType used to pass arguments to sys.unraisablehook.", True, module="builtins")
+
+    def write(text):
+        if stderr is not None:
+            stderr.write(text)
+
+    def show(value, traceback):
+        # As CPython's PyErr_Display.
+        if value is None:
+            write("NoneType: None\n")
+        elif not isinstance(value, BaseException):
+            write(f"TypeError: print_exception(): Exception expected for value, {type(value).__name__} found\n")
+        else:
+            if traceback is not None and value.__traceback__ is None:
+                value.__traceback__ = traceback
+            write(display(value))
+
+    def excepthook(*args, **kwargs):
+        """Handle an exception by displaying it with a traceback on sys.stderr."""
+        if kwargs:
+            raise TypeError("excepthook() takes no keyword arguments")
+        if len(args) != 3:
+            raise TypeError(f"excepthook expected 3 arguments, got {len(args)}")
+        show(args[1], args[2])
+
+    @_c_function(1)
+    def unraisablehook(unraisable):
+        """Handle an unraisable exception.
+
+The unraisable argument has the following attributes:
+
+* exc_type: Exception type.
+* exc_value: Exception value, can be None.
+* exc_traceback: Exception traceback, can be None.
+* err_msg: Error message, can be None.
+* object: Object causing the exception, can be None."""
+        if type(unraisable) is not UnraisableHookArgs:
+            raise TypeError("sys.unraisablehook argument type must be UnraisableHookArgs")
+        _, value, traceback, message, obj = unraisable
+        if obj is not None:
+            try:
+                text = repr(obj)
+            except BaseException:
+                text = "<object repr() failed>"
+            write(f"{message if message is not None else 'Exception ignored in'}: {text}\n")
+        elif message is not None:
+            write(f"{message}:\n")
+        show(value, traceback)
+
+    def report_unraisable(exc_type, value, traceback, message, obj):
+        # The engine's unraisable hook (_spy._setting): calls sys.unraisablehook,
+        # or the default when it is missing or fails.
+        hook = globals().get("unraisablehook")
+        try:
+            (hook or unraisablehook)(UnraisableHookArgs((exc_type, value, traceback, message, obj)))
+        except BaseException as error:
+            unraisablehook(UnraisableHookArgs((type(error), error, error.__traceback__,
+                                               "Exception ignored in sys.unraisablehook", hook)))
+    return excepthook, unraisablehook, report_unraisable
+
+
+excepthook, unraisablehook, _report_unraisable = _reporting(_traceback_display)
+_setting("unraisablehook", _report_unraisable)
+
+
 def breakpointhook(*args, **kwargs):
     """This hook function is called by built-in breakpoint().
 
@@ -515,13 +738,16 @@ Small Python has no debugger: the default hook does nothing."""
 
 __displayhook__ = displayhook
 __breakpointhook__ = breakpointhook
+__excepthook__ = excepthook
+__unraisablehook__ = unraisablehook
 
 # Functions made inside the factories above are named as CPython's are.
 for _function in (_getframemodulename, intern, getunicodeinternedsize, getswitchinterval, setswitchinterval,
                   getsizeof, exc_info, displayhook, getdefaultencoding, getfilesystemencoding,
                   getfilesystemencodeerrors, is_finalizing, is_remote_debug_enabled, get_lazy_imports,
                   get_lazy_imports_filter, get_asyncgen_hooks, get_coroutine_origin_tracking_depth, set_lazy_imports,
-                  set_lazy_imports_filter, set_asyncgen_hooks, set_coroutine_origin_tracking_depth, call_tracing):
+                  set_lazy_imports_filter, set_asyncgen_hooks, set_coroutine_origin_tracking_depth, call_tracing,
+                  excepthook, unraisablehook):
     _function.__qualname__ = _function.__name__
-del _function, _c_function, _one_argument, _settings, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
+del _function, _c_function, _one_argument, _settings, _traceback_display, _reporting, _report_unraisable, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
 del _write, _flush, _frame_module, _tracked, _setting

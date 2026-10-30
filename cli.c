@@ -4,6 +4,12 @@
 
 #include <string.h>
 
+/* The process status for the pending error, whose traceback, unless it is
+ * a SystemExit, sys.excepthook displays as python's would. */
+static int exit_status(SPYContext *c) {
+    if (strcmp(spy_error_type(c), "SystemExit") && !spy_std_report(c)) return -1;
+    return host_exit_status(c);
+}
 static int repl(SPYContext *c) {
     char line[4096];
     char *source = NULL;
@@ -22,7 +28,7 @@ static int repl(SPYContext *c) {
         if (end && line[end - 1] == ':') compound = 1;
         if (compound && end) continue;
         SPYValue *v = spy_eval_interactive(c, source, "<stdin>");
-        int status = v ? -1 : host_exit_status(c);
+        int status = v ? -1 : exit_status(c);
         spy_release(v); spy_collect(c);
         if (status >= 0) { free(source); return status; }
         len = 0; compound = 0;
@@ -57,6 +63,7 @@ int main(int argc, char **argv) {
     if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
     spy_set_output(c, host_output, stdout);
     spy_set_flush(c, host_flush);
+    spy_set_error_output(c, host_output, stderr);
     spy_set_input(c, host_read_line, stdin);
     spy_set_optimize(c, optimize);
     if (spy_std_init(c)) { host_report(c); spy_context_free(c); return 1; }
@@ -81,7 +88,7 @@ int main(int argc, char **argv) {
     int status;
     if (argc == 2 && !strcmp(argv[1], "-i")) status = repl(c);
     else if (argc == 3) {
-        status = spy_exec(c, argv[2], "<string>") ? host_exit_status(c) : 0;
+        status = spy_exec(c, argv[2], "<string>") ? exit_status(c) : 0;
         if (status < 0) status = 1;
     } else if (argc == 2 && argv[1][0] == '-' && strcmp(argv[1], "-")) status = usage();
     else {
@@ -97,7 +104,7 @@ int main(int argc, char **argv) {
                 SPYValue *file_name = from_stdin ? NULL : spy_string(c, filename, strlen(filename));
                 if (file_name) spy_set_global(c, "__file__", file_name);
                 spy_release(file_name);
-                status = spy_exec(c, source, from_stdin ? "<stdin>" : filename) ? host_exit_status(c) : 0;
+                status = spy_exec(c, source, from_stdin ? "<stdin>" : filename) ? exit_status(c) : 0;
                 if (status < 0) status = 1;
                 free(source);
             }

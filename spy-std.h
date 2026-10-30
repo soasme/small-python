@@ -15,6 +15,10 @@ extern "C" {
  * all of them. Both return 0, or -1 with an error set. */
 int spy_std_init_module(SPYContext *, const char *name);
 int spy_std_init(SPYContext *);
+/* Report the pending exception through sys.excepthook, which writes its
+ * traceback display to sys.stderr; returns 0 and clears the error, or -1
+ * with the error kept when there is no hook to call or the hook fails. */
+int spy_std_report(SPYContext *);
 
 #ifdef __cplusplus
 }

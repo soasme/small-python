@@ -324,3 +324,78 @@ show("thread_info", lambda: (type(sys.thread_info).n_fields, type(sys.thread_inf
 calls(sys, ["sys.call_tracing(len, ([1],))", "sys.call_tracing(len, [1])", "sys.call_tracing(len)",
             "sys.call_tracing(f=len, args=())", "type(sys.is_remote_debug_enabled())",
             "sys.is_remote_debug_enabled(1)"])
+
+# 5.6.2, 5.6.3
+calls(sys, ["sys.excepthook()", "sys.excepthook(1, 2)", "sys.excepthook(1, 2, 3, 4)", "sys.unraisablehook()",
+            "sys.unraisablehook(1)", "sys.__excepthook__ is sys.excepthook",
+            "sys.__unraisablehook__ is sys.unraisablehook"])
+
+
+def captured(thunk):
+    sys.stderr = Errors()
+    try:
+        thunk()
+    finally:
+        errors, sys.stderr = sys.stderr, sys.__stderr__
+    return "".join(errors.text)
+
+
+class Unprintable(Exception):
+    def __str__(self):
+        raise RuntimeError
+
+
+def chained():
+    try:
+        raise KeyError("k")
+    except KeyError as error:
+        outer = ValueError("v")
+        outer.__context__, outer.__cause__ = error, TypeError("t")
+        return outer
+
+
+noted = ValueError("noted")
+noted.add_note("first\nsecond")
+for case in (None, "text", ValueError(), Unprintable(), noted, chained(),
+             SyntaxError("bad", ("f.py", 2, 5, "  x = = 1\n", 2, 7)), SyntaxError("bare"),
+             ExceptionGroup("eg", [ValueError(1), ExceptionGroup("inner", [TypeError(2)])]),
+             ExceptionGroup("wide", [ValueError(i) for i in range(17)])):
+    show(f"excepthook {type(case).__name__}",
+         lambda: captured(lambda: sys.excepthook(type(case), case, None)).splitlines())
+
+unraisable = []
+sys.unraisablehook = lambda args: unraisable.append(
+    (type(args).__name__, args.exc_type.__name__, str(args.exc_value), args.exc_traceback is not None,
+     args.err_msg.split("<")[0], args.object))
+
+
+class Failing:
+    def __del__(self):
+        raise ValueError("in __del__")
+
+
+def closing():
+    try:
+        yield 1
+    finally:
+        raise KeyError("in close")
+
+
+failing = Failing()
+del failing
+suspended = closing()
+next(suspended)
+del suspended
+gc.collect()
+show("unraisable", lambda: unraisable)
+
+
+def drop_failing():
+    Failing()
+    gc.collect()
+
+
+sys.unraisablehook = lambda args: 1 / 0
+show("failing unraisablehook", lambda: captured(drop_failing).splitlines()[0].split("<")[0])
+sys.unraisablehook = sys.__unraisablehook__
+show("default unraisablehook", lambda: captured(drop_failing).splitlines()[0].split("<")[0])
