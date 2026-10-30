@@ -546,8 +546,10 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
         v = c->spare; cache_take(v, sizeof(*v)); c->spare = v->next; c->spares--;
     }
     /* Ints and floats, the most frequent results, read only their first
-     * union member: clearing the rest of a reused value is wasted. */
-    if (v) memset(v, 0, type == SPY_INT || type == SPY_FLOAT ? offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data) : sizeof(*v));
+     * union member: clearing the rest of a reused value is wasted. Each
+     * size is a constant, so the compiler clears in place. */
+    if (v && (type == SPY_INT || type == SPY_FLOAT)) memset(v, 0, offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data));
+    else if (v) memset(v, 0, sizeof(*v));
     else v = allocate(c, sizeof(*v));
     if (!v) return NULL;
     v->ctx = c;
@@ -13059,7 +13061,7 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
 /* The bookkeeping before evaluating node n: tick for the common case, and
  * tick_full when an error, a queued callback, a step limit, a new source
  * file or a trace function needs attention. */
-static int tick_full(SPYContext *c, Frame *f, Node *n) {
+static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
@@ -13091,7 +13093,7 @@ static int quiet(SPYContext *c, Frame *f) {
     return !c->error_type[0] && !c->attention && c->filename_from == f->unit->as.unit.filename;
 }
 static void relocate(SPYContext *, Node *);
-static int tick(SPYContext *c, Frame *f, Node *n) {
+static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, Node *n) {
     if (!quiet(c, f)) return tick_full(c, f, n);
     relocate(c, n);
     return 0;
@@ -13478,7 +13480,7 @@ static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *ca
 }
 /* An operation is reported at its own line once its operands, which may
  * span later lines, are evaluated. */
-static void relocate(SPYContext *c, Node *n) {
+static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
     c->line = n->line;
     if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
 }

@@ -65,6 +65,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Calls test for a Python function first](#calls-test-for-a-python-function-first) | -0.1% to -0.8% |
 | [A range steps in machine integers](#a-range-steps-in-machine-integers) | -8.2% (dicts) to -1.7% |
 | [The context's hot fields come first](#the-contexts-hot-fields-come-first) | -0.3% to -1.5% |
+| [A tick is inline; a new number is cleared in place](#a-tick-is-inline-a-new-number-is-cleared-in-place) | -2.8% to -9.2% |
 
 ### Releasing a number or string frees it at once
 
@@ -215,6 +216,32 @@ address computation. The lookup tables and the long message buffers now
 end the structure, and the error name begins it. The instructions fall by
 0.3% to 1.5%; on the M2 the wall time does not move, since the extra
 additions were cheap there, but they are gone everywhere.
+
+### A tick is inline; a new number is cleared in place
+
+`tick` runs for every statement, every loop pass and every node off the
+fast paths, and was a call: its quiet case, three tests and two stores of
+the line, now compiles into each caller, while the rare full path
+(`tick_full`) stays a call. `relocate`, the two stores of the line, is
+inline too. `value_alloc` cleared a reused value with `memset` of a size
+chosen at run time, a library call; it now picks between two constant
+sizes, which the compiler clears with a few stores.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| generators | 412.3 M | 378.3 M | -8.2% |
+| loop | 664.3 M | 617.4 M | -7.1% |
+| classes | 346.2 M | 323.7 M | -6.5% |
+| nbody | 805.9 M | 766.8 M | -4.9% |
+| fib | 110.0 M | 104.5 M | -5.0% |
+| strings | 285.7 M | 273.3 M | -4.4% |
+| dicts | 184.5 M | 179.0 M | -3.0% |
+| sort | 139.6 M | 135.4 M | -3.0% |
+
+The M2 gains less in time (loop -3.2%, fib -2.5%, generators -1.4%,
+the rest within noise): it runs this interpreter at about six
+instructions a cycle, so its time follows chains of dependent loads more
+than the count of instructions. The executable's text did not grow.
 
 ## Tried and left out
 
