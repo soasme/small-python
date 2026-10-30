@@ -127,6 +127,10 @@ struct SPYValue {
     unsigned char finalized; /* __del__ has been queued for this instance. */
     unsigned char watched; /* A class's namespace: its changes are class changes. */
     unsigned char frozen; /* gc.freeze(): collections treat it as reachable. */
+    /* In its context's values. Small ints and floats, which reach no other
+     * value and own no storage, are not, as CPython's collector does not
+     * track them: they cost no list upkeep, and a collection skips them. */
+    unsigned char listed;
     union {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
@@ -207,7 +211,7 @@ struct SPYContext {
     /* By size_class, released values kept for the next allocations, linked
      * by next, in front of the pools with room; see value_take. No value edges. */
     SPYValue *spare[3]; size_t spares[3];
-    Pool *pools[3];
+    Pool *pools[3], *every_pool; /* every_pool: all of them, linked by after. */
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
@@ -604,15 +608,17 @@ static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
  * allocator's thread cache, up to SPARES released values of each size wait
  * for the next allocations. */
 enum { POOL = 16384, SPARES = 64 };
-struct Pool { Pool *next, *prev; SPYValue *free; char *fresh, *end; size_t used; };
+struct Pool { Pool *next, *prev, *after, *before; /* before, after: in every_pool */ SPYValue *free; char *fresh, *end; size_t used; };
 static ALWAYS_INLINE Pool *value_pool(SPYValue *v) { return (Pool *)((uintptr_t)v & ~(uintptr_t)(POOL - 1)); }
 static ALWAYS_INLINE int pool_room(Pool *pool, size_t bytes) { return pool->free || pool->fresh + bytes <= pool->end; }
 static NO_INLINE Pool *pool_new(SPYContext *c, int size) {
     Pool *pool = aligned_alloc(POOL, POOL);
     if (!pool) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
-    *pool = (Pool){.next = c->pools[size], .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
+    *pool = (Pool){.next = c->pools[size], .after = c->every_pool, .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
     cache_put(pool->fresh, (size_t)(pool->end - pool->fresh));
     if (pool->next) pool->next->prev = pool;
+    if (pool->after) pool->after->before = pool;
+    c->every_pool = pool;
     return c->pools[size] = pool;
 }
 static NO_INLINE SPYValue *pool_take(SPYContext *c, int size) {
@@ -639,6 +645,8 @@ static NO_INLINE void pool_give(SPYContext *c, SPYValue *v, int size) {
     } else if (!pool->used && (pool->prev || pool->next)) {
         if (pool->prev) pool->prev->next = pool->next; else c->pools[size] = pool->next;
         if (pool->next) pool->next->prev = pool->prev;
+        if (pool->before) pool->before->after = pool->after; else c->every_pool = pool->after;
+        if (pool->after) pool->after->before = pool->before;
         cache_take(pool, POOL); free(pool);
     }
 }
@@ -659,6 +667,7 @@ static ALWAYS_INLINE SPYValue *value_link(SPYContext *c, SPYValue *v, int type) 
     v->ctx = c;
     v->refs = 1;
     v->type = type;
+    v->listed = 1;
     v->next = c->values;
     if (v->next) v->next->prev = v;
     c->values = v;
@@ -680,13 +689,15 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     return value_link(c, v, type);
 }
 static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type, 0); }
-/* An int or float, the most frequent results: a spare value reads only
- * its first union member, so clearing the rest is wasted. */
+/* A small int or a float, the most frequent results, unlisted: a spare
+ * value reads only its first union member, so clearing the rest is wasted. */
 static ALWAYS_INLINE SPYValue *number_new(SPYContext *c, int type) {
     SPYValue *v = value_take(c, 1);
     if (!v) return NULL;
     memset(v, 0, offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data));
-    return value_link(c, v, type);
+    v->ctx = c; v->refs = 1; v->type = type;
+    c->live++;
+    return v;
 }
 /* Exchange the contents of a and b, two values of one type. */
 static void swap_contents(SPYValue *a, SPYValue *b) {
@@ -884,7 +895,8 @@ static void drop_kept(struct ActiveFrame *);
 static void free_value(SPYValue *v) {
     SPYContext *c = v->ctx;
     if (v->weak) weak_dead(c, v, 0);
-    value_unlink(c, v);
+    if (v->listed) value_unlink(c, v);
+    else c->live--;
     switch (v->type) {
     case SPY_INT: if (v->as.integer_data.big) free(v->as.integer_data.big); break;
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: if (v->as.string.data != short_text(v)) free(v->as.string.data); break;
@@ -963,11 +975,13 @@ static void subtract_edge(SPYValue *v, void *unused) { (void)unused; v->trial--;
 typedef struct { SPYValue **items; size_t len; } Work;
 static void mark_edge(SPYValue *v, void *data) {
     Work *work = data;
-    if (!v->marked) { v->marked = 1; work->items[work->len++] = v; }
+    if (!v->marked && v->listed) { v->marked = 1; work->items[work->len++] = v; }
 }
+/* Garbage drops its references to what survives, unlisted values included. */
 static void release_live_edge(SPYValue *v, void *unused) {
     (void)unused;
     if (v->marked) v->refs--;
+    else if (!v->listed) spy_release(v);
 }
 static int sequence_append(SPYContext *, SPYValue *, SPYValue *);
 static int gc_public(SPYValue *);
@@ -26661,13 +26675,12 @@ void spy_context_free(SPYContext *c) {
     free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++)
         if (c->tuple_cache[i]) { cache_take(c->tuple_cache[i], sizeof(SPYValue)); value_give(c, c->tuple_cache[i], 0); }
-    /* Every value is then back in its pool, and only one pool of each size is left. */
-    for (int size = 0; size < 3; size++)
-        while (c->spare[size]) {
-            SPYValue *v = c->spare[size];
-            cache_take(v, class_bytes(size)); c->spare[size] = v->next; pool_give(c, v, size);
-        }
-    for (int size = 0; size < 3; size++) if (c->pools[size]) { cache_take(c->pools[size], POOL); free(c->pools[size]); }
+    /* The unlisted values still live go with their pools. */
+    while (c->every_pool) {
+        Pool *pool = c->every_pool;
+        c->every_pool = pool->after;
+        cache_take(pool, POOL); free(pool);
+    }
     while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
     if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }
     free(c);

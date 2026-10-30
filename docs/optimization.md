@@ -107,6 +107,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call without locals keeps its environment](#a-call-without-locals-keeps-its-environment) | `f()`: -12%; fib +0.3% |
 | [Values live in pools](#values-live-in-pools) | -15.7% (sort), -13.0% (dicts), -5.1% (bigint), -1.7% (fib) |
 | [A loop steps its iterator directly](#a-loop-steps-its-iterator-directly) | -0.9% (dicts), -0.6% (nbody), the rest -0.5% to 0% |
+| [Numbers stay off the value list](#numbers-stay-off-the-value-list) | -1.5% (dicts), -1.2% (nbody), -1.0% (loop, sort) |
 
 ### Releasing a number or string frees it at once
 
@@ -682,6 +683,20 @@ most common iterator a loop steps, before the list iterator. The
 iterator itself still holds the position, since Python code may hold it
 and step it too. Instructions: dicts -0.9%, nbody -0.6%, the rest 0% to
 -0.5%.
+
+### Numbers stay off the value list
+
+Every value was linked into its context's list of values, which the
+cycle collector walks and context destruction frees, and unlinked when
+released: four pointer writes for each temporary number. A small int or
+a float reaches no other value and owns no storage, so, as CPython's
+collector does not track them, they now stay off the list. They still
+count as live values. A collection never marks them, and garbage it
+frees releases the ones it holds. Context destruction, which can no
+longer find them, frees every pool whole, so the pools are listed too.
+Instructions: dicts -1.5%, nbody -1.2%, loop and sort -1.0%, classes
+and generators -0.6%, fib +0.1%; a collection walks only the values
+that can form cycles.
 
 ## Tried and left out
 
