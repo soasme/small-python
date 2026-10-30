@@ -67,6 +67,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [The context's hot fields come first](#the-contexts-hot-fields-come-first) | -0.3% to -1.5% |
 | [A tick is inline; a new number is cleared in place](#a-tick-is-inline-a-new-number-is-cleared-in-place) | -2.8% to -9.2% |
 | [An attribute's remembered answer is checked inline](#an-attributes-remembered-answer-is-checked-inline) | -2.0% (classes) |
+| [A name keeps its local's key](#a-name-keeps-its-locals-key) | -2.3% (nbody) to 0% |
 
 ### Releasing a number or string frees it at once
 
@@ -253,6 +254,23 @@ inline and the recomputation a separate call. An assignment to an
 existing attribute no longer hashes the name before it looks at the
 remembered entry. A plain read `y = o.x` fell from 400 to 359
 instructions, a store `o.x = i` from 353 to 319, and classes by 2.0%.
+
+### A name keeps its local's key
+
+The test that a remembered local is still at its position compared the
+entry's key with the symbol's key, which it reached from the node through
+the scope and its symbol table: three dependent loads before the
+comparison. The node now keeps the key itself, borrowed from the scope
+like the scope itself, set when the full lookup finds the local and
+cleared when the node remembers another symbol. Wall time: nbody -2.1%,
+generators -2.0%, fib -1.6%.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| nbody | 748.2 M | 731.0 M | -2.3% |
+| generators | 367.5 M | 362.6 M | -1.3% |
+| fib | 103.1 M | 102.3 M | -0.7% |
+| classes | 312.7 M | 310.6 M | -0.7% |
 
 ## Tried and left out
 

@@ -103,10 +103,12 @@ struct Node {
     SPYValue *code_value;
     SPYValue *constant; /* A literal's value, made once. */
     size_t name_len; int64_t name_hash; /* A name's length and hash, once computed. */
-    /* A name's symbol in the scope it last ran in, its entry position in
-     * that function environment, and the str key and position it was last
-     * found under in a dictionary (name_fast); global_key is traced. */
-    Scope *slot_scope; size_t slot_symbol, slot; int slot_kind;
+    /* A name's symbol in the scope it last ran in, the key and position it
+     * was last found under in a function environment of that scope (the
+     * symbol's key, borrowed from the scope), and the str key and position
+     * it was last found under in a dictionary (name_fast); global_key is
+     * traced. */
+    Scope *slot_scope; size_t slot_symbol, slot; int slot_kind; SPYValue *slot_key;
     SPYValue *global_key; size_t global_slot;
     /* How an attribute read answers for instances of attr_class while
      * classes_changed is attr_epoch (node_attribute); all borrowed. */
@@ -2189,7 +2191,7 @@ enum { NAME_HERE, NAME_PARENT, NAME_SLOW };
 /* Remember on name node n its symbol in scope, and what that makes of n in a
  * plain function environment of scope. */
 static Symbol *remember_symbol(Node *n, Scope *scope, Symbol *symbol) {
-    n->slot_scope = scope; n->slot = 0;
+    n->slot_scope = scope; n->slot = 0; n->slot_key = NULL;
     n->slot_symbol = symbol ? (size_t)(symbol - scope->symbols) : SIZE_MAX;
     n->slot_kind = !symbol ? NAME_PARENT : symbol->flags & (S_GLOBAL | S_NONLOCAL) ? NAME_SLOW :
         symbol->flags & (S_LOCAL | S_PARAM) ? NAME_HERE : NAME_PARENT;
@@ -2223,10 +2225,9 @@ static ALWAYS_INLINE int function_binding(SPYValue *env, Node *n, int first, SPY
  * environments bind locals under those keys only. */
 static ALWAYS_INLINE Entry *function_slot(SPYValue *env, Node *n, SPYValue *key, int first) {
     if (!key) return NULL;
-    if (first && n->slot < map_used(env) && env->as.map.items[n->slot].key == key) return &env->as.map.items[n->slot];
     Entry *entry = env_find(env, node_name(n));
     if (!entry || entry->key != key) return NULL;
-    if (first) n->slot = (size_t)(entry - env->as.map.items);
+    if (first) { n->slot = (size_t)(entry - env->as.map.items); n->slot_key = key; }
     return entry;
 }
 /* The entry for name node n in an exact dictionary or a plain instance's
@@ -2247,11 +2248,10 @@ static ALWAYS_INLINE Entry *dict_slot(SPYValue *dict, Node *n) {
  * environments and exact dictionaries the full lookup (name_find) would
  * walk, or NULL to take that path. */
 /* The entry of name node n in env when n was last found a local of its
- * scope at that position and env binds it there: only an environment of
+ * scope and env binds it at the same position: only an environment of
  * that scope holds the symbol's own key in its entries. */
 static ALWAYS_INLINE Entry *remembered_local(SPYValue *env, Node *n) {
-    Scope *scope = n->slot_scope;
-    SPYValue *key = scope && n->slot_kind == NAME_HERE ? scope->symbols[n->slot_symbol].key : NULL;
+    SPYValue *key = n->slot_key;
     return key && env->type == V_ENV && n->slot < map_used(env) && env->as.map.items[n->slot].key == key ? &env->as.map.items[n->slot] : NULL;
 }
 static SPYValue *name_fast(SPYValue *env, Node *n) {
