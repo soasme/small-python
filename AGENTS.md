@@ -232,6 +232,14 @@
   instead (e.g. `python:3.14` plus `apt-get install clang`) on a copy of the
   tree, not the mounted checkout. AddressSanitizer hangs at startup on this
   macOS, so `make sanitize` and `make libfuzzer` (see fuzz/README) run there.
+- Memory checks beyond `make sanitize` run locally when asked or when a change
+  touches C, not in CI. Fuzz with `make fuzz FUZZ_SECONDS=600` (eval, compile,
+  spyc, and allocation-failure targets), then `make fuzz-replay` to rerun the
+  kept inputs under MemorySanitizer; `make CC=clang SANITIZERS=memory
+  sanitize` runs the tests under it, and `make coverage` shows what nothing
+  executes. They need clang with compiler-rt (Ubuntu: `libclang-rt-18-dev`).
+  A finding lands in `.obj/fuzz/`; reproduce it with `./fuzz/<target> FILE`,
+  fix the engine, and keep the input as a test.
 
 ## Code taste
 
