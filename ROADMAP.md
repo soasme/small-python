@@ -183,6 +183,12 @@ Build `libspy.a` for both, with the file system and output services mapped to
 the app sandbox, and an example app for each. iOS forbids generating machine
 code at run time, which an interpreter does not need.
 
+### Game Platforms
+
+Wire Small Python into broader gaming toolchains, such as  Godot, Unity.
+Coming without standard libs means this Python can call Godot APIs
+just like c# or GDScript do.
+
 ### Bare metal
 
 Run on microcontrollers such as the ESP32 and on Raspberry Pi boards without

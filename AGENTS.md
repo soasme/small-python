@@ -274,4 +274,5 @@ by the task and do not require repeated confirmation.
 
 * Commit as often as you can when you made progress.
 * Run bench and update docs before release a new version.
+* Docs, TLA+ Models, Tests, Bench, Examples should not break before release.
 * Commit message should come with a brief of test or bench results.
