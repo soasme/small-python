@@ -76,6 +76,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Class and small-map lookups skip hashing](#class-and-small-map-lookups-skip-hashing) | -2.6% (classes) |
 | [A builtin method is called without a bound method](#a-builtin-method-is-called-without-a-bound-method) | -3.0% (strings) |
 | [A builtin name remembers it is not a global](#a-builtin-name-remembers-it-is-not-a-global) | `len(l)`: -18% |
+| [A call node is evaluated in its own function](#a-call-node-is-evaluated-in-its-own-function) | M2 time: loop -3.4%, classes -3.3% |
 
 ### Releasing a number or string frees it at once
 
@@ -431,6 +432,18 @@ dictionary at a freed one's address gains its keys the same way.
 
 A `len(l)` call in a function fell from 690 to 564 instructions. The
 suite, whose loops call few builtins, moved by -0.7% to +0.8%.
+
+### A call node is evaluated in its own function
+
+`eval` contains the whole expression switch, `eval_inner`, inlined. The
+call case keeps up to nine arguments in an array on the C stack, so with
+Apple Clang every evaluation of every node reserved that space, saved
+twelve registers and checked the stack protector's guard on return. The
+call case is now its own function, `eval_call`, and `eval` saves ten
+registers and has no guard. GCC on Linux already compiled `eval`
+without the cost, so the instruction counts there do not move; on the
+M2: loop -3.4%, classes -3.3%, nbody -2.0%, strings -1.9%, generators
+and fib within noise.
 
 ## Tried and left out
 

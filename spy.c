@@ -13593,6 +13593,41 @@ static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self
     spy_release(object);
     return callee;
 }
+/* A call node, outside eval_inner: its argument array would make every
+ * evaluation reserve and guard stack space for it. */
+static NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *a = NULL, *result = NULL;
+    /* Up to eight plain positional arguments go on the C stack, after
+     * the instance a method call passes first. */
+    size_t argc = 0;
+    for (Node *arg = n->args; arg && argc <= 8; arg = arg->next, argc++)
+        if (arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) argc = 9;
+    SPYValue *argv[9];
+    size_t done = 0;
+    int method = -1;
+    if (argc <= 8 && n->a->kind == N_ATTR) {
+        a = method_callee(c, f, n->a, argv, &method);
+        done = argv[0] != NULL;
+    } else a = eval(c, f, n->a);
+    if (!a) return NULL;
+    if (argc <= 8) {
+        argc += done;
+        for (Node *arg = n->args; arg && (argv[done] = eval(c, f, arg)); arg = arg->next) done++;
+        if (done == argc) {
+            relocate(c, n);
+            result = method < 0 ? call_keywords(c, a, argc, argv, NULL) : call_native_method(c, a, method, n->a->b->global_key, argc, argv);
+        }
+        while (done) spy_release(argv[--done]);
+        spy_release(a);
+        return result;
+    }
+    SPYValue *args = spy_list(c), *keywords = value_new(c, SPY_DICT);
+    if (!args || !keywords) { spy_release(a); spy_release(args); spy_release(keywords); return NULL; }
+    eval_arguments(c, f, n->args, a, args, keywords);
+    if (!c->error_type[0]) { relocate(c, n); result = call_keywords(c, a, args->as.seq.len, args->as.seq.items, keywords); }
+    spy_release(a); spy_release(args); spy_release(keywords);
+    return result;
+}
 static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     if (tick(c, f, n)) return NULL;
     SPYValue *a = NULL, *b = NULL, *result = NULL;
@@ -13730,36 +13765,7 @@ container_fail:
         a = eval(c, f, n->a);
         if (a) { relocate(c, n); result = node_attribute(c, a, n); }
         break;
-    case N_CALL: {
-        /* Up to eight plain positional arguments go on the C stack, after
-         * the instance a method call passes first. */
-        size_t argc = 0;
-        for (Node *arg = n->args; arg && argc <= 8; arg = arg->next, argc++)
-            if (arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) argc = 9;
-        SPYValue *argv[9];
-        size_t done = 0;
-        int method = -1;
-        if (argc <= 8 && n->a->kind == N_ATTR) {
-            a = method_callee(c, f, n->a, argv, &method);
-            done = argv[0] != NULL;
-        } else a = eval(c, f, n->a);
-        if (!a) break;
-        if (argc <= 8) {
-            argc += done;
-            for (Node *arg = n->args; arg && (argv[done] = eval(c, f, arg)); arg = arg->next) done++;
-            if (done == argc) {
-                relocate(c, n);
-                result = method < 0 ? call_keywords(c, a, argc, argv, NULL) : call_native_method(c, a, method, n->a->b->global_key, argc, argv);
-            }
-            while (done) spy_release(argv[--done]);
-            break;
-        }
-        SPYValue *args = spy_list(c), *keywords = value_new(c, SPY_DICT);
-        if (!args || !keywords) { spy_release(args); spy_release(keywords); break; }
-        eval_arguments(c, f, n->args, a, args, keywords);
-        if (!c->error_type[0]) { relocate(c, n); result = call_keywords(c, a, args->as.seq.len, args->as.seq.items, keywords); }
-        spy_release(args); spy_release(keywords); break;
-    }
+    case N_CALL: return eval_call(c, f, n);
     default: spy_error(c, "RuntimeError", "invalid expression node"); break;
     }
     spy_release(a); spy_release(b);
