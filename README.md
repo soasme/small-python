@@ -23,6 +23,8 @@ $ ./spy -c 'print(sum(range(10)))'
 - **Automatic memory management**: reference counting plus a cycle collector.
 - **Standalone executables**: `spyc` turns a `.py` file into a C program.
 - **Sandboxed files**: scripts can only `open` the directories the host mounts.
+- **Packages** for [Python, JavaScript, Rust, and Go](#packages), each able to
+  run untrusted code in a sandboxed worker.
 - **Fast startup**: about 260 µs to create a context, run hello world, and
   tear it down (Apple M2, `-O2`).
 
@@ -97,21 +99,33 @@ game package, dynamically imported themes, and sprite, and links them with
 the engine and a static raylib into one executable
 (`make -C examples/flappy run`).
 
-## From Python
+## Packages
 
-The [`small_python`](python/docs/README.md) package runs Small Python from
-CPython. Each runtime is a separate interpreter, in a worker process of its
-own, that sees only what you give it; an engine crash raises an exception
-instead of taking your program down:
+Small Python is also packaged for four host languages. Every package can run
+each runtime in a sandboxed *worker* of its own, which sees only the
+functions, modules, and directories you give it: an engine crash, or code
+exploiting one, fails the operation instead of taking your program down.
+Rust and Go can also run the engine in your process, for trusted code and
+the lowest overhead.
 
-```sh
-pip install small-python
-```
+| Language | Install | In-process | Sandboxed worker | Documentation |
+|---|---|---|---|---|
+| Python 3.10+ | `pip install small-python` | | `small_python` | [python/docs](python/docs/README.md), [spec](docs/packaging/python.md) |
+| JavaScript (Node.js 20+, browsers) | `npm install small-python` | | `small-python` (WebAssembly) | [javascript](javascript/README.md), [spec](docs/packaging/javascript.md) |
+| Rust | `cargo add small-python` | `small-python` | `small-python-worker` | [crates](rust/small-python/README.md), [spec](docs/packaging/rust.md) |
+| Go 1.24+ | `go get github.com/soasme/small-python/go` | `spy` | `worker` | [go](go/README.md), [spec](docs/packaging/go.md) |
+
+The workers share one [protocol](docs/packaging/protocol.md) and one C
+file, `spy-worker.c`: a process sealed by the OS sandbox for Python, Rust,
+and Go, and a WebAssembly instance in a Worker thread for JavaScript. All of
+them bound steps, memory, and time.
+
+### Python
 
 ```python
 import small_python
 
-with small_python.Runtime() as rt:
+with small_python.Runtime(memory_limit=64 << 20, timeout=5) as rt:
     @rt.function
     def lookup(key):
         return {"answer": 42}.get(key)
@@ -119,14 +133,23 @@ with small_python.Runtime() as rt:
     print(rt.eval("lookup('answer') * 2"))  # 84
 ```
 
-## From Rust
+### JavaScript
 
-The crates in [`rust/`](docs/packaging/rust.md) compile the engine from
-source with `cc` during `cargo build`, so there is nothing to install.
-`small-python` runs the engine in your process with a safe API (and serde
-conversions); `small-python-worker` runs each runtime in a sandboxed worker
-process, as the Python package does. [`examples/todo`](examples/todo)
-is a Flask-style Python application served by axum, with JSON from serde.
+```js
+import { Runtime } from "small-python";
+
+const rt = await Runtime.create({ memoryLimit: 64 << 20, timeout: 5000 });
+await rt.define("fetchUser", async (id) => ({ id, name: "Ada" }));
+console.log(await rt.eval("fetchUser(7)['name'].upper()"));  // ADA
+rt.close();
+```
+
+### Rust
+
+The crates compile the engine from source with `cc` during `cargo build`,
+so there is nothing to install. `small-python` has a safe API with optional
+serde conversions; [`examples/todo`](examples/todo) is a Flask-style Python
+application served by axum.
 
 ```rust
 let rt = small_python::Runtime::new()?;
@@ -137,11 +160,10 @@ rt.define("add", |rt, args| {
 let n: i64 = rt.eval("add(40, 2)")?;  // 42
 ```
 
-## From Go
+### Go
 
-The module in [`go/`](docs/packaging/go.md) follows the same split. `spy`
-compiles the engine with cgo and runs it in your process; `worker` runs each
-runtime in a sandboxed `spy-worker` process, in pure Go.
+`spy` compiles the engine with cgo; `worker` is pure Go and runs the
+`spy-worker` executable that `make install` installs.
 
 ```go
 rt, _ := spy.New()
@@ -157,13 +179,15 @@ n, _ := spy.As[int](rt.Eval("add(40, 2)"))  // 42
 ## Testing
 
 ```sh
-make test         # C API tests and the specification suite
-make test-spec    # specification tests only
-make sanitize     # AddressSanitizer, leak, and undefined-behavior checks
-make fuzz         # libFuzzer targets for FUZZ_SECONDS each
-make bench        # startup benchmark
-make test-rust    # the Rust crates and the todo example
-make test-go      # the Go module
+make test             # C API tests and the specification suite
+make test-spec        # specification tests only
+make sanitize         # AddressSanitizer, leak, and undefined-behavior checks
+make fuzz             # libFuzzer targets for FUZZ_SECONDS each
+make bench            # startup benchmark
+make test-binding     # the Python package
+make test-javascript  # the JavaScript package (wasi-sdk rebuilds its worker)
+make test-rust        # the Rust crates and the todo example
+make test-go          # the Go module
 ```
 
 ## Documentation
@@ -174,6 +198,7 @@ make test-go      # the Go module
 - [Standard modules](docs/standards/std.md): the `sys` and `gc` modules, after CPython 3.15
 - [CPython's Lib](docs/python-lib.md): scope of running CPython's `Lib/` unchanged
 - [Building programs](docs/build.md): the `spyc` bundler
+- Packages: [Python](docs/packaging/python.md), [JavaScript](docs/packaging/javascript.md), [Rust](docs/packaging/rust.md), [Go](docs/packaging/go.md), and the [worker protocol](docs/packaging/protocol.md) they share
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)
 - [Contributing](AGENTS.md): architecture and code style
