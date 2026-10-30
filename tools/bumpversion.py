@@ -94,7 +94,8 @@ def main() -> None:
         )
         run_checked("uvx", "twine", "check", "--strict", *distributions, cwd=package)
         run_checked("make", "rust-vendor", cwd=clone)
-        run_checked("cargo", "publish", "--workspace", "--dry-run", cwd=clone / "rust")
+        # Dirty: the bump is not committed yet, and csrc/ is ignored by git.
+        run_checked("cargo", "publish", "--workspace", "--dry-run", "--allow-dirty", cwd=clone / "rust")
         print("Release plan:", flush=True)
         run_checked("git", "diff", "--", *RELEASE_FILES, cwd=clone)
         if args.yes:

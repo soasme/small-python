@@ -199,6 +199,9 @@ jobs:
               "https://crates.io/api/v1/crates/$crate/$VERSION")"
             if [ "$status" = 200 ]; then
               echo "$crate@$VERSION is already on crates.io"
+            elif [ "$crate" = small-python-src ]; then
+              # csrc/ is ignored by git: the copy make rust-vendor just made.
+              cargo publish -p "$crate" --allow-dirty
             else
               cargo publish -p "$crate"
             fi

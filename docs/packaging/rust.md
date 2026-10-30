@@ -297,8 +297,11 @@ the release, only the checkout satisfies the example's dependency, so
 `make test-rust` patches it in, and the example commits no `Cargo.lock`. It authenticates with the `CARGO_REGISTRY_TOKEN` secret of the
 `crates-io` environment when one is set, which the first release needs
 because crates.io trusts a workflow only for crates that exist, and with
-trusted publishing otherwise. `cargo publish --workspace --dry-run` checks
-the packages locally.
+trusted publishing otherwise. Cargo counts the vendored `csrc/`, which git
+ignores, as uncommitted, so `small-python-src` alone publishes with
+`--allow-dirty`. After `make rust-vendor`,
+`cargo publish --workspace --dry-run --allow-dirty` checks the packages
+locally.
 
 ## 7 Alternatives considered
 
