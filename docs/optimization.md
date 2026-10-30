@@ -69,6 +69,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [An attribute's remembered answer is checked inline](#an-attributes-remembered-answer-is-checked-inline) | -2.0% (classes) |
 | [A name keeps its local's key](#a-name-keeps-its-locals-key) | -2.3% (nbody) to 0% |
 | [The stack check and the right operand are inline](#the-stack-check-and-the-right-operand-are-inline) | -1.0% to -3.6% |
+| [Numbers and strings take half an allocation](#numbers-and-strings-take-half-an-allocation) | dicts -12%, sort -14% (time) |
 
 ### Releasing a number or string frees it at once
 
@@ -293,6 +294,32 @@ inline, with the error report a separate call.
 
 On the M2 the wall time stays within noise (fib -0.3%, classes -0.7%,
 loop +1.3%), and the executable's text is the same size.
+
+### Numbers and strings take half an allocation
+
+Every value took the size of the largest member of its union, 216 bytes
+on a 64-bit host, though an int uses 16 of them and a str 48. A dict of
+a million int keys and values held two million such allocations. Ints,
+floats, complex numbers, strs, bytes and bytearrays now take an
+allocation that ends with the string member, 112 bytes; every other
+value keeps the full size. A value never changes into a type of the
+other size (str and bytes, set and frozenset, module and instance change
+within one), and the two places that exchanged the whole union of two
+values of one type now exchange only what their type holds. Released
+allocations are kept in two spare lists, one per size.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| dicts, time | 130.2 ms | 114.1 ms | -12.4% |
+| sort, time | 184.3 ms | 158.6 ms | -13.9% |
+| dicts, peak memory | 97.6 MiB | 53.8 MiB | -45% |
+| sort, peak memory | 108.1 MiB | 86.4 MiB | -20% |
+| fib, time | 66.7 ms | 65.5 ms | -1.9% |
+| classes, time | 171.2 ms | 174.1 ms | +1.7% |
+| nbody, time | 423.0 ms | 427.5 ms | +1.1% |
+
+The instructions move by -3.7% (dicts) to +2.7% (nbody), the cost of
+choosing a spare list on every allocation and release.
 
 ## Tried and left out
 

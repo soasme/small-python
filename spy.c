@@ -199,7 +199,8 @@ struct SPYContext {
      * release, advances it. Results are borrowed, with no value edges. */
     size_t classes_changed;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
-    SPYValue *spare; size_t spares; /* Released allocations of other values, linked by next; no value edges. */
+    /* Released allocations of other values, linked by next, by size (small_value); no value edges. */
+    SPYValue *spare[2]; size_t spares[2];
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
@@ -543,21 +544,30 @@ static int append(Buffer *b, const char *s, size_t n) {
     return 0;
 }
 static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
+/* Numbers and strings end with their union member, and their allocations
+ * stop there: a value never changes into a type of another size. */
+enum { SMALL_VALUE = offsetof(SPYValue, as) + sizeof(((SPYValue *)0)->as.string) };
+static ALWAYS_INLINE int small_value(int type) {
+    return (UINT64_C(1) << type & (UINT64_C(1) << SPY_INT | UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_COMPLEX |
+        UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_BYTES | UINT64_C(1) << SPY_BYTEARRAY)) != 0;
+}
+static size_t value_size(int type) { return small_value(type) ? SMALL_VALUE : sizeof(SPYValue); }
 static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     SPYValue *v = NULL;
+    int small = small_value(type);
     if (type == SPY_TUPLE && tuple_size < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache)) {
         v = c->tuple_cache[tuple_size];
         c->tuple_cache[tuple_size] = NULL;
         if (v) cache_take(v, sizeof(*v));
-    } else if (type != SPY_TUPLE && c->spare) {
-        v = c->spare; cache_take(v, sizeof(*v)); c->spare = v->next; c->spares--;
+    } else if (type != SPY_TUPLE && c->spare[small]) {
+        v = c->spare[small]; cache_take(v, value_size(type)); c->spare[small] = v->next; c->spares[small]--;
     }
     /* Ints and floats, the most frequent results, read only their first
      * union member: clearing the rest of a reused value is wasted. Each
      * size is a constant, so the compiler clears in place. */
     if (v && (type == SPY_INT || type == SPY_FLOAT)) memset(v, 0, offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data));
-    else if (v) memset(v, 0, sizeof(*v));
-    else v = allocate(c, sizeof(*v));
+    else if (v) memset(v, 0, small ? SMALL_VALUE : sizeof(*v));
+    else v = allocate(c, small ? SMALL_VALUE : sizeof(*v));
     if (!v) return NULL;
     v->ctx = c;
     v->refs = 1;
@@ -569,6 +579,12 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     return v;
 }
 static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type, 0); }
+/* Exchange the contents of a and b, two values of one type. */
+static void swap_contents(SPYValue *a, SPYValue *b) {
+    unsigned char swap[sizeof(a->as)];
+    size_t size = value_size(a->type) - offsetof(SPYValue, as);
+    memcpy(swap, &a->as, size); memcpy(&a->as, &b->as, size); memcpy(&b->as, swap, size);
+}
 SPYValue *spy_retain(SPYValue *v) { if (v) v->refs++; return v; }
 typedef void (*Visit)(SPYValue *, void *);
 static void machine_edges(Machine *, Visit, void *);
@@ -788,7 +804,10 @@ static void free_value(SPYValue *v) {
         cache_put(v, sizeof(*v));
         return;
     }
-    if (v->type != SPY_TUPLE && c->spares < 64) { v->next = c->spare; c->spare = v; c->spares++; cache_put(v, sizeof(*v)); return; }
+    int small = small_value(v->type);
+    if (v->type != SPY_TUPLE && c->spares[small] < 64) {
+        v->next = c->spare[small]; c->spare[small] = v; c->spares[small]++; cache_put(v, value_size(v->type)); return;
+    }
     free(v);
 }
 static void release_edge(SPYValue *v, void *data) {
@@ -9097,8 +9116,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             } else result = map_find(b, a) >= 0;
             if (c->error_type[0]) return NULL;
         } else if (b->type == SPY_BYTEARRAY) {
-            SPYValue view = *b;
-            view.type = SPY_BYTES;
+            SPYValue view = {.ctx = b->ctx, .type = SPY_BYTES, .as.string = b->as.string};
             return comparison(c, op, a->type == SPY_BYTEARRAY ? &(SPYValue){.type = SPY_BYTES, .as.string = a->as.string} : a, &view);
         } else if (b->type == SPY_BYTES && is_int(a)) {
             if (a->as.integer_data.big || a->as.integer_data.small < 0 || a->as.integer_data.small > 255)
@@ -11465,8 +11483,7 @@ static SPYValue *string_search_method(SPYContext *c, size_t argc, SPYValue *cons
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
     if (!self) return spy_error(c, "TypeError", "string method requires an instance of its type");
     if (self->type != SPY_BYTEARRAY) return string_search(c, self, method, argc - 1, argv + 1);
-    SPYValue view = *self;
-    view.type = SPY_BYTES;
+    SPYValue view = {.ctx = self->ctx, .type = SPY_BYTES, .as.string = self->as.string};
     return string_search(c, &view, method, argc - 1, argv + 1);
 }
 /* CPython's arity errors: METH_NOARGS and METH_O methods name their type,
@@ -15603,8 +15620,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
             /* A bytearray keeps its exports, which forbid resizing. */
             size_t exports = old->type == SPY_BYTEARRAY ? old->as.string.exports : 0;
             if (exports && fresh->as.string.len != old->as.string.len) { spy_release(fresh); bytearray_exported(c, old); return NULL; }
-            unsigned char swap[sizeof(old->as)];
-            memcpy(swap, &old->as, sizeof(swap)); memcpy(&old->as, &fresh->as, sizeof(swap)); memcpy(&fresh->as, swap, sizeof(swap));
+            swap_contents(old, fresh);
             if (old->type == SPY_BYTEARRAY) { old->as.string.exports = exports; fresh->as.string.exports = 0; }
             spy_release(fresh); return spy_retain(old);
         }
@@ -25076,12 +25092,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     if (type == SPY_DICT) {
         for (size_t i = 0; i < fresh->as.map.len; i++)
             if (map_set(c, self, map_items(fresh)[i].key, map_items(fresh)[i].value)) break;
-    } else {
-        unsigned char swap[sizeof(self->as)];
-        memcpy(swap, &self->as, sizeof(swap));
-        memcpy(&self->as, &fresh->as, sizeof(swap));
-        memcpy(&fresh->as, swap, sizeof(swap));
-    }
+    } else swap_contents(self, fresh);
     spy_release(fresh);
     return c->error_type[0] ? NULL : spy_none(c);
 }
@@ -26358,7 +26369,11 @@ void spy_context_free(SPYContext *c) {
 #endif
     free(c->files); free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++) free(c->tuple_cache[i]);
-    while (c->spare) { cache_take(c->spare, sizeof(*c->spare)); SPYValue *next = c->spare->next; free(c->spare); c->spare = next; }
+    for (int small = 0; small < 2; small++)
+        while (c->spare[small]) {
+            SPYValue *v = c->spare[small];
+            cache_take(v, small ? SMALL_VALUE : sizeof(*v)); c->spare[small] = v->next; free(v);
+        }
     while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
     if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }
     free(c);
