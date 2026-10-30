@@ -124,13 +124,13 @@ fn objects() {
 #[test]
 fn released_handles_are_freed() {
     let mut rt = Runtime::new().unwrap();
-    rt.exec("import gc, weakref\nclass Box: pass\nrefs = []").unwrap();
+    rt.exec("freed = []\nclass Box:\n    def __del__(self): freed.append(1)").unwrap();
     for _ in 0..100 {
-        let object = rt.eval("b = Box(); refs.append(weakref.ref(b)); del b; refs[-1]()").unwrap();
+        let object = rt.eval("Box()").unwrap();
         drop(object);
     }
     rt.collect().unwrap();
-    assert_eq!(rt.eval("sum(r() is not None for r in refs)").unwrap(), int(0));
+    assert_eq!(rt.eval("len(freed)").unwrap(), int(100));
 }
 
 #[test]

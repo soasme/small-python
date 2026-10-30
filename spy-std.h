@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-/* The standard layer, like QuickJS's quickjs-libc: the host modules sys, gc,
- * weakref, and _weakref, registered with spy_new_module through the public
+/* The standard layer, like QuickJS's quickjs-libc: the host modules sys and
+ * gc, registered with spy_new_module through the public
  * API and written on the engine primitives, which they register as _spy. The
  * core (spy.c) provides the language and its builtins; hosts that want these
  * modules link spy-std.c, as the spy command does, and register each one or

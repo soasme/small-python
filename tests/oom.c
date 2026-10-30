@@ -158,8 +158,8 @@ static const char *const programs[] = {
     "except* ValueError as e: print('value', e.exceptions)\n"
     "except* TypeError: print('type')\n",
 
-    /* sys and weakref are left to fuzz_oom and tests/oom FILE: importing
-     * them makes 5,000 and 39,000 allocations, too many to sweep here. */
+    /* sys is left to fuzz_oom and tests/oom FILE: importing it makes 5,000
+     * allocations, too many to sweep here. */
     "import gc\n"
     "class N:\n"
     "    def __init__(self): self.me = self\n"

@@ -33,8 +33,8 @@
   (`_spy`) with the engine primitives (module cache, weak table, frames,
   collection, limits, host output); add a primitive only when a host module
   cannot be written without it. The standard layer `spy-std.c` (like
-  `quickjs-libc.c`) supplies the host modules `sys`, `gc`, and `weakref` (with
-  its primitive half `_weakref`) on them through the public API. Their Python
+  `quickjs-libc.c`) supplies the host modules `sys` and `gc` on them through
+  the public API. Their Python
   sources are in `modules/`, embedded in `spy-std-modules.h` by
   `tools/build_intrinsics.py`. The `spy` command links the standard layer and
   `spyc -M` selects from it; `libspy.a` does not. Conformance runs on
@@ -45,7 +45,7 @@
   CPython test imports one; skip tests that are blocked only by a missing
   module and raise pass rates by fixing core semantics instead. Add a module
   only when the user explicitly asks for it. The same holds inside the
-  existing modules: do not grow `sys`, `gc`, `weakref` and the rest with more
+  existing modules: do not grow `sys`, `gc` and the rest with more
   library surface (hooks, structseqs, helpers) just because a test reaches for
   it; the engine reports core behavior such as ignored exceptions itself.
 - Cache at most one released tuple allocation for each length zero through

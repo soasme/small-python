@@ -679,8 +679,7 @@ integer-string limits, the handled exception, collection, the weak table, and
 host output. Hosts register it as `_spy`; a context where none did has no such
 module. A standard layer, `spy-std.c` (`libspy-std.a`, declared in
 `spy-std.h`), plays the role of QuickJS's `quickjs-libc`: it supplies the host
-modules `sys`, `gc`, and `weakref` (with `_weakref` as its primitive half),
-written on those primitives. `spy_std_init_module` registers one of them and
+modules `sys` and `gc`, written on those primitives. `spy_std_init_module` registers one of them and
 `spy_std_init` all of them. The `spy` command calls `spy_std_init`, `spyc -M`
 names the modules a generated program registers, and the conformance driver
 `tests/run-spec` registers none, only `_spy`. Their Python sources live in
@@ -703,14 +702,12 @@ modules) with `f_globals`, `f_locals`, `f_back`, `f_code`, `f_lineno`,
 write-through `FrameLocalsProxy` as in PEP 667. Line numbers are those of the
 executing statement. `_getframemodulename()` is provided. Tracing, profiling,
 `f_lasti`, `frame.clear()`, reference counts, audit hooks, and a separate
-error stream are not provided. `_weakref` re-exports the `weakref` primitives
-for the standard library's pure-Python modules.
-`weakref` provides `ref`, `proxy`, `getweakrefcount`, `getweakrefs`,
-`WeakMethod`, `WeakValueDictionary`, `WeakKeyDictionary`, `WeakSet`, and
-`finalize` (which has no interpreter-exit hook).
+error stream are not provided.
 
-Weak references use a per-context table of borrowed (referent, reference)
-pairs. Instances of classes without `__slots__` (or with `__weakref__` in
+No `weakref` module is built in. The engine keeps weak references for its
+hosts: the primitives `_weak_bind(target, reference, callback)` and
+`_weak_get(reference)` register a reference object in a per-context table of
+borrowed (referent, reference) pairs and read its referent back. Instances of classes without `__slots__` (or with `__weakref__` in
 them), classes, functions, bound methods, builtin functions, sets, frozensets,
 generators, coroutines, code objects, and modules are weakly referenceable,
 as in CPython. Releasing a referent, or collecting it in a cycle, clears its
@@ -1042,7 +1039,7 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `spy.c`, `spy.h` | Engine and public embedding API |
 | `spy-unicode.h`, `tools/build_unicode.py` | Generated Unicode properties and development-only generator |
 | `cli.c`, `host.h` | CLI and host stream support |
-| `spy-std.c`, `spy-std.h`, `modules/` | Standard layer: the host modules `sys`, `gc`, and `weakref` |
+| `spy-std.c`, `spy-std.h`, `modules/` | Standard layer: the host modules `sys` and `gc` |
 | `spyc.c` | Standalone C program generator |
 | `run-cython.c` | Persistent evaluation driver for upstream doctests |
 | `tests/run-spec.c` | Conformance driver: the bare core for spec tests and TLA+ replays |

@@ -11,15 +11,16 @@
 enum { THREADS = 4, ROUNDS = 8 };
 
 static const char program[] =
-    "import gc, sys, weakref\n"
+    "import gc, sys\n"
     "class Node:\n"
     "    def __init__(self, n): self.n = n; self.next = self\n"
+    "    def __del__(self): freed.append(self.n)\n"
     "    def __repr__(self): return f'Node({self.n})'\n"
     "def gen(n):\n"
     "    for i in range(n):\n"
     "        yield i * i\n"
+    "freed = []\n"
     "nodes = [Node(i) for i in range(100)]\n"
-    "ref = weakref.ref(nodes[0])\n"
     "d = {str(i): i for i in gen(50)}\n"
     "t = tuple(sorted(d, key=lambda k: -d[k]))\n"
     "big = 7 ** 300 // 3\n"
@@ -35,7 +36,7 @@ static const char program[] =
     "    total = stop.value\n"
     "del nodes\n"
     "gc.collect()\n"
-    "result = (total, len(text), sys.getrecursionlimit(), ref() is None)\n";
+    "result = (total, len(text), sys.getrecursionlimit(), len(freed))\n";
 
 static int discard(void *data, const char *s, size_t n) {
     (void)data; (void)s; (void)n;
@@ -49,7 +50,7 @@ static void *work(void *failed) {
         spy_set_output(c, discard, NULL);
         SPYValue *result = NULL;
         if (spy_exec(c, program, "<thread>") || !(result = spy_eval(c, "repr(result)", "<thread>")) ||
-            strcmp(spy_as_string(c, result, NULL), "(50, 38, 1000, True)")) {
+            strcmp(spy_as_string(c, result, NULL), "(50, 38, 1000, 100)")) {
             fprintf(stderr, "thread: %s: %s\n", spy_error_type(c), spy_error_display(c));
             *(int *)failed = 1;
         }

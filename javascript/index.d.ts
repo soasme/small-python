@@ -5,7 +5,7 @@ export type PyValue =
   | ((...args: any[]) => unknown);
 
 export interface RuntimeOptions {
-  /** Register the standard modules (sys, gc, weakref). Default true. */
+  /** Register the standard modules (sys and gc). Default true. */
   std?: boolean;
   /** Evaluation steps per top-level eval or exec; 0 is unlimited. */
   stepLimit?: number;

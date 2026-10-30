@@ -664,15 +664,19 @@ int main(void) {
     assert(!strcmp(spy_error_type(c), "MemoryError"));
 
     /* Built-in modules import without a loader. The collector clears weak
-     * references to cyclic garbage; callbacks run at the next statement. */
+     * references (the engine primitives) to cyclic garbage; callbacks run at
+     * the next statement. */
     spy_set_step_limit(c, 0);
-    assert(!spy_exec(c, "import weakref\nclass Node: pass\nseen = []\nn = Node(); n.me = n\n"
-                        "wr = weakref.ref(n, seen.append)\ndel n", "weak.py"));
+    assert(!spy_exec(c, "import _spy\nclass Ref:\n"
+                        "    def __init__(self, target, callback): _spy._weak_bind(target, self, callback)\n"
+                        "    def __call__(self): return _spy._weak_get(self)\n"
+                        "class Node: pass\nseen = []\nn = Node(); n.me = n\n"
+                        "wr = Ref(n, seen.append)\ndel n", "weak.py"));
     spy_collect(c);
     assert(!spy_exec(c, "pass\nassert wr() is None and seen == [wr], seen", "weak_check.py"));
     size_t before = spy_live_values(c);
     for (int i = 0; i < 3; i++) {
-        assert(!spy_exec(c, "n = Node(); n.me = n; w = weakref.ref(n, lambda r: None); del n, w", "weak_loop.py"));
+        assert(!spy_exec(c, "n = Node(); n.me = n; w = Ref(n, lambda r: None); del n, w", "weak_loop.py"));
         spy_collect(c);
     }
     assert(spy_live_values(c) <= before + 8);
@@ -741,17 +745,14 @@ int main(void) {
         spy_context_free(files);
     }
 
-    /* Reached by nothing else in make test: weak references and their
-     * primitives, gc.get_referents, frame-locals merging, sys's digit limit
-     * and breakpoint hook, float.__getformat__, wide and half-float memoryview
-     * items, dict-view equality, latin-9, and lazy import. */
+    /* Reached by nothing else in make test: gc.get_referents, frame-locals
+     * merging, sys's digit limit and breakpoint hook, float.__getformat__,
+     * wide and half-float memoryview items, dict-view equality, latin-9, and
+     * lazy import. */
     execute(c,
-        "import gc, sys, weakref\n"
+        "import gc, sys\n"
         "class T: pass\n"
         "t = T()\n"
-        "r = weakref.ref(t)\n"
-        "assert hash(r) == hash(t)\n"
-        "assert weakref.getweakrefcount(t) == 1 and weakref.getweakrefs(t) == [r]\n"
         "holder = [t, 'x']\n"
         "assert t in gc.get_referents(holder) and 'x' in gc.get_referents(holder)\n"
         "def merged():\n"

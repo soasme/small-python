@@ -18,7 +18,7 @@ cannot start.
 
 | Argument | Meaning |
 |---|---|
-| `std` | Register the standard modules (`sys`, `gc`, `weakref`). |
+| `std` | Register the standard modules (`sys` and `gc`). |
 | `step_limit` | Maximum evaluation steps, counted from the start of each `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. Must be `>= 0`. |
 | `memory_limit` | Bytes the engine may hold allocated; `0` is unlimited. Exceeding it raises `MemoryError` in the engine, which code can catch; the runtime keeps working. |
 | `timeout` | Seconds one operation may run in the worker, or `None`. Time spent in host functions, `output`, and `loader` does not count. Exceeding it terminates the worker and raises `Timeout`. |

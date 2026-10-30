@@ -58,8 +58,8 @@ _PROTOCOL = {"TypeError": TypeError, "KeyError": KeyError, "IndexError": IndexEr
 class Runtime:
     """An independent Small Python engine running in its own worker process.
 
-    Keyword arguments: ``std`` registers the standard modules (sys, gc,
-    weakref, ...); ``step_limit`` bounds evaluation steps (0 is unlimited);
+    Keyword arguments: ``std`` registers the standard modules (sys and
+    gc); ``step_limit`` bounds evaluation steps (0 is unlimited);
     ``memory_limit`` bounds the engine's memory in bytes (0 is unlimited);
     ``timeout`` bounds the seconds one operation may run (None is unlimited);
     ``output`` receives printed text (default ``sys.stdout.write``);

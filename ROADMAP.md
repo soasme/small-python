@@ -40,7 +40,7 @@ Python file shipped beside it.
 
 ### Standard library coverage
 
-The standard layer (`spy-std.c`) has `sys`, `gc` and `weakref`; the rest of
+The standard layer (`spy-std.c`) has `sys` and `gc`; the rest of
 the standard library is out of scope today. Cover it in steps, so that both
 `spy` (at run time) and `spyc` (at build time) load the same modules:
 

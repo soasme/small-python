@@ -185,7 +185,7 @@ describe("runtime", () => {
 
   test("std option", async () => {
     const rt = track(await Runtime.create());
-    await rt.exec("import sys, gc, weakref");
+    await rt.exec("import sys, gc");
     const bare = track(await Runtime.create({ std: false }));
     assert.equal((await bare.exec("import sys").catch((e) => e)).type, "ModuleNotFoundError");
   });

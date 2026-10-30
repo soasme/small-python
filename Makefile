@@ -66,7 +66,7 @@ spyc: $(OBJDIR)/spyc.o
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^
 
-# The standard layer (sys, gc, weakref, ...), separate from the core like quickjs-libc.
+# The standard layer (sys and gc), separate from the core like quickjs-libc.
 libspy-std.a: $(OBJDIR)/spy-std.o
 	$(AR) rcs $@ $^
 

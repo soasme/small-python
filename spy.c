@@ -224,7 +224,7 @@ struct SPYContext {
      * keeps its callback as its own __callback__ attribute, so the collector
      * sees that edge. weak_calls owns each reference whose target died, until
      * its callback runs at the next statement boundary. */
-    struct WeakEntry { SPYValue *target, *ref; int64_t hash; int hashed; } *weak;
+    struct WeakEntry { SPYValue *target, *ref; } *weak;
     size_t weak_len, weak_cap;
     SPYValue **weak_calls;
     size_t weak_calls_len, weak_calls_cap;
@@ -1951,7 +1951,7 @@ static const char *class_tname(SPYValue *cls) {
         {"string.templatelib", "Template"}, {"string.templatelib", "Interpolation"}, {"string.templatelib", "TemplateIter"},
         {"typing", "TypeVar"}, {"typing", "ParamSpec"}, {"typing", "TypeVarTuple"}, {"typing", "ParamSpecArgs"},
         {"typing", "ParamSpecKwargs"}, {"typing", "TypeAliasType"}, {"typing", "Generic"}, {"typing", "Union"},
-        {"types", "GenericAlias"}, {"weakref", "ReferenceType"}, {"weakref", "ProxyType"}, {"weakref", "CallableProxyType"},
+        {"types", "GenericAlias"},
         {"_io", "_IOBase"}, {"_io", "_RawIOBase"}, {"_io", "_BufferedIOBase"}, {"_io", "_TextIOBase"}, {"_io", "FileIO"},
         {"_io", "BytesIO"}, {"_io", "StringIO"}, {"_io", "BufferedReader"}, {"_io", "BufferedWriter"},
         {"_io", "BufferedRandom"}, {"_io", "BufferedRWPair"}, {"_io", "TextIOWrapper"}, {"_io", "IncrementalNewlineDecoder"}};
@@ -14342,9 +14342,9 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
 SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) {
     return call_keywords(c, fn, argc, argv, NULL);
 }
-/* Weak references. The weakref module builds its reference, proxy, and
- * container types on these private primitives; a reference object is any
- * value registered here with a borrowed target. */
+/* Weak references, the engine primitives _weak_bind and _weak_get: a
+ * reference object is any instance registered here with a borrowed target,
+ * and its __callback__ runs when the target dies. */
 static int weak_referenceable(SPYContext *c, SPYValue *v) {
     switch (v->type) {
     case SPY_CLASS: case SPY_FUNCTION: case SPY_SET: case SPY_FROZENSET: case SPY_GENERATOR: case SPY_COROUTINE:
@@ -14377,39 +14377,15 @@ static SPYValue *weak_bind(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     }
     if (ref->type != SPY_INSTANCE) return spy_error(c, "TypeError", "weak reference objects must be instances");
     if (name_set(c, ref, "__callback__", callback)) return NULL;
-    c->weak[c->weak_len++] = (struct WeakEntry){target, ref, 0, 0};
+    c->weak[c->weak_len++] = (struct WeakEntry){target, ref};
     target->weak = ref->weak = 1;
     return spy_none(c);
 }
 static SPYValue *weak_get(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
     struct WeakEntry *e = argc == 1 ? weak_entry(c, argv[0]) : NULL;
-    SPYValue *value = !e ? NULL : data ? name_local(e->ref, "__callback__") : e->target;
+    SPYValue *value = e ? e->target : NULL;
     return spy_retain(value ? value : c->none);
-}
-static SPYValue *weak_hash(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
-    (void)data;
-    struct WeakEntry *e = argc == 1 ? weak_entry(c, argv[0]) : NULL;
-    if (!e) return spy_error(c, "TypeError", "not a weak reference");
-    if (!e->hashed) {
-        if (!e->target) return spy_error(c, "TypeError", "weak object has gone away");
-        int64_t hash;
-        SPYValue *target = spy_retain(e->target);
-        int status = hash_value(c, target, &hash);
-        spy_release(target);
-        if (status) return NULL;
-        e = weak_entry(c, argv[0]);
-        if (e) { e->hash = hash; e->hashed = 1; }
-        return spy_int(c, hash);
-    }
-    return spy_int(c, e->hash);
-}
-static SPYValue *weak_refs(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
-    (void)data;
-    SPYValue *list = spy_list(c);
-    if (argc == 1 && argv[0]->weak)
-        for (size_t i = 0; list && i < c->weak_len; i++)
-            if (c->weak[i].target == argv[0] && spy_list_append(c, list, c->weak[i].ref)) { spy_release(list); list = NULL; }
-    return list;
 }
 static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 /* Run __del__ of dead instances and close dead suspended generators and
@@ -14477,10 +14453,8 @@ static int define_native(SPYContext *c, SPYValue *module, const char *name, SPYN
 }
 /* The module name of the running Python function's caller, for namedtuple's
  * sys._getframemodulename(1). */
-static int weakref_natives(SPYContext *c, SPYValue *module) {
-    return define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
-        define_native(c, module, "_weak_callback", weak_get, c) || define_native(c, module, "_weak_hash", weak_hash, NULL) ||
-        define_native(c, module, "_weak_refs", weak_refs, NULL);
+static int weak_natives(SPYContext *c, SPYValue *module) {
+    return define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL);
 }
 /* The gc module's view of the collector. Engine-internal values (environments
  * and other private tags) are never exposed. */
@@ -14671,7 +14645,7 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     return status;
 }
 int spy_init_primitives(SPYContext *c, SPYValue *module) {
-    return sys_natives(c, module) || gc_natives(c, module) || weakref_natives(c, module) || file_natives(c, module) ? -1 : 0;
+    return sys_natives(c, module) || gc_natives(c, module) || weak_natives(c, module) || file_natives(c, module) ? -1 : 0;
 }
 static SPYValue *import_module(SPYContext *, const char *);
 /* A module already in sys.modules; None there halts the import. */

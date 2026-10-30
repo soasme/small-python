@@ -146,7 +146,7 @@ Without a loader, importing anything else raises `ModuleNotFoundError`.
 ### Standard modules
 
 `Runtime(std=True)` (the default) registers the engine's standard modules:
-`sys`, `gc`, and `weakref`. Pass `std=False` for a runtime with only builtins. Other library
+`sys` and `gc`. Pass `std=False` for a runtime with only builtins. Other library
 modules (`json`, `re`, `math`, ...) are not part of the engine; provide them
 with `register_module` or a loader if code needs them.
 
