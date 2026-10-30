@@ -35,3 +35,19 @@ cargo run          # http://127.0.0.1:3000; APP_DIR and ADDRESS change the app a
 cargo test
 curl -d '{"title":"write docs"}' localhost:3000/todos
 ```
+
+## Against unreleased crates
+
+The example builds on the published `small-python`, so changes in
+[`rust/`](../../rust) reach it only after a release and a version bump in
+`Cargo.toml`. To run it on the checkout instead, patch the crate for one
+command:
+
+```sh
+cargo test --config 'patch.crates-io.small-python.path="../../rust/small-python"'
+cargo run  --config 'patch.crates-io.small-python.path="../../rust/small-python"'
+```
+
+`small-python-sys` and `small-python-src` follow from the checkout too.
+Cargo records the patch in `Cargo.lock`; restore it with
+`git checkout Cargo.lock` before committing.
