@@ -269,6 +269,7 @@ struct SPYContext {
      * function last saw, 0 when the next line is new to it. */
     struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial, traced; } *frames;
     size_t frames_cap, frame_serial;
+    size_t *frame_line; /* The innermost frame's line, or line itself when none runs. */
     /* The pending error's traceback, innermost entry last, and the serial
      * of the frame its head entry belongs to (0 when none). */
     SPYValue *traceback;
@@ -419,6 +420,7 @@ static int enter_frame(SPYContext *c, SPYValue *env, SPYValue *owner) {
         c->frames = frames; c->frames_cap = cap;
     }
     c->frames[c->py_depth++] = (struct ActiveFrame){env, owner, NULL, c->line, ++c->frame_serial, 0};
+    c->frame_line = &c->frames[c->py_depth - 1].line;
     if ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) { leave_frame(c, NULL); return -1; }
     return 0;
 }
@@ -463,6 +465,7 @@ static void leave_frame(SPYContext *c, SPYValue *value) {
     if (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) trace_leave(c, value);
     traceback_here(c);
     struct ActiveFrame *top = &c->frames[--c->py_depth];
+    c->frame_line = c->py_depth ? &c->frames[c->py_depth - 1].line : &c->line;
     if (c->error_type[0] && c->py_depth && intrinsic_frame(top) && !intrinsic_frame(&c->frames[c->py_depth - 1])) {
         struct ActiveFrame *caller = &c->frames[c->py_depth - 1];
         SPYValue *unit = frame_unit(caller);
@@ -13481,8 +13484,7 @@ static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *ca
 /* An operation is reported at its own line once its operands, which may
  * span later lines, are evaluated. */
 static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
-    c->line = n->line;
-    if (c->py_depth) c->frames[c->py_depth - 1].line = n->line;
+    c->line = *c->frame_line = n->line;
 }
 /* The function the attribute node n names for a call. With *self set, it is
  * a Python function of a plain instance's class, called with *self first as
@@ -25962,6 +25964,7 @@ static int name_natives(SPYContext *c, SPYValue *namespace, SPYValue *owner) {
 SPYContext *spy_context_new(void) {
     SPYContext *c = calloc(1, sizeof(*c));
     if (!c) return NULL;
+    c->frame_line = &c->line;
     c->none = value_new(c, SPY_NONE);
     c->not_implemented = value_new(c, SPY_NOT_IMPLEMENTED);
     c->ellipsis = value_new(c, SPY_ELLIPSIS);
