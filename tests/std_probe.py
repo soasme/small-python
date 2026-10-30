@@ -92,9 +92,10 @@ for args in [(), (None,), (0,), (3,), ("bye",)]:
 calls(sys, ["sys.exit(1, 2)", "sys.exit(status=1)", "sys.is_finalizing()", "sys.is_finalizing(1)"])
 
 # 5.9
-show("version_info", lambda: (sys.version_info, sys.version_info[:2], sys.version_info >= (3, 15),
-                              sys.version_info.major, sys.version_info.releaselevel))
-show("version", lambda: (hex(sys.hexversion), sys.api_version, sys.version.startswith("3.15.0")))
+# The oracle may be a later 3.15 release than the 3.15.0 baseline: micro is not compared.
+show("version_info", lambda: (type(sys.version_info).__name__, sys.version_info[:2], sys.version_info >= (3, 15),
+                              sys.version_info.major, sys.version_info.releaselevel, sys.version_info.serial))
+show("version", lambda: (hex(sys.hexversion & ~0xFF00), sys.api_version, sys.version.startswith("3.15.")))
 show("implementation", lambda: [hasattr(sys.implementation, n) for n in ("name", "cache_tag", "version", "hexversion")])
 show("numbers", lambda: (sys.maxsize == 2**63 - 1, sys.maxunicode, sys.float_repr_style, sys.float_info))
 show("int_info", lambda: (sys.int_info._fields if hasattr(sys.int_info, "_fields") else None,
