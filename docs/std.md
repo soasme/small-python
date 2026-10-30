@@ -100,7 +100,9 @@ type with a sequence of exactly `n_sequence_fields` items returns a new
 instance, and any other length raises a `TypeError` exception
 ("*module*.*name*() takes a *n*-sequence (*k*-sequence given)"). Otherwise
 calling its type raises a `TypeError` exception ("cannot create
-'*module*.*name*' instances").
+'*module*.*name*' instances"). A structseq whose type's `__module__` is
+`'builtins'` (`asyncgen_hooks`, `UnraisableHookArgs`) omits *module*`.` in
+these texts.
 
 ## 5 The `sys` module
 
@@ -339,8 +341,9 @@ reports uncaught exceptions through it (`spy_std_report`).
 #### 5.6.3 `unraisablehook(unraisable, /)`
 
 Implements HostReportUnraisable (PLS-315 B.4.3). *unraisable* is an
-`UnraisableHookArgs` structseq with the fields `exc_type`, `exc_value`,
-`exc_traceback`, `err_msg`, and `object`. The default writes to `sys.stderr`
+`UnraisableHookArgs` structseq, constructible and with `__module__`
+`'builtins'`, with the fields `exc_type`, `exc_value`, `exc_traceback`,
+`err_msg`, and `object`; `sys` does not bind its type. The default writes to `sys.stderr`
 *err_msg* (or "Exception ignored in" when it is `None`), ": ", and the repr of
 *object* when *object* is not `None`, or else *err_msg* and ":"; then a line
 terminator and the traceback display of the exception (5.6.2). For
@@ -644,9 +647,10 @@ and after the collection, it calls each item of `gc.callbacks` (6.3.2).
 
 *Host choice:* the number of generations a host's collector distinguishes;
 a collector with one generation collects everything for any valid
-*generation*.
+*generation*. Which unreachable objects the number counts.
 
-*Status:* provided; the collector has one generation.
+*Status:* provided; the collector has one generation, and the number counts
+every unreachable value freed, untracked values (6.4.3) included.
 
 ### 6.2 Automatic collection
 
@@ -785,8 +789,9 @@ collections ignore; `unfreeze()` returns them to the oldest generation;
 `get_freeze_count()` returns the number of objects in the permanent
 generation. `freeze()` and `unfreeze()` return `None`.
 
-*Status:* provided; `freeze()` marks every tracked value, and a collection
-treats marked values as reachable.
+*Status:* provided; `freeze()` marks every tracked value, a collection
+treats marked values as reachable, and `get_objects()` leaves them out, as
+CPython's does.
 
 ## Annex A (informative) Implementation status
 
@@ -811,12 +816,13 @@ threads, which a context does not have.
 
 Every value and message quoted in clauses 5 and 6 was checked against the
 pinned CPython 3.15.0 build (`make oracle`, `tests/upstream/cpython-build`),
-on 64-bit Linux, by calling the name from Python and reading the result or
-the exception. Values that depend on the build (`version`, paths,
-`builtin_module_names`, `thread_info.version`) are described rather than
-quoted.
+on 64-bit Linux or macOS, by calling the name from Python and reading the
+result or the exception. Values that depend on the build (`version`, paths,
+`builtin_module_names`, `thread_info`) are described rather than quoted.
 
 `tests/std.py`, part of `make test`, keeps the two in step: it runs
 `tests/std_probe.py`, which prints what this document states about each name
 Small Python binds, under the `spy` command and under the Python 3.15 running
-it, and fails unless the outputs are identical.
+it, and fails unless the outputs are identical. It leaves out what the host
+chooses (sizes, counts, paths, the hash algorithm, streams, source lines in
+tracebacks) and the micro version, so that any 3.15 release can serve.
