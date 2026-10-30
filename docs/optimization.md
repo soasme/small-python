@@ -64,6 +64,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A local is known by its key; one word says a tick has work](#a-local-is-known-by-its-key-one-word-says-a-tick-has-work) | -0.3% to -4.0% |
 | [Calls test for a Python function first](#calls-test-for-a-python-function-first) | -0.1% to -0.8% |
 | [A range steps in machine integers](#a-range-steps-in-machine-integers) | -8.2% (dicts) to -1.7% |
+| [The context's hot fields come first](#the-contexts-hot-fields-come-first) | -0.3% to -1.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -202,6 +203,18 @@ takes 521.
 Wall time, median of seven runs: dicts 145.3 to 133.0 ms (-8.5%),
 classes 194.0 to 179.0 ms (-7.7%), strings 188.7 to 175.8 ms (-6.9%),
 nbody 469.0 to 447.8 ms (-4.5%), sort 191.4 to 186.7 ms (-2.5%).
+
+### The context's hot fields come first
+
+`SPYContext` began with a 14 KB table of class lookups, so the fields read
+on every step (the pending error's name, the frame stack, the settings)
+sat 15 to 19 KB in. An arm64 load reaches a byte at most 4 KB from its
+base register and a 4-byte word 16 KB away, so each test of
+`c->error_type[0]`, the commonest test in the engine, took an extra
+address computation. The lookup tables and the long message buffers now
+end the structure, and the error name begins it. The instructions fall by
+0.3% to 1.5%; on the M2 the wall time does not move, since the extra
+additions were cheap there, but they are gone everywhere.
 
 ## Tried and left out
 

@@ -188,17 +188,18 @@ enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT =
 typedef struct { SPYValue *cls, *value; size_t epoch; int64_t hash; char name[24]; } ClassLookup;
 typedef struct { SPYValue *cls, *init; size_t epoch; } PlainClass;
 struct SPYContext {
+    /* The fields every step reads come first, where arm64 loads reach them
+     * with one instruction; the large tables are at the end. */
+    char error_type[64]; /* The pending error's class name; empty when none. */
     SPYValue *values, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
+    /* class_lookup results, valid while classes_changed holds the epoch they
+     * were found in. A change to a class's entries or MRO, or a class's
+     * release, advances it. Results are borrowed, with no value edges. */
+    size_t classes_changed;
     SPYValue *tuple_cache[9]; /* One released small-tuple allocation per length; no value edges. */
     SPYValue *spare; size_t spares; /* Released allocations of other values, linked by next; no value edges. */
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
-    /* class_lookup results, valid while classes_changed holds the epoch they
-     * were found in. A change to a class's entries or MRO, or a class's
-     * release, advances it. Results are borrowed, with no value edges. */
-    ClassLookup lookups[256]; /* Indexed by the top eight bits of a mixed key. */
-    size_t classes_changed;
-    PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     /* Settings a host module changes through _spy._setting; owned, NULL for None. */
@@ -281,13 +282,15 @@ struct SPYContext {
     void *loader_data;
     SPYReadLine read_line;
     void *read_data;
-    char error_type[64], error_message[256], filename[256];
+    char error_message[256], filename[256];
     const char *filename_from; /* The unit filename tick last copied into filename, or NULL. */
     /* A pending AttributeError's name and object, attached when it is materialized. */
     char error_name[256];
     SPYValue *error_object;
     char *error_display; /* spy_error_display's result, owned. */
     size_t line;
+    ClassLookup lookups[256]; /* Indexed by the top eight bits of a mixed key. */
+    PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
