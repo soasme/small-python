@@ -44,6 +44,16 @@ small steps:
 
 Each change below removes work from one of those steps.
 
+## Measuring one feature
+
+The scaled programs mix many features. To find which feature costs most
+against CPython, small programs in the same container each repeat one
+operation 100,000 times inside a function (an empty `for` loop over a
+range, a local addition, a call, an attribute read, ...), and the
+instructions of an empty loop are subtracted. The ratio to CPython per
+feature points at the worst offenders: the first such table showed an
+empty `for i in range(n)` loop at about 900 instructions an iteration.
+
 ## Changes
 
 | Change | Suite instructions |
@@ -52,6 +62,8 @@ Each change below removes work from one of those steps.
 | [A name remembers what it is in its function](#a-name-remembers-what-it-is-in-its-function) | -5.2% (nbody) to +0.4% |
 | [A call opens all its locals at once](#a-call-opens-all-its-locals-at-once) | -7.3% (classes), -6.5% (fib) |
 | [A local is known by its key; one word says a tick has work](#a-local-is-known-by-its-key-one-word-says-a-tick-has-work) | -0.3% to -4.0% |
+| [Calls test for a Python function first](#calls-test-for-a-python-function-first) | -0.1% to -0.8% |
+| [A range steps in machine integers](#a-range-steps-in-machine-integers) | -8.2% (dicts) to -1.7% |
 
 ### Releasing a number or string frees it at once
 
@@ -155,3 +167,47 @@ step limit keeps current (CPython's eval breaker plays the same part).
 | loop | 686.1 M | 678.0 M | -1.2% |
 | classes | 367.8 M | 364.4 M | -0.9% |
 | fib | 113.0 M | 112.1 M | -0.7% |
+
+### Calls test for a Python function first
+
+`call_keywords` tested a callee against eight other kinds (native
+functions, bound methods, static methods, classes, instances, ...)
+before reaching a Python function, the commonest callee. The function
+case now comes first, and its body is its own function,
+`call_function`. A small int's release no longer calls `free` with a
+null pointer.
+
+### A range steps in machine integers
+
+A `range` iterator compared its counter with the stop and added the step
+with the arbitrary-precision routines, which build a temporary digit
+array on the heap for every step, then free it and look for a small
+int. When the counter, the stop and the step are all machine integers
+and the next counter fits in one, the iterator now compares and adds
+them directly. Ranges past 64 bits take the old path, and so does the
+last step before an overflow.
+
+An empty `for i in range(n)` iteration took 902 instructions and now
+takes 521.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| dicts | 202.3 M | 185.8 M | -8.2% |
+| strings | 301.6 M | 287.6 M | -4.6% |
+| nbody | 845.2 M | 813.1 M | -3.8% |
+| classes | 361.3 M | 349.8 M | -3.2% |
+| sort | 144.4 M | 140.6 M | -2.6% |
+| bigint | 30.8 M | 30.3 M | -1.7% |
+
+Wall time, median of seven runs: dicts 145.3 to 133.0 ms (-8.5%),
+classes 194.0 to 179.0 ms (-7.7%), strings 188.7 to 175.8 ms (-6.9%),
+nbody 469.0 to 447.8 ms (-4.5%), sort 191.4 to 186.7 ms (-2.5%).
+
+## Tried and left out
+
+- **Keeping every freed value for reuse.** Released values beyond 64 go
+  back to `malloc`. With no limit, `dicts` took 21% longer and `sort`
+  9% longer on the M2: a long last-in-first-out list hands back memory
+  that has left the cache, and the system allocator is fast.
+- **`-O3`.** Within 1% of `-O2` on every program but `generators` (-5.6%),
+  so the build keeps `-O2`.

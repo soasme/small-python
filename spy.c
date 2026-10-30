@@ -744,7 +744,7 @@ static void free_value(SPYValue *v) {
     if (v->next) v->next->prev = v->prev;
     c->live--;
     switch (v->type) {
-    case SPY_INT: free(v->as.integer_data.big); break;
+    case SPY_INT: if (v->as.integer_data.big) free(v->as.integer_data.big); break;
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: free(v->as.string.data); break;
     case SPY_MEMORYVIEW: free(v->as.memory.layout); break;
     case SPY_CELL:
@@ -7536,10 +7536,23 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         break;
     }
     case I_RANGE: {
-        int order = integer_compare(v->as.iterator.counter, source->as.range.stop);
-        if (integer_sign(source->as.range.step) > 0 ? order >= 0 : order <= 0) break;
-        result = spy_retain(v->as.iterator.counter);
-        SPYValue *next = integer_add(c, v->as.iterator.counter, source->as.range.step, 0);
+        SPYValue *counter = v->as.iterator.counter, *stop = source->as.range.stop, *step = source->as.range.step, *next;
+        if (!counter->as.integer_data.big && !stop->as.integer_data.big && !step->as.integer_data.big) {
+            /* Machine integers step without arbitrary-precision arithmetic
+             * while the next counter fits. */
+            int64_t at = counter->as.integer_data.small, end = stop->as.integer_data.small, by = step->as.integer_data.small;
+            if (by > 0 ? at >= end : at <= end) break;
+            if (by > 0 ? at <= INT64_MAX - by : at >= INT64_MIN - by) {
+                if (!(next = spy_int(c, at + by))) break;
+                v->as.iterator.counter = next;
+                result = counter;
+                break;
+            }
+        }
+        int order = integer_compare(counter, stop);
+        if (integer_sign(step) > 0 ? order >= 0 : order <= 0) break;
+        result = spy_retain(counter);
+        next = integer_add(c, counter, step, 0);
         if (next) { spy_release(v->as.iterator.counter); v->as.iterator.counter = next; }
         else { spy_release(result); result = NULL; }
         break;
@@ -14258,6 +14271,32 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
 }
 static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static void not_callable(SPYContext *, SPYValue *);
+/* A Python function's body, run in a new environment of its scope. */
+static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    Node *def = fn->as.function.def;
+    SPYValue *env = value_new(c, V_ENV), *result = NULL;
+    if (!env) return NULL;
+    env->as.map.parent = spy_retain(fn->as.function.env);
+    env->as.map.scope = def->scope;
+    env->as.map.unit = spy_retain(fn->as.function.unit);
+    /* A replace()d code's parameters bind under its names and then take
+     * the body's: the body's locals are declared after them. */
+    int failed = fn->as.function.signature ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
+        declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
+    Frame frame = {env, fn->as.function.unit, 0};
+    if (!failed && def->code) result = new_generator(c, &frame, fn);
+    else if (!failed && !enter_frame(c, env, fn)) {
+        SPYValue *caller = c->caller_env;
+        c->caller_env = c->eval_env;
+        Result r = execute(c, &frame, def->b);
+        c->caller_env = caller;
+        leave_frame(c, r.flow == FLOW_RETURN ? r.value : r.flow == FLOW_NORMAL ? c->none : NULL);
+        if (r.flow == FLOW_RETURN) result = r.value;
+        else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
+    }
+    spy_release(env);
+    return result;
+}
 static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (!same_context(c, fn)) return NULL;
     for (size_t i = 0; i < argc; i++) if (!same_context(c, argv[i])) return NULL;
@@ -14265,7 +14304,10 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         if (!builtin_value(c, map_items(keywords)[i].key, SPY_STRING)) return spy_error(c, "TypeError", "keywords must be strings");
     if (deeper(c, " while calling a Python object")) return NULL;
     SPYValue *result = NULL;
-    if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
+    if (fn->type == SPY_FUNCTION && fn->as.function.def && fn->as.function.def->kind != N_CLASS &&
+        fn->as.function.def->kind != N_COMPREHENSION) {
+        result = call_function(c, fn, argc, argv, keywords);
+    } else if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
         result = fn->as.native.kwcall(c, argc, argv, keywords, fn->as.native.data);
     } else if (fn->type == SPY_NATIVE || fn->type == SPY_BOUND_METHOD) {
         if (fn->type == SPY_NATIVE && fn->as.native.call == builtin)
@@ -14326,31 +14368,6 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     } else if (fn->type == SPY_FUNCTION && (!fn->as.function.def || fn->as.function.def->kind == N_CLASS ||
                                             fn->as.function.def->kind == N_COMPREHENSION)) {
         result = call_module_code(c, fn, argc, argv, keywords);
-    } else if (fn->type == SPY_FUNCTION) {
-        Node *def = fn->as.function.def;
-        SPYValue *env = value_new(c, V_ENV);
-        if (env) {
-            env->as.map.parent = spy_retain(fn->as.function.env);
-            env->as.map.scope = def->scope;
-            env->as.map.unit = spy_retain(fn->as.function.unit);
-            /* A replace()d code's parameters bind under its names and then
-             * take the body's: the body's locals are declared after them. */
-            int failed = fn->as.function.signature ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
-                declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
-            if (!failed) {
-                Frame frame = { env, fn->as.function.unit , 0};
-                if (def->code) result = new_generator(c, &frame, fn);
-                else if (!enter_frame(c, env, fn)) {
-                    SPYValue *caller = c->caller_env;
-                    c->caller_env = c->eval_env;
-                    Result r = execute(c, &frame, def->b);
-                    c->caller_env = caller; leave_frame(c, r.flow == FLOW_RETURN ? r.value : r.flow == FLOW_NORMAL ? c->none : NULL);
-                    if (r.flow == FLOW_RETURN) result = r.value;
-                    else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
-                }
-            }
-            spy_release(env);
-        }
     } else not_callable(c, fn);
     c->depth--;
     if (c->error_type[0]) { spy_release(result); result = NULL; }
