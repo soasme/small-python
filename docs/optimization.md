@@ -74,6 +74,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A smaller value header](#a-smaller-value-header) | dicts memory -11% |
 | [A tick compares units; a push grows only when full](#a-tick-compares-units-a-push-grows-only-when-full) | -0.2% to -3.2% |
 | [Class and small-map lookups skip hashing](#class-and-small-map-lookups-skip-hashing) | -2.6% (classes) |
+| [A builtin method is called without a bound method](#a-builtin-method-is-called-without-a-bound-method) | -3.0% (strings) |
 
 ### Releasing a number or string frees it at once
 
@@ -392,12 +393,38 @@ name.
 | classes | 290.9 M | 283.3 M | -2.6% |
 | bigint | 28.8 M | 28.7 M | -0.5% |
 
+### A builtin method is called without a bound method
+
+`l.append(x)` evaluated `l.append` to a new bound method, called it, and
+freed it: an allocation, a release through the collector's edge walk, and
+the bound method's dispatch, for every call. A call node already
+remembered, per type, that its attribute is a native method of a builtin
+value. The bound method's call is now a function of the receiver, the
+method and its name (`call_method`), which the call node invokes directly,
+as CPython's method-call instructions skip the bound method. Calling a
+bound method object goes through the same function, so both behave alike,
+keyword arguments and error messages included.
+
+An `l.append(i)` loop fell from 1,334 to 928 instructions an iteration.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| strings | 264.0 M | 256.2 M | -3.0% |
+| sort | 128.4 M | 126.3 M | -1.7% |
+| dicts | 166.8 M | 164.6 M | -1.3% |
+
+Wall time: strings -4.0%, the others within noise.
+
 ## Tried and left out
 
 - **Keeping every freed value for reuse.** Released values beyond 64 go
   back to `malloc`. With no limit, `dicts` took 21% longer and `sort`
   9% longer on the M2: a long last-in-first-out list hands back memory
   that has left the cache, and the system allocator is fast.
+- **A separate function for the slow part of `eval`.** `eval` has
+  `eval_inner` inlined, so its fast paths (a literal, a local name) pay
+  for saving the registers the slow part uses. Moving everything past the
+  fast paths into a separate function added 1% to 2.5% instead.
 - **A third allocation size for numbers.** Ints and floats fit 64 bytes
   with the smaller header. Choosing among three sizes made the allocator
   too large to inline into `spy_int` and `spy_float`, and forcing it

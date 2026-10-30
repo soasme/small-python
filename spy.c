@@ -11506,10 +11506,8 @@ static SPYValue *method_arity(SPYContext *c, const char *owner, const char *name
     if (argc < min) return errorf(c, "TypeError", "%s expected at least %zu argument%s, got %zu", name, min, min == 1 ? "" : "s", argc);
     return errorf(c, "TypeError", "%s expected at most %zu argument%s, got %zu", name, max, max == 1 ? "" : "s", argc);
 }
-static SPYValue *method_arity_error(SPYContext *c, SPYValue *bound, size_t argc) {
-    SPYValue *self = bound->as.bound.self;
-    int method = bound->as.bound.method;
-    const char *name = bound->as.bound.name ? bound->as.bound.name->as.string.data : "method", *owner = type_name(self);
+static SPYValue *method_arity_error(SPYContext *c, SPYValue *self, int method, SPYValue *method_name, size_t argc) {
+    const char *name = method_name ? method_name->as.string.data : "method", *owner = type_name(self);
     size_t min = 0, max = 0;
     switch (method) {
     case M_NEXT: case M_ITER: case M_AWAIT: case M_AITER: case M_ANEXT:
@@ -11641,9 +11639,10 @@ done:
     spy_release(base); spy_release(replaced);
     return copy;
 }
-static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValue *const *argv) {
-    SPYValue *self = bound->as.bound.self;
-    switch (bound->as.bound.method) {
+/* Method number method of the builtin value self, with positional
+ * arguments; name names it in an arity error. */
+static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv) {
+    switch (method) {
     case M_FRAME_CLEAR:
         if (argc) break;
         return frame_clear(c, self);
@@ -11658,13 +11657,12 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     }
     case M_STARTSWITH: case M_ENDSWITH: case M_FIND: case M_RFIND:
     case M_STRING_INDEX: case M_RINDEX: case M_STRING_COUNT:
-        return string_search(c, self, bound->as.bound.method, argc, argv);
+        return string_search(c, self, method, argc, argv);
     case M_SUPER_GET:
         if (argc < 1 || argc > 2) break;
         return self->as.super.self || argv[0]->type == SPY_NONE ? spy_retain(self) : super_new(c, self->as.super.type, argv[0]);
     case M_COUNT: case M_INDEX: case M_REMOVE: {
         if (self->type != SPY_RANGE) {
-            int method = bound->as.bound.method;
             if (!argc || argc > (method == M_INDEX ? 3u : 1u)) break;
             int64_t start = 0, stop = INT64_MAX;
             for (size_t i = 1; i < argc; i++)
@@ -11703,7 +11701,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (is_int(argv[0])) index = range_find(c, self, argv[0]);
         else {
             SPYValue *iterator = get_iterator(c, self), *item, *position = spy_int(c, 0);
-            SPYValue *count = bound->as.bound.method == M_COUNT ? spy_int(c, 0) : NULL;
+            SPYValue *count = method == M_COUNT ? spy_int(c, 0) : NULL;
             SPYValue one = {.type = SPY_INT, .as.integer_data.small = 1};
             while (iterator && position && !c->error_type[0] && (item = iterator_next(c, iterator))) {
                 int matches = equal(item, argv[0], 0);
@@ -11725,7 +11723,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
             }
         }
         if (c->error_type[0]) { spy_release(index); return NULL; }
-        if (bound->as.bound.method == M_COUNT) {
+        if (method == M_COUNT) {
             SPYValue *count = spy_int(c, index != NULL); spy_release(index); return count;
         }
         if (index) return index;
@@ -11745,7 +11743,6 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (argc) break;
         return spy_retain(self);
     case M_ANEXT: case M_ASEND: case M_ATHROW: case M_ACLOSE: {
-        int method = bound->as.bound.method;
         if ((method == M_ASEND && argc != 1) || (method == M_ATHROW && (argc < 1 || argc > 3)) ||
             ((method == M_ANEXT || method == M_ACLOSE) && argc)) break;
         /* The first operation keeps the finalizer hook and calls firstiter (27.5.4). */
@@ -11778,7 +11775,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (argc) break;
         IntView view; integer_view(self, &view);
         size_t count = 0;
-        if (bound->as.bound.method == M_BIT_LENGTH) count = integer_bits(&view);
+        if (method == M_BIT_LENGTH) count = integer_bits(&view);
         else for (size_t i = 0; i < view.len; i++)
             for (uint32_t digit = view.digits[i]; digit; digit &= digit - 1) count++;
         return spy_int(c, (int64_t)count);
@@ -11802,9 +11799,9 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         return tuple;
     }
     case M_SEND: case M_THROW: case M_CLOSE: case M_NEXT: case M_ITER:
-        if (awaitable_iterator(self)) return awaitable_method(c, self, bound->as.bound.method, argc, argv);
-        if (self->type == SPY_COROUTINE_ITERATOR && bound->as.bound.method == M_ITER && !argc) return spy_retain(self);
-        return generator_method(c, self->type == SPY_COROUTINE_ITERATOR ? self->as.iterator.source : self, bound->as.bound.method, argc, argv);
+        if (awaitable_iterator(self)) return awaitable_method(c, self, method, argc, argv);
+        if (self->type == SPY_COROUTINE_ITERATOR && method == M_ITER && !argc) return spy_retain(self);
+        return generator_method(c, self->type == SPY_COROUTINE_ITERATOR ? self->as.iterator.source : self, method, argc, argv);
     case M_JOIN: {
         if (argc != 1) break;
         SPYValue *iterator = get_iterator(c, argv[0]);
@@ -11828,11 +11825,11 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     case M_FORMAT: return string_format(c, self, argc, argv, NULL, 1);
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
         if (argc) break;
-        if (bound->as.bound.method == M_ISIDENTIFIER && !self->as.string.len) return spy_bool(c, 0);
+        if (method == M_ISIDENTIFIER && !self->as.string.len) return spy_bool(c, 0);
         for (size_t i = 0; i < self->as.string.len;) {
             size_t width;
             unsigned code = utf8_decode(self->as.string.data + i, self->as.string.len - i, &width);
-            if (bound->as.bound.method == M_ISPRINTABLE ? !unicode_printable(code) : !identifier_character(code, !i))
+            if (method == M_ISPRINTABLE ? !unicode_printable(code) : !identifier_character(code, !i))
                 return spy_bool(c, 0);
             i += width;
         }
@@ -11956,7 +11953,7 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     case M_GET: case M_DICT_POP: case M_SETDEFAULT: {
         if (argc < 1 || argc > 2) break;
         /* dict.pop on an empty dict skips hashing the key. */
-        if (bound->as.bound.method == M_DICT_POP && !self->as.map.len)
+        if (method == M_DICT_POP && !self->as.map.len)
             return argc == 2 ? spy_retain(argv[1]) : missing_key(c, argv[0]);
         int64_t hash;
         if (map_hash(c, self, argv[0], &hash)) return NULL;
@@ -11964,15 +11961,15 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
         if (c->error_type[0]) return NULL;
         if (i >= 0) {
             SPYValue *value = spy_retain(self->as.map.items[i].value);
-            if (bound->as.bound.method == M_DICT_POP) {
+            if (method == M_DICT_POP) {
                 Entry old = map_remove(self, (size_t)i);
                 spy_release(old.key); spy_release(old.value);
             }
             return value;
         }
-        if (bound->as.bound.method == M_DICT_POP && argc == 1) return missing_key(c, argv[0]);
+        if (method == M_DICT_POP && argc == 1) return missing_key(c, argv[0]);
         SPYValue *value = argc == 2 ? argv[1] : c->none;
-        if (bound->as.bound.method == M_SETDEFAULT && map_append(c, self, argv[0], value, hash)) return NULL;
+        if (method == M_SETDEFAULT && map_append(c, self, argv[0], value, hash)) return NULL;
         return spy_retain(value);
     }
     case M_ISDISJOINT: {
@@ -11989,12 +11986,39 @@ static SPYValue *bound_call(SPYContext *c, SPYValue *bound, size_t argc, SPYValu
     }
     default: {
         if (argc) break;
-        SPYValue *view = value_new(c, bound->as.bound.method == M_KEYS ? SPY_DICT_KEYS : bound->as.bound.method == M_VALUES ? SPY_DICT_VALUES : SPY_DICT_ITEMS);
+        SPYValue *view = value_new(c, method == M_KEYS ? SPY_DICT_KEYS : method == M_VALUES ? SPY_DICT_VALUES : SPY_DICT_ITEMS);
         if (view) view->as.bound.self = spy_retain(self);
         return view;
     }
     }
-    return method_arity_error(c, bound, argc);
+    return method_arity_error(c, self, method, name, argc);
+}
+/* The methods that take keyword arguments, with argc positional ones. */
+static int keyword_method(int method, size_t argc) {
+    return method == M_FORMAT || method == M_SORT || (method == M_CODE_REPLACE && !argc) || method == M_UPDATE || method == M_SPLITLINES;
+}
+/* Method number method of self as a call of its bound method: keywords
+ * reach only a keyword_method. */
+static SPYValue *call_method(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv,
+                             SPYValue *keywords) {
+    switch (method) {
+    case M_FORMAT: return string_format(c, self, argc, argv, keywords, 1);
+    case M_SORT: return sort_method(c, self, argc, argv, keywords);
+    case M_CODE_REPLACE: if (!argc) return code_replace(c, self, keywords); break;
+    case M_UPDATE: {
+        SPYValue *result = method_call(c, self, method, name, argc, argv);
+        if (result && keywords) dict_update(c, self, keywords);
+        return result;
+    }
+    case M_SPLITLINES:
+        if (keywords && keywords->as.map.len) {
+            SPYValue *keepends = name_local(keywords, "keepends");
+            if (argc || !keepends || keywords->as.map.len != 1) return spy_error(c, "TypeError", "invalid splitlines arguments");
+            return method_call(c, self, method, name, 1, &keepends);
+        }
+        break;
+    }
+    return method_call(c, self, method, name, argc, argv);
 }
 /* A NULL value requests deletion. */
 static int descriptor_set(SPYContext *c, SPYValue *descriptor, SPYValue *object, SPYValue *value) {
@@ -13526,10 +13550,13 @@ static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
 }
 /* The function the attribute node n names for a call. With *self set, it is
  * a Python function of a plain instance's class, called with *self first as
- * the bound method would; otherwise *self is NULL. */
-static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self) {
+ * the bound method would; otherwise *self is NULL. With *method set, n
+ * names that native method of a builtin value, which is returned: the call
+ * goes to call_method without the bound method the attribute would make. */
+static SPYValue *call_native_method(SPYContext *, SPYValue *, int, SPYValue *, size_t, SPYValue *const *);
+static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self, int *method) {
     SPYValue *object = eval(c, f, n->a);
-    *self = NULL;
+    *self = NULL; *method = -1;
     if (!object) return NULL;
     relocate(c, n);
     if (plain_instance(object) && (node_access(c, object, n) & ATTR_READ) == ATTR_METHOD && !env_find(object, node_name(n->b))) {
@@ -13542,10 +13569,8 @@ static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self
     SPYValue *type = builtin_receiver(object) ? c->types[object->type] : NULL;
     if (type && n->attr_class == type && n->attr_epoch == c->classes_changed) {
         if (n->attr_kind >= 0) { *self = object; return spy_retain(n->attr_method); }
-        SPYValue *bound = bound_method(c, object, -1 - n->attr_kind);
-        if (bound) bound->as.bound.name = spy_retain(n->b->global_key);
-        spy_release(object);
-        return bound;
+        *method = -1 - n->attr_kind;
+        return object;
     }
     SPYValue *callee = node_attribute(c, object, n);
     int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
@@ -13705,15 +13730,19 @@ container_fail:
             if (arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) argc = 9;
         SPYValue *argv[9];
         size_t done = 0;
+        int method = -1;
         if (argc <= 8 && n->a->kind == N_ATTR) {
-            a = method_callee(c, f, n->a, argv);
+            a = method_callee(c, f, n->a, argv, &method);
             done = argv[0] != NULL;
         } else a = eval(c, f, n->a);
         if (!a) break;
         if (argc <= 8) {
             argc += done;
             for (Node *arg = n->args; arg && (argv[done] = eval(c, f, arg)); arg = arg->next) done++;
-            if (done == argc) { relocate(c, n); result = call_keywords(c, a, argc, argv, NULL); }
+            if (done == argc) {
+                relocate(c, n);
+                result = method < 0 ? call_keywords(c, a, argc, argv, NULL) : call_native_method(c, a, method, n->a->b->global_key, argc, argv);
+            }
             while (done) spy_release(argv[--done]);
             break;
         }
@@ -14337,6 +14366,13 @@ static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     spy_release(env);
     return result;
 }
+/* A call's result as its caller sees it, leaving the call's depth. */
+static SPYValue *call_result(SPYContext *c, SPYValue *result) {
+    c->depth--;
+    if (c->error_type[0]) { spy_release(result); result = NULL; }
+    if (!result && !c->error_type[0]) spy_error(c, "RuntimeError", "native function returned NULL without an error");
+    return result;
+}
 static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     if (!same_context(c, fn)) return NULL;
     for (size_t i = 0; i < argc; i++) if (!same_context(c, argv[i])) return NULL;
@@ -14349,25 +14385,12 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         result = call_function(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
         result = fn->as.native.kwcall(c, argc, argv, keywords, fn->as.native.data);
+    } else if (fn->type == SPY_BOUND_METHOD && (!keywords || !keywords->as.map.len || keyword_method(fn->as.bound.method, argc))) {
+        result = call_method(c, fn->as.bound.self, fn->as.bound.method, fn->as.bound.name, argc, argv, keywords);
     } else if (fn->type == SPY_NATIVE || fn->type == SPY_BOUND_METHOD) {
         if (fn->type == SPY_NATIVE && fn->as.native.call == builtin)
             result = builtin_keywords(c, argc, argv, (int)(intptr_t)fn->as.native.data, keywords,
                                       fn->as.native.name ? fn->as.native.name->as.string.data : "builtin");
-        else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_FORMAT)
-            result = string_format(c, fn->as.bound.self, argc, argv, keywords, 1);
-        else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_SORT)
-            result = sort_method(c, fn->as.bound.self, argc, argv, keywords);
-        else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_CODE_REPLACE && !argc)
-            result = code_replace(c, fn->as.bound.self, keywords);
-        else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_UPDATE) {
-            result = bound_call(c, fn, argc, argv);
-            if (result && keywords) dict_update(c, fn->as.bound.self, keywords);
-        }
-        else if (fn->type == SPY_BOUND_METHOD && fn->as.bound.method == M_SPLITLINES && keywords && keywords->as.map.len) {
-            SPYValue *keepends = name_local(keywords, "keepends");
-            if (argc || !keepends || keywords->as.map.len != 1) spy_error(c, "TypeError", "invalid splitlines arguments");
-            else result = bound_call(c, fn, 1, &keepends);
-        }
         else if (keywords && keywords->as.map.len) {
             /* CPython names a method by its qualified name, list.append. */
             SPYValue *name = attribute(c, fn, "__qualname__");
@@ -14378,7 +14401,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
             errorf(c, "TypeError", "%s() takes no keyword arguments", name ? name->as.string.data : "builtin");
             spy_release(name);
         }
-        else result = fn->type == SPY_NATIVE ? fn->as.native.call(c, argc, argv, fn->as.native.data) : bound_call(c, fn, argc, argv);
+        else result = fn->as.native.call(c, argc, argv, fn->as.native.data);
     } else if (fn->type == SPY_STATICMETHOD) {
         result = call_keywords(c, fn->as.wrapper.function, argc, argv, keywords);
     } else if (builtin_classmethod(fn)) {
@@ -14409,10 +14432,13 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
                                             fn->as.function.def->kind == N_COMPREHENSION)) {
         result = call_module_code(c, fn, argc, argv, keywords);
     } else not_callable(c, fn);
-    c->depth--;
-    if (c->error_type[0]) { spy_release(result); result = NULL; }
-    if (!result && !c->error_type[0]) spy_error(c, "RuntimeError", "native function returned NULL without an error");
-    return result;
+    return call_result(c, result);
+}
+/* Method number method of the builtin value self, called as call_keywords
+ * would call its bound method. */
+static SPYValue *call_native_method(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv) {
+    if (deeper(c, " while calling a Python object")) return NULL;
+    return call_result(c, call_method(c, self, method, name, argc, argv, NULL));
 }
 static void not_callable(SPYContext *c, SPYValue *fn) {
     errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
