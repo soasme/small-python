@@ -680,8 +680,12 @@ arguments").
 
 Returns the current collection counts as a `tuple` of three `int`s.
 
+*Host choice:* what the counts count, as for the number of generations
+(6.1.1).
+
 *Status:* provided; the single generation's count is the number of values
-allocated, less those freed, since the last collection, and the others are 0.
+allocated, less those freed, since the last collection, untracked values
+(6.4.3) included, and the others are 0.
 
 ### 6.3 Statistics and callbacks
 
@@ -793,7 +797,7 @@ deviation.
 
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
-| `sys` | every name of clause 5 not listed in the other columns | `settrace`, `setprofile` (5.12) | `monitoring`, `addaudithook`, `audit`, the stack trampolines, and `remote_exec` (5.12); the names of 5.13 and 5.14 |
+| `sys` | every name of clause 5 not listed in the other columns | `unraisablehook` (5.6.3); `settrace`, `setprofile` (5.12) | `monitoring`, `addaudithook`, `audit`, the stack trampolines, and `remote_exec` (5.12); the names of 5.13 and 5.14 |
 | `gc` | every name of clause 6 | none | none |
 
 The engine keeps the state behind 5.1.3, 5.1.4, 5.6.3, 5.8, and 5.12 as
