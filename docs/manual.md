@@ -190,12 +190,13 @@ make sanitize
 
 `make test` builds everything, runs the C API tests (ownership, context
 isolation, error recovery, reference cycles, deep graph destruction, an
-execution budget), the allocation-failure test, the host file and
+execution budget), the allocation-failure and thread tests, the host file and
 standalone-executable checks, and the language specification suite.
 `tests/oom` runs a set of programs once per allocation each makes, with
 exactly that allocation failing, then once per allocation with it and every
 later one failing, as SQLite's tests do; every run must end in a result or an
-exception and free everything it allocated.
+exception and free everything it allocated. `tests/threads` runs a context
+on each of four threads at once, which share nothing.
 
 Conformance to PLS-315 rests on two kinds of evidence, and no other:
 
@@ -237,12 +238,15 @@ the pinned oracle, and resolves all 160,282 character names and aliases
 through `\N{...}`. These checks pass; they do not
 establish complete Unicode or unittest compatibility.
 
-`make sanitize` rebuilds everything with AddressSanitizer, its leak checker,
-and UndefinedBehaviorSanitizer, then runs `make test` and the Python package's
+`make sanitize` rebuilds everything with AddressSanitizer, its leak checker
+and its check for locals used after their function returns, and
+UndefinedBehaviorSanitizer, then runs `make test` and the Python package's
 tests, so the engine, `spy`, `spyc`, the programs `spyc` generates, and the
 packages' sandboxed worker all run instrumented. `make CC=clang
 SANITIZERS=memory sanitize` runs the same tests under MemorySanitizer, which
-reports reads of uninitialized memory. No report is recoverable.
+reports reads of uninitialized memory, and `make CC=clang SANITIZERS=thread
+sanitize` under ThreadSanitizer, which reports state that contexts on
+different threads share. No report is recoverable.
 `tests/sanitize.c`, linked into every instrumented program, compiles in the
 options and appends every report to one file that must stay empty, so a report
 fails the run even from a process whose status or output a test ignores.

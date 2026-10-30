@@ -75,3 +75,28 @@ repl = subprocess.run(
 assert not repl.stderr, repl.stderr
 assert ">>> 42\n" in repl.stdout and ">>> 80\n" in repl.stdout, repl.stdout
 print("Interactive globals and multiline function definition passed")
+
+# The spy command's process status, reports, input(), and usage, as python's.
+for args, stdin, status, stdout, stderr in [
+    (["-c", "raise SystemExit(3)"], "", 3, "", ""),
+    (["-c", "raise SystemExit('bye')"], "", 1, "", "bye\n"),
+    (["-c", "raise SystemExit()"], "", 0, "", ""),
+    (["-c", "1/0"], "", 1, "", "<string>:1: ZeroDivisionError: division by zero\n"),
+    (["-c", "print(input('> '), flush=True)"], "abc\n", 0, "> abc\n", ""),
+    (["--bogus"], "", 2, "", "usage:"),
+    (["-c"], "", 2, "", "usage:"),
+]:
+    result = subprocess.run([str(ROOT / "spy"), *args], input=stdin, capture_output=True, text=True, timeout=60)
+    assert (result.returncode, result.stdout) == (status, stdout) and result.stderr.startswith(stderr), (args, result)
+print("spy exit statuses, error reports, input, and usage passed")
+
+# spyc --analyze lists the output and each input with its size, largest first.
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    source, helper = Path(temp) / "main.py", Path(temp) / "helper.py"
+    source.write_text("import helper\n", encoding="utf-8")
+    helper.write_text("x = 1\n" * 3, encoding="utf-8")
+    result = subprocess.run([str(ROOT / "spyc"), "--analyze", "-o", str(Path(temp) / "main.c"), str(source)],
+                            capture_output=True, text=True, check=True)
+    assert [line.rsplit(None, 1) for line in result.stderr.splitlines()[1:]] == [
+        [" " * 4 + str(helper), "18"], [" " * 4 + str(source), "14"]], result.stderr
+print("spyc --analyze passed")

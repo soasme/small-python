@@ -11,7 +11,7 @@ libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
                 line "#--" (main.py, a.py, pkg/__init__.py, pkg/b.py),
                 written to a fresh directory under /tmp; the first byte
                 picks spyc's options.
-  fuzz_oom      runs the input as fuzz_eval does on the bare core, with one
+  fuzz_oom      runs the input as fuzz_eval does, with one
                 allocation failing: the first two bytes pick which one after
                 context creation, and whether every later one fails too, as
                 tests/oom does for each in turn. The run must free

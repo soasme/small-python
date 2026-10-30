@@ -741,6 +741,51 @@ int main(void) {
         spy_context_free(files);
     }
 
+    /* Reached by nothing else in make test: weak references and their
+     * primitives, gc.get_referents, frame-locals merging, sys's digit limit
+     * and breakpoint hook, float.__getformat__, wide and half-float memoryview
+     * items, dict-view equality, latin-9, and lazy import. */
+    execute(c,
+        "import gc, sys, weakref\n"
+        "class T: pass\n"
+        "t = T()\n"
+        "r = weakref.ref(t)\n"
+        "assert hash(r) == hash(t)\n"
+        "assert weakref.getweakrefcount(t) == 1 and weakref.getweakrefs(t) == [r]\n"
+        "holder = [t, 'x']\n"
+        "assert t in gc.get_referents(holder) and 'x' in gc.get_referents(holder)\n"
+        "def merged():\n"
+        "    a = 1\n"
+        "    locals_ = sys._getframe().f_locals\n"
+        "    both = locals_ | {'b': 2}\n"
+        "    locals_ |= {'c': 3}\n"
+        "    return both['a'] + both['b'] + locals_['c']\n"
+        "assert merged() == 6\n"
+        "assert sys._getframe().f_locals.__or__(1) is NotImplemented\n"
+        "sys.set_int_max_str_digits(maxdigits=5000)\n"
+        "assert sys.get_int_max_str_digits() == 5000\n"
+        "sys.set_int_max_str_digits(4300)\n"
+        "sys.breakpointhook = lambda *a, **k: ('hooked', a, k)\n"
+        "assert breakpoint(1, x=2) == ('hooked', (1,), {'x': 2})\n"
+        "del sys.breakpointhook\n"
+        "try:\n"
+        "    breakpoint()\n"
+        "except RuntimeError as e:\n"
+        "    assert str(e) == 'lost sys.breakpointhook', e\n"
+        "assert float.__getformat__('double').startswith('IEEE')\n"
+        "m = memoryview(bytearray(b'\\x01' + bytes(23)))\n"
+        "assert m.cast('Q')[0] == 1 and m.cast('L')[0] == 1 and m.cast('N')[0] == 1\n"
+        "h = memoryview(bytearray(4)).cast('e')\n"
+        "h[0] = 1.5\n"
+        "h[1] = -65504.0\n"
+        "assert h.tolist() == [1.5, -65504.0]\n"
+        "assert {1: 2}.keys() == {1} and {1: 2}.items() == {(1, 2)}\n"
+        "assert 'a\\u20ac'.encode('iso8859-15') == b'a\\xa4' and b'\\xa4'.decode('latin9') == '\\u20ac'\n"
+        "assert [{1: 2}.keys()] == [{1}]\n"
+        "assert type(__lazy_import__('json')).__name__ == 'lazy_import'\n"
+        "lazy import gc as lazy_gc\n"
+        "assert lazy_gc.collect() >= 0\n");
+
     SPYContext *other = spy_context_new();
     assert(other);
     SPYValue *foreign = spy_int(other, 3);

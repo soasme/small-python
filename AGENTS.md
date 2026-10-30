@@ -236,8 +236,8 @@
   touches C, not in CI. Fuzz with `make fuzz FUZZ_SECONDS=600` (eval, compile,
   spyc, and allocation-failure targets), then `make fuzz-replay` to rerun the
   kept inputs under MemorySanitizer; `make CC=clang SANITIZERS=memory
-  sanitize` runs the tests under it, and `make coverage` shows what nothing
-  executes. They need clang with compiler-rt (Ubuntu: `libclang-rt-18-dev`).
+  sanitize` and `SANITIZERS=thread` run the tests under MemorySanitizer and
+  ThreadSanitizer, and `make coverage` shows what nothing executes. They need clang with compiler-rt (Ubuntu: `libclang-rt-18-dev`).
   A finding lands in `.obj/fuzz/`; reproduce it with `./fuzz/<target> FILE`,
   fix the engine, and keep the input as a test.
 

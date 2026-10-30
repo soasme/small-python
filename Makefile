@@ -77,7 +77,7 @@ $(OBJDIR)/%.o: %.c spy.h
 $(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
 $(OBJDIR)/spy.o $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy-unicode.h spy-intrinsics.h
 $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy.c
-$(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o: spy-std.h
+$(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o $(OBJDIR)/tests/threads.o: spy-std.h
 $(OBJDIR)/spy-std.o: spy-std-modules.h
 
 tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -86,6 +86,10 @@ tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 # The conformance driver: the bare core, without the standard layer.
 tests/run-spec: $(OBJDIR)/tests/run-spec.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# Contexts on several threads at once, sharing nothing.
+tests/threads: $(OBJDIR)/tests/threads.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
 # Allocation failure: the engine compiled in, with a failing allocator.
 tests/oom: $(OBJDIR)/tests/oom.o
@@ -191,9 +195,10 @@ check-unicode:
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
 
-test: all tests/api tests/oom tests/run-spec run-cython check-intrinsics
+test: all tests/api tests/oom tests/threads tests/run-spec run-cython check-intrinsics
 	./tests/api
 	./tests/oom
+	./tests/threads
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
@@ -323,5 +328,5 @@ coverage:
 	@echo "Annotated sources: $(COVERAGE_DIR)/html/index.html"
 
 clean:
-	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
+	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
 	rm -rf $(OBJDIR)
