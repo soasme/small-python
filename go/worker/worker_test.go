@@ -18,12 +18,16 @@ import (
 	"github.com/soasme/small-python/go/worker"
 )
 
-// The worker the repository's Makefile builds (make spy-worker).
-var executable, _ = filepath.Abs("../../spy-worker")
+// The tests and examples run the worker the repository's Makefile builds
+// (make spy-worker), found on $PATH as an installed one would be.
+func TestMain(m *testing.M) {
+	root, _ := filepath.Abs("../..")
+	os.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	os.Exit(m.Run())
+}
 
 func start(t *testing.T, opts worker.Options) *worker.Runtime {
 	t.Helper()
-	opts.Worker = executable
 	rt, err := worker.New(opts)
 	if err != nil {
 		t.Fatal(err)

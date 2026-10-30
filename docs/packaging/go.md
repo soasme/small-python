@@ -63,7 +63,9 @@ n, err := spy.As[int](rt.Eval("add(40, 2)")) // 42
 ### 3.1 Runtime
 
 `Runtime` owns one `SPYContext`. `New` registers the standard layer
-(`spy_std_init`); `NewBare` has only the core and its `builtins`.
+(`spy_std_init`); `NewBare` has only the core and its `builtins`. Both send
+output to `os.Stdout`, as `worker` and the Python package do; the engine
+itself has no default and raises `OSError` from `print` without one.
 
 | Method | C API |
 |---|---|

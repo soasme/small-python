@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime/cgo"
 	"strings"
 	"sync"
@@ -101,6 +102,7 @@ func NewBare() (*Runtime, error) {
 	rt := &Runtime{ctx: ctx, modules: map[string]func(*Runtime, *Value) error{}}
 	rt.self = cgo.NewHandle(rt)
 	C.spy_go_bind(ctx, C.uintptr_t(rt.self))
+	rt.SetOutput(os.Stdout)
 	return rt, nil
 }
 
@@ -216,8 +218,8 @@ func (rt *Runtime) ExecModule(module *Value, source, filename string) error {
 	return rt.check(C.spy_exec_module(rt.ctx, m, src, file))
 }
 
-// SetOutput sends everything engine code prints to w. With a nil w, output
-// goes to the process's standard output.
+// SetOutput sends everything engine code prints to w, os.Stdout by default.
+// With a nil w, printing raises OSError.
 func (rt *Runtime) SetOutput(w io.Writer) {
 	if rt.enter() != nil {
 		return
