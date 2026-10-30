@@ -100,6 +100,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Each call depth keeps an environment](#each-call-depth-keeps-an-environment) | -4.7% (fib), -0.6% (sort) |
 | [A jump in a generator ticks only when there is work](#a-jump-in-a-generator-ticks-only-when-there-is-work) | -3.7% (generators); inline push -2.5% |
 | [A float result takes a dying operand's place](#a-float-result-takes-a-dying-operands-place) | -10.1% (nbody), others +0.1% to +0.3% |
+| [An operator reads list items in place](#an-operator-reads-list-items-in-place) | -6.4% (nbody), others 0% to +0.3% |
 
 ### Releasing a number or string frees it at once
 
@@ -593,6 +594,18 @@ operands and keep allocating. Instructions: nbody -10.1%, the others
 With the local read inline, GCC split `operand`, the fast path's
 reading of a literal or name, into an out-of-line part; it is now always
 inline: -0.1% to -1.1%.
+
+### An operator reads list items in place
+
+An operator whose operands are literals or names takes them borrowed,
+without evaluating them through `eval`. In `b[0] - c[0]` the operands are
+indexes, so the subtraction went the general way: two nested `eval`s,
+each retaining an item and releasing it. Finding an item of a list or
+tuple at an int runs no code, so it is an operand on the fast path too:
+an index whose own operands are literals or names, read in
+`item_operand`, out of line so that the common operands stay as cheap
+as before (inline, it cost the other programs up to 0.6%). Instructions:
+nbody -6.4%, the others 0% to +0.3%.
 
 ## Tried and left out
 

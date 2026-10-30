@@ -7211,13 +7211,15 @@ static void invalid_expression_error(Parser *p) {
 static int at_hand(Node *n) {
     return n->kind == N_NAME || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
 }
-/* The right operand of n when n is arithmetic, a single comparison or an
- * index whose operands are literals or names, else NULL. The compiler marks
- * such nodes F_OPERATOR. */
+static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)); }
+/* The right operand of n when n is an index whose operands are literals or
+ * names, or arithmetic or a single comparison whose operands are those or
+ * an index of those, else NULL. The compiler marks such nodes F_OPERATOR. */
 static Node *operator_right(Node *n) {
-    Node *right = n->kind == N_INDEX ? n->b : n->kind == N_COMPARE && !n->args->next ? n->args->a :
+    if (n->kind == N_INDEX) return at_hand(n->a) && at_hand(n->b) ? n->b : NULL;
+    Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a :
         n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
-    return right && at_hand(n->a) && at_hand(right) ? right : NULL;
+    return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
 }
 static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
@@ -13828,19 +13830,31 @@ container_fail:
 }
 static int ordering(int op) { return op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE; }
 /* A literal's value or a name found along the fast path, borrowed. */
-static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
+static ALWAYS_INLINE SPYValue *leaf_operand(Frame *f, Node *n) {
     return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
+}
+/* The item of x at y when x is a list or tuple and y an int within it,
+ * borrowed, else NULL. */
+static ALWAYS_INLINE SPYValue *sequence_item(SPYValue *x, SPYValue *y) {
+    if ((x->type != SPY_LIST && x->type != SPY_TUPLE) || y->type != SPY_INT || y->as.integer_data.big) return NULL;
+    int64_t i = y->as.integer_data.small, len = (int64_t)x->as.seq.len;
+    if (i < 0) i += len;
+    return i >= 0 && i < len ? x->as.seq.items[i] : NULL;
+}
+static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
+    SPYValue *x = leaf_operand(f, n->a), *y = x ? leaf_operand(f, n->b) : NULL;
+    return y ? sequence_item(x, y) : NULL;
+}
+/* An operand found along the fast path, borrowed: a literal, a name, or
+ * an item of a list or tuple they index. Finding one runs no code. */
+static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
+    return n->kind == N_INDEX ? item_operand(f, n) : leaf_operand(f, n);
 }
 /* Operator node n on its operands x and y, both borrowed, when they are
  * exact small ints, floats, lists and tuples it computes without running
  * Python code or raising anything but MemoryError; else NULL. */
 static SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
-    if (n->kind == N_INDEX) {
-        if ((x->type != SPY_LIST && x->type != SPY_TUPLE) || y->type != SPY_INT || y->as.integer_data.big) return NULL;
-        int64_t i = y->as.integer_data.small, len = (int64_t)x->as.seq.len;
-        if (i < 0) i += len;
-        return i >= 0 && i < len ? spy_retain(x->as.seq.items[i]) : NULL;
-    }
+    if (n->kind == N_INDEX) return spy_retain(sequence_item(x, y));
     if (x->type != y->type || (x->type != SPY_FLOAT && (x->type != SPY_INT || x->as.integer_data.big || y->as.integer_data.big)) ||
         (n->kind == N_COMPARE ? !ordering(n->args->op) : n->op != '+' && n->op != '-' && n->op != '*')) return NULL;
     relocate(c, n);
