@@ -5,6 +5,7 @@
 /spy-worker
 /tests/api
 /tests/oom
+/tests/threads
 /tests/run-spec
 /bench/lifecycle
 __pycache__/

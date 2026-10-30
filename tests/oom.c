@@ -35,6 +35,7 @@ char *oom_realpath(const char *, char *);
 #define free oom_free
 #define realpath oom_realpath
 #include "../spy.c"
+#include "../spy-std.c"
 #undef malloc
 #undef calloc
 #undef realloc
@@ -92,7 +93,7 @@ static size_t run(const char *source, const char *name, int *status) {
     if (c) {
         spy_set_output(c, discard, NULL);
         spy_set_step_limit(c, 1000000);
-        *status = spy_exec(c, source, name);
+        *status = spy_std_init(c) || spy_exec(c, source, name);
         spy_clear_error(c);
         spy_collect(c);
         spy_context_free(c);
@@ -156,6 +157,16 @@ static const char *const programs[] = {
     "    raise ExceptionGroup('g', [ValueError(1), TypeError(2)])\n"
     "except* ValueError as e: print('value', e.exceptions)\n"
     "except* TypeError: print('type')\n",
+
+    /* sys and weakref are left to fuzz_oom and tests/oom FILE: importing
+     * them makes 5,000 and 39,000 allocations, too many to sweep here. */
+    "import gc\n"
+    "class N:\n"
+    "    def __init__(self): self.me = self\n"
+    "    def __del__(self): print('gone')\n"
+    "n = N()\n"
+    "del n\n"
+    "print(gc.collect() > 0, gc.get_referents([n := 1]), gc.isenabled())\n",
 };
 
 static char *read_file(const char *path) {

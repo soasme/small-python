@@ -365,8 +365,13 @@ static SPYValue *name_error(SPYContext *c, const char *name, const char *format)
 /* As CPython's _Py_CheckRecursiveCall, bound native recursion by the stack
  * actually used rather than a count; the first entry records the top. */
 static int deeper(SPYContext *c, const char *where) {
+#ifdef SPY_ASAN
+    /* AddressSanitizer may move locals to a fake stack; frames stay on the real one. */
+    uintptr_t here = (uintptr_t)__builtin_frame_address(0);
+#else
     char probe;
     uintptr_t here = (uintptr_t)&probe;
+#endif
     if (!c->depth++) { c->stack_top = here; return 0; }
     size_t used = here < c->stack_top ? c->stack_top - here : here - c->stack_top;
     if (used <= c->stack_size) return 0;
@@ -14472,15 +14477,8 @@ static int define_native(SPYContext *c, SPYValue *module, const char *name, SPYN
 }
 /* The module name of the running Python function's caller, for namedtuple's
  * sys._getframemodulename(1). */
-static SPYValue *caller_module(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
-    (void)argc; (void)argv; (void)data;
-    SPYValue *env = c->caller_env ? c->caller_env : c->globals;
-    SPYValue *name = name_local(module_env(c, env), "__name__");
-    return spy_retain(name ? name : c->none);
-}
 static int weakref_natives(SPYContext *c, SPYValue *module) {
-    return define_native(c, module, "_caller_module", caller_module, NULL) ||
-        define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
+    return define_native(c, module, "_weak_bind", weak_bind, NULL) || define_native(c, module, "_weak_get", weak_get, NULL) ||
         define_native(c, module, "_weak_callback", weak_get, c) || define_native(c, module, "_weak_hash", weak_hash, NULL) ||
         define_native(c, module, "_weak_refs", weak_refs, NULL);
 }
