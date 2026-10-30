@@ -95,6 +95,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A str keeps its hash](#a-str-keeps-its-hash) | -2.8% (strings), `d["a"]`: -10% |
 | [A name store skips the step bookkeeping](#a-name-store-skips-the-step-bookkeeping) | -1.1% to -4.3%; M2 time: nbody -4.0% |
 | [Numbers have their own allocation path](#numbers-have-their-own-allocation-path) | -2.4% (fib) to +0.5% |
+| [A call releases its own environment](#a-call-releases-its-own-environment) | -3.8% (fib), -1.8% (classes); M2: fib -4.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -514,6 +515,19 @@ belongs to the calling context moved from every call to the public
 cross contexts. Instructions: fib -2.4%, classes -1.1%, loop and nbody
 -0.4%, dicts and bigint +0.4% to +0.5%; the M2's times stayed within
 noise but for loop (-2.1%) and classes (-1.6%).
+
+### A call releases its own environment
+
+A function's environment died through `spy_release`, which walks any
+value's edges through a callback and a pending list so that long chains
+of garbage free without recursion: for a function environment, eight
+fixed fields, each entry's key and value, a finalizer check and the
+general `free_value`. When the call that made the environment is its
+only holder, as it is unless a closure, frame or generator kept it, the
+call now releases the locals itself, from the last as CPython clears a
+frame, then the parent and the unit. Anything else falls back to
+`spy_release`. Instructions: fib -3.8%, classes -1.8%, sort -0.5%, the
+rest unchanged; on the M2 fib -4.5%, classes -3.6%.
 
 ## Tried and left out
 

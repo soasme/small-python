@@ -13911,6 +13911,20 @@ static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *cons
     env->as.map.items = items; env->as.map.cap = cap; env->as.map.len = len;
     return 0;
 }
+/* Release a function's environment. One that only its call holds, as most
+ * do, drops its locals from the last, as CPython clears a frame, and then
+ * its parent and unit, without the general walk over a value's edges. */
+static void release_locals(SPYValue *env) {
+    if (env->refs != 1 || env->weak || env->as.map.index || env->as.map.namespace || env->as.map.class_cell || env->as.map.base) {
+        spy_release(env); return;
+    }
+    Entry *items = env->as.map.items;
+    for (size_t i = map_used(env); i--;)
+        if (items[i].key) { spy_release(items[i].key); spy_release(items[i].value); }
+    spy_release(env->as.map.parent); spy_release(env->as.map.unit);
+    env->refs = 0;
+    free_value(env);
+}
 static int declare_locals(SPYContext *c, SPYValue *env) {
     if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env, 0, NULL);
     Scope *scope = env->as.map.scope;
@@ -14406,7 +14420,7 @@ static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         if (r.flow == FLOW_RETURN) result = r.value;
         else { spy_release(r.value); if (r.flow == FLOW_NORMAL) result = spy_none(c); }
     }
-    spy_release(env);
+    release_locals(env);
     return result;
 }
 /* function called with self before the arguments, as a method object
