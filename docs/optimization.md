@@ -109,6 +109,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A loop steps its iterator directly](#a-loop-steps-its-iterator-directly) | -0.9% (dicts), -0.6% (nbody), the rest -0.5% to 0% |
 | [Numbers stay off the value list](#numbers-stay-off-the-value-list) | -1.5% (dicts), -1.2% (nbody), -1.0% (loop, sort) |
 | [A release inlines its common case](#a-release-inlines-its-common-case) | -10.1% (loop), -7.5% (nbody), -6.8% (classes), -6.3% (generators), -5.5% (fib); M2: loop -17%, nbody -13.5% |
+| [Arithmetic on numbers skips the dispatch](#arithmetic-on-numbers-skips-the-dispatch) | -11.7% (loop), -7.8% (fib), -6.2% (generators), -5.9% (nbody), -4.6% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -719,6 +720,28 @@ out of line, frees. The text section grows by 30.8 KB (4%).
 | dicts | -4.6% | |
 | sort | -2.8% | |
 | bigint | -1.7% | |
+
+### Arithmetic on numbers skips the dispatch
+
+An operator whose operands were found on the fast path checked that they
+were two machine ints or two floats and then called `binary`, which
+checked their types again on its way to `integer_binary` and `spy_int`;
+`x += 1` went through `inplace` and `binary` too. `number_fast`, inline,
+now computes `+`, `-` and `*` on two machine ints, with the overflow
+checks `integer_binary` uses, and `+`, `-`, `*` and `/` by a nonzero
+divisor on two floats. It serves the operator fast path, the general
+binary operator and augmented assignment alike. Where the caller owns
+the operands, a float result still takes the place of a dying one; the
+fast path, which borrows its operands, always makes a new float.
+
+| Program | Instructions | M2 time |
+| --- | ---: | ---: |
+| loop | -11.7% | 366.4 → 332.1 ms (-9.4%) |
+| fib | -7.8% | 68.7 → 69.0 ms (+0.4%) |
+| generators | -6.2% | 216.3 → 205.9 ms (-4.8%) |
+| nbody | -5.9% | 382.0 → 355.8 ms (-6.8%) |
+| classes | -4.6% | 183.5 → 175.0 ms (-4.6%) |
+| strings, dicts, sort, bigint | -1.0% to -1.9% | |
 
 ## Tried and left out
 

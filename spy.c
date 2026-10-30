@@ -8573,6 +8573,10 @@ static int int_add(int64_t a, int64_t b, int64_t *r) {
     if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return -1;
     *r = a + b; return 0;
 }
+static int int_sub(int64_t a, int64_t b, int64_t *r) {
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return -1;
+    *r = a - b; return 0;
+}
 static int int_mul(int64_t a, int64_t b, int64_t *r) {
     if (a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a) :
         (a < 0 && (b > 0 ? a < INT64_MIN / b : b < 0 && a < INT64_MAX / b))) return -1;
@@ -8757,9 +8761,7 @@ static SPYValue *integer_binary(SPYContext *c, int op, int64_t a, int64_t b) {
     int64_t r;
     switch (op) {
     case '+': if (int_add(a, b, &r)) goto overflow; break;
-    case '-':
-        if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) goto overflow;
-        r = a - b; break;
+    case '-': if (int_sub(a, b, &r)) goto overflow; break;
     case '*': if (int_mul(a, b, &r)) goto overflow; break;
     case T_FLOORDIV: case '%':
         if (!b) return spy_error(c, "ZeroDivisionError", "division by zero");
@@ -9152,15 +9154,24 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     return sequence_binary(c, op, a, b);
 }
-/* Operator op on two floats the caller owns, its result taking the place
- * of an operand nothing else holds, as CPython's float operations reuse a
- * dying operand; NULL when it cannot. */
-static ALWAYS_INLINE SPYValue *float_in_place(int op, SPYValue *a, SPYValue *b) {
-    SPYValue *spare = a->type != SPY_FLOAT || b->type != SPY_FLOAT ? NULL : a->refs == 1 ? a : b->refs == 1 ? b : NULL;
-    if (!spare || !(op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real))) return NULL;
-    spare->as.real = op == '+' ? a->as.real + b->as.real : op == '-' ? a->as.real - b->as.real :
-        op == '*' ? a->as.real * b->as.real : a->as.real / b->as.real;
-    return spy_retain(spare);
+/* Arithmetic op on two floats, or + - * on two machine ints, without the
+ * general dispatch; NULL when that must decide, or after an allocation
+ * failed. With owned, the caller owns a and b, and a float result takes
+ * the place of one nothing else holds, as CPython's float operations
+ * reuse a dying operand. */
+static ALWAYS_INLINE SPYValue *number_fast(SPYContext *c, int op, SPYValue *a, SPYValue *b, int owned) {
+    if (a->type == SPY_FLOAT && b->type == SPY_FLOAT) {
+        if (!(op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real))) return NULL;
+        double x = a->as.real, y = b->as.real, result = op == '+' ? x + y : op == '-' ? x - y : op == '*' ? x * y : x / y;
+        SPYValue *spare = !owned ? NULL : a->refs == 1 ? a : b->refs == 1 ? b : NULL;
+        if (!spare) return spy_float(c, result);
+        spare->as.real = result;
+        return spy_retain(spare);
+    }
+    if (a->type != SPY_INT || b->type != SPY_INT || a->as.integer_data.big || b->as.integer_data.big) return NULL;
+    int64_t x = a->as.integer_data.small, y = b->as.integer_data.small, result;
+    if (op == '+' ? int_add(x, y, &result) : op == '-' ? int_sub(x, y, &result) : op == '*' ? int_mul(x, y, &result) : -1) return NULL;
+    return spy_int(c, result);
 }
 static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
@@ -13893,7 +13904,7 @@ container_fail:
         a = eval(c, f, n->a);
         if (!a) break;
         b = eval(c, f, n->b);
-        if (b && !(result = float_in_place(n->op, a, b))) { relocate(c, n); result = binary(c, n->op, a, b); }
+        if (b && !(result = number_fast(c, n->op, a, b, 1)) && !c->error_type[0]) { relocate(c, n); result = binary(c, n->op, a, b); }
         break;
     case N_COMPARE:
         a = eval(c, f, n->a);
@@ -13959,10 +13970,11 @@ static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
  * Python code or raising anything but MemoryError; else NULL. */
 static SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
     if (n->kind == N_INDEX) return spy_retain(sequence_item(x, y));
+    if (n->kind == N_BINARY) return number_fast(c, n->op, x, y, 0);
     if (x->type != y->type || (x->type != SPY_FLOAT && (x->type != SPY_INT || x->as.integer_data.big || y->as.integer_data.big)) ||
-        (n->kind == N_COMPARE ? !ordering(n->args->op) : n->op != '+' && n->op != '-' && n->op != '*')) return NULL;
+        !ordering(n->args->op)) return NULL;
     relocate(c, n);
-    return n->kind == N_BINARY ? binary(c, n->op, x, y) : comparison(c, n->args->op, x, y);
+    return comparison(c, n->args->op, x, y);
 }
 /* Operator node n on its operands x and y, as eval_inner computes it. */
 static SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
@@ -16020,7 +16032,8 @@ static int assign(SPYContext *c, Frame *f, Node *n) {
             old->refs == 2 && env->type == V_ENV && !env->as.map.namespace &&
             t->slot_scope == env->as.map.scope && t->slot < map_used(env) && env->as.map.items[t->slot].value == old)
             value = string_append(c, old, rhs);
-        else if (!(value = float_in_place(operators[n->op - T_ADDEQ].token, old, rhs))) value = inplace(c, n->op, old, rhs);
+        else if (!(value = number_fast(c, operators[n->op - T_ADDEQ].token, old, rhs, 1)) && !c->error_type[0])
+            value = inplace(c, n->op, old, rhs);
     }
     if (!value) goto done;
     if (!container) status = store_target(c, f, n->a, value);
