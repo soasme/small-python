@@ -378,3 +378,119 @@ is enough.
 | `zipfile` | `_struct`, `binascii` |
 | `zipimport` | `_frozen_importlib`, `_frozen_importlib_external` |
 | `zoneinfo` | `_struct`, `math` |
+
+## 6 Bundling with `spyc`
+
+`spyc` bundles a program with every module its imports reach
+([build.md §3.2](build.md#32-discovery)). Its only tree shaking is at module
+level: a module that no import names is left out. That does not work on
+`Lib/`. spyc follows imports wherever they appear, including function bodies
+and branches that never run, and `Lib/`'s hubs import one another inside
+functions:
+
+- `warnings`, `inspect`, `typing` and `annotationlib` all do it;
+- `heapq` imports `doctest` under `if __name__ == "__main__":`.
+
+These links tie about 315 modules together. A program that imports any one
+of them gets all of them.
+
+This section designs a better cut. None of it is implemented.
+
+### 6.1 Measurements
+
+The pinned `Lib/` was scanned with the oracle's `ast`, and every import was
+classified by where it sits:
+
+| where the import sits | edges |
+|-----------------------|------:|
+| module level | 2116 |
+| function body | 407 |
+| `lazy import` at module level | 37 |
+| `try` guarded by `except ImportError` | 36 |
+| a platform test (`sys.platform == "win32"`, `os.name == "nt"`, ...) | 20 |
+| `if TYPE_CHECKING:` | 18 |
+| `if __name__ == "__main__":` | 11 |
+
+The table below counts what one `import` bundles under each policy: modules,
+then KB of source before `-OO` or `--minify`. Each column drops one more kind
+of edge than the column before:
+
+- **today:** follow every edge, as spyc does.
+- **dead blocks:** skip `__main__` and `TYPE_CHECKING` blocks.
+- **platforms:** also skip platform tests.
+- **deferred:** also defer function-body imports.
+- **module level:** also defer `lazy import`.
+
+| entry | today | dead blocks | platforms | deferred | module level |
+|-------|-------|-------------|-----------|----------|--------------|
+| `json` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 27 / 520 | 24 / 471 |
+| `re` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 20 / 413 | 17 / 363 |
+| `dataclasses` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 23 / 552 | 10 / 261 |
+| `argparse` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 31 / 916 | 23 / 570 |
+| `pathlib` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 58 / 1446 | 14 / 242 |
+| `typing` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 18 / 524 | 12 / 320 |
+| `logging` | 315 / 7262 | 165 / 4279 | 162 / 4177 | 70 / 1763 | 48 / 1110 |
+| `asyncio` | 315 / 7262 | 247 / 5406 | 239 / 5306 | 128 / 2815 | 98 / 2239 |
+| `unittest` | 315 / 7262 | 258 / 5556 | 250 / 5455 | 80 / 1999 | 67 / 1633 |
+
+For scale, all of `Lib/` (608 modules, excluding tests) is 11293 KB.
+
+### 6.2 Dead blocks
+
+In a bundled module that is not the entry, `__name__` is never `"__main__"`.
+`typing.TYPE_CHECKING` is `False` at run time. An import under
+`if __name__ == "__main__":` or `if TYPE_CHECKING:` can never run there, so
+spyc can skip it without changing behavior. The test must be one of those
+two exact forms, and the entry module keeps its `__main__` block. This rule
+alone halves the bundle.
+
+Platform tests are left alone. They save three modules, and acting on them
+would require spyc to assume a target platform, which changes behavior when
+the assumption is wrong.
+
+### 6.3 Deferred imports
+
+An import in a function body runs only when the function is called. A
+`lazy import` runs only when its name is first used. Most of what remains
+after §6.2 is reached only through such deferred edges. In the `json` case,
+135 of the remaining 162 modules are.
+
+spyc cannot drop them. Python reaches functions through `getattr`,
+`__dict__` and frames, so spyc cannot prove a function is never called. The
+same reason keeps statement-level shaking out of spyc
+([build.md §8](build.md#8-esbuild-feature-map)). Instead, spyc splits the
+bundle into two parts:
+
+- **Eager part.** The program's C file holds the modules that the entry and
+  its eager edges reach. These are module-level imports that are neither
+  lazy nor in a dead block.
+- **Deferred part.** The modules reached only through deferred edges go into
+  a second C file. It is built with the `-c` splitting that already exists
+  ([build.md §5.2](build.md#52-library-output--c)) and shares the same module
+  table. The host links it in or chains it after the eager loader, so the
+  program imports exactly what it imported before; only the location of
+  the source changes.
+
+An opt-in flag leaves the deferred part out entirely. `--metafile` and
+`--analyze` then list each deferred import with the function it sits in, and
+`-D` adds a module back. A call that reaches a missing module raises
+`ModuleNotFoundError`, which matches how
+[guarded imports](build.md#34-guarded-imports) already treat missing modules.
+
+### 6.4 Native modules
+
+spyc knows which native modules the bundled sources import. The generated
+table can reference only those modules' init functions. If each native
+module in `libspy-std.a` is its own object file, the linker drops the rest
+with no further work. `spy-std.c` would then have to be split into one
+object per module once it holds more than `sys` and `gc`.
+
+### 6.5 What stays out
+
+The unit of shaking stays the module; statements inside a module are not
+shaken:
+
+- top-level code can have side effects;
+- module attributes are reached by name at run time.
+
+Function-level splitting gets almost all of the gain without that risk.

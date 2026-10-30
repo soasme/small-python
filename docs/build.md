@@ -176,7 +176,12 @@ The bundle is the smallest set of modules that contains:
    ([3.3](#33-imports-a-module-names)).
 
 Registered and external modules are never in the set, and spyc does not read
-their files. The set is independent of the order spyc visits modules in. The
+their files. Every import counts, including those in function bodies and in
+blocks that never run. On a library as interconnected as CPython's `Lib/`,
+that bundles hundreds of modules for a single import. A planned refinement
+(not implemented) skips dead `__main__` and `TYPE_CHECKING` blocks and moves
+modules reached only from function bodies or `lazy import` into a deferred
+part ([python-lib.md §6](python-lib.md#6-bundling-with-spyc)). The set is independent of the order spyc visits modules in. The
 resolution model (`SpyBuild.tla`) checks this ([10.1](#101-tla-model)).
 
 ### 3.3 Imports a module names
@@ -470,7 +475,7 @@ reason.
 | minify (whitespace) | `--minify`, keeping line numbers | Adapted |
 | minify (identifiers), mangle props, keep names | Not ported. Names are observable through keyword arguments, `__dict__`, `getattr`, `locals()`, frames, and `__all__`, so renaming changes behavior. | Not ported |
 | minify (syntax) | Not ported. Rewriting expressions would change evaluation order and the special methods called. | Not ported |
-| tree shaking, pure, ignore annotations | Modules nothing imports are not bundled. Removing statements inside a module is not ported: top-level code may have side effects, and module attributes are reached dynamically. | Adapted |
+| tree shaking, pure, ignore annotations | Modules nothing imports are not bundled. Removing statements inside a module is not ported: top-level code may have side effects, and module attributes are reached dynamically. Splitting off deferred imports is planned ([python-lib.md §6](python-lib.md#6-bundling-with-spyc)). | Adapted |
 | define | `-O` sets `__debug__`, the language's one build-time constant. `--alias` swaps configuration modules. Replacing other names would break `global` and attribute access. | Adapted |
 | drop (debugger, console), drop labels | `-O` drops `assert`, `-OO` docstrings | Adapted |
 | inject | Not ported. Import the module from the entry. | Not ported |
