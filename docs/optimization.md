@@ -68,6 +68,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A tick is inline; a new number is cleared in place](#a-tick-is-inline-a-new-number-is-cleared-in-place) | -2.8% to -9.2% |
 | [An attribute's remembered answer is checked inline](#an-attributes-remembered-answer-is-checked-inline) | -2.0% (classes) |
 | [A name keeps its local's key](#a-name-keeps-its-locals-key) | -2.3% (nbody) to 0% |
+| [The stack check and the right operand are inline](#the-stack-check-and-the-right-operand-are-inline) | -1.0% to -3.6% |
 
 ### Releasing a number or string frees it at once
 
@@ -271,6 +272,27 @@ generators -2.0%, fib -1.6%.
 | generators | 367.5 M | 362.6 M | -1.3% |
 | fib | 103.1 M | 102.3 M | -0.7% |
 | classes | 312.7 M | 310.6 M | -0.7% |
+
+### The stack check and the right operand are inline
+
+Two calls on every operator node became inline code. The fast operator
+path asked `operator_right` for its right operand, a call that repeats
+the tests the compiler made when it marked the node; a marked node's
+right operand is its comparison's or its own second child. `deeper`,
+the native-stack check run by every evaluation off the fast paths, is
+inline, with the error report a separate call.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| fib | 102.3 M | 98.4 M | -3.9% |
+| nbody | 731.0 M | 705.7 M | -3.5% |
+| classes | 310.6 M | 303.0 M | -2.5% |
+| generators | 362.6 M | 354.3 M | -2.3% |
+| loop | 605.6 M | 589.3 M | -2.7% |
+| dicts | 177.6 M | 174.6 M | -1.7% |
+
+On the M2 the wall time stays within noise (fib -0.3%, classes -0.7%,
+loop +1.3%), and the executable's text is the same size.
 
 ## Tried and left out
 

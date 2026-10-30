@@ -391,7 +391,12 @@ static SPYValue *name_error(SPYContext *c, const char *name, const char *format)
 }
 /* As CPython's _Py_CheckRecursiveCall, bound native recursion by the stack
  * actually used rather than a count; the first entry records the top. */
-static int deeper(SPYContext *c, const char *where) {
+static NO_INLINE int stack_overflow(SPYContext *c, size_t used, const char *where) {
+    c->depth--;
+    errorf(c, "RecursionError", "Stack overflow (used %zu kB)%s", used / 1024, where);
+    return -1;
+}
+static ALWAYS_INLINE int deeper(SPYContext *c, const char *where) {
 #ifdef SPY_ASAN
     /* AddressSanitizer may move locals to a fake stack; frames stay on the real one. */
     uintptr_t here = (uintptr_t)__builtin_frame_address(0);
@@ -401,10 +406,7 @@ static int deeper(SPYContext *c, const char *where) {
 #endif
     if (!c->depth++) { c->stack_top = here; return 0; }
     size_t used = here < c->stack_top ? c->stack_top - here : here - c->stack_top;
-    if (used <= c->stack_size) return 0;
-    c->depth--;
-    errorf(c, "RecursionError", "Stack overflow (used %zu kB)%s", used / 1024, where);
-    return -1;
+    return used <= c->stack_size ? 0 : stack_overflow(c, used, where);
 }
 static int trace_call(SPYContext *);
 static void leave_frame(SPYContext *, SPYValue *);
@@ -13741,7 +13743,7 @@ static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     SPYValue *x = NULL, *y = NULL;
     if ((n->flags & F_OPERATOR) && quiet(c, f)) {
         x = operand(f, n->a);
-        y = x ? operand(f, operator_right(n)) : NULL;
+        y = x ? operand(f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL; /* operator_right(n) */
         if (!y) n->flags &= ~F_OPERATOR; /* An operand the fast path misses usually always will. */
         else {
             SPYValue *v = operator_fast(c, n, x, y);
