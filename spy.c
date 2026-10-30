@@ -186,7 +186,7 @@ struct SPYValue {
 /* Class flags. CLASS_ABSTRACT is set by assigning a true __abstractmethods__
  * to the class (20.2.8), not by binding it in the class body. */
 enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64, CLASS_OWN_DICT = 128, CLASS_OWN_WEAKREF = 256 };
-typedef struct { SPYValue *cls, *value; size_t epoch; int64_t hash; char name[24]; } ClassLookup;
+typedef struct { SPYValue *cls, *value; size_t epoch; char name[24]; } ClassLookup;
 typedef struct { SPYValue *cls, *init; size_t epoch; } PlainClass;
 struct SPYContext {
     /* The fields every step reads come first, where arm64 loads reach them
@@ -292,7 +292,10 @@ struct SPYContext {
     SPYValue *error_object;
     char *error_display; /* spy_error_display's result, owned. */
     size_t line;
-    ClassLookup lookups[256]; /* Indexed by the top eight bits of a mixed key. */
+    /* Indexed by the top eight bits of the class and name pointers mixed:
+     * most names are literals, whose text need not be hashed to find their
+     * entry. The entry's own name decides a hit. */
+    ClassLookup lookups[256];
     PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
@@ -1889,18 +1892,26 @@ static Name name_of(const char *text) {
     size_t len = strlen(text);
     return (Name){text, len, text_hash(text, len)};
 }
-static Name node_name(Node *n) {
+static ALWAYS_INLINE Name node_name(Node *n) {
     if (!n->name_len) { n->name_len = strlen(n->text); n->name_hash = text_hash(n->text, n->name_len); }
     return (Name){n->text, n->name_len, n->name_hash};
 }
 /* The entry stored under name in env's own entries. */
+static int key_names(SPYValue *env, SPYValue *key, Name name) {
+    if (key->type != SPY_STRING && !(key = builtin_value(env->ctx, key, SPY_STRING))) return 0;
+    return key->as.string.len == name.len && !memcmp(key->as.string.data, name.text, name.len);
+}
 static Entry *env_find(SPYValue *env, Name name) {
-    MapCursor cursor = map_cursor(env, name.hash);
-    for (ptrdiff_t i; (i = map_next(env, name.hash, &cursor)) >= 0;) {
-        Entry *e = &env->as.map.items[i];
-        SPYValue *key = builtin_value(env->ctx, e->key, SPY_STRING);
-        if (key && key->as.string.len == name.len && !memcmp(key->as.string.data, name.text, name.len)) return e;
+    /* Most environments and instances are too small for an index: scan them here. */
+    if (!env->as.map.index && env->as.map.len <= MAP_INDEXED) {
+        Entry *items = env->as.map.items;
+        for (size_t i = 0, used = map_used(env); i < used; i++)
+            if (items[i].key && items[i].hash == name.hash && key_names(env, items[i].key, name)) return &items[i];
+        return NULL;
     }
+    MapCursor cursor = map_cursor(env, name.hash);
+    for (ptrdiff_t i; (i = map_next(env, name.hash, &cursor)) >= 0;)
+        if (key_names(env, env->as.map.items[i].key, name)) return &env->as.map.items[i];
     return NULL;
 }
 /* The value stored under name in env's own entries, borrowed. */
@@ -9196,10 +9207,9 @@ static SPYValue *class_lookup(SPYValue *cls, const char *name) {
     if (cls && cls->as.map.mro) {
         SPYContext *c = cls->ctx;
         SPYValue *mro = cls->as.map.mro, *value = NULL;
+        ClassLookup *hit = &c->lookups[((uintptr_t)name ^ (uintptr_t)cls) * UINT64_C(0x9E3779B97F4A7C15) >> 56];
+        if (hit->epoch == c->classes_changed && hit->cls == cls && !strcmp(hit->name, name)) return hit->value;
         size_t len = strlen(name);
-        int64_t hash = text_hash(name, len);
-        ClassLookup *hit = &c->lookups[((uint64_t)hash ^ (uintptr_t)cls) * UINT64_C(0x9E3779B97F4A7C15) >> 56];
-        if (hit->epoch == c->classes_changed && hit->cls == cls && hit->hash == hash && !strcmp(hit->name, name)) return hit->value;
         /* Only class entries are watched: not __name__ and __qualname__,
          * which live in class_cell, nor a base stored elsewhere. */
         int cacheable = len < sizeof(hit->name) && !class_slot_name(name);
@@ -9209,7 +9219,7 @@ static SPYValue *class_lookup(SPYValue *cls, const char *name) {
             value = name_local(base, name);
         }
         if (cacheable) {
-            hit->cls = cls; hit->value = value; hit->epoch = c->classes_changed; hit->hash = hash;
+            hit->cls = cls; hit->value = value; hit->epoch = c->classes_changed;
             memcpy(hit->name, name, len + 1);
         }
         return value;

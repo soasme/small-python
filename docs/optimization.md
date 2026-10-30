@@ -73,6 +73,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call opens its locals with its arguments](#a-call-opens-its-locals-with-its-arguments) | -3.9% (fib), -3.3% (classes) |
 | [A smaller value header](#a-smaller-value-header) | dicts memory -11% |
 | [A tick compares units; a push grows only when full](#a-tick-compares-units-a-push-grows-only-when-full) | -0.2% to -3.2% |
+| [Class and small-map lookups skip hashing](#class-and-small-map-lookups-skip-hashing) | -2.6% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -368,6 +369,28 @@ when the stack is full.
 | nbody | 719.1 M | 716.1 M | -0.4% |
 
 Wall time: generators -1.4%, nbody -0.7%.
+
+### Class and small-map lookups skip hashing
+
+`class_lookup` keeps recent answers in a table, but found an answer's
+entry by hashing the name's text on every call. Nearly every name it is
+given is a literal, so the entry is now chosen by the name's address and
+the class's, and the entry's own copy of the name decides whether it is
+a hit: a different name at a reused address compares unequal. Releasing
+an instance, which asks its class for `__del__`, no longer hashes
+`"__del__"` each time.
+
+`env_find`, the search of an environment's or instance's own entries by
+name, scans a map too small for an index directly, comparing stored
+hashes, instead of through the general search cursor; and the name
+node's cached length and hash are read inline. A method call on an
+instance runs this search to rule out an instance attribute of the same
+name.
+
+| Program | Before | After | |
+| --- | ---: | ---: | ---: |
+| classes | 290.9 M | 283.3 M | -2.6% |
+| bigint | 28.8 M | 28.7 M | -0.5% |
 
 ## Tried and left out
 
