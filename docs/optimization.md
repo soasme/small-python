@@ -97,6 +97,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Numbers have their own allocation path](#numbers-have-their-own-allocation-path) | -2.4% (fib) to +0.5% |
 | [A call releases its own environment](#a-call-releases-its-own-environment) | -3.8% (fib), -1.8% (classes); M2: fib -4.5% |
 | [A remembered name is read inline](#a-remembered-name-is-read-inline) | -0.6% to -4.8% |
+| [Each call depth keeps an environment](#each-call-depth-keeps-an-environment) | -4.7% (fib), -0.6% (sort) |
 
 ### Releasing a number or string frees it at once
 
@@ -542,6 +543,24 @@ but slowed loop 0.6%, whose module-level names then always took the
 call. Instructions: loop -4.8%, classes and generators -2.7%, nbody
 -3.0%, dicts -2.1%, the rest -0.6% to -1.2%; on the M2 loop and classes
 -3.6%, nbody -1.5%, fib and sort within noise.
+
+### Each call depth keeps an environment
+
+A call allocated its environment, cleared it, took entry storage, and
+retained each local's symbol key; returning undid all of it. CPython
+instead runs frames on a stack it reuses. Each depth of spy's frame stack
+now keeps the environment its last call returned, when nothing else held
+it, unlinked from the context's values with its storage and keys; the
+next call of the same scope at that depth takes it back and fills in the
+arguments. A recursive function's sibling calls, and any loop calling one
+function, reuse one environment per depth. A kept environment borrows
+its unit, whose release drops it, so that a dead scope's address taken
+by a new scope is never mistaken for it, its keys checked as well; the
+context's release frees kept environments before its values. One slot
+for the whole context, instead of one per depth, reused only every
+other call of a recursion and replacing the kept environment on each
+return cost more than it saved (fib +10%). Instructions: fib -4.7%,
+sort -0.6%, generators +0.3%, the rest within 0.1%.
 
 ## Tried and left out
 

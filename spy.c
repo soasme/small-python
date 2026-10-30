@@ -273,7 +273,10 @@ struct SPYContext {
      * object once sys._getframe has materialized it, and serial tells
      * frames apart over the context's lifetime; traced is the line a trace
      * function last saw, 0 when the next line is new to it. */
-    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial, traced; } *frames;
+    /* kept: the environment the last call at this depth returned when
+     * nothing else held it, unlinked, with its storage and symbol keys
+     * (owned) for the next call of its scope; its unit is borrowed. */
+    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial, traced; SPYValue *kept; } *frames;
     size_t frames_cap, frame_serial;
     size_t *frame_line; /* The innermost frame's line, or line itself when none runs. */
     /* The pending error's traceback, innermost entry last, and the serial
@@ -428,9 +431,12 @@ static int enter_frame(SPYContext *c, SPYValue *env, SPYValue *owner) {
         size_t cap = c->frames_cap ? c->frames_cap * 2 : 64;
         struct ActiveFrame *frames = realloc(c->frames, cap * sizeof(*frames));
         if (!frames) { errorf(c, "MemoryError", "out of memory"); return -1; }
+        memset(frames + c->frames_cap, 0, (cap - c->frames_cap) * sizeof(*frames));
         c->frames = frames; c->frames_cap = cap;
     }
-    c->frames[c->py_depth++] = (struct ActiveFrame){env, owner, NULL, c->line, ++c->frame_serial, 0};
+    struct ActiveFrame *frame = &c->frames[c->py_depth++];
+    frame->env = env; frame->owner = owner; frame->object = NULL;
+    frame->line = c->line; frame->serial = ++c->frame_serial; frame->traced = 0;
     c->frame_line = &c->frames[c->py_depth - 1].line;
     if ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) { leave_frame(c, NULL); return -1; }
     return 0;
@@ -785,13 +791,18 @@ static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
 }
 /* The allocation holding a map's entries, which start front entries in. */
 static Entry *map_storage(SPYValue *map) { return map->as.map.items ? map->as.map.items - map->as.map.front : NULL; }
-static void free_value(SPYValue *v) {
-    SPYContext *c = v->ctx;
-    if (v->weak) weak_dead(c, v, 0);
+/* Take v out of its context's values. */
+static ALWAYS_INLINE void value_unlink(SPYContext *c, SPYValue *v) {
     if (v->prev) v->prev->next = v->next;
     else c->values = v->next;
     if (v->next) v->next->prev = v->prev;
     c->live--;
+}
+static void drop_kept(struct ActiveFrame *);
+static void free_value(SPYValue *v) {
+    SPYContext *c = v->ctx;
+    if (v->weak) weak_dead(c, v, 0);
+    value_unlink(c, v);
     switch (v->type) {
     case SPY_INT: if (v->as.integer_data.big) free(v->as.integer_data.big); break;
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: free(v->as.string.data); break;
@@ -815,6 +826,8 @@ static void free_value(SPYValue *v) {
         while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
         free_scope(v->as.unit.scope);
         if (c->filename_from == v) c->filename_from = NULL;
+        for (size_t i = 0; i < c->frames_cap; i++)
+            if (c->frames[i].kept && c->frames[i].kept->as.map.unit == v) drop_kept(&c->frames[i]);
         free(v->as.unit.filename);
         break;
     }
@@ -13906,7 +13919,13 @@ static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *cons
     if (scope_order(c, scope)) return -1;
     size_t len = scope->order_len, cap = len > 8 ? len : 8;
     if (!len) return 0;
-    Entry *items = cap == 8 && c->spare_entries_len ? c->spare_entries[--c->spare_entries_len] : NULL;
+    Entry *items = env->as.map.items;
+    if (items) {
+        /* A kept environment has its keys. */
+        for (size_t i = 0; i < len; i++) items[i].value = spy_retain(i < argc ? argv[i] : c->unbound);
+        return 0;
+    }
+    items = cap == 8 && c->spare_entries_len ? c->spare_entries[--c->spare_entries_len] : NULL;
     if (items) cache_take(items, 8 * sizeof(Entry));
     else if (!(items = allocate(c, cap * sizeof(Entry)))) return -1;
     for (size_t i = 0; i < len; i++) {
@@ -13916,19 +13935,51 @@ static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *cons
     env->as.map.items = items; env->as.map.cap = cap; env->as.map.len = len;
     return 0;
 }
-/* Release a function's environment. One that only its call holds, as most
- * do, drops its locals from the last, as CPython clears a frame, and then
- * its parent and unit, without the general walk over a value's edges. */
+static void drop_kept(struct ActiveFrame *frame) {
+    SPYValue *env = frame->kept;
+    frame->kept = NULL;
+    for (size_t i = 0; i < env->as.map.len; i++) spy_release(env->as.map.items[i].key);
+    free(map_storage(env)); free(env);
+}
+/* The environment kept at the next call's depth when it is one of scope,
+ * its locals unset, or NULL. A key the kept one still holds cannot belong
+ * to another scope that has since taken a released scope's address. */
+static SPYValue *kept_env(SPYContext *c, Scope *scope) {
+    SPYValue *env = c->py_depth < c->frames_cap ? c->frames[c->py_depth].kept : NULL;
+    if (!env || env->as.map.scope != scope || env->as.map.len != scope->order_len ||
+        env->as.map.items[0].key != scope->symbols[scope->order[0]].key) return NULL;
+    c->frames[c->py_depth].kept = NULL;
+    memset(env, 0, offsetof(SPYValue, as));
+    return value_link(c, env, V_ENV);
+}
+/* Release a function's environment, after its call left its frame. One
+ * that only its call holds, as most do, drops its locals from the last, as
+ * CPython clears a frame, and then its parent and unit, without the general
+ * walk over a value's edges; a plain one is kept at its call's depth. */
 static void release_locals(SPYValue *env) {
     if (env->refs != 1 || env->weak || env->as.map.index || env->as.map.namespace || env->as.map.class_cell || env->as.map.base) {
         spy_release(env); return;
     }
+    SPYContext *c = env->ctx;
+    Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
+    struct ActiveFrame *slot = c->py_depth < c->frames_cap ? &c->frames[c->py_depth] : NULL;
+    int keep = slot && !slot->kept && !env->as.map.flags && !env->as.map.holes && env->as.map.len && env->as.map.len == scope->order_len;
+    for (size_t i = 0; keep && i < env->as.map.len; i++) keep = items[i].key == scope->symbols[scope->order[i]].key;
     for (size_t i = map_used(env); i--;)
-        if (items[i].key) { spy_release(items[i].key); spy_release(items[i].value); }
-    spy_release(env->as.map.parent); spy_release(env->as.map.unit);
-    env->refs = 0;
-    free_value(env);
+        if (items[i].key) { if (!keep) spy_release(items[i].key); spy_release(items[i].value); }
+    SPYValue *parent = env->as.map.parent, *unit = env->as.map.unit;
+    if (keep) {
+        value_unlink(c, env);
+        env->as.map.parent = NULL;
+        slot->kept = env;
+    } else {
+        env->refs = 0;
+        env->as.map.parent = env->as.map.unit = NULL;
+        free_value(env);
+    }
+    /* Released last: freeing the unit drops a kept environment of its scope. */
+    spy_release(parent); spy_release(unit);
 }
 static int declare_locals(SPYContext *c, SPYValue *env) {
     if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env, 0, NULL);
@@ -14405,17 +14456,18 @@ static void not_callable(SPYContext *, SPYValue *);
 /* A Python function's body, run in a new environment of its scope. */
 static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     Node *def = fn->as.function.def;
-    SPYValue *env = value_new(c, V_ENV), *result = NULL;
-    if (!env) return NULL;
+    Scope *scope = def->scope;
+    /* The common call passes exactly the parameters, by position. */
+    int positional = !fn->as.function.signature && (!keywords || !keywords->as.map.len);
+    SPYValue *env = positional && scope->positional == argc ? kept_env(c, scope) : NULL, *result = NULL;
+    if (!env && !(env = value_new(c, V_ENV))) return NULL;
     env->as.map.parent = spy_retain(fn->as.function.env);
-    env->as.map.scope = def->scope;
+    env->as.map.scope = scope;
     env->as.map.unit = spy_retain(fn->as.function.unit);
     /* A replace()d code's parameters bind under its names and then take
      * the body's: the body's locals are declared after them. */
-    Scope *scope = def->scope;
     int failed = fn->as.function.signature ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
-        /* The common call passes exactly the parameters, by position. */
-        (!keywords || !keywords->as.map.len) && fresh_locals(env) && !scope_order(c, scope) && scope->positional == argc ?
+        positional && fresh_locals(env) && !scope_order(c, scope) && scope->positional == argc ?
         open_locals(c, env, argc, argv) : declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
     Frame frame = {env, fn->as.function.unit, 0};
     if (!failed && def->code) result = new_generator(c, &frame, fn);
@@ -26476,6 +26528,10 @@ void spy_context_free(SPYContext *c) {
     /* Context destruction invalidates every value. Free storage directly so
      * shutdown cannot recurse through an arbitrarily deep object graph. */
     c->weak_len = 0;
+    /* Kept environments' keys are values freed below. */
+    for (size_t i = 0; i < c->frames_cap; i++)
+        if (c->frames[i].kept) { free(map_storage(c->frames[i].kept)); free(c->frames[i].kept); }
+    c->frames_cap = 0;
     while (c->values) free_value(c->values);
     free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->cells); free(c->frames); free(c->repr_stack);
     for (size_t i = 0; i < c->host_modules_len; i++) free(c->host_modules[i].name);
