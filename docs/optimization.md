@@ -1109,6 +1109,11 @@ strings +0.05%, the rest unchanged. Wall time: classes 107.3 -> 95.3 ms
 
 ## Tried and left out
 
+- **Call arguments taken as direct operands.** Evaluating a call's
+  arguments through `eval_operand`, as a binary operator's are, cost fib
+  0.7% and classes 0.4%: arguments are mostly names, literals and
+  arithmetic, and each paid the two extra kind tests.
+
 - **A one-comparison stack guard.** Keeping the stack's floor instead of
   its top made `deeper` one unsigned comparison: 0.2% to 0.6% fewer
   instructions on most programs, but fib 2.1% to 3.3% slower on the M2 in
