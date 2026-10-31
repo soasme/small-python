@@ -86,9 +86,11 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * unlinked, chained through their parent, each with its storage and the
  * symbol keys (owned) for the next call. */
 /* nodes counts the scope's own nodes, which run at most once between two
- * steps: a body is charged a step per 8 of them when entered. cells: a
- * class's CLASS_CELL and CLASSDICT_CELL, found at its first build. */
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len, nodes; int kind, tries, cells; const char *within; SPYValue *kept; };
+ * steps: a body is charged a step per 8 of them when entered. A class's
+ * statics chain its methods' self.attr stores through static_next; its
+ * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
+ * its first build. */
+struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, nodes; int kind, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4 };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -111,7 +113,7 @@ struct Node {
     Node *a, *b, *c, *args, *next, *allocated, *decorators;
     Node *annotate; /* Annotation function; on that function, its owner. */
     Node *params; /* PEP 695 type parameters: an N_GENERIC scope owning N_TYPEPARAM nodes. */
-    Node *static_owner; /* Borrowed class definition for a self.attr store. */
+    Node *static_next; /* A self.attr store's next one in its class's statics. */
     Program *code;
     Scope *scope;
     SPYValue *code_value;
@@ -833,8 +835,10 @@ static void machine_edges(Machine *, Visit, void *);
 static void free_machine(SPYContext *, Machine *);
 static void free_program(Program *);
 static void scope_edges(Scope *scope, Visit visit, void *data) {
-    for (size_t i = 0; scope && i < scope->len; i++)
+    if (!scope) return;
+    for (size_t i = 0; i < scope->len; i++)
         if (scope->symbols[i].key) visit(scope->symbols[i].key, data);
+    if (scope->static_attributes) visit(scope->static_attributes, data);
 }
 static void edges(SPYValue *v, Visit visit, void *data) {
     /* A value released half-built, after a failed allocation, may hold NULL. */
@@ -7131,7 +7135,7 @@ static int scope_target(SPYContext *c, Scope *scope, Node *n, int store) {
     if (store > 0 && n->kind == N_ATTR && n->a->kind == N_NAME && !strcmp(n->a->text, "self")) {
         for (Scope *outer = scope->parent; outer; outer = outer->parent) {
             if (outer->kind != S_CLASS) continue;
-            n->static_owner = outer->owner;
+            n->static_next = outer->statics; outer->statics = n;
             break;
         }
     }
@@ -16962,18 +16966,18 @@ static int update_bases(SPYContext *c, SPYValue *bases, SPYValue *original) {
     return c->error_type[0] ? -1 : changed;
 }
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
-static SPYValue *static_attributes(SPYContext *c, SPYValue *unit, Scope *scope) {
+static SPYValue *static_attributes(SPYContext *c, Scope *scope) {
+    if (scope->static_attributes) return spy_retain(scope->static_attributes);
     SPYValue *names = value_new(c, SPY_DICT), *result = spy_list(c);
     if (!names || !result) { spy_release(names); spy_release(result); return NULL; }
-    while (unit->as.unit.owner) unit = unit->as.unit.owner;
-    for (Node *node = unit->as.unit.nodes; node && !c->error_type[0]; node = node->allocated)
-        if (node->static_owner == scope->owner)
-            name_set(c, names, source_name(node->b), c->none);
+    for (Node *node = scope->statics; node && !c->error_type[0]; node = node->static_next)
+        name_set(c, names, source_name(node->b), c->none);
     for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++)
         sequence_append(c, result, map_items(names)[i].key);
     spy_release(names);
     if (c->error_type[0] || sort_list(c, result, NULL, 0)) { spy_release(result); return NULL; }
     result->type = SPY_TUPLE;
+    scope->static_attributes = spy_retain(result);
     return result;
 }
 /* Create a class from evaluated bases (a list) and keyword arguments. The
@@ -17032,7 +17036,7 @@ static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPY
     leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     spy_release(r.value);
     if (r.flow != FLOW_NORMAL || c->error_type[0]) return -1;
-    SPYValue *attributes = static_attributes(c, unit, n->scope);
+    SPYValue *attributes = static_attributes(c, n->scope);
     if (attributes) name_set(c, env, "__static_attributes__", attributes);
     spy_release(attributes);
     if (c->error_type[0]) return -1;
