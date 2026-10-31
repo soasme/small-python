@@ -160,6 +160,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A called name is taken at hand](#a-called-name-is-taken-at-hand) | -1.9% (fib), -0.4% (dicts), -0.3% (classes) |
 | [A class call tests the builtin types once](#a-class-call-tests-the-builtin-types-once) | -0.6% (dicts), -0.5% (classes), -0.4% (bigint) |
 | [A machine test's bool is its truth](#a-machine-tests-bool-is-its-truth) | -1.2% (generators) |
+| [A call operand skips a second eval](#a-call-operand-skips-a-second-eval) | -5.7% (fib), -1.1% (dicts), -0.8% (strings); nbody +0.1%; M2: fib -5.6%, dicts -4.2% |
 
 ### Releasing a number or string frees it at once
 
@@ -1076,6 +1077,22 @@ the bool the comparison had just made. A test's step now hands the
 jump the bool's truth, as `BC_EVAL` does for a test it evaluates.
 Instructions: generators -1.2%, the rest unchanged. Wall time within
 the noise (generators +0.1%, fib -0.2%).
+
+### A call operand skips a second eval
+
+In `fib(n - 1) + fib(n - 2)`, `eval` of the sum guarded the C stack and
+set the evaluation environment, then evaluated each call through `eval`
+again, which did both a second time before reaching `eval_call`. A
+binary operator with a call operand is now marked `F_CALL_OPERAND` when
+compiled, and while tick has only the line to record, its call operands
+record their line and go to `eval_call` directly. The stack stays
+guarded: the operator's own `eval` guards each level, so a recursion
+through `f(n - 1) + 1` with the recursion limit raised to 10^7 still ends
+in a RecursionError. Testing each operand's kind without the mark cost
+nbody 0.3%; with it, nbody takes 0.1% more instructions and the same
+wall time. Instructions: fib -5.7%, dicts -1.1%, strings -0.8%, classes
+-0.6%, sort +0.07%, nbody +0.14%. Wall time: fib 36.4 -> 34.4 ms (-5.6%),
+dicts -4.2%, strings and classes -0.3%, sort and nbody unchanged.
 
 ## Tried and left out
 
