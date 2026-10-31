@@ -115,6 +115,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Any single comparison is tested without a bool](#any-single-comparison-is-tested-without-a-bool) | -12.2% (loop); fib +0.6% |
 | [A store takes its target's operands at hand](#a-store-takes-its-targets-operands-at-hand) | -3.2% (nbody), -0.8% (strings), -0.6% (classes) |
 | [A call knows its arguments are plain](#a-call-knows-its-arguments-are-plain) | -1.1% (strings), -0.7% (classes), -0.5% (fib) |
+| [A kept environment serves any function of its depth](#a-kept-environment-serves-any-function-of-its-depth) | -2.4% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -805,6 +806,19 @@ marks such calls `F_PLAIN_CALL` once, and a literal or name argument is
 taken as it is while tick has only the line to record, as an operator's
 operands are. Instructions: strings -1.1%, classes -0.7%, fib -0.5%,
 dicts and bigint -0.4%, the rest within 0.2%.
+
+### A kept environment serves any function of its depth
+
+A call's depth keeps the environment of the last function that returned
+there, but only a call of that same function took it again. `acc.add(step)`
+and `acc.dot(step)` alternate at one depth, so every `dot` call built a
+fresh environment and freed it. A kept environment of another function
+now takes the new one's keys in place of its own, which also covers a
+released scope whose address was taken again. The small-map scan of
+`env_find`, which reads an instance's two or three attributes, is now
+inline, and indexed maps take an out-of-line probe. Instructions: classes
+-2.4%, fib +0.2%, the rest within 0.1%. Wall time was within the noise of
+a busy machine.
 
 ## Tried and left out
 

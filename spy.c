@@ -2046,17 +2046,18 @@ static int key_names(SPYValue *env, SPYValue *key, Name name) {
     if (key->type != SPY_STRING && !(key = builtin_value(env->ctx, key, SPY_STRING))) return 0;
     return key->as.string.len == name.len && !memcmp(key->as.string.data, name.text, name.len);
 }
-static Entry *env_find(SPYValue *env, Name name) {
-    /* Most environments and instances are too small for an index: scan them here. */
-    if (!env->as.map.index && env->as.map.len <= MAP_INDEXED) {
-        Entry *items = env->as.map.items;
-        for (size_t i = 0, used = map_used(env); i < used; i++)
-            if (items[i].key && items[i].hash == name.hash && key_names(env, items[i].key, name)) return &items[i];
-        return NULL;
-    }
+static NO_INLINE Entry *env_probe(SPYValue *env, Name name) {
     MapCursor cursor = map_cursor(env, name.hash);
     for (ptrdiff_t i; (i = map_next(env, name.hash, &cursor)) >= 0;)
         if (key_names(env, env->as.map.items[i].key, name)) return &env->as.map.items[i];
+    return NULL;
+}
+static ALWAYS_INLINE Entry *env_find(SPYValue *env, Name name) {
+    /* Most environments and instances are too small for an index: scan them here. */
+    if (env->as.map.index || env->as.map.len > MAP_INDEXED) return env_probe(env, name);
+    Entry *items = env->as.map.items;
+    for (size_t i = 0, used = map_used(env); i < used; i++)
+        if (items[i].key && items[i].hash == name.hash && key_names(env, items[i].key, name)) return &items[i];
     return NULL;
 }
 /* The value stored under name in env's own entries, borrowed. */
@@ -14117,13 +14118,23 @@ static void drop_kept(struct ActiveFrame *frame) {
     for (size_t i = 0; i < env->as.map.len; i++) spy_release(env->as.map.items[i].key);
     free(map_storage(env)); value_give(env->ctx, env, 0);
 }
-/* The environment kept at the next call's depth when it is one of scope,
- * its locals unset, or NULL. A key the kept one still holds cannot belong
- * to another scope that has since taken a released scope's address. */
+/* The environment kept at the next call's depth, its locals unset and
+ * keyed for scope, or NULL. One kept by another function of the depth,
+ * as alternating calls leave it, takes scope's keys in place of its own;
+ * so does one whose scope was released and its address taken again. */
 static SPYValue *kept_env(SPYContext *c, Scope *scope) {
     SPYValue *env = c->py_depth < c->frames_cap ? c->frames[c->py_depth].kept : NULL;
-    if (!env || env->as.map.scope != scope || env->as.map.len != scope->order_len ||
-        (env->as.map.len && env->as.map.items[0].key != scope->symbols[scope->order[0]].key)) return NULL;
+    if (!env || !scope->order || env->as.map.cap < scope->order_len) return NULL;
+    Entry *items = env->as.map.items;
+    if (env->as.map.scope != scope || env->as.map.len != scope->order_len ||
+        (env->as.map.len && items[0].key != scope->symbols[scope->order[0]].key)) {
+        for (size_t i = 0; i < env->as.map.len; i++) spy_release(items[i].key);
+        for (size_t i = 0; i < scope->order_len; i++) {
+            Symbol *symbol = &scope->symbols[scope->order[i]];
+            items[i] = (Entry){spy_retain(symbol->key), NULL, symbol->hash};
+        }
+        env->as.map.len = scope->order_len;
+    }
     c->frames[c->py_depth].kept = NULL;
     memset(env, 0, offsetof(SPYValue, as));
     return value_link(c, env, V_ENV);
