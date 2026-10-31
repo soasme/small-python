@@ -120,6 +120,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A quiet tick is one comparison](#a-quiet-tick-is-one-comparison) | -1.5% (generators), -1.4% (loop), -1.0% (nbody) |
 | [Machine ints divide on the fast path](#machine-ints-divide-on-the-fast-path) | -10.7% (loop), -5.0% (sort), -4.9% (generators) |
 | [Any comparison of two numbers skips the dispatch](#any-comparison-of-two-numbers-skips-the-dispatch) | -0.9% (generators) |
+| [A dict read goes straight to its entries](#a-dict-read-goes-straight-to-its-entries) | -1.2% (strings), -0.7% (dicts) |
 
 ### Releasing a number or string frees it at once
 
@@ -871,6 +872,19 @@ Its comparison went to `comparison` even when both sides were machine
 ints or floats. Each link of a comparison chain now asks `number_order`
 first, as the fast path and `condition` do. Instructions: generators
 -0.9%, the rest 0%.
+
+### A dict read goes straight to its entries
+
+`d[k]` on an exact dict passed the list, range and class tests of
+`get_index` and asked `builtin_base` before reaching the dictionary.
+Hashing a str whose hash was already kept still entered the recursion
+guard and the general hash switch, and every probe retained the
+candidate key and checked afterwards that no comparison callback had
+moved it. An exact dict now comes right after the list case, a kept str
+hash is returned at once, and a probe that finds the key itself or two
+exact str values decides without the guard, since no code can run. A
+loop of `x = d["a"]` fell from 564 to 452 instructions per iteration.
+Instructions: strings -1.2%, dicts -0.7%, the rest 0%.
 
 ## Tried and left out
 

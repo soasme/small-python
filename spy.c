@@ -1839,6 +1839,8 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     return -1;
 }
 static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
+    /* A str keeps its hash once computed. */
+    if (value->type == SPY_STRING && value->as.string.hash) { *result = value->as.string.hash; return 0; }
     if (deeper(c, "")) return -1;
     int status = hash_object(c, value, result);
     c->depth--; return status;
@@ -1958,7 +1960,14 @@ static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
     int pending_error = map->ctx->error_type[0] != 0;
     MapCursor cursor = map_cursor(map, hash);
     for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
-        SPYValue *candidate = spy_retain(map->as.map.items[i].key);
+        /* The key itself, or two exact str values, compare without a callback. */
+        SPYValue *candidate = map->as.map.items[i].key;
+        if (candidate == key) return i;
+        if (candidate->type == SPY_STRING && key->type == SPY_STRING) {
+            if (equal(candidate, key, 0)) return i;
+            continue;
+        }
+        spy_retain(candidate);
         int matches = candidate == key || equal(candidate, key, 0);
         int unchanged = (size_t)i < map_used(map) && map->as.map.items[i].key == candidate &&
             (!cursor.indexed || cursor.changes == map->as.map.changes);
@@ -8502,12 +8511,14 @@ static NO_INLINE SPYValue *call_pair(SPYContext *c, SPYValue *v, const char *nam
     return v ? call_special(c, v, name, 2, args) : call_intrinsic(c, name, 2, args);
 }
 static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
-    /* An exact list or tuple at a small int position in range comes first. */
+    /* An exact list or tuple at a small int position in range, or an exact
+     * dict, comes first. */
     if ((v->type == SPY_LIST || v->type == SPY_TUPLE) && key->type == SPY_INT && !key->as.integer_data.big) {
         int64_t i = key->as.integer_data.small, len = (int64_t)v->as.seq.len;
         if (i < 0) i += len;
         if (i >= 0 && i < len) return spy_retain(v->as.seq.items[i]);
     }
+    if (v->type == SPY_DICT) return dict_subscript(c, v, v, key);
     if (v->type == SPY_RANGE) return range_index(c, v, key);
     if (v->type == SPY_CLASS && v->as.map.meta) {
         SPYValue *method = special_method(c, v, "__getitem__");
