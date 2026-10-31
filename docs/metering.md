@@ -271,7 +271,8 @@ open ([packaging/protocol.md](packaging/protocol.md) §10).
   bodies, `exec` of large source). Most repeat one operation forever; under
   a budget of 1,000,000 steps each must be stopped within its time, not
   completed or interrupted by its watchdog, an interrupt callback. The
-  probe reports the slowest, about 1 s on the reference machine.
+  probe reports the three programs slowest per step, against the target
+  of one microsecond: about 0.6 µs on the reference machine.
 - **Fuzzing**: every target runs under a step limit that ends it far
   within libFuzzer's `-timeout=10`, which `make fuzz` no longer ignores, so
   any unmetered operation is a finding; each one becomes a probe program.

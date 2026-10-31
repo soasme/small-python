@@ -123,24 +123,34 @@ static double now(void) {
 static int watchdog(void *data) { return now() > *(double *)data + 10; }
 
 int main(void) {
-    double slowest = 0;
-    size_t worst = 0, failed = 0, n = sizeof(programs) / sizeof(*programs);
-    for (size_t i = 0; i < n; i++) {
+    enum { N = sizeof(programs) / sizeof(*programs), SHOWN = 3 };
+    double took[N];
+    size_t failed = 0;
+    for (size_t i = 0; i < N; i++) {
         SPYContext *c = spy_context_new();
         double start = now();
         spy_set_step_limit(c, 1000000);
         spy_set_interrupt(c, watchdog, &start);
         int status = spy_exec(c, programs[i], "probe.py");
-        double took = now() - start;
+        took[i] = now() - start;
         if (status == 0 || spy_stopped(c) != SPY_STOP_STEPS) {
-            fprintf(stderr, "metering: %s after %.3fs (%s: %s):\n%s\n", status ? "not stopped by steps" : "completed", took,
+            fprintf(stderr, "metering: %s after %.3fs (%s: %s):\n%s\n", status ? "not stopped by steps" : "completed", took[i],
                     status ? spy_error_type(c) : "", status ? spy_error_message(c) : "", programs[i]);
             failed++;
         }
-        if (took > slowest) { slowest = took; worst = i; }
         spy_context_free(c);
     }
     if (failed) return 1;
-    printf("Metering: %zu programs stopped by 1,000,000 steps, the slowest in %.3fs:\n%s\n", n, slowest, programs[worst]);
+    /* The budget's time over its steps: what one step costs at most in each
+     * family, against the target of one microsecond. */
+    printf("Metering: %d programs stopped by 1,000,000 steps; the slowest per step:\n", (int)N);
+    for (int shown = 0; shown < SHOWN; shown++) {
+        size_t worst = 0;
+        for (size_t i = 1; i < N; i++) if (took[i] > took[worst]) worst = i;
+        printf("  %4.0f ns  ", took[worst] * 1e3);
+        for (const char *ch = programs[worst]; *ch; ch++) *ch == '\n' ? fputs("; ", stdout) : putchar(*ch);
+        putchar('\n');
+        took[worst] = -1;
+    }
     return 0;
 }
