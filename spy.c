@@ -85,7 +85,8 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
-       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048 };
+       F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
+       F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -7337,6 +7338,12 @@ static Node *operator_right(Node *n) {
         n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
 }
+static int plain_call(Node *n) {
+    size_t argc = 0;
+    for (Node *arg = n->args; arg; arg = arg->next, argc++)
+        if (argc == 8 || arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) return 0;
+    return 1;
+}
 static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
@@ -7443,6 +7450,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 n->constant = number_literal(c, n);
             }
             if (operator_right(n)) n->flags |= F_OPERATOR;
+            if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL;
         }
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
@@ -12610,6 +12618,10 @@ static int set_attribute(SPYContext *c, SPYValue *object, const char *name, SPYV
 }
 
 typedef struct { SPYValue *env, *unit; int interactive; } Frame;
+/* A literal's value or a name found along the fast path, borrowed. */
+static ALWAYS_INLINE SPYValue *leaf_operand(Frame *f, Node *n) {
+    return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
+}
 /* FLOW_HALT: an error raised before a suspended generator resumed, which stays suspended. */
 enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR, FLOW_YIELD, FLOW_HALT };
 enum { AWAIT_NONE, AWAIT_YIELD, AWAIT_DELEGATE, AWAIT_NEXT, AWAIT_COMPREHENSION };
@@ -13774,21 +13786,25 @@ static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self
 static NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
     SPYValue *a = NULL, *result = NULL;
     /* Up to eight plain positional arguments go on the C stack, after
-     * the instance a method call passes first. */
-    size_t argc = 0;
-    for (Node *arg = n->args; arg && argc <= 8; arg = arg->next, argc++)
-        if (arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) argc = 9;
+     * the instance a method call passes first; a literal or name among
+     * them, while tick has only the line to record, is taken as it is. */
+    int plain = (n->flags & F_PLAIN_CALL) != 0;
     SPYValue *argv[9];
-    size_t done = 0;
+    size_t done = 0, argc = 0;
     int method = -1;
-    if (argc <= 8 && n->a->kind == N_ATTR) {
+    if (plain && n->a->kind == N_ATTR) {
         a = method_callee(c, f, n->a, argv, &method);
         done = argv[0] != NULL;
     } else a = eval(c, f, n->a);
     if (!a) return NULL;
-    if (argc <= 8) {
+    if (plain) {
+        for (Node *arg = n->args; arg; arg = arg->next) argc++;
         argc += done;
-        for (Node *arg = n->args; arg && (argv[done] = eval(c, f, arg)); arg = arg->next) done++;
+        for (Node *arg = n->args; arg; arg = arg->next) {
+            SPYValue *value = (arg->constant || arg->kind == N_NAME) && quiet(c, f) ? leaf_operand(f, arg) : NULL;
+            if (!(argv[done] = value ? spy_retain(value) : eval(c, f, arg))) break;
+            done++;
+        }
         if (done == argc) {
             relocate(c, n);
             result = method < 0 ? call_keywords(c, a, argc, argv, NULL) : call_native_method(c, a, method, n->a->b->global_key, argc, argv);
@@ -13945,10 +13961,6 @@ container_fail:
     return result;
 }
 static int ordering(int op) { return op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE; }
-/* A literal's value or a name found along the fast path, borrowed. */
-static ALWAYS_INLINE SPYValue *leaf_operand(Frame *f, Node *n) {
-    return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
-}
 /* The item of x at y when x is a list or tuple and y an int within it,
  * borrowed, else NULL. */
 static ALWAYS_INLINE SPYValue *sequence_item(SPYValue *x, SPYValue *y) {

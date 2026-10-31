@@ -114,6 +114,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Hot sites make numbers inline](#hot-sites-make-numbers-inline) | -2.5% (nbody), -1.8% (loop), -1.3% (fib) |
 | [Any single comparison is tested without a bool](#any-single-comparison-is-tested-without-a-bool) | -12.2% (loop); fib +0.6% |
 | [A store takes its target's operands at hand](#a-store-takes-its-targets-operands-at-hand) | -3.2% (nbody), -0.8% (strings), -0.6% (classes) |
+| [A call knows its arguments are plain](#a-call-knows-its-arguments-are-plain) | -1.1% (strings), -0.7% (classes), -0.5% (fib) |
 
 ### Releasing a number or string frees it at once
 
@@ -795,6 +796,15 @@ tick has only the line to record, and held across the store, which may
 run a `__setattr__` or `__setitem__` that unbinds it. Instructions:
 nbody -3.2%, strings -0.8%, classes -0.6%, loop +0.2%, the rest 0%;
 per iteration, a loop of `o.x = i` -9% and one of `l[1] = i` -18%.
+
+### A call knows its arguments are plain
+
+Every call looked at the kind of each argument to decide whether up to
+eight plain positional ones could go on the C stack. The compiler now
+marks such calls `F_PLAIN_CALL` once, and a literal or name argument is
+taken as it is while tick has only the line to record, as an operator's
+operands are. Instructions: strings -1.1%, classes -0.7%, fib -0.5%,
+dicts and bigint -0.4%, the rest within 0.2%.
 
 ## Tried and left out
 
