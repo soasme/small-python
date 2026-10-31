@@ -841,7 +841,11 @@ filename and found nothing waiting, and queueing a callback, setting a
 step limit, a trace function or any change of the copied filename clears
 it. The test is the pending error and one comparison, on every statement
 and every operand taken at hand. Instructions: generators -1.5%, loop
--1.4%, nbody -1.0%, fib -0.7%, the rest -0.2% to -0.6%.
+-1.4%, nbody -1.0%, fib -0.7%, the rest -0.2% to -0.6%. Wall time on
+the M2 (15 runs): classes -4.2%, nbody -3.4%, the rest within 1%, but
+generators +2.9%, although a clang build runs 2.8% fewer instructions
+there too. Placing the field beside `error_type`, aligning functions and
+reordering the test did not recover it; the cause is not found.
 
 ## Tried and left out
 

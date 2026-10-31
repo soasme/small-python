@@ -202,6 +202,10 @@ struct SPYContext {
     /* The fields every step reads come first, where arm64 loads reach them
      * with one instruction; the large tables are at the end. */
     char error_type[64]; /* The pending error's class name; empty when none. */
+    /* The unit whose ticks have nothing to do but record their line, or
+     * NULL: its filename is copied, no callback waits in either queue, no
+     * steps are counted and no trace function watches. Borrowed. */
+    SPYValue *quiet_unit;
     SPYValue *values, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
     /* class_lookup results, valid while classes_changed holds the epoch they
      * were found in. A change to a class's entries or MRO, or a class's
@@ -257,10 +261,6 @@ struct SPYContext {
      * boundary, after which an unresurrected instance is freed. */
     SPYValue **finalize_calls;
     size_t finalize_calls_len, finalize_calls_cap;
-    /* The unit whose ticks have nothing to do but record their line, or
-     * NULL: its filename is copied, no callback waits in either queue, no
-     * steps are counted and no trace function watches. Borrowed. */
-    SPYValue *quiet_unit;
     /* The live cells of variables, borrowed: each variable has one cell,
      * shared by every closure over it (9.1); a cell leaves when freed. */
     SPYValue **cells;
