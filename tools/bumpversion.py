@@ -2,8 +2,8 @@
 """Preview a release in a temporary clone; use -y to commit, tag, and push it.
 
 Every package shares the engine's version: VERSION, spy.h, the manual, the
-Python and npm packages, the Rust crates, and the todo example's dependency
-on the published small-python, with the version fixtures of their tests.
+Python and npm packages, and the Rust crates, with the version fixtures of
+their tests.
 The tag publishes all of them (.github/workflows/publish.yml)."""
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ QUOTED = {
     "rust/small-python/Cargo.toml": 1,
     "rust/small-python-sys/Cargo.toml": 1,
     "rust/small-python-worker/Cargo.toml": 1,
-    "examples/todo/Cargo.toml": 2,
 }
 LOCKS = ("python/uv.lock", "rust/Cargo.lock")
 RELEASE_FILES = ("VERSION", "docs/manual.md", *QUOTED, *LOCKS)
