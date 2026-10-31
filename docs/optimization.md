@@ -1069,6 +1069,11 @@ nbody -0.8%, classes -0.7%.
 
 ## Tried and left out
 
+- **A one-comparison stack guard.** Keeping the stack's floor instead of
+  its top made `deeper` one unsigned comparison: 0.2% to 0.6% fewer
+  instructions on most programs, but fib 2.1% to 3.3% slower on the M2 in
+  two runs, and classes and generators no faster.
+
 - **An if's branch in the same statement loop.** Keeping up to eight
   statements to resume after a branch in a local array, instead of
   running the branch through a nested `execute`, cost `nbody` 1.1% and
