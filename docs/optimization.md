@@ -150,6 +150,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A dict read goes straight to its entries](#a-dict-read-goes-straight-to-its-entries) | -1.2% (strings), -0.7% (dicts) |
 | [The machine loads leaves itself](#the-machine-loads-leaves-itself) | -2.2% (generators) |
 | [Comparisons become machine steps](#comparisons-become-machine-steps) | -0.1% (generators) |
+| [A function reads its module's globals directly](#a-function-reads-its-modules-globals-directly) | -4.3% (fib), -0.8% (strings) |
 
 ### Releasing a number or string frees it at once
 
@@ -937,6 +938,20 @@ loop's fixed work of about 20 instructions. So comparisons now compile
 to machine steps and the rest stay whole until the loop is cheaper. The
 machine's `BC_BINARY` and `BC_COMPARE` also try the number fast paths
 first, as `eval` does. Instructions: generators -0.1%, the rest 0%.
+
+### A function reads its module's globals directly
+
+`fib` inside `fib` missed the remembered local and went to `name_outer`,
+which walked from the function's environment to the module's dictionary
+and there found the remembered entry: about 41 instructions, call and
+loop included, for a lookup that already knew its answer. `name_fast`
+now tries that entry itself when the node was last found outside the
+running scope and the function's parent is an exact dictionary, the
+module's globals. Builtins and closures keep the walk. Asking whether a
+scope's locals are ordered is now an inline test, with the ordering out
+of line. Instructions: fib -4.3%, strings -0.8%, classes -0.6%, the rest
+within 0.2%. Wall time: fib 44.3 -> 41.8 ms (-5.8%), strings -1.3%, nbody
++0.3% and +1.9% in two runs.
 
 ## Tried and left out
 

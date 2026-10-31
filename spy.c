@@ -2449,8 +2449,13 @@ static ALWAYS_INLINE Entry *remembered_local(SPYValue *env, Node *n) {
 }
 static SPYValue *name_outer(SPYValue *env, Node *n);
 static ALWAYS_INLINE SPYValue *name_fast(SPYValue *env, Node *n) {
-    /* A remembered local, or at module level a remembered global. */
+    /* A remembered local, at module level a remembered global, or a
+     * global a function's scope does not bind, remembered in the module's
+     * dictionary that is the function's parent. */
     Entry *entry = env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+    if (!entry && n->slot_kind == NAME_PARENT && env->type == V_ENV && env->as.map.scope == n->slot_scope &&
+        env->as.map.parent->type == SPY_DICT && plain_locals(env, n->slot_scope))
+        entry = remembered_global(env->as.map.parent, n);
     if (entry) return entry->value->type == V_UNBOUND || entry->value->type == SPY_LAZY_IMPORT ? NULL : entry->value;
     return name_outer(env, n);
 }
@@ -14090,8 +14095,7 @@ static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
  * entries, in co_varnames order: positional and keyword-only parameters,
  * *args, **kwargs, then the other locals as the scope found them; and the
  * number of parameters when all are positional, else SIZE_MAX. */
-static int scope_order(SPYContext *c, Scope *scope) {
-    if (scope->order) return 0;
+static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
     size_t *order = allocate(c, (scope->len + 1) * sizeof(*order)), len = 0;
     if (!order) return -1;
     Node *params = scope->kind == S_FUNCTION ? scope->owner->args : NULL;
@@ -14113,6 +14117,9 @@ static int scope_order(SPYContext *c, Scope *scope) {
     }
     scope->order = order; scope->order_len = len;
     return 0;
+}
+static ALWAYS_INLINE int scope_order(SPYContext *c, Scope *scope) {
+    return scope->order ? 0 : order_scope(c, scope);
 }
 /* Give a new plain function environment its scope's locals: the first
  * argc bound to argv, which are its first parameters, the rest unbound. */
