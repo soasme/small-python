@@ -25,7 +25,7 @@ $ ./spy -c 'print(sum(range(10)))'
 - **Sandboxed files**: scripts can only `open` the directories the host mounts.
 - **Packages** for [Python, JavaScript, Rust, and Go](#packages), each able to
   run untrusted code in a sandboxed worker.
-- **Fast startup**: about 260 µs to create a context, run hello world, and
+- **Fast startup**: about 190 µs to create a context, run hello world, and
   tear it down (Apple M2, `-O2`).
 
 ## Conformance
