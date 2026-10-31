@@ -158,6 +158,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A method object calls its function directly](#a-method-object-calls-its-function-directly) | -0.7% (classes) |
 | [Built text starts at 32 bytes; short text lives in its value](#built-text-starts-at-32-bytes-short-text-lives-in-its-value) | -5.5% (dicts), -4.5% (strings); M2: -5% each |
 | [A called name is taken at hand](#a-called-name-is-taken-at-hand) | -1.9% (fib), -0.4% (dicts), -0.3% (classes) |
+| [A class call tests the builtin types once](#a-class-call-tests-the-builtin-types-once) | -0.6% (dicts), -0.5% (classes), -0.4% (bigint) |
 
 ### Releasing a number or string frees it at once
 
@@ -1053,6 +1054,18 @@ paid for both lookups (classes +0.3%), so the call node carries
 `F_OPERATOR`. Instructions: fib -1.9%, dicts -0.4%, classes and bigint
 -0.3%, the rest within 0.1%. Wall time, beside a running fuzzer: fib
 -3.1%, classes -1.9%, dicts unchanged.
+
+### A class call tests the builtin types once
+
+`type.__call__` compared the class with ten builtin types that have
+constructors of their own before trying a native constructor or a plain
+`__init__`, so `Vec(x, y)` and `str(i)` paid ten comparisons. Those types,
+like every builtin type without a native constructor, are marked 2 in
+their flags, which never change, so one test of the mark now guards the
+comparisons. Checking `plain_init`'s cache first instead saved classes as
+much but cost dicts 0.3%. Instructions: dicts -0.6%, classes -0.5%,
+bigint -0.4%, nbody -0.2%, the rest within 0.1%. Wall time: dicts -2.6%,
+nbody -0.8%, classes -0.7%.
 
 ## Tried and left out
 

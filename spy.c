@@ -14890,26 +14890,28 @@ static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
 }
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *result = NULL, *plain;
-    if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
-    if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
-    if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
-    if (fn == c->types[SPY_CELL]) return cell_construct(c, argc, argv, keywords);
-    if (fn == c->types[SPY_TRACEBACK]) return traceback_construct(c, argc, argv, keywords);
-    if (fn == c->types[SPY_FUNCTION]) return function_construct(c, argc, argv, keywords);
-    if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
-        result = template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
-    else if (fn == c->types[SPY_MODULE]) result = module_construct(c, argc, argv, keywords);
-    else if (fn == c->types[SPY_METHOD]) result = method_construct(c, argc, argv, keywords);
-    else if (fn->as.map.native) {
-        result = builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, name_local(fn, "__name__")->as.string.data);
-    } else if (fn->as.map.flags == 2) {
+    /* The builtin types without a native constructor are marked 2. */
+    if (fn->as.map.flags == 2) {
+        if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_CELL]) return cell_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_TRACEBACK]) return traceback_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_FUNCTION]) return function_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_TEMPLATE] || fn == c->types[SPY_INTERPOLATION])
+            return template_construct(c, fn == c->types[SPY_TEMPLATE] ? SPY_TEMPLATE : SPY_INTERPOLATION, argc, argv, keywords);
+        if (fn == c->types[SPY_MODULE]) return module_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_METHOD]) return method_construct(c, argc, argv, keywords);
         int singleton = fn == c->types[SPY_NONE] || fn == c->types[SPY_NOT_IMPLEMENTED] || fn == c->types[SPY_ELLIPSIS];
         if (singleton && !argc && (!keywords || !keywords->as.map.len))
-            result = spy_retain(fn == c->types[SPY_NONE] ? c->none : fn == c->types[SPY_ELLIPSIS] ? c->ellipsis : c->not_implemented);
+            return spy_retain(fn == c->types[SPY_NONE] ? c->none : fn == c->types[SPY_ELLIPSIS] ? c->ellipsis : c->not_implemented);
         /* The singletons' tp_new names the C type: ellipsis is EllipsisType. */
-        else if (singleton) errorf(c, "TypeError", "%s takes no arguments", fn == c->types[SPY_ELLIPSIS] ? "EllipsisType" : name_local(fn, "__name__")->as.string.data);
-        else errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
-    } else if ((plain = plain_init(c, fn))) {
+        if (singleton) return errorf(c, "TypeError", "%s takes no arguments", fn == c->types[SPY_ELLIPSIS] ? "EllipsisType" : name_local(fn, "__name__")->as.string.data);
+        return errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
+    }
+    if (fn->as.map.native)
+        return builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, name_local(fn, "__name__")->as.string.data);
+    if ((plain = plain_init(c, fn))) {
         /* object.__new__ then a Python __init__, called directly. */
         if (!(result = new_instance(c, fn))) return NULL;
         SPYValue *value = call_with_self(c, plain, result, argc, argv, keywords);
