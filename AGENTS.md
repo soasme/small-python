@@ -273,6 +273,8 @@ by the task and do not require repeated confirmation.
 ## Workflow
 
 * Commit as often as you can when you made progress.
+* Before pushing, run the CI workflow locally with `tools/run_workflow.py`
+  (`act` in Docker; `-j test` for one job). It runs the Linux jobs only.
 * Run bench and update docs before release a new version.
 * Docs, TLA+ Models, Tests, Bench, Examples should not break before release.
 * Commit message should come with a brief of test or bench results.
