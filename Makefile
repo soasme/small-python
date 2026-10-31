@@ -173,7 +173,7 @@ install: all
 	install -m755 spy spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h spy-std.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
-	install -m644 docs/manual.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
+	install -m644 docs/manual.md docs/api.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
 	install -m644 docs/testing/cython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -d "$(DESTDIR)$(PREFIX)/share/doc/smallpython/licenses"
@@ -182,7 +182,15 @@ install: all
 docs:
 	$(PYTHON) tools/check_docs.py
 
-.PHONY: unicode-data check-unicode test-unicode intrinsics check-intrinsics
+.PHONY: unicode-data check-unicode test-unicode intrinsics check-intrinsics api-reference check-api
+# docs/api.md is generated from spy.h; check-api also compares the exported
+# symbols with spy.h and spy.h with the last release tag.
+api-reference:
+	$(PYTHON) tools/api.py
+
+check-api: libspy.a
+	CC='$(CC)' $(PYTHON) tools/api.py --check libspy.a
+
 # The intrinsics header is checked in; regenerate it after editing intrinsics.py.
 intrinsics:
 	$(PYTHON) tools/build_intrinsics.py
@@ -199,7 +207,7 @@ check-unicode:
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
 
-test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cython check-intrinsics
+test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cython check-intrinsics check-api
 	./tests/api
 	./tests/metering
 	./tests/oom

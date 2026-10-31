@@ -16,6 +16,7 @@ from pathlib import Path
 # Each file spells the version as "X.Y.Z" exactly this many times.
 QUOTED = {
     "spy.h": 1,
+    "docs/api.md": 1,
     "python/pyproject.toml": 1,
     "python/tests/test_isolation.py": 1,
     "javascript/package.json": 1,

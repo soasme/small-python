@@ -27477,5 +27477,6 @@ int spy_exec_module(SPYContext *c, SPYValue *module, const char *source, const c
     leave(c, NULL);
     return result.flow == FLOW_ERROR ? -1 : 0;
 }
+const char *spy_version(void) { return SPY_VERSION; }
 void spy_set_opaque(SPYContext *c, void *opaque) { c->opaque = opaque; }
 void *spy_get_opaque(const SPYContext *c) { return c->opaque; }

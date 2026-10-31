@@ -734,6 +734,9 @@ separately.
 
 ### 3.4 C API
 
+This section explains how the API fits together. [api.md](api.md), generated
+from `spy.h`, states each declaration's contract.
+
 #### 3.4.1 Contexts
 
 `spy_context_new()` returns an independent context or `NULL` on allocation
@@ -885,6 +888,21 @@ operating system's sandbox around the context for untrusted programs.
 values collected. Externally retained values are roots. The host schedules
 collection at suitable safe points. `spy_live_values` reports the current value
 count. Context teardown frees remaining cycles regardless of collection timing.
+
+#### 3.4.8 Stability
+
+`SPY_VERSION` is the header's version and `spy_version()` the library's.
+Releases with the same major version, or before 1.0 the same minor version,
+are compatible: a later one only adds functions, callback types and
+enumeration constants (appended, so existing values keep their numbers),
+and never changes or removes a declaration. A declaration is removed only in
+an incompatible release, after one release that marks it deprecated in
+`spy.h`; the Changelog lists every incompatible change. `make check-api`
+enforces this against the last release tag by compiling that release's
+declarations against the current header. It also requires every
+declaration to be documented and `libspy.a` to export exactly the
+functions `spy.h` declares. At 0.x the minor version still breaks; 1.0
+will freeze the API and ABI under these rules.
 
 ### 3.5 Python binding
 
@@ -1119,7 +1137,9 @@ tools.
 
 Validate the checked-in documentation with `make docs`. The standard is
 edited by hand; `make tla-coverage` checks that each of its sections is mapped
-to the TLA+ models that cover it.
+to the TLA+ models that cover it. `make api-reference` regenerates
+[api.md](api.md) from `spy.h`, and `make check-api`, part of `make test`,
+checks it (3.4.8).
 
 `make unicode-data` regenerates the checked-in Unicode property table with the
 pinned oracle; `make check-unicode` verifies it. Ordinary C builds need neither

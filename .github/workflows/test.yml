@@ -9,7 +9,10 @@ jobs:
         compiler: [clang, gcc]
     runs-on: ${{ matrix.os }}
     steps:
+      # check-api compares spy.h with the last release tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.15'

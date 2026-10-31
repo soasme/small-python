@@ -30,14 +30,13 @@ language. Most other sections depend on this one being solid.
 
 ### Stable C API and ABI at 1.0
 
-`spy.h` already keeps `SPYContext` and `SPYValue` opaque and has a
-`SPY_VERSION` macro, but it changes freely, and every binding follows it by
-hand. Before 1.0: add a run-time version query, so a host can detect a
-library built from a different header, and document ownership for every
-function in the header itself. At 1.0, declare the ABI stable. Add only
-functions, never change one, and deprecate for one minor release before
-removing. A CI job compares the exported symbols and the header against
-the last release and fails on an incompatible change.
+The rules are in place ([manual 3.4.8](docs/manual.md#348-stability)):
+`spy_version()` reports the library's version next to the header's
+`SPY_VERSION`, every declaration in `spy.h` states its ownership and errors,
+and `make check-api` compiles the last release's declarations against the
+current header and compares `libspy.a`'s exports with it. Remaining: settle
+the API's rough edges while 0.x still allows it (`spy_truth` reports a
+failure as 0 with an error set, not -1), then declare the ABI stable at 1.0.
 
 ### Build options
 
@@ -82,9 +81,9 @@ platform's own items below.
 
 ### API reference
 
-Generate a reference for `spy.h` from the header (each function's
-contract, ownership and errors) and publish it with every release, next
-to the manual and the standard.
+[docs/api.md](docs/api.md) is generated from `spy.h` (`make
+api-reference`), checked current by `make check-api`, and installed with the
+manual. Remaining: publish it as a web page with each release.
 
 ## Distribution
 

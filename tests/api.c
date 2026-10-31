@@ -68,6 +68,7 @@ static void namespace_cycles(void) {
     SPYContext *c = spy_context_new();
     assert(c);
     int host = 0;
+    assert(!strcmp(spy_version(), SPY_VERSION));
     assert(!spy_get_opaque(c));
     spy_set_opaque(c, &host);
     assert(spy_get_opaque(c) == &host);
