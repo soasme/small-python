@@ -165,6 +165,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [An append that fits does not call grow](#an-append-that-fits-does-not-call-grow) | -1.0% (strings), -0.3% (bigint) |
 | [A machine test is one step](#a-machine-test-is-one-step) | -3.0% (generators); M2: generators -5.5% |
 | [A machine assignment skips the statement dispatch](#a-machine-assignment-skips-the-statement-dispatch) | -1.8% (generators); M2: generators -13%, nbody -2.7% |
+| [Hot functions start on a cache line](#hot-functions-start-on-a-cache-line) | none; steadies wall-time comparisons |
 
 ### Releasing a number or string frees it at once
 
@@ -1148,6 +1149,20 @@ same change ran nbody 2.7% faster, as code placement decides.
 Instructions: generators -1.8%, dicts -0.2%, classes -0.1%, the rest
 unchanged. Wall time: generators 137.9 -> 120.0 ms (-13%), nbody -2.7%,
 strings and sort -0.8%, the rest within 0.6%.
+
+### Hot functions start on a cache line
+
+Three changes in a row moved nbody's wall time by 2% to 3% on the M2
+without changing its instructions, in either direction: clang does not
+place functions in source order, so a change in the generator machine
+moved the walker's hot loops relative to cache lines and branch
+predictor sets. `eval`, `execute_statements`, `condition`, `eval_call`,
+`call_function` and `run_machine` are now `HOT`, aligned to 64 bytes, so
+each keeps its own placement whatever changes around it. Alone it is
+neutral: every program within 0.6% of before but sort (+1.6%, its
+instructions unchanged). With it, fusing a leaf yield (the next entry)
+measured nbody +0.2%, where the same change had measured +2% to +3%
+without it. Aligning every function instead cost 0.5% to 1%.
 
 ## Tried and left out
 

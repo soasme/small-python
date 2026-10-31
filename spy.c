@@ -53,9 +53,11 @@
 #if defined(__GNUC__)
 #define NO_INLINE __attribute__((noinline))
 #define ALWAYS_INLINE inline __attribute__((always_inline))
+#define HOT __attribute__((aligned(64)))
 #else
 #define NO_INLINE
 #define ALWAYS_INLINE inline
+#define HOT
 #endif
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
@@ -13848,7 +13850,7 @@ static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self
 }
 /* A call node, outside eval_inner: its argument array would make every
  * evaluation reserve and guard stack space for it. */
-static NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
+static HOT NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
     SPYValue *a = NULL, *result = NULL;
     /* Up to eight plain positional arguments go on the C stack, after
      * the instance a method call passes first; a literal or name among
@@ -14071,7 +14073,7 @@ static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
     return n->kind == N_INDEX ? item_operand(f, n) : leaf_operand(f, n);
 }
 /* The truth of a condition: 1, 0, or -1 with an error set. */
-static int condition(SPYContext *c, Frame *f, Node *n) {
+static HOT int condition(SPYContext *c, Frame *f, Node *n) {
     int truth;
     /* A single comparison of two numbers is its own truth, without a bool. */
     if (n->kind == N_COMPARE && !n->args->next && ordering(n->args->op)) {
@@ -14115,7 +14117,7 @@ static ALWAYS_INLINE SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYV
     spy_release(x); spy_release(y);
     return result;
 }
-static SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
+static HOT SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     /* A literal made once, or a name found along the fast path, cannot
      * fail, so it skips the step bookkeeping, unless a trace function
      * watches for its line. */
@@ -14725,7 +14727,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
 static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static void not_callable(SPYContext *, SPYValue *);
 /* A Python function's body, run in a new environment of its scope. */
-static SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     Node *def = fn->as.function.def;
     Scope *scope = def->scope;
     /* The common call passes exactly the parameters, by position. */
@@ -19283,7 +19285,7 @@ static NO_INLINE Result execute_match(SPYContext *c, Frame *f, Node *n) {
     spy_release(subject);
     return (Result){c->error_type[0] ? FLOW_ERROR : FLOW_NORMAL, NULL};
 }
-static Result execute_statements(SPYContext *c, Frame *f, Node *body, int single) {
+static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int single) {
     SPYValue *last = NULL;
     for (Node *n = body; n; n = single ? NULL : n->next) {
         spy_release(last); last = NULL;
@@ -19706,7 +19708,7 @@ static void finish_delegate(SPYContext *c, Machine *m) {
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assign(c, f, n); }
-static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SPYValue *thrown,
+static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SPYValue *thrown,
                           size_t argc, SPYValue *const *argv) {
     Machine *m = generator->as.generator.machine;
     Frame f = {generator->as.generator.env, generator->as.generator.unit, 0};
