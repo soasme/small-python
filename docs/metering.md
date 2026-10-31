@@ -86,8 +86,8 @@ engine, calls go through a private `call`, so a public function always
 means the host.
 
 Finalizers, weak-reference callbacks and generator cleanups that become
-due while stopped stay queued and run at the start of the next outermost
-call, under its budget. They are not dropped and do not fail.
+due while stopped stay queued and run at the first statement boundary of
+the next outermost call, under its budget. They are not dropped and do not fail.
 
 The host learns why a call failed from the context, not from the error
 type: a program can raise `RuntimeError("execution step limit exceeded")`
@@ -245,7 +245,8 @@ Each step is one commit that keeps every suite green.
 1. Done: `spend` replaces the step count; outermost calls refill; the
    limit leaves `tick`. This fixed the refill bug and the 56% cost of a
    limit, with no benchmark program slower.
-2. The stop rule: a stopped flag, `spy_stopped`, queued finalizers.
+2. Done: the stop rule, with a stopped flag, `spy_stopped`, and finalizers
+   queued while stopped.
 3. Native operations spend steps, one family at a time, each with its
    probe programs.
 4. `mem_alloc` and the memory limit; the worker's renaming is removed.

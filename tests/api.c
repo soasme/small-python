@@ -638,6 +638,17 @@ int main(void) {
         assert(!strcmp(spy_error_type(c), "RuntimeError"));
     }
     assert(integer(c, spy_eval(c, "caught", "caught.py")) == 0);
+    /* The context tells a stop from the same error raised by the program;
+     * a finalizer that became due while stopped runs in the next call. */
+    assert(spy_exec(c, "class Dying:\n    def __del__(self): died.append(1)\ndied = []\n"
+                       "def f():\n    d = Dying(); d.me = d\n    while True: pass\nf()", "dying.py") == -1);
+    assert(spy_stopped(c) == SPY_STOP_STEPS);
+    spy_clear_error(c);
+    spy_collect(c);
+    assert(integer(c, spy_eval(c, "pass\nlen(died)", "died.py")) == 1);
+    assert(spy_stopped(c) == 0);
+    assert(spy_exec(c, "raise RuntimeError('execution step limit exceeded')", "raised.py") == -1);
+    assert(spy_stopped(c) == 0);
     /* Each outermost call, spy_call included, gets the whole budget; a host
      * function calling back shares its caller's. */
     execute(c, "def spin(n):\n    for i in range(n): pass\n    return n");

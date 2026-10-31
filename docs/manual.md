@@ -846,8 +846,11 @@ and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
 `spy_call_keywords`: one per Python call and loop pass, one per 64 bytes of
 source parsed, and some native work in proportion to its operands; zero means
 unlimited. A host function calling back shares its caller's budget. Once the
-budget is spent every further step fails with `RuntimeError`, so no handler or
-`finally` body runs. It is not a memory or wall-time quota and does not yet
+budget is spent the call is stopped: every further step fails with
+`RuntimeError`, so no handler or `finally` body runs, and finalizers that
+become due wait for the next outermost call. `spy_stopped` returns
+`SPY_STOP_STEPS` after such a call and zero after any other, which tells a
+stop from the same error raised by the program. It is not a memory or wall-time quota and does not yet
 meter every native operation ([metering.md](metering.md)). This experimental
 runtime is not an isolation boundary for untrusted programs.
 

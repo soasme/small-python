@@ -279,13 +279,14 @@ struct SPYContext {
     SPYValue **cells;
     size_t cells_len, cells_cap;
     int weak_running;
+    int stopped; /* Why the outermost call stopped (SPY_STOP_*), or 0. */
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
     SPYValue *small_ints[262]; /* -5 through 256, shared as in CPython. */
     SPYValue *unbound; /* What a forwarded empty cell reads as. */
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
     SPYValue *inherited_exception; /* Borrowed from a suspended caller. */
-    /* Steps left in this outermost call: SIZE_MAX without a limit, zero once
-     * spent, when every tick fails. */
+    /* Steps left in this outermost call: SIZE_MAX without a limit, zero
+     * while stopped, when every tick fails. */
     size_t live, fuel, step_limit, depth;
     size_t collected_live; /* live after the last collection, for gc.get_count(). */
     /* Python frames are limited by sys.setrecursionlimit; the engine's own C
@@ -446,18 +447,20 @@ enum { TRACE_CALL, TRACE_LINE, TRACE_RETURN, TRACE_EXCEPTION };
 static int trace_event(SPYContext *, int, SPYValue *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static NO_INLINE SPYValue *call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) { return call_keywords(c, fn, argc, argv, NULL); }
-/* Spend n steps of the budget. Calls, loop passes, source text and native
- * work proportional to its operands spend; once the budget is spent the
- * error stays, since every later spend and tick fails too. */
-static NO_INLINE int exhausted(SPYContext *c) {
+/* Stop the context: until the next outermost call every spend and tick
+ * fails with the stop's error, so no handler or finally body runs on. */
+static NO_INLINE int halt(SPYContext *c, int reason) {
+    if (!c->stopped) c->stopped = reason;
     c->fuel = 0; c->quiet_unit = NULL;
     spy_error(c, "RuntimeError", "execution step limit exceeded");
     return -1;
 }
 static void watch(SPYContext *c) { c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit; }
 static int watched(const SPYContext *c) { return c->watch; }
+/* Spend n steps of the budget. Calls, loop passes, source text and native
+ * work proportional to its operands spend. */
 static ALWAYS_INLINE int spend(SPYContext *c, size_t n) {
-    if (n > c->fuel) return exhausted(c);
+    if (n > c->fuel) return halt(c, SPY_STOP_STEPS);
     c->fuel -= n;
     return 0;
 }
@@ -902,7 +905,7 @@ static int weak_push(SPYValue ***items, size_t *len, size_t *cap, SPYValue *valu
  * liveness is the collector's mark; otherwise a reference with a zero count is
  * already queued to be freed by the running release. */
 static SPYValue *name_local(SPYValue *, const char *);
-static void attend(SPYContext *c) { if (c->weak_calls_len || c->finalize_calls_len || !c->fuel) c->quiet_unit = NULL; }
+static void attend(SPYContext *c) { if (c->weak_calls_len || c->finalize_calls_len || c->stopped) c->quiet_unit = NULL; }
 static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
     v->weak = 0;
     for (size_t i = c->weak_len; i--;) {
@@ -1073,7 +1076,7 @@ static void weak_callbacks(SPYContext *);
  * again to free what the finalizers left unreachable. */
 static size_t collect(SPYContext *c, SPYValue *save, Buffer *report) {
     size_t count = collect_once(c, save, report);
-    while (c->finalize_calls_len && !c->weak_running) {
+    while (c->finalize_calls_len && !c->weak_running && !c->stopped) {
         weak_callbacks(c);
         count += collect_once(c, save, report);
     }
@@ -13457,7 +13460,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
          * so that every tick takes this path. */
         c->filename_from = c->settings[SET_TRACE] ? NULL : f->unit;
     }
-    if (!c->fuel) return exhausted(c);
+    if (c->stopped) return halt(c, c->stopped);
     if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len) c->quiet_unit = f->unit;
     return 0;
 }
@@ -15091,9 +15094,10 @@ static void report_unraisable(SPYContext *c, const char *text, SPYValue *subject
 /* Run __del__ of dead instances and close dead suspended generators and
  * asynchronous generators, then
  * callbacks of references whose targets died, at a statement boundary. Their
- * exceptions are unraisable, reported without disturbing the interrupted code. */
+ * exceptions are unraisable, reported without disturbing the interrupted code.
+ * While stopped they wait for the next outermost call. */
 static void weak_callbacks(SPYContext *c) {
-    if (c->weak_running) return;
+    if (c->weak_running || c->stopped) return;
     c->weak_running = 1;
     while (c->finalize_calls_len) {
         SPYValue *self = c->finalize_calls[0];
@@ -26970,6 +26974,7 @@ void spy_set_error_output(SPYContext *c, SPYWrite write, void *data) { c->error_
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; watch(c); }
+int spy_stopped(const SPYContext *c) { return c->stopped; }
 void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c);
@@ -26983,9 +26988,13 @@ static SPYValue *eval_source(SPYContext *c, const char *source, const char *file
     if (result.flow == FLOW_ERROR) { spy_release(result.value); return NULL; }
     return result.value ? result.value : spy_none(c);
 }
-/* The host calls in. The outermost call gets the whole step budget; a host
- * function calling back shares its caller's. */
-static void enter(SPYContext *c) { if (!c->entries++) c->fuel = c->step_limit ? c->step_limit : SIZE_MAX; }
+/* The host calls in. The outermost call clears a stop and gets the whole
+ * step budget; a host function calling back shares its caller's. */
+static void enter(SPYContext *c) {
+    if (c->entries++) return;
+    c->fuel = c->step_limit ? c->step_limit : SIZE_MAX;
+    c->stopped = 0;
+}
 static SPYValue *leave(SPYContext *c, SPYValue *result) { c->entries--; return result; }
 SPYValue *spy_eval(SPYContext *c, const char *source, const char *filename) {
     enter(c); return leave(c, eval_source(c, source, filename, 0));
