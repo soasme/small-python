@@ -155,6 +155,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A Python call skips the general dispatch](#a-python-call-skips-the-general-dispatch) | -2.1% (fib) |
 | [A scope keeps its own environments](#a-scope-keeps-its-own-environments) | -3.1% (classes), -1.9% (fib); M2: classes -5.8% |
 | [An environment remembers it holds its scope's keys](#an-environment-remembers-it-holds-its-scopes-keys) | -1.4% (classes), -1.2% (fib) |
+| [A method object calls its function directly](#a-method-object-calls-its-function-directly) | -0.7% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -1012,6 +1013,17 @@ the length, which is checked as before. The flag fills padding after
 `odd_keys`, so values keep their size. Instructions: classes -1.4%, fib
 -1.2%, sort -0.2%, the rest within 0.01%. Wall time: fib -1.5%, classes
 -1.3%, sort -0.6%.
+
+### A method object calls its function directly
+
+`call_with_self` puts the instance before the arguments, for a method
+object and for `__init__` after `object.__new__`. It then went through
+`call_keywords` a second time, repeating the context check, the keyword
+check, the stack guard and the type cascade its caller had just done. A
+Python function now goes to `call_function`, as a call node's does.
+Moving the same test into a helper shared with `eval_call` cost fib 0.3%,
+so each keeps its own. Instructions: classes -0.7%, the rest unchanged.
+Wall time: classes -1.0%.
 
 ## Tried and left out
 

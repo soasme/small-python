@@ -14718,7 +14718,13 @@ static NO_INLINE SPYValue *call_with_self(SPYContext *c, SPYValue *function, SPY
     if (!args) return NULL;
     args[0] = self;
     for (size_t i = 0; i < argc; i++) args[i + 1] = argv[i];
-    SPYValue *result = call_keywords(c, function, argc + 1, args, keywords);
+    /* call_keywords guarded the stack and checked the keywords. */
+    SPYValue *result;
+    if (function->type == SPY_FUNCTION && function->ctx == c && function->as.function.def &&
+        function->as.function.def->kind != N_CLASS && function->as.function.def->kind != N_COMPREHENSION) {
+        result = call_function(c, function, argc + 1, args, keywords);
+        if (c->error_type[0]) { spy_release(result); result = NULL; }
+    } else result = call_keywords(c, function, argc + 1, args, keywords);
     if (args != small) free(args);
     return result;
 }
