@@ -593,7 +593,9 @@ static ALWAYS_INLINE int size_class(int type) {
     };
     return classes[type];
 }
-static ALWAYS_INLINE size_t class_bytes(int size) { return size == 2 ? SMALL_VALUE + SHORT_TEXT : size ? SMALL_VALUE : sizeof(SPYValue); }
+/* Rounded to 16 bytes as malloc rounds, so that hash_pointer finds the low
+ * four bits of a value's address clear on every target. */
+static ALWAYS_INLINE size_t class_bytes(int size) { return ((size == 2 ? SMALL_VALUE + SHORT_TEXT : size ? SMALL_VALUE : sizeof(SPYValue)) + 15) & ~(size_t)15; }
 static size_t value_size(int type) { return class_bytes(size_class(type)); }
 static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
 /* Values are carved from aligned pools of POOL bytes, each of one size
