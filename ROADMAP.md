@@ -6,6 +6,9 @@ says where the engine stands today, so the first step is clear.
 
 ## Contents
 
+- [Embeddable library](#embeddable-library): a stable ABI at 1.0, build
+  options, context density, thin bindings, a portability matrix, an API
+  reference
 - [Distribution](#distribution): one executable from pure Python, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, metering, virtual
@@ -16,6 +19,72 @@ says where the engine stands today, so the first step is clear.
 - [Long-term maintenance](#long-term-maintenance): memory safety,
   refactoring, performance, tracking CPython
 - [Performance](#performance)
+
+## Embeddable library
+
+`libspy.a` is the product; `spy` and `spyc` are its first hosts. libghostty
+shows the path (a reusable terminal core that Ghostty's own app only
+demonstrates): it was adopted once embedders could rely on a stable ABI,
+trim the build, run many instances cheaply and bind from their own
+language. Most other sections depend on this one being solid.
+
+### Stable C API and ABI at 1.0
+
+`spy.h` already keeps `SPYContext` and `SPYValue` opaque and has a
+`SPY_VERSION` macro, but it changes freely, and every binding follows it by
+hand. Before 1.0: add a run-time version query, so a host can detect a
+library built from a different header, and document ownership for every
+function in the header itself. At 1.0, declare the ABI stable. Add only
+functions, never change one, and deprecate for one minor release before
+removing. A CI job compares the exported symbols and the header against
+the last release and fails on an incompatible change.
+
+### Build options
+
+Embedders want a smaller library with less attack surface. Let a build
+leave out host-facing parts the core does not need: `open` and `spy_mount`,
+metering, the host output callback and the generated intrinsics that only
+the standard layer uses. The language cannot shrink this way. Arbitrary
+integers, Unicode and exceptions are PLS-315 requirements. Only the default
+build claims conformance, and CI builds every option so that none rots.
+`--analyze` in `spyc` reports what each option saves.
+
+### Context density
+
+Contexts are independent and share no global state, so one process can host
+many. Measure what that costs: the memory of an empty context and of one
+that has run a small program, and a density benchmark that runs thousands
+of active contexts on a fixed machine and reports throughput and resident
+memory. Then shrink the empty context (lazy builtin tables, interned
+strings shared read-only between contexts, smaller initial heaps) until the
+benchmark stops improving. This is what the sandboxed runtime is priced by:
+one context per agent call.
+
+### Thin bindings
+
+Go, JavaScript, Python and Rust bindings exist. Keep each a thin layer over
+`spy.h` or the worker protocol ([docs/packaging/protocol.md](docs/packaging/protocol.md)),
+so that a binding is days of work and not a second implementation. Add new
+ones only when a real host asks for it. Swift, .NET and the JVM (through
+the foreign function API, without JNI) are the likely next ones. A binding
+lets a program use its host language's packages instead of a Python
+standard library ported here (see the note under
+[Standard library coverage](#standard-library-coverage)).
+
+### Portability matrix
+
+CI tests Linux and macOS, and the Python package on Windows through
+MinGW-w64. Build and test `libspy.a` itself, in CI, on Windows with MSVC
+(in C11 mode) and with MinGW, FreeBSD, Android, iOS, WebAssembly and a
+freestanding target with no C library beyond what the host supplies.
+Supporting a platform starts with a green build here, before the
+platform's own items below.
+
+### API reference
+
+Generate a reference for `spy.h` from the header (each function's
+contract, ownership and errors) and publish it with every release, next
+to the manual and the standard.
 
 ## Distribution
 
@@ -62,6 +131,11 @@ Python modules do.
 Goal: broad compatibility with the CPython 3.15 standard library, measured by
 running its own test modules, and reported as passed, failed and skipped
 separately, as the Cython baseline is.
+
+// Note at 2026-10-31: This is a very large chunk of work and hard to track
+with upstream. Ideally I want small-python to have a simple interface in each
+language so that it can call those packages in that language eco-system
+rather than build it in this project, considering it's one-man's side project.
 
 ### Module tree shaking
 
