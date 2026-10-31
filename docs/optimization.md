@@ -82,6 +82,11 @@ that, gradually, with three changes that only pay off together:
    same loop continues; calls that C makes into Python (`__init__`,
    `sorted` keys, comparison callbacks) keep the C stack guard.
 
+Measured at 0.4.0 (see *Tried and left out*), steps 2 and 3 do not pay
+yet: locals are already read by index, and a function body on the
+machine costs more than the walker even before its calls. Step 1, a
+cheaper machine step, comes first.
+
 Every step keeps the tests, spec, TLA models and fuzzers passing and is
 measured against the commit before it; a step that makes a program slower
 does not land.
@@ -1193,6 +1198,30 @@ generators 114.6 -> 109.7 ms (-4.2%), fib -3.3%; nbody +1.7%, strings
 identical: code placement again.
 
 ## Tried and left out
+
+- **Function bodies on the machine, toward calls without C recursion.**
+  A plain `def` body was compiled to machine steps, expanding every
+  statement and expression that holds a call, so that a call could
+  become a machine step that pushes a frame instead of recursing in C.
+  Run through `call_keywords`, which builds an argument tuple, fib took
+  2.1 times the walker's instructions, classes 1.25 and nbody 1.11. With
+  a direct call step that takes the arguments from the machine's stack
+  (still recursing), fib took 1.245 times, classes 1.11 and nbody 1.05.
+  Entering the machine for each call (taking a machine, setting up
+  `run_machine`, unwinding the return and releasing the machine) was
+  about 40 M of fib(25)'s 277 M instructions. A flat call removes that
+  entry and the C recursion, about 75 instructions a call in function
+  prologues, but leaves fib at about 237 M against the walker's 219 M
+  before any frame push and pop. Flat calls wait for a machine step that
+  costs well under the walker's node.
+
+- **Locals in slots.** A local is already read as a slot: a name node
+  remembers its entry's index and checks only that the entry still holds
+  its symbol's key. Guarding a slot by the environment's scope and its
+  `keyed` flag instead costs the same loads and comparisons; dropping
+  the guard altogether, which `exec` of a function's code over a
+  dictionary forbids, would save about 15 of fib's 900 instructions a
+  call. Opening a kept environment already writes only the values.
 
 - **Call arguments taken as direct operands.** Evaluating a call's
   arguments through `eval_operand`, as a binary operator's are, cost fib
