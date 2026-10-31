@@ -118,6 +118,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A kept environment serves any function of its depth](#a-kept-environment-serves-any-function-of-its-depth) | -2.4% (classes) |
 | [An attribute takes its name at hand](#an-attribute-takes-its-name-at-hand) | -2.0% (classes) |
 | [A quiet tick is one comparison](#a-quiet-tick-is-one-comparison) | -1.5% (generators), -1.4% (loop), -1.0% (nbody) |
+| [Machine ints divide on the fast path](#machine-ints-divide-on-the-fast-path) | -10.7% (loop), -5.0% (sort), -4.9% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -846,6 +847,20 @@ the M2 (15 runs): classes -4.2%, nbody -3.4%, the rest within 1%, but
 generators +2.9%, although a clang build runs 2.8% fewer instructions
 there too. Placing the field beside `error_type`, aligning functions and
 reordering the test did not recover it; the cause is not found.
+
+### Machine ints divide on the fast path
+
+`%` and `//` on two machine ints went through `binary` and the general
+integer dispatch, although `i % 7` is as common in loops as `i + 1`. The
+number fast path now floors them itself: C's truncated quotient, moved
+down by one when the remainder's sign differs from the divisor's, which
+also moves the remainder by the divisor. A zero divisor and
+`-2**63 // -1`, whose quotient leaves the machine range, still take the
+general path. The division spec test gained the four sign cases and the
+64-bit edges, on both operators and their augmented forms. Instructions:
+loop -10.7%, sort -5.0%, generators -4.9%, dicts -2.3%, classes -1.6%,
+strings -1.4%, nbody +0.3%, fib +0.2%. Wall time: loop -11.0%,
+generators -4.6%, sort -2.6%, dicts -2.1%, the rest within 1%.
 
 ## Tried and left out
 

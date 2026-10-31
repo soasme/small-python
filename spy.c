@@ -9167,7 +9167,7 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     return sequence_binary(c, op, a, b);
 }
-/* Arithmetic op on two floats, or + - * on two machine ints, without the
+/* Arithmetic op on two floats, or + - * // % on two machine ints, without the
  * general dispatch; NULL when that must decide, or after an allocation
  * failed. With owned, the caller owns a and b, and a float result takes
  * the place of one nothing else holds, as CPython's float operations
@@ -9183,6 +9183,13 @@ static ALWAYS_INLINE SPYValue *number_fast(SPYContext *c, int op, SPYValue *a, S
     }
     if (a->type != SPY_INT || b->type != SPY_INT || a->as.integer_data.big || b->as.integer_data.big) return NULL;
     int64_t x = a->as.integer_data.small, y = b->as.integer_data.small, result;
+    if (op == '%' || op == T_FLOORDIV) {
+        /* Floor division: the remainder takes the divisor's sign. */
+        if (!y || (x == INT64_MIN && y == -1)) return NULL;
+        int64_t q = x / y, r = x % y;
+        if (r && (r < 0) != (y < 0)) { r += y; q--; }
+        return int_value(c, op == '%' ? r : q);
+    }
     if (op == '+' ? int_add(x, y, &result) : op == '-' ? int_sub(x, y, &result) : op == '*' ? int_mul(x, y, &result) : -1) return NULL;
     return int_value(c, result);
 }

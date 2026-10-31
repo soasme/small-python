@@ -33,3 +33,13 @@ assert (2 * 10**308) / 2 == 1e308
 assert_raises(
     OverflowError, lambda: (2 * 10**308) / 2.0
 )
+
+# Floor division rounds toward negative infinity; the remainder takes the
+# divisor's sign, at every magnitude.
+for a, b, q, r in ((7, 2, 3, 1), (-7, 2, -4, 1), (7, -2, -4, -1), (-7, -2, 3, -1), (6, -3, -2, 0),
+                   (-2**63, -1, 2**63, 0), (-2**63, 2**63 - 1, -2, 2**63 - 2), (2**63 - 1, -2**63, -1, -1)):
+    assert a // b == q and a % b == r, (a, b)
+    x, y = a, a
+    x //= b; y %= b
+    assert x == q and y == r, (a, b)
+    assert divmod(a, b) == (q, r)
