@@ -92,7 +92,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
        F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */,
        F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */,
-       F_CALL_OPERAND = 16384 /* A binary operator with a call operand. */ };
+       F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -7376,6 +7376,8 @@ static Node *operator_right(Node *n) {
         n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
 }
+/* An operand eval_operand can take without a second eval. */
+static int direct_operand(Node *n) { return n->kind == N_CALL || (n->kind == N_ATTR && n->a->kind == N_NAME); }
 static int plain_call(Node *n) {
     size_t argc = 0;
     for (Node *arg = n->args; arg; arg = arg->next, argc++)
@@ -7488,7 +7490,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 n->constant = number_literal(c, n);
             }
             if (operator_right(n)) n->flags |= F_OPERATOR;
-            if (n->kind == N_BINARY && n->a && n->b && (n->a->kind == N_CALL || n->b->kind == N_CALL)) n->flags |= F_CALL_OPERAND;
+            if (n->kind == N_BINARY && n->a && n->b && (direct_operand(n->a) || direct_operand(n->b))) n->flags |= F_DIRECT_OPERAND;
             if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
         }
         /* The compiler's own errors follow every symbol table error. */
@@ -13889,11 +13891,18 @@ static NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
     spy_release(a); spy_release(args); spy_release(keywords);
     return result;
 }
-/* An operand of an operator eval is evaluating: a call, while tick has only
- * the line to record, runs under the stack guard and environment eval set. */
+/* An operand of an operator eval is evaluating: a call, or an attribute
+ * of a name, while tick has only the line to record, runs under the stack
+ * guard and environment eval set. */
 static ALWAYS_INLINE SPYValue *eval_operand(SPYContext *c, Frame *f, Node *n) {
     if (n->kind == N_CALL && quiet(c, f)) { relocate(c, n); return eval_call(c, f, n); }
-    return eval(c, f, n);
+    SPYValue *v = n->kind == N_ATTR && n->a->kind == N_NAME && quiet(c, f) ? name_fast(f->env, n->a) : NULL;
+    if (!v) return eval(c, f, n);
+    relocate(c, n);
+    spy_retain(v);
+    SPYValue *result = node_attribute(c, v, n);
+    spy_release(v);
+    return result;
 }
 static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     if (tick(c, f, n)) return NULL;
@@ -13993,7 +14002,7 @@ container_fail:
             result = eval_tested(c, f, n, &truth);
             break;
         }
-        if (!(n->flags & F_CALL_OPERAND)) b = (a = eval(c, f, n->a)) ? eval(c, f, n->b) : NULL;
+        if (!(n->flags & F_DIRECT_OPERAND)) b = (a = eval(c, f, n->a)) ? eval(c, f, n->b) : NULL;
         else b = (a = eval_operand(c, f, n->a)) ? eval_operand(c, f, n->b) : NULL;
         if (!a) break;
         if (b && !(result = number_fast(c, n->op, a, b, 1)) && !c->error_type[0]) { relocate(c, n); result = binary(c, n->op, a, b); }

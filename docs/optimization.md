@@ -161,6 +161,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A class call tests the builtin types once](#a-class-call-tests-the-builtin-types-once) | -0.6% (dicts), -0.5% (classes), -0.4% (bigint) |
 | [A machine test's bool is its truth](#a-machine-tests-bool-is-its-truth) | -1.2% (generators) |
 | [A call operand skips a second eval](#a-call-operand-skips-a-second-eval) | -5.7% (fib), -1.1% (dicts), -0.8% (strings); nbody +0.1%; M2: fib -5.6%, dicts -4.2% |
+| [An attribute operand skips a second eval](#an-attribute-operand-skips-a-second-eval) | -7.8% (classes); M2: classes -11.2% |
 
 ### Releasing a number or string frees it at once
 
@@ -1083,7 +1084,7 @@ the noise (generators +0.1%, fib -0.2%).
 In `fib(n - 1) + fib(n - 2)`, `eval` of the sum guarded the C stack and
 set the evaluation environment, then evaluated each call through `eval`
 again, which did both a second time before reaching `eval_call`. A
-binary operator with a call operand is now marked `F_CALL_OPERAND` when
+binary operator with a call operand is now marked when
 compiled, and while tick has only the line to record, its call operands
 record their line and go to `eval_call` directly. The stack stays
 guarded: the operator's own `eval` guards each level, so a recursion
@@ -1093,6 +1094,18 @@ nbody 0.3%; with it, nbody takes 0.1% more instructions and the same
 wall time. Instructions: fib -5.7%, dicts -1.1%, strings -0.8%, classes
 -0.6%, sort +0.07%, nbody +0.14%. Wall time: fib 36.4 -> 34.4 ms (-5.6%),
 dicts -4.2%, strings and classes -0.3%, sort and nbody unchanged.
+
+### An attribute operand skips a second eval
+
+`self.x + other.x` evaluated each attribute through `eval` after the
+sum's own `eval`. The mark is now `F_DIRECT_OPERAND`, and covers an
+attribute of a name too: the name is read along `name_fast`, retained
+across the read, since a property may delete it, and passed to
+`node_attribute`. Descriptors and `__getattr__` run as calls, which
+guard the stack themselves. Instructions: classes -7.8%, fib, dicts and
+strings +0.05%, the rest unchanged. Wall time: classes 107.3 -> 95.3 ms
+(-11.2%), fib -0.7% to -1.1%, strings -0.8%, dicts -0.2% in a second run
+(+1.4% in the first).
 
 ## Tried and left out
 
