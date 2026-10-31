@@ -117,6 +117,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call knows its arguments are plain](#a-call-knows-its-arguments-are-plain) | -1.1% (strings), -0.7% (classes), -0.5% (fib) |
 | [A kept environment serves any function of its depth](#a-kept-environment-serves-any-function-of-its-depth) | -2.4% (classes) |
 | [An attribute takes its name at hand](#an-attribute-takes-its-name-at-hand) | -2.0% (classes) |
+| [A quiet tick is one comparison](#a-quiet-tick-is-one-comparison) | -1.5% (generators), -1.4% (loop), -1.0% (nbody) |
 
 ### Releasing a number or string frees it at once
 
@@ -829,6 +830,18 @@ record, held across the lookup, which may run a `__getattr__` that unbinds
 it. Unlike the attempt on the operator fast path (below), only attribute
 nodes pay for the test. Instructions: classes -2.0%, the rest 0%; a loop
 of `y = o.x` from 257 to 239 per iteration.
+
+### A quiet tick is one comparison
+
+Whether a tick has nothing to do but record its line was three tests: no
+pending error, no attention (callbacks queued or steps counted), and the
+running unit's filename already copied. The context now remembers the
+unit whose ticks are quiet: the slow tick sets it once it has copied the
+filename and found nothing waiting, and queueing a callback, setting a
+step limit, a trace function or any change of the copied filename clears
+it. The test is the pending error and one comparison, on every statement
+and every operand taken at hand. Instructions: generators -1.5%, loop
+-1.4%, nbody -1.0%, fib -0.7%, the rest -0.2% to -0.6%.
 
 ## Tried and left out
 

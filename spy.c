@@ -257,9 +257,10 @@ struct SPYContext {
      * boundary, after which an unresurrected instance is freed. */
     SPYValue **finalize_calls;
     size_t finalize_calls_len, finalize_calls_cap;
-    /* Whether a tick has more to do than record its line: callbacks wait in
-     * either queue, or steps are counted (attend keeps it current). */
-    int attention;
+    /* The unit whose ticks have nothing to do but record their line, or
+     * NULL: its filename is copied, no callback waits in either queue, no
+     * steps are counted and no trace function watches. Borrowed. */
+    SPYValue *quiet_unit;
     /* The live cells of variables, borrowed: each variable has one cell,
      * shared by every closure over it (9.1); a cell leaves when freed. */
     SPYValue **cells;
@@ -504,7 +505,7 @@ static void leave_frame(SPYContext *c, SPYValue *value) {
         struct ActiveFrame *caller = &c->frames[c->py_depth - 1];
         SPYValue *unit = frame_unit(caller);
         c->line = caller->line;
-        if (unit && unit->as.unit.filename) { snprintf(c->filename, sizeof(c->filename), "%s", unit->as.unit.filename); c->filename_from = NULL; }
+        if (unit && unit->as.unit.filename) { snprintf(c->filename, sizeof(c->filename), "%s", unit->as.unit.filename); c->filename_from = c->quiet_unit = NULL; }
     }
     SPYValue *frame = top->object;
     if (!frame) return;
@@ -527,7 +528,7 @@ void spy_clear_error(SPYContext *c) {
     spy_release(c->exception); c->exception = NULL;
     spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
     spy_release(c->error_object); c->error_object = NULL;
-    c->error_type[0] = c->error_message[0] = c->filename[0] = c->error_name[0] = 0; c->filename_from = NULL;
+    c->error_type[0] = c->error_message[0] = c->filename[0] = c->error_name[0] = 0; c->filename_from = c->quiet_unit = NULL;
     c->line = 0;
 }
 static void *allocate(SPYContext *c, size_t n) {
@@ -867,7 +868,7 @@ static int weak_push(SPYValue ***items, size_t *len, size_t *cap, SPYValue *valu
  * liveness is the collector's mark; otherwise a reference with a zero count is
  * already queued to be freed by the running release. */
 static SPYValue *name_local(SPYValue *, const char *);
-static void attend(SPYContext *c) { c->attention = c->weak_calls_len || c->finalize_calls_len || c->step_limit; }
+static void attend(SPYContext *c) { if (c->weak_calls_len || c->finalize_calls_len || c->step_limit) c->quiet_unit = NULL; }
 static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
     v->weak = 0;
     for (size_t i = c->weak_len; i--;) {
@@ -920,7 +921,7 @@ static void free_value(SPYValue *v) {
         Node *n = v->as.unit.nodes;
         while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
         free_scope(v->as.unit.scope);
-        if (c->filename_from == v) c->filename_from = NULL;
+        if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
         for (size_t i = 0; i < c->frames_cap; i++)
             if (c->frames[i].kept && c->frames[i].kept->as.map.unit == v) drop_kept(&c->frames[i]);
         free(v->as.unit.filename);
@@ -7464,7 +7465,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
 lexer_error:
     free(p.tokens);
     if (c->error_type[0]) {
-        snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = NULL;
+        snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL;
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
         /* The compiler's errors read the line from the file, which a string has not. */
@@ -7492,7 +7493,7 @@ lexer_error:
                 set_hidden_field(c, exception, "_metadata", metadata);
                 spy_clear_error(c);
                 memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-                memcpy(c->filename, file, sizeof(file)); c->line = line; c->exception = exception; c->filename_from = NULL;
+                memcpy(c->filename, file, sizeof(file)); c->line = line; c->exception = exception; c->filename_from = c->quiet_unit = NULL;
             }
             spy_release(metadata);
         }
@@ -12285,7 +12286,7 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name,
     SPYValue *existing = attribute_value(c, object, name);
     if (!existing) {
         spy_clear_error(c);
-        memcpy(c->filename, filename, sizeof(filename)); c->line = line; c->filename_from = NULL;
+        memcpy(c->filename, filename, sizeof(filename)); c->line = line; c->filename_from = c->quiet_unit = NULL;
         errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
     } else if (existing->type == SPY_BOUND_METHOD || existing->type == SPY_NATIVE || existing->type == SPY_METHOD)
         errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
@@ -13348,11 +13349,12 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
     if (c->step_limit && ++c->steps > c->step_limit) {
         spy_error(c, "RuntimeError", "execution step limit exceeded"); return -1;
     }
+    if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len && !c->step_limit) c->quiet_unit = f->unit;
     return 0;
 }
 /* Whether tick has nothing to do but record the line. */
 static int quiet(SPYContext *c, Frame *f) {
-    return !c->error_type[0] && !c->attention && c->filename_from == f->unit;
+    return !c->error_type[0] && c->quiet_unit == f->unit;
 }
 static void relocate(SPYContext *, Node *);
 static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, Node *n) {
@@ -14481,7 +14483,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         chain_exception(c, error);
         c->exception = error;
         memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-        snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = NULL;
+        snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL;
         c->line = line;
     }
 }
@@ -15254,7 +15256,7 @@ static SPYValue *setting_native(SPYContext *c, size_t argc, SPYValue *const *arg
     if (argc == 1) return spy_retain(c->settings[i] ? c->settings[i] : c->none);
     SPYValue *old = c->settings[i];
     c->settings[i] = argv[1]->type == SPY_NONE ? NULL : spy_retain(argv[1]);
-    c->filename_from = NULL; /* tick sees a new trace function. */
+    c->filename_from = c->quiet_unit = NULL; /* tick sees a new trace function. */
     spy_release(old);
     return spy_none(c);
 }
@@ -17205,7 +17207,7 @@ static void restore_error(SPYContext *c, ErrorState *state) {
     spy_clear_error(c);
     memcpy(c->error_type, state->type, sizeof(c->error_type));
     memcpy(c->error_message, state->message, sizeof(c->error_message));
-    memcpy(c->filename, state->filename, sizeof(c->filename)); c->filename_from = NULL;
+    memcpy(c->filename, state->filename, sizeof(c->filename)); c->filename_from = c->quiet_unit = NULL;
     c->line = state->line; c->exception = state->value; state->value = NULL;
     /* The traceback continues from the exception's, which already has an
      * entry for the frame that caught it. */
@@ -17643,7 +17645,7 @@ const char *spy_error_display(SPYContext *c) {
         }
         spy_clear_error(c);
         memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-        memcpy(c->filename, file, sizeof(file)); c->filename_from = NULL;
+        memcpy(c->filename, file, sizeof(file)); c->filename_from = c->quiet_unit = NULL;
         c->line = line; c->exception = exception; c->steps = steps; c->step_limit = limit;
         attend(c);
     }
@@ -22092,7 +22094,7 @@ static SPYValue *decode_source(SPYContext *c, const char *source, size_t len, co
         }
         if (!text && (error_is(c, "LookupError") || error_is(c, "UnicodeDecodeError"))) source_decode_error(c, filename);
     }
-    if (!text) { snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = NULL; }
+    if (!text) { snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL; }
     spy_release(encoding);
     return text;
 }
