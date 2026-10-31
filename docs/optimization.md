@@ -159,6 +159,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Built text starts at 32 bytes; short text lives in its value](#built-text-starts-at-32-bytes-short-text-lives-in-its-value) | -5.5% (dicts), -4.5% (strings); M2: -5% each |
 | [A called name is taken at hand](#a-called-name-is-taken-at-hand) | -1.9% (fib), -0.4% (dicts), -0.3% (classes) |
 | [A class call tests the builtin types once](#a-class-call-tests-the-builtin-types-once) | -0.6% (dicts), -0.5% (classes), -0.4% (bigint) |
+| [A machine test's bool is its truth](#a-machine-tests-bool-is-its-truth) | -1.2% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -1066,6 +1067,15 @@ comparisons. Checking `plain_init`'s cache first instead saved classes as
 much but cost dicts 0.3%. Instructions: dicts -0.6%, classes -0.5%,
 bigint -0.4%, nbody -0.2%, the rest within 0.1%. Wall time: dicts -2.6%,
 nbody -0.8%, classes -0.7%.
+
+### A machine test's bool is its truth
+
+`while i < n` and `if x % 2 == 0` in a generator compile to a
+`BC_OPERATE` step and a conditional jump, which asked `spy_truth` about
+the bool the comparison had just made. A test's step now hands the
+jump the bool's truth, as `BC_EVAL` does for a test it evaluates.
+Instructions: generators -1.2%, the rest unchanged. Wall time within
+the noise (generators +0.1%, fib -0.2%).
 
 ## Tried and left out
 

@@ -19734,6 +19734,8 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
             if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
+            /* A test's bool tells the jump its truth. */
+            if (ins->arg && value && value->type == SPY_BOOL) known = (int)value->as.integer_data.small + 1;
             machine_push(c, m, value); break;
         }
         case BC_LOAD:
