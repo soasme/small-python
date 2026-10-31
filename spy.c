@@ -9252,6 +9252,7 @@ static SPYValue *sequence_order(SPYContext *c, int op, SPYValue *a, SPYValue *b)
 /* x op y for an ordering or equality operator. */
 #define COMPARE(op, x, y) ((op) == '<' ? (x) < (y) : (op) == T_LE ? (x) <= (y) : (op) == '>' ? (x) > (y) : \
                           (op) == T_GE ? (x) >= (y) : (op) == T_EQ ? (x) == (y) : (x) != (y))
+static int ordering(int op) { return op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE; }
 /* The truth of ordering op on two machine ints or two floats, or -1 when
  * the general comparison must decide. */
 static ALWAYS_INLINE int number_order(int op, SPYValue *a, SPYValue *b) {
@@ -13939,8 +13940,9 @@ container_fail:
         for (Node *cmp = n->args; cmp; cmp = cmp->next) {
             b = eval(c, f, cmp->a);
             if (!b) break;
-            relocate(c, n);
-            result = comparison(c, cmp->op, a, b);
+            int truth = ordering(cmp->op) ? number_order(cmp->op, a, b) : -1;
+            if (truth >= 0) result = spy_bool(c, truth);
+            else { relocate(c, n); result = comparison(c, cmp->op, a, b); }
             spy_release(a); a = b; b = NULL;
             if (!result || !cmp->next) break;
             if (!spy_truth(result)) {
@@ -13972,7 +13974,6 @@ container_fail:
     spy_release(a); spy_release(b);
     return result;
 }
-static int ordering(int op) { return op == '<' || op == T_LE || op == '>' || op == T_GE || op == T_EQ || op == T_NE; }
 /* The item of x at y when x is a list or tuple and y an int within it,
  * borrowed, else NULL. */
 static ALWAYS_INLINE SPYValue *sequence_item(SPYValue *x, SPYValue *y) {

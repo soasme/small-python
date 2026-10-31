@@ -119,6 +119,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [An attribute takes its name at hand](#an-attribute-takes-its-name-at-hand) | -2.0% (classes) |
 | [A quiet tick is one comparison](#a-quiet-tick-is-one-comparison) | -1.5% (generators), -1.4% (loop), -1.0% (nbody) |
 | [Machine ints divide on the fast path](#machine-ints-divide-on-the-fast-path) | -10.7% (loop), -5.0% (sort), -4.9% (generators) |
+| [Any comparison of two numbers skips the dispatch](#any-comparison-of-two-numbers-skips-the-dispatch) | -0.9% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -861,6 +862,15 @@ general path. The division spec test gained the four sign cases and the
 loop -10.7%, sort -5.0%, generators -4.9%, dicts -2.3%, classes -1.6%,
 strings -1.4%, nbody +0.3%, fib +0.2%. Wall time: loop -11.0%,
 generators -4.6%, sort -2.6%, dicts -2.1%, the rest within 1%.
+
+### Any comparison of two numbers skips the dispatch
+
+An operator whose operands are not literals or names, as in
+`x % 2 == 0`, misses the operator fast path and is evaluated in full.
+Its comparison went to `comparison` even when both sides were machine
+ints or floats. Each link of a comparison chain now asks `number_order`
+first, as the fast path and `condition` do. Instructions: generators
+-0.9%, the rest 0%.
 
 ## Tried and left out
 
