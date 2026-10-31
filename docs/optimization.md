@@ -1043,6 +1043,12 @@ strings -4.5%, the rest within 0.03%. Wall time: strings 130.2 -> 123.4 ms
 
 ## Tried and left out
 
+- **An if's branch in the same statement loop.** Keeping up to eight
+  statements to resume after a branch in a local array, instead of
+  running the branch through a nested `execute`, cost `nbody` 1.1% and
+  most other programs 0.2% to 0.5%; only `loop` gained (0.5%). The array
+  and the resume test weigh on every block the loop runs.
+
 - **An attribute of a name on the operator fast path.** Reading `self.x`
   without evaluating `self` through `eval` saved 1.0% on classes, but
   every other program took up to 0.5% more instructions.
