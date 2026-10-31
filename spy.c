@@ -604,11 +604,22 @@ static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
  * allocator's thread cache, up to SPARES released values of each size wait
  * for the next allocations. */
 enum { POOL = 16384, SPARES = 64 };
+/* A host that counts the engine's allocations supplies its own pair. */
+#ifndef pool_alloc
+#ifdef _WIN32
+#include <malloc.h>
+#define pool_alloc() _aligned_malloc(POOL, POOL)
+#define pool_free _aligned_free
+#else
+#define pool_alloc() aligned_alloc(POOL, POOL)
+#define pool_free free
+#endif
+#endif
 struct Pool { Pool *next, *prev, *after, *before; /* before, after: in every_pool */ SPYValue *free; char *fresh, *end; size_t used; };
 static ALWAYS_INLINE Pool *value_pool(SPYValue *v) { return (Pool *)((uintptr_t)v & ~(uintptr_t)(POOL - 1)); }
 static ALWAYS_INLINE int pool_room(Pool *pool, size_t bytes) { return pool->free || pool->fresh + bytes <= pool->end; }
 static NO_INLINE Pool *pool_new(SPYContext *c, int size) {
-    Pool *pool = aligned_alloc(POOL, POOL);
+    Pool *pool = pool_alloc();
     if (!pool) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
     *pool = (Pool){.next = c->pools[size], .after = c->every_pool, .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
     cache_put(pool->fresh, (size_t)(pool->end - pool->fresh));
@@ -643,7 +654,7 @@ static NO_INLINE void pool_give(SPYContext *c, SPYValue *v, int size) {
         if (pool->next) pool->next->prev = pool->prev;
         if (pool->before) pool->before->after = pool->after; else c->every_pool = pool->after;
         if (pool->after) pool->after->before = pool->before;
-        cache_take(pool, POOL); free(pool);
+        cache_take(pool, POOL); pool_free(pool);
     }
 }
 /* An unset allocation for a value of size class size. */
@@ -26904,7 +26915,7 @@ void spy_context_free(SPYContext *c) {
     while (c->every_pool) {
         Pool *pool = c->every_pool;
         c->every_pool = pool->after;
-        cache_take(pool, POOL); free(pool);
+        cache_take(pool, POOL); pool_free(pool);
     }
     while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
     if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }

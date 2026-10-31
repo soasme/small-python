@@ -39,6 +39,8 @@ void *spy_worker_calloc(size_t, size_t);
 void *spy_worker_realloc(void *, size_t);
 void spy_worker_free(void *);
 char *spy_worker_realpath(const char *, char *);
+void *spy_worker_aligned_alloc(size_t);
+void spy_worker_aligned_free(void *);
 
 #ifdef SPY_WORKER_ENGINE
 /* The engine's own headers, included first so the renaming below reaches
@@ -54,6 +56,8 @@ char *spy_worker_realpath(const char *, char *);
 #define realloc spy_worker_realloc
 #define free spy_worker_free
 #define realpath spy_worker_realpath
+#define pool_alloc() spy_worker_aligned_alloc(POOL)
+#define pool_free spy_worker_aligned_free
 #include "spy.c"
 #include "spy-std.c"
 #else
@@ -93,6 +97,18 @@ void *spy_worker_realloc(void *p, size_t n) {
     if (!grown) return NULL;
     grown->size = n; memory_used = memory_used - old + n;
     return grown + 1;
+}
+/* The engine's pools are aligned to their size n (a power of two): each sits
+ * in a counted block of 2n, with the block's address just before it. */
+void *spy_worker_aligned_alloc(size_t n) {
+    char *block = n <= SIZE_MAX / 2 ? spy_worker_malloc(2 * n) : NULL;
+    if (!block) return NULL;
+    char **p = (char **)(((uintptr_t)block + n) & ~(uintptr_t)(n - 1));
+    p[-1] = block;
+    return p;
+}
+void spy_worker_aligned_free(void *p) {
+    if (p) spy_worker_free(((char **)p)[-1]);
 }
 /* The engine frees what realpath returns, so it must come from the counter. */
 char *spy_worker_realpath(const char *path, char *resolved) {
