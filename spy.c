@@ -12754,13 +12754,15 @@ static void compile_expr(SPYContext *, Program *, Node *);
  * at once passes on the truth it computed (BC_EVAL with arg 1). */
 static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
-    if (n && !suspends(n)) emit(c, p, BC_EVAL, n, 1);
+    if (n && !suspends(n) && n->kind != N_COMPARE) emit(c, p, BC_EVAL, n, 1);
     else compile_expr(c, p, n);
 }
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
-    if (!suspends(n)) { emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : BC_EVAL, n, 0); return; }
+    /* What cannot suspend is evaluated whole, but a comparison, whose
+     * operands each take one instruction, costs less as machine steps. */
+    if (!suspends(n) && n->kind != N_COMPARE) { emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : BC_EVAL, n, 0); return; }
     size_t branch, end;
     switch (n->kind) {
     case N_TEMPLATE: case N_JOINED:
@@ -19685,8 +19687,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_LOAD:
             /* A literal or a name found along the fast path, without eval. */
             value = leaf_operand(&f, n);
-            machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n));
-            value = NULL; break;
+            machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n)); break;
         case BC_EXEC: {
             flow = execute_statements(c, &f, n, 1);
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
@@ -19700,19 +19701,24 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_UNARY:
             a = machine_pop(m); machine_push(c, m, unary(c, ins->arg, a)); break;
         case BC_BINARY:
-            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, binary(c, ins->arg, a, b)); break;
+            b = machine_pop(m); a = machine_pop(m);
+            value = number_fast(c, ins->arg, a, b, 0);
+            machine_push(c, m, value || c->error_type[0] ? value : binary(c, ins->arg, a, b)); break;
         case BC_INDEX:
             b = machine_pop(m); a = machine_pop(m); machine_push(c, m, get_index(c, a, b)); break;
         case BC_ATTR:
             a = machine_pop(m); machine_push(c, m, node_attribute(c, a, n)); break;
-        case BC_COMPARE:
-            b = machine_pop(m); a = machine_pop(m); value = comparison(c, n->op, a, b);
+        case BC_COMPARE: {
+            b = machine_pop(m); a = machine_pop(m);
+            int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
+            value = order >= 0 ? spy_bool(c, order) : comparison(c, n->op, a, b);
             if (value && ins->arg && spy_truth(value)) { spy_release(value); value = spy_retain(b); }
             else {
                 if (value && c->error_type[0]) { spy_release(value); value = NULL; }
                 m->pc = ins->target;
             }
             machine_push(c, m, value); break;
+        }
         case BC_NEW: machine_push(c, m, display_new(c, n, ins->arg)); break;
         case BC_ADD: case BC_EXTEND:
             a = machine_pop(m);

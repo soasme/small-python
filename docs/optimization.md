@@ -149,6 +149,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Any comparison of two numbers skips the dispatch](#any-comparison-of-two-numbers-skips-the-dispatch) | -0.9% (generators) |
 | [A dict read goes straight to its entries](#a-dict-read-goes-straight-to-its-entries) | -1.2% (strings), -0.7% (dicts) |
 | [The machine loads leaves itself](#the-machine-loads-leaves-itself) | -2.2% (generators) |
+| [Comparisons become machine steps](#comparisons-become-machine-steps) | -0.1% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -923,6 +924,19 @@ misses. The machine also keeps its instruction array in a local rather
 than reloading it through the program each step. Instructions:
 generators -2.2%, the rest 0%. Wall time: generators 142.8 -> 139.2 ms
 (-2.5%).
+
+### Comparisons become machine steps
+
+With leaves loaded by `BC_LOAD`, each node kind was measured as machine
+instructions in place of a whole `BC_EVAL`, alone and together, on
+generators. Comparisons alone saved 0.1%; binary operators, unary
+operators, attributes and indexes changed nothing alone, and all of them
+together cost 2.3%: `x % 2` as one `BC_EVAL` takes its operands at hand
+on `eval`'s operator fast path, while three machine steps each pay the
+loop's fixed work of about 20 instructions. So comparisons now compile
+to machine steps and the rest stay whole until the loop is cheaper. The
+machine's `BC_BINARY` and `BC_COMPARE` also try the number fast paths
+first, as `eval` does. Instructions: generators -0.1%, the rest 0%.
 
 ## Tried and left out
 
