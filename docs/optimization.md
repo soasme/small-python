@@ -167,6 +167,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A machine assignment skips the statement dispatch](#a-machine-assignment-skips-the-statement-dispatch) | -1.8% (generators); M2: generators -13%, nbody -2.7% |
 | [Hot functions start on a cache line](#hot-functions-start-on-a-cache-line) | none; steadies wall-time comparisons |
 | [A leaf yield is one step](#a-leaf-yield-is-one-step) | -3.4% (generators); M2: generators -4.9% |
+| [A yield statement drops what is sent](#a-yield-statement-drops-what-is-sent) | -4.1% (generators); M2: generators -4.2% |
 
 ### Releasing a number or string frees it at once
 
@@ -1161,9 +1162,14 @@ predictor sets. `eval`, `execute_statements`, `condition`, `eval_call`,
 `call_function` and `run_machine` are now `HOT`, aligned to 64 bytes, so
 each keeps its own placement whatever changes around it. Alone it is
 neutral: every program within 0.6% of before but sort (+1.6%, its
-instructions unchanged). With it, fusing a leaf yield (the next entry)
-measured nbody +0.2%, where the same change had measured +2% to +3%
-without it. Aligning every function instead cost 0.5% to 1%.
+instructions unchanged); under gcc it adds 0.1% to 0.3% to most programs'
+instructions. With it, fusing a leaf yield (the next entry) measured
+nbody +0.2%, where the same change had measured +2% to +3% without it;
+but the change after that still moved nbody, strings and classes 1% to
+2% with their instructions unchanged, so it steadies placement only in
+part. Aligning every function cost 0.5% to 1%, and aligning every block
+that is not fallen into (`-mllvm -align-all-nofallthru-blocks`) evened
+nbody between trees but cost strings 3%.
 
 ### A leaf yield is one step
 
@@ -1175,6 +1181,16 @@ yield is compiled, not in `emit`: a conditional's jump may target the
 yield's own position. Instructions: generators -3.4%, the rest
 unchanged. Wall time: generators 120.6 -> 114.7 ms (-4.9%), the rest
 within 1%.
+
+### A yield statement drops what is sent
+
+`yield i` as a statement was followed by a `BC_POP` of the value its
+resumption pushed. A yield statement now compiles to a `BC_YIELD` with
+`arg` bit 2, which marks the machine `drop`, and its resumption pushes
+nothing. Instructions: generators -4.1%, the rest identical. Wall time:
+generators 114.6 -> 109.7 ms (-4.2%), fib -3.3%; nbody +1.7%, strings
++2% and classes +1% in three runs each, with their instructions
+identical: code placement again.
 
 ## Tried and left out
 

@@ -12717,7 +12717,7 @@ struct Machine {
     SPYValue **stack, *handled, *delegate;
     Block *blocks;
     size_t await_target;
-    int awaiting;
+    int awaiting, drop; /* drop: a yield statement's resumption pushes no sent value. */
 };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
@@ -12998,7 +12998,14 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
         size_t branch, end, start, loop;
         if (!suspends(n)) { emit(c, p, BC_EXEC, n, 0); continue; }
         switch (n->kind) {
-        case N_EXPR: compile_expr(c, p, n->a); emit(c, p, BC_POP, n, 0); break;
+        case N_EXPR:
+            /* A yield statement drops the sent value rather than popping it (arg 2). */
+            if (n->a->kind == N_YIELD && !n->a->op) {
+                int leaf = n->a->a && (n->a->a->kind == N_NAME || n->a->a->constant);
+                if (!leaf) compile_expr(c, p, n->a->a);
+                emit(c, p, BC_YIELD, n->a, leaf | 2); break;
+            }
+            compile_expr(c, p, n->a); emit(c, p, BC_POP, n, 0); break;
         case N_ASSIGN:
             if (n->op != '=') {
                 Node *target = n->a;
@@ -19723,7 +19730,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         finish_delegate(c, m);
     } else {
         if (thrown) raise_value(c, thrown);
-        else if (m->awaiting) machine_push(c, m, spy_retain(sent ? sent : c->none));
+        else if (m->awaiting && !m->drop) machine_push(c, m, spy_retain(sent ? sent : c->none));
         m->awaiting = AWAIT_NONE;
     }
     /* A BC_SHORT that jumps knows its value's truth; the test it lands on
@@ -19914,11 +19921,12 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             break;
         }
         case BC_YIELD:
-            if (ins->arg) {
+            if (ins->arg & 1) {
                 value = leaf_operand(&f, n->a);
                 if (!(value = value ? spy_retain(value) : eval(c, &f, n->a))) break;
             } else value = machine_pop(m);
-            m->awaiting = AWAIT_YIELD; return (Result){FLOW_YIELD, value};
+            m->awaiting = AWAIT_YIELD; m->drop = ins->arg >> 1;
+            return (Result){FLOW_YIELD, value};
         case BC_DELEGATE:
             a = machine_pop(m);
             m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
