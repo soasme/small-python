@@ -99,11 +99,12 @@ JavaScript binding, and is tested by programs that try to escape it.
 
 ### Fuel and resource metering
 
-Budgets the engine itself enforces, per context and per call: instructions
-(the step limit, made to cover native builtins too), wall and CPU time,
-memory (inside the engine, not only in the bindings' allocator), and output
-bytes. Exhausting one raises an exception the program cannot catch and leaves
-the context reusable.
+Budgets the engine itself enforces, per context and per call: steps (the
+step limit, made to cover native builtins too and to cost nothing on the
+fast path), memory (inside the engine, not only in the worker's allocator)
+and time, through a host interrupt callback. Exhausting one stops the
+program, which cannot catch it, and leaves the context reusable. The
+design is [docs/metering.md](docs/metering.md).
 
 ### Virtual file system
 
