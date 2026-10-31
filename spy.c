@@ -90,7 +90,8 @@ typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
  * or function with annotations; it evaluates them lazily (PEP 649). */
 enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_STAR = 16, F_TYPEPARAMS = 32, F_CONSTRAINTS = 64,
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
-       F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */ };
+       F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */,
+       F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -7486,7 +7487,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                 n->constant = number_literal(c, n);
             }
             if (operator_right(n)) n->flags |= F_OPERATOR;
-            if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL;
+            if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
         }
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
@@ -13849,6 +13850,11 @@ static NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
     if (plain && n->a->kind == N_ATTR) {
         a = method_callee(c, f, n->a, argv, &method);
         done = argv[0] != NULL;
+    } else if ((n->flags & F_NAMED_CALLEE) && quiet(c, f)) {
+        /* A name the fast path misses, as a method's globals are, usually always will. */
+        SPYValue *callee = name_fast(f->env, n->a);
+        if (!callee) n->flags &= ~F_NAMED_CALLEE;
+        a = callee ? spy_retain(callee) : eval(c, f, n->a);
     } else a = eval(c, f, n->a);
     if (!a) return NULL;
     if (plain) {

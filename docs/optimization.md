@@ -157,6 +157,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [An environment remembers it holds its scope's keys](#an-environment-remembers-it-holds-its-scopes-keys) | -1.4% (classes), -1.2% (fib) |
 | [A method object calls its function directly](#a-method-object-calls-its-function-directly) | -0.7% (classes) |
 | [Built text starts at 32 bytes; short text lives in its value](#built-text-starts-at-32-bytes-short-text-lives-in-its-value) | -5.5% (dicts), -4.5% (strings); M2: -5% each |
+| [A called name is taken at hand](#a-called-name-is-taken-at-hand) | -1.9% (fib), -0.4% (dicts), -0.3% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -1040,6 +1041,18 @@ short strings. Peak memory for a list of 300,000 each of `str(i)`, `f"{i}"`
 and `s.upper()` went from 129 MB to 119 MB. Instructions: dicts -5.5%,
 strings -4.5%, the rest within 0.03%. Wall time: strings 130.2 -> 123.4 ms
 (-5.2%), dicts 75.0 -> 71.1 ms (-5.1%), sort within noise.
+
+### A called name is taken at hand
+
+`fib(n - 1)` evaluated `fib` through `eval`, although its arguments
+already took a name or literal as it is. A plain call of a name now
+reads it along `name_fast` while tick has only the line to record. A
+method's global, past its class cell environment, misses that path and
+paid for both lookups (classes +0.3%), so the call node carries
+`F_NAMED_CALLEE` until its first miss, as an operator drops
+`F_OPERATOR`. Instructions: fib -1.9%, dicts -0.4%, classes and bigint
+-0.3%, the rest within 0.1%. Wall time, beside a running fuzzer: fib
+-3.1%, classes -1.9%, dicts unchanged.
 
 ## Tried and left out
 
