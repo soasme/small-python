@@ -334,6 +334,7 @@ struct SPYContext {
     PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
     size_t entries; /* Host calls running; the outermost refills the step budget. */
     size_t poll; /* The interrupt is due when fuel falls to this. */
+    size_t stopped_fuel; /* The steps left when the context stopped. */
     SPYInterrupt interrupt; void *interrupt_data;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
@@ -458,7 +459,7 @@ static NO_INLINE SPYValue *call(SPYContext *c, SPYValue *fn, size_t argc, SPYVal
 /* Stop the context: until the next outermost call every spend and tick
  * fails with the stop's error, so no handler or finally body runs on. */
 static NO_INLINE int halt(SPYContext *c, int reason) {
-    if (!c->stopped) c->stopped = reason;
+    if (!c->stopped) { c->stopped = reason; c->stopped_fuel = c->fuel; }
     c->fuel = 0; c->quiet_unit = NULL;
     if (c->stopped == SPY_STOP_MEMORY) spy_error(c, "MemoryError", "memory limit exceeded");
     else spy_error(c, "RuntimeError", c->stopped == SPY_STOP_INTERRUPT ? "execution interrupted" : "execution step limit exceeded");
@@ -27130,6 +27131,9 @@ void spy_set_interrupt(SPYContext *c, SPYInterrupt interrupt, void *data) {
 void spy_set_memory_limit(SPYContext *c, size_t limit) { c->memory_limit = limit; watch(c); }
 size_t spy_memory_used(const SPYContext *c) { return c->memory; }
 int spy_stopped(const SPYContext *c) { return c->stopped; }
+size_t spy_steps_used(const SPYContext *c) {
+    return (c->step_limit ? c->step_limit : SIZE_MAX) - (c->stopped ? c->stopped_fuel : c->fuel);
+}
 void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c);

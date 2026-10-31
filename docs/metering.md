@@ -224,6 +224,8 @@ void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 /* Why the last outermost call stopped, or zero. */
 enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY, SPY_STOP_INTERRUPT };
 int spy_stopped(const SPYContext *);
+/* Steps the running or last outermost call spent. */
+size_t spy_steps_used(const SPYContext *);
 ```
 
 `spy_set_step_limit` keeps its name; its unit changes from nodes to steps.

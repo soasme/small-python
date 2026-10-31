@@ -159,6 +159,7 @@ Fields are listed in order; each is a value (§4).
 | `0x0a` | `COLLECT` | — | `int` freed |
 | `0x0b` | `OP` | `op` int, `target`, operands (§7.3) | the result |
 | `0x0c` | `RELEASE` | `ids` tuple of `int` | notice: no reply |
+| `0x0d` | `USAGE` | — | `tuple` of two `int`: `spy_steps_used`, `spy_memory_used` |
 
 `CALL`'s target is a global name (`str`, looked up like `GET`) or a handle
 sent back as `h`. A parent sends `h` only for ids it holds.
@@ -177,6 +178,9 @@ NUL character.
 working directory.
 
 `RELEASE` drops the listed handles.
+
+`USAGE` reports the steps the last `EVAL`, `EXEC`, `CALL` or `OP` spent and
+the bytes the engine holds now.
 
 ### 7.2 Worker to parent
 

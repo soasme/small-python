@@ -279,6 +279,9 @@ func TestOutputAndLoader(t *testing.T) {
 func TestLimits(t *testing.T) {
 	rt := start(t, worker.Options{StepLimit: 10_000, MemoryLimit: 16 << 20})
 	equal(t, exception(t, rt.Exec("while True: pass")).Type, "RuntimeError")
+	if steps, memory, err := rt.Usage(); err != nil || steps <= 9_990 || steps > 10_000 || memory <= 0 {
+		t.Fatal(steps, memory, err)
+	}
 	equal(t, exception(t, rt.Exec("x = 'a' * (64 << 20)")).Type, "MemoryError")
 	equal(t, eval(t, rt, "1 + 1"), int64(2))
 }

@@ -109,6 +109,8 @@ Extending:
 Lifetime:
 
 - `collect()` runs the cycle collector and returns the number freed.
+- `usage()` returns `(steps, memory)`: the steps the last operation spent
+  and the bytes the engine holds.
 - `close()` ends the worker and drops every host reference. Idempotent.
 - `closed` is `True` after `close()` or once the worker is lost.
 - The runtime is a context manager that closes on exit, and `__del__` closes

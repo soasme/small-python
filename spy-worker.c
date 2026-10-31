@@ -77,7 +77,7 @@ static void write_bytes(const void *p, size_t n) {
 #endif
 
 enum {
-    INIT = 0x01, EVAL, EXEC, CALL, GET, SET, DELETE, MODULE, MOUNT, COLLECT, OP, RELEASE,
+    INIT = 0x01, EVAL, EXEC, CALL, GET, SET, DELETE, MODULE, MOUNT, COLLECT, OP, RELEASE, USAGE,
     HOST = 0x21, LOAD, OUTPUT,
     RESULT = 0x40, RAISE
 };
@@ -838,6 +838,13 @@ static void serve(unsigned char *message, size_t len) {
         send_result(spy_int(c, (int64_t)spy_collect(c)));
         break;
     case OP: send_result(operate(&k)); break;
+    case USAGE: {
+        finish(&k);
+        SPYValue *usage[2] = {spy_int(c, (int64_t)spy_steps_used(c)), spy_int(c, (int64_t)spy_memory_used(c))};
+        send_result(usage[0] && usage[1] ? spy_tuple(c, 2, usage) : NULL);
+        spy_release(usage[0]); spy_release(usage[1]);
+        break;
+    }
     case RELEASE: {
         SPYValue *ids = decode_type(&k, SPY_TUPLE), *iterator = ids ? spy_iter(c, ids) : NULL, *id;
         finish(&k);

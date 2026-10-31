@@ -109,6 +109,7 @@ extern "C" {
     ) -> c_int;
     pub fn spy_mount(c: *mut SPYContext, directory: *const c_char, path: *const c_char, flags: c_int) -> c_int;
     pub fn spy_set_step_limit(c: *mut SPYContext, limit: usize);
+    pub fn spy_steps_used(c: *const SPYContext) -> usize;
     pub fn spy_set_optimize(c: *mut SPYContext, level: c_int);
     pub fn spy_collect(c: *mut SPYContext) -> usize;
     pub fn spy_live_values(c: *const SPYContext) -> usize;

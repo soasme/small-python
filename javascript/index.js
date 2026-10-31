@@ -533,6 +533,11 @@ export class Runtime {
 
   /** Run the engine's cycle collector; resolves to the number of values freed. */
   async collect() { return this._run(wire.COLLECT, []); }
+  /** The steps the last operation spent and the bytes the engine holds. */
+  async usage() {
+    const [steps, memory] = await this._run(wire.USAGE, []);
+    return { steps, memory };
+  }
 
   get closed() { return this._closed || this._lost !== null; }
 

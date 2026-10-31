@@ -591,6 +591,17 @@ impl Runtime {
         }
     }
 
+    /// The steps the last operation spent and the bytes the engine holds.
+    pub fn usage(&mut self) -> Result<(i64, i64)> {
+        match self.run(wire::USAGE, &[])? {
+            Value::Tuple(pair) => match pair[..] {
+                [Value::Int(steps), Value::Int(memory)] => Ok((steps, memory)),
+                _ => Err(self.violation("malformed usage result")),
+            },
+            _ => Err(self.violation("malformed usage result")),
+        }
+    }
+
     /// `getattr(object, name)`
     pub fn getattr(&mut self, object: &Object, name: &str) -> Result<Value> {
         self.op(1, object, &[&name.into()])

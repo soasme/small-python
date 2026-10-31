@@ -475,6 +475,10 @@ class Runtime:
         """Run the engine's cycle collector; returns the number of values freed."""
         return self._run(wire.COLLECT)
 
+    def usage(self):
+        """The steps the last operation spent and the bytes the engine holds."""
+        return self._run(wire.USAGE)
+
     @property
     def closed(self):
         return self._closed or self._lost is not None

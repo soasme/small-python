@@ -687,6 +687,12 @@ int main(void) {
     assert(spy_exec(c, "caught = 0\ntry:\n    while True: pass\nexcept BaseException:\n    caught = 1", "interrupt.py") == -1);
     assert(!strcmp(spy_error_message(c), "execution interrupted") && spy_stopped(c) == SPY_STOP_INTERRUPT);
     assert(polls == 10 && integer(c, spy_eval(c, "caught", "caught.py")) == 0);
+    /* Steps used count up to the stop, then restart with the next call. */
+    polls = 0;
+    assert(spy_exec(c, "while True: pass", "interrupt.py") == -1);
+    assert(spy_steps_used(c) > 9 * 4096 && spy_steps_used(c) < 10 * 4096 + 100);
+    execute(c, "for i in range(1000): pass");
+    assert(spy_steps_used(c) >= 1000 && spy_steps_used(c) < 1100);
     polls = -1000;
     assert(spy_exec(c, "while True: pass", "polled.py") == -1);
     assert(spy_stopped(c) == SPY_STOP_STEPS && polls >= -1000 + 100000 / 4096);

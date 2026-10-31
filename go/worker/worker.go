@@ -403,6 +403,23 @@ func (rt *Runtime) Collect() (int64, error) {
 	return 0, rt.violation("malformed collect result")
 }
 
+// Usage returns the steps the last operation spent and the bytes the
+// engine holds.
+func (rt *Runtime) Usage() (steps, memory int64, err error) {
+	usage, err := rt.run(msgUsage)
+	if err != nil {
+		return 0, 0, err
+	}
+	if pair, ok := usage.(Tuple); ok && len(pair) == 2 {
+		steps, okSteps := pair[0].(int64)
+		memory, okMemory := pair[1].(int64)
+		if okSteps && okMemory {
+			return steps, memory, nil
+		}
+	}
+	return 0, 0, rt.violation("malformed usage result")
+}
+
 // GetAttr is getattr(object, name).
 func (rt *Runtime) GetAttr(object *Object, name string) (any, error) {
 	return rt.op(1, object, name)

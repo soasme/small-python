@@ -849,7 +849,9 @@ and per item a native loop takes, one per 64 bytes of source parsed or of a
 large block allocated, and native work that only reads, such as comparing,
 searching or hashing, in proportion to its operands
 ([metering.md](metering.md)). A host function calling back shares its
-caller's budget.
+caller's budget. `spy_steps_used` returns the steps the running or last
+outermost call spent; calls and native iteration spend only while a limit,
+an interrupt or a trace function is set.
 
 `spy_set_memory_limit` bounds the bytes the engine holds, values and their
 storage; zero means unlimited, and `spy_memory_used` returns the count. The

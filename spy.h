@@ -92,6 +92,9 @@ void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 /* Why the last outermost call stopped, or zero. */
 enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY, SPY_STOP_INTERRUPT };
 int spy_stopped(const SPYContext *);
+/* Steps the running or last outermost call spent. Calls and native
+ * iteration spend only while a limit, an interrupt or a trace is set. */
+size_t spy_steps_used(const SPYContext *);
 /* Optimization level, as python -O (1: no asserts, __debug__ is False) and
  * -OO (2: no docstrings either); compile(optimize=-1) uses it. Default 0. */
 void spy_set_optimize(SPYContext *, int level);

@@ -94,6 +94,8 @@ describe("limits", () => {
   test("step limit", async () => {
     const rt = track(await Runtime.create({ stepLimit: 10000 }));
     assert.equal((await rt.exec("while True:\n    pass").catch((e) => e)).type, "RuntimeError");
+    const { steps, memory } = await rt.usage();
+    assert.ok(steps > 9990 && steps <= 10000 && memory > 0);
     assert.equal(await rt.eval("1 + 1"), 2);
   });
 });

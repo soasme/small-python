@@ -114,6 +114,7 @@ Methods:
 | `define(name, fn)` | `rt.define` |
 | `registerModule(name, members = null, source = null)` | `rt.register_module`; `members` is a plain object or `Map` |
 | `collect()` | `rt.collect` |
+| `usage()` | `rt.usage`; resolves to `{ steps, memory }` |
 | `close()` | `rt.close`; synchronous: terminates the Worker |
 | `closed` | `rt.closed` |
 | `version` | the engine version, from the `INIT` reply |

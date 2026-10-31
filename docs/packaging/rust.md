@@ -74,7 +74,7 @@ layer (`spy_std_init`); `Runtime::bare()` has only the core and its
 | `register_module(name, init)`, `exec_module(module, source, filename)` | `spy_new_module`, `spy_exec_module` |
 | `set_output(f)`, `set_loader(f)` | `spy_set_output`, `spy_set_module_loader` |
 | `mount(directory, path, read_only)` | `spy_mount` |
-| `set_step_limit(n)`, `set_optimize(level)`, `collect()` | the same names |
+| `set_step_limit(n)`, `steps_used()`, `set_optimize(level)`, `collect()` | the same names |
 | `to_py(value)` | the conversions of §3.3 |
 | `ctx()` | the raw context, for calls into `small_python::ffi` |
 
@@ -189,6 +189,7 @@ directory `/`, its own process group, only descriptors 0 to 2) and sends
 | `register_module(name, members, source)` | `MODULE` |
 | `mount(directory, path, read_only)` | `MOUNT`, after resolving `directory` |
 | `collect()` | `COLLECT` |
+| `usage()` | `USAGE`: `(steps, memory)` |
 | `getattr`, `setattr`, `get_item`, `set_item`, `len`, `contains`, `iter`, `next`, `truth`, `hash`, `compare`, `repr`, `str`, `dir` | `OP` 1 to 19; `next` returns `None` at `StopIteration` |
 | `version()`, `id()`, `is_closed()`, `close()` | the `INIT` reply, the process id, state, closing |
 

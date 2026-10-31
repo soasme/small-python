@@ -56,6 +56,8 @@ cannot start.
 ### Lifetime
 
 - `collect()`: Run the cycle collector; returns the number of values freed.
+- `usage()`: The steps the last operation spent and the bytes the engine
+  holds, as `(steps, memory)`.
 - `close()`: End the worker. Every `Object` from this runtime stops working.
   Calling it again does nothing.
 - `closed`: `True` after `close()`, or once the worker is lost.

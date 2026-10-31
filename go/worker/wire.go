@@ -30,6 +30,7 @@ const (
 	msgCollect = 0x0a
 	msgOp      = 0x0b
 	msgRelease = 0x0c
+	msgUsage   = 0x0d
 	msgHost    = 0x21
 	msgLoad    = 0x22
 	msgOutput  = 0x23

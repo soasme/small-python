@@ -75,7 +75,7 @@ itself has no default and raises `OSError` from `print` without one.
 | `RegisterModule(name, init)`, `ExecModule(module, source, filename)` | `spy_new_module`, `spy_exec_module` |
 | `SetOutput(w)`, `SetLoader(f)` | `spy_set_output` with an `io.Writer`, `spy_set_module_loader` |
 | `Mount(directory, path, readOnly)` | `spy_mount`; an empty `path` is `NULL` |
-| `SetStepLimit(n)`, `SetOptimize(level)`, `Collect()` | the same names |
+| `SetStepLimit(n)`, `StepsUsed()`, `SetOptimize(level)`, `Collect()` | the same names |
 | `ToValue(x)` | the conversions of §3.3 |
 | `Close()` | `spy_context_free` |
 
@@ -191,6 +191,7 @@ and `Loader` nil answers no module.
 | `RegisterModule(name, members, source)` | `MODULE` |
 | `Mount(directory, path, readOnly)` | `MOUNT`, after resolving `directory` |
 | `Collect()` | `COLLECT` |
+| `Usage()` | `USAGE`: steps and memory |
 | `GetAttr`, `SetAttr`, `GetItem`, `SetItem`, `Len`, `Contains`, `Iter`, `Next`, `Truth`, `Hash`, `Compare`, `Repr`, `Str`, `Dir` | `OP` 1 to 19; `Next`'s `ok` is false at `StopIteration` |
 | `Version()`, `Pid()`, `Closed()`, `Close()` | the `INIT` reply, the process id, state, closing |
 

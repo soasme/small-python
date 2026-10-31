@@ -191,6 +191,12 @@ impl Runtime {
         unsafe { ffi::spy_set_step_limit(self.ctx(), limit) }
     }
 
+    /// The steps the running or last top-level `eval` or `exec` spent; calls
+    /// spend only while a step limit is set.
+    pub fn steps_used(&self) -> usize {
+        unsafe { ffi::spy_steps_used(self.ctx()) }
+    }
+
     /// The optimization level, as `python -O` (1) and `-OO` (2).
     pub fn set_optimize(&self, level: i32) {
         unsafe { ffi::spy_set_optimize(self.ctx(), level) }

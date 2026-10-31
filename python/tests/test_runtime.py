@@ -151,6 +151,8 @@ class StepLimitTest(unittest.TestCase):
             with self.assertRaises(Error) as cm:
                 rt.exec("while True: pass")
             self.assertEqual(cm.exception.type, "RuntimeError")
+            steps, memory = rt.usage()
+            self.assertTrue(990 < steps <= 1000 and memory > 0)
             self.assertEqual(rt.eval("1 + 1"), 2)
 
     def test_count_restarts_per_eval(self):

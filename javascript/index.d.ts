@@ -35,6 +35,7 @@ export class Runtime {
   define<F extends (...args: any[]) => unknown>(name: string, fn: F): Promise<F>;
   registerModule(name: string, members?: { [key: string]: PyValue } | Map<string, PyValue> | null, source?: string | null): Promise<void>;
   collect(): Promise<number>;
+  usage(): Promise<{ steps: number; memory: number }>;
   close(): void;
   [Symbol.dispose](): void;
 }

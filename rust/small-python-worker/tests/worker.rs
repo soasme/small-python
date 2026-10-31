@@ -151,6 +151,8 @@ fn output_and_loader() {
 fn limits() {
     let mut rt = Runtime::builder().step_limit(10_000).memory_limit(16 << 20).spawn().unwrap();
     assert_eq!(rt.exec("while True: pass").unwrap_err().type_name(), Some("RuntimeError"));
+    let (steps, memory) = rt.usage().unwrap();
+    assert!((9_991..=10_000).contains(&steps) && memory > 0);
     assert_eq!(rt.exec("x = 'a' * (64 << 20)").unwrap_err().type_name(), Some("MemoryError"));
     assert_eq!(rt.eval("1 + 1").unwrap(), int(2));
 }

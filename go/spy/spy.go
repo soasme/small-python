@@ -269,6 +269,15 @@ func (rt *Runtime) SetStepLimit(limit uint) {
 	}
 }
 
+// StepsUsed returns the steps the running or last top-level Eval or Exec
+// spent; calls spend only while a step limit is set.
+func (rt *Runtime) StepsUsed() uint {
+	if rt.enter() != nil {
+		return 0
+	}
+	return uint(C.spy_steps_used(rt.ctx))
+}
+
 // SetOptimize sets the optimization level, as python -O (1) and -OO (2).
 func (rt *Runtime) SetOptimize(level int) {
 	if rt.enter() == nil {
