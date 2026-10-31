@@ -566,7 +566,8 @@ fail:
 }
 typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
 static int append(Buffer *b, const char *s, size_t n) {
-    if (n > SIZE_MAX - b->len - 1 || grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1, 1)) return -1;
+    /* Text is built by many small appends; the first takes 32 bytes. */
+    if (n > SIZE_MAX - b->len - 1 || grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1 > 32 ? b->len + n + 1 : 32, 1)) return -1;
     memcpy(b->data + b->len, s, n);
     b->len += n;
     b->data[b->len] = 0;
@@ -574,22 +575,7 @@ static int append(Buffer *b, const char *s, size_t n) {
 }
 static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
 static SPYValue *value_new(SPYContext *, int);
-/* A str or bytes (type) of the text built in b, taking b's storage rather
- * than copying it, or NULL when building it failed; b is empty afterwards.
- * Storage more than 64 bytes too large shrinks to fit. */
-static SPYValue *buffer_text(Buffer *b, int type, int failed) {
-    SPYContext *c = b->ctx;
-    if (!failed && !b->data) failed = append(b, "", 0);
-    SPYValue *v = failed ? NULL : value_new(c, type);
-    if (v) {
-        char *fit = b->cap - b->len > 64 ? realloc(b->data, b->len + 1) : NULL;
-        v->as.string.data = fit ? fit : b->data; v->as.string.len = b->len;
-        b->data = NULL;
-    }
-    free(b->data);
-    *b = (Buffer){.ctx = c};
-    return v;
-}
+static SPYValue *buffer_text(Buffer *, int, int);
 /* Numbers and bytearrays end with their union member, and their
  * allocations stop there; a str or bytes also has room after it for text
  * shorter than SHORT_TEXT, saving the text its own allocation. A value
@@ -1419,6 +1405,25 @@ SPYValue *spy_string(SPYContext *c, const char *s, size_t n) {
 SPYValue *spy_bytes(SPYContext *c, const void *data, size_t len) {
     SPYValue *v = text_new(c, SPY_BYTES, len);
     if (v && len) memcpy(v->as.string.data, data, len);
+    return v;
+}
+/* A str or bytes (type) of the text built in b, or NULL when building it
+ * failed; b is empty afterwards. Short text is copied into the value; longer
+ * text takes b's storage, shrunk to fit when more than 64 bytes are spare. */
+static SPYValue *buffer_text(Buffer *b, int type, int failed) {
+    SPYContext *c = b->ctx;
+    SPYValue *v = NULL;
+    if (failed) ;
+    else if (b->len < SHORT_TEXT && type != SPY_BYTEARRAY) {
+        if ((v = text_new(c, type, b->len)) && b->len) memcpy(v->as.string.data, b->data, b->len);
+    } else if (!b->data && append(b, "", 0)) ;
+    else if ((v = value_new(c, type))) {
+        char *fit = b->cap - b->len > 64 ? realloc(b->data, b->len + 1) : NULL;
+        v->as.string.data = fit ? fit : b->data; v->as.string.len = b->len;
+        b->data = NULL;
+    }
+    free(b->data);
+    *b = (Buffer){.ctx = c};
     return v;
 }
 SPYValue *spy_list(SPYContext *c) { return value_new(c, SPY_LIST); }
@@ -2963,11 +2968,15 @@ static int bare_repr(Buffer *b, SPYValue *v) {
     return puts_buffer(b, "<") || puts_buffer(b, type_name(v)) || puts_buffer(b, text) ? -1 : 0;
 }
 /* The decimal digits of a machine integer, written from the last. */
-static int format_small(Buffer *b, int64_t n) {
-    char text[24], *p = text + sizeof text;
+/* The decimal digits of n, written backwards to end; returns their start. */
+static char *small_digits(char *end, int64_t n) {
     uint64_t m = n < 0 ? -(uint64_t)n : (uint64_t)n;
-    do *--p = (char)('0' + m % 10); while (m /= 10);
-    if (n < 0) *--p = '-';
+    do *--end = (char)('0' + m % 10); while (m /= 10);
+    if (n < 0) *--end = '-';
+    return end;
+}
+static int format_small(Buffer *b, int64_t n) {
+    char text[24], *p = small_digits(text + sizeof text, n);
     return append(b, p, (size_t)(text + sizeof text - p));
 }
 static int format_object(Buffer *, SPYValue *, int);
@@ -3350,6 +3359,10 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
     }
 }
 static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
+    if (v->type == SPY_INT && !v->as.integer_data.big) {
+        char text[24], *p = small_digits(text + sizeof text, v->as.integer_data.small);
+        return spy_string(c, p, (size_t)(text + sizeof text - p));
+    }
     Buffer b = { .ctx = c };
     /* A host may ask while an error is pending. */
     return buffer_text(&b, SPY_STRING, format_value(&b, v, repr));

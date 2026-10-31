@@ -156,6 +156,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A scope keeps its own environments](#a-scope-keeps-its-own-environments) | -3.1% (classes), -1.9% (fib); M2: classes -5.8% |
 | [An environment remembers it holds its scope's keys](#an-environment-remembers-it-holds-its-scopes-keys) | -1.4% (classes), -1.2% (fib) |
 | [A method object calls its function directly](#a-method-object-calls-its-function-directly) | -0.7% (classes) |
+| [Built text starts at 32 bytes; short text lives in its value](#built-text-starts-at-32-bytes-short-text-lives-in-its-value) | -5.5% (dicts), -4.5% (strings); M2: -5% each |
 
 ### Releasing a number or string frees it at once
 
@@ -1024,6 +1025,21 @@ Python function now goes to `call_function`, as a call node's does.
 Moving the same test into a helper shared with `eval_call` cost fib 0.3%,
 so each keeps its own. Instructions: classes -0.7%, the rest unchanged.
 Wall time: classes -1.0%.
+
+### Built text starts at 32 bytes; short text lives in its value
+
+`join`, `replace`, `upper`, f-strings and `str()` build their result in a
+`Buffer`, which grew from 8 bytes by doubling: a 40-byte line took four
+reallocations. The first append now takes 32 bytes. Doubling from 8 gives
+the same capacities from 16 bytes up, so only shorter results would hold
+more, and those are now copied into the value's own short-text room, as
+`spy_string` stores them, and the buffer is freed. `str()` and `repr()` of
+a machine int write the digits on the C stack and make the str directly.
+Starting at 64 bytes saved more on `strings` but kept 29 MB more for 900,000
+short strings. Peak memory for a list of 300,000 each of `str(i)`, `f"{i}"`
+and `s.upper()` went from 129 MB to 119 MB. Instructions: dicts -5.5%,
+strings -4.5%, the rest within 0.03%. Wall time: strings 130.2 -> 123.4 ms
+(-5.2%), dicts 75.0 -> 71.1 ms (-5.1%), sort within noise.
 
 ## Tried and left out
 
