@@ -18,8 +18,8 @@ libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
                 everything it allocated.
 
 For fuzz_eval and fuzz_compile, each input gets a fresh context with the standard layer (spy_std_init), no
-output, no input, no module loader, and no mounts, and a step limit so loops
-end. The context is collected and freed after every input, so AddressSanitizer
+output, no input, no module loader, and no mounts, a step limit so loops
+end, and a memory limit of 256 MiB. The context is collected and freed after every input, so AddressSanitizer
 reports leaks and use-after-free per input.
 
 Building needs a clang with libFuzzer. Apple clang has none; use Homebrew's
@@ -35,8 +35,9 @@ run in Linux instead: docker run with python:3.14 and apt-get install clang,
 then plain make libfuzzer.
 
 make fuzz builds all four and runs each for FUZZ_SECONDS (default 60) on a corpus
-seeded from the examples and language tests, in fork mode so out-of-memory
-and slow inputs are not reported as findings; crashes land in .obj/fuzz/.
+seeded from the examples and language tests, in fork mode. A step budget
+ends every run well within -timeout=10, so a timeout is an unmetered
+operation and a finding, as is a crash; findings land in .obj/fuzz/.
 By hand:
 
   mkdir -p corpus
@@ -51,5 +52,6 @@ input is also checked for reads of uninitialized memory. It needs clang.
 Reproduce a crash with ./fuzz/fuzz_eval crash-<hash>. Regenerate fuzz.dict
 from the engine's builtins after `make spy` with python3 fuzz/generate_dict.py.
 
-The engine has no memory limit, so an input like 'x' * 10**10 is reported as
-an out-of-memory; -rss_limit_mb and -malloc_limit_mb set where that happens.
+The memory limit turns an input like 'x' * 10**10 into a MemoryError.
+fuzz_oom's contexts have none, so it ignores out-of-memory inputs;
+-rss_limit_mb and -malloc_limit_mb set where they are reported.

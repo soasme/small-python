@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Enough for real programs, small enough that a loop ends within a second. */
+/* Enough for real programs, small enough that a loop ends within a second
+ * and memory within -rss_limit_mb under AddressSanitizer. */
 #define FUZZ_STEP_LIMIT 100000
+#define FUZZ_MEMORY_LIMIT (256 << 20)
 
 static int discard(void *data, const char *s, size_t n) {
     (void)data; (void)s; (void)n;
@@ -17,6 +19,7 @@ SPYContext *fuzz_context_new(void) {
     if (!c) return NULL;
     spy_set_output(c, discard, NULL);
     spy_set_step_limit(c, FUZZ_STEP_LIMIT);
+    spy_set_memory_limit(c, FUZZ_MEMORY_LIMIT);
     if (spy_std_init(c)) { spy_context_free(c); return NULL; }
     return c;
 }

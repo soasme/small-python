@@ -7,7 +7,7 @@
 #include "spy.h"
 
 /* A context for one input: output discarded, no input, loader, or mounts,
- * and a step budget so loops end. NULL if it cannot be created. */
+ * and step and memory budgets. NULL if it cannot be created. */
 SPYContext *fuzz_context_new(void);
 /* Collect cycles and free the context, so leaks show up per input. */
 void fuzz_context_free(SPYContext *);

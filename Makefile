@@ -257,15 +257,18 @@ FUZZERS = fuzz/fuzz_eval fuzz/fuzz_compile fuzz/fuzz_spyc fuzz/fuzz_oom
 libfuzzer: $(FUZZERS)
 
 # Each fuzzer for FUZZ_SECONDS, seeded from the examples and language tests.
-# The engine has no memory limit, so out-of-memory and slow inputs are not
-# findings; any sanitizer report or crash is.
+# Every run has a step budget that ends it far within -timeout, so a slow
+# input is an unmetered operation and a finding (docs/metering.md 5), as is
+# any sanitizer report or crash. fuzz_oom runs without a memory limit, so
+# out-of-memory inputs are not. Each input is checked for leaks; the fork
+# parent's own check at exit is off, as libFuzzer's driver leaks there.
 FUZZ_SECONDS ?= 60
 FUZZ_CORPUS = $(OBJDIR)/fuzz/corpus
 fuzz: $(FUZZERS)
 	mkdir -p $(FUZZ_CORPUS)
 	for f in examples/*.py tests/spec/*/*.py; do cp $$f $(FUZZ_CORPUS)/$$(echo $$f | tr / _); done
 	for fuzzer in $(FUZZERS); do \
-		./$$fuzzer -dict=fuzz/fuzz.dict -fork=2 -ignore_ooms=1 -ignore_timeouts=1 -timeout=10 -rss_limit_mb=2048 \
+		ASAN_OPTIONS=leak_check_at_exit=0 ./$$fuzzer -dict=fuzz/fuzz.dict -fork=2 -ignore_ooms=1 -timeout=10 -rss_limit_mb=2048 \
 			-max_total_time=$(FUZZ_SECONDS) -artifact_prefix=$(OBJDIR)/fuzz/ $(FUZZ_CORPUS) || exit 1; \
 	done
 

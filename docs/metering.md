@@ -271,9 +271,10 @@ open ([packaging/protocol.md](packaging/protocol.md) §10).
   a budget of 1,000,000 steps each must be stopped within its time, not
   completed or interrupted by its watchdog, an interrupt callback. The
   probe reports the slowest, about 1 s on the reference machine.
-- **Fuzzing**: the eval target already runs under a step limit. Running it
-  with libFuzzer's `-timeout=2` turns any unmetered operation into a
-  finding; each one becomes a probe program.
+- **Fuzzing**: every target runs under a step limit that ends it far
+  within libFuzzer's `-timeout=10`, which `make fuzz` no longer ignores, so
+  any unmetered operation is a finding; each one becomes a probe program.
+  The eval and compile targets also run under a memory limit.
 - **Performance**: no benchmark program slower than before, with and
   without a limit, measured as every change is (`docs/optimization.md`).
   The 56% cost of a limit in section 1 should disappear.
