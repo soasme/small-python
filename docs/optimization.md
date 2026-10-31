@@ -162,6 +162,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A machine test's bool is its truth](#a-machine-tests-bool-is-its-truth) | -1.2% (generators) |
 | [A call operand skips a second eval](#a-call-operand-skips-a-second-eval) | -5.7% (fib), -1.1% (dicts), -0.8% (strings); nbody +0.1%; M2: fib -5.6%, dicts -4.2% |
 | [An attribute operand skips a second eval](#an-attribute-operand-skips-a-second-eval) | -7.8% (classes); M2: classes -11.2% |
+| [An append that fits does not call grow](#an-append-that-fits-does-not-call-grow) | -1.0% (strings), -0.3% (bigint) |
 
 ### Releasing a number or string frees it at once
 
@@ -1106,6 +1107,14 @@ guard the stack themselves. Instructions: classes -7.8%, fib, dicts and
 strings +0.05%, the rest unchanged. Wall time: classes 107.3 -> 95.3 ms
 (-11.2%), fib -0.7% to -1.1%, strings -0.8%, dicts -0.2% in a second run
 (+1.4% in the first).
+
+### An append that fits does not call grow
+
+Every `append` to a text buffer called `grow`, which returned at once
+when the text fitted. The capacity is now compared in `append`, so
+`grow` runs only to reallocate. Instructions: strings -1.0%, bigint
+-0.3%, the rest unchanged. Wall time: strings -0.6%, fib -0.7%, nbody
+and bigint within the noise (bigint 6.0 -> 6.1 ms, sd 0.1, in 60 runs).
 
 ## Tried and left out
 

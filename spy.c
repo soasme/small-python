@@ -569,7 +569,8 @@ fail:
 typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
 static int append(Buffer *b, const char *s, size_t n) {
     /* Text is built by many small appends; the first takes 32 bytes. */
-    if (n > SIZE_MAX - b->len - 1 || grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1 > 32 ? b->len + n + 1 : 32, 1)) return -1;
+    if (n > SIZE_MAX - b->len - 1) return -1;
+    if (b->len + n + 1 > b->cap && grow(b->ctx, (void **)&b->data, &b->cap, b->len + n + 1 > 32 ? b->len + n + 1 : 32, 1)) return -1;
     memcpy(b->data + b->len, s, n);
     b->len += n;
     b->data[b->len] = 0;
