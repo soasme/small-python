@@ -1050,12 +1050,19 @@ size_t spy_collect(SPYContext *c) { return collect(c, NULL, NULL); }
 size_t spy_live_values(const SPYContext *c) { return c->live; }
 SPYType spy_type(const SPYValue *v) { return (SPYType)v->type; }
 SPYValue *spy_none(SPYContext *c) { return spy_retain(c->none); }
-SPYValue *spy_int(SPYContext *c, int64_t i) {
+/* spy_int and spy_float, inline where arithmetic makes most of them. */
+static ALWAYS_INLINE SPYValue *int_value(SPYContext *c, int64_t i) {
     if (i >= -5 && i <= 256 && c->small_ints[i + 5]) return spy_retain(c->small_ints[i + 5]);
     SPYValue *v = number_new(c, SPY_INT);
     if (v) v->as.integer_data.small = i;
     return v;
 }
+static ALWAYS_INLINE SPYValue *float_value(SPYContext *c, double d) {
+    SPYValue *v = number_new(c, SPY_FLOAT);
+    if (v) v->as.real = d;
+    return v;
+}
+SPYValue *spy_int(SPYContext *c, int64_t i) { return int_value(c, i); }
 static void integer_view(SPYValue *value, IntView *view) {
     BigInt *big = value->as.integer_data.big;
     if (big) { view->digits = big->digits; view->len = big->len; view->sign = big->sign; return; }
@@ -1375,11 +1382,7 @@ static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **qu
 SPYValue *spy_bool(SPYContext *c, int i) {
     return spy_retain(c->booleans[!!i]);
 }
-SPYValue *spy_float(SPYContext *c, double d) {
-    SPYValue *v = number_new(c, SPY_FLOAT);
-    if (v) v->as.real = d;
-    return v;
-}
+SPYValue *spy_float(SPYContext *c, double d) { return float_value(c, d); }
 static double complex complex_parts(double real, double imag) {
     /* C11 specifies the representation as two doubles, real then imaginary.
      * Copying avoids the spurious NaN in inf * I on some implementations. */
@@ -7695,7 +7698,7 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         if (!counter->as.integer_data.big && !stop->as.integer_data.big && !step->as.integer_data.big) {
             if (by > 0 ? at >= end : at <= end) { v->as.iterator.done = 1; return NULL; }
             if (by > 0 ? at <= INT64_MAX - by : at >= INT64_MIN - by) {
-                SPYValue *next = spy_int(c, at + by);
+                SPYValue *next = int_value(c, at + by);
                 if (!next) return NULL;
                 v->as.iterator.counter = next;
                 return counter;
@@ -9164,14 +9167,14 @@ static ALWAYS_INLINE SPYValue *number_fast(SPYContext *c, int op, SPYValue *a, S
         if (!(op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real))) return NULL;
         double x = a->as.real, y = b->as.real, result = op == '+' ? x + y : op == '-' ? x - y : op == '*' ? x * y : x / y;
         SPYValue *spare = !owned ? NULL : a->refs == 1 ? a : b->refs == 1 ? b : NULL;
-        if (!spare) return spy_float(c, result);
+        if (!spare) return float_value(c, result);
         spare->as.real = result;
         return spy_retain(spare);
     }
     if (a->type != SPY_INT || b->type != SPY_INT || a->as.integer_data.big || b->as.integer_data.big) return NULL;
     int64_t x = a->as.integer_data.small, y = b->as.integer_data.small, result;
     if (op == '+' ? int_add(x, y, &result) : op == '-' ? int_sub(x, y, &result) : op == '*' ? int_mul(x, y, &result) : -1) return NULL;
-    return spy_int(c, result);
+    return int_value(c, result);
 }
 static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
@@ -13965,13 +13968,25 @@ static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
 }
 /* The truth of a condition: 1, 0, or -1 with an error set. */
 static int condition(SPYContext *c, Frame *f, Node *n) {
-    /* A comparison of two numbers on the operator fast path is its own truth. */
-    if (n->kind == N_COMPARE && (n->flags & F_OPERATOR) && ordering(n->args->op) && quiet(c, f)) {
-        SPYValue *x = operand(f, n->a), *y = x ? operand(f, n->args->a) : NULL;
-        int truth = y ? number_order(n->args->op, x, y) : -1;
-        if (truth >= 0) return truth;
-    }
     int truth;
+    /* A single comparison of two numbers is its own truth, without a bool. */
+    if (n->kind == N_COMPARE && !n->args->next && ordering(n->args->op)) {
+        int op = n->args->op;
+        if ((n->flags & F_OPERATOR) && quiet(c, f)) {
+            SPYValue *x = operand(f, n->a), *y = x ? operand(f, n->args->a) : NULL;
+            if (y && (truth = number_order(op, x, y)) >= 0) return truth;
+        }
+        SPYValue *a = eval(c, f, n->a), *b = a ? eval(c, f, n->args->a) : NULL;
+        truth = b ? number_order(op, a, b) : -1;
+        if (b && truth < 0) {
+            relocate(c, n);
+            SPYValue *result = comparison(c, op, a, b);
+            if (result) truth = !!spy_truth(result);
+            spy_release(result);
+        }
+        spy_release(a); spy_release(b);
+        return c->error_type[0] ? -1 : truth;
+    }
     SPYValue *value = eval_tested(c, f, n, &truth);
     if (!value) return -1;
     if (truth < 0) truth = !!spy_truth(value);

@@ -111,6 +111,8 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A release inlines its common case](#a-release-inlines-its-common-case) | -10.1% (loop), -7.5% (nbody), -6.8% (classes), -6.3% (generators), -5.5% (fib); M2: loop -17%, nbody -13.5% |
 | [Arithmetic on numbers skips the dispatch](#arithmetic-on-numbers-skips-the-dispatch) | -11.7% (loop), -7.8% (fib), -6.2% (generators), -5.9% (nbody), -4.6% (classes) |
 | [A test of two numbers makes no bool](#a-test-of-two-numbers-makes-no-bool) | -10.3% (fib), -8.6% (loop); M2: loop -15%, fib -8.8% |
+| [Hot sites make numbers inline](#hot-sites-make-numbers-inline) | -2.5% (nbody), -1.8% (loop), -1.3% (fib) |
+| [Any single comparison is tested without a bool](#any-single-comparison-is-tested-without-a-bool) | -12.2% (loop); fib +0.6% |
 
 ### Releasing a number or string frees it at once
 
@@ -760,6 +762,25 @@ path and `comparison` share `number_order` for the same case.
 | generators | -1.6% | 208.9 → 201.4 ms (-3.6%) |
 | dicts | +0.3% | |
 | the rest | 0% | |
+
+### Hot sites make numbers inline
+
+`spy_int` and `spy_float` are public and called from almost two hundred
+places, so the compiler keeps them out of line. Their bodies are now
+`int_value` and `float_value`, inline, which the arithmetic of
+`number_fast` and the range iterator call directly; every other caller
+still calls the public functions. Instructions: nbody -2.5%, loop
+-1.8%, fib -1.3%, the rest -0.3% to -0.9%; the text section grows by
+2.3 KB.
+
+### Any single comparison is tested without a bool
+
+The test of a comparison skipped the bool only when both operands were
+on the operator fast path. `if i % 3 == 0` evaluates `i % 3` first, so
+it still made a bool. `condition` now evaluates both operands of any
+single comparison itself, compares two numbers with `number_order`, and
+leaves the rest to `comparison` and `spy_truth` as before. Instructions:
+loop -12.2%, fib +0.6%, the rest within 0.3%.
 
 ## Tried and left out
 
