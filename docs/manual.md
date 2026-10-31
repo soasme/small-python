@@ -843,16 +843,26 @@ and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
 
 `spy_set_step_limit` bounds the steps of each outermost `spy_eval`,
 `spy_eval_interactive`, `spy_exec`, `spy_exec_module`, `spy_call` or
-`spy_call_keywords`: one per Python call and loop pass, one per 64 bytes of
-source parsed, and some native work in proportion to its operands; zero means
-unlimited. A host function calling back shares its caller's budget. Once the
-budget is spent the call is stopped: every further step fails with
-`RuntimeError`, so no handler or `finally` body runs, and finalizers that
-become due wait for the next outermost call. `spy_stopped` returns
-`SPY_STOP_STEPS` after such a call and zero after any other, which tells a
-stop from the same error raised by the program. It is not a memory or wall-time quota and does not yet
-meter every native operation ([metering.md](metering.md)). This experimental
-runtime is not an isolation boundary for untrusted programs.
+`spy_call_keywords`; zero means unlimited. A step is a unit of bounded work:
+one per Python call and per 8 nodes of the body it runs, one per loop pass
+and per item a native loop takes, one per 64 bytes of source parsed or of a
+large block allocated, and native work that only reads, such as comparing,
+searching or hashing, in proportion to its operands
+([metering.md](metering.md)). A host function calling back shares its
+caller's budget.
+
+`spy_set_memory_limit` bounds the bytes the engine holds, values and their
+storage; zero means unlimited, and `spy_memory_used` returns the count. The
+limit is a level, not a budget: it is not refilled per call.
+
+A spent budget or a refused allocation stops the call: every further step
+fails with `RuntimeError` (steps) or `MemoryError` (memory), so no handler
+or `finally` body runs, and finalizers that become due wait for the next
+outermost call, which runs normally. `spy_stopped` returns `SPY_STOP_STEPS`
+or `SPY_STOP_MEMORY` after such a call and zero after any other, which
+tells a stop from the same error raised by the program. Neither is a
+wall-time quota. This experimental runtime is not an isolation boundary for
+untrusted programs.
 
 #### 3.4.7 Collection
 
@@ -893,7 +903,7 @@ with small_python.Runtime(step_limit=1_000_000, memory_limit=64 << 20, timeout=5
 `Runtime(*, std=True, step_limit=0, memory_limit=0, timeout=None,
 output=None, loader=None, message_limit=64 << 20)` owns one context in one
 worker. `std` registers the standard layer; `memory_limit` bounds the bytes
-the engine allocates (`MemoryError` beyond it); `timeout` bounds the seconds
+the engine holds (a `MemoryError` that stops the operation beyond it); `timeout` bounds the seconds
 one operation runs in the worker, after which the worker is terminated and
 `small_python.Timeout` raised; `output` receives printed text (default
 `sys.stdout.write`); `loader` maps a module name to source or `None`. Its

@@ -85,7 +85,9 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * up to KEPT environments its calls returned when nothing else held them,
  * unlinked, chained through their parent, each with its storage and the
  * symbol keys (owned) for the next call. */
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len; int kind, tries; const char *within; SPYValue *kept; };
+/* nodes counts the scope's own nodes, which run at most once between two
+ * steps: a body is charged a step per 64 of them when entered. */
+struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len, nodes; int kind, tries; const char *within; SPYValue *kept; };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
@@ -226,6 +228,7 @@ struct SPYContext {
     /* By size_class, released values kept for the next allocations, linked
      * by next, in front of the pools with room; see value_take. No value edges. */
     SPYValue *spare[3]; size_t spares[3];
+    union MemHead *spare_blocks[16]; /* Released blocks of 16 .. 256 bytes, by size. */
     Pool *pools[3], *every_pool; /* every_pool: all of them, linked by after. */
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
@@ -288,6 +291,7 @@ struct SPYContext {
     /* Steps left in this outermost call: SIZE_MAX without a limit, zero
      * while stopped, when every tick fails. */
     size_t live, fuel, step_limit, depth;
+    size_t memory, memory_limit; /* Bytes the engine holds, and may hold; 0: unlimited. */
     size_t collected_live; /* live after the last collection, for gc.get_count(). */
     /* Python frames are limited by sys.setrecursionlimit; the engine's own C
      * recursion by the machine stack it has used since the outermost entry. */
@@ -452,10 +456,11 @@ static NO_INLINE SPYValue *call(SPYContext *c, SPYValue *fn, size_t argc, SPYVal
 static NO_INLINE int halt(SPYContext *c, int reason) {
     if (!c->stopped) c->stopped = reason;
     c->fuel = 0; c->quiet_unit = NULL;
-    spy_error(c, "RuntimeError", "execution step limit exceeded");
+    if (c->stopped == SPY_STOP_MEMORY) spy_error(c, "MemoryError", "memory limit exceeded");
+    else spy_error(c, "RuntimeError", "execution step limit exceeded");
     return -1;
 }
-static void watch(SPYContext *c) { c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit; }
+static void watch(SPYContext *c) { c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit; }
 static int watched(const SPYContext *c) { return c->watch; }
 /* Spend n steps of the budget. Calls, loop passes, source text and native
  * work proportional to its operands spend. */
@@ -467,15 +472,19 @@ static ALWAYS_INLINE int spend(SPYContext *c, size_t n) {
 /* A Python frame, counted against sys.getrecursionlimit() as CPython's
  * _Py_CheckRecursiveCallPy. */
 static void *allocate(SPYContext *, size_t);
-/* A call while watched: its trace and profile events, then its step. */
+static void *mem_realloc(SPYContext *, void *, size_t);
+/* A frame entered while watched: its trace and profile events, then its
+ * steps, one and one per 8 nodes of the body it runs. */
 static NO_INLINE int watched_call(SPYContext *c) {
-    return ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) || spend(c, 1);
+    struct ActiveFrame *frame = &c->frames[c->py_depth - 1];
+    Scope *scope = frame->env->type == V_ENV ? frame->env->as.map.scope : frame->owner->type == V_UNIT ? frame->owner->as.unit.scope : NULL;
+    return ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) || spend(c, 1 + (scope ? scope->nodes / 8 : 0));
 }
 static int enter_frame(SPYContext *c, SPYValue *env, SPYValue *owner) {
     if (c->py_depth >= c->recursion_limit) { errorf(c, "RecursionError", "maximum recursion depth exceeded"); return -1; }
     if (c->py_depth == c->frames_cap) {
         size_t cap = c->frames_cap ? c->frames_cap * 2 : 64;
-        struct ActiveFrame *frames = realloc(c->frames, cap * sizeof(*frames));
+        struct ActiveFrame *frames = mem_realloc(c, c->frames, cap * sizeof(*frames));
         if (!frames) { errorf(c, "MemoryError", "out of memory"); return -1; }
         memset(frames + c->frames_cap, 0, (cap - c->frames_cap) * sizeof(*frames));
         c->frames = frames; c->frames_cap = cap;
@@ -568,14 +577,58 @@ void spy_clear_error(SPYContext *c) {
     c->error_type[0] = c->error_message[0] = c->filename[0] = c->error_name[0] = 0; c->filename_from = c->quiet_unit = NULL;
     c->line = 0;
 }
+enum { POOL = 16384, SPARES = 64 };
+/* Engine memory (docs/metering.md 3.3). A block starts with its size and
+ * context, so a context counts the bytes it holds and a free needs neither.
+ * While watched, growth stays within the memory limit, except while
+ * stopped, when unwinding needs it, and a block of 4 KiB or more spends a
+ * step per 64 bytes it grows by; a smaller one is paid for by the step
+ * that asked for it. A block has
+ * room for a multiple of 16 bytes; released blocks of up to 256 bytes wait
+ * in the context for allocations of their size, as pymalloc keeps its
+ * small blocks. */
+typedef union MemHead { max_align_t align; struct { size_t size; SPYContext *c; } head; union MemHead *next; } MemHead;
+static NO_INLINE int meter(SPYContext *c, size_t old, size_t n) {
+    if (c->stopped) return 0;
+    if (c->memory_limit && (c->memory > c->memory_limit || n - old > c->memory_limit - c->memory)) return halt(c, SPY_STOP_MEMORY);
+    return n < 4096 ? 0 : spend(c, n / 64 - old / 64);
+}
+/* The size class of a block of n bytes: room for 16 (k + 1) bytes. */
+static size_t block_class(size_t n) { return n ? (n - 1) / 16 : 0; }
+/* A block of n bytes, zeroed if zero, or b resized to n. */
+static NO_INLINE void *mem_block(SPYContext *c, MemHead *b, size_t n, int zero) {
+    size_t old = b ? b->head.size : 0, k = block_class(n);
+    if (n > old && (n > SIZE_MAX / 2 || (c->watch && meter(c, old, n)))) return NULL;
+    if (b) { if (k != block_class(old) && !(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) return NULL; }
+    else if (k < 16 && c->spare_blocks[k]) {
+        b = c->spare_blocks[k]; cache_take(b, sizeof(MemHead) + 16 * (k + 1));
+        c->spare_blocks[k] = b->next;
+        if (zero) memset(b + 1, 0, 16 * (k + 1));
+    } else if (!(b = zero ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1)))) return NULL;
+    c->memory += n - old;
+    b->head.size = n; b->head.c = c;
+    return b + 1;
+}
+static void *mem_malloc(SPYContext *c, size_t n) { return mem_block(c, NULL, n, 0); }
+static void *mem_realloc(SPYContext *c, void *p, size_t n) { return mem_block(c, p ? (MemHead *)p - 1 : NULL, n, 0); }
+static NO_INLINE void mem_free(void *p) {
+    if (!p) return;
+    MemHead *b = (MemHead *)p - 1;
+    SPYContext *c = b->head.c;
+    size_t n = b->head.size, k = block_class(n);
+    c->memory -= n;
+    if (k >= 16) { free(b); return; }
+    b->next = c->spare_blocks[k]; c->spare_blocks[k] = b;
+    cache_put(b, sizeof(MemHead) + 16 * (k + 1));
+}
 static void *allocate(SPYContext *c, size_t n) {
-    void *p = calloc(1, n ? n : 1);
+    void *p = mem_block(c, NULL, n, 1);
     if (!p) spy_error(c, "MemoryError", "allocation failed");
     return p;
 }
 static char *copy_text(SPYContext *c, const char *s, size_t n) {
     if (n == SIZE_MAX) { spy_error(c, "MemoryError", "string is too large"); return NULL; }
-    char *p = malloc(n + 1);
+    char *p = mem_malloc(c, n + 1);
     if (!p) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
     if (n) memcpy(p, s, n);
     p[n] = 0;
@@ -589,7 +642,7 @@ static int grow(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) {
         k *= 2;
     }
     if (k > SIZE_MAX / width) goto fail;
-    void *q = realloc(*p, k * width);
+    void *q = mem_realloc(c, *p, k * width);
     if (!q) goto fail;
     *p = q;
     *cap = k;
@@ -635,7 +688,6 @@ static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
  * listed by size class, the one taken from first. In front of them, as an
  * allocator's thread cache, up to SPARES released values of each size wait
  * for the next allocations. */
-enum { POOL = 16384, SPARES = 64 };
 /* A host that counts the engine's allocations supplies its own pair. */
 #ifndef pool_alloc
 #ifdef _WIN32
@@ -651,8 +703,9 @@ struct Pool { Pool *next, *prev, *after, *before; /* before, after: in every_poo
 static ALWAYS_INLINE Pool *value_pool(SPYValue *v) { return (Pool *)((uintptr_t)v & ~(uintptr_t)(POOL - 1)); }
 static ALWAYS_INLINE int pool_room(Pool *pool, size_t bytes) { return pool->free || pool->fresh + bytes <= pool->end; }
 static NO_INLINE Pool *pool_new(SPYContext *c, int size) {
-    Pool *pool = pool_alloc();
+    Pool *pool = c->watch && meter(c, 0, POOL) ? NULL : pool_alloc();
     if (!pool) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
+    c->memory += POOL;
     *pool = (Pool){.next = c->pools[size], .after = c->every_pool, .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
     cache_put(pool->fresh, (size_t)(pool->end - pool->fresh));
     if (pool->next) pool->next->prev = pool;
@@ -686,7 +739,7 @@ static NO_INLINE void pool_give(SPYContext *c, SPYValue *v, int size) {
         if (pool->next) pool->next->prev = pool->prev;
         if (pool->before) pool->before->after = pool->after; else c->every_pool = pool->after;
         if (pool->after) pool->after->before = pool->before;
-        cache_take(pool, POOL); pool_free(pool);
+        cache_take(pool, POOL); pool_free(pool); c->memory -= POOL;
     }
 }
 /* An unset allocation for a value of size class size. */
@@ -889,12 +942,12 @@ static void edges(SPYValue *v, Visit visit, void *data) {
 #undef VISIT
 }
 static void free_scope(Scope *scope) {
-    if (scope) { free(scope->symbols); free(scope->order); free(scope); }
+    if (scope) { mem_free(scope->symbols); mem_free(scope->order); mem_free(scope); }
 }
-static int weak_push(SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
+static int weak_push(SPYContext *c, SPYValue ***items, size_t *len, size_t *cap, SPYValue *value) {
     if (*len == *cap) {
         size_t next = *cap ? *cap * 2 : 8;
-        SPYValue **grown = realloc(*items, next * sizeof(**items));
+        SPYValue **grown = mem_realloc(c, *items, next * sizeof(**items));
         if (!grown) return -1;
         *items = grown; *cap = next;
     }
@@ -916,7 +969,7 @@ static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
             drop = collecting ? !e->ref->marked : !e->ref->refs;
             SPYValue *callback = drop ? NULL : name_local(e->ref, "__callback__");
             if (callback && callback->type != SPY_NONE &&
-                !weak_push(&c->weak_calls, &c->weak_calls_len, &c->weak_calls_cap, e->ref)) { spy_retain(e->ref); attend(c); }
+                !weak_push(c, &c->weak_calls, &c->weak_calls_len, &c->weak_calls_cap, e->ref)) { spy_retain(e->ref); attend(c); }
         } else if (!drop) continue;
         if (drop) { memmove(e, e + 1, (c->weak_len - i - 1) * sizeof(*e)); c->weak_len--; }
     }
@@ -937,29 +990,29 @@ static void free_value(SPYValue *v) {
     if (v->listed) value_unlink(c, v);
     else c->live--;
     switch (v->type) {
-    case SPY_INT: if (v->as.integer_data.big) free(v->as.integer_data.big); break;
-    case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: if (v->as.string.data != short_text(v)) free(v->as.string.data); break;
-    case SPY_MEMORYVIEW: free(v->as.memory.layout); break;
+    case SPY_INT: if (v->as.integer_data.big) mem_free(v->as.integer_data.big); break;
+    case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: if (v->as.string.data != short_text(v)) mem_free(v->as.string.data); break;
+    case SPY_MEMORYVIEW: mem_free(v->as.memory.layout); break;
     case SPY_CELL:
         for (size_t i = 0; v->as.cell.env && i < c->cells_len; i++)
             if (c->cells[i] == v) { c->cells[i] = c->cells[--c->cells_len]; break; }
         break;
     case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(c, v->as.generator.machine); break;
-    case SPY_LIST: case SPY_TUPLE: free(v->as.seq.items); break;
+    case SPY_LIST: case SPY_TUPLE: mem_free(v->as.seq.items); break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
         if (v->as.map.cap + v->as.map.front == 8 && c->spare_entries_len < 16) {
             c->spare_entries[c->spare_entries_len++] = map_storage(v);
             cache_put(map_storage(v), 8 * sizeof(Entry));
-        } else free(map_storage(v));
-        free(v->as.map.index); break;
+        } else mem_free(map_storage(v));
+        mem_free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
+        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); mem_free(n->text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
         free_scope(v->as.unit.scope);
         if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
-        free(v->as.unit.filename);
+        mem_free(v->as.unit.filename);
         break;
     }
     }
@@ -989,7 +1042,7 @@ static int finalize_later(SPYValue *v) {
         if (!v->as.memory.view || v->as.memory.released) return 0;
     } else if (!class_lookup(v->as.map.parent, "__del__")) return 0;
     SPYContext *c = v->ctx;
-    if (weak_push(&c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
+    if (weak_push(c, &c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
     attend(c);
     v->finalized = 1;
     return 1;
@@ -1029,7 +1082,7 @@ static int gc_tracked(SPYContext *, SPYValue *);
  * after finalization are appended to it instead of freed. */
 static size_t collect_once(SPYContext *c, SPYValue *save, Buffer *report) {
     if (!c->live) return 0;
-    Work work = { malloc(c->live * sizeof(SPYValue *)), 0 };
+    Work work = { mem_malloc(c, c->live * sizeof(SPYValue *)), 0 };
     if (!work.items) return 0;
     for (SPYValue *v = c->values; v; v = v->next) { v->trial = v->refs; v->marked = 0; }
     for (SPYValue *v = c->values; v; v = v->next) edges(v, subtract_edge, NULL);
@@ -1043,7 +1096,7 @@ static size_t collect_once(SPYContext *c, SPYValue *save, Buffer *report) {
     for (SPYValue *v = c->values; v; v = v->next)
         if (!v->marked && finalize_later(v)) { v->refs++; v->marked = 1; work.items[work.len++] = v; }
     for (size_t i = finalizing; i < work.len; i++) edges(work.items[i], mark_edge, &work);
-    free(work.items);
+    mem_free(work.items);
     /* gc.DEBUG_COLLECTABLE's lines, written before anything is freed. */
     for (SPYValue *v = c->values; report && v; v = v->next)
         if (!v->marked && gc_public(v) && gc_tracked(c, v)) {
@@ -1130,12 +1183,12 @@ static SPYValue *integer_finish(SPYContext *c, BigInt *big) {
         if (big->len == 2) magnitude |= (uint64_t)big->digits[1] << 32;
         if (magnitude <= (uint64_t)INT64_MAX + (big->sign < 0)) {
             int64_t number = big->sign < 0 && magnitude ? -1 - (int64_t)(magnitude - 1) : (int64_t)magnitude;
-            free(big); return spy_int(c, number);
+            mem_free(big); return spy_int(c, number);
         }
     }
     SPYValue *value = value_new(c, SPY_INT);
     if (value) value->as.integer_data.big = big;
-    else free(big);
+    else mem_free(big);
     return value;
 }
 static int integer_sign(SPYValue *value) {
@@ -1149,7 +1202,10 @@ static int magnitude_compare(const IntView *a, const IntView *b) {
     return 0;
 }
 static int integer_compare(SPYValue *a, SPYValue *b) {
+    if (!a->as.integer_data.big && !b->as.integer_data.big)
+        return (a->as.integer_data.small > b->as.integer_data.small) - (a->as.integer_data.small < b->as.integer_data.small);
     IntView x, y; integer_view(a, &x); integer_view(b, &y);
+    if (x.len >= 64 && x.len == y.len && spend(a->ctx, x.len / 64)) return 0;
     return x.sign != y.sign ? (x.sign < y.sign ? -1 : 1) : x.sign * magnitude_compare(&x, &y);
 }
 static SPYValue *integer_negate(SPYContext *c, SPYValue *value) {
@@ -1215,6 +1271,11 @@ static void magnitude_schoolbook(uint32_t *out, const uint32_t *x, size_t xn, co
     }
 }
 enum { KARATSUBA_CUTOFF = 40 };
+/* Steps for a * b digit operations: one per 1024. */
+static size_t product_steps(size_t a, size_t b) {
+    uint64_t steps = (uint64_t)a * b / 1024;
+    return steps > SIZE_MAX ? SIZE_MAX : (size_t)steps;
+}
 /* out[0, xn + yn) = x * y for xn >= yn, with scratch for 4 xn + 1024 digits.
  * Short operands multiply digit by digit. A lopsided x is cut into pieces of
  * yn digits. Otherwise Karatsuba: with x = x1 B^h + x0 and y = y1 B^h + y0,
@@ -1248,15 +1309,19 @@ static SPYValue *integer_multiply(SPYContext *c, SPYValue *a, SPYValue *b) {
     const IntView *x = &views[views[0].len < views[1].len], *y = &views[views[0].len >= views[1].len];
     if (!y->len) return spy_int(c, 0);
     if (x->len > SIZE_MAX / 8 - 1024) return spy_error(c, "MemoryError", "integer too large");
-    if (spend(c, y->len)) return NULL;
+    /* Pieces of y->len digits of x, each three products of halves until
+     * the halves multiply digit by digit, as magnitude_multiply cuts them. */
+    size_t pieces = 1, n = y->len;
+    if (n >= KARATSUBA_CUTOFF) for (pieces = x->len / n + 1; n >= KARATSUBA_CUTOFF; n = (n + 1) / 2) pieces *= 3;
+    if (spend(c, n < KARATSUBA_CUTOFF && pieces == 1 ? product_steps(x->len, n) : product_steps(pieces, n * n))) return NULL;
     BigInt *result = integer_alloc(c, x->len + y->len);
     if (!result) return NULL;
     if (y->len < KARATSUBA_CUTOFF) magnitude_schoolbook(result->digits, x->digits, x->len, y->digits, y->len);
     else {
         uint32_t *scratch = allocate(c, (4 * x->len + 1024) * sizeof(*scratch));
-        if (!scratch) { free(result); return NULL; }
+        if (!scratch) { mem_free(result); return NULL; }
         magnitude_multiply(result->digits, x->digits, x->len, y->digits, y->len, scratch);
-        free(scratch);
+        mem_free(scratch);
     }
     result->sign = x->sign * y->sign;
     return integer_finish(c, result);
@@ -1366,7 +1431,7 @@ static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **qu
     size_t n = y.len, m = x.len >= n ? x.len - n : 0;
     BigInt *q = integer_alloc(c, m + 1), *r = integer_alloc(c, x.len + 1);
     uint32_t *divisor = allocate(c, n * sizeof(*divisor));
-    if (!q || !r || !divisor) { free(q); free(r); free(divisor); return -1; }
+    if (!q || !r || !divisor) { mem_free(q); mem_free(r); mem_free(divisor); return -1; }
     int shift = 0;
     while (!(y.digits[n - 1] << shift & UINT32_C(0x80000000))) shift++;
     for (size_t i = n; i--;) divisor[i] = y.digits[i] << shift | (shift && i ? y.digits[i - 1] >> (32 - shift) : 0);
@@ -1374,8 +1439,8 @@ static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **qu
     u[x.len] = shift && x.len ? x.digits[x.len - 1] >> (32 - shift) : 0;
     for (size_t i = x.len; i--;) u[i] = x.digits[i] << shift | (shift && i ? x.digits[i - 1] >> (32 - shift) : 0);
     q->digits[m] = 0;
+    if (spend(c, product_steps(4 * (m + 1), n + 16))) { mem_free(q); mem_free(r); mem_free(divisor); return -1; }
     for (size_t j = m + 1; x.len >= n && j--;) {
-        if (spend(c, 1)) { free(q); free(r); free(divisor); return -1; }
         uint64_t top = (uint64_t)u[j + n] << 32 | u[j + n - 1];
         uint64_t estimate = top / divisor[n - 1], rest = top % divisor[n - 1];
         while (estimate >> 32 || (n > 1 && estimate * divisor[n - 2] > (rest << 32 | u[j + n - 2]))) {
@@ -1402,7 +1467,7 @@ static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **qu
     }
     r->len = x.len < n ? x.len : n;
     for (size_t i = 0; i < r->len; i++) u[i] = u[i] >> shift | (shift ? u[i + 1] << (32 - shift) : 0);
-    free(divisor);
+    mem_free(divisor);
     q->sign = x.sign * y.sign; r->sign = x.sign;
     SPYValue *qv = integer_finish(c, q), *rv = integer_finish(c, r);
     if (qv && rv && integer_sign(rv) && x.sign != y.sign) {
@@ -1464,11 +1529,11 @@ static SPYValue *buffer_text(Buffer *b, int type, int failed) {
         if ((v = text_new(c, type, b->len)) && b->len) memcpy(v->as.string.data, b->data, b->len);
     } else if (!b->data && append(b, "", 0)) ;
     else if ((v = value_new(c, type))) {
-        char *fit = b->cap - b->len > 64 ? realloc(b->data, b->len + 1) : NULL;
+        char *fit = b->cap - b->len > 64 ? mem_realloc(b->ctx, b->data, b->len + 1) : NULL;
         v->as.string.data = fit ? fit : b->data; v->as.string.len = b->len;
         b->data = NULL;
     }
-    free(b->data);
+    mem_free(b->data);
     *b = (Buffer){.ctx = c};
     return v;
 }
@@ -1621,6 +1686,10 @@ static SPYValue *comparison_item(SPYValue *v, size_t index) {
     return index == 0 ? v->as.slice.start : index == 1 ? v->as.slice.stop : v->as.slice.step;
 }
 static int view_equal(SPYContext *, SPYValue *, SPYValue *);
+/* Whether n bytes at a and b are equal; long ones spend a step per 64. */
+static int same_bytes(SPYContext *c, const char *a, const char *b, size_t n) {
+    return (n < 4096 || !spend(c, n / 64)) && !memcmp(a, b, n);
+}
 static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
     if (special_dispatch(a) || special_dispatch(b)) {
         SPYValue *value = rich_compare(a->ctx, R_EQ, a, b);
@@ -1680,12 +1749,12 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
         return !integer_compare(a->as.range.length, &one) || !integer_compare(a->as.range.step, b->as.range.step);
     }
     case SPY_STRING: case SPY_BYTES:
-        return a->as.string.len == b->as.string.len &&
-            !memcmp(a->as.string.data, b->as.string.data, a->as.string.len);
+        return a->as.string.len == b->as.string.len && same_bytes(a->ctx, a->as.string.data, b->as.string.data, a->as.string.len);
     case SPY_DICT: case SPY_SET:
         if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
         if (a->as.map.len != b->as.map.len) return 0;
         for (size_t i = 0; i < a->as.map.len; i++) {
+            if ((i & 15) == 15 && spend(a->ctx, 1)) return 0;
             SPYValue *key = spy_retain(map_items(a)[i].key);
             SPYValue *left = spy_retain(map_items(a)[i].value);
             ptrdiff_t j = map_find_hash(b, key, map_items(a)[i].hash);
@@ -1699,6 +1768,7 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
         if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
         if (comparison_length(a) != comparison_length(b)) return 0;
         for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
+            if ((i & 63) == 63 && spend(a->ctx, 1)) return 0;
             SPYValue *left = spy_retain(comparison_item(a, i)), *right = spy_retain(comparison_item(b, i));
             int matches = left == right || equal(left, right, depth + 1);
             spy_release(left); spy_release(right);
@@ -1719,7 +1789,7 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
 static int equal(SPYValue *a, SPYValue *b, size_t depth) {
     /* Two exact str values compare without a callback. */
     if (a->type == SPY_STRING && b->type == SPY_STRING)
-        return a->as.string.len == b->as.string.len && !memcmp(a->as.string.data, b->as.string.data, a->as.string.len);
+        return a->as.string.len == b->as.string.len && same_bytes(a->ctx, a->as.string.data, b->as.string.data, a->as.string.len);
     spy_retain(a); spy_retain(b);
     int result = equal_value(a, b, depth);
     spy_release(a); spy_release(b); return result;
@@ -1743,7 +1813,13 @@ static int64_t hash_pointer(SPYValue *value) {
     return hash_signed((bits >> 4) | (bits << 60));
 }
 static int64_t hash_integer(SPYValue *value) {
+    if (!value->as.integer_data.big) {
+        int64_t number = value->as.integer_data.small;
+        uint64_t hash = (number < 0 ? 0 - (uint64_t)number : (uint64_t)number) % HASH_MODULUS;
+        return hash_signed(number < 0 ? 0 - hash : hash);
+    }
     IntView view; integer_view(value, &view);
+    if (view.len >= 64 && spend(value->ctx, view.len / 64)) return -1;
     uint64_t hash = 0;
     for (size_t i = view.len; i; i--) {
         hash = ((hash << 32) & HASH_MODULUS) | (hash >> 29);
@@ -1805,7 +1881,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     case SPY_MEMORYVIEW: return memory_hash(c, value, result);
     /* None's hash is a constant, as in CPython 3.12+. */
     case SPY_NONE: *result = 0xFCA86420; return 0;
-    case SPY_BOOL: case SPY_INT: *result = hash_integer(value); return 0;
+    case SPY_BOOL: case SPY_INT: *result = hash_integer(value); return *result == -1 ? -1 : 0;
     case SPY_FLOAT: *result = hash_double(value, value->as.real); return 0;
     case SPY_COMPLEX:
         *result = hash_signed((uint64_t)hash_double(value, creal(value->as.number)) +
@@ -1859,12 +1935,13 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         }
         *result = hash->as.integer_data.big ? hash_integer(hash) :
             hash->as.integer_data.small == -1 ? -2 : hash->as.integer_data.small;
-        spy_release(hash); return 0;
+        spy_release(hash); return *result == -1 ? -1 : 0;
     }
     case SPY_FROZENDICT: case SPY_FROZENSET: {
         /* CPython's frozenset mixing; frozen mappings hash their item pairs,
          * reusing stored key hashes and caching the completed result. */
         if (value->type == SPY_FROZENDICT && value->as.map.flags) { *result = value->as.map.hash; return 0; }
+        if (spend(c, value->as.map.len / 64)) return -1;
         uint64_t hash = 0;
         for (size_t i = 0; i < value->as.map.len; i++) {
             uint64_t h = (uint64_t)map_items(value)[i].hash;
@@ -1930,7 +2007,7 @@ static void class_changed(SPYValue *map) { if (map->type == SPY_CLASS || map->wa
 static void map_unindex(SPYValue *map) {
     class_changed(map);
     if (!map->as.map.index) return;
-    free(map->as.map.index);
+    mem_free(map->as.map.index);
     map->as.map.index = NULL; map->as.map.index_cap = map->as.map.index_dead = 0; map->as.map.changes++;
 }
 /* The number of entries in items, holes included. */
@@ -1979,7 +2056,7 @@ static int map_indexed(SPYValue *map) {
     size_t len = map->as.map.len, cap = 32;
     if (len <= MAP_INDEXED || map->as.map.front + map_used(map) >= UINT32_MAX / 4) return 0;
     while (cap < len * 2) cap *= 2;
-    if (!(map->as.map.index = calloc(cap, sizeof(*map->as.map.index)))) return 0;
+    if (!(map->as.map.index = mem_block(map->ctx, NULL, cap * sizeof(*map->as.map.index), 1))) return 0;
     map->as.map.index_cap = (uint32_t)cap; map->as.map.changes++;
     for (size_t i = 0; i < map_used(map); i++) if (map->as.map.items[i].key) index_insert(map, i);
     return 1;
@@ -2628,10 +2705,12 @@ int spy_define(SPYContext *c, const char *name, SPYNative call, void *data) {
 
 static int integer_format(Buffer *out, SPYValue *value, unsigned base, int uppercase, int sign, int alternate) {
     IntView view; integer_view(value, &view);
+    /* A pass over the digits for each digit of the result. */
+    if (spend(out->ctx, product_steps(view.len, 64 * view.len))) return -1;
     size_t capacity = view.len * 32 + 1;
     uint32_t *work = allocate(out->ctx, (view.len ? view.len : 1) * sizeof(uint32_t));
     char *text = allocate(out->ctx, capacity);
-    if (!work || !text) { free(work); free(text); return -1; }
+    if (!work || !text) { mem_free(work); mem_free(text); return -1; }
     memcpy(work, view.digits, view.len * sizeof(uint32_t));
     const char *digits = uppercase ? "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" : "0123456789abcdefghijklmnopqrstuvwxyz";
     size_t len = view.len, count = 0;
@@ -2644,7 +2723,7 @@ static int integer_format(Buffer *out, SPYValue *value, unsigned base, int upper
         text[count++] = digits[remainder];
         size_t limit = out->ctx->int_max_str_digits;
         if ((base & (base - 1)) && limit && count > limit) {
-            free(work); free(text);
+            mem_free(work); mem_free(text);
             errorf(out->ctx, "ValueError", "Exceeds the limit (%zu digits) for integer string conversion; "
                    "use sys.set_int_max_str_digits() to increase the limit", limit);
             return -1;
@@ -2657,7 +2736,7 @@ static int integer_format(Buffer *out, SPYValue *value, unsigned base, int upper
     if (!status && alternate && base != 10)
         status = puts_buffer(out, base == 2 ? "0b" : base == 8 ? "0o" : uppercase ? "0X" : "0x");
     while (count && !status) status = append(out, &text[--count], 1);
-    free(work); free(text); return status;
+    mem_free(work); mem_free(text); return status;
 }
 static SPYValue *integer_parse(SPYContext *c, const char *text, size_t len, unsigned base, const char *error) {
     size_t start = 0, end = len;
@@ -2673,6 +2752,8 @@ static SPYValue *integer_parse(SPYContext *c, const char *text, size_t len, unsi
         if (indicated && (!base || base == indicated)) { base = indicated; start += 2; prefix = 1; }
     }
     if (!base) base = 10;
+    /* A pass over the digits so far for each character. */
+    if (spend(c, product_steps(end - start, (end - start) / 8 + 1))) return NULL;
     BigInt *result = integer_alloc(c, (end - start) / 4 + 1);
     if (!result) return NULL;
     result->len = 0;
@@ -2699,7 +2780,7 @@ static SPYValue *integer_parse(SPYContext *c, const char *text, size_t len, unsi
     }
     if (!digits || !previous_digit || (automatic && !prefix && leading_zero && nonzero)) goto invalid;
     if ((base & (base - 1)) && c->int_max_str_digits && digits > c->int_max_str_digits) {
-        free(result);
+        mem_free(result);
         return errorf(c, error, "Exceeds the limit (%zu digits) for integer string conversion: value has %zu digits; "
                       "use sys.set_int_max_str_digits() to increase the limit%s", c->int_max_str_digits, digits,
                       strcmp(error, "SyntaxError") ? "" : " - Consider hexadecimal for huge integer literals to avoid decimal conversion limits.");
@@ -2707,7 +2788,7 @@ static SPYValue *integer_parse(SPYContext *c, const char *text, size_t len, unsi
     result->sign = sign;
     return integer_finish(c, result);
 invalid:
-    free(result); return spy_error(c, error, "invalid integer string");
+    mem_free(result); return spy_error(c, error, "invalid integer string");
 }
 static size_t utf8_width(unsigned char ch) {
     return ch < 128 ? 1 : ch < 224 ? 2 : ch < 240 ? 3 : 4;
@@ -2867,8 +2948,8 @@ static char *normalize_identifier(SPYContext *c, const char *text, size_t length
     }
     for (at = 0; at < used; at++) if (append_codepoint(&out, codes[at])) break;
 done:
-    free(decomposed.items);
-    if (c->error_type[0]) { free(out.data); return NULL; }
+    mem_free(decomposed.items);
+    if (c->error_type[0]) { mem_free(out.data); return NULL; }
     return out.data;
 }
 static int unicode_escape(Buffer *out, unsigned code) {
@@ -2998,7 +3079,7 @@ static int repr_enter(SPYContext *c, SPYValue *v) {
     for (size_t i = 0; i < c->repr_len; i++) if (c->repr_stack[i] == v) return 1;
     if (c->repr_len == c->repr_cap) {
         size_t cap = c->repr_cap ? c->repr_cap * 2 : 16;
-        SPYValue **stack = realloc(c->repr_stack, cap * sizeof(*stack));
+        SPYValue **stack = mem_realloc(c, c->repr_stack, cap * sizeof(*stack));
         if (!stack) { spy_error(c, "MemoryError", "out of memory"); return -1; }
         c->repr_stack = stack; c->repr_cap = cap;
     }
@@ -3249,7 +3330,7 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
             int wrap = base->type == SPY_SET && base->as.map.len;
             status = status || puts_buffer(b, type_name(v)) || (wrap && puts_buffer(b, "(")) ||
                 append(b, text + skip, inner.len - skip) || (wrap && puts_buffer(b, ")"));
-            free(inner.data); return status ? -1 : 0;
+            mem_free(inner.data); return status ? -1 : 0;
         }
         if (base) return format_value(b, base, repr);
         if (deeper(b->ctx, repr ? " while getting the repr of an object" : " while getting the str of an object")) return -1;
@@ -4156,7 +4237,7 @@ static Node *identifier(Parser *p) {
         if (*cls) {
             Buffer name = {.ctx = p->ctx};
             if (puts_buffer(&name, "_") || puts_buffer(&name, cls) || puts_buffer(&name, n->text)) {
-                free(name.data); return NULL;
+                mem_free(name.data); return NULL;
             }
             n->original = n->text; n->text = name.data;
         }
@@ -4174,7 +4255,7 @@ static Node *import_name(Parser *p) {
     while (take(p, '.')) {
         Node *part = identifier(p);
         if (!part || puts_buffer(&text, ".") || puts_buffer(&text, source_name(part))) {
-            free(text.data); return NULL;
+            mem_free(text.data); return NULL;
         }
     }
     name->text = text.data; name->a = first;
@@ -4689,7 +4770,7 @@ static size_t probe_expression(Parser *, size_t, int);
 static Node *field_expression(Parser *p, const char *start, const char *end, int flags, size_t line, const char **failed) {
     Buffer text = {.ctx = p->ctx};
     if (puts_buffer(&text, "(") || append(&text, start, (size_t)(end - start)) || puts_buffer(&text, "\n)")) {
-        free(text.data); return NULL;
+        mem_free(text.data); return NULL;
     }
     Parser inner = {.ctx = p->ctx, .unit = p->unit, .private_name = p->private_name,
                     .functions = p->functions, .loops = p->loops, .async_function = p->async_function, .depth = p->depth + 1};
@@ -4737,7 +4818,7 @@ static Node *field_expression(Parser *p, const char *start, const char *end, int
         p->error_start = inner.error_start; p->error_end = inner.error_end;
         p->error_trim_line = inner.error_trim_line; p->error_end_zero = inner.error_end_zero;
     }
-    free(inner.tokens); free(text.data);
+    mem_free(inner.tokens); mem_free(text.data);
     return result;
 }
 /* Append the source text [s, end) without its comments. */
@@ -4777,7 +4858,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 /* Interpolation.expression is the source text without comments. */
                 Buffer source = {.ctx = p->ctx};
                 if (append_source(p, &source, begin, expr_end) || (!source.data && !(source.data = copy_text(p->ctx, "", 0)))) {
-                    free(source.data); return -1;
+                    mem_free(source.data); return -1;
                 }
                 field->text = source.data;
             }
@@ -4808,7 +4889,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
                 Buffer format = {.ctx = p->ctx};
                 int status = string_parts(p, &s, end, flags, 1, &parts, &format, depth + 1);
                 if (!status) status = flush_literal(p, &parts, &format);
-                free(format.data);
+                mem_free(format.data);
                 if (status) return -1;
             } else if (debug && !field->op) field->op = 'r';
             if (s >= end || *s != '}') { syntax(p, "f-string: expecting '}'"); return -1; }
@@ -4833,10 +4914,10 @@ static Node *string_node(Parser *p) {
         size_t prefix; int flags;
         literal_prefix(t->start, &prefix, &flags);
         if (template >= 0 && template != !!(flags & L_TEMPLATE)) {
-            free(literal.data); return syntax(p, "cannot mix t-string literals with string or bytes literals");
+            mem_free(literal.data); return syntax(p, "cannot mix t-string literals with string or bytes literals");
         }
         if (bytes >= 0 && bytes != !!(flags & L_BYTES)) {
-            free(literal.data); return syntax(p, "cannot mix bytes and nonbytes literals");
+            mem_free(literal.data); return syntax(p, "cannot mix bytes and nonbytes literals");
         }
         template = !!(flags & L_TEMPLATE);
         if (template) n->kind = N_TEMPLATE;
@@ -4847,17 +4928,17 @@ static Node *string_node(Parser *p) {
         s += quote;
         formatted |= flags & L_FORMAT;
         p->literal_start = s;
-        if (string_parts(p, &s, end, flags, 0, &tail, &literal, 0)) { free(literal.data); return NULL; }
+        if (string_parts(p, &s, end, flags, 0, &tail, &literal, 0)) { mem_free(literal.data); return NULL; }
         p->pos++;
     } while (at(p, T_STRING));
     if (!formatted) {
-        if (literal.len > INT_MAX) { free(literal.data); return syntax(p, "string literal too large"); }
+        if (literal.len > INT_MAX) { mem_free(literal.data); return syntax(p, "string literal too large"); }
         n->kind = bytes ? N_BYTES : N_STRING; n->op = (int)literal.len;
         n->text = literal.data ? literal.data : copy_text(p->ctx, "", 0);
         return n->text ? n : NULL;
     }
     int status = flush_literal(p, &tail, &literal);
-    free(literal.data);
+    mem_free(literal.data);
     return status ? NULL : n;
 }
 static Node *yield_expression(Parser *p) {
@@ -5117,7 +5198,7 @@ static int call_arguments(Parser *p, Node *n) {
                 }
                 p->pos++;
                 if (at(p, ',') || at(p, ')')) { syntax_span(p, start, p->pos, "expected argument value expression"); return -1; }
-                if (arg->original) { free(arg->text); arg->text = arg->original; arg->original = NULL; }
+                if (arg->original) { mem_free(arg->text); arg->text = arg->original; arg->original = NULL; }
                 arg->kind = N_KEYWORD;
                 for (Node *a = n->args; a; a = a->next)
                     if (a->kind == N_KEYWORD && !strcmp(a->text, arg->text)) {
@@ -5662,7 +5743,7 @@ static int unparse_fstring_body(Buffer *b, Node *parts) {
         int status = unparse(&field, part->a, PR_TEST + 1);
         status = status || puts_buffer(b, "{") || (field.len && field.data[0] == '{' && puts_buffer(b, " ")) ||
                  append(b, field.data, field.len);
-        free(field.data);
+        mem_free(field.data);
         if (status) return -1;
         if (part->op) { char conversion[] = {'!', (char)part->op, 0}; if (puts_buffer(b, conversion)) return -1; }
         if (part->b && (puts_buffer(b, ":") || unparse_fstring_body(b, part->b->args))) return -1;
@@ -5708,7 +5789,7 @@ static int unparse(Buffer *b, Node *n, int level) {
         Buffer body = {.ctx = b->ctx};
         int status = unparse_fstring_body(&body, n->args);
         SPYValue *text = status ? NULL : spy_string(b->ctx, body.data ? body.data : "", body.len);
-        free(body.data);
+        mem_free(body.data);
         status = !text || puts_buffer(b, n->kind == N_JOINED ? "f" : "t") || format_value(b, text, 1);
         spy_release(text); return status ? -1 : 0;
     }
@@ -5801,7 +5882,7 @@ static int unparse(Buffer *b, Node *n, int level) {
 static Node *annotation_string(Parser *p, Node *annotation) {
     Buffer text = {.ctx = p->ctx};
     Node *n = node(p, N_STRING);
-    if (!n || unparse(&text, annotation, PR_TEST) || text.len > INT_MAX) { free(text.data); return NULL; }
+    if (!n || unparse(&text, annotation, PR_TEST) || text.len > INT_MAX) { mem_free(text.data); return NULL; }
     n->line = annotation->line;
     n->text = text.data ? text.data : copy_text(p->ctx, "", 0);
     n->op = (int)text.len;
@@ -7122,6 +7203,7 @@ static int scope_mapping_keys(SPYContext *c, Node *n) {
 }
 static int scope_node(SPYContext *c, Scope *scope, Node *n) {
     if (!n || c->error_type[0]) return c->error_type[0] ? -1 : 0;
+    scope->nodes++;
     switch (n->kind) {
     case N_ANNASSIGN: {
         Symbol *symbol = (n->flags & F_SIMPLE) && n->a->kind == N_NAME ? scope_symbol(scope, n->a->text) : NULL;
@@ -7546,7 +7628,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         if (c->error_type[0] && !parsing && c->node_start) { p.error_start = c->node_start; p.error_end = c->node_end; }
     }
 lexer_error:
-    free(p.tokens);
+    mem_free(p.tokens);
     if (c->error_type[0]) {
         snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL;
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
@@ -7596,7 +7678,7 @@ static SPYValue *parse_source(SPYContext *c, const char *source, const char *fil
     }
     *out = 0;
     SPYValue *unit = parse_normalized(c, normalized, filename, incomplete);
-    free(normalized);
+    mem_free(normalized);
     return unit;
 }
 /* The future flags of the innermost running Python code. */
@@ -7749,6 +7831,7 @@ static size_t string_offset(SPYValue *s, size_t index, size_t cursor[2]) {
     const unsigned char *data = (const unsigned char *)s->as.string.data;
     size_t i = cursor[0], at = cursor[1];
     if (index < i && index < i - index) i = at = 0;
+    (void)spend(s->ctx, (i < index ? index - i : i - index) / 64);
     for (; i < index; i++) at += string_width(s, at);
     for (; i > index; i--) do at--; while (at && (data[at] & 192) == 128);
     cursor[0] = i; cursor[1] = at;
@@ -7783,6 +7866,8 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     default: return spy_error(c, "TypeError", "object is not iterable");
     }
 }
+/* The next item for a loop in native code, which spends a step for it. */
+static SPYValue *native_next(SPYContext *c, SPYValue *iterator) { return spend(c, 1) ? NULL : iterator_next(c, iterator); }
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     /* A range steps a machine-integer counter without arbitrary-precision
      * arithmetic while the next counter fits. */
@@ -8483,7 +8568,7 @@ static SPYValue *get_slice(SPYContext *c, SPYValue *v, SPYValue *key) {
         SPYValue *result = c->error_type[0] ? NULL : text_new(c, v->type, out.len);
         if (result && out.len) memcpy(result->as.string.data, out.data, out.len);
         if (result && result->type == SPY_STRING) result->as.string.chars = s.count + 1;
-        free(out.data); return result;
+        mem_free(out.data); return result;
     }
     SPYValue *result = value_new(c, v->type);
     if (!result) return NULL;
@@ -8534,7 +8619,7 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
             spy_release(items); return -1;
         }
         SPYValue **gone = removed ? allocate(c, removed * sizeof(SPYValue *)) : NULL;
-        if (removed && !gone) { spy_release(items); return -1; }
+        if ((removed && !gone) || spend(c, (len - start - removed) / 64)) { mem_free(gone); spy_release(items); return -1; }
         SPYValue **at = v->as.seq.items + start;
         if (removed) memcpy(gone, at, removed * sizeof(*gone));
         memmove(at + added, at + removed, (len - start - removed) * sizeof(*at));
@@ -8542,7 +8627,7 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
         v->as.seq.len = len - removed + added;
         spy_release(items);
         while (removed) spy_release(gone[--removed]);
-        free(gone);
+        mem_free(gone);
         return 0;
     }
     SPYValue *result = spy_list(c);
@@ -8988,7 +9073,7 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
         SPYValue *v = NULL;
         if (!append(&out, a->as.string.data, a->as.string.len) && !append(&out, right->as.string.data, right->as.string.len))
             v = a->type == SPY_BYTEARRAY ? bytearray_new(c, out.data, out.len) : spy_bytes(c, out.data, out.len);
-        free(out.data); spy_release(copy); return v;
+        mem_free(out.data); spy_release(copy); return v;
     }
     int sequence = a->type == SPY_LIST || a->type == SPY_TUPLE;
     int text = a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY;
@@ -9295,7 +9380,10 @@ static int contained_in(SPYContext *c, SPYValue *a, SPYValue *b) {
     SPYValue *iterator = get_iterator(c, a), *item;
     if (!iterator) return -1;
     int result = 1;
-    while (result > 0 && (item = iterator_next(c, iterator))) { result = contains(c, b, item); spy_release(item); }
+    for (size_t i = 1; result > 0 && (item = iterator_next(c, iterator)); i++) {
+        result = contains(c, b, item); spy_release(item);
+        if (!(i & 15) && spend(c, 1)) result = -1;
+    }
     spy_release(iterator);
     return c->error_type[0] ? -1 : result;
 }
@@ -9321,6 +9409,7 @@ static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *sequence_order(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (deeper(c, " in comparison")) return NULL;
     for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
+        if ((i & 63) == 63 && spend(c, 1)) { c->depth--; return NULL; }
         SPYValue *x = spy_retain(comparison_item(a, i)), *y = spy_retain(comparison_item(b, i));
         if (x == y || equal(x, y, 0)) { spy_release(x); spy_release(y); continue; }
         spy_release(x); spy_release(y);
@@ -9346,7 +9435,7 @@ static ALWAYS_INLINE int number_order(int op, SPYValue *a, SPYValue *b) {
     if (a->type == SPY_INT) return a->as.integer_data.big || b->as.integer_data.big ? -1 : COMPARE(op, a->as.integer_data.small, b->as.integer_data.small);
     return a->type == SPY_FLOAT ? COMPARE(op, a->as.real, b->as.real) : -1;
 }
-static size_t find_bytes(const char *, size_t, const char *, size_t, int);
+static size_t find_bytes(SPYContext *, const char *, size_t, const char *, size_t, int);
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
@@ -9434,12 +9523,12 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         } else if (b->type == SPY_BYTES) {
             SPYValue *copy, *needle = buffer_bytes(c, a, &copy);
             if (!needle) return c->error_type[0] ? NULL : errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
-            result = find_bytes(b->as.string.data, b->as.string.len, needle->as.string.data, needle->as.string.len, 0) != SIZE_MAX;
+            result = find_bytes(c, b->as.string.data, b->as.string.len, needle->as.string.data, needle->as.string.len, 0) != SIZE_MAX;
             spy_release(copy);
         } else if (b->type == SPY_STRING) {
             if (a->type != SPY_STRING) return errorf(c, "TypeError", "'in <string>' requires string as left operand, not %s", type_name(a));
             /* UTF-8 bytes match only at character boundaries. */
-            result = find_bytes(b->as.string.data, b->as.string.len, a->as.string.data, a->as.string.len, 0) != SIZE_MAX;
+            result = find_bytes(c, b->as.string.data, b->as.string.len, a->as.string.data, a->as.string.len, 0) != SIZE_MAX;
         } else {
             SPYValue *iterator = get_iterator(c, b);
             if (!iterator) {
@@ -9474,6 +9563,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     } else if ((a->type == SPY_STRING && b->type == SPY_STRING) ||
                ((a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && (b->type == SPY_BYTES || b->type == SPY_BYTEARRAY))) {
         size_t n = a->as.string.len < b->as.string.len ? a->as.string.len : b->as.string.len;
+        if (n >= 4096 && spend(c, n / 64)) return NULL;
         order = memcmp(a->as.string.data, b->as.string.data, n);
         if (!order) order = a->as.string.len < b->as.string.len ? -1 : a->as.string.len > b->as.string.len;
     } else return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
@@ -10049,7 +10139,7 @@ static SPYValue *lazy_submodule(SPYContext *c, SPYValue *module, const char *nam
             (text[prefix + 1 + length] && text[prefix + 1 + length] != '.')) continue;
         char *full = copy_text(c, text, prefix + 1 + length);
         SPYValue *imported = full ? import_module(c, full) : NULL;
-        free(full);
+        mem_free(full);
         spy_release(imported);
         if (c->error_type[0]) return NULL;
         SPYValue *value = name_local(module, name);
@@ -10253,7 +10343,7 @@ static SPYValue *docstring(SPYContext *c, Node *body) {
         while (p < end) { char ch = *p++; append(&out, &ch, 1); if (ch == '\n') break; }
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(doc.data); free(out.data);
+    mem_free(doc.data); mem_free(out.data);
     return result;
 }
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
@@ -10283,7 +10373,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             Buffer out = {.ctx = c};
             SPYValue *result = puts_buffer(&out, name_local(owner, "__qualname__")->as.string.data) || puts_buffer(&out, ".") ||
                 puts_buffer(&out, v->as.member.name->as.string.data) ? NULL : spy_string(c, out.data, out.len);
-            free(out.data); return result;
+            mem_free(out.data); return result;
         }
     }
     if (v->type == SPY_CELL && !strcmp(name, "cell_contents")) {
@@ -10538,7 +10628,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             Buffer out = {.ctx = c};
             SPYValue *result = puts_buffer(&out, qualname->as.string.data) || puts_buffer(&out, ".") ||
                 puts_buffer(&out, text->as.string.data) ? NULL : spy_string(c, out.data, out.len);
-            free(out.data); return result;
+            mem_free(out.data); return result;
         }
         if (v->type == SPY_NATIVE && (!strcmp(name, "__module__") || !strcmp(name, "__objclass__"))) {
             /* Descriptors have __objclass__ and no __module__; functions bound
@@ -10960,7 +11050,7 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
         Buffer lazy = {.ctx = c};
         spy_clear_error(c);
         if (!lazy_name(&lazy, v)) errorf(c, "AttributeError", "cannot access attribute '%s' on unresolved lazy import '%s'", name, lazy.data);
-        free(lazy.data);
+        mem_free(lazy.data);
     }
     if (result || !fallback || !error_is(c, "AttributeError")) { spy_release(fallback); return result; }
     spy_clear_error(c);
@@ -10997,7 +11087,7 @@ static SPYValue *ascii_repr(SPYContext *c, SPYValue *value) {
     }
     spy_release(repr);
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 /* Format-spec mini-language, ported from CPython's Objects/unicode_formatter.c
  * and the short float repr in Python/pystrtod.c. */
@@ -11090,7 +11180,7 @@ static int format_parse(SPYContext *c, SPYValue *named, SPYValue *text, FormatSp
 both:
     spy_error(c, "ValueError", "Cannot specify both ',' and '_'.");
 done:
-    free(spec); return status;
+    mem_free(spec); return status;
 }
 static int format_fill(Buffer *out, unsigned fill, int64_t count) {
     for (int64_t i = 0; i < count; i++) if (append_codepoint(out, fill)) return -1;
@@ -11136,7 +11226,7 @@ static int format_group(Buffer *out, const char *digits, int64_t n, int64_t min_
             char ch = chunk.data[i]; chunk.data[i] = chunk.data[chunk.len - 1 - i]; chunk.data[chunk.len - 1 - i] = ch;
         }
     if (!status && chunk.len) status = append(out, chunk.data, chunk.len);
-    free(chunk.data); return status;
+    mem_free(chunk.data); return status;
 }
 /* calc_number_widths and fill_number. body holds [digits][.frac][remainder]
  * without a sign; n_digits_override >= 0 gives the digit count directly
@@ -11188,7 +11278,7 @@ static int format_number(Buffer *out, const FormatSpec *f, unsigned fill, int si
     if (!status && frac_text.len) status = append(out, frac_text.data, frac_text.len);
     if (!status && remainder_len) status = append(out, remainder, remainder_len);
     if (!status) status = format_fill(out, fill, right);
-    free(frac_text.data); free(digit_text.data); return status;
+    mem_free(frac_text.data); mem_free(digit_text.data); return status;
 }
 /* Digits of d as _Py_dg_dtoa would return them: mode 0 shortest, mode 2
  * 'precision' significant digits, mode 3 'precision' digits after the point.
@@ -11220,7 +11310,8 @@ static char *float_digits(SPYContext *c, double d, int mode, int precision, int 
         }
     const char *format = mode == 3 ? "%.*f" : "%.*e";
     int count = mode ? snprintf(NULL, 0, format, mode == 3 ? precision : digits, magnitude) : (int)strlen(probe);
-    char *text = count < 0 ? NULL : allocate(c, (size_t)count + 1);
+    /* The host's exact conversion costs a step per 8 digits. */
+    char *text = count < 0 || spend(c, (size_t)count / 8) ? NULL : allocate(c, (size_t)count + 1);
     if (!text) return NULL;
     if (mode) snprintf(text, (size_t)count + 1, format, mode == 3 ? precision : digits, magnitude);
     else memcpy(text, probe, (size_t)count + 1);
@@ -11294,7 +11385,7 @@ static int double_to_string(Buffer *out, double d, int code, int precision, int 
     if (len < point) { ZEROS(point - len); if (!status) status = append(out, ".", 1); ZEROS(vend - point); }
     else ZEROS(vend - len);
 #undef ZEROS
-    free(digits);
+    mem_free(digits);
     if (!status && out->len > start && out->data[out->len - 1] == '.' && !alt) out->len--;
     if (!status && use_exp) {
         char text[16]; snprintf(text, sizeof(text), "%c%+.02d", upper ? 'E' : 'e', exponent);
@@ -11304,7 +11395,7 @@ static int double_to_string(Buffer *out, double d, int code, int precision, int 
 }
 static SPYValue *format_finish(SPYContext *c, Buffer *out, int status) {
     SPYValue *result = status || c->error_type[0] ? NULL : spy_string(c, out->data ? out->data : "", out->len);
-    free(out->data); return result;
+    mem_free(out->data); return result;
 }
 static SPYValue *format_string_value(SPYContext *c, SPYValue *value, const FormatSpec *f) {
     if (f->sign) return spy_error(c, "ValueError", f->sign == ' ' ? "Space not allowed in string format specifier" : "Sign not allowed in string format specifier");
@@ -11342,7 +11433,7 @@ static SPYValue *format_float_value(SPYContext *c, double value, const FormatSpe
         int negative = text.len && text.data[0] == '-';
         status = format_number(&out, f, f->fill, negative ? '-' : 0, "", text.data + negative, text.len - (size_t)negative, -1);
     }
-    free(text.data); return format_finish(c, &out, status);
+    mem_free(text.data); return format_finish(c, &out, status);
 }
 static SPYValue *format_complex_value(SPYContext *c, double re, double im, const FormatSpec *f) {
     if (f->precision > INT_MAX) return spy_error(c, "ValueError", "precision too big");
@@ -11379,7 +11470,7 @@ static SPYValue *format_complex_value(SPYContext *c, double re, double im, const
     if (!status && im_out.len) status = append(&out, im_out.data, im_out.len);
     if (!status) status = append(&out, add_parens ? "j)" : "j", (size_t)(1 + add_parens));
     if (!status) status = format_fill(&out, f->fill, total - len - left);
-    free(re_text.data); free(im_text.data); free(re_out.data); free(im_out.data);
+    mem_free(re_text.data); mem_free(im_text.data); mem_free(re_out.data); mem_free(im_out.data);
     return format_finish(c, &out, status);
 }
 static SPYValue *format_integer_value(SPYContext *c, SPYValue *value, const FormatSpec *f) {
@@ -11405,7 +11496,7 @@ static SPYValue *format_integer_value(SPYContext *c, SPYValue *value, const Form
                                    (int64_t)text.len - negative);
         }
     }
-    free(text.data); return format_finish(c, &out, status);
+    mem_free(text.data); return format_finish(c, &out, status);
 }
 static SPYValue *format_builtin(SPYContext *c, SPYValue *value, SPYValue *named, SPYValue *spec) {
     FormatSpec f;
@@ -11480,7 +11571,7 @@ static SPYValue *join_strings(SPYContext *c, SPYValue *items) {
         append(&out, text->as.string.data, text->as.string.len);
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 /* str.format and str.format_map, ported from CPython's
  * Objects/stringlib/unicode_format.h. Markup characters are ASCII, so the
@@ -11630,7 +11721,10 @@ static SPYValue *string_format(SPYContext *c, SPYValue *self, size_t argc, SPYVa
 }
 /* Byte search is shared by text and bytes. UTF-8 substring matches preserve
  * code-point boundaries; convert offsets only at the Python-facing boundary. */
-static size_t find_bytes(const char *text, size_t length, const char *needle, size_t size, int reverse) {
+/* Where needle first (or last) occurs in text, or SIZE_MAX. The search
+ * spends a step per 64 bytes it passes and per 64 bytes compared at a
+ * candidate position; once stopped it finds nothing. */
+static size_t search_bytes(SPYContext *c, const char *text, size_t length, const char *needle, size_t size, int reverse) {
     if (size > length) return SIZE_MAX;
     if (!size) return reverse ? length : 0;
     if (size == 1) {
@@ -11641,13 +11735,13 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
         for (size_t i = length; i; i--) if (text[i - 1] == *needle) return i - 1;
         return SIZE_MAX;
     }
-    size_t shift[256];
+    size_t shift[256], unit = size / 64;
     for (size_t i = 0; i < 256; i++) shift[i] = size;
     if (reverse) {
         for (size_t i = size - 1; i; i--) shift[(unsigned char)needle[i]] = i;
         size_t position = length - size;
         for (;;) {
-            if (text[position] == *needle && !memcmp(text + position, needle, size)) return position;
+            if (text[position] == *needle && (unit && spend(c, unit) ? 1 : !memcmp(text + position, needle, size))) return position;
             size_t step = shift[(unsigned char)text[position]];
             if (step > position) break;
             position -= step;
@@ -11656,13 +11750,18 @@ static size_t find_bytes(const char *text, size_t length, const char *needle, si
         for (size_t i = 0; i + 1 < size; i++) shift[(unsigned char)needle[i]] = size - i - 1;
         size_t position = 0;
         while (position <= length - size) {
-            if (text[position + size - 1] == needle[size - 1] && !memcmp(text + position, needle, size)) return position;
+            if (text[position + size - 1] == needle[size - 1] && (unit && spend(c, unit) ? 1 : !memcmp(text + position, needle, size))) return position;
             size_t step = shift[(unsigned char)text[position + size - 1]];
             if (step > length - size - position) break;
             position += step;
         }
     }
     return SIZE_MAX;
+}
+static size_t find_bytes(SPYContext *c, const char *text, size_t length, const char *needle, size_t size, int reverse) {
+    size_t found = search_bytes(c, text, length, needle, size, reverse);
+    if (spend(c, (found == SIZE_MAX ? length : reverse ? length - found : found) / 64)) return SIZE_MAX;
+    return found;
 }
 static int memory_check(SPYContext *, SPYValue *);
 static int memory_release(SPYContext *, SPYValue *);
@@ -11728,6 +11827,7 @@ search:;
     SPYValue *sub = argv[0];
     size_t count = tail && sub->type == SPY_TUPLE ? sub->as.seq.len : 1;
     for (size_t i = 0; i < count; i++) {
+        if ((i & 63) == 63 && spend(c, 1)) return NULL;
         SPYValue *part = tail && sub->type == SPY_TUPLE ? sub->as.seq.items[i] : sub;
         const char *needle;
         size_t size;
@@ -11758,18 +11858,19 @@ search:;
                 (method == M_STARTSWITH ? first : last - size), needle, size)) return spy_bool(c, 1);
             continue;
         }
-        size_t found = valid ? find_bytes(self->as.string.data + first, last - first, needle, size,
+        size_t found = valid ? find_bytes(c, self->as.string.data + first, last - first, needle, size,
                                           method == M_RFIND || method == M_RINDEX) : SIZE_MAX;
         if (method == M_STRING_COUNT) {
             size_t matches = 0;
             if (!size) matches = valid ? (size_t)(end - start) + 1 : 0;
             else while (found != SIZE_MAX) {
-                matches++;
+                if (!(++matches & 63) && spend(c, 1)) break;
                 first += found + size;
-                found = find_bytes(self->as.string.data + first, last - first, needle, size, 0);
+                found = find_bytes(c, self->as.string.data + first, last - first, needle, size, 0);
             }
-            return spy_int(c, (int64_t)matches);
+            return c->error_type[0] ? NULL : spy_int(c, (int64_t)matches);
         }
+        if (found == SIZE_MAX && c->error_type[0]) return NULL;
         if (found == SIZE_MAX) {
             if (method == M_STRING_INDEX || method == M_RINDEX) return spy_error(c, "ValueError", self->type == SPY_STRING ? "substring not found" : "subsection not found");
             return spy_int(c, -1);
@@ -11849,7 +11950,7 @@ static Node *code_signature(SPYContext *c, SPYValue *varnames, SPYValue *locals,
         }
     for (Node *arg = head; arg; arg = arg->next) arg->allocated = arg->next;
     if (c->error_type[0]) {
-        for (Node *arg = head, *next; arg; arg = next) { next = arg->next; free(arg->text); free(arg->local); free(arg); }
+        for (Node *arg = head, *next; arg; arg = next) { next = arg->next; mem_free(arg->text); mem_free(arg->local); mem_free(arg); }
         return NULL;
     }
     return head;
@@ -11979,6 +12080,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
                     if (method == M_INDEX) return spy_int(c, (int64_t)i);
                     if (method == M_REMOVE) {
                         if (i < self->as.seq.len) {
+                            if (spend(c, (self->as.seq.len - i) / 64)) return NULL;
                             item = self->as.seq.items[i]; self->as.seq.len--;
                             memmove(self->as.seq.items + i, self->as.seq.items + i + 1, (self->as.seq.len - i) * sizeof(*self->as.seq.items));
                             spy_release(item);
@@ -12001,7 +12103,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             SPYValue *iterator = get_iterator(c, self), *item, *position = spy_int(c, 0);
             SPYValue *count = method == M_COUNT ? spy_int(c, 0) : NULL;
             SPYValue one = {.type = SPY_INT, .as.integer_data.small = 1};
-            while (iterator && position && !c->error_type[0] && (item = iterator_next(c, iterator))) {
+            while (iterator && position && !c->error_type[0] && (item = native_next(c, iterator))) {
                 int matches = equal(item, argv[0], 0);
                 spy_release(item);
                 if (matches) {
@@ -12074,6 +12176,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         IntView view; integer_view(self, &view);
         size_t count = 0;
         if (method == M_BIT_LENGTH) count = integer_bits(&view);
+        else if (spend(c, view.len / 64)) return NULL;
         else for (size_t i = 0; i < view.len; i++)
             for (uint32_t digit = view.digits[i]; digit; digit &= digit - 1) count++;
         return spy_int(c, (int64_t)count);
@@ -12123,14 +12226,15 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
         if (argc) break;
         if (method == M_ISIDENTIFIER && !self->as.string.len) return spy_bool(c, 0);
-        for (size_t i = 0; i < self->as.string.len;) {
+        size_t i = 0;
+        int all = 1;
+        while (all && i < self->as.string.len) {
             size_t width;
             unsigned code = utf8_decode(self->as.string.data + i, self->as.string.len - i, &width);
-            if (method == M_ISPRINTABLE ? !unicode_printable(code) : !identifier_character(code, !i))
-                return spy_bool(c, 0);
+            all = method == M_ISPRINTABLE ? unicode_printable(code) : identifier_character(code, !i);
             i += width;
         }
-        return spy_bool(c, 1);
+        return spend(c, i / 64) ? NULL : spy_bool(c, all);
     case M_SPLITLINES: {
         if (argc > 1) break;
         int keepends = argc && spy_truth(argv[0]);
@@ -12177,7 +12281,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         size_t len = self->as.seq.len;
         if (index < 0) { index += (int64_t)len; if (index < 0) index = 0; }
         if ((uint64_t)index > len) index = (int64_t)len;
-        if (sequence_append(c, self, argv[1])) return NULL;
+        if (spend(c, (len - (size_t)index) / 64) || sequence_append(c, self, argv[1])) return NULL;
         memmove(self->as.seq.items + index + 1, self->as.seq.items + index, (len - (size_t)index) * sizeof(*self->as.seq.items));
         self->as.seq.items[index] = argv[1]; /* Ownership came from append. */
         return spy_none(c);
@@ -12190,13 +12294,13 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             map_unindex(self);
             self->as.map.items = NULL; self->as.map.len = self->as.map.cap = self->as.map.front = 0;
             for (size_t i = 0; i < len; i++) { spy_release(items[i].key); spy_release(items[i].value); }
-            free(storage);
+            mem_free(storage);
         } else if (self->as.seq.len) {
             SPYValue **items = self->as.seq.items;
             size_t len = self->as.seq.len;
             self->as.seq.items = NULL; self->as.seq.len = self->as.seq.cap = 0;
             for (size_t i = 0; i < len; i++) spy_release(items[i]);
-            free(items);
+            mem_free(items);
         }
         return spy_none(c);
     case M_COPY: {
@@ -12216,6 +12320,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
     }
     case M_REVERSE:
         if (argc) break;
+        if (spend(c, self->as.seq.len / 64)) return NULL;
         for (size_t i = 0; i < self->as.seq.len / 2; i++) {
             size_t j = self->as.seq.len - i - 1;
             SPYValue *swap = self->as.seq.items[i]; self->as.seq.items[i] = self->as.seq.items[j]; self->as.seq.items[j] = swap;
@@ -12229,6 +12334,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         if (!self->as.seq.len) return spy_error(c, "IndexError", "pop from empty list");
         if (i < 0) i += (int64_t)self->as.seq.len;
         if (i < 0 || (uint64_t)i >= self->as.seq.len) return spy_error(c, "IndexError", "pop index out of range");
+        if (spend(c, (self->as.seq.len - (size_t)i) / 64)) return NULL;
         SPYValue *v = self->as.seq.items[i];
         self->as.seq.len--;
         memmove(&self->as.seq.items[i], &self->as.seq.items[i + 1], (self->as.seq.len - (size_t)i) * sizeof(SPYValue *));
@@ -12277,7 +12383,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         SPYValue *iterator = get_iterator(c, probe), *item;
         if (!iterator) return NULL;
         int result = 1;
-        while (result > 0 && (item = iterator_next(c, iterator))) { result = contains(c, other, item) ? (c->error_type[0] ? -1 : 0) : 1; spy_release(item); }
+        while (result > 0 && (item = native_next(c, iterator))) { result = contains(c, other, item) ? (c->error_type[0] ? -1 : 0) : 1; spy_release(item); }
         spy_release(iterator);
         return result < 0 || c->error_type[0] ? NULL : spy_bool(c, result);
     }
@@ -12477,7 +12583,7 @@ static int module_set_class(SPYContext *c, SPYValue *object, SPYValue *value) {
     }
     SPYValue *base = object->as.map.base, *parent = object->as.map.parent, *namespace = object->as.map.namespace;
     if (object->as.map.len) { spy_error(c, "TypeError", "__class__ assignment: 'module' object layout differs"); return -1; }
-    free(map_storage(object));
+    mem_free(map_storage(object));
     object->as.map = base->as.map;
     memset(&base->as.map, 0, sizeof(base->as.map));
     object->type = SPY_MODULE;
@@ -12766,7 +12872,7 @@ static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->delegate) : spy_none(c);
 }
 static void free_program(Program *code) {
-    if (code) { free(code->items); free(code); }
+    if (code) { mem_free(code->items); mem_free(code); }
 }
 static void machine_edges(Machine *m, Visit visit, void *data) {
     for (size_t i = 0; i < m->len; i++) visit(m->stack[i], data);
@@ -12782,13 +12888,13 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
 /* Release m, whose values were released, keeping it as the spare when there is none. */
 static void free_machine(SPYContext *c, Machine *m) {
     if (!m) return;
-    for (size_t i = 0; i < m->block_len; i++) free(m->blocks[i].error);
+    for (size_t i = 0; i < m->block_len; i++) mem_free(m->blocks[i].error);
     if (!c->spare_machine) {
         *m = (Machine){.stack = m->stack, .cap = m->cap, .blocks = m->blocks, .block_cap = m->block_cap};
         c->spare_machine = m;
         cache_put(m->stack, m->cap * sizeof(*m->stack));
         cache_put(m->blocks, m->block_cap * sizeof(*m->blocks));
-    } else { free(m->blocks); free(m->stack); free(m); }
+    } else { mem_free(m->blocks); mem_free(m->stack); mem_free(m); }
 }
 static Machine *machine_new(SPYContext *c, Program *code) {
     Machine *m = c->spare_machine ? c->spare_machine : allocate(c, sizeof(Machine));
@@ -13295,7 +13401,7 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
         Buffer text = {.ctx = c};
         SPYValue *result = puts_buffer(&text, f->as.string.data) || puts_buffer(&text, "()") ? NULL :
             spy_string(c, text.data ? text.data : "", text.len);
-        free(text.data); return result;
+        mem_free(text.data); return result;
     }
     SPYValue *qualname = attribute(c, f, "__qualname__"), *module = NULL, *result = NULL;
     if (!qualname) {
@@ -13313,7 +13419,7 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
     if (!(!builtins && (format_value(&text, module, 0) || puts_buffer(&text, "."))) &&
         !format_value(&text, qualname, 0) && !puts_buffer(&text, "()"))
         result = spy_string(c, text.data ? text.data : "", text.len);
-    free(text.data); spy_release(qualname); spy_release(module);
+    mem_free(text.data); spy_release(qualname); spy_release(module);
     return result;
 }
 static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
@@ -13492,7 +13598,7 @@ static SPYValue *number_literal(SPYContext *c, Node *n) {
             if ((!i || prev < 0 || prev >= base) && !(base != 10 && i == 2)) prev = -1;
             else prev = 0;
             if (prev < 0 || next < 0 || next >= base) {
-                free(s); return spy_error(c, "SyntaxError", "invalid numeric separator");
+                mem_free(s); return spy_error(c, "SyntaxError", "invalid numeric separator");
             }
         } else s[j++] = n->text[i];
     }
@@ -13513,7 +13619,7 @@ static SPYValue *number_literal(SPYContext *c, Node *n) {
         }
         if (!c->error_type[0]) v = integer_parse(c, digits, strlen(digits), (unsigned)base, "SyntaxError");
     }
-    free(s); return v;
+    mem_free(s); return v;
 }
 static int append_qualname(Buffer *out, Scope *scope) {
     if (!scope || !scope->owner) return 0;
@@ -13546,7 +13652,7 @@ static int append_qualname(Buffer *out, Scope *scope) {
 static SPYValue *qualified_name(SPYContext *c, Scope *scope) {
     Buffer out = {.ctx = c};
     SPYValue *result = append_qualname(&out, scope) ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 /* A comprehension's generator names itself on first use: its __name__ is
  * <genexpr> and its __qualname__ comes from the scope of its retained code. */
@@ -13630,11 +13736,11 @@ static int code_names_walk(ClosureNames *w, Scope *scope, Node *n, int depth) {
                 for (const char *dot = n->kind == N_IMPORT && item->b && text ? strchr(text, '.') : NULL; dot; dot = strchr(dot + 1, '.')) {
                     const char *end = strchr(dot + 1, '.');
                     size_t len = end ? (size_t)(end - dot - 1) : strlen(dot + 1);
-                    char *part = malloc(len + 1);
+                    char *part = mem_malloc(w->c, len + 1);
                     if (!part) { spy_error(w->c, "MemoryError", "allocation failed"); return -1; }
                     memcpy(part, dot + 1, len); part[len] = 0;
                     int status = code_name_add(w, part);
-                    free(part);
+                    mem_free(part);
                     if (status) return -1;
                 }
             }
@@ -13704,7 +13810,7 @@ static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYVal
         cell->as.cell.name = spy_string(c, name, strlen(name));
         if (!cell->as.cell.name) { spy_release(cell); return NULL; }
         cell->as.cell.env = spy_retain(env);
-        if (weak_push(&c->cells, &c->cells_len, &c->cells_cap, cell)) { spy_release(cell); return NULL; }
+        if (weak_push(c, &c->cells, &c->cells_len, &c->cells_cap, cell)) { spy_release(cell); return NULL; }
     } else cell->as.cell.value = value ? spy_retain(value) : NULL;
     return cell;
 }
@@ -14225,7 +14331,7 @@ static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
     }
     for (size_t i = 0; i < len; i++) {
         Symbol *symbol = &scope->symbols[order[i]];
-        if (!symbol->key && !(symbol->key = spy_string(c, symbol->name, strlen(symbol->name)))) { free(order); return -1; }
+        if (!symbol->key && !(symbol->key = spy_string(c, symbol->name, strlen(symbol->name)))) { mem_free(order); return -1; }
     }
     scope->order = order; scope->order_len = len;
     return 0;
@@ -14264,7 +14370,7 @@ static NO_INLINE void drop_kept(SPYContext *c, Scope *scope, int keys) {
         SPYValue *env = scope->kept;
         scope->kept = env->as.map.parent;
         for (size_t i = 0; keys && i < env->as.map.len; i++) spy_release(env->as.map.items[i].key);
-        free(map_storage(env)); value_give(c, env, 0);
+        mem_free(map_storage(env)); value_give(c, env, 0);
     }
     if (scope) scope->kept_len = 0;
 }
@@ -14324,7 +14430,7 @@ static int abstract_instance_error(SPYContext *c, SPYValue *cls) {
     if (!c->error_type[0])
         errorf(c, "TypeError", "Can't instantiate abstract class %s without an implementation for abstract method%s %.*s",
                name_local(cls, "__name__")->as.string.data, sorted->as.seq.len == 1 ? "" : "s", (int)joined.len, joined.data ? joined.data : "");
-    free(joined.data); spy_release(sorted);
+    mem_free(joined.data); spy_release(sorted);
     return -1;
 }
 static SPYValue *new_instance(SPYContext *c, SPYValue *cls) {
@@ -14602,7 +14708,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         position ? spy_int(c, (int64_t)end_line) : spy_none(c),
         position ? spy_int(c, end_minus ? -1 : (int64_t)end_offset) : spy_none(c)
     };
-    free(text.data);
+    mem_free(text.data);
     for (size_t i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
         if (!c->error_type[0] && details && fields[i]) sequence_append(c, details, fields[i]);
         spy_release(fields[i]);
@@ -14646,7 +14752,7 @@ static int missing_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, int key
     SPYValue *name = name_local(fn->as.function.metadata, "__qualname__");
     errorf(c, "TypeError", "%s() missing %zu required %s argument%s: %s", name->as.string.data,
            missing, keyword_only ? "keyword-only" : "positional", missing == 1 ? "" : "s", names.data ? names.data : "");
-    free(names.data); return -1;
+    mem_free(names.data); return -1;
 }
 static int keyword_matches(SPYContext *c, SPYValue *key, const char *name) {
     if (key->type == SPY_STRING)
@@ -14717,7 +14823,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
                 }
             if (names.len) errorf(c, "TypeError", "%s() got some positional-only arguments passed as keyword arguments: '%s'", name, names.data);
             else errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, keyword);
-            free(names.data); return -1;
+            mem_free(names.data); return -1;
         }
     }
     if (!varargs && argc > positional) {
@@ -14770,7 +14876,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
         if (key && !hash_value(c, key, &entry->hash)) { spy_release(entry->key); entry->key = key; }
         else spy_release(key);
     }
-    free(slots);
+    mem_free(slots);
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
@@ -14818,7 +14924,7 @@ static NO_INLINE SPYValue *call_with_self(SPYContext *c, SPYValue *function, SPY
         result = call_function(c, function, argc + 1, args, keywords);
         if (c->error_type[0]) { spy_release(result); result = NULL; }
     } else result = call_keywords(c, function, argc + 1, args, keywords);
-    if (args != small) free(args);
+    if (args != small) mem_free(args);
     return result;
 }
 /* A call's result as its caller sees it, leaving the call's depth. */
@@ -15053,7 +15159,7 @@ static SPYValue *weak_bind(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     if (weak_entry(c, ref)) return spy_error(c, "SystemError", "reference object is already bound");
     if (c->weak_len == c->weak_cap) {
         size_t next = c->weak_cap ? c->weak_cap * 2 : 16;
-        struct WeakEntry *grown = realloc(c->weak, next * sizeof(*grown));
+        struct WeakEntry *grown = mem_realloc(c, c->weak, next * sizeof(*grown));
         if (!grown) return spy_error(c, "MemoryError", "allocation failed");
         c->weak = grown; c->weak_cap = next;
     }
@@ -15087,7 +15193,7 @@ static void report_unraisable(SPYContext *c, const char *text, SPYValue *subject
                              message.data ? spy_string(c, message.data, message.len) : spy_none(c), object ? object : c->none};
         if (args[3]) spy_release(call(c, hook, 5, args));
         spy_clear_error(c);
-        spy_release(repr); spy_release(traceback); spy_release(args[3]); free(message.data);
+        spy_release(repr); spy_release(traceback); spy_release(args[3]); mem_free(message.data);
     }
     spy_release(error); spy_release(hook);
 }
@@ -15130,12 +15236,12 @@ static void weak_callbacks(SPYContext *c) {
          * on, depth first: what this one queued goes ahead of the rest. */
         size_t queued = c->finalize_calls_len - waiting;
         if (queued && waiting) {
-            SPYValue **rotated = malloc(c->finalize_calls_len * sizeof(*rotated));
+            SPYValue **rotated = mem_malloc(c, c->finalize_calls_len * sizeof(*rotated));
             if (rotated) {
                 memcpy(rotated, c->finalize_calls + waiting, queued * sizeof(*rotated));
                 memcpy(rotated + queued, c->finalize_calls, waiting * sizeof(*rotated));
                 memcpy(c->finalize_calls, rotated, c->finalize_calls_len * sizeof(*rotated));
-                free(rotated);
+                mem_free(rotated);
             }
         }
     }
@@ -15216,7 +15322,7 @@ static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, vo
 #endif
         SPYValue *items[4] = {spy_int(c, (int64_t)count), spy_int(c, (int64_t)candidates), spy_float(c, seconds),
                               report.data ? spy_string(c, report.data, report.len) : spy_none(c)};
-        free(report.data);
+        mem_free(report.data);
         SPYValue *result = items[0] && items[1] && items[2] && items[3] ? spy_tuple(c, 4, items) : NULL;
         for (int i = 0; i < 4; i++) spy_release(items[i]);
         return result;
@@ -15467,7 +15573,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     if (dot) {
         char *prefix = copy_text(c, name, (size_t)(dot - name));
         parent = prefix ? import_module(c, prefix) : NULL;
-        free(prefix);
+        mem_free(prefix);
         if (!parent) return NULL;
         /* Importing the parent may have provided the submodule, as importlib allows. */
         cached = name_local(c->modules, name);
@@ -15482,13 +15588,13 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     if (!init) {
         Buffer init = {.ctx = c};
         if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c->loader_data, init.data);
-        free(init.data);
+        mem_free(init.data);
         package = source != NULL;
         if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
         if (!source && !c->error_type[0]) {
             Buffer probe = {.ctx = c};
             char *marker = puts_buffer(&probe, name) || puts_buffer(&probe, ".__namespace__") ? NULL : c->loader(c->loader_data, probe.data);
-            free(probe.data);
+            mem_free(probe.data);
             package = namespace = marker != NULL;
             free(marker);
         }
@@ -15508,7 +15614,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     SPYValue *unit = c->error_type[0] || init || namespace ? NULL : parse(c, source, filename.data);
     /* __file__ is the loader-relative name that tracebacks show. */
     SPYValue *file = unit ? spy_string(c, filename.data, filename.len) : NULL;
-    free(filename.data);
+    mem_free(filename.data);
     free(source);
     if (!unit && !init && !namespace) { spy_release(parent); return NULL; }
     if (unit && !file) { spy_release(unit); spy_release(parent); return NULL; }
@@ -15580,9 +15686,9 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
 static SPYValue *load_intrinsics(SPYContext *c) {
     Buffer source = {.ctx = c};
     for (size_t i = 0; i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)
-        if (puts_buffer(&source, intrinsics_source[i])) { free(source.data); return NULL; }
+        if (puts_buffer(&source, intrinsics_source[i])) { mem_free(source.data); return NULL; }
     SPYValue *unit = parse(c, source.data, "<intrinsics>");
-    free(source.data);
+    mem_free(source.data);
     if (!unit) return NULL;
     SPYValue *module = value_new(c, SPY_MODULE), *module_name = spy_string(c, "typing", 6);
     if (module) module->as.map.parent = spy_retain(c->builtins);
@@ -15637,7 +15743,7 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
         char missing[sizeof(c->error_message)];
         snprintf(missing, sizeof(missing), "No module named '%s'", full.data ? full.data : "");
         int absent = error_is(c, "ModuleNotFoundError") && !strcmp(c->error_message, missing);
-        free(full.data);
+        mem_free(full.data);
         if (value || !absent) return value;
         spy_clear_error(c);
     }
@@ -15650,7 +15756,7 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
         puts_buffer(&message, "' (") || puts_buffer(&message, file && file->type == SPY_STRING ? file->as.string.data : "unknown location") ||
         puts_buffer(&message, ")");
     SPYValue *text = failed ? NULL : spy_string(c, message.data, message.len), *from = text ? spy_string(c, name, strlen(name)) : NULL;
-    free(message.data);
+    mem_free(message.data);
     SPYValue *error = from ? new_exception(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
     if (error && !set_hidden_field(c, error, "msg", text) && !set_hidden_field(c, error, "name", module_name ? module_name : c->none) &&
         !set_hidden_field(c, error, "name_from", from) && !set_hidden_field(c, error, "path", file ? file : c->none)) raise_value(c, error);
@@ -15687,13 +15793,13 @@ static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals,
     Buffer name = {.ctx = c};
     append(&name, package->as.string.data, len);
     if (*suffix) { puts_buffer(&name, "."); puts_buffer(&name, suffix); }
-    if (c->error_type[0]) { free(name.data); return NULL; }
+    if (c->error_type[0]) { mem_free(name.data); return NULL; }
     return name.data;
 }
 static SPYValue *relative_module(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
     char *name = absolute_name(c, suffix, globals, level);
     SPYValue *module = name ? import_module(c, name) : NULL;
-    free(name); return module;
+    mem_free(name); return module;
 }
 /* PEP 810 lazy imports, after CPython's lazyimportobject.c. A placeholder is
  * bound in module globals and resolved when a global or module attribute
@@ -15749,7 +15855,7 @@ static void lazy_cause(SPYContext *c, SPYValue *lazy) {
             if (cause) { set_hidden_field(c, exception, "__cause__", cause); set_hidden_field(c, exception, "__suppress_context__", c->booleans[1]); }
         }
     }
-    spy_release(cause); free(name.data); free(message.data);
+    spy_release(cause); mem_free(name.data); mem_free(message.data);
     spy_clear_error(c);
     restore_error(c, &error);
 }
@@ -15760,7 +15866,7 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
         Buffer name = {.ctx = c};
         if (!lazy_name(&name, lazy))
             errorf(c, "ImportError", "cannot import name '%s' (most likely due to a circular import)", name.data);
-        free(name.data); return NULL;
+        mem_free(name.data); return NULL;
     }
     SPYValue *function = spy_retain(name_local(root->as.lazy.builtins, "__import__"));
     if (!function) return spy_error(c, "ImportError", "__import__ not found");
@@ -15850,7 +15956,7 @@ static NO_INLINE int lazy_statement(SPYContext *c, Frame *f, Node *n, Node *only
         if (value) name_set(c, f->env, item->b ? item->b->text : item->a->text, value);
         spy_release(value);
     }
-    free(name); spy_release(text); spy_release(fromlist); spy_release(root);
+    mem_free(name); spy_release(text); spy_release(fromlist); spy_release(root);
     return c->error_type[0] ? -1 : 0;
 }
 /* Whether an import is lazy (17.5): ITEM of an import statement, or a whole
@@ -15866,7 +15972,7 @@ static NO_INLINE int lazy_import(SPYContext *c, Frame *f, Node *n, Node *item) {
     char *name = item ? copy_text(c, source_name(item->a), strlen(source_name(item->a))) :
         absolute_name(c, n->a ? source_name(n->a) : "", namespace_map(globals), n->op);
     SPYValue *text = name ? spy_string(c, name, strlen(name)) : NULL;
-    free(name);
+    mem_free(name);
     int lazy = !text ? -1 : (n->flags & F_LAZY) || (module_level && c->settings[SET_LAZY_IMPORTS]) ? 1 : contains(c, listed, text);
     SPYValue *filter = c->settings[SET_LAZY_FILTER];
     if (lazy > 0 && filter) {
@@ -16202,7 +16308,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
 static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {
     size_t len = s->as.string.len, added = tail->as.string.len;
     if (added >= SIZE_MAX - len) return spy_error(c, "MemoryError", "string is too large");
-    char *own = s->as.string.data == short_text(s) ? NULL : s->as.string.data, *data = realloc(own, len + added + 1);
+    char *own = s->as.string.data == short_text(s) ? NULL : s->as.string.data, *data = mem_realloc(c, own, len + added + 1);
     if (!data) return spy_error(c, "MemoryError", "allocation failed");
     if (!own) memcpy(data, s->as.string.data, len);
     memcpy(data + len, tail->as.string.data, added); data[len + added] = 0;
@@ -16281,15 +16387,15 @@ static void mro_error(SPYContext *c, SPYValue *bases, const size_t *positions) {
         const char *name = named && named->type == SPY_STRING ? named->as.string.data : "?";
         size_t need = len + strlen(name) + 3;
         if (need > cap) {
-            char *grown = realloc(text, cap = need * 2);
-            if (!grown) { free(text); spy_error(c, "MemoryError", ""); return; }
+            char *grown = mem_realloc(c, text, cap = need * 2);
+            if (!grown) { mem_free(text); spy_error(c, "MemoryError", ""); return; }
             text = grown;
         }
         len += (size_t)snprintf(text + len, cap - len, "%s %s", first ? "" : ",", name);
         first = 0;
     }
     spy_error(c, "TypeError", text);
-    free(text);
+    mem_free(text);
 }
 /* C3 merges each base's MRO with the declared base order. The explicit
  * type.mro method computes this order even when the metaclass overrides mro. */
@@ -16326,9 +16432,9 @@ static SPYValue *default_mro(SPYContext *c, SPYValue *cls, SPYValue *bases) {
             if (positions[i] < sequence->as.seq.len && sequence->as.seq.items[positions[i]] == candidate) positions[i]++;
         }
     }
-    free(positions); return order;
+    mem_free(positions); return order;
 fail:
-    spy_release(order); free(positions); return NULL;
+    spy_release(order); mem_free(positions); return NULL;
 }
 static int set_class_bases(SPYContext *c, SPYValue *cls, SPYValue *bases) {
     SPYValue *copy = value_new(c, SPY_TUPLE);
@@ -16618,7 +16724,7 @@ static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
         for (size_t i = 1; i < v->as.map.mro->as.seq.len; i++)
             if (v->as.map.mro->as.seq.items[i] == cls) {
                 if (count == size) {
-                    SPYValue **grown = realloc(descendants, (size = size ? size * 2 : 8) * 2 * sizeof(*grown));
+                    SPYValue **grown = mem_realloc(c, descendants, (size = size ? size * 2 : 8) * 2 * sizeof(*grown));
                     if (!grown) { spy_error(c, "MemoryError", "out of memory"); status = -1; break; }
                     descendants = grown;
                 }
@@ -16643,7 +16749,7 @@ static int class_assign_bases(SPYContext *c, SPYValue *cls, SPYValue *value) {
         restore_error(c, &error);
     }
     for (size_t i = 0; i < 2 * count; i++) spy_release(descendants[i]);
-    free(descendants);
+    mem_free(descendants);
     spy_release(old_bases); spy_release(old_mro);
     return status;
 }
@@ -16688,10 +16794,10 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
         SPYValue *mangled;
         if (len > 2 && text[0] == '_' && text[1] == '_' && !(text[len - 1] == '_' && text[len - 2] == '_') && *owner) {
             size_t size = strlen(owner) + len + 2;
-            char *buffer = malloc(size);
+            char *buffer = mem_malloc(c, size);
             if (buffer) snprintf(buffer, size, "_%s%s", owner, text);
             mangled = buffer ? spy_string(c, buffer, size - 1) : spy_error(c, "MemoryError", "out of memory");
-            free(buffer);
+            mem_free(buffer);
         } else mangled = spy_retain(item);
         if (!mangled) { status = -1; break; }
         status = sequence_append(c, list, mangled);
@@ -16899,7 +17005,9 @@ static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPY
     if (attributes) name_set(c, env, "__static_attributes__", attributes);
     spy_release(attributes);
     if (c->error_type[0]) return -1;
-    /* A method using __class__ or super() gets a cell that type.__new__ fills. */
+    /* A method using __class__ or super() gets a cell that type.__new__
+     * fills; finding them walks the body again, a step per 8 nodes. */
+    if (spend(c, n->scope ? n->scope->nodes / 8 : 0)) return -1;
     SPYValue *cells = closure_names(c, n, 1);
     for (size_t i = 0; cells && i < 2 * cells->as.seq.len && !c->error_type[0]; i++) {
         /* __classdictcell__ comes first. */
@@ -17075,11 +17183,11 @@ static SPYValue *lazy_import_builtin(SPYContext *c, size_t argc, SPYValue *const
     if (level < 0) return spy_error(c, "ValueError", "level must be >= 0");
     char *name = level ? absolute_name(c, args[0]->as.string.data, globals, level) : NULL;
     if (level && !name) return NULL;
-    if (module_env(c, caller) != caller) { free(name); return spy_error(c, "SyntaxError", "'lazy import' is only allowed at module level"); }
+    if (module_env(c, caller) != caller) { mem_free(name); return spy_error(c, "SyntaxError", "'lazy import' is only allowed at module level"); }
     SPYValue *fromlist = args[3] && args[3]->type != SPY_NONE ? args[3] : c->none, *packed = NULL;
     if (fromlist->type == SPY_STRING) {
         if ((packed = value_new(c, SPY_TUPLE)) && sequence_append(c, packed, fromlist)) { spy_release(packed); packed = NULL; }
-        if (!packed) { free(name); return NULL; }
+        if (!packed) { mem_free(name); return NULL; }
         fromlist = packed;
     }
     for (size_t i = 0; fromlist->type == SPY_TUPLE && i < fromlist->as.seq.len && !c->error_type[0]; i++)
@@ -17087,7 +17195,7 @@ static SPYValue *lazy_import_builtin(SPYContext *c, size_t argc, SPYValue *const
             errorf(c, "TypeError", "Item in ``from list'' must be str, not %s", type_name(fromlist->as.seq.items[i]));
     SPYValue *text = c->error_type[0] ? NULL : name ? spy_string(c, name, strlen(name)) : spy_retain(args[0]);
     SPYValue *lazy = text ? lazy_new(c, text, fromlist, builtins) : NULL;
-    free(name); spy_release(text); spy_release(packed);
+    mem_free(name); spy_release(text); spy_release(packed);
     return lazy;
 }
 static SPYValue *sys_module(SPYContext *);
@@ -17246,7 +17354,7 @@ static SPYValue *normalize_exception(SPYContext *c, SPYValue *value, int cause) 
             !puts_buffer(&message, " should have returned an instance of BaseException, not ") &&
             !format_value(&message, value_class(c, exception), 1))
             spy_error(c, "TypeError", message.data);
-        free(message.data); spy_release(exception);
+        mem_free(message.data); spy_release(exception);
         return NULL;
     }
     if (value->type == SPY_INSTANCE && subclass(value->as.map.parent, base)) return spy_retain(value);
@@ -17597,7 +17705,7 @@ static int compile_raises(SPYContext *c, const char *source) {
 typedef struct { size_t line, start, end; char *name; } NameToken;
 /* The NAME tokens of tokenize.generate_tokens, with character columns, up to
  * the first tokenizer error. f-string replacement fields are not entered. */
-static size_t name_tokens(const char *s, NameToken *out, size_t cap) {
+static size_t name_tokens(SPYContext *c, const char *s, NameToken *out, size_t cap) {
     size_t count = 0, line = 1, column = 0;
     while (*s && count < cap) {
         unsigned char ch = (unsigned char)*s;
@@ -17615,7 +17723,7 @@ static size_t name_tokens(const char *s, NameToken *out, size_t cap) {
             for (const char *p = start; p < s; p++) if (!strchr("rRbBuUfFtT", *p)) prefix = 0;
             if (prefix && s - start <= 2 && (*s == '\'' || *s == '"')) { column += chars; goto string; }
             out[count].line = line; out[count].start = column; out[count].end = column + chars;
-            out[count].name = malloc((size_t)(s - start) + 1);
+            out[count].name = mem_malloc(c, (size_t)(s - start) + 1);
             if (!out[count].name) break;
             memcpy(out[count].name, start, (size_t)(s - start)); out[count].name[s - start] = 0;
             count++; column += chars;
@@ -17717,14 +17825,14 @@ static char *keyword_typo(SPYContext *c, SPYValue *exception) {
         if (len && !blank) append(&text, line + margin, len - margin);
         line = end ? end + 1 : NULL;
     }
-    free(code.data);
+    mem_free(code.data);
     if (!text.data) return NULL;
     size_t chars = 0;
     for (const char *ch = text.data; *ch; ch++) if (((unsigned char)*ch & 192) != 128) chars++;
     char *result = NULL;
-    if (chars > 1024 || !compile_raises(c, text.data)) { free(text.data); return NULL; }
+    if (chars > 1024 || !compile_raises(c, text.data)) { mem_free(text.data); return NULL; }
     NameToken tokens[64];
-    size_t count = name_tokens(text.data, tokens, sizeof(tokens) / sizeof(*tokens));
+    size_t count = name_tokens(c, text.data, tokens, sizeof(tokens) / sizeof(*tokens));
     int left = 10;
     for (size_t t = 0; t < count && !result; t++) {
         int reserved = 0;
@@ -17763,11 +17871,11 @@ static char *keyword_typo(SPYContext *c, SPYValue *exception) {
                 puts_buffer(&message, matches[m]); puts_buffer(&message, "'?");
                 result = message.data;
             }
-            free(candidate.data);
+            mem_free(candidate.data);
         }
     }
-    for (size_t t = 0; t < count; t++) free(tokens[t].name);
-    free(text.data);
+    for (size_t t = 0; t < count; t++) mem_free(tokens[t].name);
+    mem_free(text.data);
     return result;
 }
 /* The display is the stored message, unless that was cut to fit its buffer
@@ -17788,7 +17896,7 @@ const char *spy_error_display(SPYContext *c) {
         if (syntax) text = keyword_typo(c, exception);
         else {
             SPYValue *full = spy_str(c, exception);
-            if (full && (text = malloc(full->as.string.len + 1))) memcpy(text, full->as.string.data, full->as.string.len + 1);
+            if (full && (text = mem_malloc(c, full->as.string.len + 1))) memcpy(text, full->as.string.data, full->as.string.len + 1);
             spy_release(full);
         }
         spy_clear_error(c);
@@ -17797,8 +17905,8 @@ const char *spy_error_display(SPYContext *c) {
         c->line = line; c->exception = exception; c->fuel = fuel;
         attend(c);
     }
-    if (!text && (text = malloc(strlen(c->error_message) + 1))) strcpy(text, c->error_message);
-    free(c->error_display);
+    if (!text && (text = mem_malloc(c, strlen(c->error_message) + 1))) strcpy(text, c->error_message);
+    mem_free(c->error_display);
     c->error_display = text;
     return text ? text : c->error_message;
 }
@@ -17854,7 +17962,7 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
             puts_buffer(&message, "'");
             SPYValue *note = c->error_type[0] ? NULL : spy_string(c, message.data, message.len);
             if (note && error.value) exception_add_note(c, error.value, note);
-            spy_release(note); free(message.data);
+            spy_release(note); mem_free(message.data);
             restore_error(c, &error);
         }
         spy_release(result);
@@ -18097,7 +18205,7 @@ static int delete_index(SPYContext *c, SPYValue *object, SPYValue *key) {
                 if (!subscript_index(c, object, key, &index)) {
                     if (index < 0) index += (int64_t)object->as.seq.len;
                     if (index < 0 || (uint64_t)index >= object->as.seq.len) spy_error(c, "IndexError", "list assignment index out of range");
-                    else {
+                    else if (!spend(c, (object->as.seq.len - (size_t)index) / 64)) {
                         spy_release(object->as.seq.items[index]); object->as.seq.len--;
                         memmove(&object->as.seq.items[index], &object->as.seq.items[index + 1], (object->as.seq.len - (size_t)index) * sizeof(SPYValue *));
                     }
@@ -18312,7 +18420,7 @@ static SPYValue *group_repr(SPYContext *c, SPYValue *self, SPYValue *message, SP
         status = !shown || (list && extend_display(c, shown, items)) || format_value(&out, shown, 1);
     }
     SPYValue *result = status || puts_buffer(&out, ")") ? NULL : spy_string(c, out.data, out.len);
-    spy_release(shown); free(out.data); return result;
+    spy_release(shown); mem_free(out.data); return result;
 }
 /* BaseExceptionGroup methods; data selects __new__, __str__, __repr__, derive, split, or subgroup. */
 static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -18330,7 +18438,7 @@ static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv,
         if (!builtin_value(c, given, SPY_LIST) && !builtin_value(c, given, SPY_TUPLE)) {
             Buffer out = {.ctx = c};
             saved = format_value(&out, given, 1) ? NULL : spy_string(c, out.data, out.len);
-            free(out.data);
+            mem_free(out.data);
             if (!saved) return NULL;
         }
         SPYValue *sequence = builtin(c, 1, &given, (void *)(intptr_t)B_TUPLE);
@@ -18352,7 +18460,7 @@ static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv,
         char count[64];
         snprintf(count, sizeof(count), " (%zu sub-exception%s)", items->as.seq.len, items->as.seq.len == 1 ? "" : "s");
         SPYValue *result = format_value(&out, message, 0) || puts_buffer(&out, count) ? NULL : spy_string(c, out.data, out.len);
-        free(out.data); return result;
+        mem_free(out.data); return result;
     }
     if (argc != 2) return errorf(c, "TypeError", "%s() takes exactly one argument", which == 2 ? "derive" : which == 3 ? "split" : "subgroup");
     if (which == 2) {
@@ -18805,7 +18913,7 @@ static SPYValue *percent_integer(SPYContext *c, PercentArgs *p, SPYValue *key, S
     status = status || append(&out, text + negative, count);
     spy_release(digits);
     SPYValue *result = status ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 static SPYValue *percent_float(SPYContext *c, PercentArgs *p, SPYValue *key, SPYValue *v, int ch, int flags, int prec) {
     SPYValue *number = builtin_value(c, v, SPY_FLOAT);
@@ -19061,7 +19169,7 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
     SPYValue *result = NULL;
     if (!c->error_type[0]) result = format->type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
         bytes ? spy_bytes(c, out.data ? out.data : "", out.len) : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
@@ -19132,7 +19240,7 @@ static int match_class(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYV
     SPYValue **values = allocate(c, (positional + keywords + 1) * sizeof(*values));
     const char **seen = allocate(c, (positional + keywords + 1) * sizeof(*seen));
     size_t seen_count = 0;
-    if (!values || !seen) { free(values); free(seen); goto done; }
+    if (!values || !seen) { mem_free(values); mem_free(seen); goto done; }
     Node *item = n->args;
     for (size_t index = 0; index < positional + keywords; index++) {
         const char *name;
@@ -19170,7 +19278,7 @@ static int match_class(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYV
     }
 collected:
     for (size_t i = 0; i < count; i++) spy_release(values[i]);
-    free(values); free(seen);
+    mem_free(values); mem_free(seen);
 done:
     spy_release(cls); spy_release(match_args);
     return result;
@@ -19480,7 +19588,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
                         const char *end = strchr(part, '.');
                         char *name = copy_text(c, part, end ? (size_t)(end - part) : strlen(part));
                         SPYValue *child = name ? attribute(c, value, name) : NULL;
-                        free(name); spy_release(value); value = child;
+                        mem_free(name); spy_release(value); value = child;
                         if (!end) break;
                         part = end + 1;
                     }
@@ -19565,7 +19673,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         }
     }
     spy_release(b.value); spy_release(b.handled);
-    if (b.error) { spy_release(b.error->value); free(b.error); }
+    if (b.error) { spy_release(b.error->value); mem_free(b.error); }
 }
 static ErrorState *save_error(SPYContext *c) {
     ErrorState state = take_error(c);
@@ -20523,7 +20631,7 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
     if (target->type == SPY_TUPLE) {
         int result = 0;
         for (size_t i = 0; i < target->as.seq.len && !result; i++) {
-            if (deeper(c, sub ? " in __subclasscheck__" : " in __instancecheck__")) return -1;
+            if (((i & 15) == 15 && spend(c, 1)) || deeper(c, sub ? " in __subclasscheck__" : " in __instancecheck__")) return -1;
             result = instance_check(c, a, target->as.seq.items[i], sub, 0);
             c->depth--;
         }
@@ -20544,14 +20652,15 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
     return sub ? recursive_issubclass(c, a, target) : object_isinstance(c, a, target);
 }
 typedef struct { SPYValue *value, *key; } SortItem;
-/* a < b for exact small ints, floats or strs of one type: 1 or 0, or -1
- * when the pair is of other kinds. */
+/* a < b for exact small ints, floats or short strs of one type: 1 or 0, or
+ * -1 when the pair is of other kinds. */
 static int plain_less(SPYValue *a, SPYValue *b) {
     if (a->type != b->type) return -1;
     if (a->type == SPY_INT) return a->as.integer_data.big || b->as.integer_data.big ? -1 : a->as.integer_data.small < b->as.integer_data.small;
     if (a->type == SPY_FLOAT) return a->as.real < b->as.real;
     if (a->type != SPY_STRING) return -1;
     size_t n = a->as.string.len < b->as.string.len ? a->as.string.len : b->as.string.len;
+    if (n >= 4096) return -1; /* The general comparison spends steps for it. */
     int order = memcmp(a->as.string.data, b->as.string.data, n);
     return order ? order < 0 : a->as.string.len < b->as.string.len;
 }
@@ -20583,7 +20692,7 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     SortItem *items = allocate(c, len * sizeof(*items));
     SortItem *scratch = allocate(c, len * sizeof(*scratch));
     size_t *ends = allocate(c, len * sizeof(*ends));
-    if (!items || !scratch || !ends) { free(items); free(scratch); free(ends); return -1; }
+    if (!items || !scratch || !ends) { mem_free(items); mem_free(scratch); mem_free(ends); return -1; }
     SortItem *from = items, *to = scratch;
     size_t keys = 0;
     for (; keys < len; keys++) {
@@ -20637,7 +20746,7 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     for (size_t i = 0; i < len; i++) list->as.seq.items[i] = from[reverse ? len - i - 1 : i].value;
 done:
     for (size_t i = 0; i < keys; i++) spy_release(from[i].key);
-    free(items); free(scratch); free(ends); return c->error_type[0] ? -1 : 0;
+    mem_free(items); mem_free(scratch); mem_free(ends); return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     (void)argv;
@@ -21085,10 +21194,10 @@ static SPYValue *parse_complex(SPYContext *c, SPYValue *text) {
     /* Each underscore stands between two digits, or the text is not a number. */
     for (size_t i = 0; i < ascii_len; i++)
         if (ascii[i] == '_' && (!i || i + 1 == ascii_len || !isdigit((unsigned char)ascii[i - 1]) || !isdigit((unsigned char)ascii[i + 1]))) {
-            free(ascii); return numeric_error(c, text, "could not convert string to complex: %s", -1);
+            mem_free(ascii); return numeric_error(c, text, "could not convert string to complex: %s", -1);
         }
     SPYValue *result = parse_complex_ascii(c, ascii, ascii_len);
-    free(ascii);
+    mem_free(ascii);
     return result;
 }
 static SPYValue *parse_complex_ascii(SPYContext *c, const char *data, size_t data_len) {
@@ -21128,10 +21237,10 @@ static SPYValue *parse_complex_ascii(SPYContext *c, const char *data, size_t dat
         }
     }
     if (*tail) goto invalid;
-    free(source);
+    mem_free(source);
     return complex_new(c, complex_parts(real, imag));
 invalid:
-    free(source); return spy_error(c, "ValueError", "complex() arg is a malformed string");
+    mem_free(source); return spy_error(c, "ValueError", "complex() arg is a malformed string");
 }
 /* role names the argument of complex(real, imag), or is NULL for complex(x). */
 static int as_complex(SPYContext *c, SPYValue *value, double complex *number, int *was_complex, int allow_complex, const char *role) {
@@ -21502,12 +21611,12 @@ static char *numeric_ascii(SPYContext *c, SPYValue *text, size_t *len) {
 }
 /* float(): [sign] (digits [. digits] | . digits) [e [sign] digits], with single
  * underscores between digits, or [sign] inf, infinity, or nan. */
-static int float_text(const char *text, size_t len, double *result) {
+static int float_text(SPYContext *c, const char *text, size_t len, double *result) {
     size_t start = 0, end = len;
     while (start < end && isspace((unsigned char)text[start])) start++;
     while (end > start && isspace((unsigned char)text[end - 1])) end--;
     if (start == end) return -1;
-    char *clean = malloc(end - start + 2);
+    char *clean = mem_malloc(c, end - start + 2);
     if (!clean) return -1;
     size_t n = 0, i = start;
     int negative = 0;
@@ -21518,7 +21627,7 @@ static int float_text(const char *text, size_t len, double *result) {
         if (word != strlen(words[w])) continue;
         size_t k = 0;
         while (k < word && tolower((unsigned char)text[i + k]) == words[w][k]) k++;
-        if (k == word) { free(clean); *result = w == 2 ? (negative ? -NAN : NAN) : negative ? -INFINITY : INFINITY; return 0; }
+        if (k == word) { mem_free(clean); *result = w == 2 ? (negative ? -NAN : NAN) : negative ? -INFINITY : INFINITY; return 0; }
     }
     if (negative) clean[n++] = '-';
     int digits = 0, section = 0; /* 0 integer, 1 fraction, 2 exponent */
@@ -21529,19 +21638,19 @@ static int float_text(const char *text, size_t len, double *result) {
             clean[n++] = ch; previous_digit = 1;
             if (section == 2) exponent_digits = 1; else digits = 1;
         } else if (ch == '_') {
-            if (!previous_digit || i + 1 == end || text[i + 1] < '0' || text[i + 1] > '9') { free(clean); return -1; }
+            if (!previous_digit || i + 1 == end || text[i + 1] < '0' || text[i + 1] > '9') { mem_free(clean); return -1; }
             previous_digit = 0;
         } else if (ch == '.' && section == 0) {
             clean[n++] = ch; section = 1; previous_digit = 0;
         } else if ((ch == 'e' || ch == 'E') && section < 2 && digits) {
             clean[n++] = 'e'; section = 2; previous_digit = 0;
             if (i + 1 < end && (text[i + 1] == '+' || text[i + 1] == '-')) clean[n++] = text[++i];
-        } else { free(clean); return -1; }
+        } else { mem_free(clean); return -1; }
     }
-    if (!digits || (section == 2 && !exponent_digits)) { free(clean); return -1; }
+    if (!digits || (section == 2 && !exponent_digits)) { mem_free(clean); return -1; }
     clean[n] = 0;
     *result = strtod(clean, NULL);
-    free(clean);
+    mem_free(clean);
     return 0;
 }
 /* The repr of a rejected numeric string, truncated to 200 characters. */
@@ -21556,7 +21665,7 @@ static SPYValue *numeric_error(SPYContext *c, SPYValue *text, const char *format
     if (!quoted) return NULL;
     if (base >= 0) errorf(c, "ValueError", format, base, quoted);
     else errorf(c, "ValueError", format, quoted);
-    free(quoted);
+    mem_free(quoted);
     return NULL;
 }
 /* int() of a str, bytes, or bytearray; a rejected bytearray shows as bytes. */
@@ -21564,7 +21673,7 @@ static SPYValue *int_from_text(SPYContext *c, SPYValue *value, int base) {
     size_t len;
     char *text = numeric_ascii(c, value, &len);
     SPYValue *result = text ? integer_parse(c, text, len, (unsigned)base, "ValueError") : NULL;
-    free(text);
+    mem_free(text);
     if (!result && error_is(c, "ValueError") && !strcmp(c->error_message, "invalid integer string")) {
         spy_clear_error(c);
         SPYValue *shown = value->type == SPY_BYTEARRAY ? spy_bytes(c, value->as.string.data, value->as.string.len) : spy_retain(value);
@@ -21579,8 +21688,8 @@ static SPYValue *float_from_text(SPYContext *c, SPYValue *value, SPYValue *shown
     char *text = numeric_ascii(c, value, &len);
     if (!text) return NULL;
     double d;
-    int status = float_text(text, len, &d);
-    free(text);
+    int status = float_text(c, text, len, &d);
+    mem_free(text);
     if (status) return numeric_error(c, shown, "could not convert string to float: %s", -1);
     return spy_float(c, d);
 }
@@ -21674,7 +21783,7 @@ static SPYValue *text_case(SPYContext *c, SPYValue *self, int operation) {
         units_extend(&out, mapped, count);
     }
     SPYValue *result = c->error_type[0] ? NULL : units_value(c, self->type, out.items, out.len);
-    free(text.items); free(out.items);
+    mem_free(text.items); mem_free(out.items);
     return result;
 }
 static const char *const text_case_names[] = {"lower", "upper", "casefold", "title", "capitalize", "swapcase"};
@@ -21710,7 +21819,7 @@ static SPYValue *text_predicate(SPYContext *c, size_t argc, SPYValue *const *arg
         } else result = character_is(type, properties[test], code);
     }
     if (test >= IS_UPPER) result = result && cased;
-    free(text.items);
+    mem_free(text.items);
     return spy_bool(c, result);
 }
 /* Accept the same type, or for bytes another bytes-like object. */
@@ -21727,14 +21836,22 @@ static int text_argument(SPYContext *c, SPYValue *self, SPYValue *value, const c
     int status = units_from(c, actual, out);
     spy_release(copy); return status;
 }
+/* As find_bytes, over characters: a step per 16 positions and per 16
+ * characters compared at each. */
 static size_t units_find(const Units *text, size_t start, size_t end, const Units *needle, int reverse) {
     if (needle->len > end - start) return SIZE_MAX;
+    SPYContext *c = text->ctx;
+    size_t unit = needle->len / 16 + 1, i;
     if (!reverse) {
-        for (size_t i = start; i + needle->len <= end; i++)
+        for (i = start; i + needle->len <= end; i++) {
+            if (!(i & 15) && spend(c, unit)) return SIZE_MAX;
             if (!needle->len || !memcmp(text->items + i, needle->items, needle->len * sizeof(uint32_t))) return i;
+        }
     } else {
-        for (size_t i = end - needle->len + 1; i-- > start;)
+        for (i = end - needle->len + 1; i-- > start;) {
+            if (!(i & 15) && spend(c, unit)) return SIZE_MAX;
             if (!needle->len || !memcmp(text->items + i, needle->items, needle->len * sizeof(uint32_t))) return i;
+        }
     }
     return SIZE_MAX;
 }
@@ -21749,19 +21866,15 @@ static int optional_size(SPYContext *c, SPYValue *value, int64_t fallback, int64
     return value && index_value(c, value, out);
 }
 /* The first occurrence of needle in [at, end), or NULL. */
-static const char *bytes_find(const char *at, const char *end, SPYValue *needle) {
-    size_t width = needle->as.string.len;
-    for (; (size_t)(end - at) >= width; at++) {
-        if (!(at = memchr(at, needle->as.string.data[0], (size_t)(end - at) - width + 1))) return NULL;
-        if (!memcmp(at, needle->as.string.data, width)) return at;
-    }
-    return NULL;
+static const char *bytes_find(SPYContext *c, const char *at, const char *end, SPYValue *needle) {
+    size_t found = find_bytes(c, at, (size_t)(end - at), needle->as.string.data, needle->as.string.len, 0);
+    return found == SIZE_MAX ? NULL : at + found;
 }
 /* text.split(sep, limit) on the bytes of exact strs or bytes, as bytes_replace. */
 static SPYValue *bytes_split(SPYContext *c, SPYValue *text, SPYValue *sep, int64_t limit) {
     SPYValue *list = spy_list(c);
     const char *from = text->as.string.data, *end = from + text->as.string.len, *found;
-    for (int64_t count = 0; list && (limit < 0 || count < limit) && (found = bytes_find(from, end, sep)); count++) {
+    for (int64_t count = 0; list && (limit < 0 || count < limit) && (found = bytes_find(c, from, end, sep)); count++) {
         SPYValue *part = text->type == SPY_STRING ? spy_string(c, from, (size_t)(found - from)) : spy_bytes(c, from, (size_t)(found - from));
         if (!part || sequence_append(c, list, part)) { spy_release(part); spy_release(list); return NULL; }
         spy_release(part);
@@ -21843,10 +21956,10 @@ static SPYValue *text_split(SPYContext *c, size_t argc, SPYValue *const *argv, S
             list->as.seq.items[list->as.seq.len - 1 - i] = swap;
         }
     }
-    free(text.items); free(sep.items);
+    mem_free(text.items); mem_free(sep.items);
     return list;
 fail:
-    free(text.items); free(sep.items); spy_release(list);
+    mem_free(text.items); mem_free(sep.items); spy_release(list);
     return NULL;
 }
 static int memchr_units(const uint32_t *items, size_t len, uint32_t code) {
@@ -21862,9 +21975,9 @@ static SPYValue *text_strip(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (units_from(c, self, &text)) return NULL;
     int whitespace = !args[0] || args[0]->type == SPY_NONE;
     if (!whitespace && type == SPY_STRING && !builtin_value(c, args[0], SPY_STRING)) {
-        free(text.items); return errorf(c, "TypeError", "%s arg must be None or str", strip_names[sides]);
+        mem_free(text.items); return errorf(c, "TypeError", "%s arg must be None or str", strip_names[sides]);
     }
-    if (!whitespace && text_argument(c, self, args[0], "strip arg", &chars)) { free(text.items); return NULL; }
+    if (!whitespace && text_argument(c, self, args[0], "strip arg", &chars)) { mem_free(text.items); return NULL; }
     size_t start = 0, end = text.len;
 #define STRIPPED(code) (whitespace ? character_is(type, C_SPACE, code) : \
         memchr_units(chars.items, chars.len, code))
@@ -21872,7 +21985,7 @@ static SPYValue *text_strip(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (sides != 1) while (end > start && STRIPPED(text.items[end - 1])) end--;
 #undef STRIPPED
     SPYValue *result = units_value(c, self->type, text.items + start, end - start);
-    free(text.items); free(chars.items);
+    mem_free(text.items); mem_free(chars.items);
     return result;
 }
 /* text.replace(old, new, limit) on the bytes of exact strs or bytes, with old
@@ -21882,7 +21995,7 @@ static SPYValue *bytes_replace(SPYContext *c, SPYValue *text, SPYValue *old, SPY
     const char *from = text->as.string.data, *end = from + text->as.string.len, *at = from;
     size_t width = old->as.string.len;
     for (int64_t count = 0; (limit < 0 || count < limit) && (size_t)(end - at) >= width; count++) {
-        const char *found = bytes_find(at, end, old);
+        const char *found = bytes_find(c, at, end, old);
         if (!found) break;
         if (append(&out, from, (size_t)(found - from)) || append(&out, new->as.string.data, new->as.string.len)) break;
         from = at = found + width;
@@ -21919,7 +22032,7 @@ static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv,
     }
     result = units_value(c, self->type, out.items, out.len);
 done:
-    free(text.items); free(old.items); free(replacement.items); free(out.items);
+    mem_free(text.items); mem_free(old.items); mem_free(replacement.items); mem_free(out.items);
     return result;
 }
 static const char *const pad_names[] = {"center", "ljust", "rjust", "zfill"};
@@ -21945,7 +22058,7 @@ static SPYValue *text_pad(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
         if (type == SPY_STRING && string_length(actual) != 1)
             return spy_error(c, "TypeError", "The fill character must be exactly one character long");
         if (units_from(c, actual, &f)) return NULL;
-        fill = f.items[0]; free(f.items);
+        fill = f.items[0]; mem_free(f.items);
     }
     Units text, out = {.ctx = c};
     if (units_from(c, self, &text)) return NULL;
@@ -21958,7 +22071,7 @@ static SPYValue *text_pad(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     units_extend(&out, text.items + sign, text.len - sign);
     for (size_t i = left; i < pad && !c->error_type[0]; i++) units_push(&out, fill);
     SPYValue *result = c->error_type[0] ? NULL : units_value(c, self->type, out.items, out.len);
-    free(text.items); free(out.items);
+    mem_free(text.items); mem_free(out.items);
     return result;
 }
 static SPYValue *text_partition(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -21983,7 +22096,7 @@ static SPYValue *text_partition(SPYContext *c, size_t argc, SPYValue *const *arg
         spy_release(tuple); tuple = NULL;
     }
 done:
-    free(text.items); free(sep.items);
+    mem_free(text.items); mem_free(sep.items);
     return tuple;
 }
 static SPYValue *text_affix(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22003,7 +22116,7 @@ static SPYValue *text_affix(SPYContext *c, size_t argc, SPYValue *const *argv, S
         }
         result = units_value(c, self->type, text.items + start, end - start);
     }
-    free(text.items); free(affix.items);
+    mem_free(text.items); mem_free(affix.items);
     return result;
 }
 static SPYValue *text_expandtabs(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22030,7 +22143,7 @@ static SPYValue *text_expandtabs(SPYContext *c, size_t argc, SPYValue *const *ar
         }
     }
     SPYValue *result = c->error_type[0] ? NULL : units_value(c, self->type, out.items, out.len);
-    free(text.items); free(out.items);
+    mem_free(text.items); mem_free(out.items);
     return result;
 }
 static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22041,7 +22154,7 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
     if (!iterator) return NULL;
     Buffer out = {.ctx = c};
-    for (size_t i = 0; !c->error_type[0] && (item = iterator_next(c, iterator)); i++) {
+    for (size_t i = 0; !c->error_type[0] && (item = native_next(c, iterator)); i++) {
         SPYValue *copy, *actual = buffer_bytes(c, item, &copy);
         if (!actual && !c->error_type[0]) errorf(c, "TypeError", "sequence item %zu: expected a bytes-like object, %s found", i, type_name(item));
         else if (actual && (!i || !append(&out, self->as.string.data, self->as.string.len))) append(&out, actual->as.string.data, actual->as.string.len);
@@ -22050,7 +22163,7 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
     spy_release(iterator);
     SPYValue *result = c->error_type[0] ? NULL : type == SPY_BYTEARRAY ?
         bytearray_new(c, out.data ? out.data : "", out.len) : spy_bytes(c, out.data ? out.data : "", out.len);
-    free(out.data);
+    mem_free(out.data);
     return result;
 }
 /* Codecs: UTF-8, ASCII, Latin-1 and Latin-9 with common error handlers. */
@@ -22152,7 +22265,7 @@ static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, 
         i += width;
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_bytes(c, out.data ? out.data : "", out.len);
-    free(out.data);
+    mem_free(out.data);
     return result;
 }
 /* Length of a valid UTF-8 sequence at text, or 0. Surrogates are invalid. */
@@ -22212,7 +22325,7 @@ static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYVa
         i += bad;
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data);
+    mem_free(out.data);
     return result;
 }
 /* PEP 263, adapted from CPython Parser/tokenizer/helpers.c (PSF license).
@@ -22348,7 +22461,7 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         append(&out, hex, 2);
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
-    free(out.data);
+    mem_free(out.data);
     return result;
 }
 static SPYValue *bytes_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22383,7 +22496,7 @@ static SPYValue *bytes_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
             spy_release(result); result = converted;
         }
     }
-    free(out.data);
+    mem_free(out.data);
     return result;
 }
 static SPYValue *str_maketrans(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22423,7 +22536,7 @@ static SPYValue *str_maketrans(SPYContext *c, size_t argc, SPYValue *const *argv
                 spy_release(key);
             }
         }
-        free(from.items); free(to.items); free(drop.items);
+        mem_free(from.items); mem_free(to.items); mem_free(drop.items);
     }
     if (c->error_type[0]) { spy_release(table); return NULL; }
     return table;
@@ -22436,6 +22549,7 @@ static SPYValue *str_translate(SPYContext *c, size_t argc, SPYValue *const *argv
     Units text, out = {.ctx = c};
     if (units_from(c, self, &text)) return NULL;
     for (size_t i = 0; i < text.len && !c->error_type[0]; i++) {
+        if (spend(c, 1)) break;
         SPYValue *key = spy_int(c, text.items[i]);
         SPYValue *value = key ? get_index(c, args[0], key) : NULL;
         spy_release(key);
@@ -22452,12 +22566,12 @@ static SPYValue *str_translate(SPYContext *c, size_t argc, SPYValue *const *argv
             }
         } else if (value->type == SPY_STRING) {
             Units part;
-            if (!units_from(c, value, &part)) { units_extend(&out, part.items, part.len); free(part.items); }
+            if (!units_from(c, value, &part)) { units_extend(&out, part.items, part.len); mem_free(part.items); }
         } else spy_error(c, "TypeError", "character mapping must return integer, None or str");
         spy_release(value);
     }
     SPYValue *result = c->error_type[0] ? NULL : units_value(c, SPY_STRING, out.items, out.len);
-    free(text.items); free(out.items);
+    mem_free(text.items); mem_free(out.items);
     return result;
 }
 static SPYValue *bytes_translate(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22481,7 +22595,7 @@ static SPYValue *bytes_translate(SPYContext *c, size_t argc, SPYValue *const *ar
     }
     SPYValue *result = c->error_type[0] ? NULL : type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
         spy_bytes(c, out.data ? out.data : "", out.len);
-    free(out.data);
+    mem_free(out.data);
     return result;
 }
 static SPYValue *str_format_map(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -22540,7 +22654,7 @@ static SPYValue *int_to_bytes(SPYContext *c, size_t argc, SPYValue *const *argv,
     }
     if (!length && !bits) fits = 1;
     SPYValue *result = fits ? spy_bytes(c, out, (size_t)length) : spy_error(c, "OverflowError", "int too big to convert");
-    free(out);
+    mem_free(out);
     return result;
 }
 /* PyBytes_FromObject: the bytes of a bytes-like object, a __bytes__ result
@@ -22573,7 +22687,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
     }
     Buffer out = {.ctx = c};
     for (;;) {
-        SPYValue *item = iterator_next(c, iterator);
+        SPYValue *item = native_next(c, iterator);
         if (!item) break;
         SPYValue *index = index_object(c, item);
         if (index) {
@@ -22589,7 +22703,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
         if (spend(c, 1)) break;
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_bytes(c, out.data ? out.data : "", out.len);
-    free(out.data); spy_release(iterator); return result;
+    mem_free(out.data); spy_release(iterator); return result;
 }
 static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
@@ -22608,7 +22722,7 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     size_t len = source->as.string.len;
     BigInt *big = integer_alloc(c, len / 4 + 1);
     unsigned char *bytes = big ? allocate(c, len + 1) : NULL;
-    if (!bytes) { free(big); spy_release(owned); return NULL; }
+    if (!bytes) { mem_free(big); spy_release(owned); return NULL; }
     for (size_t i = 0; i < len; i++) bytes[i] = (unsigned char)source->as.string.data[little ? i : len - 1 - i];
     spy_release(owned);
     big->sign = 1;
@@ -22619,7 +22733,7 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
         big->sign = -1;
     }
     for (size_t i = 0; i < len; i++) big->digits[i / 4] |= (uint32_t)bytes[i] << ((i % 4) * 8);
-    free(bytes);
+    mem_free(bytes);
     SPYValue *result = integer_finish(c, big);
     SPYValue *cls = argv[0];
     if (result && cls != c->types[SPY_INT]) {
@@ -22777,13 +22891,14 @@ static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv
         SPYValue *source = args[0];
         for (size_t i = 0; i < source->as.map.len && !c->error_type[0]; i++) {
             Entry entry = map_items(source)[i];
+            if ((i & 63) == 63 && spend(c, 1)) break;
             spy_retain(entry.key);
             map_set_hash(c, dict, entry.key, value, entry.hash);
             spy_release(entry.key);
         }
     } else {
         SPYValue *iterator = get_iterator(c, args[0]), *key;
-        while (iterator && !c->error_type[0] && (key = iterator_next(c, iterator))) {
+        while (iterator && !c->error_type[0] && (key = native_next(c, iterator))) {
             if (frozen) map_set(c, dict, key, value);
             else set_index(c, dict, key, value);
             spy_release(key);
@@ -22882,7 +22997,7 @@ static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other)
         status = c->error_type[0] ? -1 : status;
         spy_release(gone[i].key);
     }
-    free(gone);
+    mem_free(gone);
     return status;
 }
 static SPYValue *set_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -22908,7 +23023,7 @@ static SPYValue *view_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         if (container->type == SPY_SET) { spy_release(result); return set_intersect_iterable(c, container, source); }
         SPYValue *iterator = get_iterator(c, source), *item;
         if (!iterator) { spy_release(result); return NULL; }
-        while ((item = iterator_next(c, iterator))) {
+        while ((item = native_next(c, iterator))) {
             int found = contains(c, container, item);
             int status = found < 0 || (found && set_add(c, result, item));
             spy_release(item);
@@ -22932,7 +23047,7 @@ static SPYValue *view_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
 static SPYValue *set_intersect_iterable(SPYContext *c, SPYValue *set, SPYValue *iterable) {
     SPYValue *result = value_new(c, SPY_SET), *iterator = result ? get_iterator(c, iterable) : NULL, *item;
     if (!iterator) { spy_release(result); return NULL; }
-    while ((item = iterator_next(c, iterator))) {
+    while ((item = native_next(c, iterator))) {
         int64_t hash;
         int found = hash_value(c, item, &hash) ? -1 : set_contains(c, set, item, hash);
         if (found > 0 && !set_contains(c, result, item, hash)) found = map_append(c, result, item, c->none, hash) ? -1 : 1;
@@ -22946,6 +23061,7 @@ static SPYValue *set_intersect_iterable(SPYContext *c, SPYValue *set, SPYValue *
 static int set_subset(SPYContext *c, SPYValue *a, SPYValue *b) {
     if (a->as.map.len > b->as.map.len) return 0;
     for (size_t i = 0; i < a->as.map.len; i++) {
+        if ((i & 15) == 15 && spend(c, 1)) return -1;
         Entry *entry = &map_items(a)[i];
         int found = set_contains(c, b, entry->key, entry->hash);
         if (found <= 0) return found;
@@ -22976,7 +23092,7 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
         else {
             result = 1;
             for (size_t i = 0; i < self->as.map.len && result > 0; i++) {
-                int found = set_contains(c, other, map_items(self)[i].key, map_items(self)[i].hash);
+                int found = (i & 15) == 15 && spend(c, 1) ? -1 : set_contains(c, other, map_items(self)[i].key, map_items(self)[i].hash);
                 result = found < 0 ? -1 : !found;
             }
         }
@@ -23253,7 +23369,7 @@ static size_t memory_count(SPYValue *m) {
 static SPYValue *memory_new(SPYContext *c, SPYValue *obj, SPYValue *source, const char *format, size_t itemsize, int ndim, int readonly) {
     SPYValue *m = value_new(c, SPY_MEMORYVIEW);
     if (!m) return NULL;
-    m->as.memory.layout = calloc(ndim ? 2 * (size_t)ndim : 1, sizeof(ptrdiff_t));
+    m->as.memory.layout = allocate(c, (ndim ? 2 * (size_t)ndim : 1) * sizeof(ptrdiff_t));
     if (!m->as.memory.layout) { m->as.memory.released = 1; spy_release(m); spy_error(c, "MemoryError", "out of memory"); return NULL; }
     m->as.memory.obj = spy_retain(obj); m->as.memory.source = spy_retain(source);
     snprintf(m->as.memory.format, sizeof(m->as.memory.format), "%s", format);
@@ -23320,9 +23436,9 @@ static int memory_walk_fortran(SPYValue *m, int dim, ptrdiff_t at, Buffer *bytes
 static SPYValue *memory_bytes_order(SPYContext *c, SPYValue *m, int fortran) {
     Buffer out = {.ctx = c};
     if (fortran ? memory_walk_fortran(m, m->as.memory.ndim - 1, m->as.memory.offset, &out)
-                : memory_walk(c, m, 0, m->as.memory.offset, WALK_BYTES, NULL, &out)) { free(out.data); return NULL; }
+                : memory_walk(c, m, 0, m->as.memory.offset, WALK_BYTES, NULL, &out)) { mem_free(out.data); return NULL; }
     SPYValue *result = spy_bytes(c, out.data ? out.data : "", out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 static SPYValue *memory_bytes(SPYContext *c, SPYValue *m) { return memory_bytes_order(c, m, 0); }
 static SPYValue *memory_from(SPYContext *, SPYValue *);
@@ -23809,7 +23925,7 @@ static SPYValue *bytearray_new(SPYContext *c, const void *data, size_t len) {
 static int bytearray_resize(SPYContext *c, SPYValue *array, size_t len) {
     if (len != array->as.string.len && bytearray_exported(c, array)) return -1;
     if (len == SIZE_MAX) { spy_error(c, "MemoryError", "bytearray is too large"); return -1; }
-    char *data = realloc(array->as.string.data, len + 1);
+    char *data = mem_realloc(c, array->as.string.data, len + 1);
     if (!data) { spy_error(c, "MemoryError", "allocation failed"); return -1; }
     if (len > array->as.string.len) memset(data + array->as.string.len, 0, len - array->as.string.len);
     data[len] = 0;
@@ -23831,7 +23947,7 @@ static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out) {
     if (source->type == SPY_STRING) { spy_error(c, "TypeError", "cannot extend bytearray with str"); return -1; }
     SPYValue *iterator = get_iterator(c, source), *item;
     if (!iterator) return -1;
-    while (!c->error_type[0] && (item = iterator_next(c, iterator))) {
+    while (!c->error_type[0] && (item = native_next(c, iterator))) {
         unsigned char byte;
         if (!byte_value(c, item, &byte)) append(out, (char *)&byte, 1);
         spy_release(item);
@@ -23858,12 +23974,12 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_none(c);
     case BA_EXTEND: {
         Buffer out = {.ctx = c};
-        if (length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out)) { free(out.data); return NULL; }
+        if (length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out)) { mem_free(out.data); return NULL; }
         len = self->as.string.len;
-        if (out.len > SIZE_MAX - len - 1) { free(out.data); return spy_error(c, "MemoryError", "bytearray is too large"); }
-        if (bytearray_resize(c, self, len + out.len)) { free(out.data); return NULL; }
+        if (out.len > SIZE_MAX - len - 1) { mem_free(out.data); return spy_error(c, "MemoryError", "bytearray is too large"); }
+        if (bytearray_resize(c, self, len + out.len)) { mem_free(out.data); return NULL; }
         if (out.len) memcpy(self->as.string.data + len, out.data, out.len);
-        free(out.data);
+        mem_free(out.data);
         return spy_none(c);
     }
     case BA_POP: {
@@ -23873,7 +23989,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         if (!len) return spy_error(c, "IndexError", "pop from empty bytearray");
         if (index < 0) index += (int64_t)len;
         if (index < 0 || (uint64_t)index >= len) return spy_error(c, "IndexError", "pop index out of range");
-        if (bytearray_exported(c, self)) return NULL;
+        if (bytearray_exported(c, self) || spend(c, (len - (size_t)index) / 64)) return NULL;
         byte = (unsigned char)self->as.string.data[index];
         memmove(self->as.string.data + index, self->as.string.data + index + 1, len - (size_t)index - 1);
         bytearray_resize(c, self, len - 1);
@@ -23885,7 +24001,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         len = self->as.string.len;
         if (index < 0) { index += (int64_t)len; if (index < 0) index = 0; }
         if ((uint64_t)index > len) index = (int64_t)len;
-        if (bytearray_resize(c, self, len + 1)) return NULL;
+        if (spend(c, (len - (size_t)index) / 64) || bytearray_resize(c, self, len + 1)) return NULL;
         memmove(self->as.string.data + index + 1, self->as.string.data + index, len - (size_t)index);
         self->as.string.data[index] = (char)byte;
         return spy_none(c);
@@ -23895,7 +24011,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         len = self->as.string.len;
         char *found = memchr(self->as.string.data, byte, len);
         if (!found) return spy_error(c, "ValueError", "value not found in bytearray");
-        if (bytearray_exported(c, self)) return NULL;
+        if (bytearray_exported(c, self) || spend(c, len / 64)) return NULL;
         memmove(found, found + 1, len - (size_t)(found - self->as.string.data) - 1);
         bytearray_resize(c, self, len - 1);
         return spy_none(c);
@@ -23935,7 +24051,7 @@ static SPYValue *bytearray_resize_method(SPYContext *c, size_t argc, SPYValue *c
     if (size < 0 || (uint64_t)size > len)
         return errorf(c, "IndexError", "can't take %lld bytes outside size %zu", (long long)size, len);
     SPYValue *result = spy_bytes(c, self->as.string.data, (size_t)size);
-    if (!result) return NULL;
+    if (!result || spend(c, (len - (size_t)size) / 64)) { spy_release(result); return NULL; }
     memmove(self->as.string.data, self->as.string.data + size, len - (size_t)size);
     if (bytearray_resize(c, self, len - (size_t)size)) { spy_release(result); return NULL; }
     return result;
@@ -23950,7 +24066,7 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
         if (index < 0) index += (int64_t)len;
         if (index < 0 || (uint64_t)index >= len) { spy_error(c, "IndexError", "bytearray index out of range"); return -1; }
         if (!item) {
-            if (bytearray_exported(c, array)) return -1;
+            if (bytearray_exported(c, array) || spend(c, (len - (size_t)index) / 64)) return -1;
             memmove(array->as.string.data + index, array->as.string.data + index + 1, len - (size_t)index - 1);
             return bytearray_resize(c, array, len - 1);
         }
@@ -23968,25 +24084,25 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
         Buffer bytes = {.ctx = c};
         int status = collect_bytes(c, item, &bytes);
         SPYValue *copy = status ? NULL : bytearray_new(c, bytes.data, bytes.len);
-        free(bytes.data);
+        mem_free(bytes.data);
         status = copy ? bytearray_set(c, array, key, copy) : -1;
         spy_release(copy);
         return status;
     }
     Buffer out = {.ctx = c};
-    if (actual && append(&out, actual->as.string.data, actual->as.string.len)) { free(out.data); return -1; }
+    if (actual && append(&out, actual->as.string.data, actual->as.string.len)) { mem_free(out.data); return -1; }
     len = array->as.string.len;
     if (slice.step != 1) {
         if (item && out.len && out.len != slice.count) {
             errorf(c, "ValueError", "attempt to assign bytes of size %zu to extended slice of size %zu", out.len, slice.count);
-            free(out.data); return -1;
+            mem_free(out.data); return -1;
         }
         if (item && out.len) {
             for (size_t i = 0; i < slice.count; i++) array->as.string.data[slice.start + (int64_t)i * slice.step] = out.data[i];
-            free(out.data); return 0;
+            mem_free(out.data); return 0;
         }
         /* Deleting an extended slice keeps the bytes not selected. */
-        free(out.data);
+        mem_free(out.data);
         if (slice.count && bytearray_exported(c, array)) return -1;
         Buffer kept = {.ctx = c};
         for (size_t i = 0; i < len; i++) {
@@ -23996,21 +24112,21 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
         }
         int status = c->error_type[0] || bytearray_resize(c, array, kept.len) ? -1 : 0;
         if (!status && kept.len) memcpy(array->as.string.data, kept.data, kept.len);
-        free(kept.data); return status;
+        mem_free(kept.data); return status;
     }
     size_t start = (size_t)slice.start, removed = slice.step == 1 ? slice.count : 0;
     if (slice.step == 1 && slice.stop < slice.start) removed = 0;
-    if (out.len > SIZE_MAX - (len - removed) - 1) { free(out.data); spy_error(c, "MemoryError", "bytearray is too large"); return -1; }
+    if (out.len > SIZE_MAX - (len - removed) - 1) { mem_free(out.data); spy_error(c, "MemoryError", "bytearray is too large"); return -1; }
     size_t tail = len - start - removed, total = len - removed + out.len;
-    if (total != len && bytearray_exported(c, array)) { free(out.data); return -1; }
+    if (total != len && bytearray_exported(c, array)) { mem_free(out.data); return -1; }
     char *data = allocate(c, total + 1);
-    if (!data) { free(out.data); return -1; }
+    if (!data) { mem_free(out.data); return -1; }
     memcpy(data, array->as.string.data, start);
     if (out.len) memcpy(data + start, out.data, out.len);
     memcpy(data + start + out.len, array->as.string.data + start + removed, tail);
-    free(array->as.string.data);
+    mem_free(array->as.string.data);
     array->as.string.data = data; array->as.string.len = total;
-    free(out.data);
+    mem_free(out.data);
     return 0;
 }
 static SPYValue *min_max(SPYContext *c, int maximum, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -24235,7 +24351,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             size_t prefix = level ? full->as.string.len - a->as.string.len : 0;
             char *name = copy_text(c, full->as.string.data, prefix + first);
             SPYValue *root = name ? import_module(c, name) : NULL;
-            free(name); spy_release(module); module = root;
+            mem_free(name); spy_release(module); module = root;
         }
         if (c->error_type[0]) { spy_release(module); return NULL; }
         return module;
@@ -24279,7 +24395,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         Buffer out = {.ctx = c};
         SPYValue *result = integer_format(&out, integer, id == B_BIN ? 2 : id == B_OCT ? 8 : 16, 0, '-', 1) ?
             NULL : spy_string(c, out.data, out.len);
-        free(out.data); spy_release(integer); return result;
+        mem_free(out.data); spy_release(integer); return result;
     }
     case B_POW: {
         if (argc < 2 || argc > 3) goto arity;
@@ -25073,7 +25189,7 @@ static int bind_free_cells(SPYContext *c, Node *def, SPYValue *globals, SPYValue
         SPYValue *cell = closure->as.seq.items[i], *name = names->as.seq.items[i];
         SPYValue *unbound = cell->as.cell.value ? NULL : value_new(c, V_UNBOUND);
         status = (!cell->as.cell.value && !unbound) || name_set(c, env, name->as.string.data, cell->as.cell.value ? cell->as.cell.value : unbound) ||
-            weak_push(&c->cells, &c->cells_len, &c->cells_cap, cell);
+            weak_push(c, &c->cells, &c->cells_len, &c->cells_cap, cell);
         spy_release(unbound);
         if (status) break;
         spy_release(cell->as.cell.value); cell->as.cell.value = NULL;
@@ -25598,7 +25714,7 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
         Buffer out = {.ctx = c};
         SPYValue *result = puts_buffer(&out, type == SPY_CLASSMETHOD ? "<classmethod(" : "<staticmethod(") ||
             puts_buffer(&out, inner->as.string.data) || puts_buffer(&out, ")>") ? NULL : spy_string(c, out.data, out.len);
-        free(out.data); spy_release(inner); return result;
+        mem_free(out.data); spy_release(inner); return result;
     }
     case DESCR_SET_NAME:
         spy_retain(argv[2]); spy_release(storage->as.property.name); storage->as.property.name = argv[2];
@@ -25798,7 +25914,7 @@ static SPYValue *object_repr(SPYContext *c, SPYValue *self) {
          (puts_buffer(&out, module->as.string.data) || puts_buffer(&out, "."))) ||
         puts_buffer(&out, name && name->type == SPY_STRING ? name->as.string.data : type_name(self)) || puts_buffer(&out, address);
     SPYValue *result = status ? NULL : spy_string(c, out.data, out.len);
-    free(out.data); return result;
+    mem_free(out.data); return result;
 }
 static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     SPYValue *fn = data;
@@ -26947,15 +27063,15 @@ void spy_context_free(SPYContext *c) {
             for (Node *n = v->as.unit.nodes; n; n = n->allocated) drop_kept(c, n->scope, 0);
     c->frames_cap = 0;
     while (c->values) free_value(c->values);
-    free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->cells); free(c->frames); free(c->repr_stack);
-    for (size_t i = 0; i < c->host_modules_len; i++) free(c->host_modules[i].name);
-    free(c->host_modules);
-    for (size_t i = 0; i < c->mounts_len; i++) { free(c->mounts[i].host); free(c->mounts[i].path); }
-    free(c->mounts);
+    mem_free(c->weak); mem_free(c->weak_calls); mem_free(c->finalize_calls); mem_free(c->cells); mem_free(c->frames); mem_free(c->repr_stack);
+    for (size_t i = 0; i < c->host_modules_len; i++) mem_free(c->host_modules[i].name);
+    mem_free(c->host_modules);
+    for (size_t i = 0; i < c->mounts_len; i++) { mem_free(c->mounts[i].host); mem_free(c->mounts[i].path); }
+    mem_free(c->mounts);
 #if SPY_FILES
     for (size_t i = 0; i < c->files_len; i++) close(c->files[i]);
 #endif
-    free(c->files); free(c->error_display);
+    mem_free(c->files); mem_free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++)
         if (c->tuple_cache[i]) { cache_take(c->tuple_cache[i], sizeof(SPYValue)); value_give(c, c->tuple_cache[i], 0); }
     /* The unlisted values still live go with their pools. */
@@ -26964,8 +27080,10 @@ void spy_context_free(SPYContext *c) {
         c->every_pool = pool->after;
         cache_take(pool, POOL); pool_free(pool);
     }
-    while (c->spare_entries_len) free(c->spare_entries[--c->spare_entries_len]);
-    if (c->spare_machine) { free(c->spare_machine->blocks); free(c->spare_machine->stack); free(c->spare_machine); }
+    while (c->spare_entries_len) mem_free(c->spare_entries[--c->spare_entries_len]);
+    if (c->spare_machine) { mem_free(c->spare_machine->blocks); mem_free(c->spare_machine->stack); mem_free(c->spare_machine); }
+    for (int k = 0; k < 16; k++)
+        for (MemHead *b = c->spare_blocks[k], *next; b; b = next) { cache_take(b, sizeof(*b) + (k + 1) * 16); next = b->next; free(b); }
     free(c);
 }
 void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
@@ -26974,6 +27092,8 @@ void spy_set_error_output(SPYContext *c, SPYWrite write, void *data) { c->error_
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; watch(c); }
+void spy_set_memory_limit(SPYContext *c, size_t limit) { c->memory_limit = limit; watch(c); }
+size_t spy_memory_used(const SPYContext *c) { return c->memory; }
 int spy_stopped(const SPYContext *c) { return c->stopped; }
 void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
@@ -27188,7 +27308,7 @@ static SPYValue *file_native(SPYContext *c, size_t argc, SPYValue *const *argv, 
         else if (m[0] != 'r') return errorf(c, "ValueError", "invalid mode: '%s'", m);
         if (c->files_len == c->files_cap) {
             size_t cap = c->files_cap ? c->files_cap * 2 : 8;
-            int *files = realloc(c->files, cap * sizeof(*files));
+            int *files = mem_realloc(c, c->files, cap * sizeof(*files));
             if (!files) return spy_error(c, "MemoryError", "out of memory");
             c->files = files; c->files_cap = cap;
         }
@@ -27236,22 +27356,22 @@ static SPYValue *file_native(SPYContext *c, size_t argc, SPYValue *const *argv, 
     if (id == FILE_TRUNCATE) return ftruncate(fd, (off_t)n) ? file_error(c, errno, NULL) : spy_int(c, n);
     /* FILE_READ: n bytes in one read, or everything to the end when negative. */
     size_t cap = n >= 0 ? (size_t)n : 8192, len = 0;
-    char *buffer = malloc(cap ? cap : 1);
+    char *buffer = mem_malloc(c, cap);
     if (!buffer) return spy_error(c, "MemoryError", "out of memory");
     for (;;) {
         if (len == cap) {
-            char *grown = realloc(buffer, cap * 2);
-            if (!grown) { free(buffer); return spy_error(c, "MemoryError", "out of memory"); }
+            char *grown = mem_realloc(c, buffer, cap * 2);
+            if (!grown) { mem_free(buffer); return spy_error(c, "MemoryError", "out of memory"); }
             buffer = grown; cap *= 2;
         }
         ssize_t got = read(fd, buffer + len, cap - len);
         if (got < 0 && errno == EINTR) continue;
-        if (got < 0) { int code = errno; free(buffer); return file_error(c, code, NULL); }
+        if (got < 0) { int code = errno; mem_free(buffer); return file_error(c, code, NULL); }
         len += (size_t)got;
         if (n >= 0 || !got) break;
     }
     SPYValue *result = spy_bytes(c, buffer, len);
-    free(buffer);
+    mem_free(buffer);
     return result;
 #else
     (void)argv;
@@ -27273,9 +27393,12 @@ int spy_mount(SPYContext *c, const char *directory, const char *path, int flags)
         free(host); return -1;
     }
     if (path && path[0] != '/') { free(host); spy_error(c, "ValueError", "a mount path must be absolute"); return -1; }
-    char *guest = copy_text(c, path ? path : host, strlen(path ? path : host));
-    struct Mount *grown = guest ? realloc(c->mounts, (c->mounts_len + 1) * sizeof(*grown)) : NULL;
-    if (!grown) { free(host); free(guest); if (!c->error_type[0]) spy_error(c, "MemoryError", "out of memory"); return -1; }
+    char *real = host;
+    host = copy_text(c, real, strlen(real));
+    free(real);
+    char *guest = host ? copy_text(c, path ? path : host, strlen(path ? path : host)) : NULL;
+    struct Mount *grown = guest ? mem_realloc(c, c->mounts, (c->mounts_len + 1) * sizeof(*grown)) : NULL;
+    if (!grown) { mem_free(host); mem_free(guest); if (!c->error_type[0]) spy_error(c, "MemoryError", "out of memory"); return -1; }
     normalize_path(guest);
     c->mounts = grown;
     c->mounts[c->mounts_len++] = (struct Mount){host, guest, flags};
@@ -27290,7 +27413,7 @@ int spy_new_module(SPYContext *c, const char *name, SPYModuleInit init) {
     size_t i = 0;
     while (i < c->host_modules_len && strcmp(c->host_modules[i].name, name)) i++;
     if (i == c->host_modules_len) {
-        struct HostModule *grown = realloc(c->host_modules, (i + 1) * sizeof(*grown));
+        struct HostModule *grown = mem_realloc(c, c->host_modules, (i + 1) * sizeof(*grown));
         if (!grown) { spy_error(c, "MemoryError", "allocation failed"); return -1; }
         c->host_modules = grown;
         if (!(c->host_modules[i].name = copy_text(c, name, strlen(name)))) return -1;

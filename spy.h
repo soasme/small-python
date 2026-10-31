@@ -82,8 +82,11 @@ enum { SPY_MOUNT_READ_ONLY = 1 };
 int spy_mount(SPYContext *, const char *directory, const char *path, int flags);
 /* Steps for each outermost call (docs/metering.md); zero means unlimited. */
 void spy_set_step_limit(SPYContext *, size_t);
+/* Bytes the engine may hold; zero means unlimited. */
+void spy_set_memory_limit(SPYContext *, size_t);
+size_t spy_memory_used(const SPYContext *);
 /* Why the last outermost call stopped, or zero. */
-enum { SPY_STOP_STEPS = 1 };
+enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY };
 int spy_stopped(const SPYContext *);
 /* Optimization level, as python -O (1: no asserts, __debug__ is False) and
  * -OO (2: no docstrings either); compile(optimize=-1) uses it. Default 0. */

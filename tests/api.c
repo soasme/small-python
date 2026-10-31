@@ -659,7 +659,24 @@ int main(void) {
     execute(c, "call_back(lambda: spin(600))");
     assert(spy_exec(c, "spin(600)\ncall_back(lambda: spin(600))", "shared.py") == -1);
     assert(!strcmp(spy_error_type(c), "RuntimeError"));
+    /* A large block spends a step per 64 bytes. */
+    assert(spy_exec(c, "s = 'a' * 10**6", "produce.py") == -1);
+    assert(spy_stopped(c) == SPY_STOP_STEPS);
     spy_set_step_limit(c, 0);
+    /* The engine counts the bytes it holds; a memory limit stops the call
+     * with a MemoryError no handler sees, and the context stays usable. */
+    spy_clear_error(c); spy_collect(c);
+    size_t held = spy_memory_used(c);
+    execute(c, "big = 'a' * 10**6");
+    assert(spy_memory_used(c) > held + 1000000);
+    execute(c, "del big");
+    spy_collect(c);
+    assert(spy_memory_used(c) < held + 100000);
+    spy_set_memory_limit(c, held + (8 << 20));
+    assert(spy_exec(c, "caught = 0\ntry:\n    x = [0] * 10**7\nexcept MemoryError:\n    caught = 1", "memory.py") == -1);
+    assert(!strcmp(spy_error_type(c), "MemoryError") && spy_stopped(c) == SPY_STOP_MEMORY);
+    assert(integer(c, spy_eval(c, "caught", "caught.py")) == 0);
+    spy_set_memory_limit(c, 0);
     assert(spy_exec(c, "def recurse():\n    return recurse()\nrecurse()", "recursion.py") == -1);
     assert(!strcmp(spy_error_type(c), "RecursionError"));
 

@@ -169,8 +169,11 @@ class LimitTest(unittest.TestCase):
             with self.assertRaises(Error) as cm:
                 rt.exec("x = 'a' * (64 << 20)")
             self.assertEqual(cm.exception.type, "MemoryError")
-            rt.exec("try:\n    chunks = [bytes(1 << 20) for _ in range(100)]\nexcept MemoryError:\n    caught = True")
-            self.assertTrue(rt["caught"])
+            # The limit stops the operation; no handler runs, and the runtime goes on.
+            with self.assertRaises(Error) as cm:
+                rt.exec("caught = False\ntry:\n    chunks = [bytes(1 << 20) for _ in range(100)]\nexcept MemoryError:\n    caught = True")
+            self.assertEqual(cm.exception.type, "MemoryError")
+            self.assertFalse(rt["caught"])
             self.assertEqual(rt.eval("len('b' * (8 << 20))"), 8 << 20)
 
     def test_message_limit(self):

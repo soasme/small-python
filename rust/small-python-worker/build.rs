@@ -1,5 +1,5 @@
 //! Builds the spy-worker executable, which the crate embeds: spy-worker.c
-//! compiled once as the engine with counted allocations, once as the worker
+//! compiled once as the engine, once as the worker
 //! (docs/packaging/protocol.md), and linked with the target's C compiler.
 
 use std::path::PathBuf;

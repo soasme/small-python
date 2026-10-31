@@ -71,7 +71,7 @@ worker cannot start, the constructor raises `WorkerError`.
 |---|---|
 | `std` | Register the standard modules (`sys` and `gc`). |
 | `step_limit` | Evaluation steps per top-level `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
-| `memory_limit` | Bytes the engine may hold; `0` is unlimited. Exceeding it raises `MemoryError` in the engine. |
+| `memory_limit` | Bytes the engine may hold; `0` is unlimited. Exceeding it stops the operation with `MemoryError`. |
 | `timeout` | Seconds a single operation may spend running in the worker, or `None`. Exceeding it terminates the worker and raises `Timeout`. |
 | `output` | Callable receiving printed text; `None` writes to `sys.stdout`. |
 | `loader` | Callable mapping a module name to source `str`, or `None` when there is none. |

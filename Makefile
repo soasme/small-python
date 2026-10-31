@@ -27,7 +27,7 @@ spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # The packages' worker (docs/packaging/protocol.md): spy-worker.c compiled
-# once as the engine with counted allocations, once as the worker.
+# once as the engine, once as the worker.
 spy-worker: $(OBJDIR)/spy-worker.o $(OBJDIR)/spy-worker-engine.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 

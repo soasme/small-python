@@ -5,9 +5,7 @@
  * and the WebAssembly worker, which speaks through two imported functions.
  *
  * It is compiled twice. With SPY_WORKER_ENGINE defined it is the engine
- * (spy.c and spy-std.c) with its allocator calls renamed to the counting
- * allocator below, which enforces the memory limit; without, it is the
- * worker itself. */
+ * (spy.c and spy-std.c); without, it is the worker itself. */
 #if defined(__linux__) && !defined(SPY_WORKER_ENGINE)
 #define _GNU_SOURCE /* syscall and O_PATH, for the sandbox */
 #elif !defined(_WIN32) && !defined(_XOPEN_SOURCE)
@@ -34,99 +32,12 @@
 #include <limits.h>
 #endif
 
-void *spy_worker_malloc(size_t);
-void *spy_worker_calloc(size_t, size_t);
-void *spy_worker_realloc(void *, size_t);
-void spy_worker_free(void *);
-char *spy_worker_realpath(const char *, char *);
-void *spy_worker_aligned_alloc(size_t);
-void spy_worker_aligned_free(void *);
-
 #ifdef SPY_WORKER_ENGINE
-/* The engine's own headers, included first so the renaming below reaches
- * only its code. */
-#include <complex.h>
-#include <ctype.h>
-#include <inttypes.h>
-#include <limits.h>
-#include <math.h>
-#include <stdarg.h>
-#define malloc spy_worker_malloc
-#define calloc spy_worker_calloc
-#define realloc spy_worker_realloc
-#define free spy_worker_free
-#define realpath spy_worker_realpath
-#define pool_alloc() spy_worker_aligned_alloc(POOL)
-#define pool_free spy_worker_aligned_free
 #include "spy.c"
 #include "spy-std.c"
 #else
 #include "spy.h"
 #include "spy-std.h"
-
-/* The memory limit counts what the engine allocates: every block carries its
- * size. The protocol's own buffers are not counted. */
-static size_t memory_used, memory_limit;
-typedef union { size_t size; max_align_t align; } Block;
-
-void *spy_worker_malloc(size_t n) {
-    if (n > SIZE_MAX - sizeof(Block) || (memory_limit && n > memory_limit - memory_used)) return NULL;
-    Block *b = malloc(sizeof(Block) + n);
-    if (!b) return NULL;
-    b->size = n; memory_used += n;
-    return b + 1;
-}
-void spy_worker_free(void *p) {
-    if (!p) return;
-    Block *b = (Block *)p - 1;
-    memory_used -= b->size;
-    free(b);
-}
-void *spy_worker_calloc(size_t count, size_t size) {
-    if (size && count > SIZE_MAX / size) return NULL;
-    void *p = spy_worker_malloc(count * size);
-    if (p) memset(p, 0, count * size);
-    return p;
-}
-void *spy_worker_realloc(void *p, size_t n) {
-    if (!p) return spy_worker_malloc(n);
-    Block *b = (Block *)p - 1;
-    size_t old = b->size;
-    if (n > SIZE_MAX - sizeof(Block) || (memory_limit && n > old && n - old > memory_limit - memory_used)) return NULL;
-    Block *grown = realloc(b, sizeof(Block) + n);
-    if (!grown) return NULL;
-    grown->size = n; memory_used = memory_used - old + n;
-    return grown + 1;
-}
-/* The engine's pools are aligned to their size n (a power of two): each sits
- * in a counted block of 2n, with the block's address just before it. */
-void *spy_worker_aligned_alloc(size_t n) {
-    char *block = n <= SIZE_MAX / 2 ? spy_worker_malloc(2 * n) : NULL;
-    if (!block) return NULL;
-    char **p = (char **)(((uintptr_t)block + n) & ~(uintptr_t)(n - 1));
-    p[-1] = block;
-    return p;
-}
-void spy_worker_aligned_free(void *p) {
-    if (p) spy_worker_free(((char **)p)[-1]);
-}
-/* The engine frees what realpath returns, so it must come from the counter. */
-char *spy_worker_realpath(const char *path, char *resolved) {
-#if defined(__unix__) || defined(__APPLE__)
-    char *real = realpath(path, resolved);
-    if (!real || resolved) return real;
-    size_t n = strlen(real) + 1;
-    char *copy = spy_worker_malloc(n);
-    if (copy) memcpy(copy, real, n);
-    else errno = ENOMEM;
-    free(real);
-    return copy;
-#else
-    (void)path; (void)resolved;
-    errno = ENOSYS;
-    return NULL;
-#endif
-}
 
 /* Streams: read_bytes fills the buffer or reports the end of input; the
  * protocol never needs a partial read. */
@@ -702,7 +613,7 @@ static char *load(void *data, const char *name) {
     size_t n;
     const char *s = spy_type(v) == SPY_STRING ? spy_as_string(w.c, v, &n) : NULL;
     if (!s) violation();
-    char *copy = spy_worker_malloc(n + 1);
+    char *copy = malloc(n + 1);
     if (copy) memcpy(copy, s, n + 1);
     else spy_error(w.c, "MemoryError", "out of memory");
     spy_release(v);
@@ -805,9 +716,9 @@ static void initialize(Cursor *k) {
     if (!std || spy_type(std) != SPY_BOOL || !count || spy_as_int(c, count, &keys) || keys != 4 ||
         steps < 0 || memory < 0 || limit < 1 || (uint64_t)limit > UINT32_MAX) violation();
     initialized = 1;
-    memory_limit = (size_t)memory;
     message_limit = (size_t)limit;
     spy_set_step_limit(c, (size_t)steps);
+    spy_set_memory_limit(c, (size_t)memory);
     int failed = spy_truth(std) && spy_std_init(c);
     spy_release(std); spy_release(n); spy_release(count); spy_release(options);
     send_result(failed ? NULL : spy_string(c, SPY_VERSION, strlen(SPY_VERSION)));

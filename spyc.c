@@ -376,7 +376,7 @@ static char *minify(SPYContext *c, const char *source, const char *path) {
     if (!lex(&after, small) && same_tokens(&before, &after)) result = concat(small, "", "");
 done:
     if (c->error_type[0]) spy_clear_error(c);
-    free(before.tokens); free(after.tokens); free(m.out.data); free(text);
+    mem_free(before.tokens); mem_free(after.tokens); mem_free(m.out.data); free(text);
     return result;
 }
 /* Read, walk, and with --minify minify the source of m, which has a path. */
@@ -796,7 +796,7 @@ done:
         free_module(b.modules[i]); free(b.modules[i]);
     }
     free(b.modules); free(b.queue); free(list); free(table); free(inputs); free(loader);
-    free(out.data); free(meta.data); free(rule.data);
+    mem_free(out.data); mem_free(meta.data); mem_free(rule.data);
     free_strings(&b.roots); free_strings(&b.externals); free_strings(&b.registered); free_strings(&b.aliases); free_strings(&b.stars);
     free_strings(&files); free_strings(&mains); free_strings(&includes);
     if (b.c) spy_context_free(b.c);

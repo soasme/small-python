@@ -322,15 +322,16 @@ the worker.
 | Limit | Enforced by | Effect when exceeded | Runtime survives |
 |---|---|---|---|
 | steps | engine step counter | `RuntimeError` in the engine | yes |
-| memory | the worker's allocator | `MemoryError` in the engine | yes |
+| memory | engine memory limit | `MemoryError` in the engine | yes |
 | recursion | engine frame and C stack guards | `RecursionError` in the engine | yes |
 | time | parent, wall clock | worker terminated | no |
 | message size | both sides | worker terminated | no |
 
-The memory limit counts every byte the engine requests through
-`malloc`/`calloc`/`realloc` (the worker builds the engine with those names
-mapped to a counting allocator) and refuses requests that would exceed it.
-The worker's own protocol buffers are not counted. In WebAssembly the linear
+The step and memory limits are the engine's own ([metering.md](../metering.md)):
+the memory limit counts every byte the engine holds and refuses requests
+that would exceed it. Either stops the operation, so the program cannot
+catch the error, and the next operation runs normally. The worker's own
+protocol buffers are not counted. In WebAssembly the linear
 memory's maximum is an additional hard bound.
 
 The timeout counts only time the parent spends waiting for the worker within

@@ -34,10 +34,11 @@ exception: the engine can call it with any arguments.
 | Time | `timeout=seconds` | worker terminated, `Timeout` raised | no |
 | Message size | `message_limit=bytes` | the value is refused | yes |
 
-`step_limit` counts evaluated syntax nodes plus loop and iterator work. The
-count restarts at each `eval` or `exec`; calls made with `call()` or through
-an `Object` add to the current count. It does not count allocation:
-`'x' * 10**9` takes few steps, which is what `memory_limit` is for.
+`step_limit` counts calls, loop passes, allocation and native work in
+proportion to what it reads ([docs/metering.md](../../docs/metering.md)).
+Each `eval`, `exec` or `call()` gets the whole budget. A spent step or
+memory budget stops the operation: the program cannot catch the error, and
+the runtime goes on.
 
 `timeout` is wall-clock time per operation spent in the worker. Time inside
 your host functions, `output`, and `loader` is yours and does not count.

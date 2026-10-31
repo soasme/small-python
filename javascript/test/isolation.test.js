@@ -61,8 +61,10 @@ describe("limits", () => {
   test("memory limit", async () => {
     const rt = track(await Runtime.create({ memoryLimit: 32 << 20 }));
     assert.equal((await rt.exec("x = 'a' * (64 << 20)").catch((e) => e)).type, "MemoryError");
-    await rt.exec("try:\n    chunks = [bytes(1 << 20) for _ in range(100)]\nexcept MemoryError:\n    caught = True");
-    assert.equal(await rt.get("caught"), true);
+    // The limit stops the operation; no handler runs, and the runtime goes on.
+    const stopped = await rt.exec("caught = False\ntry:\n    chunks = [bytes(1 << 20) for _ in range(100)]\nexcept MemoryError:\n    caught = True").catch((e) => e);
+    assert.equal(stopped.type, "MemoryError");
+    assert.equal(await rt.get("caught"), false);
     assert.equal(await rt.eval("len('b' * (8 << 20))"), 8 << 20);
   });
 

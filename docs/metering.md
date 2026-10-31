@@ -1,8 +1,9 @@
 # Metering
 
 Design for the budgets the engine itself enforces on a context: work, memory
-and time. It is the first part of the [sandboxed runtime](../ROADMAP.md#sandboxed-runtime)
-and is not implemented yet; section 1 describes what exists at 0.4.0.
+and time. It is the first part of the [sandboxed runtime](../ROADMAP.md#sandboxed-runtime).
+Section 1 describes what existed at 0.4.0; section 6 says which steps are
+done since.
 
 A budget answers one question for the host: will this call come back, and
 how much will it have taken? It does not decide what code may reach, which
@@ -54,7 +55,7 @@ every budget.
 1. A host can bound the work, the memory and the time of every call into a
    context, and no program can lift or evade a bound.
 2. A stop leaves the context usable: the next call runs normally.
-3. A context without budgets runs as fast as today, and one with budgets
+3. A context without budgets runs as fast as before, and one with budgets
    within noise of it.
 4. Every native operation whose work grows with its operands is metered;
    the test suite and the fuzzers find one that is not.
@@ -99,19 +100,37 @@ A step is a unit of work with a bounded cost. The engine spends steps at
 the points through which all unbounded work passes:
 
 - one per Python function call, including calls made from native code
-  (`__init__`, `sorted` keys, comparison callbacks);
-- one per iteration of a `for` or `while` loop and per item of a
-  comprehension or generator expression;
-- in native code, in proportion to what an operation visits or produces:
-  one per element, per 32-bit digit, or per 64 bytes of text, and for an
-  algorithm worse than linear (schoolbook multiplication, substring
-  search), in proportion to its inner loop;
+  (`__init__`, `sorted` keys, comparison callbacks), and one per 8 nodes
+  of the body the frame runs: a module, class or function body, and of a
+  class body again when the class is built;
+- one per iteration of a `for` or `while` loop, per item of a
+  comprehension or generator expression, and per item a native loop takes
+  from an iterator;
+- in native code, in proportion to what an operation produces or visits:
+  one per 64 bytes a block of 4 KiB or more grows by, one per mapping
+  lookup of `str.translate`, one per 8 digits of float formatting, one
+  per 64 elements, digits or
+  bytes compared, searched, hashed or moved (per 16 entries for hash
+  lookups), and for an algorithm worse than linear (multiplication,
+  division, base conversion, substring search), one per 1024 digit
+  products or bytes compared in its inner loop;
 - in the parser, one per 64 bytes of source, so `exec` of a large string
   is metered like any other text.
 
-Straight-line code is bounded by its own length, so nodes are no longer
-counted. A step's cost on the reference machine should stay under one
-microsecond: a budget of 1,000,000 steps returns within about a second.
+Straight-line code runs at most once between two steps, so nodes are not
+counted as they run; charging a body's length when its frame is entered
+bounds a call of a long function or `exec` of a long code object. A step's
+cost on the reference machine should stay under one microsecond: a budget
+of 1,000,000 steps returns within about a second.
+
+Allocation is where most native work shows: repetition, `join`,
+`replace`, formatting widths, copies and shifts all produce what they
+cost, so the allocator spends their steps (3.3) and none of them needs its
+own. Operations that only read, comparisons, searches, hashing, and
+predicates such as `isidentifier`, spend where they loop. Work of bounded
+size, such as a comparison of two existing strings, may spend after the
+fact; work that can grow faster than its operands spends before or during
+it.
 
 The count is one countdown in the context, `fuel`, spent through one
 inline function, `spend`; an outermost call sets it to the limit, or to
@@ -135,19 +154,28 @@ take the count past the limit, which stops the context with `MemoryError`.
 Unlike steps, memory is a level, not a spending: it is not refilled per
 call, and a call starting above the limit stops at its first allocation.
 
-Every engine allocation goes through one pair, `mem_alloc(c, n)` and
-`mem_free(p)`, with `mem_realloc` beside them. A block carries a header
-holding its size and its context, as the worker's counting allocator
-already does, so a free needs neither. Value pools are counted whole
-(16 KiB each) when taken from and returned to the system. Memory that
-crosses the host boundary stays on plain `malloc` and `free`: sources from
-the module loader, lines from `input()`, and paths from `realpath`.
+Every engine allocation goes through `mem_malloc`, `mem_realloc` and
+`mem_free`, over one function, `mem_block`. A block carries a header
+holding its size and its context, so a free needs neither. While watched,
+a block of 4 KiB or more spends a step per 64 bytes it grows by; a smaller
+one costs no more than the step that asked for it. Value pools are counted whole (16 KiB
+each) when taken from and returned to the system. Memory that crosses the
+host boundary stays on plain `malloc` and `free`: sources from the module
+loader, lines from `input()`, and paths from `realpath`, which a mount
+copies into engine memory.
+
+The header costs glibc about 45 instructions an allocation, more than the
+benchmark programs can absorb. As values already wait in spare lists,
+blocks have room for a multiple of 16 bytes, and released blocks of up to
+256 bytes wait in the context for the next allocation of their size, as
+pymalloc keeps its small blocks; programs that allocate many small blocks
+got faster, not slower. Waiting blocks are not counted as held.
 
 While stopped, allocations are not refused: unwinding needs them and is
 bounded, and native code cannot run on because every unit of its work
 fails (3.1).
 
-This removes the worker's renaming of `malloc`, `calloc`, `realloc`,
+This removed the worker's renaming of `malloc`, `calloc`, `realloc`,
 `free`, `realpath` and the pool functions, and its counting allocator: the
 worker sets the limit through the API instead. `tests/oom.c` keeps its
 renaming; it injects failures rather than counting.
@@ -223,13 +251,15 @@ and each package's document are updated in the same change.
   exception itself; `spy_memory_used` returns to its baseline after a
   stopped program's values are collected; queued finalizers run in the
   next call.
-- **Metering probe**: the table of section 1 grows into a list of
-  adversarial programs, one or more for every family of native operation
-  (repetition, `join`, search, `count`, `replace`, formatting widths,
-  integer power, division and conversion, sorting, comparison and hashing
-  of large containers, `exec` of large source). Under a budget of 1,000,000
-  steps each must be stopped, not completed. The probe reports the largest
-  time per step, which [benchmark.md](benchmark.md) records with the rest.
+- **Metering probe** (`tests/metering.c`): the table of section 1 grew
+  into a list of adversarial programs, one or more for every family of
+  native operation (repetition, `join`, search, `count`, `replace`,
+  formatting widths, integer power, division and conversion, sorting,
+  comparison and hashing of large containers, moving list elements, long
+  bodies, `exec` of large source). Most repeat one operation forever; under
+  a budget of 1,000,000 steps each must be stopped within its time, not
+  completed or interrupted. The probe reports the slowest, about 0.7 s on
+  the reference machine.
 - **Fuzzing**: the eval target already runs under a step limit. Running it
   with libFuzzer's `-timeout=2` turns any unmetered operation into a
   finding; each one becomes a probe program.
@@ -247,11 +277,13 @@ Each step is one commit that keeps every suite green.
    limit, with no benchmark program slower.
 2. Done: the stop rule, with a stopped flag, `spy_stopped`, and finalizers
    queued while stopped.
-3. Native operations spend steps, one family at a time, each with its
-   probe programs.
-4. `mem_alloc` and the memory limit; the worker's renaming is removed.
-5. The interrupt callback; the worker's timeout uses it.
-6. Bindings and their documents; the manual's statement that the runtime
+3. Done: `mem_block` and the memory limit, with the worker's renaming
+   removed; allocation spends steps, and native operations that only read
+   spend where they loop, each family with its probe programs. Allocation
+   came first since it meters most native work at once. Every benchmark
+   program is as fast or faster.
+4. The interrupt callback; the worker's timeout uses it.
+5. Bindings and their documents; the manual's statement that the runtime
    is not an isolation boundary is revised only for what metering covers.
 
 ## 7 Borrowed
