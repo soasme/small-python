@@ -161,6 +161,14 @@ def incompatibilities(old, new):
     return problems
 
 
+def git(*args):
+    """The release history is a prerequisite: without it the check fails."""
+    result = subprocess.run(["git", *args], cwd=ROOT, text=True, capture_output=True)
+    if result.returncode:
+        sys.exit(f"check-api needs the git history with release tags: {result.stderr.strip()}")
+    return result.stdout
+
+
 def check(library):
     header = (ROOT / "spy.h").read_text()
     sections = parse(header)
@@ -171,9 +179,8 @@ def check(library):
     exports = exported(library)
     errors += [f"{library} does not define {name}" for name in sorted(functions(decls).keys() - exports)]
     errors += [f"{library} exports {name}, which spy.h does not declare" for name in sorted(exports - functions(decls).keys())]
-    tag = subprocess.run(["git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", "HEAD"],
-                         cwd=ROOT, check=True, text=True, capture_output=True).stdout.strip()
-    old = subprocess.run(["git", "show", f"{tag}:spy.h"], cwd=ROOT, check=True, text=True, capture_output=True).stdout
+    tag = git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", "HEAD").strip()
+    old = git("show", f"{tag}:spy.h")
     version = (ROOT / "VERSION").read_text().strip()
     problems = incompatibilities(old, header)
     if problems and level(version) == level(tag[1:]):
