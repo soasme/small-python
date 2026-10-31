@@ -79,8 +79,12 @@ enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
  * through the unit that owns the scope. */
 typedef struct { const char *name; unsigned flags; size_t line; Node *declared; int64_t hash; SPYValue *key; } Symbol;
 /* order: the symbols of a plain function environment's entries, in the
- * order the entries keep them, once its first environment is made. */
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional; int kind, tries; const char *within; };
+ * order the entries keep them, once its first environment is made. kept:
+ * up to KEPT environments its calls returned when nothing else held them,
+ * unlinked, chained through their parent, each with its storage and the
+ * symbol keys (owned) for the next call. */
+struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len; int kind, tries; const char *within; SPYValue *kept; };
+enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
  * or function with annotations; it evaluates them lazily (PEP 649). */
@@ -282,10 +286,7 @@ struct SPYContext {
      * object once sys._getframe has materialized it, and serial tells
      * frames apart over the context's lifetime; traced is the line a trace
      * function last saw, 0 when the next line is new to it. */
-    /* kept: the environment the last call at this depth returned when
-     * nothing else held it, unlinked, with its storage and symbol keys
-     * (owned) for the next call of its scope; its unit is borrowed. */
-    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial, traced; SPYValue *kept; } *frames;
+    struct ActiveFrame { SPYValue *env, *owner, *object; size_t line, serial, traced; } *frames;
     size_t frames_cap, frame_serial;
     size_t *frame_line; /* The innermost frame's line, or line itself when none runs. */
     /* The pending error's traceback, innermost entry last, and the serial
@@ -893,7 +894,7 @@ static ALWAYS_INLINE void value_unlink(SPYContext *c, SPYValue *v) {
     if (v->next) v->next->prev = v->prev;
     c->live--;
 }
-static void drop_kept(struct ActiveFrame *);
+static void drop_kept(SPYContext *, Scope *, int);
 static void free_value(SPYValue *v) {
     SPYContext *c = v->ctx;
     if (v->weak) weak_dead(c, v, 0);
@@ -919,11 +920,9 @@ static void free_value(SPYValue *v) {
         free(v->as.map.index); break;
     case V_UNIT: {
         Node *n = v->as.unit.nodes;
-        while (n) { Node *next = n->allocated; free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
+        while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free(n->text); free(n->original); free(n->local); free(n); n = next; }
         free_scope(v->as.unit.scope);
         if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
-        for (size_t i = 0; i < c->frames_cap; i++)
-            if (c->frames[i].kept && c->frames[i].kept->as.map.unit == v) drop_kept(&c->frames[i]);
         free(v->as.unit.filename);
         break;
     }
@@ -14162,30 +14161,22 @@ static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *cons
     env->as.map.items = items; env->as.map.cap = cap; env->as.map.len = len;
     return 0;
 }
-static void drop_kept(struct ActiveFrame *frame) {
-    SPYValue *env = frame->kept;
-    frame->kept = NULL;
-    for (size_t i = 0; i < env->as.map.len; i++) spy_release(env->as.map.items[i].key);
-    free(map_storage(env)); value_give(env->ctx, env, 0);
-}
-/* The environment kept at the next call's depth, its locals unset and
- * keyed for scope, or NULL. One kept by another function of the depth,
- * as alternating calls leave it, takes scope's keys in place of its own;
- * so does one whose scope was released and its address taken again. */
-static SPYValue *kept_env(SPYContext *c, Scope *scope) {
-    SPYValue *env = c->py_depth < c->frames_cap ? c->frames[c->py_depth].kept : NULL;
-    if (!env || !scope->order || env->as.map.cap < scope->order_len) return NULL;
-    Entry *items = env->as.map.items;
-    if (env->as.map.scope != scope || env->as.map.len != scope->order_len ||
-        (env->as.map.len && items[0].key != scope->symbols[scope->order[0]].key)) {
-        for (size_t i = 0; i < env->as.map.len; i++) spy_release(items[i].key);
-        for (size_t i = 0; i < scope->order_len; i++) {
-            Symbol *symbol = &scope->symbols[scope->order[i]];
-            items[i] = (Entry){spy_retain(symbol->key), NULL, symbol->hash};
-        }
-        env->as.map.len = scope->order_len;
+/* Free the environments scope keeps; their keys are released unless the
+ * context is freeing every value. */
+static NO_INLINE void drop_kept(SPYContext *c, Scope *scope, int keys) {
+    while (scope && scope->kept) {
+        SPYValue *env = scope->kept;
+        scope->kept = env->as.map.parent;
+        for (size_t i = 0; keys && i < env->as.map.len; i++) spy_release(env->as.map.items[i].key);
+        free(map_storage(env)); value_give(c, env, 0);
     }
-    c->frames[c->py_depth].kept = NULL;
+    if (scope) scope->kept_len = 0;
+}
+/* An environment scope keeps, its locals unset, or NULL. */
+static SPYValue *kept_env(SPYContext *c, Scope *scope) {
+    SPYValue *env = scope->kept;
+    if (!env) return NULL;
+    scope->kept = env->as.map.parent; scope->kept_len--;
     memset(env, 0, offsetof(SPYValue, as));
     return value_link(c, env, V_ENV);
 }
@@ -14200,16 +14191,15 @@ static void release_locals(SPYValue *env) {
     SPYContext *c = env->ctx;
     Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
-    struct ActiveFrame *slot = c->py_depth < c->frames_cap ? &c->frames[c->py_depth] : NULL;
-    int keep = slot && !slot->kept && !env->as.map.flags && !env->as.map.holes && env->as.map.len == scope->order_len;
+    int keep = scope->kept_len < KEPT && !env->as.map.flags && !env->as.map.holes && env->as.map.len == scope->order_len;
     for (size_t i = 0; keep && i < env->as.map.len; i++) keep = items[i].key == scope->symbols[scope->order[i]].key;
     for (size_t i = map_used(env); i--;)
         if (items[i].key) { if (!keep) spy_release(items[i].key); spy_release(items[i].value); }
     SPYValue *parent = env->as.map.parent, *unit = env->as.map.unit;
     if (keep) {
         value_unlink(c, env);
-        env->as.map.parent = NULL;
-        slot->kept = env;
+        env->as.map.parent = scope->kept;
+        scope->kept = env; scope->kept_len++;
     } else {
         env->refs = 0;
         env->as.map.parent = env->as.map.unit = NULL;
@@ -26807,8 +26797,9 @@ void spy_context_free(SPYContext *c) {
      * shutdown cannot recurse through an arbitrarily deep object graph. */
     c->weak_len = 0;
     /* Kept environments' keys are values freed below. */
-    for (size_t i = 0; i < c->frames_cap; i++)
-        if (c->frames[i].kept) { free(map_storage(c->frames[i].kept)); value_give(c, c->frames[i].kept, 0); }
+    for (SPYValue *v = c->values; v; v = v->next)
+        if (v->type == V_UNIT)
+            for (Node *n = v->as.unit.nodes; n; n = n->allocated) drop_kept(c, n->scope, 0);
     c->frames_cap = 0;
     while (c->values) free_value(c->values);
     free(c->weak); free(c->weak_calls); free(c->finalize_calls); free(c->cells); free(c->frames); free(c->repr_stack);

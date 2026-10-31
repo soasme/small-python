@@ -153,6 +153,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A function reads its module's globals directly](#a-function-reads-its-modules-globals-directly) | -4.3% (fib), -0.8% (strings) |
 | [The machine operates on leaves in one step](#the-machine-operates-on-leaves-in-one-step) | -4.7% (generators) |
 | [A Python call skips the general dispatch](#a-python-call-skips-the-general-dispatch) | -2.1% (fib) |
+| [A scope keeps its own environments](#a-scope-keeps-its-own-environments) | -3.1% (classes), -1.9% (fib); M2: classes -5.8% |
 
 ### Releasing a number or string frees it at once
 
@@ -983,6 +984,22 @@ of the body passes. Forcing `call_function` inline at both sites made
 classes 0.4% to 1% slower on the M2, so the compiler chooses. Instructions:
 fib -2.1%, the rest within 0.2%. Wall time: fib 42.4 -> 39.7 ms (-6.3%),
 classes -0.4% to -1.2%; generators, loop and dicts within their noise.
+
+### A scope keeps its own environments
+
+Environments were kept one per call depth, so `add` and `dot`, which
+alternate at one depth, re-keyed the kept environment on every call:
+releasing one key per local and retaining the other scope's. Each scope
+now keeps up to four environments, chained through their parent field, in
+a list of its own. A kept environment always carries its scope's keys, so
+taking one is a pop, and the frame stack holds no environments. Freeing a
+unit drops its scopes' lists; the context's release drops every unit's
+lists before its values. A recursion takes back the environment its last
+returned call left, as before. Instructions: classes -3.1%, fib -1.9%,
+generators and sort -0.3%, the rest within 0.1%. Wall time: classes
+116.5 -> 109.8 ms (-5.8%), strings -2.0%, fib -1.7%, generators -1.5%,
+loop -0.5%. Inlining the list's release into `free_value` cost every
+program two instructions per freed value, so it stays out of line.
 
 ## Tried and left out
 
