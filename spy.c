@@ -12819,6 +12819,8 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a); emit(c, p, BC_CONVERT, n, n->op);
         compile_expr(c, p, n->b); emit(c, p, BC_FORMAT, n, 0); break;
     case N_YIELD: case N_AWAIT:
+        /* A yield of a name or literal loads it in its own step (arg 1). */
+        if (n->kind == N_YIELD && !n->op && n->a && (n->a->kind == N_NAME || n->a->constant)) { emit(c, p, BC_YIELD, n, 1); break; }
         compile_expr(c, p, n->a);
         emit(c, p, n->op || n->kind == N_AWAIT ? BC_DELEGATE : BC_YIELD, n, n->kind == N_AWAIT); break;
     case N_UNARY: case N_ATTR:
@@ -19911,7 +19913,12 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             else spy_release(machine_pop(m));
             break;
         }
-        case BC_YIELD: m->awaiting = AWAIT_YIELD; return (Result){FLOW_YIELD, machine_pop(m)};
+        case BC_YIELD:
+            if (ins->arg) {
+                value = leaf_operand(&f, n->a);
+                if (!(value = value ? spy_retain(value) : eval(c, &f, n->a))) break;
+            } else value = machine_pop(m);
+            m->awaiting = AWAIT_YIELD; return (Result){FLOW_YIELD, value};
         case BC_DELEGATE:
             a = machine_pop(m);
             m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :

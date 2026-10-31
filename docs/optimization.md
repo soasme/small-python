@@ -166,6 +166,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A machine test is one step](#a-machine-test-is-one-step) | -3.0% (generators); M2: generators -5.5% |
 | [A machine assignment skips the statement dispatch](#a-machine-assignment-skips-the-statement-dispatch) | -1.8% (generators); M2: generators -13%, nbody -2.7% |
 | [Hot functions start on a cache line](#hot-functions-start-on-a-cache-line) | none; steadies wall-time comparisons |
+| [A leaf yield is one step](#a-leaf-yield-is-one-step) | -3.4% (generators); M2: generators -4.9% |
 
 ### Releasing a number or string frees it at once
 
@@ -1163,6 +1164,17 @@ neutral: every program within 0.6% of before but sort (+1.6%, its
 instructions unchanged). With it, fusing a leaf yield (the next entry)
 measured nbody +0.2%, where the same change had measured +2% to +3%
 without it. Aligning every function instead cost 0.5% to 1%.
+
+### A leaf yield is one step
+
+`yield i` was a `BC_LOAD` that pushed `i` and a `BC_YIELD` that popped
+it. A yield of a name or literal now compiles to one `BC_YIELD` with
+`arg` 1, which reads its operand along the fast path, keeping the yield
+node so that its line is the one recorded. The fusion is made where the
+yield is compiled, not in `emit`: a conditional's jump may target the
+yield's own position. Instructions: generators -3.4%, the rest
+unchanged. Wall time: generators 120.6 -> 114.7 ms (-4.9%), the rest
+within 1%.
 
 ## Tried and left out
 
