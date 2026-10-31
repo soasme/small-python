@@ -676,7 +676,10 @@ reaches a pool. The size class comes from a table instead of a branch
 and a mask. Instructions: sort -15.7%, dicts -13.0%, bigint -5.1%, fib
 -1.7%, classes -1.1%, generators and loop -0.6%, nbody -0.4%, strings
 +0.4%; peak memory of the sort program 83.4 to 80.5 MiB, the others
-unchanged.
+unchanged. Unlike the unbounded spare list left out below, the pools
+keep a released value near its neighbours. On the M2 sort took 167.9
+→ 150.3 ms (-10.5%), strings 152.5 → 149.7 ms (-1.9%), dicts 99.8 →
+100.4 ms (+0.6%).
 
 ### A loop steps its iterator directly
 
