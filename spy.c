@@ -12651,7 +12651,7 @@ typedef struct { int flow; SPYValue *value; } Result;
 /* Suspended functions keep their operand and cleanup stacks on the heap.
  * Instructions borrow AST nodes from the generator's retained source unit. */
 enum {
-    BC_EVAL, BC_EXEC, BC_NONE, BC_POP, BC_UNARY, BC_BINARY,
+    BC_EVAL, BC_LOAD, BC_EXEC, BC_NONE, BC_POP, BC_UNARY, BC_BINARY,
     BC_COMPARE, BC_ATTR, BC_INDEX, BC_NEW, BC_ADD, BC_EXTEND, BC_MAP,
     BC_ARGS, BC_ARG, BC_CALL, BC_STORE, BC_NAMED, BC_JUMP, BC_FALSE,
     BC_SHORT, BC_YIELD, BC_DELEGATE, BC_FLOW, BC_LOOP, BC_NEXT,
@@ -12760,7 +12760,7 @@ static void compile_test(SPYContext *c, Program *p, Node *n) {
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
-    if (!suspends(n)) { emit(c, p, BC_EVAL, n, 0); return; }
+    if (!suspends(n)) { emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : BC_EVAL, n, 0); return; }
     size_t branch, end;
     switch (n->kind) {
     case N_TEMPLATE: case N_JOINED:
@@ -19654,6 +19654,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
     /* A BC_SHORT that jumps knows its value's truth; the test it lands on
      * uses that rather than calling __bool__ again, as CPython's jumps do. */
     int known = 0;
+    Instruction *code = m->code->items;
     for (;;) {
         int truth_known = known;
         known = 0;
@@ -19662,7 +19663,7 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             if (!machine_unwind(c, m, &f, &flow)) return flow;
             if (c->error_type[0]) continue;
         }
-        Instruction *ins = &m->code->items[m->pc++];
+        Instruction *ins = &code[m->pc++];
         Node *n = ins->node;
         if (n) { if (tick(c, &f, n)) continue; }
         else if (n = generator->as.generator.node, !quiet(c, &f)) {
@@ -19681,6 +19682,11 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
                 if (truth >= 0) known = truth + 1;
             } else machine_push(c, m, eval(c, &f, n));
             break;
+        case BC_LOAD:
+            /* A literal or a name found along the fast path, without eval. */
+            value = leaf_operand(&f, n);
+            machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n));
+            value = NULL; break;
         case BC_EXEC: {
             flow = execute_statements(c, &f, n, 1);
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }

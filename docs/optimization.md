@@ -59,6 +59,33 @@ speed or better on every program, with PyPy's lead on loop-heavy code
 accepted. Each change must keep the engine portable C and the behavior
 unchanged.
 
+## Toward bytecode
+
+The tree walker pays at every node for work a bytecode interpreter pays
+once: recording the line, testing for a pending error, guarding the C
+stack, and finding operands through child nodes and remembered slots. A
+call recurses in C and binds its locals in a map. The plan is to replace
+that, gradually, with three changes that only pay off together:
+
+1. **Fine-grained bytecode.** Generators already run on an instruction
+   machine with heap-owned stacks, but it hands every expression and
+   statement that cannot suspend back to the walker (`BC_EVAL`,
+   `BC_EXEC`). Compiling operators to machine instructions as they stand
+   cost generators 8% more instructions: each instruction carries about
+   45 instructions of fixed work. The machine's loop is made cheaper
+   first, then node kinds move to instructions one at a time, each only
+   once it measures faster than the walker.
+2. **Locals in slots.** A function's locals get indices at compile time
+   (`scope_order` already lists them); the keyed map is built only for
+   `locals()`, frame views and closures that need it.
+3. **Calls without C recursion.** A Python call pushes a frame and the
+   same loop continues; calls that C makes into Python (`__init__`,
+   `sorted` keys, comparison callbacks) keep the C stack guard.
+
+Every step keeps the tests, spec, TLA models and fuzzers passing and is
+measured against the commit before it; a step that makes a program slower
+does not land.
+
 ## Measuring one feature
 
 The scaled programs mix many features. To find which feature costs most
@@ -121,6 +148,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Machine ints divide on the fast path](#machine-ints-divide-on-the-fast-path) | -10.7% (loop), -5.0% (sort), -4.9% (generators) |
 | [Any comparison of two numbers skips the dispatch](#any-comparison-of-two-numbers-skips-the-dispatch) | -0.9% (generators) |
 | [A dict read goes straight to its entries](#a-dict-read-goes-straight-to-its-entries) | -1.2% (strings), -0.7% (dicts) |
+| [The machine loads leaves itself](#the-machine-loads-leaves-itself) | -2.2% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -885,6 +913,16 @@ hash is returned at once, and a probe that finds the key itself or two
 exact str values decides without the guard, since no code can run. A
 loop of `x = d["a"]` fell from 564 to 452 instructions per iteration.
 Instructions: strings -1.2%, dicts -0.7%, the rest 0%.
+
+### The machine loads leaves itself
+
+The first step toward bytecode (above). A literal or name the generator
+machine pushed went through `BC_EVAL` and so through `eval`; `BC_LOAD`
+now takes it along the fast path, falling back to `eval` when the path
+misses. The machine also keeps its instruction array in a local rather
+than reloading it through the program each step. Instructions:
+generators -2.2%, the rest 0%. Wall time: generators 142.8 -> 139.2 ms
+(-2.5%).
 
 ## Tried and left out
 
