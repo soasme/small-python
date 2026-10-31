@@ -1109,6 +1109,13 @@ strings +0.05%, the rest unchanged. Wall time: classes 107.3 -> 95.3 ms
 
 ## Tried and left out
 
+- **A machine assignment without the statement dispatch.** Calling
+  `assign` from `BC_EXEC` saved generators 1.7% of instructions and 4% of
+  wall time, but a second caller stopped `assign` being inlined into
+  `execute_statements` (loop +3.4%, nbody +2.6%). Forcing it inline, with
+  an out-of-line wrapper for the machine, left gcc's counts unchanged
+  elsewhere, yet the M2 build ran nbody 2% to 3% slower in four runs.
+
 - **Call arguments taken as direct operands.** Evaluating a call's
   arguments through `eval_operand`, as a binary operator's are, cost fib
   0.7% and classes 0.4%: arguments are mostly names, literals and
