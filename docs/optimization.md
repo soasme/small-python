@@ -952,7 +952,10 @@ running scope and the function's parent is an exact dictionary, the
 module's globals. Builtins and closures keep the walk. Asking whether a
 scope's locals are ordered is now an inline test, with the ordering out
 of line. Instructions: fib -4.3%, strings -0.8%, classes -0.6%, the rest
-within 0.2%. Wall time: fib 44.3 -> 41.8 ms (-5.8%), strings -1.3%, nbody
+within 0.2%. A method's parent is its class's cell environment, which
+binds only dunder names such as `__class__`; `name_outer` now looks past
+it to the module's remembered entry first (classes -0.6%; doing so in
+`name_fast` cost fib 0.6%, every name read paying the test). Wall time: fib 44.3 -> 41.8 ms (-5.8%), strings -1.3%, nbody
 +0.3% and +1.9% in two runs.
 
 ### The machine operates on leaves in one step
