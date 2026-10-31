@@ -163,6 +163,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call operand skips a second eval](#a-call-operand-skips-a-second-eval) | -5.7% (fib), -1.1% (dicts), -0.8% (strings); nbody +0.1%; M2: fib -5.6%, dicts -4.2% |
 | [An attribute operand skips a second eval](#an-attribute-operand-skips-a-second-eval) | -7.8% (classes); M2: classes -11.2% |
 | [An append that fits does not call grow](#an-append-that-fits-does-not-call-grow) | -1.0% (strings), -0.3% (bigint) |
+| [A machine test is one step](#a-machine-test-is-one-step) | -3.0% (generators); M2: generators -5.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -1115,6 +1116,22 @@ when the text fitted. The capacity is now compared in `append`, so
 `grow` runs only to reallocate. Instructions: strings -1.0%, bigint
 -0.3%, the rest unchanged. Wall time: strings -0.6%, fib -0.7%, nbody
 and bigint within the noise (bigint 6.0 -> 6.1 ms, sd 0.1, in 60 runs).
+
+### A machine test is one step
+
+A generator's `while i < n` or `if x % 2 == 0` was two machine steps: a
+`BC_OPERATE` that pushed a bool and a `BC_FALSE` that popped it and
+jumped. When `emit` is asked for a `BC_FALSE` right after a test's
+`BC_OPERATE`, it turns that step into `BC_TEST`, which operates and
+jumps; a comparison of two numbers decides without making a bool. Every
+test step is now fused, so the bool truth that `BC_OPERATE` handed the
+jump (the entry before last) is gone. Instructions: generators -3.0%, the
+rest unchanged. Wall time: generators 132.4 -> 125.2 ms (-5.5%), loop
+-0.3%. nbody, which runs no machine code, measured 2.2% slower in three
+runs; built with `-falign-functions=64`, the two trees ran nbody in
+238.0 and 238.2 ms and generators in 133.1 and 126.2 ms, so the
+difference is where the M2 build places code, not work. Aligning every
+function cost 0.5% to 1% elsewhere, so the build does not.
 
 ## Tried and left out
 

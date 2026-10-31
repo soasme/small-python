@@ -12692,7 +12692,7 @@ enum {
     BC_UNPACK, BC_ASSERT, BC_RAISE, BC_DECORATE, BC_CONVERT, BC_FORMAT, BC_JOIN, BC_TEMPLATE, BC_INTERPOLATION,
     BC_AENTER, BC_AWITH, BC_END_AWITH, BC_PATTERN,
     BC_STAR_BEGIN, BC_STAR_MATCH, BC_STAR_DONE, BC_STAR_CAUGHT, BC_STAR_RERAISE, BC_DELETE,
-    BC_BUILDER, BC_CLASS, BC_GENERIC_FUNCTION
+    BC_BUILDER, BC_CLASS, BC_GENERIC_FUNCTION, BC_TEST
 };
 typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
 struct Program { Instruction *items; size_t len, cap; };
@@ -12772,6 +12772,11 @@ static int suspends(Node *n) {
     return list_suspends(n->a) || list_suspends(n->b) || list_suspends(n->c) || list_suspends(n->args);
 }
 static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
+    /* A test's operator step and its jump are one step, BC_TEST. */
+    if (op == BC_FALSE && p->len && p->items[p->len - 1].op == BC_OPERATE && p->items[p->len - 1].arg) {
+        p->items[p->len - 1].op = BC_TEST;
+        return p->len - 1;
+    }
     if (grow(c, (void **)&p->items, &p->cap, p->len + 1, sizeof(*p->items))) return SIZE_MAX;
     size_t pc = p->len++;
     p->items[pc] = (Instruction){.op = op, .node = n, .arg = arg};
@@ -19752,8 +19757,6 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
             if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
-            /* A test's bool tells the jump its truth. */
-            if (ins->arg && value && value->type == SPY_BOOL) known = (int)value->as.integer_data.small + 1;
             machine_push(c, m, value); break;
         }
         case BC_LOAD:
@@ -19878,6 +19881,20 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
         case BC_PATTERN:
             if (!match_case(c, &f, n, m->stack[m->len - 1])) m->pc = ins->target;
             break;
+        case BC_TEST: {
+            /* BC_OPERATE then BC_FALSE, a comparison of numbers making no bool. */
+            SPYValue *x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
+            SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            int truth = y && n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
+            if (truth < 0) {
+                value = y ? operator_fast(c, n, x, y) : NULL;
+                if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
+                if (!(a = value)) break;
+                truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : spy_truth(a);
+            }
+            if (!truth) m->pc = ins->target;
+            break;
+        }
         case BC_FALSE:
             a = machine_pop(m);
             if (!(truth_known ? truth_known - 1 : spy_truth(a))) m->pc = ins->target;
