@@ -146,7 +146,9 @@ struct SPYValue {
          * a character index of a str and its byte offset. */
         struct { char *data; size_t len; union { size_t exports; int64_t hash; }; size_t chars, cursor[2]; } string;
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
-        struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; size_t changes; int odd_keys; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
+        /* keyed: an environment whose entries are its scope's symbols in
+         * order, as open_locals made them; a removal clears it. */
+        struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; size_t changes; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
@@ -1905,7 +1907,7 @@ static Entry map_remove(SPYValue *map, size_t i) {
         index[slot] = INDEX_DEAD; map->as.map.index_dead++;
     }
     map->as.map.items[i] = (Entry){0};
-    map->as.map.len--; map->as.map.holes++;
+    map->as.map.len--; map->as.map.holes++; map->as.map.keyed = 0;
     while (map->as.map.holes && !map->as.map.items[map_used(map) - 1].key) map->as.map.holes--;
     while (map->as.map.holes && !map->as.map.items[0].key) {
         map->as.map.items++; map->as.map.front++; map->as.map.cap--; map->as.map.holes--;
@@ -14144,6 +14146,7 @@ static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *cons
     Scope *scope = env->as.map.scope;
     if (scope_order(c, scope)) return -1;
     size_t len = scope->order_len, cap = len > 8 ? len : 8;
+    env->as.map.keyed = 1;
     if (!len) return 0;
     Entry *items = env->as.map.items;
     if (items) {
@@ -14191,8 +14194,7 @@ static void release_locals(SPYValue *env) {
     SPYContext *c = env->ctx;
     Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
-    int keep = scope->kept_len < KEPT && !env->as.map.flags && !env->as.map.holes && env->as.map.len == scope->order_len;
-    for (size_t i = 0; keep && i < env->as.map.len; i++) keep = items[i].key == scope->symbols[scope->order[i]].key;
+    int keep = env->as.map.keyed && scope->kept_len < KEPT && !env->as.map.flags && env->as.map.len == scope->order_len;
     for (size_t i = map_used(env); i--;)
         if (items[i].key) { if (!keep) spy_release(items[i].key); spy_release(items[i].value); }
     SPYValue *parent = env->as.map.parent, *unit = env->as.map.unit;

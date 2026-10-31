@@ -154,6 +154,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [The machine operates on leaves in one step](#the-machine-operates-on-leaves-in-one-step) | -4.7% (generators) |
 | [A Python call skips the general dispatch](#a-python-call-skips-the-general-dispatch) | -2.1% (fib) |
 | [A scope keeps its own environments](#a-scope-keeps-its-own-environments) | -3.1% (classes), -1.9% (fib); M2: classes -5.8% |
+| [An environment remembers it holds its scope's keys](#an-environment-remembers-it-holds-its-scopes-keys) | -1.4% (classes), -1.2% (fib) |
 
 ### Releasing a number or string frees it at once
 
@@ -1000,6 +1001,17 @@ generators and sort -0.3%, the rest within 0.1%. Wall time: classes
 116.5 -> 109.8 ms (-5.8%), strings -2.0%, fib -1.7%, generators -1.5%,
 loop -0.5%. Inlining the list's release into `free_value` cost every
 program two instructions per freed value, so it stays out of line.
+
+### An environment remembers it holds its scope's keys
+
+Before keeping an environment, its release compared every key with its
+scope's symbol keys, since a deleted and rebound local may come back in
+another position. `open_locals` now marks the environment it fills with
+those keys, and removing any entry clears the mark; appending one changes
+the length, which is checked as before. The flag fills padding after
+`odd_keys`, so values keep their size. Instructions: classes -1.4%, fib
+-1.2%, sort -0.2%, the rest within 0.01%. Wall time: fib -1.5%, classes
+-1.3%, sort -0.6%.
 
 ## Tried and left out
 
