@@ -101,8 +101,7 @@ the points through which all unbounded work passes:
 
 - one per Python function call, including calls made from native code
   (`__init__`, `sorted` keys, comparison callbacks), and one per 8 nodes
-  of the body the frame runs: a module, class or function body, and of a
-  class body again when the class is built;
+  of the body the frame runs: a module, class or function body;
 - one per iteration of a `for` or `while` loop, per item of a
   comprehension or generator expression, and per item a native loop takes
   from an iterator;

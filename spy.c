@@ -86,8 +86,10 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * unlinked, chained through their parent, each with its storage and the
  * symbol keys (owned) for the next call. */
 /* nodes counts the scope's own nodes, which run at most once between two
- * steps: a body is charged a step per 8 of them when entered. */
-struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len, nodes; int kind, tries; const char *within; SPYValue *kept; };
+ * steps: a body is charged a step per 8 of them when entered. cells: a
+ * class's CLASS_CELL and CLASSDICT_CELL, found at its first build. */
+struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len, nodes; int kind, tries, cells; const char *within; SPYValue *kept; };
+enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4 };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
 /* Node flags. An annotation function is synthesized for each module, class,
@@ -17034,22 +17036,23 @@ static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPY
     spy_release(attributes);
     if (c->error_type[0]) return -1;
     /* A method using __class__ or super() gets a cell that type.__new__
-     * fills; finding them walks the body again, a step per 8 nodes. */
-    if (spend(c, n->scope ? n->scope->nodes / 8 : 0)) return -1;
-    SPYValue *cells = closure_names(c, n, 1);
-    for (size_t i = 0; cells && i < 2 * cells->as.seq.len && !c->error_type[0]; i++) {
-        /* __classdictcell__ comes first. */
-        const char *cell = cells->as.seq.items[i % cells->as.seq.len]->as.string.data;
-        if (i < cells->as.seq.len ? strcmp(cell, "__classdict__") : strcmp(cell, "__class__")) continue;
-        if (i < cells->as.seq.len) {
-            /* Annotation scopes read the namespace, then the class's own
-             * dictionary once type.__new__ fills the cell with it. */
-            if ((env->as.map.base = cell_new(c, NULL, NULL, env->as.map.namespace)))
-                name_set(c, env, "__classdictcell__", env->as.map.base);
-        } else if ((*classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL)))
-            name_set(c, env, "__classcell__", *classcell);
+     * fills; annotation scopes read the namespace, then the class's own
+     * dictionary once type.__new__ fills the __classdict__ cell with it. */
+    if (n->scope && !n->scope->cells) {
+        SPYValue *cells = closure_names(c, n, 1);
+        if (!cells) return -1;
+        n->scope->cells = CELLS_FOUND;
+        for (size_t i = 0; i < cells->as.seq.len; i++) {
+            const char *cell = cells->as.seq.items[i]->as.string.data;
+            n->scope->cells |= !strcmp(cell, "__class__") ? CLASS_CELL : !strcmp(cell, "__classdict__") ? CLASSDICT_CELL : 0;
+        }
+        spy_release(cells);
     }
-    spy_release(cells);
+    int cells = n->scope ? n->scope->cells : 0;
+    if ((cells & CLASSDICT_CELL) && (env->as.map.base = cell_new(c, NULL, NULL, env->as.map.namespace)))
+        name_set(c, env, "__classdictcell__", env->as.map.base);
+    if ((cells & CLASS_CELL) && !c->error_type[0] && (*classcell = cell_new(c, env->as.map.class_cell, "__class__", NULL)))
+        name_set(c, env, "__classcell__", *classcell);
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function, SPYValue *name,
