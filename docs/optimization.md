@@ -116,6 +116,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A store takes its target's operands at hand](#a-store-takes-its-targets-operands-at-hand) | -3.2% (nbody), -0.8% (strings), -0.6% (classes) |
 | [A call knows its arguments are plain](#a-call-knows-its-arguments-are-plain) | -1.1% (strings), -0.7% (classes), -0.5% (fib) |
 | [A kept environment serves any function of its depth](#a-kept-environment-serves-any-function-of-its-depth) | -2.4% (classes) |
+| [An attribute takes its name at hand](#an-attribute-takes-its-name-at-hand) | -2.0% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -819,6 +820,15 @@ released scope whose address was taken again. The small-map scan of
 inline, and indexed maps take an out-of-line probe. Instructions: classes
 -2.4%, fib +0.2%, the rest within 0.1%. Wall time was within the noise of
 a busy machine.
+
+### An attribute takes its name at hand
+
+`self.x` evaluated `self` through a second `eval`. The attribute case now
+takes a name's value along the fast path while tick has only the line to
+record, held across the lookup, which may run a `__getattr__` that unbinds
+it. Unlike the attempt on the operator fast path (below), only attribute
+nodes pay for the test. Instructions: classes -2.0%, the rest 0%; a loop
+of `y = o.x` from 257 to 239 per iteration.
 
 ## Tried and left out
 

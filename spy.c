@@ -13952,8 +13952,10 @@ container_fail:
         if (b) { relocate(c, n); result = get_index(c, a, b); }
         break;
     case N_ATTR:
-        a = eval(c, f, n->a);
-        if (a) { relocate(c, n); result = node_attribute(c, a, n); }
+        /* An attribute of a name, while tick has only the line to record,
+         * takes the name's value as it is, held across the lookup. */
+        a = n->a->kind == N_NAME && quiet(c, f) ? spy_retain(name_fast(f->env, n->a)) : NULL;
+        if (a || (a = eval(c, f, n->a))) { relocate(c, n); result = node_attribute(c, a, n); }
         break;
     case N_CALL: return eval_call(c, f, n);
     default: spy_error(c, "RuntimeError", "invalid expression node"); break;
