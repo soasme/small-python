@@ -15,7 +15,7 @@ authors.workspace = true
 serde = ["dep:serde"]
 
 [dependencies]
-ffi = { package = "small-python-sys", version = "0.3.0", path = "../small-python-sys" }
+ffi = { package = "small-python-sys", version = "0.4.0", path = "../small-python-sys" }
 serde = { version = "1", optional = true }
 
 [dev-dependencies]

@@ -1,3 +1,20 @@
+2026-10-31  0.4.0
+
+- Performance: the engine stays a tree-walking interpreter with no JIT,
+  now faster than CPython 3.15 on loop, bigint, dicts and classes and
+  within 13% of it on the other benchmark programs (docs/benchmark.md).
+  Values are carved from 16 KiB pools in three size classes; numbers and
+  short str and bytes text live inside smaller values, and a str keeps
+  its hash. A function's environments are kept per scope and reused by
+  the next call; name nodes remember their local or global entry, and a
+  call node calls a Python function without the general dispatch.
+  Operators read number, name and literal operands in place and compute
+  small-int and float arithmetic without the general dispatch. Generator
+  bodies run more of their work as machine steps: operand loads,
+  comparisons, fused tests and jumps, assignments and yields. Every
+  change, and what was tried and left out, is in docs/optimization.md.
+- The embedding lifecycle takes 192 us, down from 257 us.
+
 2026-10-31  0.3.0
 
 - Packages: Rust crates small-python-src, small-python-sys, small-python

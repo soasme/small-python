@@ -14,7 +14,7 @@ describe("values", () => {
   after(() => rt.close());
 
   test("engine to JavaScript", async () => {
-    assert.equal(rt.version, "0.3.0");
+    assert.equal(rt.version, "0.4.0");
     assert.deepEqual(await rt.eval("[None, True, 3, 1.5, 'é', b'\\x00a', bytearray(b'z'), (1,), {2}, frozenset()]"),
       [null, true, 3, 1.5, "é", new Uint8Array([0, 97]), new Uint8Array([122]), [1], new Set([2]), new Set()]);
     assert.deepEqual(await rt.eval("{'a': 1, 2: [3]}"), new Map([["a", 1], [2, [3]]]));

@@ -1,6 +1,6 @@
 [project]
 name = "small-python"
-version = "0.3.0"
+version = "0.4.0"
 description = "Run Small Python, a small embeddable Python runtime, from CPython."
 readme = "README.md"
 authors = [

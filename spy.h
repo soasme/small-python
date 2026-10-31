@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define SPY_VERSION "0.3.0"
+#define SPY_VERSION "0.4.0"
 
 typedef struct SPYContext SPYContext;
 typedef struct SPYValue SPYValue;
