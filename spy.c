@@ -8598,15 +8598,15 @@ static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) 
     spy_release(old);
     return 0;
 }
-static int int_add(int64_t a, int64_t b, int64_t *r) {
+static ALWAYS_INLINE int int_add(int64_t a, int64_t b, int64_t *r) {
     if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return -1;
     *r = a + b; return 0;
 }
-static int int_sub(int64_t a, int64_t b, int64_t *r) {
+static ALWAYS_INLINE int int_sub(int64_t a, int64_t b, int64_t *r) {
     if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return -1;
     *r = a - b; return 0;
 }
-static int int_mul(int64_t a, int64_t b, int64_t *r) {
+static ALWAYS_INLINE int int_mul(int64_t a, int64_t b, int64_t *r) {
     if (a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a) :
         (a < 0 && (b > 0 ? a < INT64_MIN / b : b < 0 && a < INT64_MAX / b))) return -1;
     *r = a * b; return 0;
@@ -12656,7 +12656,7 @@ typedef struct { int flow; SPYValue *value; } Result;
 /* Suspended functions keep their operand and cleanup stacks on the heap.
  * Instructions borrow AST nodes from the generator's retained source unit. */
 enum {
-    BC_EVAL, BC_LOAD, BC_EXEC, BC_NONE, BC_POP, BC_UNARY, BC_BINARY,
+    BC_EVAL, BC_LOAD, BC_OPERATE, BC_EXEC, BC_NONE, BC_POP, BC_UNARY, BC_BINARY,
     BC_COMPARE, BC_ATTR, BC_INDEX, BC_NEW, BC_ADD, BC_EXTEND, BC_MAP,
     BC_ARGS, BC_ARG, BC_CALL, BC_STORE, BC_NAMED, BC_JUMP, BC_FALSE,
     BC_SHORT, BC_YIELD, BC_DELEGATE, BC_FLOW, BC_LOOP, BC_NEXT,
@@ -12759,15 +12759,19 @@ static void compile_expr(SPYContext *, Program *, Node *);
  * at once passes on the truth it computed (BC_EVAL with arg 1). */
 static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
-    if (n && !suspends(n) && n->kind != N_COMPARE) emit(c, p, BC_EVAL, n, 1);
+    if (n && !suspends(n) && (n->kind != N_COMPARE || operator_right(n))) emit(c, p, operator_right(n) ? BC_OPERATE : BC_EVAL, n, 1);
     else compile_expr(c, p, n);
 }
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (!n) { emit(c, p, BC_NONE, NULL, 0); return; }
-    /* What cannot suspend is evaluated whole, but a comparison, whose
-     * operands each take one instruction, costs less as machine steps. */
-    if (!suspends(n) && n->kind != N_COMPARE) { emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : BC_EVAL, n, 0); return; }
+    /* What cannot suspend is evaluated whole, a leaf or an operator on
+     * leaves in one step; a comparison of other operands costs less as
+     * machine steps. */
+    if (!suspends(n) && (n->kind != N_COMPARE || operator_right(n))) {
+        emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : operator_right(n) ? BC_OPERATE : BC_EVAL, n, 0);
+        return;
+    }
     size_t branch, end;
     switch (n->kind) {
     case N_TEMPLATE: case N_JOINED:
@@ -14039,14 +14043,14 @@ static int condition(SPYContext *c, Frame *f, Node *n) {
 /* Operator node n on its operands x and y, both borrowed, when they are
  * exact small ints, floats, lists and tuples it computes without running
  * Python code or raising anything but MemoryError; else NULL. */
-static SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
+static ALWAYS_INLINE SPYValue *operator_fast(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
     if (n->kind == N_INDEX) return spy_retain(sequence_item(x, y));
     if (n->kind == N_BINARY) return number_fast(c, n->op, x, y, 0);
     int truth = ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
     return truth < 0 ? NULL : spy_bool(c, truth);
 }
 /* Operator node n on its operands x and y, as eval_inner computes it. */
-static SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
+static ALWAYS_INLINE SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYValue *y) {
     relocate(c, n);
     spy_retain(x); spy_retain(y);
     SPYValue *result = n->kind == N_INDEX ? get_index(c, x, y) : n->kind == N_COMPARE ? comparison(c, n->args->op, x, y) :
@@ -19691,6 +19695,14 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
                 if (truth >= 0) known = truth + 1;
             } else machine_push(c, m, eval(c, &f, n));
             break;
+        case BC_OPERATE: {
+            /* Its operands taken at hand, as on eval's operator fast path. */
+            SPYValue *x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
+            SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            value = y ? operator_fast(c, n, x, y) : NULL;
+            if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
+            machine_push(c, m, value); break;
+        }
         case BC_LOAD:
             /* A literal or a name found along the fast path, without eval. */
             value = leaf_operand(&f, n);

@@ -151,6 +151,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [The machine loads leaves itself](#the-machine-loads-leaves-itself) | -2.2% (generators) |
 | [Comparisons become machine steps](#comparisons-become-machine-steps) | -0.1% (generators) |
 | [A function reads its module's globals directly](#a-function-reads-its-modules-globals-directly) | -4.3% (fib), -0.8% (strings) |
+| [The machine operates on leaves in one step](#the-machine-operates-on-leaves-in-one-step) | -4.7% (generators) |
 
 ### Releasing a number or string frees it at once
 
@@ -952,6 +953,20 @@ scope's locals are ordered is now an inline test, with the ordering out
 of line. Instructions: fib -4.3%, strings -0.8%, classes -0.6%, the rest
 within 0.2%. Wall time: fib 44.3 -> 41.8 ms (-5.8%), strings -1.3%, nbody
 +0.3% and +1.9% in two runs.
+
+### The machine operates on leaves in one step
+
+A walker node that is not a leaf costs about 100 instructions, half of
+them `eval`'s entry and exit; a machine step costs about 25. The walker's
+advantage is taking literal and name operands at hand. `BC_OPERATE` gives
+the machine the same: an operator the compiler marks `F_OPERATOR`, a
+comparison included, is one step that takes its operands along the fast
+path and falls back to `operate` or `eval` as `eval` does. `operate`,
+`operator_fast` and the machine-int helpers are now marked always inline:
+with a second caller the compiler stopped inlining them into `eval`, and
+fib and classes took 1% more instructions. Instructions: generators
+-4.7%, the rest within 0.2%. Wall time: generators 142.5 -> 131.9 ms
+(-7.4%), the rest 0% to -1.3%.
 
 ## Tried and left out
 
