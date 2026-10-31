@@ -152,6 +152,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Comparisons become machine steps](#comparisons-become-machine-steps) | -0.1% (generators) |
 | [A function reads its module's globals directly](#a-function-reads-its-modules-globals-directly) | -4.3% (fib), -0.8% (strings) |
 | [The machine operates on leaves in one step](#the-machine-operates-on-leaves-in-one-step) | -4.7% (generators) |
+| [A Python call skips the general dispatch](#a-python-call-skips-the-general-dispatch) | -2.1% (fib) |
 
 ### Releasing a number or string frees it at once
 
@@ -967,6 +968,18 @@ with a second caller the compiler stopped inlining them into `eval`, and
 fib and classes took 1% more instructions. Instructions: generators
 -4.7%, the rest within 0.2%. Wall time: generators 142.5 -> 131.9 ms
 (-7.4%), the rest 0% to -1.3%.
+
+### A Python call skips the general dispatch
+
+A call node with plain positional arguments whose callee is a Python
+function went through `call_keywords`: the context check, the keyword
+check, a second guard of the C stack, a cascade of type tests and
+`call_result`. It now calls `call_function` itself and keeps only the
+error normalization; the stack stays guarded by `eval`, which every node
+of the body passes. Forcing `call_function` inline at both sites made
+classes 0.4% to 1% slower on the M2, so the compiler chooses. Instructions:
+fib -2.1%, the rest within 0.2%. Wall time: fib 42.4 -> 39.7 ms (-6.3%),
+classes -0.4% to -1.2%; generators, loop and dicts within their noise.
 
 ## Tried and left out
 

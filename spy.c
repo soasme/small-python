@@ -13783,6 +13783,7 @@ static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
  * names that native method of a builtin value, which is returned: the call
  * goes to call_method without the bound method the attribute would make. */
 static SPYValue *call_native_method(SPYContext *, SPYValue *, int, SPYValue *, size_t, SPYValue *const *);
+static SPYValue *call_function(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self, int *method) {
     SPYValue *object = eval(c, f, n->a);
     *self = NULL; *method = -1;
@@ -13840,7 +13841,14 @@ static NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
         }
         if (done == argc) {
             relocate(c, n);
-            result = method < 0 ? call_keywords(c, a, argc, argv, NULL) : call_native_method(c, a, method, n->a->b->global_key, argc, argv);
+            /* A Python function skips call_keywords' dispatch; the stack
+             * guard stays with eval, which every node of its body passes. */
+            if (method >= 0) result = call_native_method(c, a, method, n->a->b->global_key, argc, argv);
+            else if (a->type == SPY_FUNCTION && a->ctx == c && a->as.function.def &&
+                     a->as.function.def->kind != N_CLASS && a->as.function.def->kind != N_COMPREHENSION) {
+                result = call_function(c, a, argc, argv, NULL);
+                if (c->error_type[0]) { spy_release(result); result = NULL; }
+            } else result = call_keywords(c, a, argc, argv, NULL);
         }
         while (done) spy_release(argv[--done]);
         spy_release(a);
