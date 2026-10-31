@@ -26,6 +26,12 @@ static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *
     if (n > INT64_MAX / 2 || n < INT64_MIN / 2) return spy_error(c, "OverflowError", "twice overflow");
     return spy_int(c, n * 2);
 }
+/* A host function that calls its argument back into the engine. */
+static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    if (argc != 1) return spy_error(c, "TypeError", "call_back expects one argument");
+    return spy_call(c, argv[0], 0, NULL);
+}
 static char *loader(void *data, const char *name) {
     int *calls = data;
     (*calls)++;
@@ -617,6 +623,31 @@ int main(void) {
     assert(!strcmp(spy_error_filename(c), "loop.py"));
     assert(spy_error_line(c) > 0);
     assert(integer(c, spy_eval(c, "40 + 2", "recovery.py")) == 42);
+    /* Calls, loop passes in generators and comprehensions, and source text
+     * spend steps; a spent budget fails every handler and finally body. */
+    spy_set_step_limit(c, 1000);
+    const char *endless[] = {
+        "def f(n): return f(n - 1) + f(n - 1) if n else 1\nf(40)",
+        "def g():\n    while True:\n        continue\n    yield\nnext(g())",
+        "[x for x in iter(int, 1)]",
+        "exec('x = 1\\n' * 100000)",
+        "caught = 0\ntry:\n    while True: pass\nexcept BaseException:\n    caught = 1\nfinally:\n    caught = 2",
+    };
+    for (size_t i = 0; i < sizeof(endless) / sizeof(*endless); i++) {
+        assert(spy_exec(c, endless[i], "endless.py") == -1);
+        assert(!strcmp(spy_error_type(c), "RuntimeError"));
+    }
+    assert(integer(c, spy_eval(c, "caught", "caught.py")) == 0);
+    /* Each outermost call, spy_call included, gets the whole budget; a host
+     * function calling back shares its caller's. */
+    execute(c, "def spin(n):\n    for i in range(n): pass\n    return n");
+    SPYValue *spin = spy_get_global(c, "spin"), *six = spy_int(c, 600);
+    for (int i = 0; i < 3; i++) assert(integer(c, spy_call(c, spin, 1, &six)) == 600);
+    spy_release(spin); spy_release(six);
+    assert(!spy_define(c, "call_back", call_back, NULL));
+    execute(c, "call_back(lambda: spin(600))");
+    assert(spy_exec(c, "spin(600)\ncall_back(lambda: spin(600))", "shared.py") == -1);
+    assert(!strcmp(spy_error_type(c), "RuntimeError"));
     spy_set_step_limit(c, 0);
     assert(spy_exec(c, "def recurse():\n    return recurse()\nrecurse()", "recursion.py") == -1);
     assert(!strcmp(spy_error_type(c), "RecursionError"));

@@ -841,10 +841,15 @@ reads standard input.
 and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
 `False`, at 2 docstrings are not kept either. `compile(optimize=-1)` uses it.
 
-`spy_set_step_limit` bounds evaluated nodes and iterator/loop work; zero means
-unlimited. It is not a memory or wall-time quota and cannot interrupt native
-callbacks. This experimental runtime is not an isolation boundary for untrusted
-programs.
+`spy_set_step_limit` bounds the steps of each outermost `spy_eval`,
+`spy_eval_interactive`, `spy_exec`, `spy_exec_module`, `spy_call` or
+`spy_call_keywords`: one per Python call and loop pass, one per 64 bytes of
+source parsed, and some native work in proportion to its operands; zero means
+unlimited. A host function calling back shares its caller's budget. Once the
+budget is spent every further step fails with `RuntimeError`, so no handler or
+`finally` body runs. It is not a memory or wall-time quota and does not yet
+meter every native operation ([metering.md](metering.md)). This experimental
+runtime is not an isolation boundary for untrusted programs.
 
 #### 3.4.7 Collection
 

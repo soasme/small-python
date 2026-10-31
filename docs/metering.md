@@ -76,11 +76,14 @@ stop again at its next unit. Unwinding still builds the traceback; it
 needs at most one entry per frame, bounded by the recursion limit.
 
 The outermost call into the engine returns the error. The next outermost
-call clears the stop and refills the budgets. An *outermost call* is any
-API call that runs Python code (`spy_eval`, `spy_exec`, `spy_exec_module`,
-`spy_call`, `spy_call_keywords`, and those that may call a special method,
-such as `spy_repr`) made while no other is active; a host function that
-calls back into the engine shares its caller's budget.
+call clears the stop and refills the budgets. An *outermost call* is a
+call of `spy_eval`, `spy_eval_interactive`, `spy_exec`, `spy_exec_module`,
+`spy_call` or `spy_call_keywords` made while no other is active; a host
+function that calls back into the engine shares its caller's budget.
+Other API functions that may run Python code through a special method,
+such as `spy_repr`, spend what the last outermost call left. Inside the
+engine, calls go through a private `call`, so a public function always
+means the host.
 
 Finalizers, weak-reference callbacks and generator cleanups that become
 due while stopped stay queued and run at the start of the next outermost
@@ -110,25 +113,20 @@ Straight-line code is bounded by its own length, so nodes are no longer
 counted. A step's cost on the reference machine should stay under one
 microsecond: a budget of 1,000,000 steps returns within about a second.
 
-The count is one countdown in the context, spent through one inline
-function:
+The count is one countdown in the context, `fuel`, spent through one
+inline function, `spend`; an outermost call sets it to the limit, or to
+`SIZE_MAX` without one. Calls and loop passes already test for a trace
+function at the points where a step is spent. One flag, `watch`, set
+while a trace or profile function or a step limit is present, replaces
+those tests, so the step costs nothing without a limit. The step test
+left `tick`, so a limited context runs on the same fast path as an
+unlimited one, and a spent budget still fails every tick. The scattered
+`c->step_limit && ++c->steps > c->step_limit` tests became `spend` calls,
+and a bulk copy of a list or tuple spends its length at once.
 
-```c
-static ALWAYS_INLINE int spend(SPYContext *c, size_t n) {
-    if (n <= c->fuel) { c->fuel -= n; return 0; }
-    return refuel(c, n);
-}
-```
-
-`refuel`, out of line, adds what was spent to the total, stops the context
-if the limit is reached, calls the interrupt callback (3.4), and sets the
-countdown to the smaller of the remaining budget and the interrupt period.
-Without a limit or a callback the countdown starts at `SIZE_MAX` and
-`refuel` is never reached. The step test leaves `tick_full`, and `quiet`
-no longer depends on the limit, so a limited context runs on the same fast
-path as an unlimited one. The `c->step_limit && ++c->steps > c->step_limit`
-tests scattered through iterators and integer arithmetic become `spend`
-calls.
+The interrupt callback (3.4) will extend `spend`'s slow path into a
+`refuel` that calls the host and sets the countdown to the smaller of the
+remaining budget and the interrupt period.
 
 ### 3.3 Memory
 
@@ -244,8 +242,9 @@ and each package's document are updated in the same change.
 
 Each step is one commit that keeps every suite green.
 
-1. `spend` and `refuel` replace the step count; outermost calls refill;
-   the limit leaves `tick`. Fixes the refill bug and the cost of a limit.
+1. Done: `spend` replaces the step count; outermost calls refill; the
+   limit leaves `tick`. This fixed the refill bug and the 56% cost of a
+   limit, with no benchmark program slower.
 2. The stop rule: a stopped flag, `spy_stopped`, queued finalizers.
 3. Native operations spend steps, one family at a time, each with its
    probe programs.
