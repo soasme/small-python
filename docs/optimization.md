@@ -113,6 +113,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A test of two numbers makes no bool](#a-test-of-two-numbers-makes-no-bool) | -10.3% (fib), -8.6% (loop); M2: loop -15%, fib -8.8% |
 | [Hot sites make numbers inline](#hot-sites-make-numbers-inline) | -2.5% (nbody), -1.8% (loop), -1.3% (fib) |
 | [Any single comparison is tested without a bool](#any-single-comparison-is-tested-without-a-bool) | -12.2% (loop); fib +0.6% |
+| [A store takes its target's operands at hand](#a-store-takes-its-targets-operands-at-hand) | -3.2% (nbody), -0.8% (strings), -0.6% (classes) |
 
 ### Releasing a number or string frees it at once
 
@@ -784,6 +785,16 @@ it still made a bool. `condition` now evaluates both operands of any
 single comparison itself, compares two numbers with `number_order`, and
 leaves the rest to `comparison` and `spy_truth` as before. Instructions:
 loop -12.2%, fib +0.6%, the rest within 0.3%.
+
+### A store takes its target's operands at hand
+
+`o.x = v` and `l[i] = v` ticked and then evaluated `o`, `l` and `i`
+through `eval`; `b[3] -= x` evaluated `b` and `3` the same way. As on
+the operator fast path, a literal or name is now taken as it is while
+tick has only the line to record, and held across the store, which may
+run a `__setattr__` or `__setitem__` that unbinds it. Instructions:
+nbody -3.2%, strings -0.8%, classes -0.6%, loop +0.2%, the rest 0%; a
+loop of `o.x = i` -8%.
 
 ## Tried and left out
 

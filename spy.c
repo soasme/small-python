@@ -15822,6 +15822,18 @@ static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue
     return 0;
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    /* An attribute or item of a literal or name, while tick has only the
+     * line to record, takes them as they are, held across the store. */
+    if ((n->kind == N_ATTR || n->kind == N_INDEX) && quiet(c, f)) {
+        SPYValue *object = leaf_operand(f, n->a), *key = object && n->kind == N_INDEX ? leaf_operand(f, n->b) : NULL;
+        if (object && (key || n->kind == N_ATTR)) {
+            relocate(c, n);
+            spy_retain(object); spy_retain(key);
+            int status = key ? set_index(c, object, key, value) : node_set_attribute(c, object, n, value);
+            spy_release(object); spy_release(key);
+            return status;
+        }
+    }
     if (tick(c, f, n)) return -1;
     if (n->kind == N_NAME) {
         Entry *entry = name_slot(f->env, n);
@@ -16034,13 +16046,16 @@ static int assign(SPYContext *c, Frame *f, Node *n) {
     }
     SPYValue *container = NULL, *key = NULL, *old = NULL, *rhs = NULL, *value = NULL;
     int status = -1;
-    /* Augmented assignment evaluates the target once, before the RHS. */
+    /* Augmented assignment evaluates the target once, before the RHS;
+     * a literal or name at hand, while tick has only the line to record,
+     * is taken as it is. */
     if (n->a->kind == N_INDEX || n->a->kind == N_ATTR) {
-        container = eval(c, f, n->a->a);
-        if (!container) goto done;
+        int at_hand = quiet(c, f);
+        container = at_hand ? spy_retain(leaf_operand(f, n->a->a)) : NULL;
+        if (!container && !(container = eval(c, f, n->a->a))) goto done;
         if (n->a->kind == N_INDEX) {
-            key = eval(c, f, n->a->b);
-            if (!key) goto done;
+            key = at_hand ? spy_retain(leaf_operand(f, n->a->b)) : NULL;
+            if (!key && !(key = eval(c, f, n->a->b))) goto done;
         }
     }
     {
