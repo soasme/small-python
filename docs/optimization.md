@@ -793,8 +793,8 @@ through `eval`; `b[3] -= x` evaluated `b` and `3` the same way. As on
 the operator fast path, a literal or name is now taken as it is while
 tick has only the line to record, and held across the store, which may
 run a `__setattr__` or `__setitem__` that unbinds it. Instructions:
-nbody -3.2%, strings -0.8%, classes -0.6%, loop +0.2%, the rest 0%; a
-loop of `o.x = i` -8%.
+nbody -3.2%, strings -0.8%, classes -0.6%, loop +0.2%, the rest 0%;
+per iteration, a loop of `o.x = i` -9% and one of `l[1] = i` -18%.
 
 ## Tried and left out
 
