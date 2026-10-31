@@ -164,6 +164,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [An attribute operand skips a second eval](#an-attribute-operand-skips-a-second-eval) | -7.8% (classes); M2: classes -11.2% |
 | [An append that fits does not call grow](#an-append-that-fits-does-not-call-grow) | -1.0% (strings), -0.3% (bigint) |
 | [A machine test is one step](#a-machine-test-is-one-step) | -3.0% (generators); M2: generators -5.5% |
+| [A machine assignment skips the statement dispatch](#a-machine-assignment-skips-the-statement-dispatch) | -1.8% (generators); M2: generators -13%, nbody -2.7% |
 
 ### Releasing a number or string frees it at once
 
@@ -1133,14 +1134,22 @@ runs; built with `-falign-functions=64`, the two trees ran nbody in
 difference is where the M2 build places code, not work. Aligning every
 function cost 0.5% to 1% elsewhere, so the build does not.
 
-## Tried and left out
+### A machine assignment skips the statement dispatch
 
-- **A machine assignment without the statement dispatch.** Calling
-  `assign` from `BC_EXEC` saved generators 1.7% of instructions and 4% of
-  wall time, but a second caller stopped `assign` being inlined into
-  `execute_statements` (loop +3.4%, nbody +2.6%). Forcing it inline, with
-  an out-of-line wrapper for the machine, left gcc's counts unchanged
-  elsewhere, yet the M2 build ran nbody 2% to 3% slower in four runs.
+`i += 1` in a generator is a `BC_EXEC` step, which ran
+`execute_statements` for one statement: a second tick and the statement
+switch before `assign`. The step now calls `assign` itself, through an
+out-of-line `assign_step`, with `assign` forced inline so that
+`execute_statements` keeps it inline too; a plain second call site had
+stopped that (loop +3.4%, nbody +2.6%). The first measurement of this
+form ran nbody 2% to 3% slower on the M2 with gcc's counts unchanged,
+and was left out; after the fused test step moved the code again, the
+same change ran nbody 2.7% faster, as code placement decides.
+Instructions: generators -1.8%, dicts -0.2%, classes -0.1%, the rest
+unchanged. Wall time: generators 137.9 -> 120.0 ms (-13%), nbody -2.7%,
+strings and sort -0.8%, the rest within 0.6%.
+
+## Tried and left out
 
 - **Call arguments taken as direct operands.** Evaluating a call's
   arguments through `eval_operand`, as a binary operator's are, cost fib

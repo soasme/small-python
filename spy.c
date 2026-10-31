@@ -16150,7 +16150,7 @@ static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {
     s->as.string.chars = s->as.string.chars && tail->as.string.chars ? s->as.string.chars + tail->as.string.chars - 1 : 0;
     return spy_retain(s);
 }
-static int assign(SPYContext *c, Frame *f, Node *n) {
+static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n) {
     if (n->op == '=') {
         SPYValue *value = eval(c, f, n->b);
         if (!value) return -1;
@@ -19704,6 +19704,8 @@ static void finish_delegate(SPYContext *c, Machine *m) {
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE;
 }
+/* assign, out of line for the machine and inline in execute_statements. */
+static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assign(c, f, n); }
 static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SPYValue *thrown,
                           size_t argc, SPYValue *const *argv) {
     Machine *m = generator->as.generator.machine;
@@ -19764,6 +19766,8 @@ static Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SP
             value = leaf_operand(&f, n);
             machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n)); break;
         case BC_EXEC: {
+            /* An assignment, ticked as this step, needs no statement dispatch. */
+            if (n->kind == N_ASSIGN) { assign_step(c, &f, n); break; }
             flow = execute_statements(c, &f, n, 1);
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
             break;
