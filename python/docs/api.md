@@ -21,7 +21,7 @@ cannot start.
 | `std` | Register the standard modules (`sys` and `gc`). |
 | `step_limit` | Maximum evaluation steps, counted from the start of each `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. Must be `>= 0`. |
 | `memory_limit` | Bytes the engine may hold allocated; `0` is unlimited. Exceeding it stops the operation with `MemoryError`, which code cannot catch; the runtime keeps working. |
-| `timeout` | Seconds one operation may run in the worker, or `None`. Time spent in host functions, `output`, and `loader` does not count. Exceeding it terminates the worker and raises `Timeout`. |
+| `timeout` | Seconds one operation may run in the worker, or `None`. Time spent in host functions, `output`, and `loader` does not count. Exceeding it stops the operation and raises `Timeout`; the runtime stays open. |
 | `output` | Callable receiving each piece of printed text; `None` writes to `sys.stdout`. |
 | `loader` | Callable mapping a module name to its source `str`, or `None` when there is no such module. |
 | `message_limit` | Largest message between the runtime and its worker, in bytes. A value too large to send raises `ValueError` (from Python) or `OverflowError` (in the engine). |
@@ -115,7 +115,9 @@ closed; every later operation, including those of its `Object`s, raises
 `WorkerError` again. Its state is lost: make a new `Runtime`.
 
 `Timeout` (a `WorkerError` and a `TimeoutError`) means an operation ran past
-`timeout`.
+`timeout`. The engine stops it and the runtime stays open; only a worker that
+does not stop within a further second is terminated, which closes the
+runtime.
 
 A `KeyboardInterrupt` that arrives while the runtime waits for its worker
 terminates the worker and propagates.

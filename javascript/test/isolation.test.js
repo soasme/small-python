@@ -42,13 +42,13 @@ describe("hostile worker", () => {
 
 describe("limits", () => {
   test("timeout", async () => {
-    const rt = await Runtime.create({ timeout: 300 });
+    const rt = track(await Runtime.create({ timeout: 300 }));
     const started = Date.now();
-    const error = await rt.exec("while True:\n    pass").catch((e) => e);
+    const error = await rt.exec("caught = False\ntry:\n    while True: pass\nexcept BaseException:\n    caught = True").catch((e) => e);
     assert.ok(error instanceof Timeout && error instanceof WorkerError);
     assert.ok(Date.now() - started < 5000);
-    assert.ok(rt.closed);
-    await assert.rejects(rt.eval("1"), Timeout);
+    assert.ok(!rt.closed);
+    assert.equal(await rt.eval("caught"), false);
   });
 
   test("timeout excludes host time", async () => {
@@ -109,7 +109,7 @@ describe("loss", () => {
 
   test("other runtimes survive", async () => {
     const healthy = track(await Runtime.create());
-    const doomed = await Runtime.create({ timeout: 100 });
+    const doomed = track(await Runtime.create({ timeout: 100 }));
     await assert.rejects(doomed.exec("while True: pass"), Timeout);
     assert.equal(await healthy.eval("6 * 7"), 42);
   });

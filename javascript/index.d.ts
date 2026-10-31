@@ -11,7 +11,7 @@ export interface RuntimeOptions {
   stepLimit?: number;
   /** Bytes the engine may hold; 0 is unlimited. */
   memoryLimit?: number;
-  /** Milliseconds one operation may run in the worker. */
+  /** Milliseconds one operation may run in the worker; exceeding it stops the operation with Timeout. */
   timeout?: number;
   /** Receives printed text; by default lines go to console.log. */
   output?: (text: string) => void | Promise<void>;

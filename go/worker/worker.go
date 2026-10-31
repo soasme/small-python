@@ -5,8 +5,8 @@
 // runs any code, and speaks the worker protocol (docs/packaging/protocol.md)
 // over its standard input and output. Values cross by copy; anything else
 // stays in the worker and is reached through an [*Object] handle. A crash, a
-// protocol violation, or an expired timeout loses the worker, and the
-// runtime with it.
+// protocol violation, or a worker that does not stop at its timeout loses
+// the worker, and the runtime with it.
 //
 //	rt, err := worker.New(worker.Options{Timeout: 5 * time.Second})
 //	if err != nil {
@@ -147,8 +147,9 @@ func (e *WorkerError) Error() string {
 	return e.Message
 }
 
-// A TimeoutError reports that an operation ran past the runtime's timeout;
-// the worker was ended.
+// A TimeoutError reports that an operation ran past the runtime's timeout.
+// The engine stops the operation and the runtime stays open; a worker that
+// does not stop within a grace period is ended, which loses the runtime.
 type TimeoutError struct {
 	Timeout time.Duration
 }
@@ -194,8 +195,8 @@ type Options struct {
 	// Exceeding it raises MemoryError in the engine.
 	MemoryLimit uint64
 	// Timeout bounds the time one operation may spend running in the
-	// worker, host functions excluded; 0 is unlimited. Exceeding it ends
-	// the worker with a *TimeoutError.
+	// worker, host functions excluded; 0 is unlimited. Exceeding it stops
+	// the operation with a *TimeoutError.
 	Timeout time.Duration
 	// MessageLimit is the largest message in bytes, either direction;
 	// 0 means 64 MiB.
@@ -293,6 +294,7 @@ func New(opts Options) (*Runtime, error) {
 		{"std", !opts.Bare},
 		{"step_limit", opts.StepLimit},
 		{"memory_limit", opts.MemoryLimit},
+		{"timeout", opts.Timeout.Seconds()},
 		{"message_limit", opts.MessageLimit},
 	}
 	version, err := rt.run(msgInit, options)
@@ -516,6 +518,9 @@ func (rt *Runtime) op(op int64, object *Object, operands ...any) (any, error) {
 	return rt.run(msgOp, append([]any{op, object}, operands...)...)
 }
 
+// The time past the timeout the worker has to stop the operation itself.
+const grace = time.Second
+
 // run makes one request, top-level or nested; the timeout spans the top
 // level.
 func (rt *Runtime) run(kind byte, fields ...any) (any, error) {
@@ -530,7 +535,7 @@ func (rt *Runtime) run(kind byte, fields ...any) (any, error) {
 	}
 	top := rt.depth == 0
 	if top && rt.timeout > 0 {
-		rt.deadline = time.Now().Add(rt.timeout)
+		rt.deadline = time.Now().Add(rt.timeout + grace)
 	}
 	rt.depth++
 	defer func() {
@@ -696,14 +701,19 @@ func (rt *Runtime) engineError(raised any) error {
 	}
 	e := &Exception{}
 	var token int64
+	var stop string
 	exception, hasException := fields["exception"]
-	ok := len(fields) == 6 && hasException &&
+	ok := len(fields) == 7 && hasException &&
 		(exception == nil || take(&e.Object, exception)) &&
 		take(&e.Type, fields["type"]) && take(&e.Message, fields["message"]) &&
 		take(&e.Filename, fields["filename"]) && take(&e.Line, fields["line"]) &&
-		take(&token, fields["token"])
+		take(&token, fields["token"]) && take(&stop, fields["stop"])
 	if !ok {
 		return rt.violation("malformed error")
+	}
+	if stop == "timeout" {
+		rt.failure = nil
+		return &TimeoutError{rt.timeout}
 	}
 	if rt.failure != nil && int64(rt.failure.token) == token {
 		e.Cause = rt.failure.err

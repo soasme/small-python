@@ -47,7 +47,13 @@ class WorkerError(RuntimeError):
 
 
 class Timeout(WorkerError, TimeoutError):
-    """An operation ran past the runtime's timeout; the worker was terminated."""
+    """An operation ran past the runtime's timeout. The engine stops it and the
+    runtime stays open; a worker that does not stop within a grace period is
+    terminated, which closes the runtime."""
+
+
+# Seconds past the timeout the worker has to stop the operation itself.
+_GRACE = 1.0
 
 
 # Engine exceptions that Python protocols expect as their own (Object operations).
@@ -107,7 +113,7 @@ class Runtime:
         self._to = self._process.stdin.fileno()
         self._from = self._process.stdout.fileno()
         options = {"std": bool(std), "step_limit": step_limit, "memory_limit": memory_limit,
-                   "message_limit": message_limit}
+                   "timeout": float(timeout or 0), "message_limit": message_limit}
         self.version = self._run(wire.INIT, options)
 
     # Ownership: one thread at a time, and one top-level operation at a time.
@@ -125,7 +131,7 @@ class Runtime:
             self._depth += 1
         try:
             if self._depth == 1 and self._timeout is not None:
-                self._deadline = time.monotonic() + self._timeout
+                self._deadline = time.monotonic() + self._timeout + _GRACE
             return self._request(kind, fields)
         finally:
             self._depth -= 1
@@ -202,7 +208,10 @@ class Runtime:
             poll.register(fd, select.POLLOUT if write else select.POLLIN)
             ready = poll.poll(max(self._deadline - time.monotonic(), 0) * 1000)
         if not ready:
-            raise self._lose(Timeout(f"the operation exceeded the timeout of {self._timeout} seconds"))
+            raise self._lose(Timeout(self._expired()))
+
+    def _expired(self):
+        return f"the operation exceeded the timeout of {self._timeout} seconds"
 
     def _receive(self):
         n = int.from_bytes(self._read(4), "little")
@@ -278,12 +287,15 @@ class Runtime:
 
     def _check_error(self, error):
         keys = {"type": str, "message": str, "filename": str, "line": int, "exception": (Object, type(None)),
-                "token": int}
+                "token": int, "stop": str}
         if type(error) is not dict or error.keys() != keys.keys() or \
                 not all(issubclass(type(error[k]), t) for k, t in keys.items()):
             raise self._violation("malformed error")
 
     def _engine_error(self, error):
+        if error["stop"] == "timeout":
+            self._failure = None
+            return Timeout(self._expired())
         cause = None
         if self._failure and error["token"] == self._failure[0]:
             cause = self._failure[1]

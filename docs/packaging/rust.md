@@ -221,7 +221,7 @@ next message (`RELEASE`). Objects are equal when they are the same handle.
 |---|---|
 | `Python(PythonError)` | An engine exception escaped: `type_name`, `message`, `filename`, `line`, `exception` (an `Object`), and `cause`. |
 | `Worker { message, status }` | The worker was lost (`protocol.md` §8); `status` is its exit status, negative for a signal. |
-| `Timeout(duration)` | The operation ran past the timeout; the worker was terminated. |
+| `Timeout(duration)` | The operation ran past the timeout; the engine stopped it and the runtime stays open. |
 | `Host(error)` | A host function's Rust error. |
 | `Invalid(message)` | Misuse: a closed runtime, a value of another runtime, a message over the limit, `eval` in a host function. |
 
@@ -236,11 +236,13 @@ continues unwinding. Once lost, every request returns the same loss.
 
 ### 4.5 Timeouts
 
-Two threads per runtime move bytes: one reads frames, checking each length
-against the limit before allocating, and one writes. The parent waits for
-the reader with the operation's deadline, so neither a silent worker nor one
-that stops reading can block it past the timeout. Time spent in host
-functions, the loader, and output extends the deadline.
+The worker stops an operation at its timeout itself (`protocol.md` §10),
+and the runtime stays open. Two threads per runtime move bytes: one reads
+frames, checking each length against the limit before allocating, and one
+writes. The parent waits for the reader until the timeout plus a grace
+period of one second, so neither a silent worker nor one that stops reading
+can block it longer; such a worker is terminated with `Error::Worker`.
+Time spent in host functions, the loader, and output extends the deadline.
 
 ### 4.6 Security
 

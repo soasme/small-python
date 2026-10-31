@@ -232,6 +232,7 @@ A worker's `error` is a dict with exactly these keys:
 | `filename`, `line` | `str` and `int`: where it was raised |
 | `exception` | handle to the exception, or `None` when it could not be obtained |
 | `token` | `int`: the `token` of the parent `failure` this exception came from unchanged, or 0 |
+| `stop` | `str`: why the engine stopped the operation (`spy_stopped`): `"steps"`, `"memory"` or `"timeout"`; `""` for an exception the program raised |
 
 A parent's `failure` (to `HOST`, `LOAD`, or `OUTPUT`) is a dict of one of
 two shapes. To re-raise an engine exception unchanged (a host function let an
@@ -270,6 +271,7 @@ operation, its `error` carries the token.
 | `std` | `bool` | register the standard modules with `spy_std_init` |
 | `step_limit` | `int` ≥ 0 | `spy_set_step_limit`; 0 is unlimited |
 | `memory_limit` | `int` ≥ 0 | bytes the engine may hold allocated; 0 is unlimited (§10) |
+| `timeout` | `int` or `float` ≥ 0 | seconds of the worker's own time one top-level operation may take; 0 is unlimited (§10) |
 | `message_limit` | `int` from 1 to 2³²−1 | the limit of §3, for both directions |
 
 The worker always installs output and a module loader that send `OUTPUT` and
@@ -282,7 +284,8 @@ marks the runtime *lost* when any of these happen:
 
 1. a protocol violation (§2);
 2. the stream ends or the worker exits: a crash, an `abort`, an OS limit;
-3. the timeout of the current operation expires (§10);
+3. the worker does not answer within a grace period after the timeout of
+   the current operation (§10);
 4. an exception interrupts the parent while it waits for the worker, such as
    `KeyboardInterrupt` in Python.
 
@@ -324,7 +327,8 @@ the worker.
 | steps | engine step counter | `RuntimeError` in the engine | yes |
 | memory | engine memory limit | `MemoryError` in the engine | yes |
 | recursion | engine frame and C stack guards | `RecursionError` in the engine | yes |
-| time | parent, wall clock | worker terminated | no |
+| time | engine interrupt, worker's clock | `RuntimeError` in the engine; the package's timeout error | yes |
+| time + grace | parent, wall clock | worker terminated | no |
 | message size | both sides | worker terminated | no |
 
 The step and memory limits are the engine's own ([metering.md](../metering.md)):
@@ -334,9 +338,16 @@ catch the error, and the next operation runs normally. The worker's own
 protocol buffers are not counted. In WebAssembly the linear
 memory's maximum is an additional hard bound.
 
-The timeout counts only time the parent spends waiting for the worker within
-one top-level operation. Time inside host functions, the loader, and output is
-the parent's own and is not counted.
+The timeout counts the worker's own time within one top-level operation: its
+clock stops while it waits for the parent, so time inside host functions, the
+loader, and output is not counted. The worker reads a monotonic clock in the
+engine's interrupt callback ([metering.md](../metering.md) 3.4), which stops
+the operation like a spent budget, with `stop` `"timeout"`; the parent raises
+its timeout error and the runtime stays usable. The parent keeps its own
+deadline, the timeout plus a grace period of one second counted the same way,
+and terminates a worker that has not answered by then (§8). Only a hanging
+host call into the worker or a single native operation running longer than
+the grace period reaches it.
 
 ## 11 Versioning
 

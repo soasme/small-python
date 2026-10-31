@@ -855,14 +855,27 @@ caller's budget.
 storage; zero means unlimited, and `spy_memory_used` returns the count. The
 limit is a level, not a budget: it is not refilled per call.
 
-A spent budget or a refused allocation stops the call: every further step
-fails with `RuntimeError` (steps) or `MemoryError` (memory), so no handler
-or `finally` body runs, and finalizers that become due wait for the next
-outermost call, which runs normally. `spy_stopped` returns `SPY_STOP_STEPS`
-or `SPY_STOP_MEMORY` after such a call and zero after any other, which
-tells a stop from the same error raised by the program. Neither is a
-wall-time quota. This experimental runtime is not an isolation boundary for
-untrusted programs.
+`spy_set_interrupt` installs a callback the engine polls at the first call,
+statement or native iteration after every 4096 steps; a nonzero return
+stops the call. The
+engine reads no clock: a host bounds wall or CPU time, or offers a cancel
+button, by reading its own in the callback, which must not call into the
+engine.
+
+A spent budget, a refused allocation or an interrupt stops the call: every
+further step fails with `RuntimeError` (steps, interrupt) or `MemoryError`
+(memory), so no handler or `finally` body runs, and finalizers that become
+due wait for the next outermost call, which runs normally. `spy_stopped`
+returns `SPY_STOP_STEPS`, `SPY_STOP_MEMORY` or `SPY_STOP_INTERRUPT` after
+such a call and zero after any other, which tells a stop from the same
+error raised by the program.
+
+Budgets bound what a program can spend: steps, the bytes the engine holds
+and, through the interrupt, time. They do not make a context an isolation
+boundary: the program runs in the host's process, so a defect in the engine
+can reach the host. The packages' worker
+([packaging/protocol.md](packaging/protocol.md)) adds a process and the
+operating system's sandbox around the context for untrusted programs.
 
 #### 3.4.7 Collection
 

@@ -5,8 +5,9 @@
 //! before it runs any code, and speaks the worker protocol
 //! (docs/packaging/protocol.md) over its standard input and output. Values
 //! cross by copy as [`Value`]; anything else stays in the worker and is
-//! reached through an [`Object`] handle. A crash, a protocol violation, or
-//! an expired timeout loses the worker, and the runtime with it.
+//! reached through an [`Object`] handle. A crash, a protocol violation, or a
+//! worker that does not stop at its timeout loses the worker, and the
+//! runtime with it.
 //!
 //! The worker executable is compiled by this crate's build script and
 //! embedded in the program; on first use it is written to the user's cache
@@ -22,6 +23,9 @@ use std::time::{Duration, Instant};
 use std::{fmt, fs, io, thread};
 
 mod wire;
+
+/// The time past the timeout the worker has to stop the operation itself.
+const GRACE: Duration = Duration::from_secs(1);
 
 /// A value that crossed by copy, or a reference to one that stayed.
 ///
@@ -218,7 +222,8 @@ pub enum Error {
     /// `status` is its exit status, negative for a signal, or `None` when
     /// the parent terminated it.
     Worker { message: String, status: Option<i32> },
-    /// An operation ran past the runtime's timeout; the worker was ended.
+    /// An operation ran past the runtime's timeout; the engine stopped it
+    /// and the runtime stays open.
     Timeout(Duration),
     /// A host function failed with a Rust error; the engine sees a
     /// `RuntimeError` with its message.
@@ -259,13 +264,12 @@ impl Error {
 
     /// Whether the runtime was lost with this error.
     pub fn is_lost(&self) -> bool {
-        matches!(self, Error::Worker { .. } | Error::Timeout(_))
+        matches!(self, Error::Worker { .. })
     }
 
     fn copy_lost(&self) -> Error {
         match self {
             Error::Worker { message, status } => Error::Worker { message: message.clone(), status: *status },
-            Error::Timeout(timeout) => Error::Timeout(*timeout),
             _ => unreachable!("only a loss is copied"),
         }
     }
@@ -359,7 +363,8 @@ impl Builder {
     }
 
     /// Time one operation may spend running in the worker, host functions
-    /// excluded. Exceeding it ends the worker with [`Error::Timeout`].
+    /// excluded. Exceeding it stops the operation with [`Error::Timeout`]; a
+    /// worker that does not stop within a second more is ended.
     pub fn timeout(mut self, timeout: Duration) -> Builder {
         self.timeout = Some(timeout);
         self
@@ -436,6 +441,7 @@ impl Builder {
             ("std".into(), self.std.into()),
             ("step_limit".into(), int(self.step_limit)),
             ("memory_limit".into(), int(self.memory_limit)),
+            ("timeout".into(), Value::Float(self.timeout.map_or(0.0, |timeout| timeout.as_secs_f64()))),
             ("message_limit".into(), self.message_limit.into()),
         ]);
         match rt.run(wire::INIT, &[&options])? {
@@ -691,7 +697,8 @@ impl Runtime {
         self.run(wire::OP, &fields)
     }
 
-    /// One request, top-level or nested; the timeout spans the top level.
+    /// One request, top-level or nested; the timeout, and the grace the
+    /// worker has to stop at it, span the top level.
     fn run(&mut self, kind: u8, fields: &[&Value]) -> Result<Value> {
         if let Some(lost) = &self.lost {
             return Err(lost.copy_lost());
@@ -706,7 +713,7 @@ impl Runtime {
         }
         let top = self.depth == 0;
         if top {
-            self.deadline = self.timeout.map(|timeout| Instant::now() + timeout);
+            self.deadline = self.timeout.map(|timeout| Instant::now() + timeout + GRACE);
         }
         self.depth += 1;
         let result = self.request(kind, fields);
@@ -767,10 +774,10 @@ impl Runtime {
             Ok(Received::Message(message)) => Ok(message),
             Ok(Received::Violation(what)) => Err(self.violation(&what)),
             Ok(Received::End) | Err(RecvTimeoutError::Disconnected) => Err(self.exited()),
-            Err(RecvTimeoutError::Timeout) => {
-                let timeout = self.timeout.expect("a deadline has a timeout");
-                Err(self.lose(Error::Timeout(timeout)))
-            }
+            Err(RecvTimeoutError::Timeout) => Err(self.lose(Error::Worker {
+                message: "the worker did not stop at the timeout".into(),
+                status: None,
+            })),
         }
     }
 
@@ -822,8 +829,8 @@ impl Runtime {
     // Errors from the engine.
 
     fn engine_error(&mut self, error: Value) -> Result<Error> {
-        let mut fields: [Option<Value>; 6] = Default::default();
-        let keys = ["type", "message", "filename", "line", "exception", "token"];
+        let mut fields: [Option<Value>; 7] = Default::default();
+        let keys = ["type", "message", "filename", "line", "exception", "token", "stop"];
         if let Value::Dict(pairs) = error {
             for (key, value) in pairs {
                 match keys.iter().position(|k| key.as_str() == Some(k)) {
@@ -832,11 +839,15 @@ impl Runtime {
                 }
             }
         }
-        let [Some(Value::Str(type_name)), Some(Value::Str(message)), Some(Value::Str(filename)), Some(Value::Int(line)), Some(exception @ (Value::Object(_) | Value::None)), Some(Value::Int(token))] =
+        let [Some(Value::Str(type_name)), Some(Value::Str(message)), Some(Value::Str(filename)), Some(Value::Int(line)), Some(exception @ (Value::Object(_) | Value::None)), Some(Value::Int(token)), Some(Value::Str(stop))] =
             fields
         else {
             return Err(self.violation("malformed error"));
         };
+        if stop == "timeout" {
+            self.failure = None;
+            return Ok(Error::Timeout(self.timeout.expect("a stopped operation has a timeout")));
+        }
         let cause = match self.failure.take() {
             Some((sent, cause)) if sent as i64 == token => Some(Box::new(cause)),
             _ => None,

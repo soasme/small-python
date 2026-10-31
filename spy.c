@@ -86,7 +86,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * unlinked, chained through their parent, each with its storage and the
  * symbol keys (owned) for the next call. */
 /* nodes counts the scope's own nodes, which run at most once between two
- * steps: a body is charged a step per 64 of them when entered. */
+ * steps: a body is charged a step per 8 of them when entered. */
 struct Scope { Node *owner; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, kept_len, nodes; int kind, tries; const char *within; SPYValue *kept; };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -331,6 +331,8 @@ struct SPYContext {
     ClassLookup lookups[256];
     PlainClass plain[16]; /* plain_init's answers, valid like lookups. */
     size_t entries; /* Host calls running; the outermost refills the step budget. */
+    size_t poll; /* The interrupt is due when fuel falls to this. */
+    SPYInterrupt interrupt; void *interrupt_data;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -457,16 +459,41 @@ static NO_INLINE int halt(SPYContext *c, int reason) {
     if (!c->stopped) c->stopped = reason;
     c->fuel = 0; c->quiet_unit = NULL;
     if (c->stopped == SPY_STOP_MEMORY) spy_error(c, "MemoryError", "memory limit exceeded");
-    else spy_error(c, "RuntimeError", "execution step limit exceeded");
+    else spy_error(c, "RuntimeError", c->stopped == SPY_STOP_INTERRUPT ? "execution interrupted" : "execution step limit exceeded");
     return -1;
 }
-static void watch(SPYContext *c) { c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit; }
+static void watch(SPYContext *c) {
+    c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit || c->interrupt;
+}
+/* Where the countdown next stops for the interrupt: 4096 steps on, or at
+ * zero without one, where spend stops. */
+static void schedule_poll(SPYContext *c) { c->poll = c->interrupt && c->fuel > 4096 ? c->fuel - 4096 : 0; }
 static int watched(const SPYContext *c) { return c->watch; }
 /* Spend n steps of the budget. Calls, loop passes, source text and native
  * work proportional to its operands spend. */
 static ALWAYS_INLINE int spend(SPYContext *c, size_t n) {
     if (n > c->fuel) return halt(c, SPY_STOP_STEPS);
     c->fuel -= n;
+    return 0;
+}
+/* Ask the host whether to stop once 4096 steps have passed since it was
+ * last asked, as QuickJS polls its interrupt handler at calls and backward
+ * jumps: at calls, at the items native loops take from iterators, and at
+ * the statement after a loop pass. */
+static NO_INLINE int poll(SPYContext *c) {
+    schedule_poll(c);
+    return c->interrupt(c->interrupt_data) ? halt(c, SPY_STOP_INTERRUPT) : 0;
+}
+static int due(SPYContext *c) { return c->interrupt && c->fuel <= c->poll && poll(c); }
+/* A call, or an item a native loop takes from an iterator, while watched. */
+static NO_INLINE int watched_pass(SPYContext *c) { return spend(c, 1) || due(c); }
+static ALWAYS_INLINE int pass(SPYContext *c) { return c->watch && watched_pass(c); }
+/* A loop pass while watched: a step, and when the interrupt is due, a full
+ * tick for the next statement, which polls it. Calling poll here instead
+ * costs the interpreter loops instructions when unwatched. */
+static ALWAYS_INLINE int loop_pass(SPYContext *c) {
+    if (spend(c, 1)) return -1;
+    if (c->fuel < c->poll) c->quiet_unit = NULL;
     return 0;
 }
 /* A Python frame, counted against sys.getrecursionlimit() as CPython's
@@ -478,7 +505,7 @@ static void *mem_realloc(SPYContext *, void *, size_t);
 static NO_INLINE int watched_call(SPYContext *c) {
     struct ActiveFrame *frame = &c->frames[c->py_depth - 1];
     Scope *scope = frame->env->type == V_ENV ? frame->env->as.map.scope : frame->owner->type == V_UNIT ? frame->owner->as.unit.scope : NULL;
-    return ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) || spend(c, 1 + (scope ? scope->nodes / 8 : 0));
+    return ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) || spend(c, scope ? scope->nodes / 8 : 0) || watched_pass(c);
 }
 static int enter_frame(SPYContext *c, SPYValue *env, SPYValue *owner) {
     if (c->py_depth >= c->recursion_limit) { errorf(c, "RecursionError", "maximum recursion depth exceeded"); return -1; }
@@ -7867,7 +7894,7 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
 }
 /* The next item for a loop in native code, which spends a step for it. */
-static SPYValue *native_next(SPYContext *c, SPYValue *iterator) { return spend(c, 1) ? NULL : iterator_next(c, iterator); }
+static SPYValue *native_next(SPYContext *c, SPYValue *iterator) { return pass(c) ? NULL : iterator_next(c, iterator); }
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     /* A range steps a machine-integer counter without arbitrary-precision
      * arithmetic while the next counter fits. */
@@ -8589,7 +8616,7 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
         spy_release(items); spy_release(iterator); return -1;
     }
     while (iterator && !c->error_type[0]) {
-        if (spend(c, 1)) break;
+        if (pass(c)) break;
         SPYValue *item = iterator_next(c, iterator);
         if (!item) break;
         sequence_append(c, items, item); spy_release(item);
@@ -9542,7 +9569,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
                 if (!item) break;
                 result = a == item || equal(item, a, 0); spy_release(item);
                 if (result || c->error_type[0]) break;
-                if (spend(c, 1)) break;
+                if (pass(c)) break;
             }
             spy_release(iterator);
         }
@@ -12211,7 +12238,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         if (!iterator) return NULL;
         Buffer out = {.ctx = c};
         for (size_t i = 0; !c->error_type[0]; i++) {
-            if (spend(c, 1)) break;
+            if (pass(c)) break;
             SPYValue *item = iterator_next(c, iterator);
             if (!item) break;
             SPYValue *text = builtin_value(c, item, SPY_STRING);
@@ -13458,7 +13485,7 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
             spy_release(keys);
             if (!iterator) return -1;
             while (!c->error_type[0]) {
-                if (spend(c, 1)) break;
+                if (pass(c)) break;
                 SPYValue *key = iterator_next(c, iterator);
                 if (!key) break;
                 SPYValue *value = get_index(c, source, key);
@@ -13492,7 +13519,7 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
     }
     if (!iterator) return -1;
     for (;;) {
-        if (spend(c, 1)) break;
+        if (pass(c)) break;
         SPYValue *item = iterator_next(c, iterator);
         if (!item) break;
         int status = display_add(c, result, item);
@@ -13514,7 +13541,7 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     else {
         SPYValue *iterator = get_iterator(c, a);
         for (size_t index = 0; iterator && !c->error_type[0]; index++) {
-            if (spend(c, 1)) break;
+            if (pass(c)) break;
             SPYValue *pair = iterator_next(c, iterator);
             if (!pair) break;
             /* PyDict_MergeFromSeq2 takes each element with PySequence_Fast. */
@@ -13567,6 +13594,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
         c->filename_from = c->settings[SET_TRACE] ? NULL : f->unit;
     }
     if (c->stopped) return halt(c, c->stopped);
+    if (due(c)) return -1;
     if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len) c->quiet_unit = f->unit;
     return 0;
 }
@@ -16291,7 +16319,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
             SPYValue *item;
             while ((item = iterator_next(c, iterator))) {
                 int status;
-                status = spend(c, 1) ? -1 : sequence_append(c, old, item);
+                status = pass(c) ? -1 : sequence_append(c, old, item);
                 spy_release(item);
                 if (status) break;
             }
@@ -19533,7 +19561,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
                 /* Each pass jumps back: a trace function sees the loop's line again. */
                 if (watched(c)) {
                     if (i && c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
-                    if (spend(c, 1)) break;
+                    if (loop_pass(c)) break;
                 }
                 if (tick(c, f, n)) break;
                 if (iterable) {
@@ -19695,7 +19723,7 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             m->pc = r->flow == FLOW_BREAK ? b->target : b->other;
             if (r->flow == FLOW_BREAK) pop_block(c, m, f);
             else if (watched(c)) {
-                if (spend(c, 1)) { pop_block(c, m, f); r->flow = FLOW_ERROR; continue; }
+                if (loop_pass(c)) { pop_block(c, m, f); r->flow = FLOW_ERROR; continue; }
                 if (c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0; /* Back to the loop's line. */
             }
             r->flow = FLOW_NORMAL; return 1;
@@ -20055,7 +20083,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         case BC_JUMP:
             /* A backward jump shows a trace function its line again. */
             if (watched(c) && ins->target < m->pc) {
-                if (spend(c, 1)) break;
+                if (loop_pass(c)) break;
                 if (c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
             }
             m->pc = ins->target; break;
@@ -24146,7 +24174,7 @@ static SPYValue *min_max(SPYContext *c, int maximum, size_t argc, SPYValue *cons
     if (argc == 1 && !iterator) return NULL;
     SPYValue *best = NULL, *best_key = NULL;
     for (size_t i = 0; !c->error_type[0]; i++) {
-        if (spend(c, 1)) break;
+        if (pass(c)) break;
         SPYValue *item = iterator ? iterator_next(c, iterator) : i < argc ? spy_retain(argv[i]) : NULL;
         if (!item) break;
         SPYValue *item_key = key ? call(c, key, 1, &item) : spy_retain(item);
@@ -24870,7 +24898,7 @@ execution_fail:
         }
         SPYValue *iterator = argc && (id == B_TUPLE || !length_hint_check(c, a)) ? get_iterator(c, a) : NULL;
         if (iterator) for (;;) {
-            if (spend(c, 1)) break;
+            if (pass(c)) break;
             SPYValue *item = iterator_next(c, iterator);
             if (!item) break;
             int status = sequence_append(c, v, item); spy_release(item);
@@ -24895,7 +24923,7 @@ execution_fail:
         double total = 0, compensation = 0;
         for (;;) {
             if (c->error_type[0]) break;
-            if (spend(c, 1)) break;
+            if (pass(c)) break;
             SPYValue *item = iterator_next(c, iterator);
             if (id == B_SUM && result && result->type == SPY_FLOAT && item && !c->error_type[0] &&
                 (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
@@ -27092,6 +27120,10 @@ void spy_set_error_output(SPYContext *c, SPYWrite write, void *data) { c->error_
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; watch(c); }
+void spy_set_interrupt(SPYContext *c, SPYInterrupt interrupt, void *data) {
+    c->interrupt = interrupt; c->interrupt_data = data; c->quiet_unit = NULL;
+    schedule_poll(c); watch(c);
+}
 void spy_set_memory_limit(SPYContext *c, size_t limit) { c->memory_limit = limit; watch(c); }
 size_t spy_memory_used(const SPYContext *c) { return c->memory; }
 int spy_stopped(const SPYContext *c) { return c->stopped; }
@@ -27113,6 +27145,7 @@ static SPYValue *eval_source(SPYContext *c, const char *source, const char *file
 static void enter(SPYContext *c) {
     if (c->entries++) return;
     c->fuel = c->step_limit ? c->step_limit : SIZE_MAX;
+    schedule_poll(c);
     c->stopped = 0;
 }
 static SPYValue *leave(SPYContext *c, SPYValue *result) { c->entries--; return result; }

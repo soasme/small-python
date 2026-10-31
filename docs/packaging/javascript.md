@@ -95,7 +95,7 @@ const rt = await Runtime.create({
 | `std` | Register the standard modules. |
 | `stepLimit` | Evaluation steps per top-level `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `memoryLimit` | Bytes the engine may hold; `0` is unlimited. Exceeding it raises `MemoryError` in the engine. |
-| `timeout` | Milliseconds a single operation may run in the worker, or `undefined`. Exceeding it terminates the Worker and rejects with `Timeout`. |
+| `timeout` | Milliseconds a single operation may run in the worker, or `undefined`. Exceeding it stops the operation and rejects with `Timeout`; the runtime stays open. A Worker that does not stop within a further second is terminated. |
 | `output` | `(text) => void \| Promise<void>` receiving printed text; by default each complete line goes to `console.log`, and an unfinished line when the operation ends. |
 | `loader` | `(name) => string \| null \| Promise<string \| null>` mapping module names to source. |
 | `messageLimit` | Largest message in bytes, either direction. |
@@ -213,7 +213,8 @@ methods reject.
 `null`), `filename`, `lineno`; `name` is `"PythonError"`.
 
 `WorkerError extends Error`: the worker was lost (`protocol.md` §8). `Timeout
-extends WorkerError`: the timeout expired.
+extends WorkerError`: the timeout expired; the runtime is closed only if the
+Worker had to be terminated.
 
 ### 3.6 Concurrency
 

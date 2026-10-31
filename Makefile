@@ -83,6 +83,10 @@ $(OBJDIR)/spy-std.o: spy-std-modules.h
 tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+# The metering probe: adversarial programs a step budget must stop.
+tests/metering: $(OBJDIR)/tests/metering.o $(OBJDIR)/spy.o
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
 # The conformance driver: the bare core, without the standard layer.
 tests/run-spec: $(OBJDIR)/tests/run-spec.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -195,8 +199,9 @@ check-unicode:
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
 
-test: all tests/api tests/oom tests/threads tests/run-spec run-cython check-intrinsics
+test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cython check-intrinsics
 	./tests/api
+	./tests/metering
 	./tests/oom
 	./tests/threads
 	python3 tests/spec_coverage.py
@@ -345,5 +350,5 @@ coverage:
 	@echo "Annotated sources: $(COVERAGE_DIR)/html/index.html"
 
 clean:
-	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
+	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
 	rm -rf $(OBJDIR)

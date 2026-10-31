@@ -31,6 +31,7 @@
 #include <io.h>
 #include <limits.h>
 #endif
+#include <time.h>
 
 #ifdef SPY_WORKER_ENGINE
 #include "spy.c"
@@ -204,6 +205,22 @@ static struct {
     SPYValue *modules;
     SPYValue *failure; int64_t failure_token;
 } w;
+
+/* The timeout counts the worker's own time within one top-level operation
+ * (protocol.md 10): its clock stops while the worker waits for the parent.
+ * The engine polls it through its interrupt. */
+static double timeout, spent, since;
+static int waits;
+static double seconds(void) {
+    struct timespec t;
+#ifdef _WIN32
+    timespec_get(&t, TIME_UTC);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &t);
+#endif
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
+}
+static int expired(void *data) { (void)data; return spent + seconds() - since > timeout; }
 
 static SPYValue *helper_call(int which, size_t argc, SPYValue *const *argv) {
     return spy_call(w.c, w.helper[which], argc, argv);
@@ -457,7 +474,7 @@ static void send_raise(void) {
     int64_t token = exception && exception == w.failure ? w.failure_token : 0;
     Buffer b = {0};
     begin(&b, RAISE);
-    put_byte(&b, 'd'); put_u32(&b, 6);
+    put_byte(&b, 'd'); put_u32(&b, 7);
     put_str(&b, "type"); put_c_text(&b, spy_error_type(c));
     put_str(&b, "message"); put_c_text(&b, spy_error_display(c));
     put_str(&b, "filename"); put_c_text(&b, spy_error_filename(c));
@@ -466,6 +483,8 @@ static void send_raise(void) {
     if (exception) { put_byte(&b, 'h'); put_u64(&b, handle_new(exception)); }
     else put_byte(&b, 'N');
     put_str(&b, "token"); put_int(&b, token);
+    static const char *const stops[] = {"", "steps", "memory", "timeout"};
+    put_str(&b, "stop"); put_str(&b, stops[spy_stopped(c)]);
     spy_release(exception);
     spy_clear_error(c);
     spy_release(w.failure); w.failure = NULL;
@@ -561,13 +580,22 @@ static void serve(unsigned char *message, size_t len);
  * the parent's failure raised in the engine. */
 static SPYValue *request(Buffer *b) {
     if (over_limit(b)) { free(b->data); return spy_error(w.c, "OverflowError", "message exceeds the limit"); }
+    spent += seconds() - since;
+    waits++;
     send_message(b);
     free(b->data);
     for (;;) {
         size_t len;
         unsigned char *message = read_message(&len);
         int kind = message[0];
-        if (kind != RESULT && kind != RAISE) { serve(message, len); continue; }
+        if (kind != RESULT && kind != RAISE) {
+            since = seconds();
+            serve(message, len);
+            spent += seconds() - since;
+            continue;
+        }
+        waits--;
+        since = seconds();
         Cursor k = {message + 1, message + len};
         SPYValue *v = decode(&k, 0);
         finish(&k);
@@ -713,12 +741,17 @@ static void initialize(Cursor *k) {
     SPYValue *std = field(options, "std"), *n = spy_int(c, 0), *count = helper_call(H_LEN, 1, &options);
     int64_t steps = int_field(options, "step_limit"), memory = int_field(options, "memory_limit");
     int64_t limit = int_field(options, "message_limit"), keys;
-    if (!std || spy_type(std) != SPY_BOOL || !count || spy_as_int(c, count, &keys) || keys != 4 ||
-        steps < 0 || memory < 0 || limit < 1 || (uint64_t)limit > UINT32_MAX) violation();
+    SPYValue *time_limit = field(options, "timeout");
+    if (!std || spy_type(std) != SPY_BOOL || !count || spy_as_int(c, count, &keys) || keys != 5 ||
+        steps < 0 || memory < 0 || limit < 1 || (uint64_t)limit > UINT32_MAX || !time_limit ||
+        (spy_type(time_limit) != SPY_INT && spy_type(time_limit) != SPY_FLOAT) || spy_as_float(c, time_limit, &timeout) ||
+        !(timeout >= 0)) violation();
     initialized = 1;
     message_limit = (size_t)limit;
     spy_set_step_limit(c, (size_t)steps);
     spy_set_memory_limit(c, (size_t)memory);
+    if (timeout) spy_set_interrupt(c, expired, NULL);
+    spy_release(time_limit);
     int failed = spy_truth(std) && spy_std_init(c);
     spy_release(std); spy_release(n); spy_release(count); spy_release(options);
     send_result(failed ? NULL : spy_string(c, SPY_VERSION, strlen(SPY_VERSION)));
@@ -730,6 +763,7 @@ static void serve(unsigned char *message, size_t len) {
     Cursor k = {message + 1, message + len};
     int kind = message[0];
     spy_clear_error(c);
+    if (!waits) { spent = 0; since = seconds(); }
     if (kind != INIT && !initialized) violation();
     if (!sealed && (kind == EVAL || kind == EXEC || kind == CALL || kind == OP)) {
         seal();

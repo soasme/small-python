@@ -67,7 +67,7 @@ func ExampleTimeoutError() {
 	err := rt.Exec("while True: pass")
 	var timeout *worker.TimeoutError
 	fmt.Println(errors.As(err, &timeout), rt.Closed())
-	// Output: true true
+	// Output: true false
 }
 
 func ExampleException() {

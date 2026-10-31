@@ -26,6 +26,8 @@ static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *
     if (n > INT64_MAX / 2 || n < INT64_MIN / 2) return spy_error(c, "OverflowError", "twice overflow");
     return spy_int(c, n * 2);
 }
+/* An interrupt that stops the context on its tenth poll. */
+static int count_polls(void *data) { return ++*(int *)data == 10; }
 /* A host function that calls its argument back into the engine. */
 static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)data;
@@ -677,6 +679,27 @@ int main(void) {
     assert(!strcmp(spy_error_type(c), "MemoryError") && spy_stopped(c) == SPY_STOP_MEMORY);
     assert(integer(c, spy_eval(c, "caught", "caught.py")) == 0);
     spy_set_memory_limit(c, 0);
+    /* The interrupt is polled at least every 4096 steps; it stops the call
+     * like a spent budget, and the next call runs normally. */
+    int polls = 0;
+    spy_set_step_limit(c, 100000);
+    spy_set_interrupt(c, count_polls, &polls);
+    assert(spy_exec(c, "caught = 0\ntry:\n    while True: pass\nexcept BaseException:\n    caught = 1", "interrupt.py") == -1);
+    assert(!strcmp(spy_error_message(c), "execution interrupted") && spy_stopped(c) == SPY_STOP_INTERRUPT);
+    assert(polls == 10 && integer(c, spy_eval(c, "caught", "caught.py")) == 0);
+    polls = -1000;
+    assert(spy_exec(c, "while True: pass", "polled.py") == -1);
+    assert(spy_stopped(c) == SPY_STOP_STEPS && polls >= -1000 + 100000 / 4096);
+    /* Without a step limit, a native loop over an endless iterator polls. */
+    polls = 0;
+    spy_set_step_limit(c, 0);
+    const char *polled[] = {"sum(iter(int, 1))", "while True: pass", "for x in iter(int, 1): pass", "any(x for x in iter(int, 1))",
+                            "[x for x in iter(int, 1)]"};
+    for (size_t i = 0; i < sizeof(polled) / sizeof(*polled); i++) {
+        polls = 0;
+        assert(spy_exec(c, polled[i], "polled.py") == -1 && spy_stopped(c) == SPY_STOP_INTERRUPT);
+    }
+    spy_set_interrupt(c, NULL, NULL);
     assert(spy_exec(c, "def recurse():\n    return recurse()\nrecurse()", "recursion.py") == -1);
     assert(!strcmp(spy_error_type(c), "RecursionError"));
 

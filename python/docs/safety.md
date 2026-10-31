@@ -31,7 +31,7 @@ exception: the engine can call it with any arguments.
 | Steps | `step_limit=n` | `RuntimeError` in the engine | yes |
 | Memory | `memory_limit=bytes` | `MemoryError` in the engine | yes |
 | Recursion | engine's own | `RecursionError` in the engine | yes |
-| Time | `timeout=seconds` | worker terminated, `Timeout` raised | no |
+| Time | `timeout=seconds` | `Timeout` raised | yes |
 | Message size | `message_limit=bytes` | the value is refused | yes |
 
 `step_limit` counts calls, loop passes, allocation and native work in
@@ -42,8 +42,10 @@ the runtime goes on.
 
 `timeout` is wall-clock time per operation spent in the worker. Time inside
 your host functions, `output`, and `loader` is yours and does not count.
-Because a timeout kills the worker, the runtime's state is lost; prefer
-`step_limit` for a recoverable bound and `timeout` as the backstop.
+The engine stops the operation as it stops a spent step budget, and the
+runtime goes on. A worker that does not stop within a further second, which
+only a single native operation of that length or a bug can cause, is
+terminated and the runtime's state is lost.
 
 ```python
 from small_python import Error, Runtime, Timeout

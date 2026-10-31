@@ -143,9 +143,16 @@ unlimited one, and a spent budget still fails every tick. The scattered
 `c->step_limit && ++c->steps > c->step_limit` tests became `spend` calls,
 and a bulk copy of a list or tuple spends its length at once.
 
-The interrupt callback (3.4) will extend `spend`'s slow path into a
-`refuel` that calls the host and sets the countdown to the smaller of the
-remaining budget and the interrupt period.
+The interrupt callback (3.4) is polled as QuickJS polls its interrupt
+handler, at calls and backward jumps: when `fuel` has fallen 4,096 steps
+past the last poll, a Python call, an item a native loop takes from an
+iterator, or the statement after a loop pass asks the host. A loop pass
+only marks its frame not quiet, so the next `tick` takes its slow path
+and polls there; `spend` keeps a slow path that always stops, which
+compiles to a tail call. A version whose `spend` refilled the countdown
+from a reserve and continued cost 0.1 to 0.4% of the instructions of
+every benchmark program, as did a poll called from the loop pass itself;
+the interrupt now costs no more than a step limit.
 
 ### 3.3 Memory
 
@@ -183,16 +190,20 @@ renaming; it injects failures rather than counting.
 ### 3.4 Time
 
 The engine reads no clock. The host installs an interrupt callback, which
-`refuel` calls at least once every 4,096 steps; a nonzero return stops the
-context. A host reads its own clock there, so wall time, CPU time and a
+the engine calls at the first call, statement or native iteration after
+every 4,096 steps (3.2); a nonzero return stops the context. A single
+native operation, such as one multiplication, does not poll; its steps
+bound its time. A host reads its own clock there, so wall time, CPU time and a
 cancel button are the same mechanism, and the engine stays free of clocks
 and threads, as bare metal needs. This is QuickJS's
 `JS_SetInterruptHandler`.
 
 The worker uses it for the bindings' `timeout`: the operation stops, the
-worker reports it, and the runtime stays usable. Killing the worker
-remains as the backstop for a worker that does not answer within a grace
-period, which only a metering bug or a hanging host function can cause.
+worker reports it, and the runtime stays usable. The worker's clock stops
+while it waits for the parent, so host functions are not counted. Killing
+the worker remains as the backstop for a worker that does not answer
+within a grace period of one second, which only a single native operation
+of that length, a metering bug or a hanging host function can cause.
 
 ### 3.5 Output
 
@@ -208,7 +219,7 @@ void spy_set_step_limit(SPYContext *, size_t);
 /* Bytes the engine may hold; zero means unlimited. */
 void spy_set_memory_limit(SPYContext *, size_t);
 size_t spy_memory_used(const SPYContext *);
-/* Called at least every 4096 steps; nonzero stops the context. */
+/* Polled after every 4096 steps; nonzero stops the context. */
 typedef int (*SPYInterrupt)(void *);
 void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 /* Why the last outermost call stopped, or zero. */
@@ -236,11 +247,11 @@ of the C API.
 ## 4 Bindings
 
 The worker protocol gains no message; an error reply gains the stop
-reason. `step_limit` and `memory_limit` map to the setters, and `timeout`
-to an interrupt callback reading a monotonic clock. In the Python, Rust,
-JavaScript and Go packages a stop raises the existing `Timeout` or `Error`,
-with the runtime still open. [packaging/protocol.md](packaging/protocol.md)
-and each package's document are updated in the same change.
+reason, `stop`, and `INIT` the `timeout` option. `step_limit` and
+`memory_limit` map to the setters, and `timeout` to an interrupt callback
+reading a monotonic clock. In the Python, Rust, JavaScript and Go packages
+a stop raises the existing `Timeout` or `Error`, with the runtime still
+open ([packaging/protocol.md](packaging/protocol.md) §10).
 
 ## 5 Evidence
 
@@ -258,8 +269,8 @@ and each package's document are updated in the same change.
   comparison and hashing of large containers, moving list elements, long
   bodies, `exec` of large source). Most repeat one operation forever; under
   a budget of 1,000,000 steps each must be stopped within its time, not
-  completed or interrupted. The probe reports the slowest, about 0.7 s on
-  the reference machine.
+  completed or interrupted by its watchdog, an interrupt callback. The
+  probe reports the slowest, about 1 s on the reference machine.
 - **Fuzzing**: the eval target already runs under a step limit. Running it
   with libFuzzer's `-timeout=2` turns any unmetered operation into a
   finding; each one becomes a probe program.
@@ -282,9 +293,13 @@ Each step is one commit that keeps every suite green.
    spend where they loop, each family with its probe programs. Allocation
    came first since it meters most native work at once. Every benchmark
    program is as fast or faster.
-4. The interrupt callback; the worker's timeout uses it.
-5. Bindings and their documents; the manual's statement that the runtime
-   is not an isolation boundary is revised only for what metering covers.
+4. Done: the interrupt callback, polled at calls, native iterations and
+   statements after loop passes, and the metering probe in `make test`
+   with an interrupt as its watchdog. An interrupt costs no more than a
+   step limit.
+5. Done: the worker's timeout uses the interrupt, error replies carry the
+   stop reason, and the four packages keep a timed-out runtime open; the
+   manual names what metering covers and what it does not.
 
 ## 7 Borrowed
 

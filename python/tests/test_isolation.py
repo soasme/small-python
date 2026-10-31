@@ -147,10 +147,11 @@ class LimitTest(unittest.TestCase):
         with Runtime(timeout=0.3) as rt:
             started = time.monotonic()
             with self.assertRaises(Timeout) as cm:
-                rt.exec("while True:\n    pass")
+                rt.exec("caught = False\ntry:\n    while True: pass\nexcept BaseException:\n    caught = True")
             self.assertIsInstance(cm.exception, TimeoutError)
             self.assertLess(time.monotonic() - started, 5)
-            self.assertTrue(rt.closed)
+            self.assertFalse(rt.closed)
+            self.assertIs(rt.eval("caught"), False)
 
     def test_timeout_excludes_host_time(self):
         with Runtime(timeout=0.5) as rt:

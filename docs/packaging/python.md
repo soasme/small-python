@@ -72,7 +72,7 @@ worker cannot start, the constructor raises `WorkerError`.
 | `std` | Register the standard modules (`sys` and `gc`). |
 | `step_limit` | Evaluation steps per top-level `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `memory_limit` | Bytes the engine may hold; `0` is unlimited. Exceeding it stops the operation with `MemoryError`. |
-| `timeout` | Seconds a single operation may spend running in the worker, or `None`. Exceeding it terminates the worker and raises `Timeout`. |
+| `timeout` | Seconds a single operation may spend running in the worker, or `None`. Exceeding it stops the operation and raises `Timeout`; the runtime stays open. A worker that does not stop within a further second is terminated. |
 | `output` | Callable receiving printed text; `None` writes to `sys.stdout`. |
 | `loader` | Callable mapping a module name to source `str`, or `None` when there is none. |
 | `message_limit` | Largest message in bytes, either direction. |
@@ -162,7 +162,8 @@ is re-raised itself instead.
 message names the cause; `returncode` is the worker's exit status (negative
 for a signal) or `None` when it was terminated by the parent.
 
-`Timeout(WorkerError, TimeoutError)` reports an expired timeout.
+`Timeout(WorkerError, TimeoutError)` reports an expired timeout. The runtime
+is closed only if the worker had to be terminated.
 
 Misuse raises ordinary exceptions: `RuntimeError` for a closed runtime, for
 `eval`/`exec`/`close` inside a callback of the same runtime, and for use from

@@ -13,6 +13,7 @@ const NodeWorker = node ? (await import("node:worker_threads")).Worker : null;
 const INITIAL_PAGES = 256; // spy-worker.wasm is linked with 16 MiB of initial memory
 const MAX_PAGES = 65536;
 const INBOX = 64 * 1024;
+const GRACE = 1000; // milliseconds past the timeout the worker has to stop the operation itself
 
 let compiled;
 function compile() {
@@ -46,7 +47,11 @@ export class WorkerError extends Error {
   }
 }
 
-/** An operation ran past the runtime's timeout; the worker was terminated. */
+/**
+ * An operation ran past the runtime's timeout. The engine stops it and the
+ * runtime stays open; a worker that does not stop within a grace period is
+ * terminated, which closes the runtime.
+ */
 export class Timeout extends WorkerError {
   constructor(message) {
     super(message);
@@ -145,7 +150,7 @@ export class Runtime {
     this._worker.postMessage({ module, pages: INITIAL_PAGES, maximum: Math.min(limit, MAX_PAGES), inbox: this._inbox });
     this.version = await this._run(wire.INIT, [{
       std: Boolean(std), step_limit: this._stepLimit, memory_limit: this._memoryLimit,
-      message_limit: this._messageLimit,
+      timeout: (this._timeout ?? 0) / 1000, message_limit: this._messageLimit,
     }]);
   }
 
@@ -166,7 +171,7 @@ export class Runtime {
     const top = this._levels.length === 1;
     if (top) {
       if (node) this._worker.ref();
-      if (this._timeout !== undefined) this._startTimer(this._timeout);
+      if (this._timeout !== undefined) this._startTimer(this._timeout + GRACE);
     }
     try {
       return await this._request(kind, fields);
@@ -328,8 +333,12 @@ export class Runtime {
   _startTimer(ms) {
     this._deadline = Date.now() + ms;
     this._timer = setTimeout(() => {
-      this._lose(new Timeout(`the operation exceeded the timeout of ${this._timeout} ms`));
+      this._lose(new Timeout(this._expired()));
     }, ms);
+  }
+
+  _expired() {
+    return `the operation exceeded the timeout of ${this._timeout} ms`;
   }
 
   _stopTimer() {
@@ -369,13 +378,17 @@ export class Runtime {
   // Errors from the engine.
 
   _checkError(error) {
-    const kinds = { type: "string", message: "string", filename: "string", line: "number", token: "number" };
-    const ok = error instanceof Map && error.size === 6 && Object.entries(kinds).every(([k, t]) => typeof error.get(k) === t)
+    const kinds = { type: "string", message: "string", filename: "string", line: "number", token: "number", stop: "string" };
+    const ok = error instanceof Map && error.size === 7 && Object.entries(kinds).every(([k, t]) => typeof error.get(k) === t)
       && (error.get("exception") === null || error.get("exception") instanceof PyObject);
     if (!ok) throw this._violation("malformed error");
   }
 
   _engineError(error) {
+    if (error.get("stop") === "timeout") {
+      this._failure = null;
+      return new Timeout(this._expired());
+    }
     let cause;
     if (this._failure && error.get("token") === this._failure.token) cause = this._failure.error;
     this._failure = null;

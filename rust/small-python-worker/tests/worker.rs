@@ -156,7 +156,7 @@ fn limits() {
 }
 
 #[test]
-fn timeout_ends_the_worker_but_not_while_the_host_runs() {
+fn timeout_stops_the_operation_but_not_while_the_host_runs() {
     let mut rt = Runtime::builder().timeout(Duration::from_millis(300)).spawn().unwrap();
     rt.define("slow", |_, _, _| {
         std::thread::sleep(Duration::from_millis(500));
@@ -167,8 +167,8 @@ fn timeout_ends_the_worker_but_not_while_the_host_runs() {
     let started = Instant::now();
     assert!(matches!(rt.exec("while True: pass"), Err(Error::Timeout(_))));
     assert!(started.elapsed() < Duration::from_secs(5));
-    assert!(rt.is_closed());
-    assert!(matches!(rt.eval("1"), Err(Error::Timeout(_))));
+    assert!(!rt.is_closed());
+    assert_eq!(rt.eval("1").unwrap(), int(1));
 }
 
 #[cfg(unix)]

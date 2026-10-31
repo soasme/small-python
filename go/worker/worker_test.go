@@ -283,7 +283,7 @@ func TestLimits(t *testing.T) {
 	equal(t, eval(t, rt, "1 + 1"), int64(2))
 }
 
-func TestTimeoutEndsTheWorkerButNotWhileTheHostRuns(t *testing.T) {
+func TestTimeoutStopsTheOperationButNotWhileTheHostRuns(t *testing.T) {
 	rt := start(t, worker.Options{Timeout: 300 * time.Millisecond})
 	rt.Define("slow", func(*worker.Runtime, []any, map[string]any) (any, error) {
 		time.Sleep(500 * time.Millisecond)
@@ -298,12 +298,10 @@ func TestTimeoutEndsTheWorkerButNotWhileTheHostRuns(t *testing.T) {
 	if time.Since(started) > 5*time.Second {
 		t.Fatal("the timeout took too long")
 	}
-	if !rt.Closed() {
-		t.Fatal("a timed-out runtime is open")
+	if rt.Closed() {
+		t.Fatal("a timed-out runtime is closed")
 	}
-	if _, err := rt.Eval("1"); !errors.As(err, &timeout) {
-		t.Fatal(err)
-	}
+	equal(t, eval(t, rt, "1"), int64(1))
 }
 
 func TestACrashedWorkerIsLost(t *testing.T) {

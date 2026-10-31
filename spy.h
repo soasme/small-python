@@ -85,8 +85,12 @@ void spy_set_step_limit(SPYContext *, size_t);
 /* Bytes the engine may hold; zero means unlimited. */
 void spy_set_memory_limit(SPYContext *, size_t);
 size_t spy_memory_used(const SPYContext *);
+/* Polled at the first call, statement or native iteration after every 4096
+ * steps; nonzero stops the context. It must not call into the engine. */
+typedef int (*SPYInterrupt)(void *);
+void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 /* Why the last outermost call stopped, or zero. */
-enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY };
+enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY, SPY_STOP_INTERRUPT };
 int spy_stopped(const SPYContext *);
 /* Optimization level, as python -O (1: no asserts, __debug__ is False) and
  * -OO (2: no docstrings either); compile(optimize=-1) uses it. Default 0. */

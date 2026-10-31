@@ -223,7 +223,7 @@ one unreachable, its id is queued and released with the next message
 |---|---|
 | `*Exception` | An engine exception escaped: `Type`, `Message`, `Filename`, `Line`, `Object` (an `*Object`), and `Cause`, which `Unwrap` returns. |
 | `*WorkerError` | The worker was lost (`protocol.md` §8); `State` is its `*os.ProcessState` when it exited on its own. |
-| `*TimeoutError` | The operation ran past the timeout; the worker was terminated. |
+| `*TimeoutError` | The operation ran past the timeout; the engine stopped it and the runtime stays open, unless the worker did not stop within the grace period and was terminated. |
 | matches `ErrInvalid` | Misuse: a closed runtime, a value of another runtime, a message over the limit, `Eval` in a host function. |
 
 A host function's error becomes the failure of `protocol.md` §7.4: an
@@ -238,12 +238,14 @@ error.
 
 ### 4.5 Timeouts
 
-Two goroutines per runtime move bytes: one reads frames, checking each
-length against the limit before allocating, and one writes. The parent
-waits for the reader, and for room in the writer's queue, until the
-operation's deadline, so neither a silent worker nor one that stops reading
-can block it past the timeout. Time spent in host functions, the loader,
-and output extends the deadline.
+The worker stops an operation at its timeout itself (`protocol.md` §10),
+and the runtime stays open. Two goroutines per runtime move bytes: one
+reads frames, checking each length against the limit before allocating,
+and one writes. The parent waits for the reader, and for room in the
+writer's queue, until the timeout plus a grace period of one second, so
+neither a silent worker nor one that stops reading can block it longer;
+such a worker is terminated. Time spent in host functions, the loader, and
+output extends the deadline.
 
 ### 4.6 Security
 
