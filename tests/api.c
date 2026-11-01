@@ -687,6 +687,28 @@ int main(void) {
         assert(spy_live_values(c) == display_baseline);
     }
 
+    /* The suggestion tokenizes the failing lines as tokenize does: numbers,
+     * prefixed, escaped and triple-quoted strings, comments, continuations
+     * and non-ASCII names before the typo do not hide it. */
+    static const char *const typos[] = {
+        "x = 0x1F_A + 1e+5 + 2E-3 + 0o17 + 0b1_0 + .5j; improt sample\n",
+        "x = rb'a\\'b' + u\"q\" + '''t\nq''' ; improt sample\n",
+        "s = f'{1}' + b'\\\\'; improt sample\n",
+        "x = (1,\n2) # comment\nimprot sample\n",
+        "x = 1 \\\n+ 2; improt sample\n",
+        "s = '''a\\\nb'''\nimprot sample\n",
+        "caf\xc3\xa9 = 1; improt sample\n",
+        "x = Rb\"q\" + tR'q'; improt sample\n",
+    };
+    for (size_t i = 0; i < sizeof(typos) / sizeof(*typos); i++) {
+        assert(spy_exec(c, typos[i], "suggestion.py") == -1);
+        if (strcmp(spy_error_display(c), "invalid syntax. Did you mean 'import'?")) {
+            fprintf(stderr, "typo %zu: %s\n", i, spy_error_display(c));
+            abort();
+        }
+        spy_clear_error(c);
+    }
+
     /* -OO: no asserts, __debug__ False, no docstrings; compile(optimize=-1) inherits it. */
     spy_set_optimize(c, 2);
     execute(c, "def documented():\n    'doc'\n    return 1\nassert 0\n"

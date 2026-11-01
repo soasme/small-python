@@ -47,3 +47,11 @@ check("descriptor '__init__' requires a 'SyntaxError' object but received a 'Val
 check("cannot set 1 attribute of immutable type 'int'", type.__setattr__, int, 1, 2)
 check("cannot set 1 attribute of immutable type 'int'", type.__delattr__, int, 1)
 check("attribute name must be string, not 'int'", type.__setattr__, Name, 1, 2)
+check("unbound method str.join() needs an argument", str.join)
+check("descriptor 'join' for 'str' objects doesn't apply to a 'int' object", str.join, 1, [])
+check("unbound method property.getter() needs an argument", property.getter)
+check("unbound method property.__set_name__() needs an argument", property.__set_name__)
+check("descriptor 'getter' for 'property' objects doesn't apply to a 'int' object", property.getter, 1, None)
+for cls in (classmethod, staticmethod):
+    check(f"descriptor '__get__' of '{cls.__name__}' object needs an argument", cls.__get__)
+    check(f"descriptor '__get__' requires a '{cls.__name__}' object but received a 'int'", cls.__get__, 1, None)

@@ -21599,11 +21599,12 @@ static const char *method_label(SPYContext *c, int type, const char *name, char 
     snprintf(buffer, size, "%s.%s", name_local(c->types[type], "__name__")->as.string.data, name);
     return buffer;
 }
+static NO_INLINE SPYValue *method_misapplied(SPYContext *c, size_t argc, SPYValue *const *argv, int type, const char *name) {
+    return misapplied(c, name_local(c->types[type], "__name__")->as.string.data, name, argc, argv);
+}
 static SPYValue *method_self(SPYContext *c, size_t argc, SPYValue *const *argv, int type, const char *name) {
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
-    if (self) return self;
-    return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object",
-                  name, name_local(c->types[type], "__name__")->as.string.data, argc ? type_name(argv[0]) : "nothing");
+    return self ? self : method_misapplied(c, argc, argv, type, name);
 }
 
 /* Text operations decode str into code points and bytes into byte values. */
@@ -25789,9 +25790,10 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
     int type = (int)((intptr_t)data >> 8), op = (int)((intptr_t)data & 255);
     const char *name = descriptor_methods[op];
     /* Slot wrappers and method descriptors word a wrong self differently. */
-    if (op < DESCR_GETTER && (!argc || !builtin_value(c, argv[0], type)))
-        return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name,
-                      name_local(c->types[type], "__name__")->as.string.data, argc ? type_name(argv[0]) : "nothing");
+    const char *owner = name_local(c->types[type], "__name__")->as.string.data;
+    if (op < DESCR_GETTER && !argc) return errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, owner);
+    if (op < DESCR_GETTER && !builtin_value(c, argv[0], type))
+        return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner, type_name(argv[0]));
     SPYValue *storage = method_self(c, argc, argv, type, name), *self = argc ? argv[0] : NULL;
     if (!storage) return NULL;
     size_t n = argc - 1;
