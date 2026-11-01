@@ -444,7 +444,9 @@ static NO_INLINE int stack_overflow(SPYContext *c, size_t used, const char *wher
     errorf(c, "RecursionError", "Stack overflow (used %zu kB)%s", used / 1024, where);
     return -1;
 }
-static ALWAYS_INLINE int deeper(SPYContext *c, const char *where) {
+/* Enter one more native level: the stack used past the context's limit,
+ * or 0. The first entry records the top. */
+static ALWAYS_INLINE size_t stack_excess(SPYContext *c) {
 #ifdef SPY_ASAN
     /* AddressSanitizer may move locals to a fake stack; frames stay on the real one. */
     uintptr_t here = (uintptr_t)__builtin_frame_address(0);
@@ -454,7 +456,11 @@ static ALWAYS_INLINE int deeper(SPYContext *c, const char *where) {
 #endif
     if (!c->depth++) { c->stack_top = here; return 0; }
     size_t used = here < c->stack_top ? c->stack_top - here : here - c->stack_top;
-    return used <= c->stack_size ? 0 : stack_overflow(c, used, where);
+    return used <= c->stack_size ? 0 : used;
+}
+static ALWAYS_INLINE int deeper(SPYContext *c, const char *where) {
+    size_t used = stack_excess(c);
+    return used ? stack_overflow(c, used, where) : 0;
 }
 static int trace_call(SPYContext *);
 static void leave_frame(SPYContext *, SPYValue *);
@@ -2079,7 +2085,9 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
 static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
     /* A str keeps its hash once computed. */
     if (value->type == SPY_STRING && value->as.string.hash) { *result = value->as.string.hash; return 0; }
-    if (deeper(c, "")) return -1;
+    size_t used = stack_excess(c);
+    /* tuple_hash's guard names the tuple. */
+    if (used) return stack_overflow(c, used, value->type == SPY_TUPLE ? " while hashing a tuple" : "");
     int status = hash_object(c, value, result);
     c->depth--; return status;
 }
@@ -7992,7 +8000,12 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     SPYValue *base = builtin_base(c, source, "__iter__", NULL);
     /* An iterator subclass's instance is its own iterator. */
     if (base && base->type == SPY_ITERATOR) return spy_retain(source);
-    if (base) return get_iterator(c, base);
+    if (base) {
+        /* The iterator walks the storage and holds the instance until exhausted. */
+        SPYValue *v = get_iterator(c, base);
+        if (v && v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE) v->as.iterator.counter = spy_retain(source);
+        return v;
+    }
     if (special_dispatch(source)) {
         SPYValue *method = special_method_maybe(c, source, "__iter__");
         /* __iter__ = None blocks iteration, the sequence protocol included. */
@@ -8079,6 +8092,14 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
 }
 /* The next item for a loop in native code, which spends a step for it. */
+/* An exhausted sequence iterator lets go of the builtin subclass instance
+ * whose storage it walked, as CPython's drop their sequence; that may run
+ * the instance's __del__, which sees the iterator exhausted. */
+static NO_INLINE void drop_owner(SPYValue *v) {
+    SPYValue *owner = v->as.iterator.counter;
+    v->as.iterator.counter = NULL;
+    spy_release(owner);
+}
 static SPYValue *native_next(SPYContext *c, SPYValue *iterator) { return pass(c) ? NULL : iterator_next(c, iterator); }
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     /* A range steps a machine-integer counter without arbitrary-precision
@@ -8101,7 +8122,9 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         (v->as.iterator.source->type == SPY_LIST || v->as.iterator.source->type == SPY_TUPLE)) {
         SPYValue *source = v->as.iterator.source;
         if (v->as.iterator.index < source->as.seq.len) return spy_retain(source->as.seq.items[v->as.iterator.index++]);
-        v->as.iterator.done = 1; return NULL;
+        v->as.iterator.done = 1;
+        if (v->as.iterator.counter) drop_owner(v);
+        return NULL;
     }
     if (v->type == SPY_GENERATOR) return generator_next(c, v);
     if (v->type == SPY_COROUTINE_ITERATOR) return generator_next(c, v->as.iterator.source);
@@ -8275,7 +8298,10 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         break;
     }
     }
-    if (!result && !c->error_type[0]) v->as.iterator.done = 1;
+    if (!result && !c->error_type[0]) {
+        v->as.iterator.done = 1;
+        if ((v->as.iterator.kind == I_SEQUENCE || v->as.iterator.kind == I_REVERSED) && v->as.iterator.counter) drop_owner(v);
+    }
     c->depth--;
     return result;
 }
@@ -8507,7 +8533,7 @@ static SPYValue *iterator_reduce(SPYContext *c, SPYValue *it, int id, SPYValue *
             empty = id == IT_LIST_REVERSE ? spy_list(c) : spy_tuple(c, 0, NULL);
             args = empty ? spy_tuple(c, 1, &empty) : NULL;
         } else {
-            args = spy_tuple(c, 1, &source);
+            args = spy_tuple(c, 1, it->as.iterator.counter ? &it->as.iterator.counter : &source);
             extra = spy_int(c, (int64_t)it->as.iterator.index - 1);
             if (!extra) { spy_release(args); args = NULL; }
         }
@@ -8628,7 +8654,7 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
         spy_release(empty);
     } else {
         SPYValue *index = spy_int(c, (int64_t)it->as.iterator.index);
-        args = index ? spy_tuple(c, 1, &source) : NULL;
+        args = index ? spy_tuple(c, 1, it->as.iterator.kind == I_SEQUENCE && it->as.iterator.counter ? &it->as.iterator.counter : &source) : NULL;
         SPYValue *items[] = {iter, args, index};
         if (args) result = spy_tuple(c, 3, items);
         spy_release(index);
@@ -9316,6 +9342,8 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
             if (count <= PTRDIFF_MAX / len || (a->type != SPY_STRING && a->type != SPY_BYTES)) return spy_error(c, "MemoryError", "");
             return spy_error(c, "OverflowError", a->type == SPY_STRING ? "repeated string is too long" : "repeated bytes are too long");
         }
+        /* A tuple, str or bytes repeated into an equal value is itself. */
+        if ((a->type == SPY_TUPLE || a->type == SPY_STRING || a->type == SPY_BYTES) && (count == 1 || !len)) return spy_retain(a);
         SPYValue *v = value_new(c, a->type);
         if (!v) return NULL;
         if (sequence) {
@@ -25060,7 +25088,8 @@ execution_fail:
         if (id == B_ENUMERATE && !argc) return spy_error(c, "TypeError", "enumerate() missing required argument 'iterable'");
         if (id == B_ENUMERATE && argc > 2) return errorf(c, "TypeError", "enumerate() takes at most 2 arguments (%zu given)", argc);
         if (id == B_REVERSED && argc != 1) return errorf(c, "TypeError", "reversed expected 1 argument, got %zu", argc);
-        if (id == B_REVERSED && builtin_base(c, a, "__reversed__", NULL)) a = builtin_base(c, a, "__reversed__", NULL);
+        SPYValue *owner = id == B_REVERSED && builtin_base(c, a, "__reversed__", NULL) ? a : NULL;
+        if (owner) a = builtin_base(c, a, "__reversed__", NULL);
         if (id == B_REVERSED && a->type == SPY_RANGE) {
             SPYValue *step = spy_int(c, -1);
             SPYValue *slice = step ? slice_new(c, c->none, c->none, step) : NULL;
@@ -25113,7 +25142,7 @@ execution_fail:
         if (!v) { spy_release(source); spy_release(counter); return NULL; }
         v->as.iterator.source = source;
         v->as.iterator.kind = id == B_MAP ? I_MAP : id == B_ZIP ? I_ZIP : id == B_ENUMERATE ? I_ENUMERATE : I_REVERSED;
-        v->as.iterator.counter = counter;
+        v->as.iterator.counter = owner ? spy_retain(owner) : counter;
         if (id == B_REVERSED && (is_dict(a) || is_view(a))) {
             SPYValue *map = is_dict(a) ? a : a->as.bound.self;
             v->as.iterator.index = v->as.iterator.size = map->as.map.len;
@@ -25213,6 +25242,8 @@ execution_fail:
     }
     case B_LIST: case B_TUPLE: {
         if (argc > 1) goto arity;
+        /* PySequence_Tuple: an exact tuple is its own tuple. */
+        if (id == B_TUPLE && argc && a->type == SPY_TUPLE) return spy_retain(a);
         SPYValue *v = value_new(c, id == B_LIST ? SPY_LIST : SPY_TUPLE);
         if (!v) return NULL;
         if (argc && (a->type == SPY_LIST || a->type == SPY_TUPLE)) {
@@ -25300,6 +25331,7 @@ execution_fail:
     case B_INT: case B_FLOAT: {
         if (argc > (id == B_INT ? 2u : 1u)) goto arity;
         if (!argc) return id == B_INT ? spy_int(c, 0) : spy_float(c, 0);
+        if (id == B_FLOAT && a->type == SPY_FLOAT) return spy_retain(a); /* PyNumber_Float */
         SPYValue *base = builtin_base(c, a, id == B_INT ? "__int__" : "__float__", NULL);
         if (base && (base->type == SPY_STRING || base->type == SPY_BYTES || base->type == SPY_BYTEARRAY || is_number(base))) a = base;
         if (id == B_INT && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY || argc == 2)) {
@@ -26077,14 +26109,29 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
     default: return property_copy(c, self, storage, op - DESCR_GETTER, argv[1]);
     }
 }
+/* Whether cls replaces owner's method name: CPython's tuple, float,
+ * frozenset, filter and reversed then accept keywords in __new__ for a
+ * subclass that replaces __init__, and list in __init__ for one that
+ * replaces __new__, leaving them to the replacement. */
+static int replaces(SPYValue *cls, SPYValue *owner, const char *name) {
+    return cls != owner && class_lookup(cls, name) != class_lookup(owner, name);
+}
 /* map, zip, enumerate, filter, reversed, super, and module .__new__(cls, ...):
  * a subclass instance carries the value the class itself would make, and a
  * module subclass's instance shares the module's namespace. data is the class. */
 static SPYValue *native_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     SPYValue *owner = data;
     if (new_check(c, owner, argc, argv)) return NULL;
-    SPYValue *cls = argv[0], *base = owner == c->types[SPY_MODULE] ? module_allocate(c)
-                                                  : builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
+    SPYValue *cls = argv[0];
+    int id = owner->as.map.native - 1;
+    if ((id == B_FILTER || id == B_REVERSED) && replaces(cls, owner, "__init__")) keywords = NULL;
+    SPYValue *base, *args[2];
+    static const char *const names[] = {"iterable", "start"};
+    /* A subclass reaches enum_new's argument clinic, not enumerate_vectorcall. */
+    if (id == B_ENUMERATE && cls != owner && keywords && keywords->as.map.len)
+        base = parse_arguments(c, "enumerate", argc - 1, argv + 1, keywords, names, 2, 1, 0, args) ? NULL :
+            builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
+    else base = owner == c->types[SPY_MODULE] ? module_allocate(c) : builtin_keywords(c, argc - 1, argv + 1, id, keywords, owner);
     /* reversed() of an object with __reversed__ returns that method's result. */
     if (!base || cls == owner || value_class(c, base) != owner) return base;
     SPYValue *instance = new_instance(c, cls);
@@ -26116,6 +26163,7 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     if (type == SPY_PROPERTY || type == SPY_CLASSMETHOD || type == SPY_STATICMETHOD)
         return descriptor_new(c, cls, type, argc - 1, argv + 1, keywords);
     if (cls == owner) return builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
+    if ((type == SPY_TUPLE || type == SPY_FLOAT || type == SPY_FROZENSET) && replaces(cls, owner, "__init__")) keywords = NULL;
     SPYValue *base = type == SPY_BYTEARRAY ? bytearray_new(c, "", 0) : mutable_layout(type) ? value_new(c, type) :
         builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!base) return NULL;
@@ -26132,6 +26180,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     const char *name = name_local(owner, "__name__")->as.string.data;
     if (!self) return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'",
                              name, argc ? type_name(argv[0]) : "nothing");
+    if (type == SPY_LIST && replaces(value_class(c, argv[0]), owner, "__new__")) keywords = NULL;
     SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!fresh) return NULL;
     if (type == SPY_DICT) {
