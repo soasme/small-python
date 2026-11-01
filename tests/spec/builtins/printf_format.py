@@ -51,3 +51,14 @@ class Index:
     def __index__(self):
         return 255
 assert_eq("%x" % Index(), "ff")
+
+# The bytes conversions, and widths and precisions too large to use.
+class NotBytes:
+    def __bytes__(self): return "s"
+assert_eq(str(assert_raises(TypeError, lambda: b"%c" % b"ab")),
+          "format argument: %c requires an integer in range(256) or a single byte, not a bytes object of length 2")
+assert_eq(str(assert_raises(TypeError, lambda: b"%b" % NotBytes())), "NotBytes.__bytes__() must return a bytes, not str")
+assert_eq(str(assert_raises(OverflowError, lambda: "%*d" % (2**63, 1))), "format argument 1: too big for width")
+assert_eq(str(assert_raises(OverflowError, lambda: "%.*d" % (2**63, 1))), "format argument 1: too big for precision")
+assert_eq(str(assert_raises(ValueError, lambda: "%99999999999999999999d" % 1)), "width too big at position 0")
+assert_eq(str(assert_raises(ValueError, lambda: "%.99999999999999999999d" % 1)), "precision too big at position 0")

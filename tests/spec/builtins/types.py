@@ -405,3 +405,13 @@ assert_eq(str(caught.exception), "attribute '__mro__' of 'type' objects is not w
 # Every type has a __doc__.
 for cls in (int, object, type, ValueError):
     assert_eq("__doc__" in cls.__dict__, True)
+
+# Argument checks of str, int and float methods; float text is case-blind.
+assert_eq(str(assert_raises(TypeError, "a".center, 5, "ab")), "The fill character must be exactly one character long")
+assert_eq(str(assert_raises(TypeError, str.maketrans, {1.5: "x"})), "keys in translate table mustbe strings or integers")
+assert_eq(str(assert_raises(ValueError, (1).to_bytes, 1, "middle")), "byteorder must be either 'little' or 'big'")
+assert_eq(str(assert_raises(TypeError, float.__getformat__, 1)), "__getformat__() argument must be str, not int")
+assert_eq(str(assert_raises(ValueError, float.__getformat__, "x")), "__getformat__() argument 1 must be 'double' or 'float'")
+class Real(float): pass
+assert_eq((type(Real.fromhex("0x1p1")), Real.fromhex("0x1p1")), (Real, 2.0))
+assert_eq(repr((float("iNfInItY"), float("-NaN"), float("+inF"))), "(inf, nan, inf)")

@@ -66,3 +66,9 @@ assert_false("__annotate__" in g.__code__.co_names)
 assert_eq(assert_syntax_error("[a, b]: int\n").msg, "only single target (not list) can be annotated")
 assert_eq(assert_syntax_error("a, b: int\n").msg, "only single target (not tuple) can be annotated")
 assert_eq(assert_syntax_error("(a, b): int\n").msg, "only single target (not tuple) can be annotated")
+
+# A module records executed conditional annotations in a set it can lose.
+for value in (1, frozenset()):
+    source = "__conditional_annotations__ = value\nif True:\n    x: int\n"
+    message = str(assert_raises(TypeError, exec, source, {"value": value}))
+    assert_eq(message, f"'{type(value).__name__}' object is not a set")

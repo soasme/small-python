@@ -52,3 +52,9 @@ def outer():
         return seen, x
     return inner(), x
 assert_eq(outer(), (((1, True), 5), 5))
+
+def proxy_methods():
+    x = 1
+    proxy = host.frame().f_locals
+    return proxy.__repr__(), type(proxy).__repr__(proxy), proxy.__eq__(1)
+assert_eq(proxy_methods(), ("{'x': 1, 'proxy': {...}}", "{'x': 1, 'proxy': {...}}", NotImplemented))

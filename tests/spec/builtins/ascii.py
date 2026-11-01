@@ -28,3 +28,6 @@ assert type(ascii(Foo())) is MyStr
 assert ascii(Foo()) == MyStr("hello")
 assert type(ascii(Bar())) is str
 assert ascii(Bar()) == "h\\xe9llo"
+class NotText:
+    def __repr__(self): return 1
+assert str(assert_raises(TypeError, ascii, NotText())) == "NotText.__repr__() must return a str, not int"

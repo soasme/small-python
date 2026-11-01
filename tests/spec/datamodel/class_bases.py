@@ -293,3 +293,8 @@ del C13.__radd__
 assert c13 + 1 == "C13.add"
 with assert_raises(TypeError):
     1 + c13
+
+# Each base must be a class; the name must have no null character.
+class Rebased: pass
+assert_eq(str(assert_raises(TypeError, setattr, Rebased, "__bases__", (1,))), "Rebased.__bases__ must be tuple of classes, not 'int'")
+assert_eq(str(assert_raises(ValueError, type, "a\0b", (), {})), "type name must not contain null characters")

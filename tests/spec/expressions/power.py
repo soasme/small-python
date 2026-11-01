@@ -33,3 +33,6 @@ assert_eq(str(e), "unsupported operand type(s) for ** or pow(): 'str' and 'int'"
 
 # An await_primary may be the base: await x ** 2 is (await x) ** 2.
 assert_compiles("async def f():\n    return await x ** 2\n")
+
+# The reflected method takes the modulus too.
+assert_eq((2).__rpow__(3, 5), 4)

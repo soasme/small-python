@@ -75,3 +75,10 @@ assert isinstance(
         str,
     ),
 )
+
+# An AttributeError from __class__ means the object is not an instance.
+class NoClass:
+    @property
+    def __class__(self):
+        raise AttributeError("no")
+assert_eq(isinstance(NoClass(), int), False)

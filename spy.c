@@ -16122,37 +16122,46 @@ static NO_INLINE int lazy_import(SPYContext *c, Frame *f, Node *n, Node *item) {
     spy_release(text);
     return lazy;
 }
+/* The attribute, or NULL without an error when it is missing. */
+static SPYValue *optional_attribute(SPYContext *c, SPYValue *v, const char *name) {
+    SPYValue *value = attribute(c, v, name);
+    if (!value && error_is(c, "AttributeError")) spy_clear_error(c);
+    return value;
+}
+/* from m import * (17.4.3), as CPython's import_all_from: the names m.__all__
+ * lists, or else the public keys of m.__dict__, each read from m. */
 static NO_INLINE int import_star(SPYContext *c, Frame *f, SPYValue *module) {
-    if (module->type != SPY_MODULE && module->type != SPY_INSTANCE && module->type != SPY_CLASS)
-        return spy_error(c, "TypeError", "import * requires a module namespace"), -1;
-    SPYValue *all = name_local(module, "__all__");
-    if (all) {
-        SPYValue *iterator = get_iterator(c, all), *key;
-        if (!iterator) return -1;
-        SPYValue *module_name = name_local(module, "__name__");
-        while ((key = iterator_next(c, iterator))) {
-            if (key->type != SPY_STRING) {
-                errorf(c, "TypeError", "Item in %s.__all__ must be str, not %s",
-                       module_name && module_name->type == SPY_STRING ? module_name->as.string.data : "?", type_name(key));
-                spy_release(key); break;
-            }
-            /* A package's __all__ may name submodules, which are imported first. */
-            SPYValue *value = name_local(module, "__path__") ? import_from(c, module, key->as.string.data, 0) : NULL;
-            spy_release(value);
-            value = c->error_type[0] ? NULL : attribute(c, module, key->as.string.data);
-            if (value) name_set(c, f->env, key->as.string.data, value);
-            spy_release(value); spy_release(key);
-            if (c->error_type[0]) break;
-        }
-        spy_release(iterator);
-    } else {
-        SPYValue *names = namespace_map(module);
-        for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++) {
-            Entry *entry = &map_items(names)[i];
-            if (entry->key->type == SPY_STRING && entry->key->as.string.data[0] != '_')
-                name_set(c, f->env, entry->key->as.string.data, entry->value);
-        }
+    SPYValue *all = optional_attribute(c, module, "__all__");
+    int keys = !all;
+    if (keys && !c->error_type[0]) {
+        SPYValue *dict = optional_attribute(c, module, "__dict__");
+        if (!dict && !c->error_type[0]) spy_error(c, "ImportError", "from-import-* object has no __dict__ and no __all__");
+        SPYValue *method = dict ? attribute(c, dict, "keys") : NULL, *view = method ? call(c, method, 0, NULL) : NULL;
+        all = view ? call(c, c->types[SPY_LIST], 1, &view) : NULL;
+        spy_release(dict); spy_release(method); spy_release(view);
     }
+    for (int64_t i = 0; all && !c->error_type[0]; i++) {
+        SPYValue *index = spy_int(c, i), *key = index ? get_index(c, all, index) : NULL, *text = key ? builtin_value(c, key, SPY_STRING) : NULL;
+        spy_release(index);
+        if (!key && error_is(c, "IndexError")) spy_clear_error(c);
+        if (!key) break;
+        if (!text) {
+            SPYValue *name = attribute(c, module, "__name__"), *name_text = name ? builtin_value(c, name, SPY_STRING) : NULL;
+            if (name && !name_text) errorf(c, "TypeError", "module __name__ must be a string, not %s", type_name(name));
+            else if (name) errorf(c, "TypeError", "%s in %s.%s must be str, not %s", keys ? "Key" : "Item",
+                                  name_text->as.string.data, keys ? "__dict__" : "__all__", type_name(key));
+            spy_release(name);
+        } else if (!keys || text->as.string.data[0] != '_') {
+            /* A package's __all__ may name submodules, which are imported first. */
+            SPYValue *value = !keys && name_local(module, "__path__") ? import_from(c, module, text->as.string.data, 0) : NULL;
+            spy_release(value);
+            value = c->error_type[0] ? NULL : attribute(c, module, text->as.string.data);
+            if (value) name_set(c, f->env, text->as.string.data, value);
+            spy_release(value);
+        }
+        spy_release(key);
+    }
+    spy_release(all);
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *local_snapshot(SPYContext *, SPYValue *);
@@ -18836,8 +18845,8 @@ static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
     if (!c->error_type[0] && (n->flags & F_CONDITIONAL)) {
         SPYValue *executed = name_get(c, conditional_env(f), "__conditional_annotations__");
         SPYValue *index = executed ? spy_int(c, n->op) : NULL;
-        if (index && (executed->type != SPY_SET || set_add(c, executed, index)) && !c->error_type[0])
-            spy_error(c, "TypeError", "__conditional_annotations__ must be a set");
+        if (index && executed->type != SPY_SET) errorf(c, "TypeError", "'%s' object is not a set", type_name(executed));
+        else if (index) set_add(c, executed, index);
         spy_release(index); spy_release(executed);
     }
 }
@@ -23936,12 +23945,15 @@ static SPYValue *buffer_export(SPYContext *c, size_t argc, SPYValue *const *argv
     int type = (int)(intptr_t)data, release = type < 0;
     const char *name = release ? "__release_buffer__" : "__buffer__", *owner = (release ? -type : type) == SPY_BYTES ? "bytes" : "bytearray";
     SPYValue *arg = NULL;
-    if (!argc || !builtin_value(c, argv[0], release ? -type : type))
-        return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner, argc ? type_name(argv[0]) : "nothing");
+    if (!argc) return errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, owner);
+    if (!builtin_value(c, argv[0], release ? -type : type))
+        return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner, type_name(argv[0]));
     if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 1, 1, 0, &arg)) return NULL;
     if (release) {
         if (arg->type != SPY_MEMORYVIEW) return spy_error(c, "TypeError", "expected a memoryview object");
-        memory_unexport(arg); return spy_none(c);
+        if (arg->as.memory.obj != argv[0]) return spy_error(c, "ValueError", "memoryview's buffer is not this object");
+        if (arg->as.memory.released) return spy_error(c, "ValueError", "memoryview's buffer has already been released");
+        return memory_release(c, arg) ? NULL : spy_none(c);
     }
     int64_t flags;
     if (!is_int(arg)) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(arg));
@@ -25944,18 +25956,17 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
     SPYValue *type = c->types[SPY_CLASS];
     switch ((int)(intptr_t)data) {
     case 0: /* __new__ */
-        if (argc == 2 && argv[0] == type && (!keywords || !keywords->as.map.len)) return spy_retain(value_class(c, argv[1]));
-        if (argc != 4) return errorf(c, "TypeError", "type.__new__() takes exactly 3 arguments (%zu given)", argc ? argc - 1 : 0);
-        if (argv[0]->type != SPY_CLASS || !subclass(argv[0], type))
-            return errorf(c, "TypeError", "type.__new__(X): X is not a type object (%s)", type_name(argv[0]));
+        if (new_check(c, type, argc, argv)) return NULL;
+        if (argc != 4) return errorf(c, "TypeError", "type.__new__() takes exactly 3 arguments (%zu given)", argc - 1);
         return create_class(c, argv[0], argv[1], argv[2], argv[3], keywords);
     case 1: /* __init__ */
         if (argc != 2 && argc != 4) return spy_error(c, "TypeError", "type.__init__() takes 1 or 3 arguments");
         if (argc == 2 && keywords && keywords->as.map.len) return spy_error(c, "TypeError", "type.__init__() takes no keyword arguments");
         return spy_none(c);
     case 2: /* __call__ */
-        if (!argc || argv[0]->type != SPY_CLASS)
-            return spy_error(c, "TypeError", "descriptor '__call__' requires a 'type' object");
+        if (!argc) return spy_error(c, "TypeError", "descriptor '__call__' of 'type' object needs an argument");
+        if (argv[0]->type != SPY_CLASS)
+            return errorf(c, "TypeError", "descriptor '__call__' requires a 'type' object but received a '%s'", type_name(argv[0]));
         return type_call(c, argv[0], argc - 1, argv + 1, keywords);
     default: /* __prepare__ */
         return value_new(c, SPY_DICT);

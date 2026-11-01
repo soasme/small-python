@@ -233,7 +233,12 @@ class Path:
 assert_eq(compile("1", Path(), "exec").co_filename, "path.py")
 assert_eq(compile("1", b"bytes.py", "exec").co_filename, "bytes.py")
 assert_eq(str(assert_raises(TypeError, compile, "1", 1, "exec")), "expected str, bytes or os.PathLike object, not int")
+class NotPath:
+    def __fspath__(self): return 1
+assert_eq(str(assert_raises(TypeError, compile, "1", NotPath(), "exec")), "expected NotPath.__fspath__() to return str or bytes, not int")
 assert_eq(str(assert_raises(TypeError, compile, "1", "x", 1)), "compile() argument 'mode' must be str, not int")
+assert_eq(str(assert_raises(TypeError, compile, "1", "x", "exec", module=1)), "compile() argument 'module' must be str or None, not int")
+assert_eq(str(assert_raises(TypeError, lambda: print(foo=1))), "print() got an unexpected keyword argument 'foo'")
 assert_eq(str(assert_raises(ValueError, compile, "1", "x\0", "exec")), "embedded null character")
 assert_eq(str(assert_raises(TypeError, anext, 1)), "'int' object is not an async iterator")
 assert_true((lambda: 0).__code__.co_stacksize > 0)

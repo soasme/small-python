@@ -273,6 +273,14 @@ assert_true(Annotated.__annotate__ is None)
 assert_eq(Annotated.__annotations__, {"q": 1})
 del Annotated.__annotations__
 assert_eq(Annotated.__annotations__, {})
+e = assert_raises(TypeError, setattr, Annotated, "__annotate__", 5)
+assert_eq(str(e), "__annotate__ must be callable or None")
+Annotated.__annotate__ = lambda format: {"r": 3}
+assert_eq(Annotated.__annotations__, {"r": 3})
+Annotated.__annotate__ = None
+assert_true(Annotated.__annotate__ is None)
+e = assert_raises(TypeError, setattr, annotated, "__annotations__", 1)
+assert_eq(str(e), "__annotations__ must be set to a dict object")
 e = assert_raises(TypeError, delattr, Annotated, "__annotate__")
 assert_eq(str(e), "cannot delete __annotate__ attribute")
 

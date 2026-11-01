@@ -6,6 +6,7 @@ def check(message, function, *args):
     assert_raises(TypeError, function, *args, message=message)
 
 check("expected 0 arguments, got 1", iter([]).__next__, 1)
+check("expected 0 arguments, got 1", (x for x in []).__iter__, 1)
 check("splitlines() takes at most 1 argument (2 given)", "a".splitlines, 1, 2)
 check("sort() takes at most 2 arguments (3 given)", [].sort, 1, 2, 3)
 check("index expected at least 1 argument, got 0", [].index)

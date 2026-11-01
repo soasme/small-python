@@ -57,3 +57,29 @@ for cls in (classmethod, staticmethod):
     check(f"descriptor '__get__' requires a '{cls.__name__}' object but received a 'int'", cls.__get__, 1, None)
 check("unbound method type.__subclasses__() needs an argument", type.__subclasses__)
 check("descriptor '__subclasses__' for 'type' objects doesn't apply to a 'int' object", type.__subclasses__, 1)
+
+def closure_cell():
+    value = 1
+    return (lambda: value).__closure__[0]
+check("descriptor '__eq__' requires a 'cell' object but received a 'int'", type(closure_cell()).__eq__, 1, closure_cell())
+check("unbound method sentinel.__reduce__() needs an argument", type(sentinel("S")).__reduce__)
+assert_eq(str(assert_raises(TypeError, lambda: sentinel("S").__reduce__(x=1))), "sentinel.__reduce__() takes no keyword arguments")
+check("descriptor '__reduce__' for 'BaseException' objects doesn't apply to a 'int' object", BaseException.__reduce__, 1)
+check("descriptor '__dir__' for 'type' objects doesn't apply to a 'int' object", type.__dir__, 1)
+check("descriptor '__init__' of 'object' object needs an argument", object.__init__)
+for cls, name in ((bytes, "bytes"), (bytearray, "bytearray")):
+    check(f"descriptor '__buffer__' of '{name}' object needs an argument", cls.__buffer__)
+    check(f"descriptor '__buffer__' requires a '{name}' object but received a 'int'", cls.__buffer__, 1, 0)
+check("descriptor '__release_buffer__' of 'bytearray' object needs an argument", bytearray.__release_buffer__)
+check("descriptor '__release_buffer__' requires a 'bytearray' object but received a 'int'", bytearray.__release_buffer__, 1, memoryview(b""))
+
+# type.__new__ checks its receiver as the other built-in constructors do.
+class Meta(type): pass
+check("type.__new__(): not enough arguments", type.__new__)
+check("type.__new__(X): X is not a type object (int)", type.__new__, 1)
+check("type.__new__(int): int is not a subtype of type", type.__new__, int, "X", (), {})
+check("type.__new__() takes exactly 3 arguments (1 given)", type.__new__, type, 5)
+check("type.__new__() takes exactly 3 arguments (1 given)", type.__new__, Meta, 5)
+check("descriptor '__call__' of 'type' object needs an argument", type.__call__)
+check("descriptor '__call__' requires a 'type' object but received a 'int'", type.__call__, 1)
+assert_eq(type.__call__(int, "5"), 5)
