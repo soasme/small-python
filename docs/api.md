@@ -380,7 +380,8 @@ void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 ```
 
 Polled at the first call, statement or native iteration after every 4096
-steps; nonzero stops the context. It must not call into the engine.
+steps, and inside long multiplication, division, integer formatting and
+sorting; nonzero stops the context. It must not call into the engine.
 
 ```c
 enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY, SPY_STOP_INTERRUPT };

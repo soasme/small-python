@@ -706,6 +706,16 @@ int main(void) {
         polls = 0;
         assert(spy_exec(c, polled[i], "polled.py") == -1 && spy_stopped(c) == SPY_STOP_INTERRUPT);
     }
+    /* Long native operations poll as they go. */
+    spy_set_interrupt(c, NULL, NULL);
+    execute(c, "big = 7 ** 10**6\nshuffled = [i * 2654435761 % 4000037 for i in range(4 * 10**6)]");
+    spy_set_interrupt(c, count_polls, &polls);
+    const char *native[] = {"big * big", "big // (1 << 10**6 | 1)", "hex(big)", "sorted(shuffled)"};
+    for (size_t i = 0; i < sizeof(native) / sizeof(*native); i++) {
+        polls = 5;
+        assert(spy_exec(c, native[i], "native.py") == -1 && spy_stopped(c) == SPY_STOP_INTERRUPT && polls == 10);
+    }
+    execute(c, "del big, shuffled");
     spy_set_interrupt(c, NULL, NULL);
     assert(spy_exec(c, "def recurse():\n    return recurse()\nrecurse()", "recursion.py") == -1);
     assert(!strcmp(spy_error_type(c), "RecursionError"));

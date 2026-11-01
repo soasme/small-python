@@ -861,7 +861,8 @@ storage; zero means unlimited, and `spy_memory_used` returns the count. The
 limit is a level, not a budget: it is not refilled per call.
 
 `spy_set_interrupt` installs a callback the engine polls at the first call,
-statement or native iteration after every 4096 steps; a nonzero return
+statement or native iteration after every 4096 steps, and inside long
+multiplication, division, integer formatting and sorting; a nonzero return
 stops the call. The
 engine reads no clock: a host bounds wall or CPU time, or offers a cancel
 button, by reading its own in the callback, which must not call into the

@@ -153,6 +153,15 @@ from a reserve and continued cost 0.1 to 0.4% of the instructions of
 every benchmark program, as did a poll called from the loop pass itself;
 the interrupt now costs no more than a step limit.
 
+An algorithm worse than linear spends its steps before it runs, so the
+countdown does not move while it works. Multiplication, division, integer
+formatting and sorting poll the interrupt themselves, after every 2^22
+operations of their inner loop. Division keeps one copy of its loop without
+the poll, chosen when no interrupt is set. Parsing an integer from text
+does not poll: every version cost the `bigint` program 0.06 to 0.35% of its
+instructions. A power-of-two base, which no digit limit bounds, is the one
+quadratic case an interrupt alone cannot stop partway.
+
 ### 3.3 Memory
 
 The engine counts the bytes it holds and refuses an allocation that would

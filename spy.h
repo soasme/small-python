@@ -221,7 +221,8 @@ void spy_set_step_limit(SPYContext *, size_t);
 void spy_set_memory_limit(SPYContext *, size_t);
 size_t spy_memory_used(const SPYContext *);
 /* Polled at the first call, statement or native iteration after every 4096
- * steps; nonzero stops the context. It must not call into the engine. */
+ * steps, and inside long multiplication, division, integer formatting and
+ * sorting; nonzero stops the context. It must not call into the engine. */
 typedef int (*SPYInterrupt)(void *);
 void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 /* Why the last outermost call stopped, or zero. */

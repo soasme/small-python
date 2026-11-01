@@ -490,6 +490,15 @@ static NO_INLINE int poll(SPYContext *c) {
     return c->interrupt(c->interrupt_data) ? halt(c, SPY_STOP_INTERRUPT) : 0;
 }
 static int due(SPYContext *c) { return c->interrupt && c->fuel <= c->poll && poll(c); }
+/* An algorithm worse than linear, charged before it runs, polls the
+ * interrupt after every WORK operations of its inner loop: left counts
+ * them down, n at a time. */
+enum { WORK = 1 << 22 };
+static int working(SPYContext *c, size_t *left, size_t n) {
+    if (n < *left) { *left -= n; return 0; }
+    *left = WORK;
+    return c->interrupt && poll(c);
+}
 /* A call, or an item a native loop takes from an iterator, while watched. */
 static NO_INLINE int watched_pass(SPYContext *c) { return spend(c, 1) || due(c); }
 static ALWAYS_INLINE int pass(SPYContext *c) { return c->watch && watched_pass(c); }
@@ -1314,28 +1323,30 @@ static size_t product_steps(size_t a, size_t b) {
  * Short operands multiply digit by digit. A lopsided x is cut into pieces of
  * yn digits. Otherwise Karatsuba: with x = x1 B^h + x0 and y = y1 B^h + y0,
  * x y = x1 y1 B^2h + ((x0 + x1)(y0 + y1) - x0 y0 - x1 y1) B^h + x0 y0. */
-static void magnitude_multiply(uint32_t *out, const uint32_t *x, size_t xn, const uint32_t *y, size_t yn, uint32_t *scratch) {
-    if (yn < KARATSUBA_CUTOFF) { magnitude_schoolbook(out, x, xn, y, yn); return; }
+static int magnitude_multiply(SPYContext *c, size_t *left, uint32_t *out, const uint32_t *x, size_t xn, const uint32_t *y, size_t yn,
+                              uint32_t *scratch) {
+    if (yn < KARATSUBA_CUTOFF) { magnitude_schoolbook(out, x, xn, y, yn); return working(c, left, xn * yn); }
     if (xn >= 2 * yn) {
         memset(out, 0, (xn + yn) * sizeof(*out));
         for (size_t at = 0; at < xn; at += yn) {
             size_t n = xn - at < yn ? xn - at : yn;
-            if (n == yn) magnitude_multiply(scratch, x + at, n, y, yn, scratch + 2 * yn);
-            else magnitude_multiply(scratch, y, yn, x + at, n, scratch + 2 * yn);
+            if (n == yn ? magnitude_multiply(c, left, scratch, x + at, n, y, yn, scratch + 2 * yn)
+                        : magnitude_multiply(c, left, scratch, y, yn, x + at, n, scratch + 2 * yn)) return -1;
             magnitude_add(out + at, xn + yn - at, scratch, n + yn);
         }
-        return;
+        return 0;
     }
     size_t h = (xn + 1) / 2;
-    magnitude_multiply(out, x, h, y, h, scratch);
-    magnitude_multiply(out + 2 * h, x + h, xn - h, y + h, yn - h, scratch);
+    if (magnitude_multiply(c, left, out, x, h, y, h, scratch) ||
+        magnitude_multiply(c, left, out + 2 * h, x + h, xn - h, y + h, yn - h, scratch)) return -1;
     uint32_t *sx = scratch, *sy = sx + h + 1, *middle = sy + h + 1;
     memcpy(sx, x, h * sizeof(*sx)); sx[h] = 0; magnitude_add(sx, h + 1, x + h, xn - h);
     memcpy(sy, y, h * sizeof(*sy)); sy[h] = 0; magnitude_add(sy, h + 1, y + h, yn - h);
-    magnitude_multiply(middle, sx, h + 1, sy, h + 1, middle + 2 * h + 2);
+    if (magnitude_multiply(c, left, middle, sx, h + 1, sy, h + 1, middle + 2 * h + 2)) return -1;
     magnitude_subtract(middle, 2 * h + 2, out, 2 * h);
     magnitude_subtract(middle, 2 * h + 2, out + 2 * h, xn + yn - 2 * h);
     magnitude_add(out + h, xn + yn - h, middle, 2 * h + 2 < xn + yn - h ? 2 * h + 2 : xn + yn - h);
+    return 0;
 }
 static SPYValue *integer_multiply(SPYContext *c, SPYValue *a, SPYValue *b) {
     IntView views[2]; integer_view(a, &views[0]); integer_view(b, &views[1]);
@@ -1354,8 +1365,10 @@ static SPYValue *integer_multiply(SPYContext *c, SPYValue *a, SPYValue *b) {
     else {
         uint32_t *scratch = allocate(c, (4 * x->len + 1024) * sizeof(*scratch));
         if (!scratch) { mem_free(result); return NULL; }
-        magnitude_multiply(result->digits, x->digits, x->len, y->digits, y->len, scratch);
+        size_t left = WORK;
+        int status = magnitude_multiply(c, &left, result->digits, x->digits, x->len, y->digits, y->len, scratch);
         mem_free(scratch);
+        if (status) { mem_free(result); return NULL; }
     }
     result->sign = x->sign * y->sign;
     return integer_finish(c, result);
@@ -1454,27 +1467,12 @@ static SPYValue *integer_bitwise(SPYContext *c, int op, SPYValue *a, SPYValue *b
     }
     return integer_finish(c, result);
 }
-static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **quotient, SPYValue **remainder) {
-    IntView x, y; integer_view(a, &x); integer_view(b, &y);
-    *quotient = *remainder = NULL;
-    if (!y.len) { spy_error(c, "ZeroDivisionError", "division by zero"); return -1; }
-    /* Knuth's algorithm D (TAOCP 4.3.1) on 32-bit digits: shift both so the
-     * divisor's top digit has its high bit set, estimate each quotient digit
-     * from the top two remainder digits, subtract, and add back when the
-     * estimate was one too large. */
-    size_t n = y.len, m = x.len >= n ? x.len - n : 0;
-    BigInt *q = integer_alloc(c, m + 1), *r = integer_alloc(c, x.len + 1);
-    uint32_t *divisor = allocate(c, n * sizeof(*divisor));
-    if (!q || !r || !divisor) { mem_free(q); mem_free(r); mem_free(divisor); return -1; }
-    int shift = 0;
-    while (!(y.digits[n - 1] << shift & UINT32_C(0x80000000))) shift++;
-    for (size_t i = n; i--;) divisor[i] = y.digits[i] << shift | (shift && i ? y.digits[i - 1] >> (32 - shift) : 0);
-    uint32_t *u = r->digits;
-    u[x.len] = shift && x.len ? x.digits[x.len - 1] >> (32 - shift) : 0;
-    for (size_t i = x.len; i--;) u[i] = x.digits[i] << shift | (shift && i ? x.digits[i - 1] >> (32 - shift) : 0);
-    q->digits[m] = 0;
-    if (spend(c, product_steps(4 * (m + 1), n + 16))) { mem_free(q); mem_free(r); mem_free(divisor); return -1; }
-    for (size_t j = m + 1; x.len >= n && j--;) {
+/* The quotient digits of algorithm D, high to low, polling the interrupt
+ * when polled: integer_divmod makes a copy with and one without. */
+static ALWAYS_INLINE int quotient_digits(SPYContext *c, uint32_t *u, const uint32_t *divisor, uint32_t *q, size_t m, size_t n, int polled) {
+    size_t left = WORK;
+    for (size_t j = m + 1; j--;) {
+        if (polled && working(c, &left, n)) return -1;
         uint64_t top = (uint64_t)u[j + n] << 32 | u[j + n - 1];
         uint64_t estimate = top / divisor[n - 1], rest = top % divisor[n - 1];
         while (estimate >> 32 || (n > 1 && estimate * divisor[n - 2] > (rest << 32 | u[j + n - 2]))) {
@@ -1497,7 +1495,32 @@ static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **qu
             }
             u[j + n] += (uint32_t)carry;
         }
-        q->digits[j] = (uint32_t)estimate;
+        q[j] = (uint32_t)estimate;
+    }
+    return 0;
+}
+static int integer_divmod(SPYContext *c, SPYValue *a, SPYValue *b, SPYValue **quotient, SPYValue **remainder) {
+    IntView x, y; integer_view(a, &x); integer_view(b, &y);
+    *quotient = *remainder = NULL;
+    if (!y.len) { spy_error(c, "ZeroDivisionError", "division by zero"); return -1; }
+    /* Knuth's algorithm D (TAOCP 4.3.1) on 32-bit digits: shift both so the
+     * divisor's top digit has its high bit set, estimate each quotient digit
+     * from the top two remainder digits, subtract, and add back when the
+     * estimate was one too large. */
+    size_t n = y.len, m = x.len >= n ? x.len - n : 0;
+    BigInt *q = integer_alloc(c, m + 1), *r = integer_alloc(c, x.len + 1);
+    uint32_t *divisor = allocate(c, n * sizeof(*divisor));
+    if (!q || !r || !divisor) { mem_free(q); mem_free(r); mem_free(divisor); return -1; }
+    int shift = 0;
+    while (!(y.digits[n - 1] << shift & UINT32_C(0x80000000))) shift++;
+    for (size_t i = n; i--;) divisor[i] = y.digits[i] << shift | (shift && i ? y.digits[i - 1] >> (32 - shift) : 0);
+    uint32_t *u = r->digits;
+    u[x.len] = shift && x.len ? x.digits[x.len - 1] >> (32 - shift) : 0;
+    for (size_t i = x.len; i--;) u[i] = x.digits[i] << shift | (shift && i ? x.digits[i - 1] >> (32 - shift) : 0);
+    q->digits[m] = 0;
+    if (spend(c, product_steps(4 * (m + 1), n + 16)) ||
+        (x.len >= n && (c->interrupt ? quotient_digits(c, u, divisor, q->digits, m, n, 1) : quotient_digits(c, u, divisor, q->digits, m, n, 0)))) {
+        mem_free(q); mem_free(r); mem_free(divisor); return -1;
     }
     r->len = x.len < n ? x.len : n;
     for (size_t i = 0; i < r->len; i++) u[i] = u[i] >> shift | (shift ? u[i + 1] << (32 - shift) : 0);
@@ -2747,8 +2770,9 @@ static int integer_format(Buffer *out, SPYValue *value, unsigned base, int upper
     if (!work || !text) { mem_free(work); mem_free(text); return -1; }
     memcpy(work, view.digits, view.len * sizeof(uint32_t));
     const char *digits = uppercase ? "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" : "0123456789abcdefghijklmnopqrstuvwxyz";
-    size_t len = view.len, count = 0;
+    size_t len = view.len, count = 0, left = WORK;
     do {
+        if (working(out->ctx, &left, len)) { mem_free(work); mem_free(text); return -1; }
         uint64_t remainder = 0;
         for (size_t i = len; i; i--) {
             uint64_t numerator = (remainder << 32) | work[i - 1];
@@ -20764,7 +20788,8 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
         }
         ends[runs++] = end;
     }
-    while (runs > 1) {
+    /* A pass leaves a permutation in from, where a stop may come. */
+    for (size_t left = WORK; runs > 1 && !working(c, &left, len);) {
         size_t merged = 0;
         for (size_t r = 0, start = 0; r < runs; r += 2) {
             size_t mid = ends[r], end = r + 1 < runs ? ends[r + 1] : mid;
