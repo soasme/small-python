@@ -167,7 +167,10 @@ static const char *const programs[] = {
     "try:\n"
     "    raise ExceptionGroup('g', [ValueError(1), TypeError(2)])\n"
     "except* ValueError as e: print('value', e.exceptions)\n"
-    "except* TypeError: print('type')\n",
+    "except* TypeError: print('type')\n"
+    "try:\n"
+    "    raise KeyError(3)\n"
+    "except* KeyError as e: print('naked', e.exceptions)\n",
 
     "class A:\n"
     "    __x = 1\n"

@@ -557,6 +557,16 @@ static int intrinsic_frame(struct ActiveFrame *frame) {
     SPYValue *unit = frame_unit(frame);
     return unit && unit->as.unit.filename && !strcmp(unit->as.unit.filename, "<intrinsics>");
 }
+/* A traceback entry for the innermost frame at its line, followed by
+ * next, which it takes; or NULL, leaving next with the caller. */
+static SPYValue *frame_traceback(SPYContext *c, SPYValue *next) {
+    SPYValue *frame = frame_object(c, c->py_depth - 1), *entry = frame ? value_new(c, SPY_TRACEBACK) : NULL;
+    if (!entry) { spy_release(frame); return NULL; }
+    entry->as.traceback.next = next;
+    entry->as.traceback.frame = frame;
+    entry->as.traceback.line = c->frames[c->py_depth - 1].line;
+    return entry;
+}
 /* PyTraceBack_Here: an error passing through the innermost frame prepends
  * that frame's entry to the pending traceback, once per frame. */
 static void traceback_here(SPYContext *c) {
@@ -566,12 +576,9 @@ static void traceback_here(SPYContext *c) {
     char type[sizeof(c->error_type)];
     memcpy(type, c->error_type, sizeof(type));
     c->error_type[0] = 0;
-    SPYValue *frame = frame_object(c, c->py_depth - 1), *entry = frame ? value_new(c, SPY_TRACEBACK) : NULL;
+    SPYValue *entry = frame_traceback(c, c->traceback);
     memcpy(c->error_type, type, sizeof(type));
-    if (!entry) { spy_release(frame); return; }
-    entry->as.traceback.next = c->traceback;
-    entry->as.traceback.frame = frame;
-    entry->as.traceback.line = top->line;
+    if (!entry) return;
     c->traceback = entry; c->traceback_frame = top->serial;
 }
 static void trace_leave(SPYContext *, SPYValue *);
@@ -18741,11 +18748,27 @@ static int star_match(SPYContext *c, SPYValue *exception, SPYValue *type, SPYVal
         SPYValue *items = value_new(c, SPY_TUPLE);
         if (items && !sequence_append(c, items, exception)) *match = new_group(c, "", items);
         spy_release(items);
-        if (*match) set_hidden_field(c, *match, "__traceback__", hidden_field(exception, "__traceback__"));
+        /* Its traceback starts where except* wrapped it. */
+        SPYValue *traceback = *match ? frame_traceback(c, NULL) : NULL;
+        if (traceback) set_hidden_field(c, *match, "__traceback__", traceback);
+        else { spy_release(*match); *match = NULL; }
+        spy_release(traceback);
         return *match ? 0 : -1;
     }
     if (!is_group(c, exception)) { *rest = spy_retain(exception); return 0; }
-    return group_split(c, exception, group_condition, type, 1, match, rest);
+    /* A group splits itself, through its own split method. */
+    SPYValue *split = attribute(c, exception, "split"), *pair = split ? call(c, split, 1, &type) : NULL;
+    spy_release(split);
+    if (pair && pair->type != SPY_TUPLE)
+        errorf(c, "TypeError", "%s.split must return a tuple, not %s", type_name(exception), type_name(pair));
+    else if (pair && pair->as.seq.len < 2)
+        errorf(c, "TypeError", "%s.split must return a 2-tuple, got tuple of size %zu", type_name(exception), pair->as.seq.len);
+    else if (pair) {
+        if (pair->as.seq.items[0] != c->none) *match = spy_retain(pair->as.seq.items[0]);
+        if (pair->as.seq.items[1] != c->none) *rest = spy_retain(pair->as.seq.items[1]);
+    }
+    spy_release(pair);
+    return c->error_type[0] ? -1 : 0;
 }
 static int same_metadata(SPYValue *a, SPYValue *b) {
     static const char *const fields[] = {"__notes__", "__traceback__", "__cause__", "__context__"};
@@ -18773,29 +18796,36 @@ done:
     spy_release(fresh); spy_release(reraised); spy_release(leaves); spy_release(keep); spy_release(rest);
     return result;
 }
-/* Raise a computed exception without chaining it to the active exception. */
+/* Raise a computed exception as CPython's RERAISE does: not chained to the
+ * active exception, its traceback continued without an entry for this frame. */
 static void raise_unchained(SPYContext *c, SPYValue *exception, size_t line) {
     SPYValue *handled = c->handled, *inherited = c->inherited_exception;
     c->handled = c->inherited_exception = NULL;
     raise_value(c, exception);
     c->handled = handled; c->inherited_exception = inherited;
     c->line = line;
+    if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
 }
 static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
     Result r = execute(c, f, n->a);
     SPYValue *outer = c->handled;
     if (r.flow == FLOW_ERROR) {
         ErrorState error = take_error(c);
-        SPYValue *rest = spy_retain(error.value), *raised = spy_list(c);
+        /* The group is handled while the first clause matches; each match is
+         * from its handler on, as CPython sets it and never resets it. */
+        SPYValue *rest = spy_retain(error.value), *raised = spy_list(c), *handled = spy_retain(error.value);
         size_t line = error.line;
+        c->handled = handled;
         for (Node *h = n->args; h && rest && raised && !c->error_type[0]; h = h->next) {
+            if (c->settings[SET_TRACE] && tick(c, f, h->a)) break;
+            relocate(c, h->a);
             SPYValue *type = eval(c, f, h->a), *match = NULL, *remaining = NULL;
             int status = type ? star_match(c, rest, type, &match, &remaining) : -1;
             spy_release(type);
             if (status) break;
             if (!match) { spy_release(remaining); continue; }
             spy_release(rest); rest = remaining;
-            c->handled = match;
+            spy_release(handled); c->handled = handled = match;
             if (h->c) name_set(c, f->env, h->c->text, match);
             Result body = execute(c, f, h->b);
             spy_release(body.value);
@@ -18806,10 +18836,10 @@ static Result execute_try_star(SPYContext *c, Frame *f, Node *n) {
                 spy_release(inner.value);
             }
             if (h->c) clear_binding(c, f->env, h->c->text);
-            c->handled = outer;
-            spy_release(match);
         }
+        materialize_error(c);
         c->handled = outer;
+        spy_release(handled);
         if (!c->error_type[0] && raised && (!rest || !sequence_append(c, raised, rest))) {
             SPYValue *result = reraise_star(c, error.value, raised);
             if (result == error.value) restore_error(c, &error);
@@ -20416,7 +20446,6 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             Block *outer = &m->blocks[m->block_len - 1];
             if (raised) sequence_append(c, outer->value->as.seq.items[1], raised);
             spy_release(raised);
-            spy_release(c->handled); c->handled = spy_retain(outer->error->value);
             if (ins->op == BC_STAR_DONE) m->pc = ins->target;
             break;
         }
