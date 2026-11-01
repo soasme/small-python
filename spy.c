@@ -14872,9 +14872,18 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         for (const char *ch = start; ch < position; ch++) if (textless || ((unsigned char)*ch & 192) != 128) offset++;
         end_offset = offset;
         /* A range may run onto later lines, through an explicit line join. */
+        const char *end_start = NULL;
         for (const char *ch = position; ch < finish; ch++)
-            if (*ch == '\n' && ch + 1 < finish) { end_line++; end_offset = 1; }
+            if (*ch == '\n' && ch + 1 < finish) { end_line++; end_offset = 1; end_start = ch + 1; }
             else if (textless || ((unsigned char)*ch & 192) != 128) end_offset++;
+        /* CPython converts an end on a later line against the first line's
+         * text: its byte column, at most that line's length, in characters. */
+        if (end_start && !textless) {
+            size_t column = (size_t)(finish - end_start), length = (size_t)(end - start) - (end > start && end[-1] == '\n');
+            end_offset = 1;
+            for (const char *ch = start; ch < start + (column < length ? column : length); ch++)
+                if (((unsigned char)*ch & 192) != 128) end_offset++;
+        }
         if (end_zero) end_offset = 0;
         if (zero_based) offset--;
     }

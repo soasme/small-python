@@ -35,3 +35,14 @@ for source, position, location in (
     error = assert_syntax_error(source)
     assert_eq(error.msg, f"(unicode error) 'unicodeescape' codec can't decode bytes in position {position}: truncated \\xXX escape")
     assert_eq((error.lineno, error.offset, error.end_lineno, error.end_offset), location)
+
+# A literal that ends on a later line reports its end column measured
+# against the first line: at most that line's length, plus one.
+for source, location in (
+        ('"""a\n\\xZZ"""', (1, 1, 2, 5)),
+        ('"""abcdefgh\n\\xZZ"""', (1, 1, 2, 8)),
+        ('x = """a\n\\xZZ"""', (1, 5, 2, 8)),
+        ('"""é\n\\xZZ"""', (1, 1, 2, 5)),
+        ('"a\\\n\\xZZ"', (1, 1, 2, 4))):
+    error = assert_syntax_error(source)
+    assert_eq((error.lineno, error.offset, error.end_lineno, error.end_offset), location)
