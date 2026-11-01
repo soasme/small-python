@@ -286,6 +286,16 @@ int main(void) {
     spy_set_output(c, output, &o);
     execute(c, "print('hello', 6 * 7)");
     assert(!strcmp(o.text, "hello 42\n"));
+    /* The final value dies after the last statement, before spy_exec returns;
+     * a registered sys reports an unraisable error before it is imported. */
+    Output errors = {0};
+    spy_set_error_output(c, output, &errors);
+    o.len = 0;
+    execute(c, "class Last:\n    def __del__(self):\n        print('finalized')\n        1 / 0\nLast()");
+    assert(!strcmp(o.text, "finalized\n"));
+    assert(strstr(errors.text, "Exception ignored while calling deallocator <function Last.__del__ at ")
+           && strstr(errors.text, "ZeroDivisionError: division by zero\n"));
+    spy_set_error_output(c, NULL, NULL);
     spy_set_flush(c, flush_output);
     execute(c, "print(end='', flush=True)");
     assert(o.flushes == 1);
@@ -305,6 +315,14 @@ int main(void) {
     spy_set_input(c, NULL, NULL);
     assert(!spy_define(c, "twice", twice, NULL));
     assert(integer(c, spy_eval(c, "twice(21)", "api.py")) == 42);
+    /* exit and quit are the host's (PLS-315 19.4), with site's Quitter messages. */
+    static const char *const exits[][2] = {
+        {"exit(code=3)", "3"}, {"quit(1, 2)", "Quitter.__call__() takes from 1 to 2 positional arguments but 3 were given"},
+        {"exit(x=1)", "Quitter.__call__() got an unexpected keyword argument 'x'"},
+        {"exit(1, code=2)", "Quitter.__call__() got multiple values for argument 'code'"}};
+    for (size_t i = 0; i < sizeof(exits) / sizeof(*exits); i++)
+        assert(spy_exec(c, exits[i][0], "exit.py") && !strcmp(spy_error_message(c), exits[i][1]));
+    spy_clear_error(c);
     execute(c, "x = 19");
     assert(integer(c, spy_get_global(c, "x")) == 19);
     assert(integer(c, spy_eval(c, "x + 23", "api.py")) == 42);

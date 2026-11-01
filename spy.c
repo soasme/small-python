@@ -10219,7 +10219,7 @@ static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size
         if (!strcmp(name, "__next__")) return errorf(c, "TypeError", "'%s' object is not an iterator", type);
         if (!strcmp(name, "__anext__")) return errorf(c, "TypeError", "'%s' object is not an async iterator", type);
         if (!strcmp(name, "__reversed__")) return errorf(c, "TypeError", "'%s' object is not reversible", type);
-        if (!strcmp(name, "__getitem__")) return errorf(c, "TypeError", "'%s' object is not subscriptable", type);
+        if (!strcmp(name, "__getitem__")) return errorf(c, "TypeError", "'%s' object does not support indexing", type);
         if (!strcmp(name, "__setitem__")) return errorf(c, "TypeError", "'%s' object does not support item assignment", type);
         if (!strcmp(name, "__delitem__")) return errorf(c, "TypeError", "'%s' object doesn't support item deletion", type);
         return errorf(c, "TypeError", "'%s' object does not support %s", type, name);
@@ -15306,14 +15306,28 @@ static SPYValue *weak_get(SPYContext *c, size_t argc, SPYValue *const *argv, voi
     return spy_retain(value ? value : c->none);
 }
 static SPYValue *generator_method(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
+/* The index of the module the host registered as name, or host_modules_len. */
+static size_t host_module(SPYContext *c, const char *name) {
+    size_t i = 0;
+    while (i < c->host_modules_len && strcmp(c->host_modules[i].name, name)) i++;
+    return i;
+}
 /* Pass the pending error, which cannot propagate (18.1.4), to the host's
  * unraisable hook as (type, value, traceback, message, object): message is
- * text followed by the repr of subject, or None without text. Without a hook,
- * or when the hook fails, the error is discarded. */
+ * text followed by the repr of subject, or None without text. A registered
+ * sys not yet imported is imported for its hook, as CPython's sys is always
+ * loaded. Without a hook, or when the hook fails, the error is discarded. */
 static void report_unraisable(SPYContext *c, const char *text, SPYValue *subject, SPYValue *object) {
-    SPYValue *hook = spy_retain(c->settings[SET_UNRAISABLE]), *error = hook ? spy_error_value(c) : NULL;
+    /* The error left a call the running frame made, not the frame itself. */
+    if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+    SPYValue *error = spy_error_value(c);
     spy_clear_error(c);
-    if (error) {
+    if (!c->settings[SET_UNRAISABLE] && host_module(c, "sys") < c->host_modules_len && !name_local(c->modules, "sys")) {
+        spy_release(import_module(c, "sys"));
+        spy_clear_error(c);
+    }
+    SPYValue *hook = spy_retain(c->settings[SET_UNRAISABLE]);
+    if (hook) {
         SPYValue *repr = subject ? spy_repr(c, subject) : NULL;
         Buffer message = {.ctx = c};
         if (text) { puts_buffer(&message, text); if (repr) append(&message, repr->as.string.data, repr->as.string.len); }
@@ -15348,18 +15362,8 @@ static void weak_callbacks(SPYContext *c) {
         else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
             spy_release(call(c, self->as.generator.origin, 1, &self));
             failure = "Exception ignored while finalizing generator ";
-        } else if (self->type == SPY_ASYNC_GENERATOR) {
-            /* No host finalizer (27.5.4): drive aclose() to completion. */
-            SPYValue *closing = value_new(c, SPY_ASYNC_GENERATOR_ATHROW), *step;
-            if (closing) {
-                closing->as.async_operation.generator = spy_retain(self);
-                closing->as.async_operation.args = value_new(c, SPY_TUPLE);
-                closing->as.async_operation.method = M_ACLOSE;
-            }
-            while (closing && (step = awaitable_method(c, closing, M_SEND, 1, &c->none))) spy_release(step);
-            spy_release(closing);
         } else if (self->type != SPY_INSTANCE) spy_release(generator_method(c, self, M_CLOSE, 0, NULL));
-        if (c->error_type[0] && self->type != SPY_MEMORYVIEW) report_unraisable(c, failure, self, NULL);
+        if (c->error_type[0]) report_unraisable(c, failure, self, NULL);
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
         /* CPython finalizes what an object's destruction frees before moving
@@ -15686,8 +15690,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (name_set(c, c->modules, name, module)) { spy_release(module); return NULL; }
         return module;
     }
-    size_t builtin = 0;
-    while (builtin < c->host_modules_len && strcmp(c->host_modules[builtin].name, name)) builtin++;
+    size_t builtin = host_module(c, name);
     int embedded = builtin < c->host_modules_len;
     if (!embedded && !c->loader) return errorf(c, "ModuleNotFoundError", "no loader installed for '%s'", name);
     SPYModuleInit init = embedded ? c->host_modules[builtin].init : NULL;
@@ -18287,7 +18290,8 @@ static void delete_evaluated(SPYContext *c, Node *n, SPYValue *object, SPYValue 
 static void deletion_error(SPYContext *c, SPYValue *object, SPYValue *key) {
     int sequence = 0;
     switch (object->type) {
-    case SPY_INSTANCE: sequence = !meta_class(object); break;
+    case SPY_INSTANCE: sequence = 1; break;
+    case SPY_CLASS: sequence = meta_class(object); break; /* its metaclass is a heap type */
     case SPY_STRING: case SPY_BYTES: case SPY_TUPLE: case SPY_RANGE: case SPY_SET: case SPY_FROZENSET: case SPY_FROZENDICT:
     case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: case SPY_MAPPINGPROXY: case SPY_MEMORYVIEW: sequence = 1; break;
     default: break;
@@ -20470,7 +20474,8 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
         spy_release(exception);
         if (result) {
             spy_release(result);
-            return spy_error(c, "RuntimeError", g->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
+            return spy_error(c, "RuntimeError", g->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" :
+                             g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" : "generator ignored GeneratorExit");
         }
         if (error_is(c, "StopIteration")) {
             SPYValue *value = stop_value(c);
@@ -27270,11 +27275,15 @@ SPYValue *spy_eval(SPYContext *c, const char *source, const char *filename) {
 SPYValue *spy_eval_interactive(SPYContext *c, const char *source, const char *filename) {
     enter(c); return leave(c, eval_source(c, source, filename, 1));
 }
+/* The final value dies here, after the last statement boundary. */
 int spy_exec(SPYContext *c, const char *source, const char *filename) {
-    SPYValue *v = spy_eval(c, source, filename);
-    if (!v) return -1;
+    enter(c);
+    SPYValue *v = eval_source(c, source, filename, 0);
+    int status = v ? 0 : -1;
     spy_release(v);
-    return 0;
+    if (!status && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
+    leave(c, NULL);
+    return status;
 }
 /* Embedding API over the evaluator's own operations. */
 SPYValue *spy_native(SPYContext *c, const char *name, SPYNativeKeywords call, void *data, void (*release)(void *)) {
@@ -27558,8 +27567,7 @@ int spy_mount(SPYContext *c, const char *directory, const char *path, int flags)
 #endif
 }
 int spy_new_module(SPYContext *c, const char *name, SPYModuleInit init) {
-    size_t i = 0;
-    while (i < c->host_modules_len && strcmp(c->host_modules[i].name, name)) i++;
+    size_t i = host_module(c, name);
     if (i == c->host_modules_len) {
         struct HostModule *grown = mem_realloc(c, c->host_modules, (i + 1) * sizeof(*grown));
         if (!grown) { spy_error(c, "MemoryError", "allocation failed"); return -1; }

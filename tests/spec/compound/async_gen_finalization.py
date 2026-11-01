@@ -1,5 +1,5 @@
 # spec: PLS-315 B.5, 27.5.4
-# description: The host's firstiter and finalizer hooks for asynchronous generators, and aclose() when there is no finalizer.
+# description: The host's firstiter and finalizer hooks for asynchronous generators, and closing without a finalizer.
 from harness import *
 
 def step(awaitable):
@@ -30,6 +30,18 @@ class sleep_zero:
         return
         yield
 
+class suspend:
+    def __await__(self):
+        yield
+
+async def suspending_cleanup():
+    try:
+        yield 1
+    finally:
+        log.append("before")
+        await suspend()
+        log.append("after")
+
 hooks = host.async_gen_hooks()
 saved = hooks
 if hooks is not None:
@@ -37,8 +49,9 @@ if hooks is not None:
     host.set_async_gen_hooks(None, None)
     assert_eq(host.async_gen_hooks(), (None, None))
 
-# No finalizer: an unreachable suspended generator is closed with aclose(),
-# whose awaitable is driven to completion.
+# No finalizer: an unreachable suspended generator is closed once, as close()
+# closes a generator: an await that completes at once lets cleanup finish, one
+# that suspends is not resumed.
 g = agen("plain")
 assert_eq(step(g.__anext__()), 1)
 del g
@@ -50,6 +63,27 @@ assert_eq(step(g.__anext__()), 1)
 del g
 host.collect()
 assert_eq(log, [("finally", "awaiting")])
+log.clear()
+g = suspending_cleanup()
+assert_eq(step(g.__anext__()), 1)
+del g
+host.collect()
+assert_eq(log, ["before"])
+log.clear()
+# Collected while its __anext__() awaitable is suspended in an await, the
+# generator is closed without the "already running" check of aclose().
+async def awaits_first():
+    try:
+        await suspend()
+        yield 1
+    finally:
+        log.append("closed")
+g = awaits_first()
+awaiting = g.__anext__()
+assert_eq(awaiting.send(None), None)
+del g, awaiting
+host.collect()
+assert_eq(log, ["closed"])
 log.clear()
 # A generator never started, or already finished, has nothing to close.
 g = agen("unstarted")

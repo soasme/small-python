@@ -1973,7 +1973,10 @@ class TextIOWrapper(_IOBase):
 
 def open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
     if hasattr(file, '__fspath__') and not isinstance(file, (str, bytes)):
-        file = file.__fspath__()
+        path = file.__fspath__()
+        if not isinstance(path, (str, bytes)):
+            raise TypeError(f"expected {type(file).__name__}.__fspath__() to return str or bytes, not {type(path).__name__}")
+        file = path
     if not isinstance(file, (str, bytes, int)) or isinstance(file, bool):
         raise TypeError(f"expected str, bytes or os.PathLike object, not {type(file).__name__}")
     if not isinstance(mode, str):

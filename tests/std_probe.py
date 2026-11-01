@@ -364,9 +364,17 @@ for case in (None, "text", ValueError(), Unprintable(), noted, chained(),
     show(f"excepthook {type(case).__name__}",
          lambda: captured(lambda: sys.excepthook(type(case), case, None)).splitlines())
 
+def functions(traceback):
+    names = []
+    while traceback is not None:
+        names.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    return names
+
+
 unraisable = []
 sys.unraisablehook = lambda args: unraisable.append(
-    (type(args).__name__, args.exc_type.__name__, str(args.exc_value), args.exc_traceback is not None,
+    (type(args).__name__, args.exc_type.__name__, str(args.exc_value), functions(args.exc_traceback),
      args.err_msg.split("<")[0], args.object))
 
 

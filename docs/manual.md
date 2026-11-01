@@ -709,8 +709,10 @@ hook that receives unraisable exceptions, and the trace and profile
 functions are settings the engine keeps and `sys` changes through the
 `_spy._setting` primitive; trace functions see the 'call', 'line',
 'return', and 'exception' events of Python frames; `sys.excepthook` and
-`sys.unraisablehook` write CPython's traceback display without source lines; `tests/std.py` checks the rest against
-CPython.
+`sys.unraisablehook` write CPython's traceback display without source lines. When a
+host registered `sys` but no program imported it, the first unraisable exception
+imports it, so the report appears as under CPython, whose `sys` is always
+loaded. `tests/std.py` checks the rest against CPython.
 
 No `weakref` module is built in. The engine keeps weak references for its
 hosts: the primitives `_weak_bind(target, reference, callback)` and
