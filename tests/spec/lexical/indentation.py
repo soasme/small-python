@@ -1,4 +1,4 @@
-# spec: PLS-315 12.3
+# spec: PLS-315 12.3, 18.2.3
 # description: INDENT/DEDENT generation, tabs, and inconsistent indentation errors.
 from harness import *
 
@@ -50,3 +50,11 @@ error = assert_syntax_error("\tif 0:\nif 0:\n if 0:\n\tif 0:\n", exception=Inden
 assert_eq((type(error), error.lineno, error.msg), (IndentationError, 1, "unexpected indent"))
 error = assert_syntax_error("if True:\n  if True:\n print(2)\n", exception=IndentationError)
 assert_eq((error.lineno, error.msg), (3, "unindent does not match any outer indentation level"))
+# 18.2.3: 99 levels of indentation, and no more.
+def nested(levels):
+    return "".join(" " * i + "if 1:\n" for i in range(levels)) + " " * levels + "pass\n"
+assert_compiles(nested(99))
+error = assert_syntax_error(nested(100))
+assert_eq((error.msg, error.lineno, error.offset, error.end_offset), ("too many levels of indentation", 101, 1, 0))
+error = assert_syntax_error("(" * 201 + ")" * 201)
+assert_eq((error.msg, error.offset, error.end_offset), ("too many nested parentheses", 201, 201))

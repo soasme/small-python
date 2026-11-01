@@ -1,4 +1,4 @@
-# spec: PLS-315 13.2.6
+# spec: PLS-315 13.2.6, 8.1
 # description: Comprehension scoping, clause order, filtering, unpacking, and errors.
 from harness import *
 
@@ -62,3 +62,10 @@ def it(name, values):
     return values
 [(a, b) for a in it("A", [1, 2]) for b in it("B", [3])]
 assert_eq(log, ["A", "B", "B"])
+# Scope analysis reports the first error in source order, whichever rule it breaks.
+error = assert_syntax_error("type T = (yield)\n((yield) for x in y)")
+assert_eq((error.msg, error.lineno), ("yield expression cannot be used within a type alias", 1))
+error = assert_syntax_error("((yield) for x in y)\ntype T = (yield)")
+assert_eq((error.msg, error.lineno), ("'yield' inside generator expression", 1))
+error = assert_syntax_error("def g():\n    [lambda a=(yield): 0 for x in y]")
+assert_eq((error.msg, error.offset, error.end_offset), ("'yield' inside list comprehension", 16, 21))

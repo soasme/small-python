@@ -43,3 +43,7 @@ assert_true(a[0] is not b[0] and a[1] is not b[1])
 # Literals and identity: immutable literal values with the same value may or may not be the same object,
 # but a tuple display with equal items compares equal.
 assert_eq((1, 2), (1, 2))
+# Dict unpacking in a set display is reported at its operator.
+for source, offset in (("{1, **a}", 5), ("{1, 2, **a, 3}", 8), ("{1, **a for a in b}", 5), ("{1, *a, **b}", 9), ("{1, **a: 2}", 5)):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, error.offset, error.end_offset), ("cannot use dict unpacking here", offset, offset + 2), source)

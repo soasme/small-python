@@ -105,10 +105,14 @@ assert_eq(spec_lazy_target.attr, "lazy value")
 assert_eq(spec_lazy_log.events, ["loaded"])
 lazy from spec_mod import value as lazy_value
 assert_eq(lazy_value, 1)
-assert_syntax_error("def f():\n    lazy import x\n")
-assert_syntax_error("class C:\n    lazy import x\n")
-assert_syntax_error("try:\n    lazy import x\nexcept: pass\n")
-assert_syntax_error("lazy from x import *\n")
+for source, message, line, offset, end_offset in (
+        ("def f():\n    lazy import p.q\n", "lazy import not allowed inside functions", 2, 5, 20),
+        ("def f():\n    lazy from r import s\n", "lazy from ... import not allowed inside functions", 2, 5, 25),
+        ("class C:\n    lazy import x\n", "lazy import not allowed inside classes", 2, 5, 18),
+        ("try:\n    lazy import x\nexcept: pass\n", "lazy import not allowed inside try/except blocks", 2, 5, 18),
+        ("lazy from x import *\n", "lazy from ... import * is not allowed", 1, 1, 21)):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, error.lineno, error.offset, error.end_offset), (message, line, offset, end_offset), source)
 assert_syntax_error("lazy from __future__ import annotations\n")
 # The submodule of a lazy dotted import waits in %LazyModules% until it is
 # first looked up as an attribute.

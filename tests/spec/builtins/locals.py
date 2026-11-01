@@ -38,3 +38,29 @@ def g(p, q=5):
 
 
 assert g(q=2, p=1) == ["p", "q"]
+
+
+# Cells that are not parameters follow the other locals in co_cellvars order
+# (parameter cells first, then sorted), and free names come last.
+def cells(y, x, *, w):
+    d = 1
+    c = 2
+    def inner(): return x, y, w, c, d
+    return list(locals())
+
+
+assert cells(1, 2, w=3) == ["y", "x", "w", "inner", "c", "d"]
+assert cells.__code__.co_cellvars == ("y", "x", "w", "c", "d")
+
+
+def outer():
+    m = 1
+    def middle():
+        b = 2
+        a = 1
+        def innermost(): return a, b, m
+        return list(locals()), middle.__code__.co_freevars
+    return middle()
+
+
+assert outer() == (["innermost", "a", "b", "m", "middle"], ("m", "middle"))

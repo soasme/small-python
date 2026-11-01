@@ -2,6 +2,7 @@
 #include "../spy-std.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +63,77 @@ static void execute(SPYContext *c, const char *source) {
         fprintf(stderr, "api.py:%zu: %s: %s\n", spy_error_line(c), spy_error_type(c), spy_error_message(c));
         abort();
     }
+}
+/* OSError(errno, strerror) is the subclass for the host's value of errno. */
+static void errno_classes(void) {
+    static const struct { int code; const char *name; } classes[] = {
+#ifdef EAGAIN
+        {EAGAIN, "BlockingIOError"},
+#endif
+#ifdef EWOULDBLOCK
+        {EWOULDBLOCK, "BlockingIOError"},
+#endif
+#ifdef EALREADY
+        {EALREADY, "BlockingIOError"},
+#endif
+#ifdef EINPROGRESS
+        {EINPROGRESS, "BlockingIOError"},
+#endif
+#ifdef ECHILD
+        {ECHILD, "ChildProcessError"},
+#endif
+#ifdef EPIPE
+        {EPIPE, "BrokenPipeError"},
+#endif
+#ifdef ESHUTDOWN
+        {ESHUTDOWN, "BrokenPipeError"},
+#endif
+#ifdef ECONNABORTED
+        {ECONNABORTED, "ConnectionAbortedError"},
+#endif
+#ifdef ECONNREFUSED
+        {ECONNREFUSED, "ConnectionRefusedError"},
+#endif
+#ifdef ECONNRESET
+        {ECONNRESET, "ConnectionResetError"},
+#endif
+#ifdef EEXIST
+        {EEXIST, "FileExistsError"},
+#endif
+#ifdef ENOENT
+        {ENOENT, "FileNotFoundError"},
+#endif
+#ifdef EISDIR
+        {EISDIR, "IsADirectoryError"},
+#endif
+#ifdef ENOTDIR
+        {ENOTDIR, "NotADirectoryError"},
+#endif
+#ifdef EINTR
+        {EINTR, "InterruptedError"},
+#endif
+#ifdef EACCES
+        {EACCES, "PermissionError"},
+#endif
+#ifdef EPERM
+        {EPERM, "PermissionError"},
+#endif
+#ifdef ESRCH
+        {ESRCH, "ProcessLookupError"},
+#endif
+#ifdef ETIMEDOUT
+        {ETIMEDOUT, "TimeoutError"},
+#endif
+        {0, "OSError"}, {-1, "OSError"},
+    };
+    SPYContext *c = spy_context_new();
+    assert(c);
+    for (size_t i = 0; i < sizeof(classes) / sizeof(*classes); i++) {
+        char source[128];
+        snprintf(source, sizeof(source), "assert type(OSError(%d, 'x')).__name__ == '%s'\n", classes[i].code, classes[i].name);
+        execute(c, source);
+    }
+    spy_context_free(c);
 }
 /* Mappings can close cycles through class bodies, closures, and exec locals. */
 static void namespace_cycles(void) {
@@ -150,6 +222,7 @@ static SPYValue *raise_value_error(SPYContext *c, size_t argc, SPYValue *const *
 }
 int main(void) {
     namespace_cycles();
+    errno_classes();
     {
         SPYContext *source = spy_context_new();
         assert(source);

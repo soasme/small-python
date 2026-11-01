@@ -66,3 +66,20 @@ assert_true(all(len(p) == 4 for p in code.co_positions()))
 assert_true(repr(code).startswith("<code object sample at "))
 assert_true(repr(code).endswith(", line 5>"))
 assert_true('file "' in repr(code))
+# co_names counts what a function evaluates of its nested definitions
+# (decorators, defaults, a plain class's bases and keywords, a generator
+# expression's first iterable) and the names its imports use.
+def uses():
+    @dec
+    def f(x=y, *, z=w) -> r: pass
+    class C(B, metaclass=M): q = 1
+    class D[T](E, F=G): pass
+    lambda a=b: c
+    (i for i in it)
+    del deleted
+    import a.b.c
+    import d.e as g2
+    from h.i import j as k, l
+    from . import m
+    return f.attr
+assert_eq(uses.__code__.co_names, ("dec", "y", "w", "B", "M", "b", "it", "a.b.c", "d.e", "e", "h.i", "j", "l", "", "m", "attr"))
