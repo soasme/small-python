@@ -35,6 +35,54 @@ assert_syntax_error("lambda: 1 = 1")
 assert_syntax_error("(yield) = 1") if False else None
 *star, = [1, 2]
 assert_eq(star, [1, 2])
+# Every item is taken before the first store, which may change the source.
+source = [1, 2, 3]
+class Clears:
+    def __setattr__(self, name, value):
+        source.clear()
+        object.__setattr__(self, name, value)
+clears = Clears()
+clears.first, second, third = source
+assert_eq((clears.first, second, third, source), (1, 2, 3, []))
+source = [1, 2]
+source[1], other = source
+assert_eq((source, other), ([1, 1], 2))
+class Backwards(list):
+    def __iter__(self): return iter(self[::-1])
+a, b = Backwards([1, 2])
+assert_eq((a, b), (2, 1))
+class Pair(tuple):
+    def __iter__(self): return iter("xy")
+a, b = Pair((1, 2))
+assert_eq((a, b), ("x", "y"))
+e = assert_raises(ValueError, run, "a, b = [1, 2, 3]")
+assert_eq(str(e), "too many values to unpack (expected 2, got 3)")
+# An item that raises stops the assignment before any store; a store that
+# raises leaves the targets before it assigned.
+def item_raises():
+    p, q = 1, 2
+    try:
+        p, q = 3, 1 // 0
+    except ZeroDivisionError:
+        pass
+    return p, q
+assert_eq(item_raises(), (1, 2))
+def store_raises(value):
+    p = 0
+    try:
+        p, (1).real = value
+    except AttributeError:
+        pass
+    return p
+assert_eq(store_raises((5, 6)), 5)
+def display_store_raises():
+    p = 0
+    try:
+        p, (1).real = 5, 6
+    except AttributeError:
+        pass
+    return p
+assert_eq(display_store_raises(), 5)
 [] = []
 () = ()
 

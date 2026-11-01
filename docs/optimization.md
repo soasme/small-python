@@ -175,6 +175,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A yield statement drops what is sent](#a-yield-statement-drops-what-is-sent) | -4.1% (generators); M2: generators -4.2% |
 | [Keys of one kind sort without dispatch](#keys-of-one-kind-sort-without-dispatch) | -23.8% (sort); M2: sort -11.6% |
 | [A profile-guided build](#a-profile-guided-build) | M2 time: generators -21%, fib -16%, strings -14%, classes -12%; loop +2% |
+| [An unpacking reads a tuple or list in place](#an-unpacking-reads-a-tuple-or-list-in-place) | `a, b = t`: -76%, `a, b = b, a`: -73%; programs within 1% |
 
 ### Releasing a number or string frees it at once
 
@@ -1213,6 +1214,25 @@ CPython 127.7 ms). Inlining a copy of the merge for each kind saved
 more instructions (-28.9%) but made sorting tuples 50% slower on the
 M2, so one merge function tests the kind at each comparison, a branch
 that is always predicted.
+
+### An unpacking reads a tuple or list in place
+
+`a, b = t` made a list, took an iterator of `t` and appended each item,
+ticking for each, before storing the targets: 59 ns an assignment on the
+M2, against CPython's 2.5 ns. As CPython's `UNPACK_SEQUENCE` does, an
+exact tuple or list with an item for each target and no starred target
+is now read in place. Its items are held first, since storing a target
+can run code that changes a list being unpacked; every other value is
+unpacked as before, with the same errors. A target tuple given a tuple
+display of as many items, `a, b = b, a`, evaluates the items and stores
+them without making the tuple at all, which nothing could see; the
+parser marks such assignments.
+
+Two million assignments in a loop on the M2: `a, b = t` 145 → 54 ms,
+`a, b = b, a` 207 → 51 ms (an empty loop takes 26.5 ms). Instructions of
+the programs, which seldom unpack: +0.2% at most. Wall time averaged
+over eight code layouts: generators -1.7%, nbody +0.7%, fib +0.6%, the
+rest within 0.5%.
 
 ### A profile-guided build
 

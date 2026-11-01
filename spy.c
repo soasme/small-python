@@ -100,7 +100,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_LAZY = 128, F_FUTURE = 256, F_SETUP_ANNOTATIONS = 512, F_LAZY_COMPAT = 1024, F_OPERATOR = 2048,
        F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */,
        F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */,
-       F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */ };
+       F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
+       F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -7618,6 +7619,13 @@ static Node *operator_right(Node *n) {
         n->kind == N_BINARY && n->op != O_AND && n->op != O_OR ? n->b : NULL;
     return right && item_at_hand(n->a) && item_at_hand(right) ? right : NULL;
 }
+/* Whether tuples a and b have the same number of items, at most 8, and
+ * neither has a starred one. */
+static int paired_items(Node *a, Node *b) {
+    size_t count = 0;
+    for (; a && b && a->kind != N_STAR && b->kind != N_STAR && count < 8; a = a->next, b = b->next) count++;
+    return !a && !b;
+}
 /* An operand eval_operand can take without a second eval. */
 static int direct_operand(Node *n) { return n->kind == N_CALL || (n->kind == N_ATTR && n->a->kind == N_NAME); }
 static int plain_call(Node *n) {
@@ -7749,6 +7757,8 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (operator_right(n)) n->flags |= F_OPERATOR;
             if (n->kind == N_BINARY && n->a && n->b && (direct_operand(n->a) || direct_operand(n->b))) n->flags |= F_DIRECT_OPERAND;
             if (n->kind == N_CALL && plain_call(n)) n->flags |= F_PLAIN_CALL | (n->a->kind == N_NAME ? F_NAMED_CALLEE : 0);
+            if (n->kind == N_ASSIGN && n->op == '=' && !n->args && n->a->kind == N_TUPLE && n->b->kind == N_TUPLE &&
+                paired_items(n->a->args, n->b->args)) n->flags |= F_PAIRED;
         }
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
@@ -16203,6 +16213,29 @@ static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value
     return unpack_values(c, f, n, value, count, star);
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value);
+static ALWAYS_INLINE int store_target(SPYContext *, Frame *, Node *, SPYValue *);
+/* Store value's items in target list n. An exact tuple or list with an
+ * item for each target and no star, as CPython's UNPACK_SEQUENCE takes it,
+ * is read in place; its items are held first, since a store may change it. */
+static NO_INLINE int store_items(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    SPYValue *held[8];
+    size_t count = 0;
+    int star = 0;
+    for (Node *item = n->args; item; item = item->next) { count++; star |= item->kind == N_STAR; }
+    if (!star && count <= 8 && (value->type == SPY_TUPLE || value->type == SPY_LIST) && value->as.seq.len == count) {
+        for (size_t i = 0; i < count; i++) held[i] = spy_retain(value->as.seq.items[i]);
+        size_t i = 0;
+        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) store_target(c, f, item, held[i++]);
+        while (count) spy_release(held[--count]);
+        return c->error_type[0] ? -1 : 0;
+    }
+    SPYValue *items = unpack_target(c, f, n, value);
+    if (!items) return -1;
+    size_t index = 0;
+    for (Node *item = n->args; item && !c->error_type[0]; item = item->next)
+        store_target(c, f, item->kind == N_STAR ? item->a : item, items->as.seq.items[index++]);
+    spy_release(items); return c->error_type[0] ? -1 : 0;
+}
 /* A name stored in its remembered slot cannot fail, so it skips the step
  * bookkeeping unless a trace function watches, as eval's names do. */
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
@@ -16252,12 +16285,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
         spy_release(container); spy_release(key);
         return status;
     }
-    SPYValue *items = unpack_target(c, f, n, value);
-    if (!items) return -1;
-    size_t index = 0;
-    for (Node *item = n->args; item && !c->error_type[0]; item = item->next)
-        store_target(c, f, item->kind == N_STAR ? item->a : item, items->as.seq.items[index++]);
-    spy_release(items); return c->error_type[0] ? -1 : 0;
+    return store_items(c, f, n, value);
 }
 static int machine_push(SPYContext *, Machine *, SPYValue *);
 static Result run_machine(SPYContext *, SPYValue *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
@@ -16446,8 +16474,23 @@ static SPYValue *string_append(SPYContext *c, SPYValue *s, SPYValue *tail) {
     s->as.string.chars = s->as.string.chars && tail->as.string.chars ? s->as.string.chars + tail->as.string.chars - 1 : 0;
     return spy_retain(s);
 }
+/* A target list given a tuple display of as many items, as in a, b = b, a:
+ * the items are evaluated in order and stored left to right without the
+ * tuple, which nothing could see. */
+static NO_INLINE int assign_items(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *held[8];
+    size_t count = 0;
+    Node *item = n->b->args;
+    for (; item && (held[count] = eval(c, f, item)); item = item->next) count++;
+    size_t i = 0;
+    for (Node *target = item ? NULL : n->a->args; target && !c->error_type[0]; target = target->next)
+        store_target(c, f, target, held[i++]);
+    while (count) spy_release(held[--count]);
+    return c->error_type[0] ? -1 : 0;
+}
 static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n) {
     if (n->op == '=') {
+        if (n->flags & F_PAIRED) return assign_items(c, f, n);
         SPYValue *value = eval(c, f, n->b);
         if (!value) return -1;
         int status = store_target(c, f, n->a, value);
