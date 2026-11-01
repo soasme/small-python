@@ -182,6 +182,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A free variable is remembered in its enclosing environment](#a-free-variable-is-remembered-in-its-enclosing-environment) | closure call: -16%; programs within 0.5% |
 | [A list, tuple or range iterates without a protocol search](#a-list-tuple-or-range-iterates-without-a-protocol-search) | `[k for k in range(3)]`: -4%; M2: nbody -1.5%, strings -1.1% |
 | [A comprehension reuses its environment](#a-comprehension-reuses-its-environment) | `[k for k in range(3)]`: -5.5%; M2: strings -0.7% |
+| [A growing buffer moves through the spare blocks](#a-growing-buffer-moves-through-the-spare-blocks) | M2: strings -6.8%, peak memory 11.7 → 3.1 MiB |
 
 ### Releasing a number or string frees it at once
 
@@ -1308,6 +1309,19 @@ comprehension. One a closure captured is freed as before. Two million
 has two callers and is marked inline: left to the compiler, it was
 called out of line and fib took 1.6% longer. Wall time averaged over
 eight code layouts: strings -0.7%, the rest within 0.5%.
+
+### A growing buffer moves through the spare blocks
+
+Released blocks of up to 256 bytes wait in per-size spare lists, but a
+block resized between those sizes went to `realloc`, which never takes
+from them. A buffer that starts small and grows, as `join` and an
+f-string's do, left its last block on a larger size's list each time,
+and fresh allocations seldom came for it: `strings` held 8 MiB of such
+blocks at its end. A resize to or from a small size now takes the new
+block from the spare lists and returns the old one there; only a resize
+between two large sizes calls `realloc`. Peak memory of `strings`:
+11.7 → 3.1 MiB. Wall time averaged over eight code layouts: strings
+-6.8%, the rest within 0.5%.
 
 ### A profile-guided build
 

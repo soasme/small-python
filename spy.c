@@ -652,17 +652,37 @@ static NO_INLINE int meter(SPYContext *c, size_t old, size_t n, int mode) {
 #endif
 /* The size class of a block of n bytes: room for 16 (k + 1) bytes. */
 static size_t block_class(size_t n) { return n ? (n - 1) / 16 : 0; }
-/* A block of n bytes, zeroed in mode ZERO, or b resized to n. */
+/* A block of class k, zeroed in mode ZERO: a released one of that size,
+ * or a new one. */
+static MemHead *block_take(SPYContext *c, size_t k, int mode) {
+    MemHead *b = k < 16 ? c->spare_blocks[k] : NULL;
+    if (!b) return mode & ZERO ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1));
+    if (reuse_fails()) return NULL;
+    cache_take(b, sizeof(MemHead) + 16 * (k + 1));
+    c->spare_blocks[k] = b->next;
+    if (mode & ZERO) memset(b + 1, 0, 16 * (k + 1));
+    return b;
+}
+/* Release block b of class k: a small one waits for block_take. */
+static void block_give(SPYContext *c, MemHead *b, size_t k) {
+    if (k >= 16) { free(b); return; }
+    b->next = c->spare_blocks[k]; c->spare_blocks[k] = b;
+    cache_put(b, sizeof(MemHead) + 16 * (k + 1));
+}
+/* A block of n bytes, zeroed in mode ZERO, or b resized to n. A resize to
+ * or from a small class moves the bytes through the spare lists, so a
+ * buffer that grows does not leave a released block behind each time. */
 static NO_INLINE void *mem_block(SPYContext *c, MemHead *b, size_t n, int mode) {
-    size_t old = b ? b->head.size : 0, k = block_class(n);
+    size_t old = b ? b->head.size : 0, k = block_class(n), j = block_class(old);
     if (n > old && (n > SIZE_MAX / 2 || (c->watch && meter(c, old, n, mode)))) return NULL;
-    if (b) { if (k != block_class(old) && !(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) goto failed; }
-    else if (k < 16 && c->spare_blocks[k]) {
-        if (reuse_fails()) goto failed;
-        b = c->spare_blocks[k]; cache_take(b, sizeof(MemHead) + 16 * (k + 1));
-        c->spare_blocks[k] = b->next;
-        if (mode & ZERO) memset(b + 1, 0, 16 * (k + 1));
-    } else if (!(b = mode & ZERO ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1)))) goto failed;
+    if (!b) { if (!(b = block_take(c, k, mode))) goto failed; }
+    else if (k != j && k >= 16 && j >= 16) { if (!(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) goto failed; }
+    else if (k != j) {
+        MemHead *moved = block_take(c, k, 0);
+        if (!moved) goto failed;
+        memcpy(moved + 1, b + 1, old < n ? old : n);
+        block_give(c, b, j); b = moved;
+    }
     c->memory += n - old;
     b->head.size = n; b->head.c = c;
     return b + 1;
@@ -676,11 +696,8 @@ static NO_INLINE void mem_free(void *p) {
     if (!p) return;
     MemHead *b = (MemHead *)p - 1;
     SPYContext *c = b->head.c;
-    size_t n = b->head.size, k = block_class(n);
-    c->memory -= n;
-    if (k >= 16) { free(b); return; }
-    b->next = c->spare_blocks[k]; c->spare_blocks[k] = b;
-    cache_put(b, sizeof(MemHead) + 16 * (k + 1));
+    c->memory -= b->head.size;
+    block_give(c, b, block_class(b->head.size));
 }
 static void *allocate(SPYContext *c, size_t n) {
     void *p = mem_block(c, NULL, n, ZERO);
