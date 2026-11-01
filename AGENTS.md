@@ -240,6 +240,12 @@
   ThreadSanitizer, and `make coverage` shows what nothing executes. They need clang with compiler-rt (Ubuntu: `libclang-rt-18-dev`).
   A finding lands in `.obj/fuzz/`; reproduce it with `./fuzz/<target> FILE`,
   fix the engine, and keep the input as a test.
+- Every line of the engine (`spy.c`, `spyc.c`, `spy-std.c`, `cli.c`,
+  `spy-worker.c`) must run under the tests; `make coverage` fails and lists
+  the lines that do not. Cover `spy.c` with spec tests wherever the standard
+  states the behaviour, and reach host boundaries and allocation failures
+  through `tests/api` and `tests/oom`. Delete code no input can reach instead
+  of exempting it.
 
 ## Code taste
 

@@ -341,7 +341,8 @@ sanitize:
 	status=$$?; if [ -s $(SANITIZE_DIR)/report ]; then cat $(SANITIZE_DIR)/report; exit 1; fi; exit $$status
 
 # Line and branch coverage of make test and the package tests, with clang:
-# code no test executes is code no sanitizer run has checked. The profile
+# code no test executes is code no sanitizer run has checked, so every line of
+# the engine must run (tools/coverage.py lists the ones that do not). The profile
 # path is compiled in, since the test runners clear the environment, and
 # mapped at startup (%c), before the worker's sandbox forbids opening it.
 COVERAGE_DIR = $(abspath $(OBJDIR))/coverage
@@ -359,6 +360,9 @@ coverage:
 	$(LLVM_COV) show -format=html -output-dir=$(COVERAGE_DIR)/html -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy \
 		-object ./spyc -object ./tests/run-spec -object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
 	@echo "Annotated sources: $(COVERAGE_DIR)/html/index.html"
+	$(LLVM_COV) export -format=lcov -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./spyc -object ./tests/run-spec \
+		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c > $(COVERAGE_DIR)/all.lcov
+	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc.c spy-std.c cli.c spy-worker.c
 
 clean:
 	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)

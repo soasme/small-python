@@ -265,7 +265,9 @@ MemorySanitizer.
 These tools report the memory errors that the tests and fuzzed inputs reach;
 they cannot show that code nothing executes is free of them. `make coverage`
 (clang) measures what `make test` and the package tests execute, with an
-annotated copy of every source under `.obj/coverage/html`. Linux CI runs
+annotated copy of every source under `.obj/coverage/html`. It fails unless every
+line of the engine sources runs, and lists by function the lines that do not
+(`tools/coverage.py`). Linux CI runs
 `make sanitize`. On the initial macOS host, AddressSanitizer hung during its own
 initialization; `make SANITIZERS=undefined sanitize` passed there.
 
