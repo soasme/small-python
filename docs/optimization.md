@@ -179,6 +179,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A method without arguments names itself only for an error](#a-method-without-arguments-names-itself-only-for-an-error) | `s.upper()`: -60%; M2: strings -3.7% |
 | [`in` searches a list or tuple in place](#in-searches-a-list-or-tuple-in-place) | `3 in l`: -46%; programs within 0.4% |
 | [A builtin class call names itself only for an error](#a-builtin-class-call-names-itself-only-for-an-error) | -5.4% (dicts), -4.0% (bigint); `str(i)`: -15%; M2: dicts -3.2% |
+| [A free variable is remembered in its enclosing environment](#a-free-variable-is-remembered-in-its-enclosing-environment) | closure call: -16%; programs within 0.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -1268,6 +1269,19 @@ read only when an error is raised. Instructions: dicts -5.4%, bigint
 -4.0%, nbody -1.7%. Two million `str(i)` on the M2: 126 → 107 ms. Wall
 time averaged over eight code layouts: dicts -3.2%, nbody -1.2%,
 strings -0.8%, the rest within 0.4%.
+
+### A free variable is remembered in its enclosing environment
+
+A function reading a name its enclosing function binds looked the name
+up in the enclosing scope's symbols and then in its environment, on every
+read. The read now remembers the entry's position and the symbol's key,
+as reads of locals do; only environments of that scope hold the key, so
+a matching key at that position is the binding the lookup would find,
+in whichever call of the enclosing function made it. The check sits in
+the out-of-line part of the lookup: inlined, it slowed every program by
+up to 1%. Two million calls of a closure returning a free variable on
+the M2: 102 → 86 ms. Wall time averaged over eight code layouts: every
+program within 0.5%.
 
 ### A profile-guided build
 

@@ -124,3 +124,38 @@ assert_true("__builtins__" in g)
 l = {}
 exec("w = 2\ndef f(): return w", {}, l)
 assert_raises(NameError, l["f"])
+
+# A free variable read again finds each enclosing call's own binding, at
+# whatever position, through rebinding and deletion there.
+def enclosing(first):
+    if first:
+        a = 1; v = "first"
+    else:
+        v = "second"; a = 2; b = 3
+    def read(): return v
+    def rebind(value):
+        nonlocal v
+        v = value
+    def drop():
+        nonlocal v
+        del v
+    return read, rebind, drop
+read1, rebind1, drop1 = enclosing(True)
+read2, rebind2, drop2 = enclosing(False)
+for _ in range(3):
+    assert_eq((read1(), read2()), ("first", "second"))
+rebind1("again")
+assert_eq((read1(), read2()), ("again", "second"))
+drop2()
+assert_raises(NameError, read2, message="cannot access free variable 'v' where it is not associated with a value in enclosing scope")
+assert_eq(read1(), "again")
+rebind2("back")
+assert_eq((read1(), read2()), ("again", "back"))
+def method_free():
+    v = "outer"
+    class K:
+        v = "class"
+        def m(self): return v
+    return K().m
+m = method_free()
+assert_eq((m(), m()), ("outer", "outer"))

@@ -2691,13 +2691,15 @@ static ALWAYS_INLINE SPYValue *name_fast(SPYValue *env, Node *n) {
 static NO_INLINE SPYValue *name_outer(SPYValue *env, Node *n) {
     SPYValue *e = env;
     Scope *scope = n->slot_scope;
-    /* A name last found further out than the running function's scope;
-     * a method's global past its class cell environment, which binds only
-     * dunder names, when remembered in the module's dictionary. */
+    /* A name last found further out than the running function's scope:
+     * remembered in the enclosing function's environment, or a method's
+     * global past its class cell environment, which binds only dunder
+     * names, remembered in the module's dictionary. */
     if (scope && n->slot_kind == NAME_PARENT && env->type == V_ENV && env->as.map.scope == scope && plain_locals(env, scope)) {
         e = env->as.map.parent;
-        Entry *entry = e->type == V_ENV && e->as.map.flags == 4 && n->text[0] != '_' && e->as.map.parent->type == SPY_DICT ?
-            remembered_global(e->as.map.parent, n) : NULL;
+        Entry *entry = e->type != V_ENV ? NULL : e->as.map.flags == 4 ?
+            n->text[0] != '_' && e->as.map.parent->type == SPY_DICT ? remembered_global(e->as.map.parent, n) : NULL :
+            (entry = remembered_local(e, n)) && plain_locals(e, e->as.map.scope) ? entry : NULL;
         if (entry) return entry->value->type == V_UNBOUND || entry->value->type == SPY_LAZY_IMPORT ? NULL : entry->value;
     }
     for (; e; e = e->as.map.parent) {
@@ -2719,6 +2721,12 @@ static NO_INLINE SPYValue *name_outer(SPYValue *env, Node *n) {
             }
             if (binding == NAME_PARENT) continue;
             if (!(entry = function_slot(e, n, key, e == env))) return NULL;
+            /* A free name of env's scope bound by its parent, found there
+             * next time: only that scope's environments hold its symbol's
+             * key. */
+            if (e != env && e == env->as.map.parent && scope == env->as.map.scope) {
+                n->slot = (size_t)(entry - e->as.map.items); n->slot_key = key;
+            }
         }
         SPYValue *value = entry->value;
         return value->type == V_UNBOUND || value->type == SPY_LAZY_IMPORT ? NULL : value;
