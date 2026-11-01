@@ -38,3 +38,16 @@ for value in ([1], (1, 2), bytearray(b"ab")):
     assert_eq(assert_raises(MemoryError, lambda: value * huge).args, ())
 items = [1]
 assert_eq(assert_raises(MemoryError, items.__imul__, huge).args, ())
+
+# Sorting is stable and orders keys by <, whatever their kinds (25.1.4).
+values = [(i * 7919) % 101 for i in range(300)]
+by_less = lambda keys: all(not keys[i + 1] < keys[i] for i in range(len(keys) - 1))
+for keys in (values, [v / 8 for v in values], [(v % 3, -v) for v in values], [(v % 3,) * (v % 3) for v in values],
+             values + [2 ** 70], [(1, 2 ** 70), (1, 2)] + [(v,) for v in values], values + [1.5], [True, 0, 2], []):
+    for reverse in (False, True):
+        ordered = sorted(keys, reverse=reverse)
+        assert_true(by_less(ordered[::-1] if reverse else ordered))
+        assert_eq(sorted(ordered), sorted(keys))
+pairs = sorted(range(60), key=lambda v: (v % 4, v % 2), reverse=True)
+assert_eq(pairs[:5], [3, 7, 11, 15, 19])
+assert_eq(sorted(range(30), key=lambda v: (v % 3) / 2)[:4], [0, 3, 6, 9])

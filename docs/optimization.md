@@ -1197,6 +1197,21 @@ generators 114.6 -> 109.7 ms (-4.2%), fib -3.3%; nbody +1.7%, strings
 +2% and classes +1% in three runs each, with their instructions
 identical: code placement again.
 
+### Keys of one kind sort without dispatch
+
+Every comparison of a sort went through `plain_less`, which tests both
+keys' types, and then tested for a pending error. As CPython's
+`list.sort` does, a sort now looks at its keys once: when all are small
+ints, all floats, or all tuples of small ints, its comparisons read the
+numbers directly and no comparison can raise. Other keys compare as
+before. The order is the one `<` gives, ties keep their order, and the
+merge itself is unchanged. Instructions: sort -23.8% (969.4 → 739.0 M),
+the rest unchanged. On the M2 sort took 137.2 → 121.3 ms (-11.6%;
+CPython 127.7 ms). Inlining a copy of the merge for each kind saved
+more instructions (-28.9%) but made sorting tuples 50% slower on the
+M2, so one merge function tests the kind at each comparison, a branch
+that is always predicted.
+
 ## Tried and left out
 
 - **Function bodies on the machine, toward calls without C recursion.**
