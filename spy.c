@@ -82,7 +82,8 @@ enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
 typedef struct { const char *name; unsigned flags; size_t line; Node *declared; int64_t hash; SPYValue *key; } Symbol;
 /* order: the symbols of a plain function environment's entries, in the
  * order the entries keep them, once its first environment is made. kept:
- * up to KEPT environments its calls returned when nothing else held them,
+ * up to KEPT environments its calls (or a comprehension's runs) returned
+ * when nothing else held them,
  * unlinked, chained through their parent, each with its storage and the
  * symbol keys (owned) for the next call. */
 /* nodes counts the scope's own nodes, which run at most once between two
@@ -14530,18 +14531,19 @@ static SPYValue *kept_env(SPYContext *c, Scope *scope) {
     memset(env, 0, offsetof(SPYValue, as));
     return value_link(c, env, V_ENV);
 }
-/* Release a function's environment, after its call left its frame. One
+/* Release a function's environment, after its call left its frame, or a
+ * list, set or dict comprehension's after its run. One
  * that only its call holds, as most do, drops its locals from the last, as
  * CPython clears a frame, and then its parent and unit, without the general
  * walk over a value's edges; a plain one is kept at its call's depth. */
-static void release_locals(SPYValue *env) {
+static ALWAYS_INLINE void release_locals(SPYValue *env) {
     if (env->refs != 1 || env->weak || env->as.map.index || env->as.map.namespace || env->as.map.class_cell || env->as.map.base) {
         spy_release(env); return;
     }
     SPYContext *c = env->ctx;
     Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
-    int keep = env->as.map.keyed && scope->kept_len < KEPT && !env->as.map.flags && env->as.map.len == scope->order_len;
+    int keep = env->as.map.keyed && scope->kept_len < KEPT && !(env->as.map.flags & ~2) && env->as.map.len == scope->order_len;
     for (size_t i = map_used(env); i--;)
         if (items[i].key) { if (!keep) spy_release(items[i].key); spy_release(items[i].value); }
     SPYValue *parent = env->as.map.parent, *unit = env->as.map.unit;
@@ -16315,7 +16317,9 @@ static Result run_machine(SPYContext *, SPYValue *, SPYValue *, SPYValue *, size
 static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
     SPYValue *iterator = n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source);
     if (!iterator) return NULL;
-    SPYValue *env = value_new(c, V_ENV);
+    int eager = n->op != N_TUPLE && !n->asynchronous;
+    SPYValue *env = eager ? kept_env(c, n->scope) : NULL;
+    if (!env) env = value_new(c, V_ENV);
     SPYValue *result = env ? value_new(c, n->asynchronous ?
         (n->op == N_TUPLE ? SPY_ASYNC_GENERATOR : SPY_COROUTINE) : SPY_GENERATOR) : NULL;
     if (result) {
@@ -16325,7 +16329,8 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
         env->as.map.parent = spy_retain(outer);
         env->as.map.scope = n->scope;
         env->as.map.unit = spy_retain(f->unit);
-        declare_locals(c, env);
+        if (env->as.map.items) open_locals(c, env, 0, NULL);
+        else declare_locals(c, env);
         result->as.generator.env = spy_retain(env);
         result->as.generator.unit = spy_retain(f->unit);
         result->as.generator.node = n;
@@ -16339,9 +16344,10 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
     }
     spy_release(iterator); spy_release(env);
     if (c->error_type[0]) { spy_release(result); return NULL; }
-    if (n->op != N_TUPLE && !n->asynchronous) {
+    if (eager) {
         Result value = run_machine(c, result, NULL, NULL, 0, NULL);
-        spy_release(result);
+        env = result->as.generator.env; result->as.generator.env = NULL;
+        spy_release(result); release_locals(env);
         if (value.flow == FLOW_RETURN) return value.value;
         spy_release(value.value);
         return c->error_type[0] ? NULL : spy_error(c, "RuntimeError", "synchronous comprehension suspended");

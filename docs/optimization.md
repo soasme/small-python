@@ -181,6 +181,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A builtin class call names itself only for an error](#a-builtin-class-call-names-itself-only-for-an-error) | -5.4% (dicts), -4.0% (bigint); `str(i)`: -15%; M2: dicts -3.2% |
 | [A free variable is remembered in its enclosing environment](#a-free-variable-is-remembered-in-its-enclosing-environment) | closure call: -16%; programs within 0.5% |
 | [A list, tuple or range iterates without a protocol search](#a-list-tuple-or-range-iterates-without-a-protocol-search) | `[k for k in range(3)]`: -4%; M2: nbody -1.5%, strings -1.1% |
+| [A comprehension reuses its environment](#a-comprehension-reuses-its-environment) | `[k for k in range(3)]`: -5.5%; M2: strings -0.7% |
 
 ### Releasing a number or string frees it at once
 
@@ -1294,6 +1295,19 @@ so it now gets its iterator first. Two million `iter(t)` on the M2:
 125 → 114 ms; `[k for k in range(3)]`: 499 → 480 ms. Wall time averaged
 over eight code layouts: nbody -1.5%, strings -1.1%, the rest within
 0.5%.
+
+### A comprehension reuses its environment
+
+A list, set or dict comprehension made a fresh environment for its
+variables on every run, entries and keys included, and freed it with the
+general walk over a generator's edges. It now takes and returns one the
+way a function call does: when only the run held it, the environment
+keeps its storage and keys for the next run, up to four for each
+comprehension. One a closure captured is freed as before. Two million
+`[k for k in range(3)]` on the M2: 472 → 446 ms. `release_locals` now
+has two callers and is marked inline: left to the compiler, it was
+called out of line and fib took 1.6% longer. Wall time averaged over
+eight code layouts: strings -0.7%, the rest within 0.5%.
 
 ### A profile-guided build
 

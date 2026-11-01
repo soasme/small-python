@@ -69,3 +69,22 @@ error = assert_syntax_error("((yield) for x in y)\ntype T = (yield)")
 assert_eq((error.msg, error.lineno), ("'yield' inside generator expression", 1))
 error = assert_syntax_error("def g():\n    [lambda a=(yield): 0 for x in y]")
 assert_eq((error.msg, error.offset, error.end_offset), ("'yield' inside list comprehension", 16, 21))
+
+# Each run of a comprehension binds its own variables, even when an
+# earlier run's closures still see theirs, recursion runs it again inside
+# itself, or a run stopped with an exception.
+def closures():
+    return [lambda: k for k in range(3)]
+first = closures()
+second = closures()
+assert_eq([f() for f in first] + [f() for f in second], [2, 2, 2, 2, 2, 2])
+assert_true(first[0].__closure__[0] is not second[0].__closure__[0])
+def depth(n):
+    return [k + sum(depth(n - 1)) for k in range(2)] if n else [0]
+assert_eq([depth(n) for n in range(4)], [[0], [0, 1], [1, 2], [3, 4]])
+def raising(stop):
+    return [1 // (k - stop) for k in range(3)]
+for _ in range(6):
+    assert_raises(ZeroDivisionError, raising, 1)
+    assert_eq(raising(5), [-1, -1, -1])
+assert_eq({k: [j for j in range(k)] for k in range(3)}, {0: [], 1: [0], 2: [0, 1]})
