@@ -1664,11 +1664,14 @@ static int same_context(SPYContext *c, SPYValue *v) {
     if (!v || v->ctx != c) { spy_error(c, "ValueError", "value belongs to another context"); return 0; }
     return 1;
 }
+/* Make room for n items in the list or tuple v. */
+static int sequence_grow(SPYContext *c, SPYValue *v, size_t n) {
+    if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
+    return grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, n, sizeof(SPYValue *));
+}
 static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
     if (!same_context(c, v) || !same_context(c, item)) return -1;
-    if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
-    if (grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap,
-             v->as.seq.len + 1, sizeof(SPYValue *))) return -1;
+    if (sequence_grow(c, v, v->as.seq.len + 1)) return -1;
     v->as.seq.items[v->as.seq.len++] = spy_retain(item);
     return 0;
 }
@@ -1677,9 +1680,8 @@ static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
  * growth. */
 static int sequence_extend(SPYContext *c, SPYValue *v, SPYValue *source, size_t start, ptrdiff_t step, size_t n) {
     if (!n) return 0;
-    if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
     if (n > SIZE_MAX - v->as.seq.len) { spy_error(c, "MemoryError", "allocation too large"); return -1; }
-    if (grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, v->as.seq.len + n, sizeof(SPYValue *))) return -1;
+    if (sequence_grow(c, v, v->as.seq.len + n)) return -1;
     SPYValue **to = v->as.seq.items + v->as.seq.len, **from = source->as.seq.items + start;
     for (size_t i = 0; i < n; i++) to[i] = spy_retain(from[(ptrdiff_t)i * step]);
     v->as.seq.len += n;
@@ -8848,7 +8850,7 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
          * entries are released last, with the list already consistent, and
          * in reverse, as list_ass_slice does. */
         size_t start = (size_t)s.start, removed = s.count, added = items->as.seq.len, len = v->as.seq.len;
-        if (added > removed && grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, len - removed + added, sizeof(SPYValue *))) {
+        if (added > removed && sequence_grow(c, v, len - removed + added)) {
             spy_release(items); return -1;
         }
         SPYValue **gone = removed ? allocate_array(c, removed, sizeof(SPYValue *)) : NULL;
@@ -16480,7 +16482,7 @@ static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *r
         if ((uint64_t)count > SIZE_MAX / len || (uint64_t)count * len > INT_MAX)
             return spy_error(c, "MemoryError", "");
         size_t total = (size_t)count * len;
-        if (grow_array(c, (void **)&old->as.seq.items, &old->as.seq.cap, total, sizeof(SPYValue *))) return NULL;
+        if (sequence_grow(c, old, total)) return NULL;
         for (size_t i = len; i < total; i++) old->as.seq.items[i] = spy_retain(old->as.seq.items[i % len]);
         old->as.seq.len = total;
     }

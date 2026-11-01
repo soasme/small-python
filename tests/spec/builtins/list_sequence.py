@@ -51,3 +51,24 @@ for keys in (values, [v / 8 for v in values], [(v % 3, -v) for v in values], [(v
 pairs = sorted(range(60), key=lambda v: (v % 4, v % 2), reverse=True)
 assert_eq(pairs[:5], [3, 7, 11, 15, 19])
 assert_eq(sorted(range(30), key=lambda v: (v % 3) / 2)[:4], [0, 3, 6, 9])
+
+# Keys see the list empty; any growth of it during the sort, through
+# whatever operation, is a modification, and the sorted items return (25.1.4).
+def mutate(change):
+    data = [3, 1, 2]
+    seen = []
+    def key(x):
+        seen.append(len(data))
+        change(data)
+        return x
+    assert_raises(ValueError, data.sort, key=key, message="list modified during sort")
+    assert_eq(seen[0], 0)
+    assert_eq(data, [1, 2, 3])
+def slice_assign(data):
+    del data[:]
+    data[:] = range(3)
+def append_clear(data):
+    data.append(0)
+    data.clear()
+for change in (slice_assign, append_clear, lambda data: data.extend((1, 2)), lambda data: data.insert(0, 1)):
+    mutate(change)
