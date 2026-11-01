@@ -11,8 +11,8 @@ says where the engine stands today, so the first step is clear.
   reference
 - [Distribution](#distribution): one executable from pure Python, the
   standard library, tree shaking
-- [Sandboxed runtime](#sandboxed-runtime): runtime policy, metering, virtual
-  file systems, host functions, resumable execution, inspection, snapshots,
+- [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
+  systems, host functions, resumable execution, inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -20,6 +20,7 @@ says where the engine stands today, so the first step is clear.
 - [Long-term maintenance](#long-term-maintenance): memory safety,
   refactoring, performance, tracking CPython
 - [Performance](#performance)
+- [Done](#done)
 
 ## Embeddable library
 
@@ -162,9 +163,10 @@ section 8).
 A layer outside the language core that lets an AI agent, or any host, run
 untrusted Python safely. The core keeps executing the language; the layer
 decides what the code may reach. Today a context reaches files only through
-`spy_mount`, has a step limit, and the Python and JavaScript bindings bound
-memory and wall time from outside the engine. The manual says plainly that
-this is not yet an isolation boundary; this section is what makes it one.
+`spy_mount`, and the engine enforces a step limit, a memory limit and a host
+interrupt callback ([docs/metering.md](docs/metering.md)). The manual says
+plainly that this is not yet an isolation boundary; this section is what
+makes it one.
 
 ### Runtime policy API
 
@@ -180,15 +182,6 @@ with fine-grained grants for:
 A denied operation raises `PermissionError` in Python and is reported to the
 host. The policy is the same in C, in the Python binding and in the
 JavaScript binding, and is tested by programs that try to escape it.
-
-### Fuel and resource metering
-
-Budgets the engine itself enforces, per context and per call: steps (the
-step limit, made to cover native builtins too and to cost nothing on the
-fast path), memory (inside the engine, not only in the worker's allocator)
-and time, through a host interrupt callback. Exhausting one stops the
-program, which cannot catch it, and leaves the context reusable. The
-design is [docs/metering.md](docs/metering.md).
 
 ### Virtual file system
 
@@ -367,17 +360,18 @@ after it.
 Everything is C, so every tool and every program it produces must be
 memory safe, not only the engine. `make sanitize` runs the C API tests, the
 specification suite and the bundler tests under AddressSanitizer,
-UndefinedBehaviorSanitizer and, on Linux, LeakSanitizer; `fuzz/` has
-libFuzzer targets for evaluation and compilation. Continue with:
+UndefinedBehaviorSanitizer and, on Linux, LeakSanitizer, and also under
+MemorySanitizer and ThreadSanitizer; `tests/oom` fails each allocation in
+turn; `fuzz/` has libFuzzer targets for evaluation, compilation, `spyc`
+and allocation failure. Continue with:
 
 - every executable in the repository, `spyc` and `spy-worker` included,
   freeing what it allocates, so leak checks stay meaningful and a tool can
   later become a library;
-- fuzzing run continuously, with targets for the bundler, the module loader,
-  the wire protocol of the bindings and, once they exist, the policy and
-  snapshot formats;
-- MemorySanitizer and ThreadSanitizer where they apply, and a static
-  analyzer in CI;
+- fuzzing run continuously, with targets for the module loader, the wire
+  protocol of the bindings and, once they exist, the policy and snapshot
+  formats;
+- a static analyzer in CI;
 - an ownership test for each new C API function, as the existing ones have;
 - a GC stress mode that runs the specification suite with a collection at
   every point where one may happen, so a value missing from the collector's
@@ -446,3 +440,14 @@ regression check in CI that flags a slowdown before it is merged.
 Size gets the same treatment: CI records the gzip size of `libspy.a` and the
 wasm module as a ceiling that may only fall. A change that raises it says
 what the extra size buys.
+
+## Done
+
+- [x] Metering: step limit, memory limit and interrupt callback inside the
+  engine ([docs/metering.md](docs/metering.md))
+- [x] MemorySanitizer, ThreadSanitizer, allocation-failure tests, `spyc`
+  fuzzer
+- [x] API reference generated from `spy.h`; `make check-api`
+- [x] `spyc` bundles a program's imports into one C file
+- [x] Go and Rust bindings
+- [x] Values from pools in three size classes
