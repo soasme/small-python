@@ -11,6 +11,7 @@ OBJDIR = .obj
 
 # Optional development/build settings, following the QuickJS Makefile style.
 # CONFIG_LTO=y
+# CONFIG_PGO=y
 # CONFIG_WERROR=y
 ifdef CONFIG_LTO
 CFLAGS += -flto
@@ -73,6 +74,19 @@ libspy-std.a: $(OBJDIR)/spy-std.o
 $(OBJDIR)/%.o: %.c spy.h
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+# Profile-guided optimization with clang: the engine is first built with
+# instrumentation and run over the spec tests, never over bench/programs.
+ifdef CONFIG_PGO
+PGO_DATA = $(OBJDIR)/pgo/spy.profdata
+$(OBJDIR)/spy.o: $(PGO_DATA)
+$(OBJDIR)/spy.o: CFLAGS += -fprofile-instr-use=$(PGO_DATA)
+$(PGO_DATA): spy.c spy.h host.h spy-unicode.h spy-intrinsics.h tests/run-spec.c tests/spec_runner.py
+	rm -rf $(OBJDIR)/pgo && mkdir -p $(OBJDIR)/pgo
+	$(CC) $(filter-out -fprofile-instr-use=%,$(CFLAGS)) -fprofile-instr-generate=$(abspath $(OBJDIR))/pgo/%4m.profraw tests/run-spec.c spy.c $(LDLIBS) -o $(OBJDIR)/pgo/run-spec
+	python3 tests/spec_runner.py $(OBJDIR)/pgo/run-spec --strict
+	$(LLVM_PROFDATA) merge -o $@ $(OBJDIR)/pgo/*.profraw
+endif
 
 $(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
 $(OBJDIR)/spy.o $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy-unicode.h spy-intrinsics.h

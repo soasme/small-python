@@ -173,6 +173,8 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Hot functions start on a cache line](#hot-functions-start-on-a-cache-line) | none; steadies wall-time comparisons |
 | [A leaf yield is one step](#a-leaf-yield-is-one-step) | -3.4% (generators); M2: generators -4.9% |
 | [A yield statement drops what is sent](#a-yield-statement-drops-what-is-sent) | -4.1% (generators); M2: generators -4.2% |
+| [Keys of one kind sort without dispatch](#keys-of-one-kind-sort-without-dispatch) | -23.8% (sort); M2: sort -11.6% |
+| [A profile-guided build](#a-profile-guided-build) | M2 time: generators -21%, fib -16%, strings -14%, classes -12%; loop +2% |
 
 ### Releasing a number or string frees it at once
 
@@ -1212,7 +1214,51 @@ more instructions (-28.9%) but made sorting tuples 50% slower on the
 M2, so one merge function tests the kind at each comparison, a branch
 that is always predicted.
 
+### A profile-guided build
+
+`make CC=clang CONFIG_PGO=y` builds the engine twice: once instrumented,
+to run the specification tests, and once with the profile they leave,
+which tells clang which branches are taken and which functions are hot.
+The profile comes from the specification tests, so the bench programs
+do not train their own build. The engine and its behavior are the same;
+the default build is unchanged.
+
+Wall time on the M2 (median of 15 runs), against CPython 3.15 built
+the default way (`-O3`) and with `--enable-optimizations --with-lto`
+(PGO and LTO, as release builds of CPython are):
+
+| Program | spy `-O2` | spy PGO | CPython `-O3` | CPython PGO+LTO |
+| --- | ---: | ---: | ---: | ---: |
+| startup | 2.0 ms | 1.9 ms | 10.9 ms | 10.5 ms |
+| fib | 33.4 ms | 28.0 ms | 30.1 ms | 25.0 ms |
+| loop | 153 ms | 156 ms | 385 ms | 319 ms |
+| nbody | 235 ms | 219 ms | 233 ms | 183 ms |
+| strings | 120 ms | 103 ms | 112 ms | 86.3 ms |
+| dicts | 67.3 ms | 62.3 ms | 90.9 ms | 66.5 ms |
+| sort | 123 ms | 118 ms | 128 ms | 113 ms |
+| classes | 89.8 ms | 79.3 ms | 97.7 ms | 70.9 ms |
+| generators | 108 ms | 84.8 ms | 109 ms | 89.4 ms |
+| bigint | 5.7 ms | 5.6 ms | 11.8 ms | 11.2 ms |
+
+A profile helps CPython about as much as spy: against CPython's own
+optimized build, spy's is faster on startup, loop, bigint, dicts and
+generators and 4% to 20% slower on sort, fib, classes, strings and
+nbody. Only loop, a module-level `while`, is slower with the profile
+(+2%); the specification tests do not run such a loop hot.
+
 ## Tried and left out
+
+- **An augmented item assignment reads the list in place.** `b[3] -= x`
+  took the old item and stored the new one through `get_index` and
+  `set_index`; reading and replacing the slot inline cut nbody's
+  instructions by 4.7%, but on the M2 nbody was unchanged (+0.3%) and
+  classes took 2% longer.
+- **A quiet tick without the error test.** If setting an error also
+  cleared `quiet_unit`, `quiet` could compare the unit alone and skip the
+  test for a pending error. Instructions fell on every program (1-2%, fib
+  -2.1% built with clang), but on the M2 fib took 1.6-3% longer, nbody
+  1-3% and classes 2%, with the same results when every function was
+  aligned to 64 bytes and when main was timed against a copy of itself.
 
 - **Function bodies on the machine, toward calls without C recursion.**
   A plain `def` body was compiled to machine steps, expanding every

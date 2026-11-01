@@ -96,10 +96,17 @@ make clean
 make CC=clang CONFIG_WERROR=y
 make clean
 make CONFIG_LTO=y
+make clean
+make CC=clang CONFIG_PGO=y
 ```
 
 Clean before changing compiler or instrumentation flags. The source language
 remains C11; LTO is an optional compiler/linker optimization, not a dependency.
+`CONFIG_PGO=y` is clang's profile-guided optimization: it first builds an
+instrumented copy of the engine under `.obj/pgo`, runs the specification tests
+on it, merges the profile with `llvm-profdata` (set `LLVM_PROFDATA`, for
+example to `xcrun llvm-profdata` on macOS), and compiles `spy.c` with it. The
+profile comes from the specification tests, never from `bench/programs`.
 
 An optional installation uses the conventional `PREFIX` and `DESTDIR` variables:
 
