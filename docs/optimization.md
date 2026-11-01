@@ -180,6 +180,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [`in` searches a list or tuple in place](#in-searches-a-list-or-tuple-in-place) | `3 in l`: -46%; programs within 0.4% |
 | [A builtin class call names itself only for an error](#a-builtin-class-call-names-itself-only-for-an-error) | -5.4% (dicts), -4.0% (bigint); `str(i)`: -15%; M2: dicts -3.2% |
 | [A free variable is remembered in its enclosing environment](#a-free-variable-is-remembered-in-its-enclosing-environment) | closure call: -16%; programs within 0.5% |
+| [A list, tuple or range iterates without a protocol search](#a-list-tuple-or-range-iterates-without-a-protocol-search) | `[k for k in range(3)]`: -4%; M2: nbody -1.5%, strings -1.1% |
 
 ### Releasing a number or string frees it at once
 
@@ -1282,6 +1283,17 @@ the out-of-line part of the lookup: inlined, it slowed every program by
 up to 1%. Two million calls of a closure returning a free variable on
 the M2: 102 → 86 ms. Wall time averaged over eight code layouts: every
 program within 0.5%.
+
+### A list, tuple or range iterates without a protocol search
+
+Taking an iterator asked whether its source was an iterator already, an
+instance of a builtin subclass, or a value whose type dispatches special
+methods, and then checked it against every iterable kind. An exact list,
+tuple or range is none of these (a subclass's instance is an instance),
+so it now gets its iterator first. Two million `iter(t)` on the M2:
+125 → 114 ms; `[k for k in range(3)]`: 499 → 480 ms. Wall time averaged
+over eight code layouts: nbody -1.5%, strings -1.1%, the rest within
+0.5%.
 
 ### A profile-guided build
 

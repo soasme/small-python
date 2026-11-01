@@ -7919,6 +7919,15 @@ static int iterable_type(SPYValue *v) {
            v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY || v->type == SPY_RANGE || v->type == SPY_TEMPLATE || v->type == SPY_TEMPLATE_ITERATOR || v->type == SPY_ITERATOR || v->type == SPY_COROUTINE_ITERATOR || v->type == SPY_INSTANCE || v->type == SPY_GENERATOR || is_view(v) || awaitable_iterator(v);
 }
 static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
+    if (source->type == SPY_LIST || source->type == SPY_TUPLE || source->type == SPY_RANGE) {
+        SPYValue *v = value_new(c, SPY_ITERATOR);
+        if (v) v->as.iterator.source = spy_retain(source);
+        if (v && source->type == SPY_RANGE) {
+            v->as.iterator.kind = I_RANGE;
+            v->as.iterator.counter = spy_retain(source->as.range.start);
+        }
+        return v;
+    }
     if (awaitable_iterator(source)) return spy_retain(source);
     if (source->type == SPY_TEMPLATE_ITERATOR || source->type == SPY_ITERATOR || source->type == SPY_GENERATOR || source->type == SPY_COROUTINE_ITERATOR) return spy_retain(source);
     SPYValue *base = builtin_base(c, source, "__iter__", NULL);
@@ -7954,10 +7963,6 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         v->as.iterator.source = spy_retain(source);
         if (special_dispatch(source)) v->as.iterator.kind = I_GETITEM;
         if (source->type == SPY_TEMPLATE) v->as.iterator.kind = I_TEMPLATE;
-        if (source->type == SPY_RANGE) {
-            v->as.iterator.kind = I_RANGE;
-            v->as.iterator.counter = spy_retain(source->as.range.start);
-        }
         if (is_dict(source) || source->type == SPY_SET || source->type == SPY_FROZENSET) v->as.iterator.size = source->as.map.len;
         if (is_view(source)) v->as.iterator.size = source->as.bound.self->as.map.len;
     }
