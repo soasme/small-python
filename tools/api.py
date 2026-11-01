@@ -117,7 +117,9 @@ def undocumented(sections):
 
 
 def exported(library):
-    """External symbols the library defines, without the Mach-O underscore."""
+    """External symbols the library defines, without the Mach-O underscore.
+    Names starting with two underscores belong to the implementation (C11
+    7.1.3): sanitizer and coverage builds add their runtime's."""
     listing = subprocess.run(["nm", "-gP", library], check=True, text=True, capture_output=True).stdout
     names = set()
     for line in listing.splitlines():
@@ -125,7 +127,7 @@ def exported(library):
         if len(fields) >= 2 and fields[1] in "TDBSC" and len(fields[1]) == 1:
             name = fields[0]
             names.add(name[1:] if sys.platform == "darwin" and name.startswith("_") else name)
-    return names
+    return {name for name in names if not name.startswith("__")}
 
 
 def level(version):
