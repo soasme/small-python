@@ -73,3 +73,8 @@ for name in ("__func__", "__wrapped__", "__isabstractmethod__", "__dict__"):
 
 fromkeys = dict.__dict__["fromkeys"]
 assert_raises(TypeError, fromkeys.__get__, None, 1, message="descriptor 'fromkeys' for type 'dict' needs a type, not a 'int' as arg 2")
+
+def plain(): pass
+for wrapper in (classmethod(plain), staticmethod(plain)):
+    assert_raises(AttributeError, setattr, wrapper, "__func__", plain, message="readonly attribute")
+    assert_raises(AttributeError, setattr, wrapper, "__wrapped__", plain, message="readonly attribute")

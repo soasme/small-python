@@ -89,3 +89,10 @@ class StrMeta(type):
     def __str__(cls): return "N-str"
 class WithStr(metaclass=StrMeta): pass
 assert_eq((str(WithStr), repr(WithStr)), ("N-str", f"<class '{__name__}.WithStr'>"))
+
+# type() with three arguments picks the most derived metaclass of the bases.
+class Winner(type): pass
+class Ruled(metaclass=Winner): pass
+assert type(type("Sub", (Ruled,), {})) is Winner
+assert_raises(TypeError, type, "X", (1,), {},
+              message="metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases")

@@ -43,3 +43,11 @@ e = assert_raises(ValueError, lambda: spec_lazy_broken.anything)
 assert_eq(str(e.__cause__), "lazy import of 'spec_lazy_broken' raised an exception during resolution")
 # A failed reification leaves the placeholder bound.
 assert_eq(type(globals()["spec_lazy_broken"]).__name__, "lazy_import")
+
+# A lazy import object read without reifying it has no attributes of the module.
+lazy import spec_lazy_unresolved
+lazy from spec_lazy_unresolved import thing
+assert_raises(AttributeError, lambda: globals()["spec_lazy_unresolved"].foo,
+              message="cannot access attribute 'foo' on unresolved lazy import 'spec_lazy_unresolved'")
+assert_raises(AttributeError, lambda: globals()["thing"].foo,
+              message="cannot access attribute 'foo' on unresolved lazy import 'spec_lazy_unresolved.thing'")

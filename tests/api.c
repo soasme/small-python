@@ -886,6 +886,21 @@ int main(void) {
                         "wr = Ref(n, seen.append)\ndel n", "weak.py"));
     spy_collect(c);
     assert(!spy_exec(c, "pass\nassert wr() is None and seen == [wr], seen", "weak_check.py"));
+    /* The weakly referenceable types are CPython's. */
+    assert(!spy_exec(c, "def gen(): yield\nasync def co(): pass\nasync def agen(): yield\n"
+                        "class K:\n    def m(self): pass\n"
+                        "c = co()\n"
+                        "for target in (Node, gen, {1}, frozenset(), gen(), c, agen(), gen.__code__, _spy, len, K().m, [].append):\n"
+                        "    Ref(target, None)\n"
+                        "c.close()\n"
+                        "for target in (int.__add__, (1).__add__, 1, [], None, (), 'x', object(), range(1), 1.0):\n"
+                        "    try: Ref(target, None)\n"
+                        "    except TypeError as e: assert str(e) == f\"cannot create weak reference to '{type(target).__name__}' object\", e\n"
+                        "    else: raise AssertionError(target)\n"
+                        "for args in ((1,), (None, 1, 2)):\n"
+                        "    try: _spy._collect(*args)\n"
+                        "    except TypeError as e: assert str(e) == '_collect expects None or a list, and a flag', e\n"
+                        "    else: raise AssertionError(args)\n", "weak_types.py"));
     size_t before = spy_live_values(c);
     for (int i = 0; i < 3; i++) {
         assert(!spy_exec(c, "n = Node(); n.me = n; w = Ref(n, lambda r: None); del n, w", "weak_loop.py"));

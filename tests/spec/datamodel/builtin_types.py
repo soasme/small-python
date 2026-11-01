@@ -311,3 +311,14 @@ for value in values:
 for cls in (type(t""), type(generic.__type_params__[0])):
     e = assert_raises(TypeError, type, "X", (cls,), {})
     assert_eq(str(e), f"type '{qualified(cls)}' is not an acceptable base type")
+
+# A module may move between ModuleType subclasses and back.
+ModuleType = type(assert_eq.__globals__["__builtins__"]) if not isinstance(assert_eq.__globals__["__builtins__"], dict) else type(__builtins__)
+class FirstModule(ModuleType): pass
+class SecondModule(ModuleType): pass
+module = ModuleType("module")
+module.__class__ = FirstModule
+module.__class__ = SecondModule
+assert_type(module, SecondModule)
+module.__class__ = ModuleType
+assert_type(module, ModuleType)

@@ -10796,11 +10796,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
         }
         if (!strcmp(name, "__func__")) return spy_retain(v->as.method.function);
-        if (!strcmp(name, "__call__")) {
-            SPYValue *own = builtin_descriptor(c, c->types[SPY_METHOD], name);
-            if (own) return descriptor_get(c, own, v, c->types[SPY_METHOD]);
-            if (c->error_type[0]) return NULL;
-        }
+        if (!strcmp(name, "__call__")) return descriptor_get(c, builtin_descriptor(c, c->types[SPY_METHOD], name), v, c->types[SPY_METHOD]);
         /* The method type's own attributes come before the function's; bound
          * builtins (builtin methods and method-wrappers) are not descriptors. */
         if (!strcmp(name, "__get__")) {
@@ -12140,9 +12136,6 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
     case M_FRAME_CLEAR:
         if (argc) break;
         return frame_clear(c, self);
-    case M_CODE_REPLACE:
-        if (argc) break;
-        return code_replace(c, self, NULL);
     case M_CODE_LINES: {
         /* No bytecode, so no instructions to map to lines or positions. */
         if (argc) break;
@@ -12318,7 +12311,6 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         spy_release(iterator);
         return buffer_text(&out, SPY_STRING, c->error_type[0] != 0);
     }
-    case M_FORMAT: return string_format(c, self, argc, argv, NULL, 1);
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
         if (argc) break;
         if (method == M_ISIDENTIFIER && !self->as.string.len) return spy_bool(c, 0);
@@ -12422,7 +12414,6 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             SPYValue *swap = self->as.seq.items[i]; self->as.seq.items[i] = self->as.seq.items[j]; self->as.seq.items[j] = swap;
         }
         return spy_none(c);
-    case M_SORT: return sort_method(c, self, argc, argv, NULL);
     case M_POP: {
         if (argc > 1) break;
         int64_t i = -1;
@@ -12492,18 +12483,19 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
     }
     return method_arity_error(c, self, method, name, argc);
 }
-/* The methods that take keyword arguments, with argc positional ones. */
-static int keyword_method(int method, size_t argc) {
-    return method == M_FORMAT || method == M_SORT || (method == M_CODE_REPLACE && !argc) || method == M_UPDATE || method == M_SPLITLINES;
+/* The methods that take keyword arguments. */
+static int keyword_method(int method) {
+    return method == M_FORMAT || method == M_SORT || method == M_CODE_REPLACE || method == M_UPDATE || method == M_SPLITLINES;
 }
 /* Method number method of self as a call of its bound method: keywords
- * reach only a keyword_method. */
+ * reach only a keyword_method, and method_call never sees format, sort,
+ * or code.replace without arguments. */
 static SPYValue *call_method(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv,
                              SPYValue *keywords) {
     switch (method) {
     case M_FORMAT: return string_format(c, self, argc, argv, keywords, 1);
     case M_SORT: return sort_method(c, self, argc, argv, keywords);
-    case M_CODE_REPLACE: if (!argc) return code_replace(c, self, keywords); break;
+    case M_CODE_REPLACE: return argc ? spy_error(c, "TypeError", "replace() takes no positional arguments") : code_replace(c, self, keywords);
     case M_UPDATE: {
         SPYValue *result = method_call(c, self, method, name, argc, argv);
         if (result && keywords) dict_update(c, self, keywords);
@@ -12727,10 +12719,6 @@ static int function_set_code(SPYContext *c, SPYValue *fn, SPYValue *code) {
         return -1;
     }
     Node *def = code->as.unit.definition;
-    if (def && def->kind == N_COMPREHENSION && def->op != N_TUPLE) {
-        /* List, set, and dict comprehensions are inlined and have no code of their own. */
-        spy_error(c, "NotImplementedError", "replacing a function's code with an inlined comprehension's code is not implemented"); return -1;
-    }
     /* Code with other free variables reads f's cells through a forwarding scope. */
     if (need && def != fn->as.function.def) {
         SPYValue *closure = function_closure(c, fn);
@@ -13684,24 +13672,9 @@ static SPYValue *number_literal(SPYContext *c, Node *n) {
     if (n->constant) return spy_retain(n->constant);
     char *s = copy_text(c, n->text, strlen(n->text));
     if (!s) return NULL;
-    size_t j = 0;
-    int base = 10;
-    if (n->text[0] == '0' && n->text[1]) {
-        int ch = tolower((unsigned char)n->text[1]);
-        if (ch == 'x' || ch == 'o' || ch == 'b') base = ch == 'x' ? 16 : ch == 'o' ? 8 : 2;
-    }
-    size_t limit = strlen(n->text) - (n->kind == N_IMAG);
-    for (size_t i = 0; i < limit; i++) {
-        if (n->text[i] == '_') {
-            int prev = i ? hex_digit(n->text[i - 1]) : -1;
-            int next = hex_digit(n->text[i + 1]);
-            if ((!i || prev < 0 || prev >= base) && !(base != 10 && i == 2)) prev = -1;
-            else prev = 0;
-            if (prev < 0 || next < 0 || next >= base) {
-                mem_free(s); return spy_error(c, "SyntaxError", "invalid numeric separator");
-            }
-        } else s[j++] = n->text[i];
-    }
+    /* The lexer has checked the separators; drop them and an imaginary suffix. */
+    size_t j = 0, limit = strlen(n->text) - (n->kind == N_IMAG);
+    for (size_t i = 0; i < limit; i++) if (n->text[i] != '_') s[j++] = n->text[i];
     s[j] = 0;
     char *end;
     SPYValue *v = NULL;
@@ -13712,6 +13685,7 @@ static SPYValue *number_literal(SPYContext *c, Node *n) {
         else v = n->kind == N_IMAG ? complex_new(c, complex_parts(0, d)) : spy_float(c, d);
     } else {
         char *digits = s;
+        int base = 10;
         if (s[0] == '0' && s[1]) {
             int ch = tolower((unsigned char)s[1]);
             if (ch == 'x' || ch == 'o' || ch == 'b') { base = ch == 'x' ? 16 : ch == 'o' ? 8 : 2; digits += 2; }
@@ -14186,7 +14160,6 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
     if (tick(c, f, n)) return NULL;
     SPYValue *a = NULL, *b = NULL, *result = NULL;
     switch (n->kind) {
-    case N_INT: case N_FLOAT: case N_IMAG: return number_literal(c, n);
     case N_STRING: case N_BYTES:
         if (!n->constant) n->constant = n->kind == N_STRING ? spy_string(c, n->text, (size_t)n->op) : spy_bytes(c, n->text, (size_t)n->op);
         return spy_retain(n->constant);
@@ -15062,7 +15035,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         result = call_function(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_NATIVE && fn->as.native.kwcall) {
         result = fn->as.native.kwcall(c, argc, argv, keywords, fn->as.native.data);
-    } else if (fn->type == SPY_BOUND_METHOD && (!keywords || !keywords->as.map.len || keyword_method(fn->as.bound.method, argc))) {
+    } else if (fn->type == SPY_BOUND_METHOD && (!keywords || !keywords->as.map.len || keyword_method(fn->as.bound.method))) {
         result = call_method(c, fn->as.bound.self, fn->as.bound.method, fn->as.bound.name, argc, argv, keywords);
     } else if (fn->type == SPY_NATIVE || fn->type == SPY_BOUND_METHOD) {
         if (fn->type == SPY_NATIVE && fn->as.native.call == builtin)
@@ -15071,11 +15044,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         else if (keywords && keywords->as.map.len) {
             /* CPython names a method by its qualified name, list.append. */
             SPYValue *name = attribute(c, fn, "__qualname__");
-            if (!name || name->type != SPY_STRING) {
-                spy_clear_error(c); spy_release(name);
-                name = spy_retain(fn->type == SPY_NATIVE ? fn->as.native.name : fn->as.bound.name);
-            }
-            errorf(c, "TypeError", "%s() takes no keyword arguments", name ? name->as.string.data : "builtin");
+            if (name) errorf(c, "TypeError", "%s() takes no keyword arguments", name->as.string.data);
             spy_release(name);
         }
         else result = fn->as.native.call(c, argc, argv, fn->as.native.data);
@@ -15089,7 +15058,6 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
                class_lookup(fn->as.map.meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) {
         SPYValue *method = special_method(c, fn, "__call__");
         if (method) { result = call_keywords(c, method, argc, argv, keywords); spy_release(method); }
-        else if (!c->error_type[0]) spy_error(c, "TypeError", "metaclass has no __call__");
     } else if (fn->type == SPY_CLASS) {
         result = type_call(c, fn, argc, argv, keywords);
     } else if (fn->type == SPY_INSTANCE) {
@@ -15246,7 +15214,7 @@ static int weak_referenceable(SPYContext *c, SPYValue *v) {
     switch (v->type) {
     case SPY_CLASS: case SPY_FUNCTION: case SPY_SET: case SPY_FROZENSET: case SPY_GENERATOR: case SPY_COROUTINE:
     case SPY_ASYNC_GENERATOR: case SPY_CODE: case SPY_MODULE: return 1;
-    case SPY_NATIVE: case SPY_METHOD: { int kind = native_kind(v); return kind == NATIVE_FUNCTION || kind == NATIVE_BOUND; }
+    case SPY_NATIVE: case SPY_METHOD: case SPY_BOUND_METHOD: { int kind = native_kind(v); return kind == NATIVE_FUNCTION || kind == NATIVE_BOUND; }
     case SPY_INSTANCE: break;
     default: return 0;
     }
@@ -16341,6 +16309,19 @@ static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *r
     }
     return spy_retain(old);
 }
+/* Augmented assignment. list and bytearray have no number slots, so the
+ * right operand's reflected method comes before their in-place concatenation
+ * and repetition; for their subclasses, before repetition only. */
+static SPYValue *augmented(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
+    const Operator *operation = &operators[op - T_ADDEQ];
+    int token = operation->token;
+    SPYValue *base = token == '*' && old->type == SPY_INSTANCE ? builtin_base(c, old, operation->inplace, NULL) : old;
+    if (base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) && (token == '+' || token == '*') && special_dispatch(rhs)) {
+        SPYValue *result = try_operator(c, rhs, operation->reflected, old, NULL, 0);
+        if (result || c->error_type[0]) return result;
+    }
+    return inplace(c, op, old, rhs);
+}
 /* An unsupported operation is reported with the augmented operator. */
 static NO_INLINE void augmented_error(SPYContext *c, int token, SPYValue *old, SPYValue *rhs) {
     char expected[sizeof(c->error_message)];
@@ -16386,19 +16367,21 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         memcpy(old->as.string.data + len, bytes->as.string.data, added);
         return spy_retain(old);
     }
-    if ((old->type == SPY_SET && is_set(rhs) && (token == '|' || token == '&' || token == '-' || token == '^')) ||
-        (old->type == SPY_BYTEARRAY && (token == '+' || token == '*'))) {
-        SPYValue *fresh = binary(c, token, old, rhs);
+    /* A set's in-place operators take any set, subclasses included, and never reflect. */
+    SPYValue *other_set = old->type == SPY_SET && (token == '|' || token == '&' || token == '-' || token == '^') ?
+        builtin_value(c, rhs, SPY_SET) : NULL;
+    if (old->type == SPY_SET && !other_set && (token == '|' || token == '&' || token == '-' || token == '^'))
+        other_set = builtin_value(c, rhs, SPY_FROZENSET);
+    if (other_set || (old->type == SPY_BYTEARRAY && (token == '+' || token == '*'))) {
+        SPYValue *fresh = other_set ? set_binary(c, token, old, other_set) : sequence_binary(c, token, old, rhs);
         if (!fresh) return NULL;
-        if (fresh->type == old->type) {
-            /* A bytearray keeps its exports, which forbid resizing. */
-            size_t exports = old->type == SPY_BYTEARRAY ? old->as.string.exports : 0;
-            if (exports && fresh->as.string.len != old->as.string.len) { spy_release(fresh); bytearray_exported(c, old); return NULL; }
-            swap_contents(old, fresh);
-            if (old->type == SPY_BYTEARRAY) { old->as.string.exports = exports; fresh->as.string.exports = 0; }
-            spy_release(fresh); return spy_retain(old);
-        }
-        return fresh;
+        if (fresh->type != old->type) return fresh;
+        /* A bytearray keeps its exports, which forbid resizing. */
+        size_t exports = old->type == SPY_BYTEARRAY ? old->as.string.exports : 0;
+        if (exports && fresh->as.string.len != old->as.string.len) { spy_release(fresh); bytearray_exported(c, old); return NULL; }
+        swap_contents(old, fresh);
+        if (old->type == SPY_BYTEARRAY) { old->as.string.exports = exports; fresh->as.string.exports = 0; }
+        spy_release(fresh); return spy_retain(old);
     }
     if (old->type == SPY_DICT && token == '|') return dict_update(c, old, rhs) ? NULL : spy_retain(old);
     if (op == T_ADDEQ && old->type == SPY_LIST) {
@@ -16474,7 +16457,7 @@ static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n) {
             t->slot_scope == env->as.map.scope && t->slot < map_used(env) && env->as.map.items[t->slot].value == old)
             value = string_append(c, old, rhs);
         else if (!(value = number_fast(c, operators[n->op - T_ADDEQ].token, old, rhs, 1)) && !c->error_type[0])
-            value = inplace(c, n->op, old, rhs);
+            value = augmented(c, n->op, old, rhs);
     }
     if (!value) goto done;
     if (!container) status = store_target(c, f, n->a, value);
@@ -16672,8 +16655,6 @@ static SPYValue *new_user_class(SPYContext *c, const char *name, SPYValue *bases
     SPYValue *solid = NULL;
     for (size_t i = 0; i < bases->as.seq.len; i++) {
         SPYValue *base = bases->as.seq.items[i];
-        if (base->type != SPY_CLASS)
-            return spy_error(c, "TypeError", "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases");
         if (!acceptable_base(c, base)) return errorf(c, "TypeError", "type '%s' is not an acceptable base type", class_tname(base));
         /* Exceptions and each builtin value type have their own layout. */
         int kind = builtin_layout(c, base);
@@ -20145,7 +20126,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             else node_set_attribute(c, a, n, value);
             spy_release(value); break;
         case BC_INPLACE:
-            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, inplace(c, ins->arg, a, b)); break;
+            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, augmented(c, ins->arg, a, b)); break;
         case BC_CONVERT:
             a = machine_pop(m); machine_push(c, m, convert_field(c, a, ins->arg)); break;
         case BC_TEMPLATE:
@@ -26117,10 +26098,12 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         }
         return slot_result(c, kind == SLOT_BINARY ? binary(c, op, value, other) : binary(c, op, other, value));
     case SLOT_INPLACE: {
-        if (!slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
+        /* dict.__ior__ is dict.update and list and bytearray concatenation
+         * is extend: their errors propagate. */
+        int extends = type == SPY_DICT || type == SPY_LIST || type == SPY_BYTEARRAY;
+        if (!extends && !slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
         SPYValue *result = inplace(c, op, value, other);
-        /* dict.__ior__ is dict.update: its errors propagate. */
-        if (type != SPY_DICT) result = slot_result(c, result);
+        if (!extends) result = slot_result(c, result);
         if (result && result == value && value != self) { spy_release(result); result = spy_retain(self); }
         return result;
     }

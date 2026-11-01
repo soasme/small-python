@@ -142,3 +142,7 @@ assert_eq(str(assert_raises(TypeError, lambda: target(p=1))), "target() got an u
 # Lambdas, and the CO_ITERABLE_COROUTINE flag, as before.
 lam = lambda first, second: first * 10 + second
 assert_eq(FunctionType(lam.__code__.replace(co_varnames=("second", "first")), {})(second=1, first=2), 12)
+
+code = (lambda: 0).__code__
+assert_raises(TypeError, code.replace, 1, message="replace() takes no positional arguments")
+assert_raises(TypeError, lambda: code.replace(1, co_name="x"), message="replace() takes no positional arguments")

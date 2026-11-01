@@ -88,3 +88,20 @@ def caller_frame():
 class Body:
     frame = caller_frame()
 assert_true(repr(Body.frame).endswith(", code Body>"))
+
+def caught_frame():
+    try: raise ValueError
+    except ValueError as error: return error.__traceback__.tb_frame
+frame = caught_frame()
+frame.f_trace_opcodes = True
+assert_true(frame.f_trace_opcodes)
+def set_unknown(): frame.foo = 1
+assert_raises(AttributeError, set_unknown, message="'frame' object has no attribute 'foo' and no __dict__ for setting new attributes")
+# A comprehension runs in its function's frame.
+def comprehension_code():
+    try: [1 / 0 for _ in [1]]
+    except ZeroDivisionError as error:
+        tb = error.__traceback__
+        while tb.tb_next: tb = tb.tb_next
+        return tb.tb_frame.f_code
+assert_eq(comprehension_code().co_name, "comprehension_code")

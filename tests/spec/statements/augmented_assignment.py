@@ -127,3 +127,33 @@ x = 7.5
 x /= 2
 x %= 2
 assert x == 1.75
+
+# list and bytearray concatenation and repetition rank after the operand's
+# reflected method; set in-place operators accept any set operand first.
+class Reflected:
+    def __radd__(self, o): return "radd"
+    def __rmul__(self, o): return "rmul"
+for seq in ([1], bytearray(b"a")):
+    x = seq
+    x += Reflected()
+    assert x == "radd"
+    x = seq
+    x *= Reflected()
+    assert x == "rmul"
+class SubList(list): pass
+x = SubList([1])
+x *= Reflected()
+assert x == "rmul"
+x = SubList([1])
+x += [2]
+assert x == [1, 2]
+class Declines:
+    def __radd__(self, o): return NotImplemented
+x = [1]
+assert_raises(TypeError, lambda: x.__iadd__(Declines()), message="'Declines' object is not iterable")
+class OrSet(set):
+    def __ror__(self, o): return "ror"
+s = {1}
+alias = s
+s |= OrSet({2})
+assert s is alias and s == {1, 2}

@@ -75,3 +75,12 @@ assert str(cm.exception) == "bad operand type for unary -: 'str'"
 with assert_raises(TypeError) as cm:
     abs([])
 assert str(cm.exception) == "bad operand type for abs(): 'list'"
+
+# A class's unary operator comes from its metaclass.
+class Plain(type): pass
+class WithPlain(metaclass=Plain): pass
+assert_raises(TypeError, lambda: -WithPlain, message="bad operand type for unary -: 'Plain'")
+class Negating(type):
+    def __neg__(cls): return "neg"
+class WithNegating(metaclass=Negating): pass
+assert_eq(-WithNegating, "neg")

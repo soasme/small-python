@@ -40,3 +40,9 @@ class XY(X, Y): pass
 class YX(Y, X): pass
 assert_eq(str(assert_raises(TypeError, type, "Z", (XY, YX), {})),
           "Cannot create a consistent method resolution order (MRO) for bases X, Y")
+
+# The conflict message names every base in full, however long.
+Long = type("A" * 60, (), {})
+Longer = type("B" * 60, (Long,), {})
+assert_raises(TypeError, type, "C", (Long, Longer), {},
+              message=f"Cannot create a consistent method resolution order (MRO) for bases {'A' * 60}, {'B' * 60}")

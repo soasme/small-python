@@ -57,3 +57,12 @@ class Items(list): pass
 items = Items([1])
 super(Items, items).append(2)
 assert_eq(items, [1, 2])
+
+# super() past a built-in base: a name it lacks continues to the next class.
+class Listed(list):
+    def missing(self): return super().bogus
+    def present(self): return super().append
+assert_raises(AttributeError, Listed().missing, message="'super' object has no attribute 'bogus'")
+present = Listed().present()
+present(1)
+assert_eq(present.__self__, [1])

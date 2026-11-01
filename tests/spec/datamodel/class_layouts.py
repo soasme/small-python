@@ -186,3 +186,9 @@ class Leaf(Root):
 Leaf._Leaf__up = MySuper(Leaf)
 assert_eq(Leaf().name(), "LeafRoot")
 assert_type(Leaf()._Leaf__up, MySuper)
+
+# Compatible slot layouts still need a consistent order.
+class SlotA: __slots__ = ("a",)
+class SlotB(SlotA): __slots__ = ("b",)
+assert_raises(TypeError, type, "R", (SlotA, SlotB), {},
+              message="Cannot create a consistent method resolution order (MRO) for bases SlotA, SlotB")
