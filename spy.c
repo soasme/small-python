@@ -9610,6 +9610,17 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     if (op == O_IN || op == O_NOTIN) {
         result = 0;
+        /* An exact list or tuple is searched in place, as list_contains does:
+         * each item is held across a comparison that may change the list. */
+        if (b->type == SPY_LIST || b->type == SPY_TUPLE) {
+            for (size_t i = 0; i < b->as.seq.len && !result; i++) {
+                SPYValue *item = spy_retain(b->as.seq.items[i]);
+                result = a == item || equal(item, a, 0);
+                spy_release(item);
+                if (c->error_type[0] || (!result && pass(c))) return NULL;
+            }
+            return spy_bool(c, op == O_IN ? result : !result);
+        }
         SPYValue *base = builtin_base(c, b, "__contains__", NULL);
         if (base) return comparison(c, op, a, base);
         if (special_dispatch(b)) {

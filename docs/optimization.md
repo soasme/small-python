@@ -177,6 +177,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A profile-guided build](#a-profile-guided-build) | M2 time: generators -21%, fib -16%, strings -14%, classes -12%; loop +2% |
 | [An unpacking reads a tuple or list in place](#an-unpacking-reads-a-tuple-or-list-in-place) | `a, b = t`: -76%, `a, b = b, a`: -73%; programs within 1% |
 | [A method without arguments names itself only for an error](#a-method-without-arguments-names-itself-only-for-an-error) | `s.upper()`: -60%; M2: strings -3.7% |
+| [`in` searches a list or tuple in place](#in-searches-a-list-or-tuple-in-place) | `3 in l`: -46%; programs within 0.4% |
 
 ### Releasing a number or string frees it at once
 
@@ -1245,6 +1246,17 @@ of `s.upper()` on the M2: 238 → 110 ms (an empty loop takes 26.5 ms).
 Wall time averaged over eight code layouts: strings -3.7%, the rest
 within 0.2%.
 
+### `in` searches a list or tuple in place
+
+`x in l` asked whether the list's type overrides `__contains__`, took an
+iterator and stepped it, comparing each item. An exact list or tuple is
+now searched by index, as CPython's `list_contains` does: each item is
+held across its comparison, which may change the list, and the length
+is read again for the next item. The comparison, its errors and the step
+counted per item are those of the iterator's loop. Two million `3 in l`
+over a three-item list on the M2: 129 → 80 ms (CPython 73.5 ms). Wall
+time averaged over eight code layouts: every program within 0.4%.
+
 ### A profile-guided build
 
 `make CC=clang CONFIG_PGO=y` builds the engine twice: once instrumented,
@@ -1284,6 +1296,12 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   `set_index`; reading and replacing the slot inline cut nbody's
   instructions by 4.7%, but on the M2 nbody was unchanged (+0.3%) and
   classes took 2% longer.
+- **A dying container frees its numbers and strings at once.**
+  `release_edge` queued every item of a dying list for the loop of
+  `release_dead`, which asks each whether it needs a finalizer; freeing
+  a number or string as soon as its count reached zero cut classes'
+  instructions by 1.3% and sort's by 0.5%, but on the M2 nbody took
+  1.4% longer and loop 0.9%, averaged over eight code layouts.
 - **A quiet tick without the error test.** If setting an error also
   cleared `quiet_unit`, `quiet` could compare the unit alone and skip the
   test for a pending error. Instructions fell on every program (1-2%, fib

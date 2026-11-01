@@ -67,3 +67,37 @@ class MyContainingClass:
 
 assert 2 in MyContainingClass(2)
 assert 1 not in MyContainingClass(2)
+
+
+# A list or tuple compares each item by identity, then equality, holding the
+# item and reading the length again while an __eq__ changes the list.
+nan = float("nan")
+assert nan in [nan] and nan in (nan,)
+assert nan not in [float("nan")]
+assert 1 not in [] and 1 not in ()
+items = []
+class Clears:
+    def __eq__(self, other):
+        items.clear()
+        return False
+items.extend([Clears(), Clears(), 1])
+assert 1 not in items
+assert_eq(items, [])
+grown = []
+class Grows:
+    def __eq__(self, other):
+        if len(grown) < 4:
+            grown.append(Grows())
+        return False
+grown.append(Grows())
+assert 5 not in grown
+assert_eq(len(grown), 4)
+class Raises:
+    def __eq__(self, other):
+        raise ValueError("eq")
+assert_raises(ValueError, lambda: 1 in [Raises()])
+assert_raises(ValueError, lambda: 1 not in (Raises(),))
+class Refuses(list):
+    def __contains__(self, item):
+        return False
+assert 1 not in Refuses([1])
