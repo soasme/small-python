@@ -178,6 +178,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [An unpacking reads a tuple or list in place](#an-unpacking-reads-a-tuple-or-list-in-place) | `a, b = t`: -76%, `a, b = b, a`: -73%; programs within 1% |
 | [A method without arguments names itself only for an error](#a-method-without-arguments-names-itself-only-for-an-error) | `s.upper()`: -60%; M2: strings -3.7% |
 | [`in` searches a list or tuple in place](#in-searches-a-list-or-tuple-in-place) | `3 in l`: -46%; programs within 0.4% |
+| [A builtin class call names itself only for an error](#a-builtin-class-call-names-itself-only-for-an-error) | -5.4% (dicts), -4.0% (bigint); `str(i)`: -15%; M2: dicts -3.2% |
 
 ### Releasing a number or string frees it at once
 
@@ -1256,6 +1257,17 @@ is read again for the next item. The comparison, its errors and the step
 counted per item are those of the iterator's loop. Two million `3 in l`
 over a three-item list on the M2: 129 → 80 ms (CPython 73.5 ms). Wall
 time averaged over eight code layouts: every program within 0.4%.
+
+### A builtin class call names itself only for an error
+
+`str(i)`, `int(s)`, `dict(...)` and the other builtin class calls looked
+up the class's `__name__` on every call, for the error they would raise
+if given keywords they do not take; `__new__` looked it up again for its
+receiver checks. The class itself is now passed along, and its name is
+read only when an error is raised. Instructions: dicts -5.4%, bigint
+-4.0%, nbody -1.7%. Two million `str(i)` on the M2: 126 → 107 ms. Wall
+time averaged over eight code layouts: dicts -3.2%, nbody -1.2%,
+strings -0.8%, the rest within 0.4%.
 
 ### A profile-guided build
 

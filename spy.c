@@ -2471,10 +2471,10 @@ static SPYValue *misapplied(SPYContext *c, const char *owner, const char *name, 
 }
 /* tp_new_wrapper's check of owner.__new__(cls, ...): cls is a subclass of owner. */
 static int new_check(SPYContext *c, SPYValue *owner, size_t argc, SPYValue *const *argv) {
+    if (argc && argv[0]->type == SPY_CLASS && subclass(argv[0], owner)) return 0;
     const char *name = name_local(owner, "__name__")->as.string.data;
     if (!argc) { errorf(c, "TypeError", "%s.__new__(): not enough arguments", name); return -1; }
     if (argv[0]->type != SPY_CLASS) { errorf(c, "TypeError", "%s.__new__(X): X is not a type object (%s)", name, type_name(argv[0])); return -1; }
-    if (subclass(argv[0], owner)) return 0;
     const char *other = name_local(argv[0], "__name__")->as.string.data;
     errorf(c, "TypeError", "%s.__new__(%s): %s is not a subtype of %s", name, other, other, name);
     return -1;
@@ -13484,7 +13484,7 @@ static Result execute(SPYContext *, Frame *, Node *);
 static Result execute_module(SPYContext *, Frame *);
 static int start_annotations(SPYContext *, Frame *, Node *, const char *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
-static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, const char *);
+static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, SPYValue *);
 static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *frame_module_name(SPYContext *, size_t);
 static const char *const *exception_keywords(SPYContext *, SPYValue *);
@@ -15086,8 +15086,7 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
         result = call_method(c, fn->as.bound.self, fn->as.bound.method, fn->as.bound.name, argc, argv, keywords);
     } else if (fn->type == SPY_NATIVE || fn->type == SPY_BOUND_METHOD) {
         if (fn->type == SPY_NATIVE && fn->as.native.call == builtin)
-            result = builtin_keywords(c, argc, argv, (int)(intptr_t)fn->as.native.data, keywords,
-                                      fn->as.native.name ? fn->as.native.name->as.string.data : "builtin");
+            result = builtin_keywords(c, argc, argv, (int)(intptr_t)fn->as.native.data, keywords, fn);
         else if (keywords && keywords->as.map.len) {
             /* CPython names a method by its qualified name, list.append. */
             SPYValue *name = attribute(c, fn, "__qualname__");
@@ -15159,7 +15158,7 @@ static SPYValue *super_init_method(SPYContext *c, size_t argc, SPYValue *const *
     (void)data;
     SPYValue *target = argc ? builtin_value(c, argv[0], SPY_SUPER) : NULL;
     if (!target) return errorf(c, "TypeError", "descriptor '__init__' of 'super' object needs an argument");
-    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, c->types[SPY_SUPER]->as.map.native - 1, keywords, "super");
+    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, c->types[SPY_SUPER]->as.map.native - 1, keywords, c->types[SPY_SUPER]);
     if (!fresh) return NULL;
     SPYValue *type = target->as.super.type, *self = target->as.super.self, *owner = target->as.super.owner;
     target->as.super = fresh->as.super;
@@ -15214,7 +15213,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         return errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
     }
     if (fn->as.map.native)
-        return builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, name_local(fn, "__name__")->as.string.data);
+        return builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, fn);
     /* A class whose MRO a custom mro() is still computing makes no instances. */
     if (!fn->as.map.mro) return errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
     if ((plain = plain_init(c, fn))) {
@@ -24686,7 +24685,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         spy_release(quotient); spy_release(remainder); return result;
     }
     case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
-        if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, "compile");
+        if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, NULL);
         SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
         if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
         /* exec's fourth parameter, closure, is keyword-only. */
@@ -24976,7 +24975,7 @@ execution_fail:
             if (method && method->type != SPY_NONE) return call_special(c, a, "__reversed__", 0, NULL);
             if (method || !class_lookup(cls, "__getitem__") || subclass(cls, c->types[SPY_DICT]))
                 return errorf(c, "TypeError", "'%s' object is not reversible", type_name(a));
-            SPYValue *length = builtin_keywords(c, 1, &a, B_LEN, NULL, "len");
+            SPYValue *length = builtin_keywords(c, 1, &a, B_LEN, NULL, NULL);
             int64_t n;
             int status = length ? spy_as_int(c, length, &n) : -1;
             spy_release(length);
@@ -25603,7 +25602,9 @@ static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const 
     if (args[5]->type != SPY_NONE) name_set(c, fn->as.function.metadata, "__kwdefaults__", args[5]);
     return fn;
 }
-static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, const char *name) {
+/* Builtin id called with keywords; owner, the builtin class or function,
+ * names it in errors. */
+static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, SPYValue *owner) {
     switch (id) {
     case B_TYPE: {
         /* Only type(object) refuses keywords; other counts but 3 are wrong first. */
@@ -25841,7 +25842,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         }
         default: break;
         }
-        if (id != B_DICT) return errorf(c, "TypeError", "%s() takes no keyword arguments", name);
+        if (id != B_DICT)
+            return errorf(c, "TypeError", "%s() takes no keyword arguments", owner->type != SPY_NATIVE ? name_local(owner, "__name__")->as.string.data :
+                          owner->as.native.name ? owner->as.native.name->as.string.data : "builtin");
     }
     SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
     if (value && id == B_DICT && keywords && extend_display(c, value, keywords)) { spy_release(value); return NULL; }
@@ -25964,9 +25967,8 @@ static SPYValue *descriptor_method(SPYContext *c, size_t argc, SPYValue *const *
 static SPYValue *native_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     SPYValue *owner = data;
     if (new_check(c, owner, argc, argv)) return NULL;
-    const char *name = name_local(owner, "__name__")->as.string.data;
     SPYValue *cls = argv[0], *base = owner == c->types[SPY_MODULE] ? module_allocate(c)
-                                                  : builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, name);
+                                                  : builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     /* reversed() of an object with __reversed__ returns that method's result. */
     if (!base || cls == owner || value_class(c, base) != owner) return base;
     SPYValue *instance = new_instance(c, cls);
@@ -25982,7 +25984,6 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     int type = (int)(intptr_t)data;
     SPYValue *owner = c->types[type];
     if (new_check(c, owner, argc, argv)) return NULL;
-    const char *name = name_local(owner, "__name__")->as.string.data;
     SPYValue *cls = argv[0];
     /* tp_new_wrapper: the nearest builtin class of cls must share this
      * __new__, so int.__new__(bool) cannot skip bool's. */
@@ -25992,15 +25993,15 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
         if (!builtin_class(c, base)) continue;
         SPYValue *own = name_local(base, "__new__");
         if (base != owner && own && own != name_local(owner, "__new__"))
-            return errorf(c, "TypeError", "%s.__new__(%s) is not safe, use %s.__new__()", name, name_local(cls, "__name__")->as.string.data, class_tname(base));
+            return errorf(c, "TypeError", "%s.__new__(%s) is not safe, use %s.__new__()", name_local(owner, "__name__")->as.string.data, name_local(cls, "__name__")->as.string.data, class_tname(base));
         break;
     }
     if (cls == owner && type == SPY_FROZENDICT) return frozendict_construct(c, argc - 1, argv + 1, keywords);
     if (type == SPY_PROPERTY || type == SPY_CLASSMETHOD || type == SPY_STATICMETHOD)
         return descriptor_new(c, cls, type, argc - 1, argv + 1, keywords);
-    if (cls == owner) return builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, name_local(owner, "__name__")->as.string.data);
+    if (cls == owner) return builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     SPYValue *base = type == SPY_BYTEARRAY ? bytearray_new(c, "", 0) : mutable_layout(type) ? value_new(c, type) :
-        builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, name_local(owner, "__name__")->as.string.data);
+        builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!base) return NULL;
     SPYValue *instance = new_instance(c, cls);
     if (instance) instance->as.map.base = base;
@@ -26015,7 +26016,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     const char *name = name_local(owner, "__name__")->as.string.data;
     if (!self) return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'",
                              name, argc ? type_name(argv[0]) : "nothing");
-    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, name_local(owner, "__name__")->as.string.data);
+    SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!fresh) return NULL;
     if (type == SPY_DICT) {
         for (size_t i = 0; i < fresh->as.map.len; i++)
