@@ -199,3 +199,15 @@ assert_eq(it.__reduce__(), (iter, ((),)))
 assert_raises(StopIteration, next, it)
 e = assert_raises(TypeError, type, "X", (type(it),), {})
 assert_eq(str(e), "type 'generic_alias_iterator' is not an acceptable base type")
+
+# A range iterates with a C long unless a value, its length, or the
+# stepping does not fit one; reversed has its own condition.
+M = 2 ** 63
+for args, forward, backward in (((0, 10), "range_iterator", "range_iterator"),
+                                ((M - 2, M - 1, 2), "longrange_iterator", "range_iterator"),
+                                ((-M + 1, -M, -2), "longrange_iterator", "range_iterator"),
+                                ((M - 2, M - 2, 2), "range_iterator", "range_iterator"),
+                                ((-M, 0, 1), "longrange_iterator", "longrange_iterator"),
+                                ((0, 10, -M), "range_iterator", "longrange_iterator"),
+                                ((0, M + 5, M - 1), "longrange_iterator", "longrange_iterator")):
+    assert_eq((type(iter(range(*args))).__name__, type(reversed(range(*args))).__name__), (forward, backward))

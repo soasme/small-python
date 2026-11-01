@@ -2352,6 +2352,18 @@ static const char *const iterator_names[] = {"iterator", "list_iterator", "tuple
     "range_iterator", "longrange_iterator", "callable_iterator", "list_reverseiterator", "dict_reversekeyiterator",
     "dict_reversevalueiterator", "dict_reverseitemiterator", "TemplateIter", "map", "zip", "enumerate", "filter", "reversed"};
 _Static_assert(sizeof(iterator_names) / sizeof(*iterator_names) == IT_COUNT, "iterator class table");
+/* Whether CPython iterates range r with a longrange_iterator: its C long
+ * iterator needs start, stop, step and length to fit, and no overflow in
+ * stepping toward stop (range_iter) or, reversed, in negating the step and
+ * stepping back from start (range_reverse). */
+static int long_range_iteration(SPYValue *r, int reversed) {
+    if (r->as.range.start->as.integer_data.big || r->as.range.stop->as.integer_data.big ||
+        r->as.range.step->as.integer_data.big || r->as.range.length->as.integer_data.big) return 1;
+    int64_t start = r->as.range.start->as.integer_data.small, stop = r->as.range.stop->as.integer_data.small;
+    int64_t step = r->as.range.step->as.integer_data.small;
+    if (reversed) return step == INT64_MIN || (step > 0 ? start < INT64_MIN + step : start > INT64_MAX + step);
+    return r->as.range.length->as.integer_data.small && (step > 0 ? stop > INT64_MAX - (step - 1) : stop < INT64_MIN + (-1 - step));
+}
 static int iterator_class_id(SPYValue *v) {
     SPYValue *source = v->as.iterator.source;
     switch (v->as.iterator.kind) {
@@ -2361,8 +2373,9 @@ static int iterator_class_id(SPYValue *v) {
     case I_FILTER: return IT_FILTER;
     case I_CALLABLE: return IT_CALLABLE;
     case I_RANGE:
-        return source->as.range.start->as.integer_data.big || source->as.range.stop->as.integer_data.big ||
-            source->as.range.step->as.integer_data.big || source->as.range.length->as.integer_data.big ? IT_LONGRANGE : IT_RANGE;
+        /* A reversed range's iterator records its class, which the range
+         * it reverses decides; a forward one's follows from its own range. */
+        return (v->as.iterator.size ? v->as.iterator.size == 2 : long_range_iteration(source, 0)) ? IT_LONGRANGE : IT_RANGE;
     case I_REVERSED:
         switch (source->type) {
         case SPY_LIST: return IT_LIST_REVERSE;
@@ -25053,6 +25066,7 @@ execution_fail:
             SPYValue *slice = step ? slice_new(c, c->none, c->none, step) : NULL;
             SPYValue *range = slice ? range_index(c, a, slice) : NULL;
             SPYValue *iterator = range ? get_iterator(c, range) : NULL;
+            if (iterator) iterator->as.iterator.size = 1 + (size_t)long_range_iteration(a, 1);
             spy_release(step); spy_release(slice); spy_release(range); return iterator;
         }
         if (id == B_MAP && argc < 2) return spy_error(c, "TypeError", "map() must have at least two arguments.");
