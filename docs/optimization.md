@@ -1329,6 +1329,11 @@ nbody. Only loop, a module-level `while`, is slower with the profile
 
 ## Tried and left out
 
+- **A builtin found past the module's dictionary without the walk.**
+  When a function's global name was remembered missing from the module's
+  dictionary, checking the builtins dictionary's remembered entry first
+  saved about 50 instructions per `len` or `range` lookup, but two
+  million `len(l)` on the M2 took only 0.8% less time.
 - **An augmented item assignment reads the list in place.** `b[3] -= x`
   took the old item and stored the new one through `get_index` and
   `set_index`; reading and replacing the slot inline cut nbody's
@@ -1405,4 +1410,6 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   inline slowed the other callers: `sort` gained 6% but `nbody`, `loop`
   and `generators` lost 3% to 10%.
 - **`-O3`.** Within 1% of `-O2` on every program but `generators` (-5.6%),
-  so the build keeps `-O2`.
+  so the build keeps `-O2`. Measured again later, averaged over eight
+  code layouts: sort -1.4%, classes and fib -0.9%, nbody +0.8%,
+  generators +0.3%; still no clear gain for a larger engine.
