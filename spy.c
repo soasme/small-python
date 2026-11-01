@@ -21706,10 +21706,13 @@ static SPYValue *builtin_value(SPYContext *c, SPYValue *v, int type) {
     return NULL;
 }
 /* Return the borrowed builtin value a method operates on. */
-/* "type.name", the name CPython's argument errors give a method. */
-static const char *method_label(SPYContext *c, int type, const char *name, char *buffer, size_t size) {
-    snprintf(buffer, size, "%s.%s", name_local(c->types[type], "__name__")->as.string.data, name);
-    return buffer;
+/* Fail unless method type.name, which takes no arguments, was given
+ * none; its errors name it "type.name", as CPython's do. */
+static int no_arguments(SPYContext *c, int type, const char *name, size_t argc, SPYValue *keywords) {
+    if (!argc && (!keywords || !keywords->as.map.len)) return 0;
+    char label[64];
+    snprintf(label, sizeof(label), "%s.%s", name_local(c->types[type], "__name__")->as.string.data, name);
+    return parse_arguments(c, label, argc, NULL, keywords, NULL, 0, 0, 0, NULL);
 }
 static NO_INLINE SPYValue *method_misapplied(SPYContext *c, size_t argc, SPYValue *const *argv, int type, const char *name) {
     return misapplied(c, name_local(c->types[type], "__name__")->as.string.data, name, argc, argv);
@@ -22012,18 +22015,16 @@ static SPYValue *text_case(SPYContext *c, SPYValue *self, int operation) {
 static const char *const text_case_names[] = {"lower", "upper", "casefold", "title", "capitalize", "swapcase"};
 static SPYValue *text_case_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int operation = (int)((intptr_t)data & 255), type = (int)((intptr_t)data >> 8);
-    SPYValue *self = method_self(c, argc, argv, type, text_case_names[operation]), *args[1];
-    char label[64];
-    if (!self || parse_arguments(c, method_label(c, type, text_case_names[operation], label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    SPYValue *self = method_self(c, argc, argv, type, text_case_names[operation]);
+    if (!self || no_arguments(c, type, text_case_names[operation], argc - 1, keywords)) return NULL;
     return text_case(c, self, operation);
 }
 enum { IS_ALPHA, IS_DECIMAL, IS_DIGIT, IS_NUMERIC, IS_SPACE, IS_ALNUM, IS_ASCII, IS_UPPER, IS_LOWER, IS_TITLE };
 static const char *const predicate_names[] = {"isalpha", "isdecimal", "isdigit", "isnumeric", "isspace", "isalnum", "isascii", "isupper", "islower", "istitle"};
 static SPYValue *text_predicate(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int test = (int)((intptr_t)data & 255), type = (int)((intptr_t)data >> 8);
-    SPYValue *self = method_self(c, argc, argv, type, predicate_names[test]), *args[1];
-    char label[64];
-    if (!self || parse_arguments(c, method_label(c, type, predicate_names[test], label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    SPYValue *self = method_self(c, argc, argv, type, predicate_names[test]);
+    if (!self || no_arguments(c, type, predicate_names[test], argc - 1, keywords)) return NULL;
     Units text;
     if (units_from(c, self, &text)) return NULL;
     static const int properties[] = {C_ALPHA, C_DECIMAL, C_DIGIT, C_NUMERIC, C_SPACE, C_ALNUM};
@@ -22967,9 +22968,8 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
 static SPYValue *int_simple(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int which = (int)(intptr_t)data;
     const char *name = which == 0 ? "as_integer_ratio" : which == 1 ? "is_integer" : "__index__";
-    SPYValue *self = method_self(c, argc, argv, SPY_INT, name), *args[1];
-    char label[64];
-    if (!self || parse_arguments(c, method_label(c, SPY_INT, name, label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    SPYValue *self = method_self(c, argc, argv, SPY_INT, name);
+    if (!self || no_arguments(c, SPY_INT, name, argc - 1, keywords)) return NULL;
     if (which == 1) return spy_bool(c, 1);
     SPYValue *value = self->type == SPY_BOOL ? spy_int(c, self->as.integer_data.small) : spy_retain(self);
     if (which == 2 || !value) return value;
@@ -22981,9 +22981,8 @@ static SPYValue *int_simple(SPYContext *c, size_t argc, SPYValue *const *argv, S
 static SPYValue *float_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int which = (int)(intptr_t)data;
     const char *name = which == 0 ? "as_integer_ratio" : which == 1 ? "is_integer" : "hex";
-    SPYValue *self = method_self(c, argc, argv, SPY_FLOAT, name), *args[1];
-    char label[64];
-    if (!self || parse_arguments(c, method_label(c, SPY_FLOAT, name, label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    SPYValue *self = method_self(c, argc, argv, SPY_FLOAT, name);
+    if (!self || no_arguments(c, SPY_FLOAT, name, argc - 1, keywords)) return NULL;
     double x = self->as.real;
     if (which == 1) return spy_bool(c, isfinite(x) && floor(x) == x);
     if (which == 2) {
@@ -23137,8 +23136,7 @@ static SPYValue *dict_fromkeys(SPYContext *c, size_t argc, SPYValue *const *argv
 static SPYValue *frozendict_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     const char *name = data ? "__getnewargs__" : "copy";
     SPYValue *self = method_self(c, argc, argv, SPY_FROZENDICT, name);
-    char label[64];
-    if (!self || parse_arguments(c, method_label(c, SPY_FROZENDICT, name, label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, NULL)) return NULL;
+    if (!self || no_arguments(c, SPY_FROZENDICT, name, argc - 1, keywords)) return NULL;
     if (!data) return argv[0]->type == SPY_FROZENDICT ? spy_retain(self) : frozendict_construct(c, 1, &self, NULL);
     SPYValue *dict = builtin(c, 1, argv, (void *)(intptr_t)B_DICT);
     SPYValue *args = dict ? value_new(c, SPY_TUPLE) : NULL;
@@ -26657,9 +26655,8 @@ static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, 
 /* __getnewargs__ of immutable builtin values: the plain value, as a tuple. */
 static SPYValue *getnewargs(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
-    SPYValue *self = method_self(c, argc, argv, type, "__getnewargs__"), *args[1];
-    char label[64];
-    if (!self || parse_arguments(c, method_label(c, type, "__getnewargs__", label, sizeof(label)), argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
+    SPYValue *self = method_self(c, argc, argv, type, "__getnewargs__");
+    if (!self || no_arguments(c, type, "__getnewargs__", argc - 1, keywords)) return NULL;
     if (type == SPY_COMPLEX) {
         SPYValue *items[] = {spy_float(c, creal(self->as.number)), spy_float(c, cimag(self->as.number))};
         SPYValue *result = items[0] && items[1] ? spy_tuple(c, 2, items) : NULL;

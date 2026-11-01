@@ -176,6 +176,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Keys of one kind sort without dispatch](#keys-of-one-kind-sort-without-dispatch) | -23.8% (sort); M2: sort -11.6% |
 | [A profile-guided build](#a-profile-guided-build) | M2 time: generators -21%, fib -16%, strings -14%, classes -12%; loop +2% |
 | [An unpacking reads a tuple or list in place](#an-unpacking-reads-a-tuple-or-list-in-place) | `a, b = t`: -76%, `a, b = b, a`: -73%; programs within 1% |
+| [A method without arguments names itself only for an error](#a-method-without-arguments-names-itself-only-for-an-error) | `s.upper()`: -60%; M2: strings -3.7% |
 
 ### Releasing a number or string frees it at once
 
@@ -1233,6 +1234,16 @@ Two million assignments in a loop on the M2: `a, b = t` 145 → 54 ms,
 the programs, which seldom unpack: +0.2% at most. Wall time averaged
 over eight code layouts: generators -1.7%, nbody +0.7%, fib +0.6%, the
 rest within 0.5%.
+
+### A method without arguments names itself only for an error
+
+`str.upper`, `str.isdigit` and the other methods that take no arguments
+formatted their name, `"str.upper"`, with `snprintf` on every call, for
+the error they would raise if given arguments. The name is now formatted
+only when there are arguments or keywords to refuse. Two million calls
+of `s.upper()` on the M2: 238 → 110 ms (an empty loop takes 26.5 ms).
+Wall time averaged over eight code layouts: strings -3.7%, the rest
+within 0.2%.
 
 ### A profile-guided build
 
