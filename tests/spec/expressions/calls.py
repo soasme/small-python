@@ -65,3 +65,28 @@ assert_is(bound.__func__, C.m)
 assert_eq(C.m(c, 2), (c, 2))
 e = assert_raises(TypeError, C.m)
 assert_eq(str(e), "C.m() missing 2 required positional arguments: 'self' and 'x'")
+
+# A duplicate keyword names the callable by __qualname__ and __module__, by str()
+# without a __qualname__, and as "function" when looking either up fails.
+class Plain:
+    def __call__(self, **kwargs): pass
+    def __repr__(self): return "Plain-object"
+assert_raises(TypeError, lambda: Plain()(**{"a": 1}, **{"a": 2}), message="Plain-object got multiple values for keyword argument 'a'")
+class NoModule:
+    def __call__(self, **kwargs): pass
+    def __getattribute__(self, name):
+        if name == "__module__": raise AttributeError(name)
+        if name == "__qualname__": return "Named"
+        return object.__getattribute__(self, name)
+assert_raises(TypeError, lambda: NoModule()(**{"a": 1}, **{"a": 2}), message="Named() got multiple values for keyword argument 'a'")
+class Failing:
+    broken = "__qualname__"
+    def __call__(self, **kwargs): pass
+    def __getattribute__(self, name):
+        if name == type(self).broken: raise ValueError("boom")
+        if name == "__qualname__": return "Named"
+        return object.__getattribute__(self, name)
+class FailingModule(Failing):
+    broken = "__module__"
+for cls in (Failing, FailingModule):
+    assert_raises(TypeError, lambda: cls()(**{"a": 1}, **{"a": 2}), message="function got multiple values for keyword argument 'a'")

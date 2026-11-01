@@ -92,3 +92,11 @@ assert_eq(str(e), "BadExporter.__buffer__() must return a memoryview, not bytes"
 e = assert_raises(TypeError, memoryview, "str")
 assert_eq(str(e), "memoryview: a bytes-like object is required, not 'str'")
 assert_eq(b"-".join([Exporter()]), b"exported")
+
+# The buffer protocol methods, called directly.
+view = memoryview(b"ab")
+assert_eq(memoryview.__hash__(view), hash(b"ab"))
+exported = view.__buffer__(0)
+assert_eq((type(exported).__name__, bytes(exported)), ("memoryview", b"ab"))
+assert_raises(TypeError, view.__buffer__, "x", message="'str' object cannot be interpreted as an integer")
+assert_is(view.__release_buffer__(exported), None)

@@ -13541,8 +13541,11 @@ static SPYValue *function_str(SPYContext *c, SPYValue *f) {
 }
 static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValue *value, SPYValue *callable) {
     if (map_find(result, key) >= 0) {
-        SPYValue *name = function_str(c, callable), *text = name ? stringify(c, key, 0) : NULL;
-        if (text) errorf(c, "TypeError", "%s got multiple values for keyword argument '%s'", name->as.string.data, text->as.string.data);
+        /* As %V in _PyEval_FormatKwargsError: "function" when naming it fails. */
+        SPYValue *name = function_str(c, callable);
+        if (!name) spy_clear_error(c);
+        SPYValue *text = stringify(c, key, 0);
+        if (text) errorf(c, "TypeError", "%s got multiple values for keyword argument '%s'", name ? name->as.string.data : "function", text->as.string.data);
         spy_release(name); spy_release(text);
         return -1;
     }
@@ -15984,8 +15987,11 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
     while (lazy_projection(root)) { first = root; root = root->as.lazy.from; }
     if (lazy->as.lazy.resolving) {
         Buffer name = {.ctx = c};
-        if (!lazy_name(&name, lazy))
-            errorf(c, "ImportError", "cannot import name '%s' (most likely due to a circular import)", name.data);
+        if (!lazy_name(&name, lazy)) {
+            errorf(c, "ImportCycleError", "cannot import name '%s' (most likely due to a circular import)", name.data);
+            SPYValue *module = root->as.lazy.from;
+            if (module->as.string.len < sizeof(c->error_name)) memcpy(c->error_name, module->as.string.data, module->as.string.len + 1);
+        }
         mem_free(name.data); return NULL;
     }
     SPYValue *function = spy_retain(name_local(root->as.lazy.builtins, "__import__"));
@@ -16002,7 +16008,9 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
     const char *full = root->as.lazy.from->as.string.data, *dot = strchr(full, '.');
     SPYValue *target = lazy == root && dot && !lazy_from_import(root) ? spy_string(c, full, (size_t)(dot - full)) : spy_retain(root->as.lazy.from);
     if (fromlist && level && target) {
-        SPYValue *args[] = {target, c->none, c->none, fromlist, level};
+        /* The globals of the frame that touched the name, as both mappings. */
+        SPYValue *globals = namespace_map(module_env(c, c->eval_env ? c->eval_env : c->globals));
+        SPYValue *args[] = {target, globals, globals, fromlist, level};
         module = call(c, function, 5, args);
     }
     spy_release(target);
@@ -20045,7 +20053,8 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
             if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
-            machine_push(c, m, value); break;
+            machine_push(c, m, value);
+            break;
         }
         case BC_LOAD:
             /* A literal or a name found along the fast path, without eval. */
