@@ -30,8 +30,8 @@ warnings, test.support) were rewritten to use only the core language; each
 rewrite is explained by a "(Ported ...)" note inside the docstring.
 
 The `ports/` chapter carries CPython's unittest-based language test modules
-(test_augassign, test_binop, test_contains, ...), copied once from CPython
-3.15.0 and run by `harness.unittest`, a core-only adaptation of the unittest
+(test_augassign, test_binop, test_contains, ...), copied from CPython
+3.15.2 and run by `harness.unittest`, a core-only adaptation of the unittest
 names they use (TestCase with its assertions, skips, subtests and fixtures, and
 a subset of regular expressions for assertRaisesRegex). Each library import is
 replaced by a core equivalent, and each change is marked "(Ported)". Modules

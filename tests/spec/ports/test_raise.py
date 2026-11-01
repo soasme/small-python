@@ -1,6 +1,6 @@
 # spec: PLS-315 14.8, 21.1, 28.9, 15.4, 9.5
 # description: raise: bare re-raise, from clauses, causes and contexts, traceback objects, and removed raise forms.
-# Ported from CPython 3.15.0 Lib/test/test_raise.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_raise.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Copyright 2007 Google, Inc. All Rights Reserved.

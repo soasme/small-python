@@ -2,11 +2,11 @@
 
 **Edition:** 2026, draft 1  
 **Document identifier:** `PLS-STD-315:2026-draft1`  
-**Library baseline:** CPython 3.15.0 (`v3.15.0`, commit `d220409a`), 64-bit Linux  
+**Library baseline:** CPython 3.15.2 (`v3.15.2`, commit `5e58eaad`), 64-bit Linux  
 **Status:** Project library specification, draft
 
 This document specifies the library modules of Small Python's standard layer
-(`spy-std.c`): `sys` and `gc`. It follows CPython 3.15.0: a name this document
+(`spy-std.c`): `sys` and `gc`. It follows CPython 3.15.2: a name this document
 defines behaves as CPython's does, with CPython's signatures, results, and
 error messages. Where CPython's behaviour depends on the process, the platform,
 or the build, this document says so and lets the host choose.
@@ -37,7 +37,7 @@ the Python Software Foundation.
 ## 1 Scope
 
 This document specifies the public names of the modules `sys` and `gc` as
-CPython 3.15.0 defines them, and their behaviour when called from Python code.
+CPython 3.15.2 defines them, and their behaviour when called from Python code.
 It does not specify:
 
 - the language, including the objects these modules return that the language
@@ -71,9 +71,9 @@ to add (5.15).
 - The Python Standard Library, version 3.15: *sys — System-specific parameters
   and functions*, and *gc — Garbage Collector interface*. Python Software
   Foundation.
-- CPython 3.15.0 source: `Python/sysmodule.c`, `Modules/gcmodule.c`,
+- CPython 3.15.2 source: `Python/sysmodule.c`, `Modules/gcmodule.c`,
   `Python/clinic/sysmodule.c.h`, `Modules/clinic/gcmodule.c.h`, at commit
-  `d220409a13b77de7a6c30abe16ea90db01528edc` (`tests/upstream.json`).
+  `5e58eaad7c58df58dfa8ea549c87996e01dd1077` (`tests/upstream.json`).
 
 ## 4 Conventions
 
@@ -157,7 +157,7 @@ standard library's top-level modules, including those the host lacks.
 CPython build. `builtin_module_names` includes `'sys'` and `'builtins'`.
 
 *Status:* provided; `builtin_module_names` is `('_spy', 'builtins', 'gc',
-'sys')`, and `stdlib_module_names` is CPython 3.15.0's.
+'sys')`, and `stdlib_module_names` is CPython 3.15.2's.
 
 #### 5.1.6 `path`, `meta_path`, `path_hooks`, `path_importer_cache`
 
@@ -815,7 +815,7 @@ threads, which a context does not have.
 ## Annex B (informative) Verification
 
 Every value and message quoted in clauses 5 and 6 was checked against the
-pinned CPython 3.15.0 build (`make oracle`, `tests/upstream/cpython-build`),
+pinned CPython 3.15.2 build (`make oracle`, `tests/upstream/cpython-build`),
 on 64-bit Linux or macOS, by calling the name from Python and reading the
 result or the exception. Values that depend on the build (`version`, paths,
 `builtin_module_names`, `thread_info`) are described rather than quoted.

@@ -1,6 +1,6 @@
 # spec: PLS-315 13.5, 22.1, 22.3, 19.3
 # description: pow and **: int and float powers, negative exponents, three-argument pow with modular inverses, and big exponents.
-# Ported from CPython 3.15.0 Lib/test/test_pow.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_pow.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) random is the harness's core equivalent; math.gcd is written out.

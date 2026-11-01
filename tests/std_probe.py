@@ -92,7 +92,7 @@ for args in [(), (None,), (0,), (3,), ("bye",)]:
 calls(sys, ["sys.exit(1, 2)", "sys.exit(status=1)", "sys.is_finalizing()", "sys.is_finalizing(1)"])
 
 # 5.9
-# The oracle may be a later 3.15 release than the 3.15.0 baseline: micro is not compared.
+# The oracle may be a later 3.15 release than the 3.15.2 baseline: micro is not compared.
 show("version_info", lambda: (type(sys.version_info).__name__, sys.version_info[:2], sys.version_info >= (3, 15),
                               sys.version_info.major, sys.version_info.releaselevel, sys.version_info.serial))
 show("version", lambda: (hex(sys.hexversion & ~0xFF00), sys.api_version, sys.version.startswith("3.15.")))

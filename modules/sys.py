@@ -72,9 +72,9 @@ def _structseq(name, fields, doc, instantiable=False, values=None, hidden=(), mo
 
 version_info = _structseq("version_info", ("major", "minor", "micro", "releaselevel", "serial"),
                           "sys.version_info\n\nVersion information as a named tuple.",
-                          values=(3, 15, 0, "final", 0))
-hexversion = 0x030F00F0
-version = "3.15.0 (Small Python)"
+                          values=(3, 15, 2, "final", 0))
+hexversion = 0x030F02F0
+version = "3.15.2 (Small Python)"
 api_version = 1013
 float_repr_style = "short"
 maxunicode = 0x10FFFF

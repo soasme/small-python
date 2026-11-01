@@ -1,6 +1,6 @@
 # spec: PLS-315 13.7, 7.6, 10.5
 # description: Binary operators dispatched to user-defined numeric classes.
-# Ported from CPython 3.15.0 Lib/test/test_binop.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_binop.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Tests for binary operators on subtypes of built-in types."""

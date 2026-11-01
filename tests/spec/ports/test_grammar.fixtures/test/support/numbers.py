@@ -1,4 +1,4 @@
-# (Ported) Copied from CPython 3.15.0 Lib/test/support/numbers.py unchanged.
+# (Ported) Copied from CPython 3.15.2 Lib/test/support/numbers.py unchanged.
 # These are shared with test_tokenize and other test modules.
 #
 # Note: since several test cases filter out floats by looking for "e" and ".",

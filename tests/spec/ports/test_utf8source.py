@@ -1,6 +1,6 @@
 # spec: PLS-315 11.2
 # description: UTF-8 source text in string literals.
-# Ported from CPython 3.15.0 Lib/test/test_utf8source.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_utf8source.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 

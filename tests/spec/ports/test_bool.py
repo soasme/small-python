@@ -1,6 +1,6 @@
 # spec: PLS-315 22.2, 7.5.1, 13.11
 # description: bool: construction, arithmetic and bitwise results, repr and str, __bool__ and __len__ conversions, and truth of types.
-# Ported from CPython 3.15.0 Lib/test/test_bool.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_bool.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Test properties of bool promised by PEP 285

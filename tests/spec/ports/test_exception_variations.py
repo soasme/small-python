@@ -1,6 +1,6 @@
 # spec: PLS-315 15.4
 # description: try/except/else/finally in every combination.
-# Ported from CPython 3.15.0 Lib/test/test_exception_variations.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_exception_variations.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 

@@ -1,6 +1,6 @@
 # spec: PLS-315 16.1.1, 16.1, 7.4.3, 13.3.4
 # description: Positional-only parameters: syntax errors, binding, defaults, keyword collisions, lambdas, methods, generators and coroutines.
-# Ported from CPython 3.15.0 Lib/test/test_positional_only_arg.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_positional_only_arg.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Unit tests for the positional only argument syntax specified in PEP 570."""

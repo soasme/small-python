@@ -1837,7 +1837,7 @@ class support:
     def skip_if_huge_c_stack(*args, **kwargs):
         return lambda test: test
 
-    skip_emscripten_stack_overflow = skip_wasi_stack_overflow = skip_if_huge_c_stack
+    skip_emscripten_stack_overflow = skip_wasi_stack_overflow = run_with_limited_c_stack = skip_if_huge_c_stack
 
     @staticmethod
     def thread_unsafe(reason=None):

@@ -1,6 +1,6 @@
 # spec: PLS-315 15.6, 15.6.1, 15.6.2, 15.6.3, 15.6.4, 15.6.5
 # description: CPython's test_patma: the match statement, its patterns, their binding and evaluation order, and its syntax errors.
-# Ported from CPython 3.15.0 Lib/test/test_patma.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_patma.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) array, collections, dataclasses, dis, enum, inspect, sys and typing

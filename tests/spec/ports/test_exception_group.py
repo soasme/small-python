@@ -1,6 +1,6 @@
 # spec: PLS-315 21.4, 15.4
 # description: BaseExceptionGroup and ExceptionGroup: construction, split, subgroup, derive, and str.
-# Ported from CPython 3.15.0 Lib/test/test_exception_group.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_exception_group.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) Core stand-ins: the generic alias type, the support helpers, and a
@@ -8,7 +8,7 @@ from harness import *
 GenericAlias = type(list[int])
 skip_emscripten_stack_overflow = support.skip_emscripten_stack_overflow
 skip_wasi_stack_overflow = support.skip_wasi_stack_overflow
-skip_if_huge_c_stack = support.skip_if_huge_c_stack
+run_with_limited_c_stack = support.run_with_limited_c_stack
 exceeds_recursion_limit = support.exceeds_recursion_limit
 
 class deque:
@@ -147,6 +147,8 @@ class InstanceCreation(unittest.TestCase):
         self.assertIs(
             type(MyBEG("eg", [ValueError(12), KeyboardInterrupt(42)])),
             MyBEG)
+
+    # (Ported) test_no_memory needs _testcapi; omitted.
 
 
 class StrAndReprTests(unittest.TestCase):
@@ -567,7 +569,7 @@ class DeepRecursionInSplitAndSubgroup(unittest.TestCase):
             e = ExceptionGroup('eg', [e])
         return e
 
-    @skip_if_huge_c_stack()
+    @run_with_limited_c_stack()
     @skip_emscripten_stack_overflow()
     @skip_wasi_stack_overflow()
     def test_deep_split(self):
@@ -575,7 +577,7 @@ class DeepRecursionInSplitAndSubgroup(unittest.TestCase):
         with self.assertRaises(RecursionError):
             e.split(TypeError)
 
-    @skip_if_huge_c_stack()
+    @run_with_limited_c_stack()
     @skip_emscripten_stack_overflow()
     @skip_wasi_stack_overflow()
     def test_deep_subgroup(self):

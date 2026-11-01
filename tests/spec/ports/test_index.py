@@ -1,6 +1,6 @@
 # spec: PLS-315 7.5.3, 22.1, 25.4, 25.5, 13.3
 # description: __index__ in operator.index equivalents, slices, sequence repetition and subscripts, and int subclasses.
-# Ported from CPython 3.15.0 Lib/test/test_index.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_index.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) support and operator are the harness's core equivalents.

@@ -1,6 +1,6 @@
 # spec: PLS-315 25.4, 13.3, 25.5, 7.5.3, 9.7
 # description: slice objects: construction, repr, hashing, comparison, members, indices against a reference model, and __setitem__ with slices.
-# Ported from CPython 3.15.0 Lib/test/test_slice.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_slice.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # tests for slice objects; in particular the indices method.

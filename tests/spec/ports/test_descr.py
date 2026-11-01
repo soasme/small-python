@@ -1,6 +1,6 @@
 # spec: PLS-315 16.1, 16.2, 16.3, 16.4, 16.5, 20.1
 # description: CPython's test_descr: special methods, slots, descriptors, properties, class and static methods, MRO, and pickling reductions.
-# Ported from CPython 3.15.0 Lib/test/test_descr.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_descr.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 import builtins
@@ -2329,10 +2329,22 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         def swallow(*args): pass
         def format_impl(self, spec):
             return "hello"
+        def do_eq(obj):
+            return obj == 1
+        def do_ne(obj):
+            return obj != 1
+        def do_lt(obj):
+            return obj < 1
+        def do_le(obj):
+            return obj <= 1
+        def do_gt(obj):
+            return obj > 1
+        def do_ge(obj):
+            return obj >= 1
 
-        # It would be nice to have every special method tested here, but I'm
-        # only listing the ones I can remember outside of typeobject.c, since it
-        # does it right.
+        # It would be nice to have every special method tested here.
+        # gh-131151: the rich comparison operators used to clear any exception
+        # raised by a descriptor's __get__.
         specials = [
             ("__bytes__", bytes, hello, set(), {}),
             ("__reversed__", reversed, empty_seq, set(), {}),
@@ -2351,6 +2363,12 @@ class ClassPropertiesAndMethods(unittest.TestCase):
             # (Ported) math.floor, math.trunc and math.ceil are library functions.
             ("__dir__", dir, empty_seq, set(), {}),
             ("__round__", round, zero, set(), {}),
+            ("__eq__", do_eq, return_true, set(), {}),
+            ("__ne__", do_ne, return_true, set(), {}),
+            ("__lt__", do_lt, return_true, set(), {}),
+            ("__le__", do_le, return_true, set(), {}),
+            ("__gt__", do_gt, return_true, set(), {}),
+            ("__ge__", do_ge, return_true, set(), {}),
             ]
 
         class Checker(object):

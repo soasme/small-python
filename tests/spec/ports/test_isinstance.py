@@ -1,6 +1,6 @@
 # spec: PLS-315 19.3, 7.2
 # description: isinstance and issubclass, including __instancecheck__, __subclasscheck__ and __bases__.
-# Ported from CPython 3.15.0 Lib/test/test_isinstance.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_isinstance.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Tests some corner cases with isinstance() and issubclass().  While these

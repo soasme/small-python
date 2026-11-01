@@ -237,7 +237,7 @@ Conformance to PLS-315 rests on two kinds of evidence, and no other:
   step for step. The [README](../tests/tla/README.md) states what these checks
   do and do not establish.
 
-The pinned CPython 3.15.0 oracle (`make oracle`) validates tests and models;
+The pinned CPython 3.15.2 oracle (`make oracle`) validates tests and models;
 no test needs it to run.
 
 `make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
@@ -1172,7 +1172,7 @@ encoding and its lookup follow QuickJS's libunicode (`build_prop_table` and
 `lre_is_in_table`) under its [MIT license](licenses/quickjs.txt); no other
 QuickJS implementation code has been copied into the engine.
 
-The language standard contains derived Python 3.15.0 documentation under its
+The language standard contains derived Python 3.15.2 documentation under its
 original PSF license, with copyright notices and complete license text included
 in the single-file standard. Cython downloads retain their upstream Apache 2.0
 license and other file-specific notices. The adapter reads the checkout rather

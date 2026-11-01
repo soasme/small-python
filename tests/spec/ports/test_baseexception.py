@@ -1,6 +1,6 @@
 # spec: PLS-315 21.1, 21.2, 21.3, 14.8, 15.4
 # description: BaseException: the built-in exception hierarchy, the args/str/repr interface, raising and catching non-exceptions, and __setstate__.
-# Ported from CPython 3.15.0 Lib/test/test_baseexception.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_baseexception.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) The built-in namespace, the text of Lib/test/exception_hierarchy.txt

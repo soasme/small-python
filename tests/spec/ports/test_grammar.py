@@ -1,6 +1,6 @@
 # spec: PLS-315 12.1, 12.2, 12.3, 12.6, 13.2.6, 13.16, 14.2, 14.4, 16.1, 16.2
 # description: CPython's test_grammar: the parser accepts each grammar rule, rejects the invalid forms, and runs them with their semantics.
-# Ported from CPython 3.15.0 Lib/test/test_grammar.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_grammar.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 # Python test set -- part 1, grammar.
 # This just tests whether the parser accepts them all.

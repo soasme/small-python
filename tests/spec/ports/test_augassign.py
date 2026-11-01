@@ -1,6 +1,6 @@
 # spec: PLS-315 14.3, 7.6
 # description: Augmented assignment: in-place special methods and their fallbacks.
-# Ported from CPython 3.15.0 Lib/test/test_augassign.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_augassign.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Augmented assignment test.

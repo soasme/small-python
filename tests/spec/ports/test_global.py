@@ -1,6 +1,6 @@
 # spec: PLS-315 14.14, 8.2, 8.3, 18.2
 # description: global declarations: syntax errors after use, assignment, annotation, or as a parameter, and every name-binding construct storing a global.
-# Ported from CPython 3.15.0 Lib/test/test_global.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_global.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """This module includes tests for syntax errors that occur when a name

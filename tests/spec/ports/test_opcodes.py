@@ -1,6 +1,6 @@
 # spec: PLS-315 15.4, 14.8, 16.6, 14.4, 13.14, 23.6
 # description: Try statements in loops, annotations namespaces, raising class exceptions, comparing functions, and % on str subclasses.
-# Ported from CPython 3.15.0 Lib/test/test_opcodes.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_opcodes.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Python test set -- part 2, opcodes

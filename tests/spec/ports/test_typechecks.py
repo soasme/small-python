@@ -1,6 +1,6 @@
 # spec: PLS-315 19.3, 20.2
 # description: __instancecheck__ and __subclasscheck__ on metaclasses.
-# Ported from CPython 3.15.0 Lib/test/test_typechecks.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_typechecks.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Unit tests for __instancecheck__ and __subclasscheck__."""

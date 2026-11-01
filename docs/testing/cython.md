@@ -64,7 +64,7 @@ Limitations are explicit:
   loops and conditionals; function and class bodies use ordinary execution.
 - Exception matching follows doctest type/message checks; traceback frames are
   not compared.
-- Both current discovery runs use the pinned Python 3.15.0 oracle. A future-syntax discovery failure is
+- Both current discovery runs use the pinned Python 3.15.2 oracle. A future-syntax discovery failure is
   adapter-ineligible, not a runtime pass or an engine syntax failure.
 - Execution budgets and process timeouts prevent an unsupported test from
   hanging the reporting run. Such failures are recorded, never passed.

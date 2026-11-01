@@ -1,6 +1,6 @@
 # spec: PLS-315 15.3, 19.3.23, 27.1.1, 27.1.2, 27.1.3
 # description: CPython's test_iter: the iterator protocol, sequence iteration, sentinel iterators and the builtins that consume iterables.
-# Ported from CPython 3.15.0 Lib/test/test_iter.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_iter.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Test iterators.

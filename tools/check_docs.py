@@ -74,7 +74,7 @@ def main():
             continue
         prose = re.sub(r"`+[^`]+`+", "", line)
         for ref in re.findall(r"(?<![\w.])((?:[1-9]\d?|[A-E])\.\d+(?:\.\d+)*)(?![\w.]*\d)", prose):
-            if ref not in sections and not re.fullmatch(r"\d+\.\d+\.0|3\.15|1\.0|2\.675?", ref):
+            if ref not in sections and not re.fullmatch(r"\d+\.\d+\.0|3\.15(\.\d+)?|1\.0|2\.675?", ref):
                 raise ValueError(f"standard line {number}: no clause {ref}")
     version = (ROOT / "VERSION").read_text().strip()
     header = (ROOT / "spy.h").read_text()

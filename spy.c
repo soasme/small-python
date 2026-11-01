@@ -4818,11 +4818,30 @@ static size_t escape_position(Parser *p, const char *at) {
         if (((unsigned char)*s & 0xc0) != 0x80) n += (unsigned char)*s < 0x80 ? 1 : 10;
     return n;
 }
-static int escape_error(Parser *p, const char *backslash, const char *stop, const char *reason) {
+/* The end of the f- or t-string text from s, as CPython's tokenizer splits
+ * it: before a field, after a doubled brace, or after a \N{...} escape. */
+static const char *segment_end(const char *s, const char *end) {
+    while (s < end) {
+        if (*s == '{' || *s == '}') return s + 1 < end && s[1] == *s ? s + 2 : s;
+        if (*s == '\\' && end - s > 2 && s[1] == 'N' && s[2] == '{') {
+            const char *close = memchr(s, '}', (size_t)(end - s));
+            return close ? close + 1 : end;
+        }
+        s += *s == '\\' && s + 1 < end && s[1] != '{' && s[1] != '}' ? 2 : 1;
+    }
+    return end;
+}
+/* An escape error in an f- or t-string spans the text segment holding it. */
+static int escape_error(Parser *p, const char *backslash, const char *stop, const char *end, int flags, const char *reason) {
     char message[200];
     snprintf(message, sizeof(message), "(unicode error) 'unicodeescape' codec can't decode bytes in position %zu-%zu: %s",
              escape_position(p, backslash), escape_position(p, stop) - 1, reason);
-    syntax(p, message); return -1;
+    syntax(p, message);
+    if (flags & L_FORMAT) {
+        for (const char *ch = p->error_start; ch < p->literal_start; ch++) if (*ch == '\n') p->ctx->line++;
+        p->error_start = p->literal_start; p->error_end = segment_end(backslash, end);
+    }
+    return -1;
 }
 static int literal_character(Parser *p, Buffer *out, const char **cursor, const char *end, int flags) {
     const char *s = *cursor;
@@ -4851,11 +4870,11 @@ static int literal_character(Parser *p, Buffer *out, const char **cursor, const 
                     syntax(p, message); return -1;
                 }
                 if (digit < 0)
-                    return escape_error(p, backslash, s + i, ch == 'x' ? "truncated \\xXX escape" : ch == 'u' ? "truncated \\uXXXX escape" :
+                    return escape_error(p, backslash, s + i, end, flags, ch == 'x' ? "truncated \\xXX escape" : ch == 'u' ? "truncated \\uXXXX escape" :
                                         "truncated \\UXXXXXXXX escape");
                 code = code * 16 + (unsigned)digit;
             }
-            if (code > 0x10ffff) return escape_error(p, backslash, s + digits, "illegal Unicode character");
+            if (code > 0x10ffff) return escape_error(p, backslash, s + digits, end, flags, "illegal Unicode character");
             *cursor = s + digits;
             if (flags & L_BYTES) { char byte = (char)code; return append(out, &byte, 1); }
             return append_codepoint(out, code);
@@ -4869,9 +4888,11 @@ static int literal_character(Parser *p, Buffer *out, const char **cursor, const 
             const char *close = s < end && *s == '{' ? memchr(s, '}', (size_t)(end - s)) : NULL;
             unsigned code;
             if (!close || close == s + 1)
-                return escape_error(p, backslash, close ? close : s < end && *s == '{' ? end : s, "malformed \\N character escape");
-            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) return escape_error(p, backslash, close + 1, "unknown Unicode character name");
+                return escape_error(p, backslash, close ? close : s < end && *s == '{' ? end : s, end, flags, "malformed \\N character escape");
+            if (!unicode_lookup(s + 1, (size_t)(close - s - 1), &code)) return escape_error(p, backslash, close + 1, end, flags, "unknown Unicode character name");
             *cursor = close + 1;
+            /* The tokenizer ends an f-string's text after the escape. */
+            if (flags & L_FORMAT) p->literal_start = close + 1;
             return append_codepoint(out, code);
         } else if (ch != '\\' && ch != '\'' && ch != '"') {
             /* Python retains unknown escapes; SyntaxWarning reporting is pending. */
@@ -4969,7 +4990,7 @@ static int string_parts(Parser *p, const char **cursor, const char *end, int fla
             if (spec && *s == '}') break;
             if (!spec && s + 1 < end && s[1] == *s) {
                 if (append(literal, s, 1)) return -1;
-                s += 2; continue;
+                s += 2; p->literal_start = s; continue;
             }
             if (*s == '}') { syntax(p, "f-string: single '}' is not allowed"); return -1; }
             Field f = {flags, 0, s, NULL};

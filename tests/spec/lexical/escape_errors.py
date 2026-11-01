@@ -18,3 +18,20 @@ assert_eq(assert_syntax_error("x = '\\\n\\x1'").lineno, 1)
 # Every word of the name exists, but no character has this name.
 error = assert_syntax_error('"\\N{LATIN LETTER SMALL}"')
 assert_eq(error.msg, "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-21: unknown Unicode character name")
+
+# In an f- or t-string, the position counts within the text segment holding
+# the escape, and the error spans that segment. A segment ends before a
+# field, after the first of a doubled brace, or after a \N{...} escape.
+for source, position, location in (
+        (r'f"\xZZ"', "0-1", (1, 3, 1, 7)),
+        (r'f"ab{x!r}cd\xZZ"', "2-3", (1, 10, 1, 16)),
+        (r'f"a{{b\xZZc"', "1-2", (1, 6, 1, 12)),
+        (r'f"\xZZ}}c{x}"', "0-1", (1, 3, 1, 9)),
+        (r'f"\xZZ\N{DASH}x{y}"', "0-1", (1, 3, 1, 15)),
+        (r'f"\N{EM DASH}\xZZ"', "0-1", (1, 14, 1, 18)),
+        (r't"{x}\xZZ"', "0-1", (1, 6, 1, 10)),
+        ('f"""abc\n{x}\\xZZ\ndef"""', "0-1", (2, 4, 3, 4)),
+        (r'"ok" f"\xZZ"', "0-1", (1, 8, 1, 12))):
+    error = assert_syntax_error(source)
+    assert_eq(error.msg, f"(unicode error) 'unicodeescape' codec can't decode bytes in position {position}: truncated \\xXX escape")
+    assert_eq((error.lineno, error.offset, error.end_lineno, error.end_offset), location)

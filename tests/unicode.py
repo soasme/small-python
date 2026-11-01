@@ -8,8 +8,8 @@ import unicodedata
 
 
 def main():
-    if sys.version_info[:3] != (3, 15, 0) or unicodedata.unidata_version != "17.0.0":
-        raise SystemExit("Run with the pinned Python 3.15.0 oracle")
+    if sys.version_info[:3] != (3, 15, 2) or unicodedata.unidata_version != "17.0.0":
+        raise SystemExit("Run with the pinned Python 3.15.2 oracle")
     engine = str(Path(sys.argv[1]).resolve())
     source = """
 for code in range(0x110000):

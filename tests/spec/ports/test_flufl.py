@@ -1,6 +1,6 @@
 # spec: PLS-315 14.13, 13.10
 # description: The barry_as_FLUFL future: <> as inequality.
-# Ported from CPython 3.15.0 Lib/test/test_flufl.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_flufl.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) The compiler flag of PLS-315 Table 14-1, without the __future__ module.

@@ -22,7 +22,7 @@ CPython's standard library has two halves:
 
 So the plan is:
 
-1. Copy `Lib/` byte for byte from the pinned tag (`v3.15.0`, the oracle under
+1. Copy `Lib/` byte for byte from the pinned tag (`v3.15.2`, the oracle under
    `tests/upstream/cpython`). Never patch a file in it. Updating to a later
    3.15 release means copying the tree again.
 2. Provide the native modules that `Lib/` imports. They live at the host

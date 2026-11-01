@@ -1,6 +1,6 @@
 # spec: PLS-315 12.5, 13.2.4, 21.5
 # description: CPython's test_fstring: formatted string literals, their fields, conversions, format specifications, debug forms and syntax errors.
-# Ported from CPython 3.15.0 Lib/test/test_fstring.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_fstring.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 # -*- coding: utf-8 -*-
 # There are tests here with unicode string literals and
@@ -1095,6 +1095,24 @@ except Exception:
                              r"'\N{'",
                              r"'\N{GREEK CAPITAL LETTER DELTA'",
                              ])
+
+    def test_invalid_escape_location(self):
+        cases = [
+            (r'f"\xZZ"', (1, 3, 1, 7)),
+            (r'f"{x}\xZZ"', (1, 6, 1, 10)),
+            (r'f"a{x}b\N{NOPE}{y}"', (1, 7, 1, 16)),
+            (r'f"ok" f"\xZZ"', (1, 9, 1, 13)),
+            ('f"""\\xZZ\nabc"""', (1, 5, 2, 4)),
+            ('f"""abc\ndef\\xZZ"""', (1, 5, 2, 8)),
+            ('x = (1,\n  f"\\xZZ")', (2, 5, 2, 9)),
+        ]
+        for source, location in cases:
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(SyntaxError, r'\(unicode error\)') as cm:
+                    compile(source, '<string>', 'exec')
+                error = cm.exception
+                self.assertEqual((error.lineno, error.offset,
+                                  error.end_lineno, error.end_offset), location)
 
     def test_backslashes_in_expression_part(self):
         self.assertEqual(f"{(

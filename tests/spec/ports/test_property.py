@@ -1,6 +1,6 @@
 # spec: PLS-315 20.5, 10.3, 7.3
 # description: property: getters, setters, deleters, docstrings, subclasses, __set_name__, and error messages.
-# Ported from CPython 3.15.0 Lib/test/test_property.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_property.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # Test case for property

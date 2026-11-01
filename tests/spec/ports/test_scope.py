@@ -1,6 +1,6 @@
 # spec: PLS-315 8.1, 8.3, 8.4, 9.3, 14.14, 13.14, 9.7
 # description: Nested scopes: closures, free and cell variables, global and nonlocal declarations, class scopes, and reclaiming closure cycles.
-# Ported from CPython 3.15.0 Lib/test/test_scope.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_scope.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 

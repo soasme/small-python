@@ -1,6 +1,6 @@
 # spec: PLS-315 13.2
 # description: A very long list display.
-# Ported from CPython 3.15.0 Lib/test/test_longexp.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_longexp.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 

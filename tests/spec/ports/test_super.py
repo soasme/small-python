@@ -1,6 +1,6 @@
 # spec: PLS-315 20.3, 20.3.1, 20.3.2, 16.4.2
 # description: super(): zero-argument and explicit forms, the __class__ cell, shadowing, argument checks, and attribute lookup along the MRO.
-# Ported from CPython 3.15.0 Lib/test/test_super.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_super.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Unit tests for zero-argument super() & related machinery."""

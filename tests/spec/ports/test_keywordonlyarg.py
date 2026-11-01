@@ -1,6 +1,6 @@
 # spec: PLS-315 16.1, 13.3
 # description: Keyword-only parameters.
-# Ported from CPython 3.15.0 Lib/test/test_keywordonlyarg.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_keywordonlyarg.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Unit tests for the keyword only argument specified in PEP 3102."""

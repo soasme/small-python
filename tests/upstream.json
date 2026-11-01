@@ -5,8 +5,8 @@
   },
   "cpython": {
     "url": "https://github.com/python/cpython.git",
-    "commit": "d220409a13b77de7a6c30abe16ea90db01528edc",
-    "tag": "v3.15.0"
+    "commit": "5e58eaad7c58df58dfa8ea549c87996e01dd1077",
+    "tag": "v3.15.2"
   },
   "quickjs": {
     "url": "https://github.com/bellard/quickjs.git",

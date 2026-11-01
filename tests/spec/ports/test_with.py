@@ -1,6 +1,6 @@
 # spec: PLS-315 15.5, 15.5.2, 7.9
 # description: The with statement: context manager protocol errors, entering and exiting, nesting, exceptions in each phase, and targets.
-# Ported from CPython 3.15.0 Lib/test/test_with.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_with.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Unit tests for the 'with/async with' statements specified in PEP 343/492."""

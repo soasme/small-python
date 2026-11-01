@@ -1,6 +1,6 @@
 # spec: PLS-315 27.1.4, 27.1.7
 # description: CPython's test_enumerate: enumerate and reversed over sequences, iterators and failing inputs.
-# Ported from CPython 3.15.0 Lib/test/test_enumerate.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_enumerate.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) operator, pickle and support come from the harness; sys, gc,

@@ -1,6 +1,6 @@
 # spec: PLS-315 7.7.5, 8.7, 13.4, 15.3.2, 15.5.2, 27.3, 27.4, 27.5
 # description: CPython's test_coroutines: async syntax, await, async with and async for, coroutine objects and their wrappers.
-# Ported from CPython 3.15.0 Lib/test/test_coroutines.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_coroutines.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 # (Ported) ast, contextlib, copy, inspect, pickle, sys, types, traceback,

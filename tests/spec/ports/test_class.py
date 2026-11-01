@@ -1,6 +1,6 @@
 # spec: PLS-315 16.4, 10.2, 10.4, 7.3, 7.6
 # description: Classes: special method dispatch for every operator, attribute hooks, comparison and hashing of methods, __class__ assignment, construction errors, and definition order.
-# Ported from CPython 3.15.0 Lib/test/test_class.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_class.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 "Test the functionality of Python classes implementing operators."

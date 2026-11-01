@@ -1,6 +1,6 @@
 # spec: PLS-315 7.8, 13.10
 # description: Membership tests through __contains__, __iter__ and __getitem__.
-# Ported from CPython 3.15.0 Lib/test/test_contains.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_contains.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 NEVER_EQ = support.NEVER_EQ

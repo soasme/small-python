@@ -1,6 +1,6 @@
 # spec: PLS-315 13.10, 7.2, 20.1, 10.5
 # description: Comparisons: identity and default equality, __ne__ defaulting and priority, reflected delegation, and total orders across numbers, sequences, bytes, sets, and mappings.
-# Ported from CPython 3.15.0 Lib/test/test_compare.py (docs/licenses/python.txt);
+# Ported from CPython 3.15.2 Lib/test/test_compare.py (docs/licenses/python.txt);
 # library imports are replaced by core equivalents, each change marked "(Ported)".
 from harness import *
 """Test equality and order comparisons."""
