@@ -78,3 +78,14 @@ try:
     assert False
 except TypeError:
     pass
+
+# A metaclass's __repr__ and __str__ serve every conversion of its classes.
+class ReprMeta(type):
+    def __repr__(cls): return "M-repr"
+class WithRepr(metaclass=ReprMeta): pass
+assert_eq([repr(WithRepr), str(WithRepr), f"{WithRepr}", f"{WithRepr!r}", "%s %r" % (WithRepr, WithRepr), repr([WithRepr])],
+          ["M-repr", "M-repr", "M-repr", "M-repr", "M-repr M-repr", "[M-repr]"])
+class StrMeta(type):
+    def __str__(cls): return "N-str"
+class WithStr(metaclass=StrMeta): pass
+assert_eq((str(WithStr), repr(WithStr)), ("N-str", f"<class '{__name__}.WithStr'>"))

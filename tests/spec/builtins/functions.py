@@ -244,3 +244,15 @@ def duplicate(f):
     return str(assert_raises(TypeError, lambda: f(**{"a": 1}, a=2)))
 assert_eq(duplicate(Holder().method), f"{__name__}.Holder.method() got multiple values for keyword argument 'a'")
 assert_eq(duplicate(dict), "dict() got multiple values for keyword argument 'a'")
+
+# reversed() over the sequence protocol stops at IndexError or StopIteration.
+class Holey:
+    stop = IndexError
+    def __len__(self): return 3
+    def __getitem__(self, i):
+        if i == 1: raise self.stop
+        return i
+assert_eq(list(reversed(Holey())), [2])
+class Stopping(Holey):
+    stop = StopIteration
+assert_eq(list(reversed(Stopping())), [2])

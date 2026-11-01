@@ -18928,14 +18928,13 @@ static SPYValue *arity_error(SPYContext *c, int id, size_t argc) {
         const char *name = table[i].name;
         size_t min = table[i].min, max = table[i].max;
         if (argc >= min && argc <= max) break;
+        size_t n = argc < min ? min : max;
         switch (table[i].style) {
         case 'O': return errorf(c, "TypeError", "%s() takes exactly one argument (%zu given)", name, argc);
         case 'N': return errorf(c, "TypeError", "%s() takes no arguments (%zu given)", name, argc);
-        case 'E': {
-            size_t n = argc < min ? min : max;
+        case 'E':
             return errorf(c, "TypeError", "%s expected %s%zu argument%s, got %zu", name,
                           min == max ? "" : argc < min ? "at least " : "at most ", n, n == 1 ? "" : "s", argc);
-        }
         case 'K':
             if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
             return errorf(c, "TypeError", "%s() missing required argument '%s' (pos %zu)", name,
@@ -24589,6 +24588,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, "compile");
         SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
         if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
+        /* exec's fourth parameter, closure, is keyword-only. */
+        if (id == B_EXEC && argc == 4) return spy_error(c, "TypeError", "exec() takes at most 3 positional arguments (4 given)");
         if (id == B_COMPILE ? argc != 3 : argc < 1 || argc > 3) goto arity;
         const char *filename = "<string>";
         char filename_buffer[sizeof(c->filename)];
@@ -25606,7 +25607,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             static const char *const names[] = {"source", "globals", "locals", "closure"};
             SPYValue *args[4];
             const char *function = id == B_EVAL ? "eval" : "exec";
-            if (argc > 3) return errorf(c, "TypeError", "%s expected at most 3 arguments, got %zu", function, argc);
+            size_t total = argc + keywords->as.map.len;
+            if (total > (id == B_EVAL ? 3u : 4u)) return arity_error(c, id, total);
+            if (argc > 3) return arity_error(c, id, argc);
             if (parse_arguments(c, function, argc, argv, keywords, names, id == B_EVAL ? 3 : 4, 1, 1, args)) return NULL;
             for (size_t i = 1; i < 4; i++) if (!args[i]) args[i] = c->none;
             return builtin(c, id == B_EXEC && args[3] != c->none ? 4 : 3, args, (void *)(intptr_t)(id == B_EXEC ? B_EXEC_CLOSURE : id));

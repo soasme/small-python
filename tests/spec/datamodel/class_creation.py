@@ -162,3 +162,17 @@ assert_eq(str(assert_raises(TypeError, Outer.Base.__init_subclass__, 1)),
           "Outer.Base.__init_subclass__() takes no arguments (1 given)")
 assert_eq(str(assert_raises(TypeError, object.__init_subclass__, k=1)),
           "object.__init_subclass__() takes no keyword arguments")
+
+# __prepare__ must return a mapping; a metaclass that is not a class is named <metaclass>.
+class Preparing(type):
+    @classmethod
+    def __prepare__(mcls, name, bases): return 5
+def make_bad():
+    class Bad(metaclass=Preparing): pass
+assert_raises(TypeError, make_bad, message="Preparing.__prepare__() must return a mapping, not int")
+class Callable:
+    def __prepare__(self, name, bases): return 5
+    def __call__(self, *args): return args
+def make_callable():
+    class Bad(metaclass=Callable()): pass
+assert_raises(TypeError, make_callable, message="<metaclass>.__prepare__() must return a mapping, not int")

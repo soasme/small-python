@@ -94,3 +94,7 @@ p2 = property("a", doc="pdoc")
 assert_raises(TypeError, property, None, None, None, None, None)
 assert_raises(TypeError, property, "a", "b", "c", "d", "e")
 assert_raises(TypeError, property, name="x")
+
+empty = property()
+for text in (repr(empty), str(empty), f"{empty!r}", repr([empty])[1:-1]):
+    assert_true(text.startswith("<property object at 0x") and text.endswith(">"))

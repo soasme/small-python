@@ -34,3 +34,11 @@ def predicate(x):
 
 filtered = list(filter(predicate, [1, 2, 0, 4, 5]))
 assert filtered == [1, 2], filtered
+
+# A StopIteration from the predicate ends only that call; other errors propagate.
+def stopper(x): raise StopIteration
+stopped = filter(stopper, [1, 2])
+assert_raises(StopIteration, next, stopped)
+assert_eq(list(stopped), [])
+def failing(x): raise ValueError("bad")
+assert_raises(ValueError, next, filter(failing, [1]), message="bad")

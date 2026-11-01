@@ -78,3 +78,13 @@ running_generator = running()
 frame = next(running_generator)
 assert_is(running_generator.gi_frame, frame)
 assert_eq(frame.f_code.co_name, "running")
+
+# A class body's frame names the class as its code.
+def caller_frame():
+    try:
+        raise ValueError
+    except ValueError as e:
+        return e.__traceback__.tb_frame.f_back
+class Body:
+    frame = caller_frame()
+assert_true(repr(Body.frame).endswith(", code Body>"))

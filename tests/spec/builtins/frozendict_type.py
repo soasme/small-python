@@ -38,3 +38,9 @@ assert_type(f.copy(), frozendict)
 assert_eq({f: 1}[frozendict(b=2, a=1)], 1)
 assert_eq(list(f.keys()), ["a", "b"])
 assert_eq(list(reversed(f)), ["b", "a"])
+
+# fromkeys on a frozendict subclass builds the frozendict, then calls the subclass with it.
+class Frozen(frozendict): pass
+made = Frozen.fromkeys("ab", 0)
+assert_is(type(made), Frozen)
+assert_eq(made, {"a": 0, "b": 0})

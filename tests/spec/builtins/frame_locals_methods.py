@@ -41,3 +41,14 @@ def demo():
     assert_is(p.update({"q": 2}), None)
     assert_eq(p["q"], 2)
 demo()
+
+# A free variable reads and writes the enclosing function's cell through f_locals.
+def outer():
+    x = 1
+    def inner():
+        frame = current()
+        seen = (frame.f_locals["x"], "x" in frame.f_locals)
+        frame.f_locals["x"] = 5
+        return seen, x
+    return inner(), x
+assert_eq(outer(), (((1, True), 5), 5))

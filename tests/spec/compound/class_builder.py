@@ -61,3 +61,9 @@ class Missing(dict):
     def __missing__(self, key): return "missing:" + key
 assert_eq(eval("abc", {"__builtins__": Missing()}), "missing:abc")
 assert_eq(eval("abc", {"__builtins__": Missing(abc=1)}), 1)
+
+# __build_class__ runs an ordinary function as the body in its own frame.
+ran = []
+def body(): ran.append(True)
+built = __build_class__(body, "Built")
+assert_eq((ran, built.__name__, isinstance(built, type)), ([True], "Built", True))
