@@ -49,3 +49,8 @@ for spelling in ["latin-1", "latin1", "iso-8859-1", "l1"]:
 with assert_raises(UnicodeEncodeError) as cm:
     "é".encode("ascii")
 assert str(cm.exception).startswith("'ascii' codec"), str(cm.exception)
+
+# A strict error covers the whole run of characters that fail alike.
+for text, codec, span in (("aéèb", "ascii", (1, 3)), ("x€€", "latin-1", (1, 3))):
+    error = assert_raises(UnicodeEncodeError, text.encode, codec)
+    assert_eq((error.start, error.end), span)

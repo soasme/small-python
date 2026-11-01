@@ -148,3 +148,9 @@ assert_raises(TypeError, __import__, "spec_from_pkg", fromlist=["*"], message="I
 import spec_from_pkg
 spec_from_pkg.__name__ = 5
 assert_raises(TypeError, __import__, "spec_from_pkg", fromlist=["*"], message="unsupported operand type(s) for +: 'int' and 'str'")
+# Without a fromlist, a relative __import__ returns the module its first
+# part names, found by the resolved name, not by the module's __name__.
+write("spec_pkg/subpkg/renamed.py", "__name__ = 'x'\n")
+package_globals = {"__package__": "spec_pkg", "__name__": "spec_pkg.importer"}
+assert_true(__import__("subpkg.renamed", package_globals, None, (), 1) is spec_pkg.subpkg)
+assert_eq(__import__("subpkg.renamed", package_globals, None, ("x",), 1).__name__, "x")

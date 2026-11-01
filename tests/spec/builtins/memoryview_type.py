@@ -117,3 +117,12 @@ assert_eq(exporter, bytearray(b"ab\x01"))
 # The complex formats Zf and Zd.
 assert_eq(memoryview(bytes(8)).cast("Zf").tolist(), [0j])
 assert_eq(memoryview(bytes(16)).cast("Zd").tolist(), [0j])
+
+# A buffer that cannot be had makes == not implemented, whatever it raises.
+class RefusingBuffer:
+    def __init__(self, error): self.error = error
+    def __buffer__(self, flags): raise self.error
+for error in (TypeError("t"), KeyError("k")):
+    other = RefusingBuffer(error)
+    assert_is(memoryview(b"a").__eq__(other), NotImplemented)
+    assert_false(memoryview(b"a") == other)

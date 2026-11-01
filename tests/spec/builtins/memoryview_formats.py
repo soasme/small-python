@@ -65,3 +65,10 @@ assert_raises(TypeError, store0, message="invalid indexing of 0-dim memory")
 def store_key(): memoryview(bytearray(b"ab"))["x"] = 1
 assert_raises(TypeError, store_key, message="memoryview: invalid slice key")
 assert_eq((memoryview(b"a") == 1, memoryview(b"a").__eq__(object())), (False, NotImplemented))
+
+# Complex formats store a real and an imaginary part.
+for complex_format, size in (("Zd", 16), ("Zf", 8)):
+    view = memoryview(bytearray(32)).cast(complex_format)
+    view[0] = 1.5 + 2j
+    view[-1] = 3
+    assert_eq((view.itemsize, view.tolist()), (size, [1.5 + 2j] + [0j] * (32 // size - 2) + [3 + 0j]))

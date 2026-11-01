@@ -36,6 +36,8 @@ char *oom_realpath(const char *, char *);
 #define aligned_alloc oom_aligned_alloc
 #define free oom_free
 #define realpath oom_realpath
+static int fails(void);
+#define reuse_fails() fails()
 #include "../spy.c"
 #include "../spy-std.c"
 #undef malloc
@@ -187,7 +189,7 @@ static const char *const programs[] = {
     "    def m(self, __p): return __p\n"
     "print(K().m(3), {1: 2, 3: 4}.popitem())\n"
     "l = [1, 2, 3]; l[1:2] = list(range(40)); print(len(l))\n"
-    "print('a,b'.partition(','), divmod(7.5, 2), divmod(7, 2))\n"
+    "print('a,b'.partition(','), 'ab'.rpartition('x'), divmod(7.5, 2), divmod(7, 2))\n"
     "def gen():\n"
     "    try:\n"
     "        x = yield 1\n"
@@ -221,6 +223,40 @@ static const char *const programs[] = {
     "n = N()\n"
     "del n\n"
     "print(gc.collect() > 0, gc.get_referents([n := 1]), gc.isenabled())\n",
+
+    /* Cleanup after a value or block the context reuses fails. */
+    "print({1: 2}.popitem(), list(range(10**30, 10**30 + 2)), t\"a{1}b\".strings)\n"
+    "def diff(a, b, *, c=1): return a - b\n"
+    "swapped = type(diff)(diff.__code__.replace(co_varnames=(\"b\", \"a\", \"c\")), {}, \"s\", (1, 2), None, {\"c\": 3})\n"
+    "print(swapped(10, 1), swapped(a=10, b=1))\n"
+    "def outer():\n"
+    "    x = 1\n"
+    "    def f(): return (len, lambda: x)\n"
+    "    return f\n"
+    "f = outer()\n"
+    "print(f.__code__.co_freevars, f.__code__.co_names, type(f)(f.__code__, {}, None, None, f.__closure__)())\n"
+    "class M:\n"
+    "    def __enter__(self): return 5\n"
+    "    def __exit__(self, *a): return False\n"
+    "def g():\n"
+    "    with M() as m:\n"
+    "        yield m\n"
+    "it = g()\n"
+    "next(it)\n"
+    "try: raise ValueError('v')\n"
+    "except ValueError as e: tb = e.__traceback__\n"
+    "try: it.throw(ValueError, ValueError('w'), tb)\n"
+    "except ValueError as e: print(e)\n"
+    "class L(list): pass\n"
+    "print(L([1]))\n"
+    "lazy from gc import isenabled\n"
+    "print(isenabled())\n"
+    "from _spy import _setting\n"
+    "_setting('coroutine_origin_tracking_depth', 2)\n"
+    "async def co(): return 1\n"
+    "c = co()\n"
+    "print(c.cr_origin is not None)\n"
+    "c.close()\n",
 };
 
 static char *read_file(const char *path) {
@@ -242,12 +278,13 @@ static char *read_file(const char *path) {
     return s;
 }
 
-/* Fail each allocation of source after the first `from`: once, then from
- * there on. */
-static size_t check(const char *source, const char *name, size_t from) {
+/* Fail each allocation of source after the first `from`, up to the first
+ * `upto` (0: all): once, then from there on. */
+static size_t check(const char *source, const char *name, size_t from, size_t upto) {
     int status;
     fail = 0;
     size_t total = run(source, name, &status), failed[2] = {0, 0};
+    if (upto && upto < total) total = upto;
     const char *ends = status ? "an exception" : "a result";
     for (lasting = 0; lasting < 2; lasting++)
         for (fail = from + 1; fail <= total; fail++) {
@@ -263,16 +300,19 @@ static size_t check(const char *source, const char *name, size_t from) {
 int main(int argc, char **argv) {
     /* The empty program covers creating and freeing a context; the others
      * fail only what they allocate after that. */
-    size_t from = check("", "<empty>", 0);
+    size_t from = check("", "<empty>", 0, 0);
     for (int i = 1; i < argc; i++) {
         char *source = read_file(argv[i]);
-        check(source, argv[i], from);
+        check(source, argv[i], from, 0);
         free(source);
     }
     for (size_t i = 0; argc == 1 && i < sizeof programs / sizeof *programs; i++) {
         char name[32];
         snprintf(name, sizeof name, "<program %zu>", i + 1);
-        check(programs[i], name, from);
+        check(programs[i], name, from, 0);
     }
+    /* The intrinsics make 22,000 allocations when first used; the first are
+     * the module they run in. */
+    if (argc == 1) check("print(list[int])\n", "<intrinsics>", from, from + 400);
     return 0;
 }

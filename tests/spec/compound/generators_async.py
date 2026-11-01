@@ -179,3 +179,57 @@ async def async_with_sync():
 assert_eq(protocol_error(async_with_sync()),
           "'SyncManager' object does not support the asynchronous context manager protocol (missed __aexit__ method)"
           " but it supports the context manager protocol. Did you mean to use 'with'?")
+
+# An __aexit__ that fails when called replaces the exception or result that
+# was leaving the async with body.
+class FailingExit:
+    async def __aenter__(self): return self
+    def __aexit__(self, *exc): raise KeyError("exit")
+class Pause:
+    def __await__(self): yield
+async def leave(kind):
+    async with FailingExit():
+        if kind == "raise": raise ValueError("body")
+        if kind == "return": return "result"
+        await Pause()
+for kind, context in (("raise", ValueError), ("return", type(None)), ("await", type(None))):
+    coroutine = leave(kind)
+    try:
+        coroutine.send(None)
+        coroutine.send(None)
+    except KeyError as error:
+        assert type(error.__context__) is context
+    else:
+        raise AssertionError(kind)
+
+# A throw with the wrong number of arguments starts the operation and closes it.
+async def one(): yield 1
+for make, reuse in ((lambda gen: gen.asend(None), "__anext__()/asend()"), (lambda gen: gen.athrow(ValueError), "aclose()/athrow()"),
+                    (lambda gen: anext(gen, 5), "__anext__()/asend()")):
+    awaitable = make(one())
+    assert_raises(TypeError, awaitable.throw, message="throw expected at least 1 argument, got 0")
+    assert_raises(RuntimeError, awaitable.throw, 1, 2, 3, 4, message=f"cannot reuse already awaited {reuse}")
+    awaitable = make(one())
+    assert_raises(TypeError, awaitable.throw, 1, 2, 3, 4, message="throw expected at most 3 arguments, got 4")
+
+# throw() stores a traceback in the exception's field, past a __traceback__ a
+# subclass defines; a class must make an instance of BaseException.
+class OwnTraceback(Exception):
+    @property
+    def __traceback__(self): return "own"
+def catching():
+    try: yield
+    except OwnTraceback as e: yield (e.__traceback__, BaseException.__dict__["__traceback__"].__get__(e).tb_next is traceback)
+try: raise ValueError
+except ValueError as e: traceback = e.__traceback__
+g = catching(); next(g)
+assert_eq(g.throw(OwnTraceback, OwnTraceback(), traceback), ("own", True))
+assert_true(BaseException.__dict__["__traceback__"].__get__(OwnTraceback().with_traceback(traceback)) is traceback)
+assert_raises(TypeError, OwnTraceback().with_traceback, 5, message="__traceback__ must be a traceback or None")
+class NotMade(Exception):
+    def __new__(cls, *args): return 5
+for args in ((NotMade,), (NotMade, None, traceback), (NotMade, (1,), traceback)):
+    g = catching(); next(g)
+    assert_raises(TypeError, g.throw, *args, message=f"calling {NotMade!r} should have returned an instance of BaseException, not int")
+try: raise NotMade
+except TypeError as e: assert_eq(str(e), f"calling {NotMade!r} should have returned an instance of BaseException, not <class 'int'>")

@@ -21,6 +21,18 @@ jobs:
       - run: make CC=${{ matrix.compiler }} sanitize
         if: runner.os == 'Linux'
 
+  # Every line of the engine must run under the tests (tools/coverage.py).
+  coverage:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.15'
+      - run: make coverage LLVM_PROFDATA='xcrun llvm-profdata' LLVM_COV='xcrun llvm-cov'
+
   packages:
     strategy:
       matrix:

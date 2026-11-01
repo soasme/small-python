@@ -192,3 +192,24 @@ class SlotA: __slots__ = ("a",)
 class SlotB(SlotA): __slots__ = ("b",)
 assert_raises(TypeError, type, "R", (SlotA, SlotB), {},
               message="Cannot create a consistent method resolution order (MRO) for bases SlotA, SlotB")
+
+# A class makes no instances while its metaclass's mro() computes its MRO,
+# nor through a call when its MRO leaves out every __new__.
+seen = []
+class Computing(type):
+    def mro(cls):
+        for make in (cls, lambda: object.__new__(cls), lambda: BaseException.__new__(cls)):
+            seen.append(str(assert_raises(TypeError, make)))
+        return type.mro(cls)
+class Unready(metaclass=Computing): pass
+assert_eq(seen, ["cannot create 'Unready' instances"] * 2 + ["BaseException.__new__(Unready): Unready is not a subtype of BaseException"])
+class ComputingError(Computing): pass
+seen.clear()
+class UnreadyError(Exception, metaclass=ComputingError): pass
+assert_eq(seen, ["cannot create 'UnreadyError' instances"] * 3)
+class Alone(type):
+    def mro(cls): return (cls,)
+class Bare(metaclass=Alone): pass
+assert_eq(Bare.__mro__, (Bare,))
+assert_raises(TypeError, Bare, message="cannot create 'Bare' instances")
+assert_raises(TypeError, object.__new__, Bare, message="object.__new__(Bare): Bare is not a subtype of object")

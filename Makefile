@@ -345,8 +345,10 @@ sanitize:
 # the engine must run (tools/coverage.py lists the ones that do not). The profile
 # path is compiled in, since the test runners clear the environment, and
 # mapped at startup (%c), before the worker's sandbox forbids opening it.
+# Threads and the processes sharing a profile file count atomically: a lost
+# increment can make a count llvm-cov derives by subtraction zero.
 COVERAGE_DIR = $(abspath $(OBJDIR))/coverage
-COVERAGE_PROFILE = -fprofile-instr-generate=$(COVERAGE_DIR)/%c%4m.profraw
+COVERAGE_PROFILE = -fprofile-instr-generate=$(COVERAGE_DIR)/%c%4m.profraw -fprofile-update=atomic
 LLVM_PROFDATA ?= llvm-profdata
 LLVM_COV ?= llvm-cov
 coverage:

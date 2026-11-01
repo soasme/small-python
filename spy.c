@@ -642,6 +642,12 @@ static NO_INLINE int meter(SPYContext *c, size_t old, size_t n, int mode) {
     size_t unit = mode >> 1 ? (size_t)mode >> 1 : 64;
     return n / unit < 64 ? 0 : spend(c, n / unit - old / unit);
 }
+/* A host that injects allocation failures (tests/oom.c) defines
+ * reuse_fails() so that values and blocks a context reuses fail as malloc
+ * does. */
+#ifndef reuse_fails
+#define reuse_fails() 0
+#endif
 /* The size class of a block of n bytes: room for 16 (k + 1) bytes. */
 static size_t block_class(size_t n) { return n ? (n - 1) / 16 : 0; }
 /* A block of n bytes, zeroed in mode ZERO, or b resized to n. */
@@ -650,6 +656,7 @@ static NO_INLINE void *mem_block(SPYContext *c, MemHead *b, size_t n, int mode) 
     if (n > old && (n > SIZE_MAX / 2 || (c->watch && meter(c, old, n, mode)))) return NULL;
     if (b) { if (k != block_class(old) && !(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) goto failed; }
     else if (k < 16 && c->spare_blocks[k]) {
+        if (reuse_fails()) goto failed;
         b = c->spare_blocks[k]; cache_take(b, sizeof(MemHead) + 16 * (k + 1));
         c->spare_blocks[k] = b->next;
         if (mode & ZERO) memset(b + 1, 0, 16 * (k + 1));
@@ -763,10 +770,15 @@ static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
 struct Pool { Pool *next, *prev, *after, *before; /* before, after: in every_pool */ SPYValue *free; char *fresh, *end; size_t used; };
 static ALWAYS_INLINE Pool *value_pool(SPYValue *v) { return (Pool *)((uintptr_t)v & ~(uintptr_t)(POOL - 1)); }
 static ALWAYS_INLINE int pool_room(Pool *pool, size_t bytes) { return pool->free || pool->fresh + bytes <= pool->end; }
+static NO_INLINE void *allocation_failed(SPYContext *c) {
+    c->allocation_failures++;
+    spy_error(c, "MemoryError", "allocation failed");
+    return NULL;
+}
 static NO_INLINE Pool *pool_new(SPYContext *c, int size) {
     /* Its values are paid for by the operations that make them. */
     Pool *pool = c->watch && meter(c, 0, POOL, ARRAY(POOL)) ? NULL : pool_alloc();
-    if (!pool) { c->allocation_failures++; spy_error(c, "MemoryError", "allocation failed"); return NULL; }
+    if (!pool) return allocation_failed(c);
     c->memory += POOL;
     *pool = (Pool){.next = c->pools[size], .after = c->every_pool, .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
     cache_put(pool->fresh, (size_t)(pool->end - pool->fresh));
@@ -806,6 +818,7 @@ static NO_INLINE void pool_give(SPYContext *c, SPYValue *v, int size) {
 }
 /* An unset allocation for a value of size class size. */
 static ALWAYS_INLINE SPYValue *value_take(SPYContext *c, int size) {
+    if (reuse_fails()) return allocation_failed(c);
     SPYValue *v = c->spare[size];
     if (!v) return pool_take(c, size);
     cache_take(v, class_bytes(size)); c->spare[size] = v->next; c->spares[size]--;
@@ -2154,28 +2167,35 @@ static ptrdiff_t map_next(SPYValue *map, int64_t hash, MapCursor *cursor) {
     }
     return -1;
 }
-static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
-    map = namespace_map(map);
+/* The rest of a search from candidate i on, comparing through callbacks that
+ * may change the map. */
+static NO_INLINE ptrdiff_t map_find_compare(SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, ptrdiff_t i) {
     int pending_error = map->ctx->error_type[0] != 0;
-    MapCursor cursor = map_cursor(map, hash);
-    for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
-        /* The key itself, or two exact str values, compare without a callback. */
-        SPYValue *candidate = map->as.map.items[i].key;
-        if (candidate == key) return i;
-        if (candidate->type == SPY_STRING && key->type == SPY_STRING) {
-            if (equal(candidate, key, 0)) return i;
-            continue;
-        }
-        spy_retain(candidate);
+    do {
+        SPYValue *candidate = spy_retain(map->as.map.items[i].key);
         int matches = candidate == key || equal(candidate, key, 0);
         int unchanged = (size_t)i < map_used(map) && map->as.map.items[i].key == candidate &&
             (!cursor.indexed || cursor.changes == map->as.map.changes);
         spy_release(candidate);
         if (!pending_error && map->ctx->error_type[0]) return -1;
-        if (!unchanged) { cursor = map_cursor(map, hash); continue; }
-        if (matches) return i;
-    }
+        if (!unchanged) cursor = map_cursor(map, hash);
+        else if (matches) return i;
+    } while ((i = map_next(map, hash, &cursor)) >= 0);
     return -1;
+}
+static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
+    map = namespace_map(map);
+    MapCursor cursor = map_cursor(map, hash);
+    ptrdiff_t i = map_next(map, hash, &cursor);
+    if (i < 0) return -1;
+    /* The key itself, or an equal exact str or small int value, matches without a callback. */
+    SPYValue *candidate = map->as.map.items[i].key;
+    if (candidate == key || (candidate->type == SPY_STRING && key->type == SPY_STRING && candidate->as.string.len == key->as.string.len &&
+                             same_bytes(key->ctx, candidate->as.string.data, key->as.string.data, key->as.string.len)) ||
+        (candidate->type == SPY_INT && key->type == SPY_INT && !candidate->as.integer_data.big && !key->as.integer_data.big &&
+         candidate->as.integer_data.small == key->as.integer_data.small))
+        return i;
+    return map_find_compare(map, key, hash, cursor, i);
 }
 static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) {
     int status = hash_value(c, key, hash);
@@ -12297,7 +12317,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         return tuple;
     }
     case M_SEND: case M_THROW: case M_CLOSE: case M_NEXT: case M_ITER:
-        if (method == M_SEND ? argc != 1 : method == M_THROW ? argc < 1 || argc > 3 : argc != 0) break;
+        if (method == M_SEND ? argc != 1 : method == M_THROW ? (argc < 1 || argc > 3) && !awaitable_iterator(self) : argc != 0) break;
         if (awaitable_iterator(self)) return awaitable_method(c, self, method, argc, argv);
         if (self->type == SPY_COROUTINE_ITERATOR && method == M_ITER && !argc) return spy_retain(self);
         return generator_method(c, self->type == SPY_COROUTINE_ITERATOR ? self->as.iterator.source : self, method, argc, argv);
@@ -13121,13 +13141,12 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a->a); emit(c, p, BC_COMPREHENSION, n, 0);
         if (n->op != N_TUPLE && n->asynchronous) emit(c, p, BC_DELEGATE, n, DELEGATE_COMPREHENSION);
         break;
-    case N_LAMBDA:
+    default: /* N_LAMBDA, the last expression that can contain a yield */
         emit(c, p, BC_FUNCTION, n, 0);
         for (Node *a = n->args; a; a = a->next) if (a->a) {
             compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
         }
         break;
-    default: spy_error(c, "NotImplementedError", "yield in this expression is not implemented"); break;
     }
 }
 static void compile_body(SPYContext *, Program *, Node *);
@@ -13383,7 +13402,7 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
         }
         case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
         case N_DELETE: compile_delete(c, p, n->a); break;
-        case N_CLASS: {
+        default: { /* N_CLASS, the last statement that can contain a yield */
             /* Decorators, then the bases and keywords as __build_class__'s
              * arguments; a generic class's bases cannot suspend. */
             int stacked = 0;
@@ -13400,7 +13419,6 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
             for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
             emit(c, p, BC_STORE, n->a, 1); break;
         }
-        default: spy_error(c, "NotImplementedError", "yield in this statement is not implemented"); break;
         }
     }
 }
@@ -14301,8 +14319,7 @@ container_fail:
         a = n->a->kind == N_NAME && quiet(c, f) ? spy_retain(name_fast(f->env, n->a)) : NULL;
         if (a || (a = eval(c, f, n->a))) { relocate(c, n); result = node_attribute(c, a, n); }
         break;
-    case N_CALL: return eval_call(c, f, n);
-    default: spy_error(c, "RuntimeError", "invalid expression node"); break;
+    default: return eval_call(c, f, n); /* N_CALL, the last expression */
     }
     spy_release(a); spy_release(b);
     return result;
@@ -15177,6 +15194,8 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     }
     if (fn->as.map.native)
         return builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, name_local(fn, "__name__")->as.string.data);
+    /* A class whose MRO a custom mro() is still computing makes no instances. */
+    if (!fn->as.map.mro) return errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
     if ((plain = plain_init(c, fn))) {
         /* object.__new__ then a Python __init__, called directly. */
         if (!(result = new_instance(c, fn))) return NULL;
@@ -15188,7 +15207,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
         SPYValue *bound = method ? bind_method(c, fn, method) : NULL;
         if (bound) result = call_keywords(c, bound, argc, argv, keywords);
-        else if (!c->error_type[0]) spy_error(c, "TypeError", "class has no allocator");
+        else if (!c->error_type[0]) errorf(c, "TypeError", "cannot create '%s' instances", name_local(fn, "__name__")->as.string.data);
         spy_release(bound); spy_release(method);
         /* A factory may return an unrelated object. Only instances of the
          * requested class are initialized, using the returned type's init. */
@@ -15771,21 +15790,18 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
  * first use, in a private module named typing that imports cannot reach,
  * with the file primitives in its globals. */
 static SPYValue *load_intrinsics(SPYContext *c) {
-    Buffer source = {.ctx = c};
-    for (size_t i = 0; i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)
-        if (puts_buffer(&source, intrinsics_source[i])) { mem_free(source.data); return NULL; }
-    SPYValue *unit = parse(c, source.data, "<intrinsics>");
-    mem_free(source.data);
-    if (!unit) return NULL;
     SPYValue *module = value_new(c, SPY_MODULE), *module_name = spy_string(c, "typing", 6);
     if (module) module->as.map.parent = spy_retain(c->builtins);
     if (module) module->as.map.namespace = value_new(c, SPY_DICT);
-    if (!module || !module_name || !module->as.map.namespace ||
-        name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name) ||
-        file_natives(c, module)) {
-        spy_release(module); spy_release(module_name); spy_release(unit); return NULL;
-    }
+    int failed = !module || !module_name || !module->as.map.namespace ||
+        name_set(c, module, "__builtins__", c->builtins) || name_set(c, module, "__name__", module_name) || file_natives(c, module);
     spy_release(module_name);
+    Buffer source = {.ctx = c};
+    for (size_t i = 0; !failed && i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)
+        failed = puts_buffer(&source, intrinsics_source[i]);
+    SPYValue *unit = failed ? NULL : parse(c, source.data, "<intrinsics>");
+    mem_free(source.data);
+    if (!unit) { spy_release(module); return NULL; }
     Frame frame = {module, unit, 0};
     c->intrinsics_loading = 1;
     Result result = execute_module(c, &frame);
@@ -15882,11 +15898,6 @@ static char *absolute_name(SPYContext *c, const char *suffix, SPYValue *globals,
     if (*suffix) { puts_buffer(&name, "."); puts_buffer(&name, suffix); }
     if (c->error_type[0]) { mem_free(name.data); return NULL; }
     return name.data;
-}
-static SPYValue *relative_module(SPYContext *c, const char *suffix, SPYValue *globals, int64_t level) {
-    char *name = absolute_name(c, suffix, globals, level);
-    SPYValue *module = name ? import_module(c, name) : NULL;
-    mem_free(name); return module;
 }
 /* PEP 810 lazy imports, after CPython's lazyimportobject.c. A placeholder is
  * bound in module globals and resolved when a global or module attribute
@@ -17450,20 +17461,26 @@ static void chain_exception(SPYContext *c, SPYValue *exception) {
     }
     set_hidden_field(c, exception, "__context__", context);
 }
+/* Exception class cls called with the arguments, which must make an instance
+ * of BaseException; raise names another result's class by its repr, throw()
+ * by its name. */
+static SPYValue *instantiate_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv, int by_repr) {
+    SPYValue *exception = call(c, cls, argc, argv);
+    if (!exception || (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, name_local(c->classes, "BaseException"))))
+        return exception;
+    Buffer message = {.ctx = c};
+    if (!puts_buffer(&message, "calling ") && !format_value(&message, cls, 1) &&
+        !puts_buffer(&message, " should have returned an instance of BaseException, not ") &&
+        !(by_repr ? format_value(&message, value_class(c, exception), 1) : puts_buffer(&message, type_name(exception))))
+        spy_error(c, "TypeError", message.data);
+    mem_free(message.data); spy_release(exception);
+    return NULL;
+}
 static SPYValue *normalize_exception(SPYContext *c, SPYValue *value, int cause) {
     SPYValue *base = name_local(c->classes, "BaseException");
     if (value->type == SPY_CLASS) {
         if (!subclass(value, base)) goto invalid;
-        SPYValue *exception = call(c, value, 0, NULL);
-        if (!exception) return NULL;
-        if (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, base)) return exception;
-        Buffer message = {.ctx = c};
-        if (!puts_buffer(&message, "calling ") && !format_value(&message, value, 1) &&
-            !puts_buffer(&message, " should have returned an instance of BaseException, not ") &&
-            !format_value(&message, value_class(c, exception), 1))
-            spy_error(c, "TypeError", message.data);
-        mem_free(message.data); spy_release(exception);
-        return NULL;
+        return instantiate_exception(c, value, 0, NULL, 1);
     }
     if (value->type == SPY_INSTANCE && subclass(value->as.map.parent, base)) return spy_retain(value);
 invalid:
@@ -18792,12 +18809,11 @@ static SPYValue *conditional_env(Frame *f) {
 }
 /* The set an __annotate__ reads: its class's cell, else the module's name. */
 static SPYValue *conditional_set(SPYContext *c, Frame *f) {
+    /* start_annotations put the set in the cell of a class whose body has
+     * conditional annotations. */
     for (SPYValue *e = f->env; e && e->type == V_ENV; e = e->as.map.parent)
-        if (e->as.map.flags == 1 && e->as.map.class_cell) {
-            SPYValue *set = name_local(e->as.map.class_cell, "__conditional_annotations__");
-            if (set) return spy_retain(set);
-            break;
-        }
+        if (e->as.map.flags == 1 && e->as.map.class_cell)
+            return spy_retain(name_local(e->as.map.class_cell, "__conditional_annotations__"));
     return name_get(c, f->env, "__conditional_annotations__");
 }
 static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
@@ -18919,28 +18935,25 @@ static SPYValue *arity_error(SPYContext *c, int id, size_t argc) {
         {B_BYTEARRAY, "bytearray", 'K', 0, 3, 0, 0}, {B_BYTES, "bytes", 'K', 0, 3, 0, 0}, {B_COMPLEX, "complex", 'K', 0, 2, 0, 0},
         {B_EVAL, "eval", 'P', 1, 3, 0, 0}, {B_EXEC, "exec", 'P', 1, 4, 0, 0}, {B_SUM, "sum", 'P', 1, 2, 0, 0},
     };
-    for (size_t i = 0; i < sizeof(table) / sizeof(*table); i++) {
-        if (table[i].id != id) continue;
-        const char *name = table[i].name;
-        size_t min = table[i].min, max = table[i].max;
-        if (argc >= min && argc <= max) break;
-        size_t n = argc < min ? min : max;
-        switch (table[i].style) {
-        case 'O': return errorf(c, "TypeError", "%s() takes exactly one argument (%zu given)", name, argc);
-        case 'N': return errorf(c, "TypeError", "%s() takes no arguments (%zu given)", name, argc);
-        case 'E':
-            return errorf(c, "TypeError", "%s expected %s%zu argument%s, got %zu", name,
-                          min == max ? "" : argc < min ? "at least " : "at most ", n, n == 1 ? "" : "s", argc);
-        case 'K':
-            if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
-            return errorf(c, "TypeError", "%s() missing required argument '%s' (pos %zu)", name,
-                          argc == 0 ? table[i].first : table[i].second, argc + 1);
-        default:
-            if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
-            return errorf(c, "TypeError", "%s() takes at least %zu positional argument%s (%zu given)", name, min, min == 1 ? "" : "s", argc);
-        }
+    /* Every builtin that reports a wrong count is in the table. */
+    size_t i = 0;
+    while (table[i].id != id) i++;
+    const char *name = table[i].name;
+    size_t min = table[i].min, max = table[i].max, n = argc < min ? min : max;
+    switch (table[i].style) {
+    case 'O': return errorf(c, "TypeError", "%s() takes exactly one argument (%zu given)", name, argc);
+    case 'N': return errorf(c, "TypeError", "%s() takes no arguments (%zu given)", name, argc);
+    case 'E':
+        return errorf(c, "TypeError", "%s expected %s%zu argument%s, got %zu", name,
+                      min == max ? "" : argc < min ? "at least " : "at most ", n, n == 1 ? "" : "s", argc);
+    case 'K':
+        if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
+        return errorf(c, "TypeError", "%s() missing required argument '%s' (pos %zu)", name,
+                      argc == 0 ? table[i].first : table[i].second, argc + 1);
+    default:
+        if (argc > max) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", name, max, argc);
+        return errorf(c, "TypeError", "%s() takes at least %zu positional argument%s (%zu given)", name, min, min == 1 ? "" : "s", argc);
     }
-    return spy_error(c, "TypeError", "wrong number of builtin arguments");
 }
 /* printf-style formatting for str, bytes, and bytearray, following CPython's
  * unicode_format.c and bytesobject.c. Text widths and positions count code
@@ -19664,7 +19677,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
             }
             break;
         }
-        case N_IMPORT: case N_FROM: {
+        default: { /* N_IMPORT, N_FROM: the last statements */
             if (n->kind == N_FROM) {
                 int lazy = lazy_import(c, f, n, NULL);
                 if (lazy) { if (lazy > 0) lazy_statement(c, f, n, NULL); break; }
@@ -19706,7 +19719,6 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
             }
             spy_release(module); break;
         }
-        default: spy_error(c, "RuntimeError", "invalid statement node"); break;
         }
         if (c->error_type[0]) { spy_release(last); return (Result){FLOW_ERROR, NULL}; }
     }
@@ -20026,7 +20038,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             if (tick(c, &f, n)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
         }
-        SPYValue *a = NULL, *b = NULL, *value = NULL;
+        SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
         switch (ins->op) {
         case BC_EVAL:
             if (ins->arg) {
@@ -20035,15 +20047,14 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 if (truth >= 0) known = truth + 1;
             } else machine_push(c, m, eval(c, &f, n));
             break;
-        case BC_OPERATE: {
+        case BC_OPERATE:
             /* Its operands taken at hand, as on eval's operator fast path. */
-            SPYValue *x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
-            SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
+            y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
             if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
             machine_push(c, m, value);
             break;
-        }
         case BC_LOAD:
             /* A literal or a name found along the fast path, without eval. */
             value = leaf_operand(&f, n);
@@ -20173,8 +20184,8 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             break;
         case BC_TEST: {
             /* BC_OPERATE then BC_FALSE, a comparison of numbers making no bool. */
-            SPYValue *x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
-            SPYValue *y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
+            y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             int truth = y && n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
             if (truth < 0) {
                 value = y ? operator_fast(c, n, x, y) : NULL;
@@ -20337,9 +20348,9 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             if (!enter && !c->error_type[0]) manager_error(c, a, 1, b != NULL);
             value = enter ? call(c, enter, 0, NULL) : NULL;
             spy_release(enter);
-            if (value) {
-                if (!machine_push(c, m, spy_retain(b))) machine_push(c, m, value);
-                else spy_release(value);
+            if (value) { /* A push that fails leaves the error, and unwinding releases what is pushed. */
+                machine_push(c, m, spy_retain(b));
+                machine_push(c, m, value);
             }
             break;
         }
@@ -20474,25 +20485,22 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
         return spy_error(c, "TypeError", "throw() third argument must be a traceback object");
     if (exception->type == SPY_CLASS && subclass(exception, name_local(c->classes, "BaseException"))) {
         if (argc > 1 && argv[1]->type == SPY_INSTANCE && subclass(argv[1]->as.map.parent, exception)) exception = spy_retain(argv[1]);
-        else if (argc > 1 && argv[1]->type == SPY_TUPLE) exception = call(c, exception, argv[1]->as.seq.len, argv[1]->as.seq.items);
-        else exception = call(c, exception, argc > 1 && argv[1]->type != SPY_NONE ? 1 : 0, argv + 1);
+        else if (argc > 1 && argv[1]->type == SPY_TUPLE) exception = instantiate_exception(c, exception, argv[1]->as.seq.len, argv[1]->as.seq.items, 0);
+        else exception = instantiate_exception(c, exception, argc > 1 && argv[1]->type != SPY_NONE ? 1 : 0, argv + 1, 0);
     } else if (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, name_local(c->classes, "BaseException"))) {
         if (argc > 1 && argv[1]->type != SPY_NONE) return spy_error(c, "TypeError", "instance exception may not have a separate value");
         exception = spy_retain(exception);
     } else return errorf(c, "TypeError", "exceptions must be classes or instances deriving from BaseException, not %s",
                         exception->type == SPY_CLASS ? "type" : type_name(exception));
-    if (exception && argc == 3 && argv[2]->type == SPY_TRACEBACK && set_attribute_default(c, exception, "__traceback__", argv[2])) {
-        spy_release(exception); return NULL;
-    }
+    /* As PyException_SetTraceback, past any __traceback__ a subclass defines;
+     * it replaces the field every exception has, which cannot fail. */
+    if (exception && argc == 3 && argv[2]->type == SPY_TRACEBACK) set_hidden_field(c, exception, "__traceback__", argv[2]);
     SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, argc, argv) : NULL;
     spy_release(exception); return result;
 }
 
 static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_t argc, SPYValue *const *argv) {
-    if (method == M_ITER && !argc) return spy_retain(op);
-    if ((method == M_SEND && argc != 1) || (method == M_THROW && (argc < 1 || argc > 3)) ||
-        ((method == M_CLOSE || method == M_NEXT) && argc))
-        return spy_error(c, "TypeError", "incorrect number of arguments to async generator method");
+    if (method == M_ITER) return spy_retain(op);
     if (op->type == SPY_ANEXT_AWAITABLE) {
         SPYValue *source = op->as.iterator.source;
         SPYValue *iterator = source->type == SPY_COROUTINE ? spy_retain(source) : await_iterator(c, source, NULL);
@@ -20548,6 +20556,12 @@ static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_
         if (closing && method != M_THROW) g->as.generator.async_closed = 1;
         if (op->as.async_operation.method == M_ASEND && sent->type == SPY_NONE)
             sent = op->as.async_operation.args->as.seq.items[0];
+    }
+    /* gen_throw checks its arguments once the operation has started; failing, it closes it. */
+    if (method == M_THROW && (argc < 1 || argc > 3)) {
+        op->as.async_operation.state = 2;
+        return argc ? errorf(c, "TypeError", "throw expected at most 3 arguments, got %zu", argc) :
+                      spy_error(c, "TypeError", "throw expected at least 1 argument, got 0");
     }
     g->as.generator.async_running = 1;
     SPYValue *value;
@@ -21179,13 +21193,12 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
             spy_clear_error(c); return spy_retain(c->not_implemented);
         }
         return spy_retain(proxy);
-    case FL_UPDATE:
+    default: /* FL_UPDATE */
         if (!frame_locals_mapping(args[0]) || frame_locals_merge(c, frame, args[0])) {
             spy_clear_error(c); return spy_error(c, "TypeError", "update() argument must be dict or another FrameLocalsProxy");
         }
         return spy_none(c);
     }
-    return NULL;
 }
 static SPYValue *builtins_env(SPYContext *, SPYValue *);
 /* exec() and eval() word their argument errors differently. */
@@ -21526,6 +21539,7 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     }
     if (!argc || argv[0]->type != SPY_MAPPINGPROXY) return misapplied(c, "mappingproxy", name, argc, argv);
     SPYValue *proxy = argv[0], *mapping = proxy->as.bound.self, *args[2] = {NULL, NULL};
+    int64_t hash;
     size_t required = op == MP_GETITEM || op == MP_CONTAINS || (op >= MP_EQ && op <= MP_IOR) || op == MP_GET;
     if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, op == MP_GET ? 2 : required, required, 0, args)) return NULL;
     switch (op) {
@@ -21534,10 +21548,7 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_ITER: return get_iterator(c, mapping);
     case MP_LEN: return builtin(c, 1, &mapping, (void *)(intptr_t)B_LEN);
     case MP_REVERSED: return builtin(c, 1, &mapping, (void *)(intptr_t)B_REVERSED);
-    case MP_HASH: {
-        int64_t hash;
-        return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
-    }
+    case MP_HASH: return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
     case MP_EQ: case MP_NE: {
         /* Match descrobject.c: arbitrary reflected comparisons must not get
          * the mutable exact dict behind a class namespace (gh-152405). */
@@ -21668,8 +21679,7 @@ static int character_is(int type, int property, uint32_t code) {
         case C_TITLE: return 0;
         case C_LOWER: return lower;
         case C_CASED: return upper || lower;
-        case C_ALNUM: return upper || lower || digit;
-        default: return 0;
+        default: return upper || lower || digit; /* C_ALNUM */
         }
     }
     if (code < 128) {
@@ -23413,13 +23423,12 @@ static SPYValue *memory_unpack(SPYContext *c, const char *code, const unsigned c
     case 'f': UNPACK(float, spy_float(c, x))
     case 'd': UNPACK(double, spy_float(c, x))
     case '?': UNPACK(_Bool, spy_bool(c, x))
-    case 'Z':
-        if (code[1] == 'f') { float x[2]; memcpy(x, p, sizeof(x)); return complex_new(c, complex_parts(x[0], x[1])); }
-        { double x[2]; memcpy(x, p, sizeof(x)); return complex_new(c, complex_parts(x[0], x[1])); }
-#undef UNPACK
     case 'e': return spy_float(c, half_unpack(p));
+    default: /* 'Zf' or 'Zd': the formats are checked when the view is made */
+        if (code[1] == 'f') UNPACK(float complex, complex_new(c, x))
+        UNPACK(double complex, complex_new(c, x))
     }
-    return errorf(c, "NotImplementedError", "memoryview: format %s not supported", code);
+#undef UNPACK
 }
 static int memory_value_error(SPYContext *c, const char *code, int type_error) {
     spy_clear_error(c);
@@ -23478,12 +23487,10 @@ static int memory_pack(SPYContext *c, const char *code, unsigned char *p, SPYVal
     case 'L': UPACK(unsigned long, ULONG_MAX)
     case 'Q': UPACK(unsigned long long, ULLONG_MAX)
     case 'N': UPACK(size_t, SIZE_MAX)
-    case 'P': UPACK(uintptr_t, UINTPTR_MAX)
+    default: UPACK(uintptr_t, UINTPTR_MAX) /* 'P': the formats are checked when the view is made */
     }
 #undef PACK
 #undef UPACK
-    errorf(c, "NotImplementedError", "memoryview: format %s not supported", code);
-    return -1;
 }
 static ptrdiff_t *memory_shape(SPYValue *m) { return m->as.memory.layout; }
 static ptrdiff_t *memory_strides(SPYValue *m) { return m->as.memory.layout + m->as.memory.ndim; }
@@ -23779,10 +23786,8 @@ static SPYValue *memory_compare(SPYContext *c, SPYValue *m, SPYValue *other, int
     if (view && view->as.memory.released) { spy_release(view); return spy_bool(c, (m == other) == equal_op); }
     if (!view && !builtin_value(c, other, SPY_BYTES) && !builtin_value(c, other, SPY_BYTEARRAY) &&
         !(other->type == SPY_INSTANCE && class_lookup(other->as.map.parent, "__buffer__"))) return spy_retain(c->not_implemented);
-    if (!view && !(view = memory_from(c, other))) {
-        if (c->error_type[0] && !error_is(c, "TypeError")) return NULL;
-        spy_clear_error(c); return spy_retain(c->not_implemented);
-    }
+    /* Any failure to get the other's buffer makes the comparison not implemented. */
+    if (!view && !(view = memory_from(c, other))) { spy_clear_error(c); return spy_retain(c->not_implemented); }
     int same = view->as.memory.ndim == m->as.memory.ndim;
     for (int i = 0; same && i < m->as.memory.ndim; i++) {
         if (memory_shape(m)[i] != memory_shape(view)[i]) same = 0;
@@ -24372,7 +24377,6 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
     switch (id) {
-    case B_MIN: case B_MAX: return min_max(c, id == B_MAX, argc, argv, NULL);
     case B_TYPE_SUBCLASSES: {
         /* The live classes naming argv[0] as a direct base, oldest first;
          * values are listed newest first. */
@@ -24470,7 +24474,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (!argc || argv[0]->type != SPY_INSTANCE || !subclass(argv[0]->as.map.parent, name_local(c->classes, "BaseException")))
             return misapplied(c, "BaseException", "with_traceback", argc, argv);
         if (argc != 2) return errorf(c, "TypeError", "BaseException.with_traceback() takes exactly one argument (%zu given)", argc - 1);
-        return set_attribute_default(c, argv[0], "__traceback__", argv[1]) ? NULL : spy_retain(argv[0]);
+        if (argv[1]->type != SPY_NONE && argv[1]->type != SPY_TRACEBACK) return spy_error(c, "TypeError", "__traceback__ must be a traceback or None");
+        set_hidden_field(c, argv[0], "__traceback__", argv[1]); /* as in throw() */
+        return spy_retain(argv[0]);
     }
     case B_ADD_NOTE: {
         if (!argc || argv[0]->type != SPY_INSTANCE || !subclass(argv[0]->as.map.parent, name_local(c->classes, "BaseException")))
@@ -24484,23 +24490,19 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (strlen(a->as.string.data) != a->as.string.len) return spy_error(c, "ValueError", "module name contains a null character");
         int64_t level = 0;
         if (argc == 5 && index_value(c, argv[4], &level)) return NULL;
-        SPYValue *module = relative_module(c, a->as.string.data, argc > 1 ? argv[1] : NULL, level);
-        if (!module) return NULL;
-        int fromlist = argc > 3 && spy_truth(argv[3]);
-        if (fromlist) {
+        char *absolute = absolute_name(c, a->as.string.data, argc > 1 ? argv[1] : NULL, level);
+        SPYValue *module = absolute ? import_module(c, absolute) : NULL;
+        if (module && argc > 3 && spy_truth(argv[3])) {
             if (name_local(module, "__path__")) import_fromlist(c, module, argv[3], 0);
-        } else if (a->as.string.len) {
+        } else if (module && a->as.string.len) {
+            /* Without a fromlist, the module the first part of name resolved to. */
             const char *dot = strchr(a->as.string.data, '.');
-            size_t first = dot ? (size_t)(dot - a->as.string.data) : a->as.string.len;
-            SPYValue *full = level ? name_local(module, "__name__") : a;
-            if (!full || full->type != SPY_STRING || full->as.string.len < a->as.string.len) {
-                spy_release(module); return spy_error(c, "ImportError", "invalid module name for relative import");
-            }
-            size_t prefix = level ? full->as.string.len - a->as.string.len : 0;
-            char *name = copy_text(c, full->as.string.data, prefix + first);
+            size_t tail = dot ? a->as.string.len - (size_t)(dot - a->as.string.data) : 0;
+            char *name = copy_text(c, absolute, strlen(absolute) - tail);
             SPYValue *root = name ? import_module(c, name) : NULL;
             mem_free(name); spy_release(module); module = root;
         }
+        mem_free(absolute);
         if (c->error_type[0]) { spy_release(module); return NULL; }
         return module;
     }
@@ -25177,29 +25179,27 @@ execution_fail:
         return errorf(c, "TypeError", "bad operand type for abs(): '%s'", type_name(a));
     }
     if (id == B_LEN && argc == 1 && builtin_base(c, a, "__len__", NULL)) a = builtin_base(c, a, "__len__", NULL);
-    if (id == B_LEN) {
-        uint64_t n;
-        if (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) n = string_length(a);
-        else if (a->type == SPY_LIST || a->type == SPY_TUPLE) n = a->as.seq.len;
-        else if (is_dict(a) || a->type == SPY_SET || a->type == SPY_FROZENSET) n = a->as.map.len;
-        else if (is_view(a)) n = a->as.bound.self->as.map.len;
-        else if (special_dispatch(a)) {
-            SPYValue *length = call_special(c, a, "__len__", 0, NULL);
-            if (!length) return NULL;
-            int64_t value;
-            int status = length_result(c, length, &value);
-            spy_release(length);
-            return status ? NULL : spy_int(c, value);
-        }
-        else if (a->type == SPY_RANGE) {
-            if (a->as.range.length->as.integer_data.big) return spy_error(c, "OverflowError", "Python int too large to convert to C ssize_t");
-            return spy_retain(a->as.range.length);
-        }
-        else return errorf(c, "TypeError", "object of type '%s' has no len()", type_name(a));
-        if (n > INT64_MAX) return spy_error(c, "OverflowError", "length exceeds signed 64-bit limit");
-        return spy_int(c, (int64_t)n);
+    /* B_LEN: every other builtin has returned. */
+    uint64_t n;
+    if (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) n = string_length(a);
+    else if (a->type == SPY_LIST || a->type == SPY_TUPLE) n = a->as.seq.len;
+    else if (is_dict(a) || a->type == SPY_SET || a->type == SPY_FROZENSET) n = a->as.map.len;
+    else if (is_view(a)) n = a->as.bound.self->as.map.len;
+    else if (special_dispatch(a)) {
+        SPYValue *length = call_special(c, a, "__len__", 0, NULL);
+        if (!length) return NULL;
+        int64_t value;
+        int status = length_result(c, length, &value);
+        spy_release(length);
+        return status ? NULL : spy_int(c, value);
     }
-    return spy_error(c, "RuntimeError", "unknown builtin");
+    else if (a->type == SPY_RANGE) {
+        if (a->as.range.length->as.integer_data.big) return spy_error(c, "OverflowError", "Python int too large to convert to C ssize_t");
+        return spy_retain(a->as.range.length);
+    }
+    else return errorf(c, "TypeError", "object of type '%s' has no len()", type_name(a));
+    if (n > INT64_MAX) return spy_error(c, "OverflowError", "length exceeds signed 64-bit limit");
+    return spy_int(c, (int64_t)n);
 arity:
     return arity_error(c, id, argc);
 }
@@ -25506,11 +25506,11 @@ static SPYValue *function_construct(SPYContext *c, size_t argc, SPYValue *const 
         if (args[4]->as.seq.items[i]->type != SPY_CELL)
             return errorf(c, "TypeError", "arg 5 (closure) expected cell, found %s", type_name(args[4]->as.seq.items[i]));
     SPYValue *fn = function_from_code(c, args[0], args[1], args[4]->type == SPY_TUPLE ? args[4] : NULL);
-    if (fn && ((args[2]->type != SPY_NONE && name_set(c, fn->as.function.metadata, "__name__", args[2])) ||
-               (args[3]->type != SPY_NONE && name_set(c, fn->as.function.metadata, "__defaults__", args[3])) ||
-               (args[5]->type != SPY_NONE && name_set(c, fn->as.function.metadata, "__kwdefaults__", args[5])))) {
-        spy_release(fn); return NULL;
-    }
+    if (!fn) return NULL;
+    /* These replace entries every function's metadata has, which cannot fail. */
+    if (args[2]->type != SPY_NONE) name_set(c, fn->as.function.metadata, "__name__", args[2]);
+    if (args[3]->type != SPY_NONE) name_set(c, fn->as.function.metadata, "__defaults__", args[3]);
+    if (args[5]->type != SPY_NONE) name_set(c, fn->as.function.metadata, "__kwdefaults__", args[5]);
     return fn;
 }
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, const char *name) {
@@ -25564,16 +25564,15 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
                                     "descriptor '__init__' of 'object' object needs an argument");
         SPYValue *object = c->object;
         SPYValue *cls = id == B_OBJECT_INIT ? value_class(c, argv[0]) : argv[0];
-        if (cls->type != SPY_CLASS) {
-            if (id == B_OBJECT_NEW || id == B_EXCEPTION_NEW)
-                return errorf(c, "TypeError", "%s.__new__(X): X is not a type object (%s)", id == B_OBJECT_NEW ? "object" : "BaseException", type_name(cls));
-            return spy_error(c, "TypeError", "__new__ requires a type object");
-        }
+        if (cls->type != SPY_CLASS) /* only __new__: object.__init__ took the receiver's class */
+            return errorf(c, "TypeError", "%s.__new__(X): X is not a type object (%s)", id == B_OBJECT_NEW ? "object" : "BaseException", type_name(cls));
+        if (id == B_OBJECT_NEW && !subclass(cls, object))
+            return errorf(c, "TypeError", "object.__new__(%s): %s is not a subtype of object", class_tname(cls), class_tname(cls));
         int exception = subclass(cls, name_local(c->classes, "BaseException"));
-        if (id == B_EXCEPTION_NEW) {
-            if (!exception) return errorf(c, "TypeError", "BaseException.__new__(%s): %s is not a subtype of BaseException", class_tname(cls), class_tname(cls));
-            return new_exception(c, cls, argc - 1, argv + 1);
-        }
+        if (id == B_EXCEPTION_NEW && !exception)
+            return errorf(c, "TypeError", "BaseException.__new__(%s): %s is not a subtype of BaseException", class_tname(cls), class_tname(cls));
+        if (!cls->as.map.mro) return errorf(c, "TypeError", "cannot create '%s' instances", class_tname(cls));
+        if (id == B_EXCEPTION_NEW) return new_exception(c, cls, argc - 1, argv + 1);
         if (id == B_OBJECT_NEW && (cls->as.map.native || cls->as.map.flags == 2 || exception))
             return errorf(c, "TypeError", "object.__new__(%s) is not safe, use %s.__new__()", name_local(cls, "__name__")->as.string.data,
                           name_local(cls, "__name__")->as.string.data);
@@ -25961,7 +25960,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
  * sees only Python-level overrides. */
 enum { SLOT_BINARY, SLOT_RBINARY, SLOT_INPLACE, SLOT_COMPARE, SLOT_UNARY, SLOT_BUILTIN, SLOT_CALL, SLOT_OTHER };
 enum { SLOT_REPR, SLOT_STR, SLOT_FORMAT, SLOT_ITER, SLOT_CONTAINS, SLOT_GETITEM, SLOT_SETITEM, SLOT_DELITEM,
-       SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_SELF, SLOT_NEXT };
+       SLOT_BOOL, SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL, SLOT_COMPLEX, SLOT_NEXT };
 #define T(x) (UINT64_C(1) << (x))
 #define T_OBJECT (UINT64_C(1) << 63)
 #define T_NUMBERS (T(SPY_INT) | T(SPY_FLOAT) | T(SPY_COMPLEX))
@@ -26182,12 +26181,11 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     case SLOT_DELITEM: return delete_index(c, value, argv[0]) ? NULL : spy_none(c);
     case SLOT_BOOL: return spy_bool(c, spy_truth(value));
     case SLOT_COMPLEX: return spy_retain(value);
-    case SLOT_TRUNC: case SLOT_FLOOR: case SLOT_CEIL:
+    default: /* SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL */
         if (value->type != SPY_FLOAT) return builtin(c, 1, &value, (void *)(intptr_t)B_INT);
         if (!isfinite(value->as.real)) return spy_error(c, isnan(value->as.real) ? "ValueError" : "OverflowError",
             isnan(value->as.real) ? "cannot convert float NaN to integer" : "cannot convert float infinity to integer");
         return integer_from_double(c, op == SLOT_FLOOR ? floor(value->as.real) : op == SLOT_CEIL ? ceil(value->as.real) : trunc(value->as.real));
-    default: return spy_error(c, "SystemError", "unknown slot");
     }
 }
 /* A builtin value of the type, used to discover its value-dispatched methods. */

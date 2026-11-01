@@ -1,4 +1,4 @@
-# spec: PLS-315 26.4, 26.6
+# spec: PLS-315 26, 26.4, 26.6
 # description: dict views are live, ordered, and (for keys and items) set-like.
 from harness import *
 
@@ -95,3 +95,12 @@ for i in range(6): del compacted[i]
 for i in range(100, 140): compacted[i] = i
 assert_eq(list(compacted)[:4], [6, 7, 100, 101])
 assert_eq(len(compacted), 42)
+
+# A key is found by identity even past an entry of the same hash, without its
+# __eq__ (26).
+class NeverEqual:
+    def __hash__(self): return 1
+    def __eq__(self, other): return False
+first, second = NeverEqual(), NeverEqual()
+table = {first: 1, second: 2}
+assert_eq((table[first], table[second], second in table, len({first, second, second})), (1, 2, True, 2))

@@ -105,3 +105,31 @@ def comprehension_code():
         while tb.tb_next: tb = tb.tb_next
         return tb.tb_frame.f_code
 assert_eq(comprehension_code().co_name, "comprehension_code")
+
+# The locals proxy holds a function's own and free variables, not the
+# globals and builtins it reads.
+def enclosing():
+    captured = 1
+    def reader():
+        len; captured
+        return current().f_back.f_locals
+    return reader()
+proxy = enclosing()
+assert_eq(["len" in proxy, "captured" in proxy, "enclosing" in proxy], [False, True, False])
+assert_eq(proxy.get("len", "missing"), "missing")
+
+# A class body's frame runs the class body's code.
+class BodyFrame:
+    code = current().f_back.f_code
+assert_eq((BodyFrame.code.co_name, BodyFrame.code.co_qualname), ("BodyFrame", "BodyFrame"))
+
+# |= with an operand that is no mapping falls back to |, which fails.
+def merge_frame():
+    kept = 1
+    proxy = current().f_back.f_locals
+    assert_is(proxy.__ior__(5), NotImplemented)
+    try:
+        proxy |= 5
+    except TypeError as error:
+        return str(error)
+assert_eq(merge_frame(), "unsupported operand type(s) for |=: 'FrameLocalsProxy' and 'int'")

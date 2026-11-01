@@ -192,8 +192,9 @@ make sanitize
 isolation, error recovery, reference cycles, deep graph destruction, an
 execution budget), the allocation-failure and thread tests, the host file and
 standalone-executable checks, and the language specification suite.
-`tests/oom` runs a set of programs once per allocation each makes, with
-exactly that allocation failing, then once per allocation with it and every
+`tests/oom` runs a set of programs once per allocation each makes (from
+malloc, or a value or block the context reuses), with exactly that allocation
+failing, then once per allocation with it and every
 later one failing, as SQLite's tests do; every run must end in a result or an
 exception and free everything it allocated. `tests/threads` runs a context
 on each of four threads at once, which share nothing.
@@ -267,8 +268,8 @@ they cannot show that code nothing executes is free of them. `make coverage`
 (clang) measures what `make test` and the package tests execute, with an
 annotated copy of every source under `.obj/coverage/html`. It fails unless every
 line of the engine sources runs, and lists by function the lines that do not
-(`tools/coverage.py`). Linux CI runs
-`make sanitize`. On the initial macOS host, AddressSanitizer hung during its own
+(`tools/coverage.py`); CI runs it on macOS, so a change that leaves a line
+unexecuted fails there. Linux CI runs `make sanitize`. On the initial macOS host, AddressSanitizer hung during its own
 initialization; `make SANITIZERS=undefined sanitize` passed there.
 
 ### 2.5 Upstream Cython tests

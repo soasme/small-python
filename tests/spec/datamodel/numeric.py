@@ -100,3 +100,16 @@ assert_raises(ValueError, lambda: 1 << -1)
 assert_same(-1 >> 10, -1)
 assert_same(5 & 3 | 8 ^ 1, 9)
 assert_same(divmod(-7, 2), (-4, 1))
+
+# A built-in method returns NotImplemented for an operand whose built-in base
+# is not a number, even when the operand carries a base value.
+Module = type(__import__("builtins"))
+class SubModule(Module): pass
+assert_true(int.__add__(1, SubModule("m")) is NotImplemented)
+assert_true(float.__lt__(1.5, SubModule("m")) is NotImplemented)
+
+# float's rounding methods reject the values no integer represents.
+for method in (float.__trunc__, float.__floor__, float.__ceil__):
+    assert_raises(ValueError, method, float("nan"), message="cannot convert float NaN to integer")
+    assert_raises(OverflowError, method, float("-inf"), message="cannot convert float infinity to integer")
+assert_eq((float.__trunc__(-2.5), float.__floor__(-2.5), float.__ceil__(-2.5)), (-2, -3, -2))

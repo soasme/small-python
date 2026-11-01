@@ -415,3 +415,17 @@ assert_eq(str(assert_raises(ValueError, float.__getformat__, "x")), "__getformat
 class Real(float): pass
 assert_eq((type(Real.fromhex("0x1p1")), Real.fromhex("0x1p1")), (Real, 2.0))
 assert_eq(repr((float("iNfInItY"), float("-NaN"), float("+inF"))), "(inf, nan, inf)")
+
+# str.isalnum: any character that is alphabetic, decimal, digit or numeric.
+assert_eq([ch.isalnum() for ch in "é١Ⅷ½ -"], [True, True, True, True, False, False])
+
+# float.fromhex reads infinities and NaN in any case.
+assert_eq([float.fromhex(s) for s in (" inf ", "-Infinity", "+INF")], [float("inf"), float("-inf"), float("inf")])
+assert_true(float.fromhex("NaN") != float.fromhex("nan"))
+for bad in ("inx", "infinit", "nana"):
+    assert_raises(ValueError, float.fromhex, bad, message="invalid hexadecimal floating-point string")
+
+# An absent name is absent from every built-in class and its values.
+for value in (bytearray(), memoryview(b""), property(), iter([]), None, len, 1j, (x for x in ()), object(),
+              NotImplemented, ..., range(1), slice(1), lambda: 0):
+    assert_true(not hasattr(value, "absent") and not hasattr(type(value), "absent"))

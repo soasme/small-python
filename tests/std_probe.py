@@ -488,3 +488,24 @@ sys.settrace(sparse_tracer)
 traced_loop(4)
 sys.settrace(None)
 show("tracer returning None", lambda: sparse)
+
+
+def yielding():
+    yield 1
+    yield 2
+
+
+def raising_on_return(frame, event, arg):
+    if frame.f_code.co_name == "yielding" and event == "return":
+        raise KeyError("trace")
+    return raising_on_return
+
+
+suspended = yielding()
+sys.settrace(raising_on_return)
+try:
+    next(suspended)
+except KeyError as error:
+    caught = repr(error)
+sys.settrace(None)
+show("tracer raising as a generator yields", lambda: (caught, list(suspended)))
