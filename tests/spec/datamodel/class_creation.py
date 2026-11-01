@@ -176,3 +176,16 @@ class Callable:
 def make_callable():
     class Bad(metaclass=Callable()): pass
 assert_raises(TypeError, make_callable, message="<metaclass>.__prepare__() must return a mapping, not int")
+
+# type() takes its bases as they are: a base with __mro_entries__ is
+# rejected before the metaclass is calculated, and other lookup errors
+# propagate.
+class Entries:
+    def __mro_entries__(self, bases):
+        return ()
+assert_raises(TypeError, type, "Bad", (Entries(),), {},
+              message="type() doesn't support MRO entry resolution; use types.new_class()")
+class Broken:
+    def __getattr__(self, name):
+        raise KeyError(name)
+assert_raises(KeyError, type, "Bad", (Broken(),), {})

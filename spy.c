@@ -17105,6 +17105,13 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     if (name->type != SPY_STRING) return errorf(c, "TypeError", "type.__new__() argument 1 must be str, not %s", type_name(name));
     if (bases->type != SPY_TUPLE) return errorf(c, "TypeError", "type.__new__() argument 2 must be tuple, not %s", type_name(bases));
     if (!storage) return errorf(c, "TypeError", "type.__new__() argument 3 must be dict or frozendict, not %s", type_name(namespace));
+    /* Bases are taken as they are: a class statement resolves MRO entries. */
+    for (size_t i = 0; i < bases->as.seq.len; i++) {
+        SPYValue *entries = bases->as.seq.items[i]->type == SPY_CLASS ? NULL : optional_attribute(c, bases->as.seq.items[i], "__mro_entries__");
+        spy_release(entries);
+        if (entries) return spy_error(c, "TypeError", "type() doesn't support MRO entry resolution; use types.new_class()");
+        if (c->error_type[0]) return NULL;
+    }
     if (strlen(name->as.string.data) != name->as.string.len)
         return spy_error(c, "ValueError", "type name must not contain null characters");
     SPYValue *winner = derived_metaclass(c, meta, bases);
