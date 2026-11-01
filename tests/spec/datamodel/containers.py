@@ -113,3 +113,13 @@ e = assert_raises(TypeError, lambda: 1 in "abc")
 assert_eq(str(e), "'in <string>' requires string as left operand, not int")
 e = assert_raises(TypeError, lambda: "a" in b"abc")
 assert_eq(str(e), "a bytes-like object is required, not 'str'")
+
+class Removed:
+    def __setitem__(self, key, value): pass
+    def __delitem__(self, key): pass
+removed = Removed()
+del Removed.__setitem__, Removed.__delitem__
+def set_item(): removed[0] = 1
+def del_item(): del removed[0]
+assert_raises(TypeError, set_item, message="'Removed' object does not support item assignment")
+assert_raises(TypeError, del_item, message="'Removed' object doesn't support item deletion")

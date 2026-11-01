@@ -28,3 +28,5 @@ for fromlist, message in ((("x", 1), "Item in ``from list'' must be str, not int
         assert_eq(str(error), message)
     else:
         fail(f"no TypeError for {fromlist!r}")
+
+assert_eq(assert_raises(SyntaxError, compile, "from x lazy import y", "s", "exec").msg, "use 'lazy from ... ' instead of 'from ... lazy import'")

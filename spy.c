@@ -8658,8 +8658,6 @@ static int slice_adjust(SPYContext *c, const SliceBounds *bounds, size_t length,
     *out = (Slice){start, stop, step, (size_t)count}; return 0;
 }
 static SPYValue *get_slice(SPYContext *c, SPYValue *v, SPYValue *key) {
-    if (v->type != SPY_LIST && v->type != SPY_TUPLE && v->type != SPY_STRING && v->type != SPY_BYTES && v->type != SPY_BYTEARRAY)
-        return spy_error(c, "TypeError", "object does not support slicing");
     SliceBounds bounds;
     if (slice_bounds(c, key, &bounds)) return NULL;
     int text = v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY;
@@ -8826,10 +8824,10 @@ static SPYValue *get_index(SPYContext *c, SPYValue *v, SPYValue *key) {
         spy_release(method); return result;
     }
     if (is_dict(v)) return dict_subscript(c, v, v, key);
-    if (key->type == SPY_SLICE) return get_slice(c, v, key);
-    int64_t index;
     if (v->type != SPY_LIST && v->type != SPY_TUPLE && v->type != SPY_STRING && v->type != SPY_BYTES && v->type != SPY_BYTEARRAY)
         return errorf(c, "TypeError", "'%s' object is not subscriptable", type_name(v));
+    if (key->type == SPY_SLICE) return get_slice(c, v, key);
+    int64_t index;
     if (subscript_index(c, v, key, &index)) return NULL;
     size_t len = v->type == SPY_LIST || v->type == SPY_TUPLE ? v->as.seq.len : string_length(v);
     if (index < 0 && len <= INT64_MAX) index += (int64_t)len;

@@ -70,3 +70,6 @@ assert_eq(str(e), "descriptor 'x' for 'Slotted' objects doesn't apply to a 'int'
 # A classmethod_descriptor wraps nothing.
 for name in ("__func__", "__wrapped__", "__isabstractmethod__", "__dict__"):
     assert_raises(AttributeError, getattr, fromkeys, name, message=f"'classmethod_descriptor' object has no attribute '{name}'")
+
+fromkeys = dict.__dict__["fromkeys"]
+assert_raises(TypeError, fromkeys.__get__, None, 1, message="descriptor 'fromkeys' for type 'dict' needs a type, not a 'int' as arg 2")

@@ -218,3 +218,5 @@ for source, message, position in (
         ("def f(a: int, __debug__: int = 3): pass", "cannot assign to __debug__", (1, 15, 1, 29))):
     error = assert_syntax_error(source)
     assert_eq((error.msg, (error.lineno, error.offset, error.end_lineno, error.end_offset)), (message, position))
+
+assert_eq(assert_raises(SyntaxError, compile, "f(*a=1)", "s", "exec").msg, "cannot assign to iterable argument unpacking")

@@ -77,3 +77,5 @@ error = assert_syntax_error("f'{x:{x:{x:{x}}}}'")
 assert_eq((error.msg, error.lineno, error.offset, error.end_offset), ("f-string: expressions nested too deeply", 1, 11, 11))
 error = assert_syntax_error("f'''{x:{x:{\nx:{x}}}}'''")
 assert_eq((error.lineno, error.offset), (2, 2))
+
+assert_eq(assert_raises(SyntaxError, eval, 'f"""{(\n]}"""').msg, "closing parenthesis ']' does not match opening parenthesis '(' on line 1")

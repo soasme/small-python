@@ -89,3 +89,9 @@ assert_true(Proxy.__eq__(proxy, Other()))
 assert_true(proxy == Other())
 assert_false(proxy != Other())
 assert_eq(seen, [dict, dict, dict])
+
+compacted = {i: i for i in range(8)}
+for i in range(6): del compacted[i]
+for i in range(100, 140): compacted[i] = i
+assert_eq(list(compacted)[:4], [6, 7, 100, 101])
+assert_eq(len(compacted), 42)

@@ -32,3 +32,7 @@ assert_syntax_error("r = 1 <> 2\n")
 # The other features change nothing.
 ns = run("from __future__ import division\nr = 1 / 2\n")
 assert_eq(ns["r"], 0.5)
+
+namespace = {}
+exec("from __future__ import annotations\nx: ...\ny: f(...)\n", namespace)
+assert_eq(namespace["__annotations__"], {"x": "...", "y": "f(...)"})

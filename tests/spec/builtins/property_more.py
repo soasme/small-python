@@ -98,3 +98,8 @@ assert_raises(TypeError, property, name="x")
 empty = property()
 for text in (repr(empty), str(empty), f"{empty!r}", repr([empty])[1:-1]):
     assert_true(text.startswith("<property object at 0x") and text.endswith(">"))
+
+empty = property()
+assert_raises(AttributeError, empty.__get__, 1, message="property of 'int' object has no getter")
+assert_raises(AttributeError, empty.__set__, 1, 2, message="property of 'int' object has no setter")
+assert_raises(AttributeError, empty.__delete__, 1, message="property of 'int' object has no deleter")

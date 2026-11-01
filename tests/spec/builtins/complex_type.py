@@ -285,3 +285,9 @@ assert repr(complex(0.0, 1959276370239205.2)) == "1959276370239205.2j"
 assert repr(complex(-1818262230632059.2, 0.0)) == "(-1818262230632059.2+0j)"
 
 assert_raises(OverflowError, abs, complex(1.5e308, 1.5e308), message="absolute value too large")
+
+# Infinite operands keep their infinities through division.
+inf = float("inf")
+assert_eq(repr(complex(inf, float("nan")) / complex(1, 1)), "(inf-infj)")
+assert_eq(repr(complex(inf, inf) / complex(1, 2)), "(inf+nanj)")
+assert_eq(complex(1, 1) / complex(inf, float("nan")), 0j)

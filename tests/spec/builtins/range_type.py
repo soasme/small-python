@@ -153,3 +153,6 @@ for i in range(100):
     a[range(10)] = 1
 
 assert len(a.keys()) == 1
+
+assert_raises(TypeError, range.__reduce__, 1, message="descriptor '__reduce__' for 'range' objects doesn't apply to a 'int' object")
+assert_raises(TypeError, range.__reduce__, message="unbound method range.__reduce__() needs an argument")

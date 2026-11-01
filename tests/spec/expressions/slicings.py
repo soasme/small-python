@@ -47,3 +47,6 @@ assert d[3::-1] == "4321"
 assert d[4::-3] == "52"
 
 assert [1, 2, 3, 5, 6][-1:-5:-1] == [6, 5, 3, 2]  # #746
+
+value = 5
+assert_raises(TypeError, lambda: value[1:2], message="'int' object is not subscriptable")

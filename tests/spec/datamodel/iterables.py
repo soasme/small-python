@@ -50,3 +50,13 @@ assert_raises(TypeError, iter, C)
 it = iter([1, 2, 3, 4, 5])
 call_it = iter(lambda: next(it), 4)
 assert list(call_it) == [1, 2, 3]
+
+# A length hint that is unusable leaves the result empty, not failed.
+class Hinted:
+    def __iter__(self): return self
+    def __next__(self): raise StopIteration
+    def __length_hint__(self): return NotImplemented
+class Failing(Hinted):
+    def __length_hint__(self): raise TypeError("x")
+assert_eq(list(Hinted()), [])
+assert_eq(list(Failing()), [])

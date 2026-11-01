@@ -49,3 +49,5 @@ template = t'{1 + 1 # two
 assert_eq(template.interpolations[0].expression, "1 + 1 \n")
 assert_eq(t'{"#" # x
 }'.interpolations[0].expression, '"#" \n')
+
+assert_eq(type(iter(t"a{1}")).__name__, "TemplateIter")
