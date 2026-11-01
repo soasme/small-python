@@ -12,7 +12,8 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): one executable from pure Python, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, metering, virtual
-  file systems, host functions, inspection, snapshots, replay, Pi codemode
+  file systems, host functions, resumable execution, inspection, snapshots,
+  replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
 - [Development](#development): hot module reload
@@ -58,6 +59,16 @@ memory. Then shrink the empty context (lazy builtin tables, interned
 strings shared read-only between contexts, smaller initial heaps) until the
 benchmark stops improving. This is what the sandboxed runtime is priced by:
 one context per agent call.
+
+Past that point, start a context from a prebuilt image instead of building
+it: the builtins, and the intrinsics module that today runs once per context
+on first use, set up at build time and copied in. djs creates a VM this way
+in about 40 µs in wasm, and its Pi adapter keeps the image taken after Pi's
+prelude, so a codemode script starts in 1.0 ms against QuickJS's 3.9 ms. It
+needs the snapshot format below. Memory figures for this work compare
+distributions over runs with the heap layout perturbed, not single runs:
+where the allocator places a growing heap can move one run's peak by
+megabytes.
 
 ### Thin bindings
 
@@ -197,6 +208,39 @@ which policy grant it needs) from which each binding generates the Python
 signature, argument conversion and documentation, so a tool written once is
 offered the same way from C, Python and JavaScript.
 
+Values that cross the boundary go through one compact binary encoding, with
+a table so that repeated dictionary keys are sent once, measured against
+JSON as the baseline it has to beat (djs's wire format is 1.4 to 9 times
+faster than `JSON.stringify` plus `JSON.parse` in wasm).
+
+### Resumable execution
+
+Today a host function is a C callback that runs inside the engine's call,
+and a spent step budget stops the program for good. The JavaScript package
+works around the first by blocking a worker in `Atomics.wait` while the
+host answers ([docs/packaging/javascript.md](docs/packaging/javascript.md)),
+which is why it needs `SharedArrayBuffer`.
+
+Let the engine return to the host instead, and continue later from the
+same point:
+
+- a synchronous host call returns "waiting on host call *n*" from the
+  evaluation entry point; the host answers it, possibly asynchronously, and
+  resumes the context;
+- an asynchronous host call returns an awaitable at once and records the
+  pending call in the context; results are delivered one at a time, in the
+  order the host supplies them, when the event loop is idle, so a run
+  depends on the order of results and never on when they arrived;
+- a spent step budget is a pause the host may resume, so the budget becomes
+  a time slice as well as a limit.
+
+Every frame that can be paused must then live in the heap, not on the C
+stack: this is the case for calls without C recursion in
+[Toward bytecode](#toward-bytecode). djs (a JavaScript engine for Pi's
+codemode) is built this way and is the reference design. Resumable
+execution comes before snapshots, which save a context exactly at such a
+pause.
+
 ### Embedded inspector
 
 Trace execution, allocations, policy violations and imports, as structured
@@ -218,6 +262,16 @@ in the first group; anything else makes the snapshot fail with the reason,
 unless the host supplies a way to reopen or recreate it. Code that only
 does safe operations must always be forkable.
 
+Values hold real pointers, so a snapshot cannot be a copy of memory as it
+is in djs. The cycle collector already traces every live value; the same
+trace can write the graph out and read it back. Around that, borrow djs's
+container: a header with the engine's build hash, so that an image loads
+only into the build that wrote it; the image compressed with zstd against a
+reference image both sides can rebuild (the prebuilt base image, or the one
+taken after a codemode prelude), which brings a session waiting on a tool
+from about 550 KB down to 2 to 9 KB in djs; and journal replay, not a
+version-independent format, for durability across engine versions.
+
 ### Deterministic execution and replay
 
 `spy --record trace` writes every nondeterministic input the program
@@ -232,6 +286,18 @@ it. Recording at the host boundary is cheap once the policy layer and the
 inspector route every external input through one place, and it is the same
 mechanism snapshots need to describe host effects. Do it after those two.
 
+Make determinism a tested property, not only a recording. Every source of
+nondeterminism is a host input: the clock, randomness, and weak references,
+which a deterministic mode makes either always strong or absent. Python adds
+one source that JavaScript lacks: `id`, the default `__hash__` and so the
+iteration order of sets of plain objects all come from addresses today. A
+deterministic mode derives them from an allocation counter instead. A
+canonical hash of the live graph, independent of when the collector last
+ran, is recorded in the trace at each idle point and at the end, so a
+replay that diverges is caught where it diverges. The tests then compare
+those hashes across step-budget slicings, across snapshot and restore, and
+between native and wasm builds.
+
 ### Codemode plugin for the Pi agent
 
 A codemode plugin for the Pi coding agent: the model writes Python, which
@@ -239,6 +305,14 @@ runs in a Small Python context instead of QuickJS, with the tools Pi exposes
 offered as host functions. It ships with a default runtime policy, metering
 and a virtual file system, so its guardrails are stricter than a bare
 JavaScript sandbox's, and it is the first user of the layer above.
+
+Pi keeps everything engine-specific in one module, `src/runtime/vm.ts`
+(the `startVm` contract and its message protocol). djs replaces only that
+module and runs Pi's own codemode test suite on a copy of the package; the
+plugin can be accepted the same way, with every failing test explained.
+Next to it, a corpus of Python codemode scripts written by models, with
+fake tool results and redacted as djs's harvested corpus is, serves as
+both a regression suite and the benchmark for this use.
 
 ## Platforms
 
@@ -249,7 +323,9 @@ worker thread, on Node.js and in cross-origin isolated browsers. Remaining:
 a build without `SharedArrayBuffer` and threads, for pages that are not
 cross-origin isolated and for edge runtimes such as Cloudflare Workers; a
 WASI build; and `spyc build --target wasm`, which produces one module for a
-bundled program.
+bundled program. The build without threads needs host calls that return to
+the host ([Resumable execution](#resumable-execution)) in place of the
+blocking worker.
 
 ### Android and iOS
 
@@ -302,7 +378,12 @@ libFuzzer targets for evaluation and compilation. Continue with:
   snapshot formats;
 - MemorySanitizer and ThreadSanitizer where they apply, and a static
   analyzer in CI;
-- an ownership test for each new C API function, as the existing ones have.
+- an ownership test for each new C API function, as the existing ones have;
+- a GC stress mode that runs the specification suite with a collection at
+  every point where one may happen, so a value missing from the collector's
+  trace fails a test instead of waiting for an unlucky schedule. Once
+  snapshots exist, a second mode snapshots and restores the context every
+  *N* steps. In both, the output must not change.
 
 A memory-safety bug in the sandboxed runtime is a sandbox escape, so this
 work gates that section.
@@ -348,7 +429,9 @@ instruction list that hands every expression that cannot suspend back to the
 walker. Move node kinds onto machine instructions one at a time, each only
 once it measures faster than the walker, then revisit locals in slots and
 calls without C recursion, which pay only once a machine step costs well
-under a walker node. The plan and its measurements are in
+under a walker node. Calls without C recursion are also what
+[resumable execution](#resumable-execution) and snapshots need, so they
+are weighed against those as well as against speed. The plan and its measurements are in
 [docs/optimization.md](docs/optimization.md#toward-bytecode).
 
 Expected gain: two to three times on interpreter-bound programs.
@@ -359,3 +442,7 @@ Expected gain: two to three times on interpreter-bound programs.
 Extend it with standard-library workloads (JSON, regular expressions, I/O) as
 those modules arrive, larger programs alongside the micro-benchmarks, and a
 regression check in CI that flags a slowdown before it is merged.
+
+Size gets the same treatment: CI records the gzip size of `libspy.a` and the
+wasm module as a ceiling that may only fall. A change that raises it says
+what the extra size buys.
