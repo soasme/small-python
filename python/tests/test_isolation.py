@@ -294,6 +294,13 @@ def exits(pid, seconds=5):
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
+        # An orphan ends as a zombie when no init reaps it, as in a container.
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                if stat.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except OSError:
+            pass
         time.sleep(0.05)
     return False
 
