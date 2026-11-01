@@ -110,3 +110,13 @@ try:
     assert False, "TypeError expected for function dict deletion"
 except TypeError:
     pass
+
+# __builtins__ is the globals' "__builtins__" value, whatever it is; a module stands for its dictionary.
+import builtins
+for value in (5, None, {"len": 1}):
+    namespace = {"__builtins__": value}
+    exec("def made(): pass", namespace)
+    assert_is(namespace["made"].__builtins__, value)
+namespace = {"__builtins__": builtins}
+exec("def made(): pass", namespace)
+assert_is(namespace["made"].__builtins__, builtins.__dict__)

@@ -66,3 +66,7 @@ member.__delete__(s)
 assert_raises(AttributeError, getattr, s, "x")
 e = assert_raises(TypeError, member.__get__, 1, int)
 assert_eq(str(e), "descriptor 'x' for 'Slotted' objects doesn't apply to a 'int' object")
+
+# A classmethod_descriptor wraps nothing.
+for name in ("__func__", "__wrapped__", "__isabstractmethod__", "__dict__"):
+    assert_raises(AttributeError, getattr, fromkeys, name, message=f"'classmethod_descriptor' object has no attribute '{name}'")

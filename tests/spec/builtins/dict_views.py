@@ -71,3 +71,21 @@ assert_eq(str(e), "mappingproxy() argument must be a mapping, not list")
 with assert_raises(TypeError):
     class Sub(MappingProxy):
         pass
+
+# mappingproxy's methods delegate to the mapping, called directly too.
+Proxy = type(type.__dict__)
+frozen = frozendict(a=1)
+assert_eq(Proxy.__hash__(Proxy(frozen)), hash(frozen))
+assert_eq(hash(Proxy(frozen)), hash(frozen))
+assert_raises(TypeError, Proxy.__hash__, Proxy({}), message="unhashable type: 'dict'")
+proxy = Proxy({"a": 1})
+assert_eq((Proxy.__repr__(proxy), Proxy.__str__(proxy), str(proxy)), ("mappingproxy({'a': 1})", "{'a': 1}", "{'a': 1}"))
+class Other:
+    def __eq__(self, other):
+        seen.append(type(other))
+        return True
+seen = []
+assert_true(Proxy.__eq__(proxy, Other()))
+assert_true(proxy == Other())
+assert_false(proxy != Other())
+assert_eq(seen, [dict, dict, dict])

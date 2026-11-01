@@ -70,3 +70,11 @@ u = unstarted()
 u.gi_frame.clear()
 assert_eq(log, [])
 assert_raises(StopIteration, next, u)
+
+# A running generator's frame is the executing frame.
+def running():
+    yield running_generator.gi_frame
+running_generator = running()
+frame = next(running_generator)
+assert_is(running_generator.gi_frame, frame)
+assert_eq(frame.f_code.co_name, "running")

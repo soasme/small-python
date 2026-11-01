@@ -10466,6 +10466,12 @@ static SPYValue *docstring(SPYContext *c, Node *body) {
     mem_free(doc.data); mem_free(out.data);
     return result;
 }
+/* cls's attribute name, bound to self as owner's instance. */
+static NO_INLINE SPYValue *native_attribute(SPYContext *c, SPYValue *cls, const char *name, SPYValue *self, SPYValue *owner) {
+    SPYValue *slot = attribute(c, cls, name), *method = slot ? descriptor_get(c, slot, self, owner) : NULL;
+    spy_release(slot);
+    return method;
+}
 static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
     if (v->type != SPY_INSTANCE && !strcmp(name, "__class__")) return spy_retain(value_class(c, v));
     if ((v->type == SPY_NATIVE || v->type == SPY_BOUND_METHOD || v->type == SPY_METHOD) && !strcmp(name, "__module__")) {
@@ -10539,16 +10545,9 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
                 if (definition) break;
                 if ((definition = builtin_descriptor(c, cls, name))) break;
                 if (c->error_type[0]) return NULL;
-                /* Builtin methods dispatched by value type live on the base. */
+                /* Builtin methods dispatched by value type live on the native class, bound to self. */
                 if (cls->as.map.native && self && self->type == SPY_INSTANCE && self->as.map.base) {
-                    /* A super subclass's carried super would look past its own type. */
-                    if (self->as.map.base->type == SPY_SUPER) {
-                        SPYValue *slot = attribute(c, cls, name), *method = slot ? descriptor_get(c, slot, self, v->as.super.owner) : NULL;
-                        spy_release(slot);
-                        if (method || !error_is(c, "AttributeError")) return method;
-                        spy_clear_error(c); continue;
-                    }
-                    SPYValue *method = attribute_value(c, self->as.map.base, name);
+                    SPYValue *method = native_attribute(c, cls, name, self, v->as.super.owner);
                     if (method || !error_is(c, "AttributeError")) return method;
                     spy_clear_error(c);
                 }
@@ -10771,11 +10770,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             /* The builtins fixed when the function was made (9.3.4): those its globals lead to. */
             SPYValue *parent = module_env(c, v->as.function.env)->as.map.parent;
             if (parent && parent->type == V_ENV) parent = parent->as.map.namespace;
-            if (parent && is_dict(parent)) return spy_retain(parent);
-            SPYValue *module = load_source_module(c, "builtins");
-            SPYValue *dict = module ? attribute(c, module, "__dict__") : NULL;
-            spy_release(module);
-            return dict;
+            return spy_retain(parent ? parent : c->builtins);
         }
         if (!strcmp(name, "__code__")) {
             SPYValue *code = name_local(v->as.function.metadata, "__code__");
@@ -17301,14 +17296,16 @@ static SPYValue *lazy_import_builtin(SPYContext *c, size_t argc, SPYValue *const
     if (level && !name) return NULL;
     if (module_env(c, caller) != caller) { mem_free(name); return spy_error(c, "SyntaxError", "'lazy import' is only allowed at module level"); }
     SPYValue *fromlist = args[3] && args[3]->type != SPY_NONE ? args[3] : c->none, *packed = NULL;
-    if (fromlist->type == SPY_STRING) {
+    if (builtin_value(c, fromlist, SPY_STRING)) {
         if ((packed = value_new(c, SPY_TUPLE)) && sequence_append(c, packed, fromlist)) { spy_release(packed); packed = NULL; }
         if (!packed) { mem_free(name); return NULL; }
         fromlist = packed;
     }
-    for (size_t i = 0; fromlist->type == SPY_TUPLE && i < fromlist->as.seq.len && !c->error_type[0]; i++)
-        if (fromlist->as.seq.items[i]->type != SPY_STRING)
-            errorf(c, "TypeError", "Item in ``from list'' must be str, not %s", type_name(fromlist->as.seq.items[i]));
+    SPYValue *items = builtin_value(c, fromlist, SPY_TUPLE);
+    for (size_t i = 0; items && i < items->as.seq.len && !c->error_type[0]; i++)
+        if (!builtin_value(c, items->as.seq.items[i], SPY_STRING))
+            errorf(c, "TypeError", "Item in ``from list'' must be str, not %s", type_name(items->as.seq.items[i]));
+    if (!items && fromlist->type != SPY_NONE) spy_error(c, "TypeError", "lazy_import: fromlist must be None, a string, or a tuple");
     SPYValue *text = c->error_type[0] ? NULL : name ? spy_string(c, name, strlen(name)) : spy_retain(args[0]);
     SPYValue *lazy = text ? lazy_new(c, text, fromlist, builtins) : NULL;
     mem_free(name); spy_release(text); spy_release(packed);
@@ -21532,7 +21529,10 @@ static SPYValue *mappingproxy_method(SPYContext *c, size_t argc, SPYValue *const
     case MP_ITER: return get_iterator(c, mapping);
     case MP_LEN: return builtin(c, 1, &mapping, (void *)(intptr_t)B_LEN);
     case MP_REVERSED: return builtin(c, 1, &mapping, (void *)(intptr_t)B_REVERSED);
-    case MP_HASH: return builtin(c, 1, &mapping, (void *)(intptr_t)B_HASH);
+    case MP_HASH: {
+        int64_t hash;
+        return hash_value(c, mapping, &hash) ? NULL : spy_int(c, hash);
+    }
     case MP_EQ: case MP_NE: {
         /* Match descrobject.c: arbitrary reflected comparisons must not get
          * the mutable exact dict behind a class namespace (gh-152405). */

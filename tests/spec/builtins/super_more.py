@@ -45,3 +45,15 @@ class Emptied:
 assert_eq(str(assert_raises(NameError, Emptied().f)),
           "cannot access free variable '__class__' where it is not associated with a value in enclosing scope")
 assert_raises(ValueError, lambda: Emptied.f.__closure__[0].cell_contents)
+
+# super() binds a built-in base class's methods to the subclass instance.
+class Text(str): pass
+text = Text("ab")
+for name in ("__getattribute__", "upper"):
+    assert_is(getattr(super(Text, text), name).__self__, text)
+assert_eq(super(Text, text).upper(), "AB")
+assert_raises(AttributeError, super(Text, text).__getattribute__, "real", message="'Text' object has no attribute 'real'")
+class Items(list): pass
+items = Items([1])
+super(Items, items).append(2)
+assert_eq(items, [1, 2])
