@@ -106,7 +106,8 @@ the points through which all unbounded work passes:
   comprehension or generator expression, and per item a native loop takes
   from an iterator;
 - in native code, in proportion to what an operation produces or visits:
-  one per 64 bytes a block of 4 KiB or more grows by, one per mapping
+  one per 64 bytes, or 8 elements of an array of values or entries, a
+  block of 64 such units or more grows by, one per mapping
   lookup of `str.translate`, one per 8 digits of float formatting, one
   per 64 elements, digits or
   bytes compared, searched, hashed or moved (per 16 entries for hash
@@ -173,8 +174,14 @@ Every engine allocation goes through `mem_malloc`, `mem_realloc` and
 `mem_free`, over one function, `mem_block`. A block carries a header
 holding its size and its context, so a free needs neither. While watched,
 a block of 4 KiB or more spends a step per 64 bytes it grows by; a smaller
-one costs no more than the step that asked for it. Value pools are counted whole (16 KiB
-each) when taken from and returned to the system. Memory that crosses the
+one costs no more than the step that asked for it. An array of values or
+dictionary entries, whose width follows the pointer's, spends instead per
+8 elements, so a program spends the same steps on `wasm32` as on a 64-bit
+machine; so do integers, whose header has one layout on every target.
+Value pools are counted whole (16 KiB each) when taken from and returned
+to the system, but spend no steps: their values are paid for by the
+operations that make them, and a pool's share differs with the width of
+a value. Memory that crosses the
 host boundary stays on plain `malloc` and `free`: sources from the module
 loader, lines from `input()`, and paths from `realpath`, which a mount
 copies into engine memory.

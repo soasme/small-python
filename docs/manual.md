@@ -849,7 +849,8 @@ and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
 `spy_call_keywords`; zero means unlimited. A step is a unit of bounded work:
 one per Python call and per 8 nodes of the body it runs, one per loop pass
 and per item a native loop takes, one per 64 bytes of source parsed or of a
-large block allocated, and native work that only reads, such as comparing,
+large block allocated (per 8 elements of an array, so every target spends
+the same), and native work that only reads, such as comparing,
 searching or hashing, in proportion to its operands
 ([metering.md](metering.md)). A host function calling back shares its
 caller's budget. `spy_steps_used` returns the steps the running or last

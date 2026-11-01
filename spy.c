@@ -73,7 +73,7 @@ typedef struct Program Program;
 typedef struct Machine Machine;
 typedef struct Pool Pool;
 typedef struct Scope Scope;
-typedef struct { size_t len; int sign; uint32_t digits[]; } BigInt;
+typedef struct { uint64_t len; int sign; uint32_t digits[]; } BigInt; /* One layout on every target. */
 typedef struct { const uint32_t *digits; size_t len; int sign; uint32_t small[2]; } IntView;
 enum { S_LOCAL = 1, S_PARAM = 2, S_USE = 4, S_GLOBAL = 8, S_NONLOCAL = 16, S_ANNOT = 32 };
 enum { S_MODULE, S_FUNCTION, S_CLASS, S_COMPREHENSION };
@@ -622,30 +622,36 @@ enum { POOL = 16384, SPARES = 64 };
 /* Engine memory (docs/metering.md 3.3). A block starts with its size and
  * context, so a context counts the bytes it holds and a free needs neither.
  * While watched, growth stays within the memory limit, except while
- * stopped, when unwinding needs it, and a block of 4 KiB or more spends a
- * step per 64 bytes it grows by; a smaller one is paid for by the step
- * that asked for it. A block has
+ * stopped, when unwinding needs it, and a block of 64 steps or more spends
+ * a step per 64 bytes it grows by, or per 8 elements of an array, which
+ * spends the same where pointers are narrower; a smaller one is paid for
+ * by the step that asked for it. A block has
  * room for a multiple of 16 bytes; released blocks of up to 256 bytes wait
  * in the context for allocations of their size, as pymalloc keeps its
  * small blocks. */
 typedef union MemHead { max_align_t align; struct { size_t size; SPYContext *c; } head; union MemHead *next; } MemHead;
-static NO_INLINE int meter(SPYContext *c, size_t old, size_t n) {
+/* mem_block's mode: ZERO, and for an array, ARRAY(width) of its elements:
+ * the bytes of a step, which are 64 for any other block. */
+enum { ZERO = 1 };
+#define ARRAY(width) ((int)(width) * 16)
+static NO_INLINE int meter(SPYContext *c, size_t old, size_t n, int mode) {
     if (c->stopped) return 0;
     if (c->memory_limit && (c->memory > c->memory_limit || n - old > c->memory_limit - c->memory)) return halt(c, SPY_STOP_MEMORY);
-    return n < 4096 ? 0 : spend(c, n / 64 - old / 64);
+    size_t unit = mode >> 1 ? (size_t)mode >> 1 : 64;
+    return n / unit < 64 ? 0 : spend(c, n / unit - old / unit);
 }
 /* The size class of a block of n bytes: room for 16 (k + 1) bytes. */
 static size_t block_class(size_t n) { return n ? (n - 1) / 16 : 0; }
-/* A block of n bytes, zeroed if zero, or b resized to n. */
-static NO_INLINE void *mem_block(SPYContext *c, MemHead *b, size_t n, int zero) {
+/* A block of n bytes, zeroed in mode ZERO, or b resized to n. */
+static NO_INLINE void *mem_block(SPYContext *c, MemHead *b, size_t n, int mode) {
     size_t old = b ? b->head.size : 0, k = block_class(n);
-    if (n > old && (n > SIZE_MAX / 2 || (c->watch && meter(c, old, n)))) return NULL;
+    if (n > old && (n > SIZE_MAX / 2 || (c->watch && meter(c, old, n, mode)))) return NULL;
     if (b) { if (k != block_class(old) && !(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) return NULL; }
     else if (k < 16 && c->spare_blocks[k]) {
         b = c->spare_blocks[k]; cache_take(b, sizeof(MemHead) + 16 * (k + 1));
         c->spare_blocks[k] = b->next;
-        if (zero) memset(b + 1, 0, 16 * (k + 1));
-    } else if (!(b = zero ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1)))) return NULL;
+        if (mode & ZERO) memset(b + 1, 0, 16 * (k + 1));
+    } else if (!(b = mode & ZERO ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1)))) return NULL;
     c->memory += n - old;
     b->head.size = n; b->head.c = c;
     return b + 1;
@@ -663,7 +669,12 @@ static NO_INLINE void mem_free(void *p) {
     cache_put(b, sizeof(MemHead) + 16 * (k + 1));
 }
 static void *allocate(SPYContext *c, size_t n) {
-    void *p = mem_block(c, NULL, n, 1);
+    void *p = mem_block(c, NULL, n, ZERO);
+    if (!p) spy_error(c, "MemoryError", "allocation failed");
+    return p;
+}
+static void *allocate_array(SPYContext *c, size_t count, size_t width) {
+    void *p = count <= SIZE_MAX / width ? mem_block(c, NULL, count * width, ZERO | ARRAY(width)) : NULL;
     if (!p) spy_error(c, "MemoryError", "allocation failed");
     return p;
 }
@@ -675,7 +686,7 @@ static char *copy_text(SPYContext *c, const char *s, size_t n) {
     p[n] = 0;
     return p;
 }
-static int grow(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) {
+static ALWAYS_INLINE int grow_block(SPYContext *c, void **p, size_t *cap, size_t n, size_t width, int mode) {
     if (n <= *cap) return 0;
     size_t k = *cap ? *cap : 8;
     while (k < n) {
@@ -683,7 +694,7 @@ static int grow(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) {
         k *= 2;
     }
     if (k > SIZE_MAX / width) goto fail;
-    void *q = mem_realloc(c, *p, k * width);
+    void *q = mem_block(c, *p ? (MemHead *)*p - 1 : NULL, k * width, mode);
     if (!q) goto fail;
     *p = q;
     *cap = k;
@@ -692,6 +703,10 @@ fail:
     spy_error(c, "MemoryError", "allocation too large");
     return -1;
 }
+static int grow(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) { return grow_block(c, p, cap, n, width, 0); }
+/* Arrays of values and entries, whose width follows the pointer's, spend
+ * per 8 elements. */
+static int grow_array(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) { return grow_block(c, p, cap, n, width, ARRAY(width)); }
 typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
 static int append(Buffer *b, const char *s, size_t n) {
     /* Text is built by many small appends; the first takes 32 bytes. */
@@ -744,7 +759,8 @@ struct Pool { Pool *next, *prev, *after, *before; /* before, after: in every_poo
 static ALWAYS_INLINE Pool *value_pool(SPYValue *v) { return (Pool *)((uintptr_t)v & ~(uintptr_t)(POOL - 1)); }
 static ALWAYS_INLINE int pool_room(Pool *pool, size_t bytes) { return pool->free || pool->fresh + bytes <= pool->end; }
 static NO_INLINE Pool *pool_new(SPYContext *c, int size) {
-    Pool *pool = c->watch && meter(c, 0, POOL) ? NULL : pool_alloc();
+    /* Its values are paid for by the operations that make them. */
+    Pool *pool = c->watch && meter(c, 0, POOL, ARRAY(POOL)) ? NULL : pool_alloc();
     if (!pool) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
     c->memory += POOL;
     *pool = (Pool){.next = c->pools[size], .after = c->every_pool, .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
@@ -1125,7 +1141,7 @@ static int gc_tracked(SPYContext *, SPYValue *);
  * after finalization are appended to it instead of freed. */
 static size_t collect_once(SPYContext *c, SPYValue *save, Buffer *report) {
     if (!c->live) return 0;
-    Work work = { mem_malloc(c, c->live * sizeof(SPYValue *)), 0 };
+    Work work = { mem_block(c, NULL, c->live * sizeof(SPYValue *), ARRAY(sizeof(SPYValue *))), 0 };
     if (!work.items) return 0;
     for (SPYValue *v = c->values; v; v = v->next) { v->trial = v->refs; v->marked = 0; }
     for (SPYValue *v = c->values; v; v = v->next) edges(v, subtract_edge, NULL);
@@ -1605,7 +1621,7 @@ static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
         spy_error(c, "TypeError", "expected list"); return -1;
     }
     if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
-    if (grow(c, (void **)&v->as.seq.items, &v->as.seq.cap,
+    if (grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap,
              v->as.seq.len + 1, sizeof(SPYValue *))) return -1;
     v->as.seq.items[v->as.seq.len++] = spy_retain(item);
     return 0;
@@ -1617,7 +1633,7 @@ static int sequence_extend(SPYContext *c, SPYValue *v, SPYValue *source, size_t 
     if (!n) return 0;
     if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
     if (n > SIZE_MAX - v->as.seq.len) { spy_error(c, "MemoryError", "allocation too large"); return -1; }
-    if (grow(c, (void **)&v->as.seq.items, &v->as.seq.cap, v->as.seq.len + n, sizeof(SPYValue *))) return -1;
+    if (grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, v->as.seq.len + n, sizeof(SPYValue *))) return -1;
     SPYValue **to = v->as.seq.items + v->as.seq.len, **from = source->as.seq.items + start;
     for (size_t i = 0; i < n; i++) to[i] = spy_retain(from[(ptrdiff_t)i * step]);
     v->as.seq.len += n;
@@ -2113,7 +2129,7 @@ static int map_indexed(SPYValue *map) {
     size_t len = map->as.map.len, cap = 32;
     if (len <= MAP_INDEXED || map->as.map.front + map_used(map) >= UINT32_MAX / 4) return 0;
     while (cap < len * 2) cap *= 2;
-    if (!(map->as.map.index = mem_block(map->ctx, NULL, cap * sizeof(*map->as.map.index), 1))) return 0;
+    if (!(map->as.map.index = mem_block(map->ctx, NULL, cap * sizeof(*map->as.map.index), ZERO))) return 0;
     map->as.map.index_cap = (uint32_t)cap; map->as.map.changes++;
     for (size_t i = 0; i < map_used(map); i++) if (map->as.map.items[i].key) index_insert(map, i);
     return 1;
@@ -2195,7 +2211,7 @@ static int map_append(SPYContext *c, SPYValue *map, SPYValue *key, SPYValue *val
         map->as.map.items = items; map->as.map.cap += map->as.map.front; map->as.map.front = 0;
         map_unindex(map);
     }
-    if (grow(c, (void **)&map->as.map.items, &map->as.map.cap, used + 1, sizeof(Entry))) return -1;
+    if (grow_array(c, (void **)&map->as.map.items, &map->as.map.cap, used + 1, sizeof(Entry))) return -1;
     Entry *entry = &map->as.map.items[used];
     map->as.map.len++;
     entry->key = spy_retain(key); entry->value = spy_retain(value); entry->hash = hash;
@@ -8673,10 +8689,10 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
          * entries are released last, with the list already consistent, and
          * in reverse, as list_ass_slice does. */
         size_t start = (size_t)s.start, removed = s.count, added = items->as.seq.len, len = v->as.seq.len;
-        if (added > removed && grow(c, (void **)&v->as.seq.items, &v->as.seq.cap, len - removed + added, sizeof(SPYValue *))) {
+        if (added > removed && grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, len - removed + added, sizeof(SPYValue *))) {
             spy_release(items); return -1;
         }
-        SPYValue **gone = removed ? allocate(c, removed * sizeof(SPYValue *)) : NULL;
+        SPYValue **gone = removed ? allocate_array(c, removed, sizeof(SPYValue *)) : NULL;
         if ((removed && !gone) || spend(c, (len - start - removed) / 64)) { mem_free(gone); spy_release(items); return -1; }
         SPYValue **at = v->as.seq.items + start;
         if (removed) memcpy(gone, at, removed * sizeof(*gone));
@@ -14414,7 +14430,7 @@ static int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *cons
     }
     items = cap == 8 && c->spare_entries_len ? c->spare_entries[--c->spare_entries_len] : NULL;
     if (items) cache_take(items, 8 * sizeof(Entry));
-    else if (!(items = allocate(c, cap * sizeof(Entry)))) return -1;
+    else if (!(items = allocate_array(c, cap, sizeof(Entry)))) return -1;
     for (size_t i = 0; i < len; i++) {
         Symbol *symbol = &scope->symbols[scope->order[i]];
         items[i] = (Entry){spy_retain(symbol->key), spy_retain(i < argc ? argv[i] : c->unbound), symbol->hash};
@@ -16275,7 +16291,7 @@ static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *r
         if ((uint64_t)count > SIZE_MAX / len || (uint64_t)count * len > INT_MAX)
             return spy_error(c, "MemoryError", "repeated list too large");
         size_t total = (size_t)count * len;
-        if (grow(c, (void **)&old->as.seq.items, &old->as.seq.cap, total, sizeof(SPYValue *))) return NULL;
+        if (grow_array(c, (void **)&old->as.seq.items, &old->as.seq.cap, total, sizeof(SPYValue *))) return NULL;
         for (size_t i = len; i < total; i++) old->as.seq.items[i] = spy_retain(old->as.seq.items[i % len]);
         old->as.seq.len = total;
     }
@@ -19707,7 +19723,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     return v;
 }
 static NO_INLINE int machine_grow(SPYContext *c, Machine *m, SPYValue *v) {
-    if (grow(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) { spy_release(v); return -1; }
+    if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 1, sizeof(*m->stack))) { spy_release(v); return -1; }
     m->stack[m->len++] = v; return 0;
 }
 /* push takes ownership, including on failure. */
@@ -20749,9 +20765,9 @@ static ALWAYS_INLINE int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
 static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) {
     size_t len = list->as.seq.len;
     if (len > SIZE_MAX / sizeof(SortItem)) { spy_error(c, "MemoryError", "list too large to sort"); return -1; }
-    SortItem *items = allocate(c, len * sizeof(*items));
-    SortItem *scratch = allocate(c, len * sizeof(*scratch));
-    size_t *ends = allocate(c, len * sizeof(*ends));
+    SortItem *items = allocate_array(c, len, sizeof(*items));
+    SortItem *scratch = allocate_array(c, len, sizeof(*scratch));
+    size_t *ends = allocate_array(c, len, sizeof(*ends));
     if (!items || !scratch || !ends) { mem_free(items); mem_free(scratch); mem_free(ends); return -1; }
     SortItem *from = items, *to = scratch;
     size_t keys = 0;
