@@ -223,6 +223,19 @@
   effort.
 - Build pinned CPython out of tree as a development oracle. Keep it under
   ignored `tests/upstream/`; never make it an engine or test dependency.
+- Moving the oracle to a new CPython release (e.g. 3.15.1->3.15.2): set commit and
+  tag in `tests/upstream.json`, keep the old build aside, `make oracle`;
+  bump `modules/sys.py` (`version`, `version_info`, `hexversion`) and run
+  `tools/build_intrinsics.py`; bump the version checks in
+  `tools/build_unicode.py` and `tests/unicode.py`, then regenerate
+  `spy-unicode.h`; `git grep` the old version (standards' baselines and
+  commit, manual, `python-lib.md`, `testing/cython.md`, spec README, port
+  headers). Diff each ported `Lib/test` file between the tags and apply it
+  to `tests/spec/ports`, marking library changes "(Ported)". Then pass
+  `test-spec-oracle`, `test-build-oracle`, `test-tla-oracle`, `test-unicode`,
+  `check-unicode`, `tests/std.py` and the Cython reports on the new oracle;
+  where its behaviour changed, fix spy and the standard and add a spec test.
+  Re-measure the benchmark's CPython column.
 - A missing suite, prerequisite, or failed runner must fail explicitly, not
   report success with zero tests. Never count skips as passes.
 - Use strict C11 warnings, meaningful semantic checks, ownership tests, and
@@ -279,8 +292,7 @@ by the task and do not require repeated confirmation.
 ## Workflow
 
 * Commit as often as you can when you made progress.
+* Docs, TLA+ Models, Tests, Examples should not break and benchmarks has no degradation before push or release or releasing a new version unless user accepts.
 * Before pushing, run the CI workflow locally with `tools/run_workflow.py`
   (`act` in Docker; `-j test` for one job). It runs the Linux jobs only.
-* Run bench and update docs before release a new version.
-* Docs, TLA+ Models, Tests, Bench, Examples should not break before release.
 * Commit message should come with a brief of test or bench results.
