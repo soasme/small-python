@@ -248,7 +248,7 @@ struct SPYContext {
     int optimize; /* The level the parser applies (spy_set_optimize, compile(optimize=)):
                    * 1 drops asserts and makes __debug__ False, 2 also drops docstrings. */
     int string_source; /* compile(), exec(), or eval() is parsing a string. */
-    int eval_input; /* The source is eval input: one expression list. */
+    int eval_input; /* 1: eval input, one expression list; 2: single input. Neither ends with an implicit newline. */
     const char *node_start, *node_end; /* The source a compile-time SyntaxError covers. */
     /* Modules a host registered with spy_new_module, created on first import. */
     struct HostModule { char *name; SPYModuleInit init; } *host_modules;
@@ -3625,7 +3625,7 @@ typedef struct {
     int lex_stopped; /* lex() stopped without raising: CPython's done codes. */
     const char *private_name;
     const char *error_start, *error_end;
-    int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset). */
+    int error_trim_line, error_end_zero; /* error_end_zero: CPython's end column -1 (2: end offset -1; 3: also a 0-based offset; 4: a 0-based offset, end offset 0). */
     SPYValue *unit;
     /* CPython raises these from its compiler, after a successful parse. */
     const char *deferred, *deferred_start, *deferred_end;
@@ -4062,7 +4062,11 @@ static int lex(Parser *p, const char *s) {
                 else { indent++; alternate++; }
                 s++;
             }
-            if (*s && *s != '#' && *s != '\n' && *s != '\r') {
+            /* eval and single input end without a newline, so a final line of
+             * blanks indents, unless single input already ended its statement. */
+            int blanks = !*s && s > line_start && p->ctx->eval_input && indent > indents[level];
+            for (size_t i = 0; blanks && p->ctx->eval_input == 2 && !level && i < p->len; i++) blanks = p->tokens[i].kind == T_NL;
+            if ((*s || blanks) && *s != '#' && *s != '\n' && *s != '\r') {
                 if (indent > indents[level]) {
                     if (level == 99) goto too_deep; /* CPython's MAXINDENT */
                     if (alternate <= altindents[level]) goto tab_error;
@@ -5520,7 +5524,7 @@ static Node *plain_expression(Parser *p, int min) { return expression_mode(p, mi
  * items (star_named_expressions) allow an unparenthesized walrus. */
 /* eval input is expressions, without starred items outside brackets. */
 static int eval_star(Parser *p) {
-    if (!at(p, '*') || !p->ctx->eval_input || peek(p)->level) return 0;
+    if (!at(p, '*') || p->ctx->eval_input != 1 || peek(p)->level) return 0;
     syntax(p, "invalid syntax"); return 1;
 }
 static Node *expression_items(Parser *p, int min, int named) {
@@ -7661,7 +7665,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             goto lexer_error;
         }
         if (!c->error_type[0] && !at(&p, T_END)) syntax(&p, "unexpected indentation");
-        if (c->eval_input && !strcmp(c->error_type, "SyntaxError")) {
+        if (c->eval_input == 1 && !strcmp(c->error_type, "SyntaxError")) {
             /* eval_input has no statement rules: report what its expressions find. */
             spy_clear_error(c);
             p.pos = 0; p.error_start = p.error_end = NULL; p.error_trim_line = p.error_end_zero = 0;
@@ -7678,7 +7682,18 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
         }
         if (c->error_type[0]) invalid_expression_error(&p);
         Node *body = unit->as.unit.body;
-        if (!c->error_type[0] && c->eval_input && (!body || body->kind != N_EXPR || body->next)) {
+        if (!c->error_type[0] && c->eval_input && !body) {
+            /* No tokens: the parser fails at the end marker, on the last line, at offset 0. */
+            const char *last = source;
+            c->line = 0;
+            for (const char *ch = source; *ch; ch++)
+                if (ch == source || ch[-1] == '\n') { c->line++; last = ch; }
+            p.error_start = last; p.error_end_zero = 4;
+            spy_error(c, "SyntaxError", "invalid syntax");
+        }
+        int semicolon = 0;
+        for (size_t i = 0; c->eval_input == 1 && i < p.len; i++) semicolon |= p.tokens[i].kind == ';';
+        if (!c->error_type[0] && c->eval_input == 1 && (body->kind != N_EXPR || body->next || semicolon)) {
             /* eval_input is expressions NEWLINE* ENDMARKER: fail where it stops. */
             p.pos = 0;
             if (expression_list(&p, 0)) {
@@ -7738,7 +7753,7 @@ lexer_error:
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
         /* The compiler's errors read the line from the file, which a string has not. */
-        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | c->eval_input | (p.error_end_zero ? 2 : 0) | (p.error_end_zero >= 2 ? 8 : 0) | (p.error_end_zero == 3 ? 16 : 0) |
+        if (syntax_error) attach_syntax_error(c, filename, source, p.error_start, p.error_end, p.error_trim_line | (p.error_end_zero ? 2 : 0) | (p.error_end_zero == 2 || p.error_end_zero == 3 ? 8 : 0) | (p.error_end_zero >= 3 ? 16 : 0) | (c->eval_input ? 32 : 0) |
                                               (!parsing && c->string_source ? 4 : 0));
         if (incomplete) *incomplete = syntax_error && parsing && (p.incomplete || at_end);
         if (syntax_error && parsing && c->exception) {
@@ -14788,7 +14803,7 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
 static size_t utf8_valid(const unsigned char *, size_t, const char **, size_t *);
 static void attach_syntax_error(SPYContext *c, const char *filename, const char *source,
                                 const char *position, const char *finish, int trim_line) {
-    int end_zero = trim_line & 2, textless = trim_line & 4, end_minus = trim_line & 8, zero_based = trim_line & 16;
+    int end_zero = trim_line & 2, textless = trim_line & 4, end_minus = trim_line & 8, zero_based = trim_line & 16, unterminated = trim_line & 32;
     trim_line &= 1;
     char type[sizeof(c->error_type)], message[sizeof(c->error_message)];
     memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
@@ -14825,7 +14840,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         else append_codepoint(&text, 0xfffd);
         ch += width ? width : bad;
     }
-    if (!trim_line && (end == start || end[-1] != '\n')) puts_buffer(&text, "\n");
+    if (!trim_line && !unterminated && (end == start || end[-1] != '\n')) puts_buffer(&text, "\n");
     SPYValue *fields[] = {
         spy_string(c, filename, strlen(filename)), spy_int(c, (int64_t)line),
         position ? spy_int(c, (int64_t)offset) : spy_none(c),
@@ -24353,8 +24368,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     case B_TYPE_SUBCLASSES: {
         /* The live classes naming argv[0] as a direct base, oldest first;
          * values are listed newest first. */
-        if (!argc || argv[0]->type != SPY_CLASS)
-            return errorf(c, "TypeError", "descriptor '__subclasses__' for 'type' objects doesn't apply to a '%s' object", argc ? type_name(argv[0]) : "nothing");
+        if (!argc || argv[0]->type != SPY_CLASS) return misapplied(c, "type", "__subclasses__", argc, argv);
         if (argc > 1) return errorf(c, "TypeError", "type.__subclasses__() takes no arguments (%zu given)", argc - 1);
         SPYValue *list = value_new(c, SPY_LIST);
         for (SPYValue *v = c->values; list && v; v = v->next) {
@@ -24651,7 +24665,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             int flags = c->compile_flags;
             if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
             c->string_source++;
-            c->eval_input = expression == 1;
+            c->eval_input = expression;
             /* eval() of a string ignores leading spaces and tabs. */
             const char *code = text ? text->as.string.data : NULL;
             while (code && id == B_EVAL && (*code == ' ' || *code == '\t')) code++;
@@ -24661,15 +24675,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             c->compile_flags = flags;
             spy_release(text);
             if (!unit) goto execution_fail;
-            Node *body = unit->as.unit.body;
-            if (expression == 1 && (!body || body->kind != N_EXPR || body->next)) {
-                spy_error(c, "SyntaxError", "invalid syntax"); goto execution_fail;
-            }
-            if (expression == 2) {
-                if (unit->as.unit.statements > 1)
-                    spy_error(c, "SyntaxError", "multiple statements found while compiling a single statement");
-                if (!body) spy_error(c, "SyntaxError", "invalid syntax");
-                if (c->error_type[0]) goto execution_fail;
+            if (expression == 2 && unit->as.unit.statements > 1) {
+                spy_error(c, "SyntaxError", "multiple statements found while compiling a single statement"); goto execution_fail;
             }
             unit->as.unit.expression = expression;
         }

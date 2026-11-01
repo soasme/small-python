@@ -283,3 +283,5 @@ assert repr(161852602146008.12 + 1j) == "(161852602146008.12+1j)"
 assert repr(-788830060729777.2 + 2j) == "(-788830060729777.2+2j)"
 assert repr(complex(0.0, 1959276370239205.2)) == "1959276370239205.2j"
 assert repr(complex(-1818262230632059.2, 0.0)) == "(-1818262230632059.2+0j)"
+
+assert_raises(OverflowError, abs, complex(1.5e308, 1.5e308), message="absolute value too large")

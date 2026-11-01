@@ -80,3 +80,14 @@ f()
 # reported rather than assumed away.
 with assert_raises(UnicodeEncodeError):
     exec(chr(0xD800))
+
+# Only a code object takes a closure; other sources must be text or bytes.
+assert_raises(TypeError, exec, "1", {}, {}, closure=(1,), message="closure can only be used when source is a code object")
+assert_raises(TypeError, exec, 1, message="exec() arg 1 must be a string, bytes or code object")
+assert_raises(TypeError, eval, 1, message="eval() arg 1 must be a string, bytes or code object")
+assert_raises(TypeError, compile, 1, "s", "exec", message="compile() arg 1 must be a string, bytes or AST object")
+
+# A function's code runs as a call with no arguments.
+def five(): return 5
+assert_eq(eval(five.__code__), 5)
+assert_is(exec(five.__code__), None)

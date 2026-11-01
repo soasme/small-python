@@ -55,3 +55,5 @@ check("descriptor 'getter' for 'property' objects doesn't apply to a 'int' objec
 for cls in (classmethod, staticmethod):
     check(f"descriptor '__get__' of '{cls.__name__}' object needs an argument", cls.__get__)
     check(f"descriptor '__get__' requires a '{cls.__name__}' object but received a 'int'", cls.__get__, 1, None)
+check("unbound method type.__subclasses__() needs an argument", type.__subclasses__)
+check("descriptor '__subclasses__' for 'type' objects doesn't apply to a 'int' object", type.__subclasses__, 1)

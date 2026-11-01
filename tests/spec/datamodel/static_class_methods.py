@@ -60,3 +60,18 @@ assert_true(classmethod(abstract).__isabstractmethod__)
 assert_raises(TypeError, staticmethod(1))
 assert_eq(repr(staticmethod(f)).startswith("<staticmethod("), True)
 assert_eq(repr(classmethod(f)).startswith("<classmethod("), True)
+
+# Reinitializing a wrapper replaces its function; __repr__ shows the function's repr.
+def other(): pass
+for cls in (classmethod, staticmethod):
+    wrapper = cls(f)
+    wrapper.__init__(f)
+    assert_is(wrapper.__func__, f)
+    wrapper.__init__(other)
+    assert_is(wrapper.__func__, other)
+    assert_is(wrapper.__wrapped__, other)
+    assert_eq(cls.__repr__(wrapper), f"<{cls.__name__}({other!r})>")
+    assert_eq(cls.__repr__(cls(len)), f"<{cls.__name__}({len!r})>")
+    assert_raises(TypeError, wrapper.__get__, message="__get__ expected at least 1 argument, got 0")
+    assert_raises(TypeError, wrapper.__get__, 1, 2, 3, message="__get__ expected at most 2 arguments, got 3")
+    assert_raises(TypeError, wrapper.__repr__, 1, message="expected 0 arguments, got 1")
