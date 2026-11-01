@@ -78,3 +78,8 @@ def plain(): pass
 for wrapper in (classmethod(plain), staticmethod(plain)):
     assert_raises(AttributeError, setattr, wrapper, "__func__", plain, message="readonly attribute")
     assert_raises(AttributeError, setattr, wrapper, "__wrapped__", plain, message="readonly attribute")
+
+# A static or class method's wrapped function cannot be deleted.
+for wrapper in (staticmethod(len), classmethod(len)):
+    for name in ("__func__", "__wrapped__"):
+        assert_raises(AttributeError, delattr, wrapper, name, message="readonly attribute")

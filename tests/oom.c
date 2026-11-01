@@ -173,6 +173,45 @@ static const char *const programs[] = {
     "print(A.y.strings, A.y.interpolations[0].expression)\n"
     "print([i for i in range(2 ** 70, 2 ** 70 + 2)], list(enumerate('ab', 2 ** 70)))\n",
 
+    /* A backtracking parse that clears a failed allocation's error still
+     * fails; functions rebuilt from code, generators and lazy imports. */
+    "def outer(a, /, b, *c, d, **e):\n"
+    "    def inner(): return a + b + len(c) + d + len(e) + g\n"
+    "    return inner\n"
+    "g = 1\n"
+    "fn = outer(1, 2, 3, d=4, f=5)\n"
+    "F = type(fn)\n"
+    "copy = F(fn.__code__, globals(), 'copy', None, fn.__closure__, None)\n"
+    "print(copy(), fn.__code__.co_freevars, outer.__code__.co_names, outer.__code__.co_varnames)\n"
+    "class K:\n"
+    "    def m(self, __p): return __p\n"
+    "print(K().m(3), {1: 2, 3: 4}.popitem())\n"
+    "l = [1, 2, 3]; l[1:2] = list(range(40)); print(len(l))\n"
+    "print('a,b'.partition(','), divmod(7.5, 2), divmod(7, 2))\n"
+    "def gen():\n"
+    "    try:\n"
+    "        x = yield 1\n"
+    "        yield x\n"
+    "    except ValueError as e:\n"
+    "        yield repr(e)\n"
+    "it = gen(); next(it); print(it.send(5))\n"
+    "it = gen(); next(it)\n"
+    "try:\n"
+    "    raise ValueError('v')\n"
+    "except ValueError as e:\n"
+    "    print(it.throw(ValueError, 'w', e.__traceback__))\n"
+    "class M:\n"
+    "    def __enter__(self): return self\n"
+    "    def __exit__(self, *a): return False\n"
+    "def wg():\n"
+    "    with M() as m:\n"
+    "        yield m\n"
+    "print(next(wg()) is not None)\n"
+    "class I(int): pass\n"
+    "print(I(5) + 1)\n"
+    "lazy from gc import isenabled, collect\n"
+    "print(isenabled())\n",
+
     /* sys is left to fuzz_oom and tests/oom FILE: importing it makes 5,000
      * allocations, too many to sweep here. */
     "import gc\n"

@@ -130,3 +130,19 @@ for source in ["x = 1; class X: pass\n", "x = 1; if x: pass\n", "x = 1; def f():
     e = assert_raises(SyntaxError, compile, source, "<s>", "exec")
     assert_eq((e.msg, e.lineno), ("invalid syntax", 1))
 compile("match = 1; match\n", "<s>", "exec")
+
+# A type alias takes __module__ from the globals' storage, never the class namespace.
+class GlobalsSubclass(dict):
+    def __getitem__(self, key):
+        assert key != "__name__"
+        return super().__getitem__(key)
+scope = GlobalsSubclass(__name__="aliases")
+exec("type Alias = int", scope)
+assert dict.__getitem__(scope, "Alias").__module__ == "aliases"
+scope = {}
+exec("type Alias = int", scope)
+assert scope["Alias"].__module__ is None
+class Holder:
+    __name__ = "inner"
+    type Alias = int
+assert Holder.Alias.__module__ == __name__

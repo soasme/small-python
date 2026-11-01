@@ -475,3 +475,16 @@ try:
     traced_loop(3)
 except RuntimeError as error:
     show("failing tracer", lambda: (str(error), sys.gettrace()))
+
+
+def sparse_tracer(frame, event, arg):
+    if frame.f_code.co_name == "traced_loop":
+        sparse.append((event, frame.f_lineno - traced_loop.__code__.co_firstlineno))
+        return sparse_tracer if event == "call" else None
+
+
+sparse = []
+sys.settrace(sparse_tracer)
+traced_loop(4)
+sys.settrace(None)
+show("tracer returning None", lambda: sparse)

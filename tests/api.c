@@ -371,6 +371,20 @@ int main(void) {
     assert(!strcmp(spy_error_type(c), "ZeroDivisionError"));
     spy_clear_error(c);
     execute(c, "f = None\nC = None\n");
+    /* A repr that imports sys sends the default display to sys.stdout. */
+    static const char *const late[][2] = {{"", "late\n"}, {"del sys.stdout\n        ", ""}, {"sys.stdout = None\n        ", ""}};
+    for (size_t i = 0; i < sizeof(late) / sizeof(*late); i++) {
+        SPYContext *fresh = spy_context_new();
+        Output shown = {0};
+        char source[160];
+        assert(fresh && !spy_std_init(fresh));
+        spy_set_output(fresh, output, &shown);
+        snprintf(source, sizeof(source), "class Late:\n    def __repr__(self):\n        import sys\n        %sreturn 'late'\nLate()\n", late[i][0]);
+        SPYValue *value = spy_eval_interactive(fresh, source, "late.py");
+        assert(i == 1 ? !value && !strcmp(spy_error_message(fresh), "lost sys.stdout") : value != NULL);
+        assert(!strcmp(shown.text, late[i][1]));
+        spy_release(value); spy_context_free(fresh);
+    }
 
     /* Functions and closures outlive their original evaluation's syntax tree. */
     execute(c, "def outer(x):\n    def inner(y):\n        return x + y\n    return inner\nf = outer(40)\n");
@@ -717,6 +731,7 @@ int main(void) {
         "s = '''a\\\nb'''\nimprot sample\n",
         "caf\xc3\xa9 = 1; improt sample\n",
         "x = Rb\"q\" + tR'q'; improt sample\n",
+        "   \n# leading comment\nimprot sample\n",
     };
     for (size_t i = 0; i < sizeof(typos) / sizeof(*typos); i++) {
         assert(spy_exec(c, typos[i], "suggestion.py") == -1);
@@ -726,6 +741,10 @@ int main(void) {
         }
         spy_clear_error(c);
     }
+    /* A message longer than the context keeps is displayed in full. */
+    assert(spy_exec(c, "raise ValueError('x' * 300)", "long.py") == -1);
+    assert(strlen(spy_error_message(c)) == 255 && strlen(spy_error_display(c)) == 300);
+    spy_clear_error(c);
 
     /* -OO: no asserts, __debug__ False, no docstrings; compile(optimize=-1) inherits it. */
     spy_set_optimize(c, 2);

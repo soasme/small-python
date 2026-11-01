@@ -296,6 +296,7 @@ struct SPYContext {
      * while stopped, when every tick fails. */
     size_t live, fuel, step_limit, depth;
     size_t memory, memory_limit; /* Bytes the engine holds, and may hold; 0: unlimited. */
+    size_t allocation_failures; /* The parser's alternatives clear their errors, not these. */
     size_t collected_live; /* live after the last collection, for gc.get_count(). */
     /* Python frames are limited by sys.setrecursionlimit; the engine's own C
      * recursion by the machine stack it has used since the outermost entry. */
@@ -647,15 +648,18 @@ static size_t block_class(size_t n) { return n ? (n - 1) / 16 : 0; }
 static NO_INLINE void *mem_block(SPYContext *c, MemHead *b, size_t n, int mode) {
     size_t old = b ? b->head.size : 0, k = block_class(n);
     if (n > old && (n > SIZE_MAX / 2 || (c->watch && meter(c, old, n, mode)))) return NULL;
-    if (b) { if (k != block_class(old) && !(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) return NULL; }
+    if (b) { if (k != block_class(old) && !(b = realloc(b, sizeof(MemHead) + 16 * (k + 1)))) goto failed; }
     else if (k < 16 && c->spare_blocks[k]) {
         b = c->spare_blocks[k]; cache_take(b, sizeof(MemHead) + 16 * (k + 1));
         c->spare_blocks[k] = b->next;
         if (mode & ZERO) memset(b + 1, 0, 16 * (k + 1));
-    } else if (!(b = mode & ZERO ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1)))) return NULL;
+    } else if (!(b = mode & ZERO ? calloc(1, sizeof(MemHead) + 16 * (k + 1)) : malloc(sizeof(MemHead) + 16 * (k + 1)))) goto failed;
     c->memory += n - old;
     b->head.size = n; b->head.c = c;
     return b + 1;
+failed:
+    c->allocation_failures++;
+    return NULL;
 }
 static void *mem_malloc(SPYContext *c, size_t n) { return mem_block(c, NULL, n, 0); }
 static void *mem_realloc(SPYContext *c, void *p, size_t n) { return mem_block(c, p ? (MemHead *)p - 1 : NULL, n, 0); }
@@ -762,7 +766,7 @@ static ALWAYS_INLINE int pool_room(Pool *pool, size_t bytes) { return pool->free
 static NO_INLINE Pool *pool_new(SPYContext *c, int size) {
     /* Its values are paid for by the operations that make them. */
     Pool *pool = c->watch && meter(c, 0, POOL, ARRAY(POOL)) ? NULL : pool_alloc();
-    if (!pool) { spy_error(c, "MemoryError", "allocation failed"); return NULL; }
+    if (!pool) { c->allocation_failures++; spy_error(c, "MemoryError", "allocation failed"); return NULL; }
     c->memory += POOL;
     *pool = (Pool){.next = c->pools[size], .after = c->every_pool, .fresh = (char *)pool + (sizeof(Pool) + 15) / 16 * 16, .end = (char *)pool + POOL};
     cache_put(pool->fresh, (size_t)(pool->end - pool->fresh));
@@ -2519,12 +2523,10 @@ static SPYValue *dict_name(SPYContext *c, SPYValue *dict, Name name) {
 /* Return an owned local value, or NULL without an error for a missing key. */
 static SPYValue *name_lookup(SPYContext *c, SPYValue *env, Name name) {
     SPYValue *namespace = env->as.map.namespace;
-    /* A class body with a __classdict__ cell reads the mapping in it. */
+    /* A class body's __classdict__ cell holds its namespace until type.__new__
+     * replaces it with the type's dictionary. */
     SPYValue *classdict = env->type == V_ENV && env->as.map.flags == 1 && env->as.map.base ? cell_contents(env->as.map.base) : NULL;
-    if (classdict && classdict != namespace) {
-        if (classdict->type == SPY_DICT) return spy_retain(dict_name(c, classdict, name));
-        namespace = classdict;
-    }
+    if (classdict && classdict != namespace) return spy_retain(dict_name(c, classdict, name));
     if (namespace && namespace->type != SPY_DICT) {
         SPYValue *key = spy_string(c, name.text, name.len);
         SPYValue *value = key ? get_index(c, namespace, key) : NULL;
@@ -5336,6 +5338,8 @@ static int call_arguments(Parser *p, Node *n) {
 }
 static Node *expression_inner(Parser *p, int min, int named) {
     Node *left;
+    /* Operations begin where their first operand does, parentheses included. */
+    size_t first = p->pos;
     if (keyword(p, "lambda")) {
         if (min) return syntax(p, "invalid syntax");
         p->pos++;
@@ -5402,7 +5406,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             } else {
                 if (call_arguments(p, n)) return NULL;
             }
-            extend(p, n, left);
+            span(p, n, atom_start);
             left = n;
         }
         if (awaiting) {
@@ -5438,7 +5442,7 @@ static Node *expression_inner(Parser *p, int min, int named) {
             n->b = expression(p, op == T_POW ? 10 : prec + 1);
             if (!n->b) return NULL;
         }
-        extend(p, n, left);
+        span(p, n, first);
         left = n;
     }
     if (min == 0 && take_word(p, "if")) {
@@ -5643,14 +5647,15 @@ static int probe_excluded(Parser *p, size_t at) {
 }
 /* Whether tokens [first, end) are one bracketed group. */
 static int single_group(Parser *p, size_t first, size_t end) {
-    int depth = 0;
-    for (size_t i = first; i < end; i++) {
+    /* The tokens form a parsed expression, so their brackets balance. */
+    size_t i = first;
+    for (int depth = 0;; i++) {
         int kind = p->tokens[i].kind;
         if (kind == '(' || kind == '[' || kind == '{') depth++;
         else if (kind == ')' || kind == ']' || kind == '}') depth--;
-        if (depth == 0) return i + 1 == end;
+        if (depth == 0) break;
     }
-    return 0;
+    return i + 1 == end;
 }
 /* invalid_named_expression at token 'at'; returns 1 after raising. */
 static int named_equals_error(Parser *p, size_t at) {
@@ -5949,11 +5954,10 @@ static int unparse(Buffer *b, Node *n, int level) {
             if (unparse_list(b, n->b->args, PR_TEST) || (!n->b->args->next && puts_buffer(b, ","))) return -1;
         } else if (unparse(b, n->b, PR_TUPLE)) return -1;
         return puts_buffer(b, "]");
-    case N_SLICE:
+    default: /* N_SLICE, the last kind of expression */
         return (n->a && unparse(b, n->a, PR_TEST)) || puts_buffer(b, ":") || (n->b && unparse(b, n->b, PR_TEST)) ||
                (n->c && (puts_buffer(b, ":") || unparse(b, n->c, PR_TEST)));
     }
-    return puts_buffer(b, "...");
 }
 /* The annotation as a string constant node, which keeps the expression for
  * scope analysis. */
@@ -7625,7 +7629,12 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
                  token_add(&p, T_END, at_error, 0, line);
     }
     if (unit->as.unit.filename && !failed) {
+        size_t failures = c->allocation_failures;
         unit->as.unit.body = statements(&p);
+        if (c->allocation_failures != failures && !error_is(c, "MemoryError")) {
+            spy_clear_error(c);
+            spy_error(c, "MemoryError", "allocation failed");
+        }
         if (p.constant_name) {
             spy_clear_error(c);
             errorf(c, "ValueError", "identifier field can't represent '%s' constant", p.constant_name);
@@ -12492,15 +12501,15 @@ static int keyword_method(int method) {
  * or code.replace without arguments. */
 static SPYValue *call_method(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv,
                              SPYValue *keywords) {
+    SPYValue *result;
     switch (method) {
     case M_FORMAT: return string_format(c, self, argc, argv, keywords, 1);
     case M_SORT: return sort_method(c, self, argc, argv, keywords);
     case M_CODE_REPLACE: return argc ? spy_error(c, "TypeError", "replace() takes no positional arguments") : code_replace(c, self, keywords);
-    case M_UPDATE: {
-        SPYValue *result = method_call(c, self, method, name, argc, argv);
+    case M_UPDATE:
+        result = method_call(c, self, method, name, argc, argv);
         if (result && keywords) dict_update(c, self, keywords);
         return result;
-    }
     case M_SPLITLINES:
         if (keywords && keywords->as.map.len) {
             SPYValue *keepends = name_local(keywords, "keepends");
@@ -15556,12 +15565,17 @@ static SPYValue *sys_set_int_max_str_digits(SPYContext *c, size_t argc, SPYValue
 }
 /* The module of the Python frame depth levels out from the innermost; a
  * function frame names its function's __module__. */
+/* The __name__ in env's globals, read from their dictionary storage. */
+static SPYValue *globals_name(SPYContext *c, SPYValue *env) {
+    SPYValue *globals = namespace_map(module_env(c, env)), *storage = builtin_value(c, globals, SPY_DICT);
+    SPYValue *name = name_local(storage ? storage : globals, "__name__");
+    return name ? name : c->none;
+}
 static SPYValue *frame_module_name(SPYContext *c, size_t depth) {
     if (depth >= c->py_depth) return spy_none(c);
     struct ActiveFrame *frame = &c->frames[c->py_depth - 1 - depth];
     if (frame->owner->type == SPY_FUNCTION) return attribute(c, frame->owner, "__module__");
-    SPYValue *name = name_local(namespace_map(module_env(c, frame->env)), "__name__");
-    return spy_retain(name ? name : c->none);
+    return spy_retain(globals_name(c, frame->env));
 }
 static SPYValue *lazy_registry(SPYContext *c) {
     if (!c->lazy_modules) c->lazy_modules = value_new(c, SPY_SET);
@@ -16344,13 +16358,16 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         return binary(c, token, old, rhs);
     SPYValue *result = try_operator(c, old, operation->inplace, rhs, NULL, 1);
     if (result || c->error_type[0]) return result;
+    /* A subclass instance's builtin updates in place; any other operation
+     * dispatches on the instance itself. */
     SPYValue *base = builtin_base(c, old, operation->inplace, NULL);
-    if (base && (base->type == SPY_LIST || base->type == SPY_SET || base->type == SPY_DICT || base->type == SPY_BYTEARRAY)) {
+    int kind = base ? base->type : SPY_NONE, set_operator = token == '|' || token == '&' || token == '-' || token == '^';
+    if (((kind == SPY_LIST || kind == SPY_BYTEARRAY) && (token == '+' || token == '*')) || (kind == SPY_DICT && token == '|') ||
+        (kind == SPY_SET && set_operator && (builtin_value(c, rhs, SPY_SET) || builtin_value(c, rhs, SPY_FROZENSET)))) {
         SPYValue *other = rhs->type == SPY_INSTANCE && rhs->as.map.base ? rhs->as.map.base : rhs;
         result = inplace(c, op, base, other);
         if (!result) return NULL;
-        if (result == base) { spy_release(result); return spy_retain(old); }
-        return result;
+        spy_release(result); return spy_retain(old);
     }
     /* Mutable sets, dicts, and bytearrays update in place. */
     SPYValue *bytes = old->type == SPY_BYTEARRAY && token == '+' ? builtin_value(c, rhs, SPY_BYTES) : NULL;
@@ -17413,15 +17430,13 @@ static NO_INLINE void execute_type_alias(SPYContext *c, Frame *f, Node *n) {
     Frame frame = {env ? env : f->env, f->unit, 0};
     SPYValue *fn = function_new(c, &frame, n->b);
     SPYValue *name = fn ? spy_string(c, source_name(n->a), strlen(source_name(n->a))) : NULL;
-    SPYValue *module = name ? name_get(c, f->env, "__name__") : NULL;
-    if (!module && error_is(c, "NameError")) { spy_clear_error(c); module = spy_none(c); }
-    if (module) {
-        SPYValue *args[] = {name, fn, params, module};
+    if (name) {
+        SPYValue *args[] = {name, fn, params, globals_name(c, f->env)};
         SPYValue *alias = call_intrinsic(c, "_type_alias", 4, args);
         if (alias) name_set(c, f->env, n->a->text, alias);
         spy_release(alias);
     }
-    spy_release(fn); spy_release(name); spy_release(module); spy_release(params); spy_release(env);
+    spy_release(fn); spy_release(name); spy_release(params); spy_release(env);
 }
 static void chain_exception(SPYContext *c, SPYValue *exception) {
     SPYValue *context = active_exception(c);

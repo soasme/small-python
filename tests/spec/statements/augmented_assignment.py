@@ -157,3 +157,22 @@ s = {1}
 alias = s
 s |= OrSet({2})
 assert s is alias and s == {1, 2}
+
+# Operations a builtin base does not perform in place reflect with the
+# subclass instance itself.
+class Witness:
+    def __rsub__(self, o): return type(o)
+    def __ror__(self, o): return type(o)
+class SubSet(set): pass
+class SubDict(dict): pass
+x = SubList([1])
+x -= Witness()
+assert x is SubList
+x = SubSet({1})
+x |= Witness()
+assert x is SubSet
+x = SubDict(a=1)
+x -= Witness()
+assert x is SubDict
+x = SubDict(a=1)
+assert_raises(TypeError, lambda: x.__ior__(Witness()), message="'Witness' object is not iterable")

@@ -47,3 +47,11 @@ assert_eq(str(e), "traceback() argument 'tb_frame' must be frame, not int")
 # with_traceback installs a constructed traceback.
 error = KeyError().with_traceback(made)
 assert_is(error.__traceback__, made)
+
+# A traceback's frame and instruction cannot be deleted.
+try:
+    raise ValueError
+except ValueError as caught:
+    readonly = caught.__traceback__
+for name in ("tb_frame", "tb_lasti"):
+    assert_raises(AttributeError, delattr, readonly, name, message="readonly attribute")

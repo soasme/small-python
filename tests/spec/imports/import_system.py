@@ -120,6 +120,10 @@ lazy import spec_lazy_pkg.part
 assert_true("spec_lazy_pkg.part" in host.lazy_modules())
 assert_eq(spec_lazy_pkg.part.value, "part")
 assert_false("spec_lazy_pkg.part" in host.lazy_modules())
+# lazy import a.b as c binds c to the submodule, found by attribute lookups.
+lazy import spec_pkg.subpkg.deep as lazy_deep
+assert_eq(type(globals()["lazy_deep"]).__name__, "lazy_import")
+assert_eq(lazy_deep.name, "spec_pkg.subpkg.deep")
 # __lazy_modules__ makes the module-level imports it lists lazy, but not
 # those inside try statements.
 write("spec_lazy_compat.py", "value = 'compat'\n")

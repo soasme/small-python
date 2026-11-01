@@ -36,3 +36,12 @@ with assert_raises(TypeError):
 # Created from code run in another namespace, __module__ is that namespace's __name__.
 ns = run("s = sentinel('S')\n", {"__name__": "elsewhere"})
 assert_eq(ns["s"].__module__, "elsewhere")
+
+# The module name comes from the globals' dictionary storage.
+class GlobalsSubclass(dict):
+    def __getitem__(self, key):
+        assert key != "__name__"
+        return super().__getitem__(key)
+scope = GlobalsSubclass(__name__="markers")
+exec("s = sentinel('S')", scope)
+assert dict.__getitem__(scope, "s").__module__ == "markers"

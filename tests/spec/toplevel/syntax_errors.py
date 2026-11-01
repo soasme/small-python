@@ -228,3 +228,10 @@ assert_eq(error_of("f(**k, *a, *b=1)"), ("cannot assign to iterable argument unp
 assert_eq(error_of("try:\n pass\nexcept E as a b:\n pass\n"), ("invalid syntax", 15, 16))
 assert_eq(error_of("x = pass if y else continue z"), ("expected expression before 'if', but statement is given", 5, 9))
 assert_eq(error_of("import a.1"), ("invalid syntax", 9, 11))
+assert_eq(error_of("import a."), ("invalid syntax", 10, 11))
+# An operation begins at its first operand's opening parenthesis.
+assert_eq(error_of("x = (1) + 1 = 2"), ("cannot assign to expression", 5, 12))
+assert_eq(error_of("(a, [b, c]) = (1) + 1 = 2"), ("cannot assign to expression", 15, 22))
+assert_eq(error_of("x = (f)(x)[0] + 1 = 1"), ("cannot assign to expression", 5, 18))
+assert_eq(error_of("f((1) + 1 = 2)"), ('expression cannot contain assignment, perhaps you meant "=="?', 3, 12))
+assert_eq(error_of("x = pass if y else else"), ("invalid syntax", 5, 9))
