@@ -21430,17 +21430,25 @@ static SPYValue *complex_construct(SPYContext *c, SPYValue *real_value, SPYValue
     if (real_complex) y += cimag(real);
     return complex_new(c, complex_parts(x, y));
 }
-static int import_fromlist(SPYContext *c, SPYValue *module, SPYValue *names, int depth) {
-    if (depth > 128) { spy_error(c, "RecursionError", "recursive import names"); return -1; }
+/* The submodules of a package that fromlist names, as CPython's
+ * _handle_fromlist: "*" names those of its __all__, where "*" is ignored. */
+static int import_fromlist(SPYContext *c, SPYValue *module, SPYValue *names, int recursive) {
     SPYValue *iterator = get_iterator(c, names), *name;
     if (!iterator) return -1;
     while ((name = iterator_next(c, iterator))) {
-        if (name->type != SPY_STRING) spy_error(c, "TypeError", "items in fromlist must be strings");
-        else if (!strcmp(name->as.string.data, "*")) {
-            SPYValue *all = name_local(module, "__all__");
-            if (all) import_fromlist(c, module, all, depth + 1);
+        SPYValue *text = builtin_value(c, name, SPY_STRING);
+        if (!text) {
+            /* module.__name__ + '.__all__', with the operator's own errors */
+            SPYValue *package = recursive ? attribute(c, module, "__name__") : NULL, *suffix = package ? spy_string(c, ".__all__", 8) : NULL;
+            SPYValue *where = suffix ? binary(c, '+', package, suffix) : NULL, *where_text = where ? stringify(c, where, 0) : NULL;
+            if (!recursive || where_text)
+                errorf(c, "TypeError", "Item in %s must be str, not %s", where_text ? where_text->as.string.data : "``from list''", type_name(name));
+            spy_release(package); spy_release(suffix); spy_release(where); spy_release(where_text);
+        } else if (!strcmp(text->as.string.data, "*")) {
+            SPYValue *all = recursive ? NULL : name_local(module, "__all__");
+            if (all) import_fromlist(c, module, all, 1);
         } else {
-            SPYValue *value = import_from(c, module, name->as.string.data, 0);
+            SPYValue *value = import_from(c, module, text->as.string.data, 0);
             spy_release(value);
         }
         spy_release(name);

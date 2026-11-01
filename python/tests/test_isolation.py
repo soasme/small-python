@@ -188,11 +188,38 @@ class LimitTest(unittest.TestCase):
             with self.assertRaises(Error):
                 rt.eval("big()")
             self.assertEqual(rt.eval("len('x' * 100)"), 100)
+            with self.assertRaises(Error) as cm:
+                rt.eval("['x'] * (1 << 16)")
+            self.assertEqual(cm.exception.type, "OverflowError")
 
     def test_bad_options(self):
         for options in ({"memory_limit": -1}, {"timeout": 0}, {"message_limit": 0}, {"step_limit": 1.5}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Runtime(**options)
+
+
+class HostileParentTest(unittest.TestCase):
+    """The worker trusts its parent and exits with status 3 on a bad message."""
+    def frame(self, payload):
+        return u32(len(payload)) + payload
+
+    def test_violations(self):
+        def key(name, value):
+            return string(name.encode()) + value
+        init = b"\x01d" + u32(5) + key("std", b"F") + b"".join(
+            key(name, b"i" + struct.pack("<q", n))
+            for name, n in (("step_limit", 0), ("memory_limit", 0), ("message_limit", 1 << 20), ("timeout", 0)))
+        cases = {
+            "reply kind": b"\x7f",
+            "unknown kind": b"\x20",
+            "unknown tag": b"\x02?",
+            "unknown operation": b"\x0bi" + struct.pack("<q", 99) + b"i" + struct.pack("<q", 1),
+        }
+        for name, message in cases.items():
+            with self.subTest(case=name):
+                worker = subprocess.run([runtime_module.WORKER], input=self.frame(init) + self.frame(message),
+                                        capture_output=True, timeout=30)
+                self.assertEqual(worker.returncode, 3)
 
 
 class ProtocolTest(unittest.TestCase):

@@ -480,8 +480,8 @@ static void send_raise(void) {
     put_str(&b, "filename"); put_c_text(&b, spy_error_filename(c));
     put_str(&b, "line"); put_int(&b, (int64_t)spy_error_line(c));
     put_str(&b, "exception");
-    if (exception) { put_byte(&b, 'h'); put_u64(&b, handle_new(exception)); }
-    else put_byte(&b, 'N');
+    put_byte(&b, exception ? 'h' : 'N');
+    if (exception) put_u64(&b, handle_new(exception));
     put_str(&b, "token"); put_int(&b, token);
     static const char *const stops[] = {"", "steps", "memory", "timeout"};
     put_str(&b, "stop"); put_str(&b, stops[spy_stopped(c)]);
@@ -642,8 +642,8 @@ static char *load(void *data, const char *name) {
     const char *s = spy_type(v) == SPY_STRING ? spy_as_string(w.c, v, &n) : NULL;
     if (!s) violation();
     char *copy = malloc(n + 1);
-    if (copy) memcpy(copy, s, n + 1);
-    else spy_error(w.c, "MemoryError", "out of memory");
+    if (!copy) exit(1);
+    memcpy(copy, s, n + 1);
     spy_release(v);
     return copy;
 }
@@ -982,7 +982,7 @@ static void quote(char **at, const char *s) {
 static void seal(void) {
     size_t size = 256;
     for (size_t i = 0; i < mounts_len; i++) size += 2 * strlen(mounts[i].directory) + 64;
-    char *profile = malloc(size), *at = profile, *error = NULL;
+    char *profile = malloc(size), *at = profile, *error;
     if (!profile) exit(1);
     at += sprintf(at, "(version 1)(deny default)(allow file-read-metadata)(allow sysctl-read)");
     for (size_t i = 0; i < mounts_len; i++) {
@@ -990,10 +990,7 @@ static void seal(void) {
         quote(&at, mounts[i].directory);
         at += sprintf(at, "))");
     }
-    if (sandbox_init(profile, 0, &error)) {
-        fprintf(stderr, "spy-worker: sandbox: %s\n", error ? error : "failed");
-        exit(1);
-    }
+    if (sandbox_init(profile, 0, &error)) exit(1);
     free(profile);
 }
 #else

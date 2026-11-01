@@ -76,7 +76,7 @@ assert not repl.stderr, repl.stderr
 assert ">>> 42\n" in repl.stdout and ">>> 80\n" in repl.stdout, repl.stdout
 print("Interactive globals and multiline function definition passed")
 
-# The spy command's process status, reports, input(), and usage, as python's.
+# The spy command's process status, reports, input(), -O, and usage, as python's.
 for args, stdin, status, stdout, stderr in [
     (["-c", "raise SystemExit(3)"], "", 3, "", ""),
     (["-c", "raise SystemExit('bye')"], "", 1, "", "bye\n"),
@@ -84,6 +84,8 @@ for args, stdin, status, stdout, stderr in [
     (["-c", "1/0"], "", 1, "", 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
                                "ZeroDivisionError: division by zero\n"),
     (["-c", "print(input('> '), flush=True)"], "abc\n", 0, "> abc\n", ""),
+    (["-O", "-c", "assert False; print(__debug__)"], "", 0, "False\n", ""),
+    (["-OO", "-c", "def f():\n 'doc'\nprint(f.__doc__)"], "", 0, "None\n", ""),
     (["--bogus"], "", 2, "", "usage:"),
     (["-c"], "", 2, "", "usage:"),
 ]:

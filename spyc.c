@@ -333,14 +333,13 @@ static void minify_comments(Minified *m, const char *text, const char *from, con
         s += n - 1;
     }
 }
+static int same_token(const Token *x, const Token *y) {
+    return x->kind == y->kind && x->line == y->line && (x->kind == T_NL || (x->len == y->len && !memcmp(x->start, y->start, x->len)));
+}
 static int same_tokens(const Parser *a, const Parser *b) {
-    if (a->len != b->len) return 0;
-    for (size_t i = 0; i < a->len; i++) {
-        const Token *x = &a->tokens[i], *y = &b->tokens[i];
-        if (x->kind != y->kind || x->line != y->line || (x->kind != T_NL && (x->len != y->len || memcmp(x->start, y->start, x->len))))
-            return 0;
-    }
-    return 1;
+    size_t i = 0;
+    while (i < a->len && i < b->len && same_token(&a->tokens[i], &b->tokens[i])) i++;
+    return i == a->len && i == b->len;
 }
 static char *minify(SPYContext *c, const char *source, const char *path) {
     SPYValue *decoded = decode_source(c, source, strlen(source), path);

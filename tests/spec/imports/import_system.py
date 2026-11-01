@@ -135,3 +135,12 @@ assert_eq(str(e), "import of spec_halted halted; None in " + host.name("the modu
 del host.module_cache()["spec_halted"]
 lazy = "soft keyword"
 assert_eq(lazy, "soft keyword")
+
+# fromlist items must be str; "*" expands __all__, where "*" is ignored (17.4.4).
+class Name(str): pass
+assert_raises(TypeError, __import__, "spec_from_pkg", fromlist=[1], message="Item in ``from list'' must be str, not int")
+assert_eq(__import__("spec_from_pkg", fromlist=[Name("part")]).part.VALUE, 1)
+assert_raises(TypeError, __import__, "spec_from_pkg", fromlist=["*"], message="Item in spec_from_pkg.__all__ must be str, not int")
+import spec_from_pkg
+spec_from_pkg.__name__ = 5
+assert_raises(TypeError, __import__, "spec_from_pkg", fromlist=["*"], message="unsupported operand type(s) for +: 'int' and 'str'")

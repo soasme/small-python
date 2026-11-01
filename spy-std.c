@@ -9,16 +9,13 @@ static size_t std_find(const char *name) {
     while (i < sizeof(std_modules) / sizeof(*std_modules) && strcmp(std_modules[i].name, name)) i++;
     return i;
 }
-/* Run a module's embedded Python source in it; a package also gets __path__. */
+/* Run a module's embedded Python source in it; a package also gets __path__.
+ * Only standard names are registered with this function, and a module being
+ * initialized still has the __name__ the engine created it with. */
 static int std_module_init(SPYContext *c, SPYValue *module) {
     SPYValue *name = spy_get_attr(c, module, "__name__");
-    const char *text = name ? spy_as_string(c, name, NULL) : NULL;
-    size_t i = text ? std_find(text) : sizeof(std_modules) / sizeof(*std_modules);
-    if (i == sizeof(std_modules) / sizeof(*std_modules)) {
-        spy_release(name);
-        if (!spy_error_type(c)[0]) spy_error(c, "ImportError", "unknown standard module");
-        return -1;
-    }
+    const char *text = spy_as_string(c, name, NULL);
+    size_t i = std_find(text);
     size_t len = 0;
     for (size_t j = 0; j < std_modules[i].count; j++) len += strlen(std_modules[i].lines[j]);
     char *source = malloc(len + 1), *filename = malloc(strlen(text) + sizeof("<frozen >"));
