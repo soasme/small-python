@@ -1223,10 +1223,9 @@ static void integer_view(SPYValue *value, IntView *view) {
     view->len = view->small[1] ? 2 : magnitude ? 1 : 0;
     view->sign = number < 0 ? -1 : number != 0;
 }
+/* len is below SIZE_MAX / 32: integer_shift bounds it, and the other callers
+ * size it from values already in memory. */
 static BigInt *integer_alloc(SPYContext *c, size_t len) {
-    if (len > (SIZE_MAX - sizeof(BigInt)) / sizeof(uint32_t) || len > SIZE_MAX / 32) {
-        spy_error(c, "MemoryError", "integer too large"); return NULL;
-    }
     BigInt *big = allocate(c, sizeof(*big) + len * sizeof(uint32_t));
     if (big) { big->len = len; big->sign = 1; }
     return big;
@@ -1618,9 +1617,6 @@ static int same_context(SPYContext *c, SPYValue *v) {
 }
 static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
     if (!same_context(c, v) || !same_context(c, item)) return -1;
-    if (v->type != SPY_LIST && v->type != SPY_TUPLE) {
-        spy_error(c, "TypeError", "expected list"); return -1;
-    }
     if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
     if (grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap,
              v->as.seq.len + 1, sizeof(SPYValue *))) return -1;
@@ -1796,7 +1792,6 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
     int tb = b->type == SPY_FROZENDICT ? SPY_DICT : b->type == SPY_FROZENSET ? SPY_SET : b->type == SPY_BYTEARRAY ? SPY_BYTES : b->type;
     if (ta != tb) return 0;
     switch (ta) {
-    case SPY_NONE: return 1;
     case SPY_CODE: {
         /* Codes for one definition are equal when replace() changed the same
          * fields alike, except those that take no part in equality (28.2). */
@@ -1997,10 +1992,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
             /* slot_tp_hash: a __hash__ whose descriptor fails is no hash. */
             spy_clear_error(c); break;
         }
-        if (!method) {
-            if (c->error_type[0]) return -1;
-            *result = hash_pointer(value); return 0;
-        }
+        if (!method) return -1;
         SPYValue *hash = call(c, method, 0, NULL);
         spy_release(method);
         if (!hash) return -1;
@@ -2318,7 +2310,6 @@ static int iterator_class_id(SPYValue *v) {
     case I_ENUMERATE: return IT_ENUMERATE;
     case I_FILTER: return IT_FILTER;
     case I_CALLABLE: return IT_CALLABLE;
-    case I_TEMPLATE: return IT_TEMPLATE;
     case I_RANGE:
         return source->as.range.start->as.integer_data.big || source->as.range.stop->as.integer_data.big ||
             source->as.range.step->as.integer_data.big || source->as.range.length->as.integer_data.big ? IT_LONGRANGE : IT_RANGE;
@@ -2343,8 +2334,8 @@ static int iterator_class_id(SPYValue *v) {
         case SPY_DICT_VALUES: return IT_DICT_VALUE;
         case SPY_DICT_ITEMS: return IT_DICT_ITEM;
         case SPY_SET: case SPY_FROZENSET: return IT_SET;
-        default: return IT_ITERATOR;
         }
+        /* fall through */
     default: return IT_ITERATOR;
     }
 }
@@ -2568,11 +2559,6 @@ static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
         if (v) {
             if (v->type == V_UNBOUND) {
                 spy_release(v);
-                if (e->type == V_ENV && e->as.map.flags == 1) {
-                    /* A class-local name that has not been assigned falls back
-                     * to globals, not a same-named enclosing function cell. */
-                    return name_find(c, module_env(c, e), name);
-                }
                 /* List, set, and dict comprehensions are inlined into their
                  * function (PEP 709), so its locals are theirs too. */
                 SPYValue *inner = env;
@@ -2772,11 +2758,6 @@ static int name_set(SPYContext *c, SPYValue *env, const char *text, SPYValue *v)
  * locals bind under their symbols' keys in its own entries. */
 static int fresh_locals(SPYValue *env) {
     return env->type == V_ENV && env->as.map.scope && plain_locals(env, env->as.map.scope);
-}
-/* The symbol node n names in scope, remembered on n. */
-static Symbol *node_symbol(Scope *scope, Node *n) {
-    if (n->slot_scope != scope) return remember_symbol(n, scope, scope_find(scope, node_name(n)));
-    return n->slot_symbol < scope->len ? &scope->symbols[n->slot_symbol] : NULL;
 }
 SPYValue *spy_get_global(SPYContext *c, const char *name) { return name_get(c, c->globals, name); }
 int spy_set_global(SPYContext *c, const char *name, SPYValue *v) {
@@ -4399,15 +4380,17 @@ static int parameter_list(Parser *p, Node *n, int close) {
     Node **tail = &n->args;
     int keyword_only = 0, slash = 0, defaults = 0, bare_star = 0;
     while (!at(p, close)) {
-        if (take(p, '/')) {
+        if (at(p, '/')) {
             if (slash || keyword_only || !n->args) { syntax(p, "invalid positional-only marker"); return -1; }
+            p->pos++;
             slash = 1;
             for (Node *arg = n->args; arg; arg = arg->next) arg->op = P_POSONLY;
         } else {
             int kind = keyword_only ? P_KWONLY : P_POSITIONAL;
             if (take(p, T_POW)) kind = P_KWARGS;
-            else if (take(p, '*')) {
+            else if (at(p, '*')) {
                 if (keyword_only) { syntax(p, "duplicate star parameter"); return -1; }
+                p->pos++;
                 keyword_only = 1;
                 if (take(p, ',')) { bare_star = 1; continue; }
                 kind = P_VARARGS;
@@ -4632,7 +4615,7 @@ static int rules_parameters(ParamRules *r) {
     if ((status = rules_many(r, 2, 1)) < 0) return -1;
     if (status && take(p, '/') && at(p, '*')) return rules_raise(p, p->pos, "expected comma between / and *");
     /* parameters */
-    for (int alternative = 0; alternative < 5; alternative++) {
+    for (int alternative = 0; alternative < 4; alternative++) {
         p->pos = start;
         if (alternative == 0) {
             if ((status = rules_slash(r, 0)) > 0 && (status = rules_many(r, 0, 0)) >= 0) status = rules_many(r, 1, 0) < 0 ? -1 : 1;
@@ -4640,12 +4623,12 @@ static int rules_parameters(ParamRules *r) {
             if ((status = rules_slash(r, 1)) > 0) status = rules_many(r, 1, 0) < 0 ? -1 : 1;
         } else if (alternative == 2) {
             if ((status = rules_many(r, 0, 1)) > 0) status = rules_many(r, 1, 0) < 0 ? -1 : 1;
-        } else if (alternative == 3) status = rules_many(r, 1, 1);
-        else return rules_star_etc(r);
+        } else status = rules_many(r, 1, 1);
         if (status < 0) return -1;
         if (status) return rules_star_etc(r) < 0 ? -1 : 1;
     }
-    return 0;
+    p->pos = start;
+    return rules_star_etc(r);
 }
 static int parameters(Parser *p, Node *n, int close) {
     size_t start = p->pos;
@@ -7981,8 +7964,7 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     }
     case SPY_BYTES: case SPY_BYTEARRAY:
         return index < v->as.string.len ? spy_int(c, (unsigned char)v->as.string.data[index]) : NULL;
-    case SPY_STRING: return string_char(c, v, index, v->as.string.cursor);
-    default: return spy_error(c, "TypeError", "object is not iterable");
+    default: return string_char(c, v, index, v->as.string.cursor); /* SPY_STRING: get_iterator admits no other source */
     }
 }
 /* The next item for a loop in native code, which spends a step for it. */
@@ -8226,7 +8208,7 @@ static SPYValue *iterator_length_hint(SPYContext *c, SPYValue *v) {
         if (v->as.iterator.kind == I_REVERSED) return spy_int(c, (int64_t)index <= len ? (int64_t)index : 0);
         return spy_int(c, (int64_t)index <= len ? len - (int64_t)index : 0);
     }
-    case I_SEQUENCE: {
+    default: { /* I_SEQUENCE: the other kinds' types have no __length_hint__ */
         SPYValue *sized = is_view(source) ? source->as.bound.self : source;
         size_t len;
         if (is_dict(sized) || sized->type == SPY_SET || sized->type == SPY_FROZENSET) {
@@ -8236,7 +8218,6 @@ static SPYValue *iterator_length_hint(SPYContext *c, SPYValue *v) {
         else len = sized->as.seq.len;
         return spy_int(c, index < len ? (int64_t)(len - index) : 0);
     }
-    default: return spy_retain(c->not_implemented);
     }
 }
 static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
@@ -8745,15 +8726,13 @@ static int set_slice(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *source
         mem_free(gone);
         return 0;
     }
+    /* Deleting an extended slice. */
     SPYValue *result = spy_list(c);
     if (!result) { spy_release(items); return -1; }
     size_t first = (size_t)s.start, step = s.step < 0 ? (size_t)(0 - (uint64_t)s.step) : (size_t)s.step;
     if (s.step < 0 && s.count) first -= (s.count - 1) * step;
     size_t remove = s.count, next = first;
-    for (size_t i = 0; i <= v->as.seq.len && !c->error_type[0]; i++) {
-        if (source && i == (size_t)s.start)
-            for (size_t j = 0; j < items->as.seq.len; j++) if (sequence_append(c, result, items->as.seq.items[j])) break;
-        if (i == v->as.seq.len) break;
+    for (size_t i = 0; i < v->as.seq.len && !c->error_type[0]; i++) {
         if (remove && i == next) { remove--; if (remove) next += step; }
         else sequence_append(c, result, v->as.seq.items[i]);
     }
@@ -8951,7 +8930,7 @@ static SPYValue *big_integer_binary(SPYContext *c, int op, SPYValue *a, SPYValue
             return spy_error(c, "OverflowError", "too many digits in integer");
         }
         return integer_shift(c, a, (uint64_t)b->as.integer_data.small, op == T_LSHIFT);
-    case T_POW: {
+    default: { /* T_POW: the integer operators reach no other */
         if (integer_sign(b) < 0) {
             double x, y;
             if (!integer_sign(a)) return spy_error(c, "ZeroDivisionError", "zero to a negative power");
@@ -8981,7 +8960,6 @@ static SPYValue *big_integer_binary(SPYContext *c, int op, SPYValue *a, SPYValue
         if (c->error_type[0]) { spy_release(result); return NULL; }
         return result;
     }
-    default: return spy_error(c, "TypeError", "unsupported integer operator");
     }
 }
 static SPYValue *round_value(SPYContext *c, SPYValue *value, SPYValue *digits) {
@@ -9172,8 +9150,9 @@ static const char *binary_symbol(int op) {
     static const struct { int op; const char *text; } names[] = {
         {'+', "+"}, {'-', "-"}, {'*', "*"}, {'/', "/"}, {'%', "%"}, {'@', "@"}, {'&', "&"}, {'|', "|"}, {'^', "^"},
         {T_POW, "** or pow()"}, {T_FLOORDIV, "//"}, {T_LSHIFT, "<<"}, {T_RSHIFT, ">>"}};
-    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) if (names[i].op == op) return names[i].text;
-    return "?";
+    size_t i = 0;
+    while (names[i].op != op) i++;
+    return names[i].text;
 }
 static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     SPYValue *left = a, *right = b;
@@ -9220,8 +9199,12 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
         uint64_t count = b->as.integer_data.small < 0 ? 0 : (uint64_t)b->as.integer_data.small;
         size_t len = sequence ? a->as.seq.len : a->as.string.len;
         if (!len) count = 0;
-        if (count && (count > SIZE_MAX / len || count * len > (size_t)INT_MAX))
-            return spy_error(c, "MemoryError", "repeated sequence too large");
+        /* CPython: a str or bytes length past PY_SSIZE_T_MAX overflows, any
+         * other too-long result is out of memory; spy holds at most INT_MAX. */
+        if (count && (count > SIZE_MAX / len || count * len > (size_t)INT_MAX)) {
+            if (count <= PTRDIFF_MAX / len || (a->type != SPY_STRING && a->type != SPY_BYTES)) return spy_error(c, "MemoryError", "");
+            return spy_error(c, "OverflowError", a->type == SPY_STRING ? "repeated string is too long" : "repeated bytes are too long");
+        }
         SPYValue *v = value_new(c, a->type);
         if (!v) return NULL;
         if (sequence) {
@@ -10209,18 +10192,16 @@ static SPYValue *call_special(SPYContext *c, SPYValue *v, const char *name, size
     SPYValue *method = special_method(c, v, name);
     if (!method) {
         if (c->error_type[0]) return NULL;
-        const char *type = type_name(v);
-        if (!strcmp(name, "__neg__") || !strcmp(name, "__pos__") || !strcmp(name, "__invert__"))
-            return errorf(c, "TypeError", "bad operand type for unary %c: '%s'", name[2] == 'n' && name[3] == 'e' ? '-' : name[2] == 'p' ? '+' : '~', type);
-        if (!strcmp(name, "__abs__")) return errorf(c, "TypeError", "bad operand type for abs(): '%s'", type);
-        if (!strcmp(name, "__len__")) return errorf(c, "TypeError", "object of type '%s' has no len()", type);
-        if (!strcmp(name, "__next__")) return errorf(c, "TypeError", "'%s' object is not an iterator", type);
-        if (!strcmp(name, "__anext__")) return errorf(c, "TypeError", "'%s' object is not an async iterator", type);
-        if (!strcmp(name, "__reversed__")) return errorf(c, "TypeError", "'%s' object is not reversible", type);
-        if (!strcmp(name, "__getitem__")) return errorf(c, "TypeError", "'%s' object does not support indexing", type);
-        if (!strcmp(name, "__setitem__")) return errorf(c, "TypeError", "'%s' object does not support item assignment", type);
-        if (!strcmp(name, "__delitem__")) return errorf(c, "TypeError", "'%s' object doesn't support item deletion", type);
-        return errorf(c, "TypeError", "'%s' object does not support %s", type, name);
+        /* Each caller names one of these, or checks for the method first. */
+        static const char *const missing[][2] = {
+            {"__neg__", "bad operand type for unary -: '%s'"}, {"__pos__", "bad operand type for unary +: '%s'"},
+            {"__invert__", "bad operand type for unary ~: '%s'"}, {"__abs__", "bad operand type for abs(): '%s'"},
+            {"__len__", "object of type '%s' has no len()"}, {"__next__", "'%s' object is not an iterator"},
+            {"__anext__", "'%s' object is not an async iterator"}, {"__reversed__", "'%s' object is not reversible"},
+            {"__getitem__", "'%s' object does not support indexing"}, {"__setitem__", "'%s' object does not support item assignment"}};
+        size_t i = 0;
+        while (strcmp(name, missing[i][0])) i++;
+        return errorf(c, "TypeError", missing[i][1], type_name(v));
     }
     SPYValue *result = call(c, method, argc, argv);
     spy_release(method); return result;
@@ -14456,7 +14437,7 @@ static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
         scope->positional = arg->op == P_POSITIONAL || arg->op == P_POSONLY ? scope->positional + 1 : SIZE_MAX;
     for (int pass = 0; pass < 3; pass++)
         for (Node *arg = params; arg; arg = arg->next) {
-            Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? node_symbol(scope, arg) : NULL;
+            Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? remember_symbol(arg, scope, scope_find(scope, node_name(arg))) : NULL;
             if (symbol && !(symbol->flags & (S_GLOBAL | S_NONLOCAL))) order[len++] = (size_t)(symbol - scope->symbols);
         }
     for (size_t i = 0; i < scope->len; i++) {
@@ -16352,7 +16333,7 @@ static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *r
         for (size_t i = 0; i < len; i++) spy_release(old->as.seq.items[i]);
     } else if (len) {
         if ((uint64_t)count > SIZE_MAX / len || (uint64_t)count * len > INT_MAX)
-            return spy_error(c, "MemoryError", "repeated list too large");
+            return spy_error(c, "MemoryError", "");
         size_t total = (size_t)count * len;
         if (grow_array(c, (void **)&old->as.seq.items, &old->as.seq.cap, total, sizeof(SPYValue *))) return NULL;
         for (size_t i = len; i < total; i++) old->as.seq.items[i] = spy_retain(old->as.seq.items[i % len]);

@@ -14,3 +14,7 @@ for source, message in (
     assert_eq(assert_syntax_error(source).msg, message)
 # The error is reported on the line where the literal begins.
 assert_eq(assert_syntax_error("x = '\\\n\\x1'").lineno, 1)
+
+# Every word of the name exists, but no character has this name.
+error = assert_syntax_error('"\\N{LATIN LETTER SMALL}"')
+assert_eq(error.msg, "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-21: unknown Unicode character name")

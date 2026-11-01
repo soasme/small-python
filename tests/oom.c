@@ -167,6 +167,12 @@ static const char *const programs[] = {
     "except* ValueError as e: print('value', e.exceptions)\n"
     "except* TypeError: print('type')\n",
 
+    "class A:\n"
+    "    __x = 1\n"
+    "    y = t'{__x!r:>3} {(__x)}'\n"
+    "print(A.y.strings, A.y.interpolations[0].expression)\n"
+    "print([i for i in range(2 ** 70, 2 ** 70 + 2)], list(enumerate('ab', 2 ** 70)))\n",
+
     /* sys is left to fuzz_oom and tests/oom FILE: importing it makes 5,000
      * allocations, too many to sweep here. */
     "import gc\n"

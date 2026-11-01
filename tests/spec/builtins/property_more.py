@@ -103,3 +103,17 @@ empty = property()
 assert_raises(AttributeError, empty.__get__, 1, message="property of 'int' object has no getter")
 assert_raises(AttributeError, empty.__set__, 1, 2, message="property of 'int' object has no setter")
 assert_raises(AttributeError, empty.__delete__, 1, message="property of 'int' object has no deleter")
+
+# An error reading the getter's name or its repr propagates instead.
+class BadName:
+    def __call__(self, owner): return 1
+    @property
+    def __name__(self): raise ValueError("bad name")
+class BadRepr:
+    def __repr__(self): raise KeyError("r")
+class ReprName:
+    def __call__(self, owner): return 1
+    __name__ = BadRepr()
+class Owner: pass
+assert_raises(ValueError, property(BadName()).__set__, Owner(), 1, message="bad name")
+assert_raises(KeyError, property(ReprName()).__delete__, Owner())

@@ -60,3 +60,13 @@ class Failing(Hinted):
     def __length_hint__(self): raise TypeError("x")
 assert_eq(list(Hinted()), [])
 assert_eq(list(Failing()), [])
+
+# A __len__ that raises TypeError is no length: the hint is consulted next.
+class Unsized:
+    def __iter__(self): return iter([1, 2])
+    def __len__(self): raise TypeError("no len")
+    def __length_hint__(self): return 5
+assert_eq(list(Unsized()), [1, 2])
+class BadLength(Unsized):
+    def __len__(self): raise ValueError("bad")
+assert_raises(ValueError, list, BadLength(), message="bad")

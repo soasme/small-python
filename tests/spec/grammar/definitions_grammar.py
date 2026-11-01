@@ -63,3 +63,10 @@ for source in ("type A[] = int", "type A[*Ts: int] = 0", "type A[**P: int] = 0",
                "type A = *b", "type A[T = *b] = 0", "type A[**P = *b] = 0", "type A[T] = int = str",
                "type A[T = int, U] = 0"):
     assert_syntax_error(source + "\n")
+
+# A star-annotated *args is followed by keyword parameters only; the error is
+# at the token that cannot follow it.
+for source, offset in (("def f(*a: *b, /): pass", 15), ("def f(*a: *b, c, /): pass", 18), ("def f(*a: *b, *c): pass", 15)):
+    error = assert_syntax_error(source)
+    assert_eq((error.msg, error.offset), ("invalid syntax", offset))
+assert_compiles("def f(*a: *b): pass")

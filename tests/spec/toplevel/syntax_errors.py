@@ -220,3 +220,11 @@ for source, message, position in (
     assert_eq((error.msg, (error.lineno, error.offset, error.end_lineno, error.end_offset)), (message, position))
 
 assert_eq(assert_raises(SyntaxError, compile, "f(*a=1)", "s", "exec").msg, "cannot assign to iterable argument unpacking")
+
+def error_of(source):
+    error = assert_syntax_error(source)
+    return error.msg, error.offset, error.end_offset
+assert_eq(error_of("f(**k, *a, *b=1)"), ("cannot assign to iterable argument unpacking", 12, 16))
+assert_eq(error_of("try:\n pass\nexcept E as a b:\n pass\n"), ("invalid syntax", 15, 16))
+assert_eq(error_of("x = pass if y else continue z"), ("expected expression before 'if', but statement is given", 5, 9))
+assert_eq(error_of("import a.1"), ("invalid syntax", 9, 11))
