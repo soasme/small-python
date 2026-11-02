@@ -23014,11 +23014,14 @@ static SPYValue *str_format_map(SPYContext *c, size_t argc, SPYValue *const *arg
 static int byteorder_argument(SPYContext *c, const char *function, SPYValue *value, int *little) {
     *little = 0;
     if (!value) return 0;
-    if (!builtin_value(c, value, SPY_STRING)) {
+    SPYValue *text = builtin_value(c, value, SPY_STRING);
+    if (!text) {
         errorf(c, "TypeError", "%s() argument 'byteorder' must be str, not %s", function, type_name(value)); return -1;
     }
-    if (!strcmp(value->as.string.data, "little")) { *little = 1; return 0; }
-    if (!strcmp(value->as.string.data, "big")) return 0;
+    /* An embedded NUL matches neither name. */
+    const char *order = strlen(text->as.string.data) == text->as.string.len ? text->as.string.data : "";
+    if (!strcmp(order, "little")) { *little = 1; return 0; }
+    if (!strcmp(order, "big")) return 0;
     spy_error(c, "ValueError", "byteorder must be either 'little' or 'big'");
     return -1;
 }

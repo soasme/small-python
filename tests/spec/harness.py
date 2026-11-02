@@ -1831,6 +1831,21 @@ class support:
         return skip("CPython implementation detail")(test)
 
     @staticmethod
+    def requires_IEEE_754(test):
+        """Floats are IEEE 754 binary64 values (PLS-315 2.2)."""
+        return test
+
+    @staticmethod
+    def bigmemtest(size, memuse, dry_run=True):
+        """Run the test with CPython's size when no memory limit is set."""
+        def decorator(test):
+            def wrapper(self):
+                return test(self, 5147)
+            wrapper.__name__ = test.__name__
+            return wrapper
+        return decorator
+
+    @staticmethod
     def exceeds_recursion_limit():
         """A depth well past any recursion limit (9.6)."""
         return 150_000

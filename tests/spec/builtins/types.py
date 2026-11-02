@@ -414,6 +414,10 @@ for cls in (int, object, type, ValueError):
 assert_eq(str(assert_raises(TypeError, "a".center, 5, "ab")), "The fill character must be exactly one character long")
 assert_eq(str(assert_raises(TypeError, str.maketrans, {1.5: "x"})), "keys in translate table mustbe strings or integers")
 assert_eq(str(assert_raises(ValueError, (1).to_bytes, 1, "middle")), "byteorder must be either 'little' or 'big'")
+assert_eq(str(assert_raises(ValueError, (1).to_bytes, 1, "big\0")), "byteorder must be either 'little' or 'big'")
+class Order(str): pass
+assert_eq((1).to_bytes(2, Order("little")), b"\x01\x00")
+assert_eq(int.from_bytes(b"\x01\x00", Order("big")), 256)
 assert_eq(str(assert_raises(TypeError, float.__getformat__, 1)), "__getformat__() argument must be str, not int")
 assert_eq(str(assert_raises(ValueError, float.__getformat__, "x")), "__getformat__() argument 1 must be 'double' or 'float'")
 class Real(float): pass
