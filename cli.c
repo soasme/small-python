@@ -67,9 +67,14 @@ int main(int argc, char **argv) {
     spy_set_input(c, host_read_line, stdin);
     spy_set_optimize(c, optimize);
     if (spy_std_init(c)) { host_report(c); spy_context_free(c); return 1; }
-    if (!mount_count) mounts[mount_count++] = ".";
+    /* The default mount of the working directory is best-effort: a build
+     * without file support, or a deleted working directory, runs with
+     * nothing mounted, so open raises OSError. */
+    int implicit = !mount_count;
+    if (implicit) mounts[mount_count++] = ".";
     for (int i = 0; i < mount_count; i++)
         if (spy_mount(c, mounts[i], NULL, 0)) {
+            if (implicit) { spy_clear_error(c); break; }
             fprintf(stderr, "spy: %s\n", spy_error_message(c));
             spy_context_free(c); return 1;
         }

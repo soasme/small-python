@@ -96,6 +96,14 @@ def main():
         actual = run([engine, '--mount', 'missing', '-c', '1'], root)
         if actual.returncode != 1 or 'cannot mount' not in actual.stderr:
             raise AssertionError(f'missing mount:\n{actual.stdout}{actual.stderr}')
+        # Without the default mount, as on a host without files, programs
+        # still run and open raises OSError.
+        gone = root / 'gone'
+        gone.mkdir()
+        actual = run(['sh', '-c', 'cd gone && rmdir ../gone && exec "$0" -c "$1"', engine,
+                      'print(1)\ntry: open("x")\nexcept OSError: print("no file")'], root)
+        if actual.returncode or actual.stdout != '1\nno file\n':
+            raise AssertionError(f'no default mount:\n{actual.stdout}{actual.stderr}')
     print(f'Files: {len(CASES)} differential open() programs, mount boundary, and --mount passed')
 
 
