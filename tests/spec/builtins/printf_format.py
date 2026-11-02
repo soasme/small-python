@@ -79,3 +79,17 @@ class Rmod(str):
         return "reflected"
 assert_eq("%s" % Rmod("v"), "reflected")
 assert_eq("%s".__mod__(Rmod("v")), "v")
+
+# Conversion errors name the argument's fully qualified type.
+def make_local():
+    class Local: pass
+    return Local()
+local = make_local()
+for fmt, args, wanted in (("%x", local, "%x requires an integer"), ("%d", local, "%d requires a real number"),
+                          ("%f", local, "%f requires a real number"), ("%c", local, "%c requires an integer or a unicode character"),
+                          ("%*d", (local, 1), "* requires int"),
+                          (b"%x", local, "%x requires an integer"), (b"%c", local, "%c requires an integer in range(256) or a single byte"),
+                          (b"%b", local, "%b requires a bytes-like object, or an object that implements __bytes__")):
+    position = "format argument 1" if fmt in ("%*d",) else "format argument"
+    e = assert_raises(TypeError, lambda: fmt % args)
+    assert_eq(str(e), f"{position}: {wanted}, not make_local.<locals>.Local")

@@ -19335,6 +19335,13 @@ static SPYValue *percent_fail(SPYContext *c, const char *type, const PercentArgs
     else errorf(c, type, "format argument: %s", message);
     return NULL;
 }
+/* A conversion's TypeError: what it wanted (formatted with ch), not the
+ * argument's fully qualified type. */
+static SPYValue *percent_type(SPYContext *c, const PercentArgs *p, SPYValue *key, const char *wanted, int ch, SPYValue *v) {
+    char what[96], fq[256];
+    snprintf(what, sizeof(what), wanted, ch);
+    return percent_fail(c, "TypeError", p, key, "%s, not %s", what, type_fqname(v, fq, sizeof(fq)));
+}
 static SPYValue *percent_next(SPYContext *c, PercentArgs *p, int allowone) {
     if (p->argidx < p->arglen && (allowone || p->arglen >= 0)) {
         ptrdiff_t at = p->argidx++;
@@ -19370,8 +19377,7 @@ static SPYValue *percent_integer(SPYContext *c, PercentArgs *p, SPYValue *key, S
         if (!number && error_is(c, "TypeError")) spy_clear_error(c);
         else if (!number) return NULL;
     } else if (c->error_type[0]) return NULL;
-    if (!number) return hex ? percent_fail(c, "TypeError", p, key, "%%%c requires an integer, not %s", ch, type_name(v)) :
-        percent_fail(c, "TypeError", p, key, "%%%c requires a real number, not %s", ch, type_name(v));
+    if (!number) return percent_type(c, p, key, hex ? "%%%c requires an integer" : "%%%c requires a real number", ch, v);
     char spec[2] = {ch == 'i' || ch == 'u' ? 'd' : (char)ch, 0};
     SPYValue *digits = percent_spec(c, number, spec);
     spy_release(number);
@@ -19395,7 +19401,7 @@ static SPYValue *percent_float(SPYContext *c, PercentArgs *p, SPYValue *key, SPY
         if (!number && !error_is(c, "TypeError")) return NULL;
         if (!number) spy_clear_error(c);
     }
-    if (!number) return c->error_type[0] ? NULL : percent_fail(c, "TypeError", p, key, "%%%c requires a real number, not %s", ch, type_name(v));
+    if (!number) return c->error_type[0] ? NULL : percent_type(c, p, key, "%%%c requires a real number", ch, v);
     char spec[32];
     snprintf(spec, sizeof(spec), "%s.%d%c", flags & PF_ALT ? "#" : "", prec < 0 ? 6 : prec, ch);
     SPYValue *result = percent_spec(c, number, spec);
@@ -19415,8 +19421,7 @@ static SPYValue *percent_char(SPYContext *c, PercentArgs *p, SPYValue *key, SPYV
     }
     if (!is_int(v) && !percent_has(c, v, "__index__")) {
         if (c->error_type[0]) return NULL;
-        return bytes ? percent_fail(c, "TypeError", p, key, "%%c requires an integer in range(256) or a single byte, not %s", type_name(v)) :
-            percent_fail(c, "TypeError", p, key, "%%c requires an integer or a unicode character, not %s", type_name(v));
+        return percent_type(c, p, key, bytes ? "%%c requires an integer in range(256) or a single byte" : "%%c requires an integer or a unicode character", 0, v);
     }
     SPYValue *number = index_object(c, v);
     if (!number) return NULL;
@@ -19439,7 +19444,7 @@ static SPYValue *percent_bytes(SPYContext *c, PercentArgs *p, SPYValue *key, SPY
         return copy;
     }
     if (!method) return c->error_type[0] ? NULL :
-        percent_fail(c, "TypeError", p, key, "%%b requires a bytes-like object, or an object that implements __bytes__, not %s", type_name(v));
+        percent_type(c, p, key, "%%b requires a bytes-like object, or an object that implements __bytes__", 0, v);
     SPYValue *result = call(c, method, 0, NULL);
     spy_release(method);
     if (result && result->type != SPY_BYTES) {
@@ -19556,7 +19561,7 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
             SPYValue *v = failed ? NULL : percent_next(c, &p, 0);
             int64_t value = 0;
             if (!v) failed = 1;
-            else if (!is_int(v)) { percent_fail(c, "TypeError", &p, key, "* requires int, not %s", type_name(v)); failed = 1; }
+            else if (!is_int(v)) { percent_type(c, &p, key, "* requires int", 0, v); failed = 1; }
             else if (v->as.integer_data.big || spy_as_int(c, v, &value) || value > PTRDIFF_MAX || value < -PTRDIFF_MAX) {
                 spy_clear_error(c); percent_fail(c, "OverflowError", &p, key, "too big for width"); failed = 1;
             }
@@ -19582,7 +19587,7 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
                 SPYValue *v = failed ? NULL : percent_next(c, &p, 0);
                 int64_t value = 0;
                 if (!v) failed = 1;
-                else if (!is_int(v)) { percent_fail(c, "TypeError", &p, key, "* requires int, not %s", type_name(v)); failed = 1; }
+                else if (!is_int(v)) { percent_type(c, &p, key, "* requires int", 0, v); failed = 1; }
                 else if (v->as.integer_data.big || spy_as_int(c, v, &value) || value > INT_MAX || value < INT_MIN) {
                     spy_clear_error(c); percent_fail(c, "OverflowError", &p, key, "too big for precision"); failed = 1;
                 }
@@ -24686,6 +24691,25 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_none(c);
     }
 }
+/* bytearray.__reduce__ and __reduce_ex__: (type, (contents,), state), the
+ * contents a latin-1 str with its encoding below protocol 3. */
+static SPYValue *bytearray_reduce(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    int ex = (int)(intptr_t)data;
+    const char *name = ex ? "__reduce_ex__" : "__reduce__";
+    SPYValue *self = method_self(c, argc, argv, SPY_BYTEARRAY, name);
+    int64_t proto = 0;
+    if (!self || positional_only(c, "bytearray", name, 0, (size_t)ex, argc - 1, keywords) || (argc > 1 && index_int(c, argv[1], &proto))) return NULL;
+    SPYValue *encoding = proto < 3 ? spy_string(c, "latin-1", 7) : NULL;
+    SPYValue *contents = proto >= 3 ? spy_bytes(c, self->as.string.data, self->as.string.len) :
+        encoding ? bytes_decode(c, self->as.string.data, self->as.string.len, encoding, NULL) : NULL;
+    SPYValue *parts[] = {contents, encoding}, *args = contents ? spy_tuple(c, proto < 3 ? 2 : 1, parts) : NULL;
+    SPYValue *getstate = args ? attribute(c, argv[0], "__getstate__") : NULL;
+    SPYValue *state = getstate ? call(c, getstate, 0, NULL) : NULL;
+    SPYValue *items[] = {value_class(c, argv[0]), args, state};
+    SPYValue *result = state ? spy_tuple(c, 3, items) : NULL;
+    spy_release(contents); spy_release(encoding); spy_release(args); spy_release(getstate); spy_release(state);
+    return result;
+}
 static SPYValue *bytearray_resize_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int take = (int)(intptr_t)data;
     const char *name = take ? "take_bytes" : "resize";
@@ -27346,7 +27370,9 @@ static int register_type_methods(SPYContext *c) {
     }
     for (int i = 0; i < 8; i++)
         if (register_method(c, SPY_BYTEARRAY, bytearray_names[i], bytearray_method, i, METHOD_INSTANCE)) return -1;
-    if (register_method(c, SPY_BYTEARRAY, "resize", bytearray_resize_method, 0, METHOD_INSTANCE) ||
+    if (register_method(c, SPY_BYTEARRAY, "__reduce__", bytearray_reduce, 0, METHOD_INSTANCE) ||
+        register_method(c, SPY_BYTEARRAY, "__reduce_ex__", bytearray_reduce, 1, METHOD_INSTANCE) ||
+        register_method(c, SPY_BYTEARRAY, "resize", bytearray_resize_method, 0, METHOD_INSTANCE) ||
         register_method(c, SPY_BYTEARRAY, "take_bytes", bytearray_resize_method, 1, METHOD_INSTANCE)) return -1;
     for (int i = 0; i < 11; i++) {
         if (register_method(c, SPY_SET, set_names[i], set_method, ((intptr_t)SPY_SET << 8) | i, METHOD_INSTANCE)) return -1;

@@ -92,3 +92,18 @@ for s in (bytearray(b"abcdef")[::2], bytearray(b"abcdef")[1:3]):
     s += b"x" * 40
     s.extend(b"yz")
     assert_eq(s, bytearray(t + b"x" * 40 + b"yz"))
+
+# __reduce_ex__ carries the contents as latin-1 text below protocol 3.
+class Kept(bytearray): pass
+kept = Kept(b"\xe9a")
+kept.note = 1
+assert_eq(kept.__reduce_ex__(2), (Kept, ("\xe9a", "latin-1"), {"note": 1}))
+assert_eq(kept.__reduce_ex__(4), (Kept, (b"\xe9a",), {"note": 1}))
+assert_eq(bytearray(b"z").__reduce__(), (bytearray, ("z", "latin-1"), None))
+class Slotted(bytearray):
+    __slots__ = ("a",)
+slotted = Slotted(b"q")
+slotted.a = 2
+assert_eq(slotted.__reduce_ex__(3), (Slotted, (b"q",), (None, {"a": 2})))
+assert_eq(str(assert_raises(TypeError, bytearray().__reduce__, 1)), "bytearray.__reduce__() takes no arguments (1 given)")
+assert_eq(str(assert_raises(OverflowError, bytearray().__reduce_ex__, 1 << 40)), "Python int too large to convert to C int")
