@@ -308,7 +308,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binaries-${{ matrix.platform }}
-          path: small-python-*.*
+          # Only the archive: the staging directory's name also contains dots.
+          path: ${{ env.NAME }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
 
   # Creates the release of the pushed tag, or adds the archives a release
   # lacks when one already exists.
@@ -332,7 +333,7 @@ jobs:
 
       - name: Checksum archives
         working-directory: dist
-        run: sha256sum small-python-* > SHA256SUMS
+        run: sha256sum small-python-*.tar.gz small-python-*.zip > SHA256SUMS
 
       - name: Publish GitHub release
         run: |
