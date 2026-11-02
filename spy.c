@@ -24915,7 +24915,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         return status ? NULL : spy_none(c);
     }
     case B_SUPER: {
-        if (argc > 2) return spy_error(c, "TypeError", "super() expected at most 2 arguments");
+        if (argc > 2) return errorf(c, "TypeError", "super() expected at most 2 arguments, got %zu", argc);
         return argc ? super_new(c, argv[0], argc == 2 ? argv[1] : NULL) : implicit_super(c);
     }
     case B_EXCEPTION_REDUCE: case B_OSERROR_REDUCE: case B_IMPORT_REDUCE: case B_ATTRIBUTE_REDUCE:
@@ -26349,11 +26349,13 @@ static SPYValue *native_new(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if ((id == B_FILTER || id == B_REVERSED) && replaces(cls, owner, "__init__")) keywords = NULL;
     SPYValue *base, *args[2];
     static const char *const names[] = {"iterable", "start"};
-    /* A subclass reaches enum_new's argument clinic, not enumerate_vectorcall. */
-    if (id == B_ENUMERATE && cls != owner && keywords && keywords->as.map.len)
+    /* __new__ reaches enum_new's argument clinic, not enumerate_vectorcall. */
+    if (id == B_ENUMERATE)
         base = parse_arguments(c, "enumerate", argc - 1, argv + 1, keywords, names, 2, 1, 0, args) ? NULL :
             builtin(c, args[1] ? 2 : 1, args, (void *)(intptr_t)B_ENUMERATE);
-    else base = owner == c->types[SPY_MODULE] ? module_allocate(c) : builtin_keywords(c, argc - 1, argv + 1, id, keywords, owner);
+    else if (owner == c->types[SPY_MODULE]) base = module_allocate(c);
+    else if (owner == c->types[SPY_SENTINEL]) base = sentinel_construct(c, argc - 1, argv + 1, keywords);
+    else base = builtin_keywords(c, argc - 1, argv + 1, id, keywords, owner);
     /* reversed() of an object with __reversed__ returns that method's result. */
     if (!base || cls == owner || value_class(c, base) != owner) return base;
     SPYValue *instance = new_instance(c, cls);
@@ -26384,11 +26386,13 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     if (cls == owner && type == SPY_FROZENDICT) return frozendict_construct(c, argc - 1, argv + 1, keywords);
     if (type == SPY_PROPERTY || type == SPY_CLASSMETHOD || type == SPY_STATICMETHOD)
         return descriptor_new(c, cls, type, argc - 1, argv + 1, keywords);
-    if (cls == owner) return builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if ((type == SPY_TUPLE || type == SPY_FLOAT || type == SPY_FROZENSET) && replaces(cls, owner, "__init__")) keywords = NULL;
+    /* int and str parse __new__ with argument clinic, unlike their vectorcalls. */
+    size_t most = type == SPY_INT ? 2 : type == SPY_STRING ? 3 : SIZE_MAX;
+    if (argc - 1 > most) return errorf(c, "TypeError", "%s() takes at most %zu arguments (%zu given)", type == SPY_INT ? "int" : "str", most, argc - 1);
     SPYValue *base = type == SPY_BYTEARRAY ? bytearray_new(c, "", 0) : mutable_layout(type) ? value_new(c, type) :
         builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
-    if (!base) return NULL;
+    if (!base || cls == owner) return base;
     SPYValue *instance = new_instance(c, cls);
     if (instance) instance->as.map.base = base;
     else spy_release(base);
@@ -26881,7 +26885,8 @@ static int register_descriptor_methods(SPYContext *c) {
 /* The __new__ of the native classes of native_new, once they exist. */
 static int register_native_new(SPYContext *c) {
     SPYValue *natives[] = {c->iterator_types[IT_MAP], c->iterator_types[IT_ZIP], c->iterator_types[IT_ENUMERATE],
-                           c->iterator_types[IT_FILTER], c->iterator_types[IT_REVERSED], c->types[SPY_SUPER], c->types[SPY_MODULE]};
+                           c->iterator_types[IT_FILTER], c->iterator_types[IT_REVERSED], c->types[SPY_SUPER], c->types[SPY_MODULE],
+                           c->types[SPY_RANGE], c->types[SPY_SLICE], c->types[SPY_SENTINEL]};
     for (size_t i = 0; i < sizeof(natives) / sizeof(*natives); i++) {
         SPYValue *method = value_new(c, SPY_NATIVE);
         if (!method) return -1;
