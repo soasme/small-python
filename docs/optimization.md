@@ -188,6 +188,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A negated number is a constant](#a-negated-number-is-a-constant) | `while` testing `i == -1`: -22%; M2: -27%; programs within 0.6% |
 | [A float power from a positive base skips the dispatch](#a-float-power-from-a-positive-base-skips-the-dispatch) | -3.4% (nbody); M2: nbody -3.1% |
 | [A dying number returns to its spare list directly](#a-dying-number-returns-to-its-spare-list-directly) | -5.6% (loop, nbody), -3.2% (generators), -2.4% (classes); M2: nbody -6.5%, loop -3.0%, classes -2.6% |
+| [Two strs concatenate before the operator dispatch](#two-strs-concatenate-before-the-operator-dispatch) | -2.9% (dicts); M2: dicts -1.6% |
 
 ### Releasing a number or string frees it at once
 
@@ -1389,6 +1390,21 @@ strings -1.1%, bigint -0.6%, fib unchanged (its numbers are cached small
 ints). Wall time averaged over eight code layouts: nbody -6.5%, loop
 -3.0%, classes -2.6%, generators -1.9%, sort -1.2%, the rest within
 0.6%.
+
+### Two strs concatenate before the operator dispatch
+
+`"k" + str(i)` reached `text_concat` through `binary`'s tests for
+special methods, templates, set views, formatting and numbers, then
+`sequence_binary`'s for sets, dictionaries and bytes: about 100
+instructions before the copy. Two exact strs joined by `+` now take
+`text_concat` right after the exact float and int cases. Placed first,
+ahead of the number cases, the test cost bigint 0.2%; at the top of
+`sequence_binary` it saved a quarter as much. Instructions (clang):
+dicts -2.9%, bigint -0.2%, the rest unchanged. Wall time averaged over
+eight code layouts: dicts -1.6%, the rest within 0.6%, except sort
+(-1.7%) and classes, which does not run `binary` (+0.4%; +1.2% on a busier
+machine, where shifting the code after `binary` by the same 192 bytes
+alone measured +0.3%).
 
 ### A profile-guided build
 
