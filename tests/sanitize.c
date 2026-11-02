@@ -43,12 +43,14 @@ UNINSTRUMENTED static int worker(void) {
     return 0;
 #endif
 }
+/* An allocation larger than a runtime supports returns NULL, as malloc
+ * does, so the engine raises MemoryError instead of the runtime aborting. */
 const char *__asan_default_options(void) {
-    return worker() ? "detect_stack_use_after_return=1:detect_leaks=0:handle_segv=0"
-                    : "detect_stack_use_after_return=1:detect_leaks=1:handle_segv=0";
+    return worker() ? "detect_stack_use_after_return=1:detect_leaks=0:handle_segv=0:allocator_may_return_null=1"
+                    : "detect_stack_use_after_return=1:detect_leaks=1:handle_segv=0:allocator_may_return_null=1";
 }
 const char *__ubsan_default_options(void) { return "print_stacktrace=1:handle_segv=0"; }
-const char *__msan_default_options(void) { return "handle_segv=0"; }
+const char *__msan_default_options(void) { return "handle_segv=0:allocator_may_return_null=1"; }
 
 __attribute__((constructor)) static void report_to_file(void) {
     int fd = open(REPORT, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);

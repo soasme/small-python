@@ -368,7 +368,7 @@ LLVM_COV ?= llvm-cov
 coverage:
 	$(MAKE) clean
 	mkdir -p $(COVERAGE_DIR)
-	$(MAKE) CC=clang CFLAGS='-O1 -g -std=c11 $(COVERAGE_PROFILE) -fcoverage-mapping -mllvm -runtime-counter-relocation' \
+	SPY_TEST_TIMEOUT=600 $(MAKE) CC=clang CFLAGS='-O1 -g -std=c11 $(COVERAGE_PROFILE) -fcoverage-mapping -mllvm -runtime-counter-relocation' \
 		LDFLAGS='$(COVERAGE_PROFILE)' test test-binding
 	$(LLVM_PROFDATA) merge -o $(COVERAGE_DIR)/all.profdata $(COVERAGE_DIR)/*.profraw
 	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./spyc -object ./tests/run-spec \

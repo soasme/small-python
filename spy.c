@@ -786,7 +786,9 @@ static int grow(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) { 
 /* Arrays of values and entries, whose width follows the pointer's, spend
  * per 8 elements. */
 static int grow_array(SPYContext *c, void **p, size_t *cap, size_t n, size_t width) { return grow_block(c, p, cap, n, width, ARRAY(width)); }
-typedef struct { SPYContext *ctx; char *data; size_t len, cap; } Buffer;
+/* whole, when set, receives the first __str__ or __repr__ result appended
+ * to the empty buffer (see stringify). */
+typedef struct { SPYContext *ctx; char *data; size_t len, cap; SPYValue **whole; } Buffer;
 static int append(Buffer *b, const char *s, size_t n) {
     /* Text is built by many small appends; the first takes 32 bytes. */
     if (n > SIZE_MAX - b->len - 1) return -1;
@@ -3268,6 +3270,7 @@ static int unicode_error_text(Buffer *, SPYValue *, int);
 static int append_conversion(Buffer *b, SPYValue *v, SPYValue *text, const char *method) {
     if (!text) return -1;
     SPYValue *string = builtin_value(b->ctx, text, SPY_STRING);
+    if (string && b->whole && !b->len && !*b->whole) *b->whole = spy_retain(text);
     if (string) return append(b, string->as.string.data, string->as.string.len);
     { char fq[256]; errorf(b->ctx, "TypeError", "%s.%s() must return a str, not %s", type_fqname(v, fq, sizeof(fq)), method, type_name(text)); }
     return -1;
@@ -3692,6 +3695,21 @@ static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
     return buffer_text(&b, SPY_STRING, format_value(&b, v, repr));
 }
 SPYValue *spy_repr(SPYContext *c, SPYValue *v) { return stringify(c, v, 1); }
+/* str(v) and repr(v) (ToStr, ToRepr): what __str__ or __repr__ returned, a
+ * str subclass included, when that is the whole text; else as stringify. */
+static NO_INLINE SPYValue *instance_conversion(SPYContext *c, SPYValue *v, int repr) {
+    SPYValue *whole = NULL, *string;
+    Buffer b = { .ctx = c, .whole = &whole };
+    int failed = format_value(&b, v, repr);
+    if (!failed && whole && (string = builtin_value(c, whole, SPY_STRING))->as.string.len == b.len &&
+        !memcmp(string->as.string.data, b.data, b.len)) { mem_free(b.data); return whole; }
+    spy_release(whole);
+    return buffer_text(&b, SPY_STRING, failed);
+}
+/* Only instances and classes (adjacent types) have their own methods. */
+static ALWAYS_INLINE SPYValue *conversion(SPYContext *c, SPYValue *v, int repr) {
+    return (unsigned)(v->type - SPY_CLASS) <= 1 ? instance_conversion(c, v, repr) : stringify(c, v, repr);
+}
 
 enum {
     T_END = 256, T_NAME, T_INT, T_FLOAT, T_IMAG, T_STRING, T_NL, T_INDENT, T_DEDENT,
@@ -11843,16 +11861,16 @@ static SPYValue *format_builtin(SPYContext *c, SPYValue *value, SPYValue *named,
 }
 static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
     SPYValue *base = builtin_base(c, value, "__format__", NULL);
-    if (base && spec->type == SPY_STRING) return spec->as.string.len ? format_builtin(c, base, value, spec) : stringify(c, value, 0);
+    if (base && spec->type == SPY_STRING) return spec->as.string.len ? format_builtin(c, base, value, spec) : conversion(c, value, 0);
     /* A user __format__ receives a str subclass spec itself; builtin formatting, its text. */
     SPYValue *text = builtin_value(c, spec, SPY_STRING);
-    if (base) return text && !text->as.string.len ? stringify(c, value, 0) : format_builtin(c, base, value, text ? text : spec);
+    if (base) return text && !text->as.string.len ? conversion(c, value, 0) : format_builtin(c, base, value, text ? text : spec);
     if (value->type == SPY_INSTANCE || meta_class(value)) {
         SPYValue *method = special_method(c, value, "__format__");
         if (method) {
             SPYValue *result = call(c, method, 1, &spec);
             spy_release(method);
-            if (result && result->type != SPY_STRING) {
+            if (result && !builtin_value(c, result, SPY_STRING)) {
                 { char fq[256]; errorf(c, "TypeError", "%s.__format__() must return a str, not %s", type_fqname(value, fq, sizeof(fq)), type_name(result)); }
                 spy_release(result); return NULL;
             }
@@ -11860,17 +11878,26 @@ static SPYValue *format_spec(SPYContext *c, SPYValue *value, SPYValue *spec) {
         }
         if (c->error_type[0]) return NULL;
     }
-    if (text && !text->as.string.len) return stringify(c, value, 0);
+    if (text && !text->as.string.len) return conversion(c, value, 0);
     return format_builtin(c, value, value, text ? text : spec);
 }
 static SPYValue *convert_field(SPYContext *c, SPYValue *value, int conversion) {
     return conversion == 'a' ? ascii_repr(c, value) :
         conversion ? stringify(c, value, conversion == 'r') : spy_retain(value);
 }
-static SPYValue *format_field(SPYContext *c, SPYValue *value, SPYValue *spec) {
+/* format(value, spec): Format (7.5.8), whose result may be a str subclass. */
+static ALWAYS_INLINE SPYValue *format_call(SPYContext *c, SPYValue *value, SPYValue *spec) {
     SPYValue *format = spec && spec->type != SPY_NONE ? spy_retain(spec) : spy_string(c, "", 0);
     SPYValue *result = format ? format_spec(c, value, format) : NULL;
     spy_release(format); return result;
+}
+/* A replacement field of an f-string, a part of a new str. */
+static SPYValue *format_field(SPYContext *c, SPYValue *value, SPYValue *spec) {
+    SPYValue *result = format_call(c, value, spec), *text;
+    if (!result || result->type == SPY_STRING) return result;
+    text = builtin_value(c, result, SPY_STRING);
+    SPYValue *copy = spy_string(c, text->as.string.data, text->as.string.len);
+    spy_release(result); return copy;
 }
 static SPYValue *interpolation_field(SPYContext *c, Node *n, SPYValue *value, SPYValue *spec) {
     SPYValue *expression = spy_string(c, n->text, strlen(n->text));
@@ -12004,7 +12031,8 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
     }
     if (object) format = expanding ? format_build(c, text, spec, spec_end, args, depth - 1) : spy_string(c, text + spec, spec_end - spec);
     if (format) result = format_spec(c, object, format);
-    int status = result ? append(out, result->as.string.data, result->as.string.len) : -1;
+    SPYValue *string = result ? builtin_value(c, result, SPY_STRING) : NULL;
+    int status = string ? append(out, string->as.string.data, string->as.string.len) : -1;
     spy_release(object); spy_release(format); spy_release(result);
     return status;
 }
@@ -19655,7 +19683,9 @@ static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) 
             } else errorf(c, "ValueError", "stray %% at position %zu or unexpected format character U+%04X at position %zu", fmtstart, ch, atc - 1);
             break;
         }
-        int status = !piece || percent_output(&out, piece->as.string.data, piece->as.string.len, bytes, (int)ch, flags, width, prec, sign);
+        /* str(), repr() and ascii() may return a str subclass. */
+        SPYValue *text = piece && piece->type == SPY_INSTANCE ? builtin_value(c, piece, SPY_STRING) : piece;
+        int status = !piece || percent_output(&out, text->as.string.data, text->as.string.len, bytes, (int)ch, flags, width, prec, sign);
         spy_release(piece); spy_release(key);
         if (status) break;
     }
@@ -23152,7 +23182,7 @@ static SPYValue *str_maketrans(SPYContext *c, size_t argc, SPYValue *const *argv
     SPYValue *table = value_new(c, SPY_DICT);
     if (!table) return NULL;
     if (!args[1]) {
-        SPYValue *mapping = args[0]->type == SPY_DICT ? args[0] : NULL;
+        SPYValue *mapping = args[0]->type == SPY_DICT || args[0]->type == SPY_FROZENDICT ? args[0] : NULL;
         if (!mapping) { spy_release(table); return spy_error(c, "TypeError", "if you give only one argument to maketrans it must be a dict"); }
         for (size_t i = 0; i < mapping->as.map.len && !c->error_type[0]; i++) {
             Entry *entry = &map_items(mapping)[i];
@@ -25563,7 +25593,7 @@ execution_fail:
     case B_FORMAT: {
         if (argc < 1 || argc > 2) goto arity;
         if (argc == 2 && !builtin_value(c, argv[1], SPY_STRING)) return errorf(c, "TypeError", "format() argument 2 must be str, not %s", type_name(argv[1]));
-        return format_field(c, a, argc == 2 ? argv[1] : NULL);
+        return format_call(c, a, argc == 2 ? argv[1] : NULL);
     }
     case B_PROPERTY: {
         SPYValue *args[4];
@@ -25685,7 +25715,7 @@ execution_fail:
             spy_release(copy); return text;
         }
         /* An exact str is its own str(). */
-        return argc ? a->type == SPY_STRING ? spy_retain(a) : stringify(c, a, 0) : spy_string(c, "", 0);
+        return argc ? a->type == SPY_STRING ? spy_retain(a) : conversion(c, a, 0) : spy_string(c, "", 0);
     }
     case B_INT: case B_FLOAT: {
         if (argc > (id == B_INT ? 2u : 1u)) goto arity;
@@ -25754,7 +25784,7 @@ execution_fail:
     default: break;
     }
     if (argc != 1) goto arity;
-    if (id == B_REPR) return spy_repr(c, a);
+    if (id == B_REPR) return conversion(c, a, 1);
     if (id == B_ABS && argc == 1 && (a->type == SPY_INSTANCE || meta_class(a))) {
         SPYValue *base = builtin_base(c, a, "__abs__", NULL);
         if (!base) return call_special(c, a, "__abs__", 0, NULL);
@@ -26806,7 +26836,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (argv[0]->type != SPY_STRING) return errorf(c, "TypeError", "%s.__format__() argument must be str, not %s", owner_name, type_name(argv[0]));
         if (type == 63) {
             if (argv[0]->as.string.len) return errorf(c, "TypeError", "unsupported format string passed to %s.__format__", type_name(self));
-            return stringify(c, self, 0);
+            return conversion(c, self, 0);
         } else {
             SPYValue *args[] = {value, argv[0]};
             return builtin(c, 2, args, (void *)(intptr_t)B_FORMAT);

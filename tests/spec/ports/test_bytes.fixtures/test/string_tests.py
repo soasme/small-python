@@ -1610,6 +1610,5 @@ class MixinStrUnicodeTest:
         self.assertIsNot(s1, s2)
         self.assertIs(type(s2), t)
 
-        s1 = t("abcd")
-        s2 = t().join([s1])
-        self.assertIs(s1, s2)
+        # (Ported) The check that joining one exact str returns it is
+        # dropped: the identity of str values is implementation-defined (6.1.2).
