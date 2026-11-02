@@ -1196,6 +1196,10 @@ static int finalize_later(SPYValue *v) {
 }
 /* v, whose last reference was just released. */
 static NO_INLINE void release_dead(SPYValue *v) {
+    /* A number number_new made returns to the spare list it came from. */
+    if (((v->type == SPY_INT && !v->as.integer_data.big) || v->type == SPY_FLOAT) && !v->listed) {
+        v->ctx->live--; value_give(v->ctx, v, 1); return;
+    }
     /* Numbers and strings, most of what dies, hold no edges and need no finalizer. */
     if (v->type == SPY_INT || v->type == SPY_FLOAT || v->type == SPY_STRING) { free_value(v); return; }
     SPYValue *pending = v;

@@ -187,6 +187,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A machine jump reads a bool's truth](#a-machine-jump-reads-a-bools-truth) | -1.5% (generators); M2: generators -3.4% |
 | [A negated number is a constant](#a-negated-number-is-a-constant) | `while` testing `i == -1`: -22%; M2: -27%; programs within 0.6% |
 | [A float power from a positive base skips the dispatch](#a-float-power-from-a-positive-base-skips-the-dispatch) | -3.4% (nbody); M2: nbody -3.1% |
+| [A dying number returns to its spare list directly](#a-dying-number-returns-to-its-spare-list-directly) | -5.6% (loop, nbody), -3.2% (generators), -2.4% (classes); M2: nbody -6.5%, loop -3.0%, classes -2.6% |
 
 ### Releasing a number or string frees it at once
 
@@ -1373,6 +1374,21 @@ is `pow`, and an infinite result is an overflow. The fast path now takes
 that case and leaves an overflow, and every other power, to `binary`.
 Instructions: nbody -3.4% (GCC -3.3%), the rest unchanged. Wall time
 averaged over eight code layouts: nbody -3.1%, the rest within 0.7%.
+
+### A dying number returns to its spare list directly
+
+Ints and floats are made by `number_new`, which takes a spare value and
+leaves it off the list of values the collector walks. When one died,
+`release_dead` still sent it through `free_value`, which tests for weak
+references, unlinks a listed value, switches on the type and looks up the
+size class. A number without big-integer digits that is not listed (one
+`number_new` made; neither ints nor floats take weak references) now
+goes straight back to its spare list. Instructions (clang): loop and
+nbody -5.6%, generators -3.2%, classes -2.4%, dicts -1.9%, sort -1.7%,
+strings -1.1%, bigint -0.6%, fib unchanged (its numbers are cached small
+ints). Wall time averaged over eight code layouts: nbody -6.5%, loop
+-3.0%, classes -2.6%, generators -1.9%, sort -1.2%, the rest within
+0.6%.
 
 ### A profile-guided build
 
