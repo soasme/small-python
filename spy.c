@@ -6528,16 +6528,19 @@ static Node *match_statement(Parser *p) {
 }
 
 /* A lazily evaluated type-parameter bound, constraint tuple, default, or
- * alias value: an annotation-scope function `name(format, /)`. */
+ * alias value: an annotation-scope function `name(.format=1, /)`, whose
+ * parameter no source name can reach. */
 static Node *lazy_function(Parser *p, const char *name, Node *value) {
     Node *fn = node(p, N_DEF), *label = fn ? node(p, N_NAME) : NULL, *format = label ? node(p, N_NAME) : NULL;
-    Node *body = format ? node(p, N_ANNOTATIONS) : NULL, *entry = body ? node(p, N_KEYWORD) : NULL;
+    Node *one = format ? node(p, N_INT) : NULL, *body = one ? node(p, N_ANNOTATIONS) : NULL;
+    Node *entry = body ? node(p, N_KEYWORD) : NULL;
     if (!entry) return NULL;
     label->text = copy_text(p->ctx, name, strlen(name));
-    format->text = copy_text(p->ctx, "format", 6);
+    format->text = copy_text(p->ctx, ".format", 7);
+    one->text = copy_text(p->ctx, "1", 1);
     entry->text = copy_text(p->ctx, name, strlen(name));
-    if (!label->text || !format->text || !entry->text) return NULL;
-    format->op = P_POSONLY;
+    if (!label->text || !format->text || !one->text || !entry->text) return NULL;
+    format->op = P_POSONLY; format->a = one;
     fn->a = label; fn->args = format; fn->b = body;
     body->op = 1; body->args = entry; entry->a = value;
     fn->flags = F_ANNOTATE | F_TYPEPARAMS;
@@ -17563,8 +17566,8 @@ static SPYValue *generic_env(SPYContext *c, Frame *f, Node *generic, SPYValue **
     declare_locals(c, env);
     Frame frame = {env, f->unit, 0};
     for (Node *param = generic->args; param && !c->error_type[0]; param = param->next) {
-        SPYValue *lazy = param->b ? function_new(c, &frame, param->b) : spy_none(c);
-        SPYValue *fallback = !lazy ? NULL : param->c ? function_new(c, &frame, param->c) : spy_none(c);
+        SPYValue *lazy = param->b ? make_function(c, &frame, param->b) : spy_none(c);
+        SPYValue *fallback = !lazy ? NULL : param->c ? make_function(c, &frame, param->c) : spy_none(c);
         SPYValue *kind = spy_int(c, param->op), *name = spy_string(c, source_name(param), strlen(source_name(param)));
         if (fallback && kind && name) {
             int constraints = (param->flags & F_CONSTRAINTS) != 0;
@@ -17630,7 +17633,7 @@ static NO_INLINE void execute_type_alias(SPYContext *c, Frame *f, Node *n) {
     if (n->params && !env) return;
     if (!params && !(params = value_new(c, SPY_TUPLE))) return;
     Frame frame = {env ? env : f->env, f->unit, 0};
-    SPYValue *fn = function_new(c, &frame, n->b);
+    SPYValue *fn = make_function(c, &frame, n->b);
     SPYValue *name = fn ? spy_string(c, source_name(n->a), strlen(source_name(n->a))) : NULL;
     if (name) {
         SPYValue *args[] = {name, fn, params, globals_name(c, f->env)};
@@ -19065,7 +19068,7 @@ static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
     }
 }
 static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
-    SPYValue *format = name_get(c, f->env, "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
+    SPYValue *format = name_get(c, f->env, n->op == 1 ? ".format" : "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
     SPYValue *unsupported = format ? comparison(c, '>', format, &two) : NULL;
     int raise = unsupported && spy_truth(unsupported);
     spy_release(format); spy_release(unsupported);

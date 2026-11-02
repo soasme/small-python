@@ -105,3 +105,15 @@ TypeAliasType = type(Holder.Alias)
 assert_eq(str(assert_raises(TypeError, TypeAliasType, "B")), "typealias() missing required argument 'value' (pos 2)")
 assert_eq(TypeAliasType("B", int, qualname="Q.B").__qualname__, "Q.B")
 assert_eq(repr(type(t"")[int]), f"{qualified(type(t''))}[int]")
+# An evaluate function's parameter defaults to 1, and no source name reaches it.
+type Format = format
+def shadow[T: format = format](): pass
+T, = shadow.__type_params__
+assert_is(Format.__value__, format)
+assert_is(T.__bound__, format)
+assert_is(T.__default__, format)
+for evaluate in (Format.evaluate_value, T.evaluate_bound, T.evaluate_default):
+    assert_is(evaluate(), format)
+    assert_eq(evaluate.__defaults__, (1,))
+    assert_raises(NotImplementedError, evaluate, 3)
+    assert_raises(TypeError, evaluate, format=1)
