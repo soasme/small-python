@@ -8264,8 +8264,12 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
                 if (error_is(c, "IndexError") || error_is(c, "StopIteration")) spy_clear_error(c);
             }
         }
-        else if (v->as.iterator.index) result = source->type == SPY_STRING ? string_char(c, source, --v->as.iterator.index, v->as.iterator.cursor) :
-            iter_at(c, source, --v->as.iterator.index);
+        else if (v->as.iterator.index) {
+            result = source->type == SPY_STRING ? string_char(c, source, --v->as.iterator.index, v->as.iterator.cursor) :
+                iter_at(c, source, --v->as.iterator.index);
+            /* A bytearray that shrank ends the iteration for good. */
+            if (!result) v->as.iterator.index = 0;
+        }
         break;
     }
     case I_ZIP: case I_MAP:
@@ -8379,7 +8383,7 @@ static SPYValue *iterator_length_hint(SPYContext *c, SPYValue *v) {
         if (source->type != SPY_INSTANCE && v->as.iterator.kind == I_REVERSED) {
             SPYValue *sized = is_view(source) ? source->as.bound.self : source;
             if ((sized->type == SPY_DICT || sized->type == SPY_FROZENDICT) && v->as.iterator.size != sized->as.map.len) return spy_int(c, 0);
-            size_t len = sized->type == SPY_LIST ? sized->as.seq.len : sized->as.map.len;
+            size_t len = sized->type == SPY_LIST ? sized->as.seq.len : sized->type == SPY_BYTEARRAY ? sized->as.string.len : sized->as.map.len;
             return spy_int(c, index <= len ? (int64_t)index : 0);
         }
         if (v->as.iterator.kind == I_GETITEM) {
@@ -23266,7 +23270,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
     if (method) {
         SPYValue *result = call(c, method, 0, NULL);
         spy_release(method);
-        if (result && result->type != SPY_BYTES) {
+        if (result && !builtin_value(c, result, SPY_BYTES)) {
             { char fq[256]; errorf(c, "TypeError", "%s.__bytes__() must return a bytes, not %s", type_fqname(a, fq, sizeof(fq)), type_name(result)); }
             spy_release(result); return NULL;
         }
@@ -23305,6 +23309,25 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
     SPYValue *result = c->error_type[0] ? NULL : spy_bytes(c, out.data ? out.data : "", out.len);
     mem_free(out.data); spy_release(iterator); return result;
 }
+/* bytes(n) and bytearray(n) make n zero bytes; when n's __index__ raises
+ * TypeError the source goes on to the buffer and iterable forms. */
+static SPYValue *sized_bytes(SPYContext *c, SPYValue *a, const char *target) {
+    if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) {
+        int64_t len;
+        if (!index_size(c, a, &len)) {
+            if (len < 0) return spy_error(c, "ValueError", "negative count");
+            if ((uint64_t)len >= SIZE_MAX) return spy_error(c, "OverflowError", "byte string too large");
+            SPYValue *result = value_new(c, SPY_BYTES);
+            if (!result) return NULL;
+            result->as.string.data = allocate(c, (size_t)len + 1); result->as.string.len = (size_t)len;
+            if (!result->as.string.data) { spy_release(result); return NULL; }
+            return result;
+        }
+        if (!error_is(c, "TypeError")) return NULL;
+        spy_clear_error(c);
+    }
+    return bytes_from_object(c, a, target);
+}
 static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     (void)data;
     static const char *const names[] = {"bytes", "byteorder", "signed"};
@@ -23317,7 +23340,7 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     if (!source) {
         owned = bytes_from_object(c, args[0], "bytes");
         if (!owned) return NULL;
-        source = owned;
+        source = builtin_value(c, owned, SPY_BYTES);
     }
     size_t len = source->as.string.len;
     BigInt *big = integer_alloc(c, len / 4 + 1);
@@ -25011,9 +25034,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc > 3) goto arity;
         if (argc > 1 && codec_argument_types(c, "bytearray", argv[1], argc > 2 ? argv[2] : NULL)) return NULL;
         if (argc == 1 && builtin_value(c, a, SPY_STRING)) return spy_error(c, "TypeError", "string argument without an encoding");
-        SPYValue *bytes = !argc ? spy_bytes(c, "", 0) :
-            argc == 1 && !is_int(a) && !(a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))
-            ? bytes_from_object(c, a, "bytearray") : builtin(c, argc, argv, (void *)(intptr_t)B_BYTES);
+        SPYValue *bytes = !argc ? spy_bytes(c, "", 0) : argc == 1 ? sized_bytes(c, a, "bytearray") : builtin(c, argc, argv, (void *)(intptr_t)B_BYTES);
         SPYValue *array = bytes ? bytearray_new(c, bytes->as.string.data, bytes->as.string.len) : NULL;
         spy_release(bytes);
         return array;
@@ -25028,18 +25049,9 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         /* A str is encoded only with an encoding, unless its class defines __bytes__. */
         if (text && (text == a || !class_lookup(a->as.map.parent, "__bytes__"))) return spy_error(c, "TypeError", "string argument without an encoding");
-        if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) {
-            int64_t len;
-            if (index_size(c, a, &len)) return NULL;
-            if (len < 0) return spy_error(c, "ValueError", "negative count");
-            if ((uint64_t)len >= SIZE_MAX) return spy_error(c, "OverflowError", "byte string too large");
-            SPYValue *result = value_new(c, SPY_BYTES);
-            if (!result) return NULL;
-            result->as.string.data = allocate(c, (size_t)len + 1); result->as.string.len = (size_t)len;
-            if (!result->as.string.data) { spy_release(result); return NULL; }
-            return result;
-        }
-        return bytes_from_object(c, a, "bytes");
+        /* __bytes__, which bytes subclasses inherit, comes before __index__. */
+        if (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__bytes__")) return bytes_from_object(c, a, "bytes");
+        return sized_bytes(c, a, "bytes");
     }
     case B_BIN: case B_OCT: case B_HEX: {
         if (argc != 1) goto arity;
@@ -25402,8 +25414,8 @@ execution_fail:
             v->as.iterator.index = (size_t)n;
             return v;
         } else {
-            if (a->type != SPY_LIST && a->type != SPY_TUPLE && a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_RANGE &&
-                !is_dict(a) && !is_view(a))
+            if (a->type != SPY_LIST && a->type != SPY_TUPLE && a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY &&
+                a->type != SPY_RANGE && !is_dict(a) && !is_view(a))
                 return errorf(c, "TypeError", "'%s' object is not reversible", type_name(a));
             source = spy_retain(a);
         }
@@ -25418,7 +25430,7 @@ execution_fail:
             v->as.iterator.index = v->as.iterator.size = map->as.map.len;
             v->as.iterator.removed = map->as.map.removed;
         } else if (id == B_REVERSED) v->as.iterator.index =
-            (a->type == SPY_STRING || a->type == SPY_BYTES) ? string_length(a) : a->as.seq.len;
+            (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) ? string_length(a) : a->as.seq.len;
         return v;
     }
     case B_DIR: {
@@ -26444,6 +26456,10 @@ static SPYValue *type_new(SPYContext *c, size_t argc, SPYValue *const *argv, SPY
     SPYValue *base = type == SPY_BYTEARRAY ? bytearray_new(c, "", 0) : mutable_layout(type) ? value_new(c, type) :
         builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!base || cls == owner) return base;
+    if (base->type == SPY_INSTANCE) { /* a __bytes__ result of a bytes subclass */
+        SPYValue *value = spy_retain(builtin_value(c, base, type));
+        spy_release(base); base = value;
+    }
     SPYValue *instance = new_instance(c, cls);
     if (instance) instance->as.map.base = base;
     else spy_release(base);
@@ -27120,6 +27136,12 @@ static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, 
     spy_release(result);
     return instance;
 }
+/* bytes.__bytes__: the plain value. */
+static SPYValue *bytes_dunder(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *self = method_self(c, argc, argv, SPY_BYTES, "__bytes__");
+    return !self || no_arguments(c, SPY_BYTES, "__bytes__", argc - 1, keywords) ? NULL : spy_retain(self);
+}
 /* __getnewargs__ of immutable builtin values: the plain value, as a tuple. */
 static SPYValue *getnewargs(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
@@ -27256,6 +27278,7 @@ static int register_core_methods(SPYContext *c) {
     static const int newargs[] = {SPY_INT, SPY_FLOAT, SPY_COMPLEX, SPY_STRING, SPY_BYTES, SPY_TUPLE};
     for (size_t i = 0; i < sizeof(newargs) / sizeof(*newargs); i++)
         if (register_method(c, newargs[i], "__getnewargs__", getnewargs, newargs[i], METHOD_INSTANCE)) return -1;
+    if (register_method(c, SPY_BYTES, "__bytes__", bytes_dunder, 0, METHOD_INSTANCE)) return -1;
     static const char *const generic[] = {"enumerate", "slice", "memoryview"};
     for (size_t i = 0; i < 3; i++) {
         SPYValue *cls = name_local(c->builtins, generic[i]);
