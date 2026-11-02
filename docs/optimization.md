@@ -186,6 +186,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A machine step keeps its place in a local](#a-machine-step-keeps-its-place-in-a-local) | -1.2% (generators); M2: generators -2.7% |
 | [A machine jump reads a bool's truth](#a-machine-jump-reads-a-bools-truth) | -1.5% (generators); M2: generators -3.4% |
 | [A negated number is a constant](#a-negated-number-is-a-constant) | `while` testing `i == -1`: -22%; M2: -27%; programs within 0.6% |
+| [A float power from a positive base skips the dispatch](#a-float-power-from-a-positive-base-skips-the-dispatch) | -3.4% (nbody); M2: nbody -3.1% |
 
 ### Releasing a number or string frees it at once
 
@@ -1361,6 +1362,17 @@ function looping 300,000 times over `if i == -1:` took 22% fewer
 instructions and 27% less time on the M2. The bench programs use negative
 numbers only while setting up, so their instructions are unchanged; their
 wall time averaged over eight code layouts is within 0.6%.
+
+### A float power from a positive base skips the dispatch
+
+`d2 ** 0.5` in nbody went through `binary`, about 400 instructions with
+`pow` itself, because the number fast path left powers out: a negative
+base may need a complex result and a zero base may divide by zero. A
+positive finite base with a finite exponent has neither case; its power
+is `pow`, and an infinite result is an overflow. The fast path now takes
+that case and leaves an overflow, and every other power, to `binary`.
+Instructions: nbody -3.4% (GCC -3.3%), the rest unchanged. Wall time
+averaged over eight code layouts: nbody -3.1%, the rest within 0.7%.
 
 ### A profile-guided build
 

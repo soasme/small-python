@@ -9677,11 +9677,16 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
  * general dispatch; NULL when that must decide, or after an allocation
  * failed. With owned, the caller owns a and b, and a float result takes
  * the place of one nothing else holds, as CPython's float operations
- * reuse a dying operand. */
+ * reuse a dying operand. A float power is taken here only from a positive
+ * finite base, which has no complex or zero-division case, and when it
+ * does not overflow. */
 static ALWAYS_INLINE SPYValue *number_fast(SPYContext *c, int op, SPYValue *a, SPYValue *b, int owned) {
     if (a->type == SPY_FLOAT && b->type == SPY_FLOAT) {
-        if (!(op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real))) return NULL;
-        double x = a->as.real, y = b->as.real, result = op == '+' ? x + y : op == '-' ? x - y : op == '*' ? x * y : x / y;
+        double x = a->as.real, y = b->as.real, result;
+        if (op == T_POW) {
+            if (!(x > 0 && isfinite(x) && isfinite(y)) || isinf(result = pow(x, y))) return NULL;
+        } else if (!(op == '+' || op == '-' || op == '*' || (op == '/' && y))) return NULL;
+        else result = op == '+' ? x + y : op == '-' ? x - y : op == '*' ? x * y : x / y;
         SPYValue *spare = !owned ? NULL : a->refs == 1 ? a : b->refs == 1 ? b : NULL;
         if (!spare) return float_value(c, result);
         spare->as.real = result;
