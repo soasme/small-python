@@ -12030,9 +12030,51 @@ static SPYValue *string_format(SPYContext *c, SPYValue *self, size_t argc, SPYVa
 }
 /* Byte search is shared by text and bytes. UTF-8 substring matches preserve
  * code-point boundaries; convert offsets only at the Python-facing boundary. */
+/* Byte i of s, counted from its end when reverse. */
+static inline unsigned char byte_at(const char *s, size_t length, ptrdiff_t i, int reverse) {
+    return (unsigned char)s[reverse ? (ptrdiff_t)length - 1 - i : i];
+}
+/* The maximal suffix of needle under the byte order (inverted when invert)
+ * and its period, as the two-way algorithm factors the needle. */
+static ptrdiff_t maximal_suffix(const char *x, ptrdiff_t m, int reverse, int invert, ptrdiff_t *period) {
+    ptrdiff_t ms = -1, j = 0, k = 1, p = 1;
+    while (j + k < m) {
+        unsigned char a = byte_at(x, (size_t)m, j + k, reverse), b = byte_at(x, (size_t)m, ms + k, reverse);
+        if (invert ? a > b : a < b) { j += k; k = 1; p = j - ms; }
+        else if (a == b) { if (k != p) k++; else { j += p; k = 1; } }
+        else { ms = j++; k = p = 1; }
+    }
+    *period = p;
+    return ms;
+}
+/* Crochemore and Perrin's two-way search: linear time, constant space. With
+ * reverse it searches the reversed text for the reversed needle. */
+static size_t two_way(const char *y, size_t length, const char *x, size_t size, int reverse) {
+    ptrdiff_t n = (ptrdiff_t)length, m = (ptrdiff_t)size, p, q, i, j = 0;
+    ptrdiff_t u = maximal_suffix(x, m, reverse, 0, &p), v = maximal_suffix(x, m, reverse, 1, &q);
+    ptrdiff_t ell = u > v ? u : v, per = u > v ? p : q, memory = -1;
+#define X(k) byte_at(x, size, k, reverse)
+#define Y(k) byte_at(y, length, k, reverse)
+    for (i = 0; i <= ell && X(i) == X(i + per); i++) {}
+    int periodic = i > ell;
+    if (!periodic) per = (ell + 1 > m - ell - 1 ? ell + 1 : m - ell - 1) + 1;
+    while (j <= n - m) {
+        for (i = (ell > memory ? ell : memory) + 1; i < m && X(i) == Y(i + j); i++) {}
+        if (i < m) { j += i - ell; memory = -1; continue; }
+        for (i = ell; i > memory && X(i) == Y(i + j); i--) {}
+        if (i <= memory) return reverse ? length - (size_t)j - size : (size_t)j;
+        j += per;
+        if (periodic) memory = m - per - 1;
+    }
+#undef X
+#undef Y
+    return SIZE_MAX;
+}
 /* Where needle first (or last) occurs in text, or SIZE_MAX. The search
  * spends a step per 64 bytes it passes and per 64 bytes compared at a
- * candidate position; once stopped it finds nothing. */
+ * candidate position; once stopped it finds nothing. Horspool's shifts skip
+ * through typical text; when candidates have cost more than the text passed,
+ * the two-way search finishes in linear time. */
 static size_t search_bytes(SPYContext *c, const char *text, size_t length, const char *needle, size_t size, int reverse) {
     if (size > length) return SIZE_MAX;
     if (!size) return reverse ? length : 0;
@@ -12044,13 +12086,16 @@ static size_t search_bytes(SPYContext *c, const char *text, size_t length, const
         for (size_t i = length; i; i--) if (text[i - 1] == *needle) return i - 1;
         return SIZE_MAX;
     }
-    size_t shift[256], unit = size / 64;
+    size_t shift[256], unit = size / 64, cost = 0;
     for (size_t i = 0; i < 256; i++) shift[i] = size;
     if (reverse) {
         for (size_t i = size - 1; i; i--) shift[(unsigned char)needle[i]] = i;
         size_t position = length - size;
         for (;;) {
-            if (text[position] == *needle && (unit && spend(c, unit) ? 1 : !memcmp(text + position, needle, size))) return position;
+            if (text[position] == *needle) {
+                if (unit && spend(c, unit) ? 1 : !memcmp(text + position, needle, size)) return position;
+                if ((cost += size) > length - position + 4 * size) return two_way(text, position + size - 1, needle, size, 1);
+            }
             size_t step = shift[(unsigned char)text[position]];
             if (step > position) break;
             position -= step;
@@ -12059,7 +12104,13 @@ static size_t search_bytes(SPYContext *c, const char *text, size_t length, const
         for (size_t i = 0; i + 1 < size; i++) shift[(unsigned char)needle[i]] = size - i - 1;
         size_t position = 0;
         while (position <= length - size) {
-            if (text[position + size - 1] == needle[size - 1] && (unit && spend(c, unit) ? 1 : !memcmp(text + position, needle, size))) return position;
+            if (text[position + size - 1] == needle[size - 1]) {
+                if (unit && spend(c, unit) ? 1 : !memcmp(text + position, needle, size)) return position;
+                if ((cost += size) > position + 4 * size) {
+                    size_t found = two_way(text + position + 1, length - position - 1, needle, size, 0);
+                    return found == SIZE_MAX ? found : position + 1 + found;
+                }
+            }
             size_t step = shift[(unsigned char)text[position + size - 1]];
             if (step > length - size - position) break;
             position += step;
