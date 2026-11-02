@@ -22560,6 +22560,11 @@ static SPYValue *text_partition(SPYContext *c, size_t argc, SPYValue *const *arg
         if (list_add_units(c, tuple, type, reverse ? NULL : text.items, reverse ? 0 : text.len) ||
             list_add_units(c, tuple, type, NULL, 0) ||
             list_add_units(c, tuple, type, reverse ? text.items : NULL, reverse ? text.len : 0)) { spy_release(tuple); tuple = NULL; }
+        else if (type != SPY_BYTEARRAY) {
+            /* An immutable text without the separator is itself the whole part. */
+            SPYValue **whole = &tuple->as.seq.items[reverse ? 2 : 0];
+            spy_release(*whole); *whole = spy_retain(argv[0]);
+        }
     } else if (list_add_units(c, tuple, type, text.items, found) || list_add_units(c, tuple, type, sep.items, sep.len) ||
                list_add_units(c, tuple, type, text.items + found + sep.len, text.len - found - sep.len)) {
         spy_release(tuple); tuple = NULL;
@@ -22674,14 +22679,61 @@ static unsigned latin9_encode(unsigned code) {
         if (code == latin9_codes[i]) return latin9_bytes[i];
     return code < 256 && latin9_decode(code) == code ? code : 256;
 }
-enum { ERRORS_STRICT, ERRORS_IGNORE, ERRORS_REPLACE, ERRORS_BACKSLASH, ERRORS_XMLCHARREF, ERRORS_SURROGATEESCAPE, ERRORS_SURROGATEPASS, ERRORS_UNKNOWN };
+/* The name of a code point, as unicode_lookup reads it, into name (at least
+ * 128 bytes); 0 for a code point without one. The records list a name
+ * before its aliases, and only the controls have aliases alone. */
+static NO_INLINE int unicode_name(unsigned code, char *name) {
+    if (code < 0x20 || (code >= 0x7f && code < 0xa0)) return 0;
+    if (code >= 0xac00 && code <= 0xd7a3) {
+        unsigned s = code - 0xac00;
+        sprintf(name, "%s%s%s%s", unicode_derived_prefixes[0], hangul_syllables[s / 588][0],
+                hangul_syllables[s / 28 % 21][1], hangul_syllables[s % 28][2]);
+        return 1;
+    }
+    for (size_t i = 0; i < sizeof(unicode_derived_names) / sizeof(*unicode_derived_names); i++)
+        if (code >= unicode_derived_names[i][0] && code <= unicode_derived_names[i][1]) {
+            sprintf(name, "%s%04X", unicode_derived_prefixes[unicode_derived_names[i][2]], code);
+            return 1;
+        }
+    int words[15];
+    size_t count = 0;
+    unsigned current = 0;
+    for (size_t at = 0; at < sizeof(unicode_names) && current <= code;) {
+        unsigned delta = 0;
+        for (unsigned shift = 0; ; shift += 7) {
+            unsigned char byte = unicode_names[at++];
+            delta |= (unsigned)(byte & 127) << shift;
+            if (!(byte & 128)) break;
+        }
+        current += delta;
+        count = unicode_names[at] >> 4;
+        for (size_t added = unicode_names[at++] & 15; added; added--) {
+            int id = unicode_names[at++];
+            if (id >= 128) id = (id & 127) << 8 | unicode_names[at++];
+            words[count++] = id;
+        }
+        /* A record at the same code point (no delta) is an alias. */
+        if (current != code || !delta) continue;
+        char *out = name;
+        for (size_t w = 0; w < count; w++) {
+            const uint8_t *word = unicode_name_words;
+            for (int skip = words[w]; skip; skip--) word += 1 + *word;
+            if (w) *out++ = ' ';
+            memcpy(out, word + 1, *word); out += *word;
+        }
+        *out = 0;
+        return 1;
+    }
+    return 0;
+}
+enum { ERRORS_STRICT, ERRORS_IGNORE, ERRORS_REPLACE, ERRORS_BACKSLASH, ERRORS_XMLCHARREF, ERRORS_NAMEREPLACE, ERRORS_SURROGATEESCAPE, ERRORS_SURROGATEPASS, ERRORS_UNKNOWN };
 static int errors_lookup(SPYContext *c, SPYValue *errors, int *handler) {
-    static const char *const names[] = {"strict", "ignore", "replace", "backslashreplace", "xmlcharrefreplace", "surrogateescape", "surrogatepass"};
+    static const char *const names[] = {"strict", "ignore", "replace", "backslashreplace", "xmlcharrefreplace", "namereplace", "surrogateescape", "surrogatepass"};
     *handler = ERRORS_STRICT;
     if (!errors) return 0;
     SPYValue *text = builtin_value(c, errors, SPY_STRING);
     if (!text) { errorf(c, "TypeError", "errors must be str, not %s", type_name(errors)); return -1; }
-    for (int i = 0; i < 7; i++) if (!strcmp(text->as.string.data, names[i])) { *handler = i; return 0; }
+    for (int i = 0; i < ERRORS_UNKNOWN; i++) if (!strcmp(text->as.string.data, names[i])) { *handler = i; return 0; }
     /* The name is looked up only when an error occurs (23.3.2). */
     *handler = ERRORS_UNKNOWN;
     return 0;
@@ -22714,6 +22766,10 @@ static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, 
             unicode_escape(&out, code);
         } else if (handler == ERRORS_XMLCHARREF) {
             char text[16]; int len = snprintf(text, sizeof(text), "&#%u;", code); append(&out, text, (size_t)len);
+        } else if (handler == ERRORS_NAMEREPLACE) {
+            char name[128];
+            if (!unicode_name(code, name)) unicode_escape(&out, code);
+            else { append(&out, "\\N{", 3); append(&out, name, strlen(name)); append(&out, "}", 1); }
         } else if (handler == ERRORS_UNKNOWN) {
             unknown_handler(c, errors);
         } else {
@@ -22786,7 +22842,7 @@ static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYVa
             for (size_t j = 0; j < bad; j++) if (text[i + j] >= 128) append_codepoint(&out, 0xdc00 + text[i + j]);
         } else if (handler == ERRORS_UNKNOWN) {
             unknown_handler(c, errors);
-        } else if (handler == ERRORS_XMLCHARREF) {
+        } else if (handler == ERRORS_XMLCHARREF || handler == ERRORS_NAMEREPLACE) {
             spy_error(c, "TypeError", "don't know how to handle UnicodeDecodeError in error callback");
         } else {
             SPYValue *object = spy_bytes(c, data, len);
@@ -26025,7 +26081,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             SPYValue *args[3];
             size_t count = id == B_SUM ? 2 : 3;
             if (parse_arguments(c, function, argc, argv, keywords, names, count, id == B_SUM, id == B_SUM, args)) return NULL;
-            if (id != B_SUM && !args[0]) args[0] = id == B_STR ? spy_string(c, "", 0) : spy_bytes(c, "", 0);
+            /* str() without an object is empty, whatever the codec arguments name. */
+            if (id == B_STR && !args[0]) return codec_argument_types(c, "str", args[1], args[2]) ? NULL : spy_string(c, "", 0);
+            if (id != B_SUM && !args[0]) args[0] = spy_bytes(c, "", 0);
             else if (args[0]) spy_retain(args[0]);
             if (!args[0]) return NULL;
             size_t used = count;
@@ -26421,6 +26479,14 @@ static int slot_index(const char *name) {
     return -1;
 }
 /* Whether a builtin operation of the owner type handles this operand. */
+/* str, bytes and bytearray __mod__ format with self as the template, and
+ * __rmod__ (reflected) formats a template of self's type with self as the
+ * values; formatting errors propagate. */
+static NO_INLINE SPYValue *text_mod_slot(SPYContext *c, int reflected, int type, SPYValue *value, SPYValue *self, SPYValue *other) {
+    if (!reflected) return percent_format(c, value, other);
+    SPYValue *format = builtin_value(c, other, type);
+    return format ? percent_format(c, format, self) : spy_retain(c->not_implemented);
+}
 static int slot_accepts(SPYContext *c, int type, SPYValue *other) {
     if (other->type == SPY_INSTANCE && !other->as.map.base) return 0;
     if (type == SPY_INT) return builtin_value(c, other, SPY_INT) != NULL;
@@ -26499,6 +26565,8 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     }
     switch (kind) {
     case SLOT_BINARY: case SLOT_RBINARY:
+        if (op == '%' && (type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY))
+            return text_mod_slot(c, kind == SLOT_RBINARY, type, value, self, argv[0]);
         if (!slot_accepts(c, type, argv[0])) return spy_retain(c->not_implemented);
         if (op == '|' && (type == SPY_DICT || type == SPY_FROZENDICT))
             return dict_union(c, kind == SLOT_BINARY ? self : argv[0], kind == SLOT_BINARY ? argv[0] : self);

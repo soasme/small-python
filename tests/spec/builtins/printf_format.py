@@ -1,4 +1,4 @@
-# spec: PLS-315 23.6
+# spec: PLS-315 23.6, 23.1.8, 24.3
 # description: printf-style formatting with str.__mod__.
 from harness import *
 
@@ -62,3 +62,20 @@ assert_eq(str(assert_raises(OverflowError, lambda: "%*d" % (2**63, 1))), "format
 assert_eq(str(assert_raises(OverflowError, lambda: "%.*d" % (2**63, 1))), "format argument 1: too big for precision")
 assert_eq(str(assert_raises(ValueError, lambda: "%99999999999999999999d" % 1)), "width too big at position 0")
 assert_eq(str(assert_raises(ValueError, lambda: "%.99999999999999999999d" % 1)), "precision too big at position 0")
+
+# str.__mod__ formats whatever the values are, so its errors propagate;
+# __rmod__ formats a template of its own type and declines anything else.
+assert_raises(TypeError, "x".__mod__, 1, message="not all arguments converted during string formatting (required 0, got 1)")
+assert_eq("%s".__mod__(None), "None")
+assert_eq("x".__rmod__("<%s>"), "<x>")
+assert_raises(TypeError, "x".__rmod__, "y", message="not all arguments converted during string formatting (required 0, got 1)")
+assert_is("x".__rmod__(1), NotImplemented)
+assert_is("x".__rmod__(b"%s"), NotImplemented)
+assert_eq(b"x".__rmod__(b"<%s>"), b"<x>")
+assert_is(b"x".__rmod__(bytearray(b"%s")), NotImplemented)
+assert_eq(bytearray(b"%d").__mod__(5), bytearray(b"5"))
+class Rmod(str):
+    def __rmod__(self, other):
+        return "reflected"
+assert_eq("%s" % Rmod("v"), "reflected")
+assert_eq("%s".__mod__(Rmod("v")), "v")
