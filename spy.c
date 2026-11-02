@@ -327,9 +327,10 @@ struct SPYContext {
     SPYReadLine read_line;
     void *read_data;
     char error_message[256], filename[256];
+    char *error_text; /* The whole message when error_message cuts it short, owned. */
     SPYValue *filename_from; /* The unit whose filename tick last copied into filename, or NULL; borrowed. */
     /* A pending AttributeError's name and object, attached when it is materialized. */
-    char error_name[256];
+    char *error_name; /* Owned. */
     SPYValue *error_object;
     char *error_display; /* spy_error_display's result, owned. */
     size_t line;
@@ -431,21 +432,42 @@ static SPYValue *active_exception(SPYContext *c) {
     return c->handled ? c->handled : c->inherited_exception;
 }
 
+static void *mem_malloc(SPYContext *, size_t);
+static NO_INLINE void mem_free(void *);
 static SPYValue *errorf(SPYContext *c, const char *type, const char *fmt, ...) {
     if (!c->error_type[0]) {
         va_list ap;
         spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
         snprintf(c->error_type, sizeof(c->error_type), "%s", type);
         va_start(ap, fmt);
-        vsnprintf(c->error_message, sizeof(c->error_message), fmt, ap);
+        int len = vsnprintf(c->error_message, sizeof(c->error_message), fmt, ap);
         va_end(ap);
+        if (c->error_text) { mem_free(c->error_text); c->error_text = NULL; }
+        if (len >= (int)sizeof(c->error_message) && (c->error_text = mem_malloc(c, (size_t)len + 1))) {
+            va_start(ap, fmt);
+            vsnprintf(c->error_text, (size_t)len + 1, fmt, ap);
+            va_end(ap);
+        }
     }
     return NULL;
 }
+/* Record the name attribute of the pending AttributeError, NameError or ImportError. */
+static void error_name_set(SPYContext *c, const char *name, size_t len) {
+    mem_free(c->error_name);
+    if ((c->error_name = mem_malloc(c, len + 1))) { memcpy(c->error_name, name, len); c->error_name[len] = 0; }
+}
+/* How much of text CPython's "%.<limit>s" shows: at most limit bytes, less
+ * a character they cut. */
+static NO_INLINE int shown(const char *text, size_t limit) {
+    size_t len = strlen(text);
+    if (len > limit) for (len = limit; (text[len] & 0xC0) == 0x80; len--) {}
+    return (int)len;
+}
 /* A NameError that records the missing name for its name attribute. */
-static SPYValue *name_error(SPYContext *c, const char *name, const char *format) {
-    errorf(c, "NameError", format, name);
-    if (strlen(name) < sizeof(c->error_name)) memcpy(c->error_name, name, strlen(name) + 1);
+static SPYValue *name_error(SPYContext *c, const char *name, int free) {
+    if (free) errorf(c, "NameError", "cannot access free variable '%s' where it is not associated with a value in enclosing scope", name);
+    else errorf(c, "NameError", "name '%.*s' is not defined", shown(name, 200), name);
+    error_name_set(c, name, strlen(name));
     return NULL;
 }
 /* As CPython's _Py_CheckRecursiveCall, bound native recursion by the stack
@@ -643,7 +665,9 @@ void spy_clear_error(SPYContext *c) {
     spy_release(c->exception); c->exception = NULL;
     spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
     spy_release(c->error_object); c->error_object = NULL;
-    c->error_type[0] = c->error_message[0] = c->filename[0] = c->error_name[0] = 0; c->filename_from = c->quiet_unit = NULL;
+    if (c->error_text) { mem_free(c->error_text); c->error_text = NULL; }
+    if (c->error_name) { mem_free(c->error_name); c->error_name = NULL; }
+    c->error_type[0] = c->error_message[0] = c->filename[0] = 0; c->filename_from = c->quiet_unit = NULL;
     c->line = 0;
 }
 enum { POOL = 16384, SPARES = 64 };
@@ -2657,7 +2681,7 @@ static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
                  * function (PEP 709), so its locals are theirs too. */
                 SPYValue *inner = env;
                 while (inner != e && inlined_comprehension(inner)) inner = inner->as.map.parent;
-                if (inner != e) return name_error(c, text, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
+                if (inner != e) return name_error(c, text, 1);
                 return errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", text);
             }
             /* Global and class namespaces resolve lazy imports; function locals do not. */
@@ -2667,7 +2691,7 @@ static SPYValue *name_find(SPYContext *c, SPYValue *env, Name name) {
             return v;
         }
     }
-    return name_error(c, text, "name '%s' is not defined");
+    return name_error(c, text, 0);
 }
 static SPYValue *name_get(SPYContext *c, SPYValue *env, const char *text) { return name_find(c, env, name_of(text)); }
 /* What the full lookup of name node n does at env, a plain function or
@@ -9314,6 +9338,14 @@ static const char *binary_symbol(int op) {
     while (names[i].op != op) i++;
     return names[i].text;
 }
+/* TypeError "unsupported operand type(s) for <op>: 'A' and 'B'", or 'A', 'B', 'C'
+ * with pow's modulus z, each type name cut to 100 bytes. */
+static NO_INLINE SPYValue *operand_error(SPYContext *c, const char *op, SPYValue *a, SPYValue *b, SPYValue *z) {
+    const char *x = type_name(a), *y = type_name(b);
+    if (z) return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%.*s', '%.*s', '%.*s'", op,
+                         shown(x, 100), x, shown(y, 100), y, shown(type_name(z), 100), type_name(z));
+    return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%.*s' and '%.*s'", op, shown(x, 100), x, shown(y, 100), y);
+}
 static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     SPYValue *left = a, *right = b;
     if (is_set(a) && is_set(b) && (op == '|' || op == '&' || op == '-' || op == '^')) return set_binary(c, op, a, b);
@@ -9391,8 +9423,8 @@ static SPYValue *sequence_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b
     if (op == '+' && (a->type == SPY_STRING || a->type == SPY_LIST || a->type == SPY_TUPLE))
         return errorf(c, "TypeError", "can only concatenate %s (not \"%s\") to %s", type_name(a), type_name(b), type_name(a));
     if (op == '+' && (a->type == SPY_BYTES || a->type == SPY_BYTEARRAY))
-        return errorf(c, "TypeError", "can't concat %s to %s", type_name(b), type_name(a));
-    return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(left), type_name(right));
+        return errorf(c, "TypeError", "can't concat %.*s to %.*s", shown(type_name(b), 100), type_name(b), shown(type_name(a), 100), type_name(a));
+    return operand_error(c, symbol, left, right, NULL);
 }
 static double complex numeric_complex(SPYContext *c, SPYValue *value) {
     if (value->type == SPY_COMPLEX) return value->as.number;
@@ -9557,7 +9589,7 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         int inexact = has_complex || a->type == SPY_FLOAT || b->type == SPY_FLOAT;
         int bitwise = op == T_LSHIFT || op == T_RSHIFT || op == '&' || op == '|' || op == '^';
         if (op == '@' || (inexact && bitwise) || (has_complex && (op == T_FLOORDIV || op == '%')))
-            return errorf(c, "TypeError", "unsupported operand type(s) for %s: '%s' and '%s'", binary_symbol(op), type_name(a), type_name(b));
+            return operand_error(c, binary_symbol(op), a, b, NULL);
     }
     if (a->type == SPY_COMPLEX || b->type == SPY_COMPLEX) return complex_binary(c, op, a, b);
     if (a->type == SPY_BOOL && b->type == SPY_BOOL && (op == '&' || op == '|' || op == '^')) {
@@ -10127,7 +10159,7 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (d->as.member.flags & DESC_VALUE) {
         if (!strcmp(name, "__class__")) return spy_retain(value_class(c, object));
         SPYValue *base = object->type == SPY_INSTANCE ? object->as.map.base : object;
-        if (!base) return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(object), name);
+        if (!base) return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(object), 100), type_name(object), name);
         return attribute_value(c, base, name);
     }
     if (d->as.member.flags & DESC_GENERIC) {
@@ -10908,7 +10940,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             if (!descriptor && owner && !strcmp(name, "__module__"))
                 return v->as.native.static_method ? spy_retain(name_local(owner, "__module__")) : spy_none(c);
             if (descriptor || owner)
-                return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
+                return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
         }
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__self__")) return spy_retain(v->as.bound.self);
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__module__")) return spy_none(c);
@@ -10967,7 +10999,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
          * method-wrapper has neither. */
         if (v->as.method.function->type == SPY_NATIVE && !v->as.method.plain && (!strcmp(name, "__func__") || !strcmp(name, "__module__"))) {
             if (!strcmp(name, "__module__") && native_kind(v) == NATIVE_BOUND) return spy_none(c);
-            return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
+            return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
         }
         if (!strcmp(name, "__func__")) return spy_retain(v->as.method.function);
         if (!strcmp(name, "__call__")) return descriptor_get(c, builtin_descriptor(c, c->types[SPY_METHOD], name), v, c->types[SPY_METHOD]);
@@ -11075,8 +11107,8 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             value = class_lookup(c->types[SPY_CLASS], name);
             if (value) return descriptor_get(c, value, v, c->types[SPY_CLASS]);
         }
-        if (v->type == SPY_CLASS) return errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", class_tname(v), name);
-        return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
+        if (v->type == SPY_CLASS) return errorf(c, "AttributeError", "type object '%.*s' has no attribute '%s'", shown(class_tname(v), 100), class_tname(v), name);
+        return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
     }
     if (v->type == SPY_MODULE) {
         if (!strcmp(name, "__dict__")) return spy_retain(namespace_map(v));
@@ -11187,7 +11219,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!definition && !c->error_type[0]) definition = builtin_descriptor_lookup(c, cls, name);
         if (definition) return descriptor_get(c, definition, v, cls);
         if (c->error_type[0]) return NULL;
-        return errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(v), name);
+        return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
     }
     return bound_method(c, v, method, name);
 }
@@ -11197,9 +11229,9 @@ static SPYValue *attribute_lookup(SPYContext *, SPYValue *, const char *);
 static SPYValue *attribute_failed(SPYContext *c, SPYValue *v, const char *name) {
     if (!error_is(c, "AttributeError")) return NULL;
     if (c->exception) attribute_details(c, c->exception, v, name);
-    else if (!c->error_object && strlen(name) < sizeof(c->error_name)) {
+    else if (!c->error_object) {
         c->error_object = spy_retain(v);
-        memcpy(c->error_name, name, strlen(name) + 1);
+        error_name_set(c, name, strlen(name));
     }
     return NULL;
 }
@@ -12740,7 +12772,7 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name,
      * the rest only read through to __func__. */
     if (object->type == SPY_METHOD && strcmp(name, "__func__") && strcmp(name, "__self__")) {
         if (!strcmp(name, "__doc__")) errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object));
-        else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+        else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s' and no __dict__ for setting new attributes", shown(type_name(object), 100), type_name(object), name);
         return -1;
     }
     /* Every type's namespace has a __doc__. */
@@ -12752,7 +12784,7 @@ static int readonly_attribute(SPYContext *c, SPYValue *object, const char *name,
     if (!existing) {
         spy_clear_error(c);
         memcpy(c->filename, filename, sizeof(filename)); c->line = line; c->filename_from = c->quiet_unit = NULL;
-        errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+        errorf(c, "AttributeError", "'%.*s' object has no attribute '%s' and no __dict__ for setting new attributes", shown(type_name(object), 100), type_name(object), name);
     } else if (existing->type == SPY_BOUND_METHOD || existing->type == SPY_NATIVE || existing->type == SPY_METHOD)
         errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
     else errorf(c, "AttributeError", "attribute '%s' of '%s' objects is not writable", name, type_name(object));
@@ -13037,7 +13069,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         /* __class__ is object's to assign, dictionary or not. */
         if (!instance_has_dict(object) && strcmp(name, "__class__")) {
             if ((descriptor || !strcmp(name, "__doc__")) && !c->error_type[0]) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
-            else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+            else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s' and no __dict__ for setting new attributes", shown(type_name(object), 100), type_name(object), name);
             return -1;
         }
         if (!descriptor && !strcmp(name, "__dict__")) {
@@ -14973,9 +15005,12 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         if (end_zero) end_offset = 0;
         if (zero_based) offset--;
     }
+    char *whole = c->error_text;
+    c->error_text = NULL;
     spy_clear_error(c);
     SPYValue *details = value_new(c, SPY_TUPLE);
-    SPYValue *msg = spy_string(c, message, strlen(message));
+    SPYValue *msg = whole ? spy_string(c, whole, strlen(whole)) : spy_string(c, message, strlen(message));
+    mem_free(whole);
     /* The line's text, decoded with replacement characters. */
     Buffer text = {.ctx = c};
     for (const char *ch = start; ch < end;) {
@@ -15825,7 +15860,7 @@ static SPYValue *import_module(SPYContext *, const char *);
 static SPYValue *cached_module(SPYContext *c, const char *name, SPYValue *cached) {
     if (cached->type != SPY_NONE) return spy_retain(cached);
     errorf(c, "ModuleNotFoundError", "import of %s halted; None in sys.modules", name);
-    if (strlen(name) < sizeof(c->error_name)) memcpy(c->error_name, name, strlen(name) + 1);
+    error_name_set(c, name, strlen(name));
     return NULL;
 }
 static SPYValue *load_source_module(SPYContext *c, const char *name) {
@@ -15876,7 +15911,7 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
             spy_release(parent);
             if (c->error_type[0]) return NULL;
             errorf(c, "ModuleNotFoundError", "No module named '%s'", name);
-            if (strlen(name) < sizeof(c->error_name)) memcpy(c->error_name, name, strlen(name) + 1);
+            error_name_set(c, name, strlen(name));
             return NULL;
         }
         for (const char *ch = name; *ch && !c->error_type[0]; ch++) {
@@ -16133,7 +16168,7 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
         if (!lazy_name(&name, lazy)) {
             errorf(c, "ImportCycleError", "cannot import name '%s' (most likely due to a circular import)", name.data);
             SPYValue *module = root->as.lazy.from;
-            if (module->as.string.len < sizeof(c->error_name)) memcpy(c->error_name, module->as.string.data, module->as.string.len + 1);
+            error_name_set(c, module->as.string.data, module->as.string.len);
         }
         mem_free(name.data); return NULL;
     }
@@ -16541,11 +16576,11 @@ static SPYValue *augmented(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) 
 static NO_INLINE void augmented_error(SPYContext *c, int token, SPYValue *old, SPYValue *rhs) {
     char expected[sizeof(c->error_message)];
     const char *symbol = binary_symbol(token);
-    snprintf(expected, sizeof(expected), "unsupported operand type(s) for %s: '%s' and '%s'", symbol, type_name(old), type_name(rhs));
+    snprintf(expected, sizeof(expected), "unsupported operand type(s) for %s: '%.*s' and '%.*s'", symbol, shown(type_name(old), 100), type_name(old), shown(type_name(rhs), 100), type_name(rhs));
     if (!strcmp(c->error_message, expected)) {
         size_t len = strcspn(symbol, " ");
         spy_clear_error(c);
-        errorf(c, "TypeError", "unsupported operand type(s) for %.*s=: '%s' and '%s'", (int)len, symbol, type_name(old), type_name(rhs));
+        errorf(c, "TypeError", "unsupported operand type(s) for %.*s=: '%.*s' and '%.*s'", (int)len, symbol, shown(type_name(old), 100), type_name(old), shown(type_name(rhs), 100), type_name(rhs));
     }
 }
 static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
@@ -17773,19 +17808,18 @@ static ErrorState take_error(SPYContext *c) {
     state.line = c->line;
     state.value = c->exception; c->exception = NULL;
     SPYValue *object = c->error_object;
-    char attribute[sizeof(c->error_name)];
-    memcpy(attribute, c->error_name, sizeof(attribute));
-    c->error_object = NULL;
+    char *attribute = c->error_name, *text = c->error_text;
+    c->error_object = NULL; c->error_name = c->error_text = NULL;
     spy_clear_error(c);
     if (!state.value && state.type[0]) {
         SPYValue *cls = name_local(c->classes, state.type);
         if (!cls) cls = name_local(c->classes, "RuntimeError");
-        SPYValue *message = spy_string(c, state.message, strlen(state.message));
+        SPYValue *message = text ? spy_string(c, text, strlen(text)) : spy_string(c, state.message, strlen(state.message));
         if (message) state.value = subclass(cls, name_local(c->classes, "SyntaxError")) ?
             call(c, cls, state.message[0] ? 1 : 0, &message) : new_exception(c, cls, state.message[0] ? 1 : 0, &message);
         if (state.value && subclass(cls, name_local(c->classes, "ImportError")) && state.message[0]) set_hidden_field(c, state.value, "msg", message);
-        if (state.value && object) attribute_details(c, state.value, object, attribute);
-        else if (state.value && attribute[0] && (subclass(cls, name_local(c->classes, "NameError")) ||
+        if (state.value && object && attribute) attribute_details(c, state.value, object, attribute);
+        else if (state.value && attribute && (subclass(cls, name_local(c->classes, "NameError")) ||
                                                  subclass(cls, name_local(c->classes, "ImportError")))) {
             SPYValue *text = spy_string(c, attribute, strlen(attribute));
             if (text) set_hidden_field(c, state.value, "name", text);
@@ -17794,6 +17828,7 @@ static ErrorState take_error(SPYContext *c) {
         spy_release(message);
         if (state.value) chain_exception(c, state.value);
     }
+    mem_free(text); mem_free(attribute);
     if (state.value && traceback && state.value->type == SPY_INSTANCE) set_hidden_field(c, state.value, "__traceback__", traceback);
     spy_release(traceback);
     spy_release(object);
@@ -18245,7 +18280,8 @@ const char *spy_error_display(SPYContext *c) {
         c->line = line; c->exception = exception; c->fuel = fuel;
         attend(c);
     }
-    if (!text && (text = mem_malloc(c, strlen(c->error_message) + 1))) strcpy(text, c->error_message);
+    const char *whole = c->error_text ? c->error_text : c->error_message;
+    if (!text && (text = mem_malloc(c, strlen(whole) + 1))) strcpy(text, whole);
     mem_free(c->error_display);
     c->error_display = text;
     return text ? text : c->error_message;
@@ -18441,7 +18477,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
         }
         if (object->type == SPY_INSTANCE && !instance_has_dict(object)) {
             if (descriptor || !strcmp(name, "__doc__")) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
-            else errorf(c, "AttributeError", "'%s' object has no attribute '%s' and no __dict__ for setting new attributes", type_name(object), name);
+            else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s' and no __dict__ for setting new attributes", shown(type_name(object), 100), type_name(object), name);
             return -1;
         }
         if (object->type != SPY_INSTANCE && object->type != SPY_CLASS && object->type != SPY_MODULE) return readonly_attribute(c, object, name, NULL);
@@ -18459,8 +18495,8 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     }
     if (!object || !name_local(object, name)) {
         if (target->type == SPY_CLASS)
-            errorf(c, "AttributeError", "type object '%s' has no attribute '%s'", class_tname(target), name);
-        else errorf(c, "AttributeError", "'%s' object has no attribute '%s'", type_name(target), name);
+            errorf(c, "AttributeError", "type object '%.*s' has no attribute '%s'", shown(class_tname(target), 100), class_tname(target), name);
+        else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(target), 100), type_name(target), name);
         return -1;
     }
     delete_name(object, name); return 0;
@@ -18483,7 +18519,7 @@ static NO_INLINE int delete_target(SPYContext *c, Frame *f, Node *n) {
             int status = clear_binding(c, owner, n->text);
             if (status) {
                 spy_clear_error(c);
-                name_error(c, n->text, "name '%s' is not defined");
+                name_error(c, n->text, 0);
             }
             return status;
         }
@@ -18491,8 +18527,8 @@ static NO_INLINE int delete_target(SPYContext *c, Frame *f, Node *n) {
         if (!value || value->type == V_UNBOUND) {
             if (value && owner == f->env) errorf(c, "UnboundLocalError", "cannot access local variable '%s' where it is not associated with a value", n->text);
             else if (value && owner->type == V_ENV && ((owner->as.map.scope && owner->as.map.scope->kind != S_MODULE) || owner->as.map.flags == 4))
-                name_error(c, n->text, "cannot access free variable '%s' where it is not associated with a value in enclosing scope");
-            else name_error(c, n->text, "name '%s' is not defined");
+                name_error(c, n->text, 1);
+            else name_error(c, n->text, 0);
             return -1;
         }
         return clear_binding(c, f->env, n->text);
@@ -22089,9 +22125,12 @@ static int float_text(SPYContext *c, const char *text, size_t len, double *resul
 static SPYValue *numeric_error(SPYContext *c, SPYValue *text, const char *format, int base) {
     SPYValue *repr = spy_repr(c, text);
     if (!repr) return NULL;
-    size_t bytes = 0;
-    for (size_t chars = 0; bytes < repr->as.string.len && chars < 200; chars++) bytes += utf8_width((unsigned char)repr->as.string.data[bytes]);
-    if (bytes > repr->as.string.len) bytes = repr->as.string.len;
+    /* int() shows at most 200 characters of the text, float() and complex() all of it. */
+    size_t bytes = repr->as.string.len;
+    if (base >= 0) {
+        bytes = 0;
+        for (size_t chars = 0; bytes < repr->as.string.len && chars < 200; chars++) bytes += utf8_width((unsigned char)repr->as.string.data[bytes]);
+    }
     char *quoted = copy_text(c, repr->as.string.data, bytes);
     spy_release(repr);
     if (!quoted) return NULL;
@@ -23259,9 +23298,9 @@ static SPYValue *float_getformat(SPYContext *c, size_t argc, SPYValue *const *ar
     (void)data;
     SPYValue *args[1];
     if (parse_arguments(c, "__getformat__", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
-    if (args[0]->type != SPY_STRING)
-        return errorf(c, "TypeError", "__getformat__() argument must be str, not %s", type_name(args[0]));
-    if (strcmp(args[0]->as.string.data, "double") && strcmp(args[0]->as.string.data, "float"))
+    SPYValue *text = builtin_value(c, args[0], SPY_STRING);
+    if (!text) return errorf(c, "TypeError", "__getformat__() argument must be str, not %s", type_name(args[0]));
+    if (strcmp(text->as.string.data, "double") && strcmp(text->as.string.data, "float"))
         return spy_error(c, "ValueError", "__getformat__() argument 1 must be 'double' or 'float'");
     uint16_t probe = 1;
     const char *format = *(unsigned char *)&probe ? "IEEE, little-endian" : "IEEE, big-endian";
@@ -24908,8 +24947,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (kind == SPY_FLOAT) return spy_error(c, "TypeError", "pow() 3rd argument not allowed unless all arguments are integers");
             if (kind == SPY_COMPLEX) return spy_error(c, "ValueError", "complex modulo");
         }
-        return errorf(c, "TypeError", "unsupported operand type(s) for ** or pow(): '%s', '%s', '%s'",
-                      type_name(operands[0]), type_name(operands[1]), type_name(operands[2]));
+        return operand_error(c, "** or pow()", operands[0], operands[1], operands[2]);
     }
     case B_DIVMOD: {
         if (argc != 2) goto arity;
@@ -24926,7 +24964,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         } else if (is_number(a) && is_number(b)) {
             quotient = binary(c, T_FLOORDIV, a, b);
             if (quotient) remainder = binary(c, '%', a, b);
-        } else return errorf(c, "TypeError", "unsupported operand type(s) for divmod(): '%s' and '%s'", type_name(left), type_name(right));
+        } else return operand_error(c, "divmod()", left, right, NULL);
         SPYValue *result = quotient && remainder ? value_new(c, SPY_TUPLE) : NULL;
         if (result && (sequence_append(c, result, quotient) || sequence_append(c, result, remainder))) {
             spy_release(result); result = NULL;
