@@ -25385,7 +25385,7 @@ execution_fail:
             if (a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY)
                 return spy_error(c, "TypeError", "int() can't convert non-string with explicit base");
             int64_t base = 10;
-            if (argc == 2 && index_value(c, argv[1], &base)) return NULL;
+            if (argc == 2 && slice_index(c, argv[1], &base)) return NULL;
             if (base != 0 && (base < 2 || base > 36)) return spy_error(c, "ValueError", "int() base must be >= 2 and <= 36, or 0");
             return int_from_text(c, a, (int)base);
         }

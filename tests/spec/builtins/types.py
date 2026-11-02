@@ -1,4 +1,4 @@
-# spec: PLS-315 28.5, 20.2.3, 10.4.2
+# spec: PLS-315 28.5, 20.2.3, 10.4.2, 22.1.1
 # description: Methods and operations of the built-in types: numbers, str, bytes, list, tuple, dict, set, range.
 from harness import *
 
@@ -290,6 +290,10 @@ assert_eq(float(bytearray(b"1.5")), 1.5)
 assert_eq(float(memoryview(b"2")), 2.0)
 assert_eq(float("1" * 5000), float("inf"))
 assert_eq(type_error(lambda: int(memoryview(b"1"), 10)), "int() can't convert non-string with explicit base")
+# A base of any magnitude outside 2 through 36 is a ValueError (22.1.1).
+for base in (2**234, -2**234, 1, 37):
+    error = assert_raises(ValueError, int, "0", base)
+    assert_eq(str(error), "int() base must be >= 2 and <= 36, or 0")
 assert_eq(type_error(lambda: int([])), "int() argument must be a string, a bytes-like object or a real number, not 'list'")
 assert_eq(type_error(lambda: float(None)), "float() argument must be a string or a real number, not 'NoneType'")
 try:
