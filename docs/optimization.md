@@ -1412,6 +1412,12 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   a number or string as soon as its count reached zero cut classes'
   instructions by 1.3% and sort's by 0.5%, but on the M2 nbody took
   1.4% longer and loop 0.9%, averaged over eight code layouts.
+- **A machine truth cleared only by the tests that read it.** `known`,
+  the truth a `BC_SHORT` jump hands to the test it lands on, was copied
+  and cleared on every machine step. Clearing it only in `BC_FALSE`,
+  `BC_SHORT` and the error path cut generators' instructions by 1.1%, but
+  its M2 wall time, averaged over eight code layouts, did not fall
+  (+0.1% and +1.1% in two runs).
 - **A quiet tick without the error test.** If setting an error also
   cleared `quiet_unit`, `quiet` could compare the unit alone and skip the
   test for a pending error. Instructions fell on every program (1-2%, fib
