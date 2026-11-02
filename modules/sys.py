@@ -84,7 +84,7 @@ float_info = _structseq("float_info", ("max", "max_exp", "max_10_exp", "min", "m
                         "sys.float_info\n\nA named tuple holding information about the float type.", True,
                         (1.7976931348623157e+308, 1024, 308, 2.2250738585072014e-308, -1021, -307,
                          15, 53, 2.220446049250313e-16, 2, 1))
-# Integers are stored in 32-bit limbs; strings hash with 64-bit FNV-1a.
+# Integers are stored in 32-bit limbs; strings hash with folded 64-bit FNV-1a.
 int_info = _structseq("int_info", ("bits_per_digit", "sizeof_digit", "default_max_str_digits",
                                    "str_digits_check_threshold"),
                       "sys.int_info\n\nA named tuple that holds information about Python's\n"

@@ -1922,11 +1922,12 @@ static int64_t hash_signed(uint64_t bits) {
     int64_t value = bits <= INT64_MAX ? (int64_t)bits : -1 - (int64_t)(UINT64_MAX - bits);
     return value == -1 ? -2 : value;
 }
-/* The hash of str and bytes: FNV-1a over the bytes, 0 when empty. */
+/* The hash of str and bytes: FNV-1a over the bytes, 0 when empty. Its low
+ * bits see only the bytes' low bits, so the high half is folded in. */
 static int64_t text_hash(const char *data, size_t len) {
     uint64_t hash = UINT64_C(14695981039346656037);
     for (size_t i = 0; i < len; i++) hash = (hash ^ (unsigned char)data[i]) * UINT64_C(1099511628211);
-    return len ? hash_signed(hash) : 0;
+    return len ? hash_signed(hash ^ hash >> 31) : 0;
 }
 static int64_t hash_pointer(SPYValue *value) {
     uint64_t bits = (uint64_t)(uintptr_t)value;

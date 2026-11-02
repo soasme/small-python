@@ -474,8 +474,8 @@ is `None`, and its version is the language version.
 Annex D allows.
 
 *Status:* provided. `int_info` reports 32-bit digits in 4 bytes, and
-`hash_info` the algorithm `'fnv'` (64-bit FNV-1a, unseeded) with 64 hash
-bits, 0 seed bits, and cutoff 0.
+`hash_info` the algorithm `'fnv'` (64-bit FNV-1a, its high half folded into
+the low, unseeded) with 64 hash bits, 0 seed bits, and cutoff 0.
 
 #### 5.9.3 Platform
 
