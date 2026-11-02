@@ -28,7 +28,7 @@ another. Exceptions to these rules are stated where they occur.
 ## Versions
 
 ```c
-#define SPY_VERSION "0.4.0"
+#define SPY_VERSION "0.5.0"
 const char *spy_version(void);
 ```
 

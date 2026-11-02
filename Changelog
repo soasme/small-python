@@ -1,3 +1,19 @@
+2026-11-03 0.5.0:
+
+- step budgets, memory limits and an interrupt callback; the C API and
+  packages report the steps a call spent
+- every engine line runs under the tests; CI enforces coverage
+- every C API declaration documented, ABI compatibility checked
+- CPython 3.15.2 is the oracle; 26 more CPython language tests ported
+  (72 in all)
+- error messages, argument errors and keyword suggestions follow CPython
+- str, bytes, tuple and dict subclasses accepted where builtins expect
+  their base type
+- spy, spyc and spy-worker binaries published per release tag
+- faster than CPython 3.15 on loop, bigint, dicts, strings and classes,
+  within 4% on sort, nbody and generators
+- embedding lifecycle in 186 us (was 192 us)
+
 2026-10-31 0.4.0:
 
 - faster than CPython 3.15 on loop, bigint, dicts and classes, within 13%

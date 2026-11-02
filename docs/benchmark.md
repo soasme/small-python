@@ -1,6 +1,6 @@
 # Benchmarks
 
-Engine: the 0.5.0 baseline, `main` at `f1f274d`. This report compares wall time
+Engine: 0.5.0 (`f1f274d`). This report compares wall time
 and peak memory of small programs on several Python implementations. It
 measures the current engine; it is not a compatibility claim.
 
@@ -55,7 +55,7 @@ idle machine.
 
 | Engine | Version | Build | Executable |
 | --- | --- | --- | --- |
-| spy | 0.5.0 baseline (`f1f274d`) | `make`, Apple Clang 17, `-O2` | 1.5 MB |
+| spy | 0.5.0 (`f1f274d`) | `make`, Apple Clang 17, `-O2` | 1.5 MB |
 | CPython 3.15 | 3.15.2 (the pinned oracle) | `configure --without-ensurepip`, `-O3`, no PGO/LTO | 6.3 MB, plus `Lib/` |
 | CPython 3.14 | 3.14.3 | Homebrew bottle | Homebrew framework |
 | PyPy | 8.0.1, Python 3.11.17 | Homebrew bottle, JIT | 33 MB `libpypy3.11-c` |
