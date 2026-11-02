@@ -305,11 +305,11 @@ print(next(a))
 try:
     next(a)
 except RuntimeError as e:
-    print(e, e.__cause__.value)
+    print(e, e.__cause__.value, e.__context__ is e.__cause__, e.__suppress_context__)
 ''',
               '''1 2 3 4 []
 1
-generator raised StopIteration oops
+generator raised StopIteration oops True True
 ''')
 
 check_program('''def g():

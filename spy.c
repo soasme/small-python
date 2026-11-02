@@ -20339,6 +20339,7 @@ static void error_from_cause(SPYContext *c, const char *type, const char *text) 
     if (exception) {
         set_hidden_field(c, exception, "__cause__", error.value);
         set_hidden_field(c, exception, "__context__", error.value);
+        set_hidden_field(c, exception, "__suppress_context__", c->booleans[1]);
         raise_value(c, exception);
     }
     spy_release(exception); spy_release(message); spy_release(error.value);
