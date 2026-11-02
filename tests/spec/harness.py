@@ -1821,6 +1821,11 @@ class support:
         return test
 
     @staticmethod
+    def check_impl_detail(**guards):
+        """The messages and behaviour these checks guard are those of PLS-315."""
+        return guards.get("cpython", True)
+
+    @staticmethod
     def cpython_only(test):
         """CPython implementation details are outside PLS-315."""
         return skip("CPython implementation detail")(test)
@@ -1834,7 +1839,7 @@ class support:
     def skip_if_huge_c_stack(*args, **kwargs):
         return lambda test: test
 
-    skip_emscripten_stack_overflow = skip_wasi_stack_overflow = run_with_limited_c_stack = skip_if_huge_c_stack
+    skip_emscripten_stack_overflow = skip_wasi_stack_overflow = run_with_limited_c_stack = skip_if_sanitizer = skip_if_huge_c_stack
 
     @staticmethod
     def thread_unsafe(reason=None):

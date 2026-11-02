@@ -160,7 +160,7 @@ struct SPYValue {
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
-        struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; size_t changes; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
+        struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
         struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
@@ -198,8 +198,9 @@ struct SPYValue {
          * DESC_ flags; values live in the instance's hidden fields. */
         struct { SPYValue *name, *owner; int flags; } member;
         struct { SPYValue *value, *expression, *conversion, *format_spec; } interpolation;
-        /* cursor: over a str, a character index and its byte offset. */
-        struct { SPYValue *source, *counter; size_t index, size, cursor[2]; int kind, done; const void *last; } iterator;
+        /* cursor: over a str, a character index and its byte offset; size and
+         * removed: over a dict, its length and the keys it had removed (26.1.4). */
+        struct { SPYValue *source, *counter; size_t index, size, cursor[2]; int kind, done; uint32_t removed; } iterator;
         struct { SPYValue *generator, *args; int method, state; } async_operation;
         struct {
             SPYValue *env, *unit, *name, *qualname, *code, *frame; /* frame: gi_frame, once read */
@@ -415,6 +416,7 @@ static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static int length_result(SPYContext *, SPYValue *, int64_t *);
 static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
+static void error_note(SPYContext *, const char *);
 enum { SET_UNION, SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC };
 static int set_combine(SPYContext *, SPYValue *, int, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
@@ -1886,7 +1888,8 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
             spy_release(key); spy_release(left); spy_release(right);
             if (!matches || a->ctx->error_type[0]) return 0;
         }
-        return a->as.map.len == b->as.map.len;
+        /* As dict_equal: a callback that empties a only ends the loop early. */
+        return 1;
     case SPY_LIST: case SPY_TUPLE: case SPY_SLICE:
         if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
         if (comparison_length(a) != comparison_length(b)) return 0;
@@ -2092,8 +2095,9 @@ static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
     /* A str keeps its hash once computed. */
     if (value->type == SPY_STRING && value->as.string.hash) { *result = value->as.string.hash; return 0; }
     size_t used = stack_excess(c);
-    /* tuple_hash's guard names the tuple. */
-    if (used) return stack_overflow(c, used, value->type == SPY_TUPLE ? " while hashing a tuple" : "");
+    /* tuple_hash and frozendict_hash name their objects in their guards. */
+    if (used) return stack_overflow(c, used, value->type == SPY_TUPLE ? " while hashing a tuple" :
+                                             value->type == SPY_FROZENDICT ? " while hashing a frozendict" : "");
     int status = hash_object(c, value, result);
     c->depth--; return status;
 }
@@ -2158,7 +2162,7 @@ static Entry map_remove(SPYValue *map, size_t i) {
         index[slot] = INDEX_DEAD; map->as.map.index_dead++;
     }
     map->as.map.items[i] = (Entry){0};
-    map->as.map.len--; map->as.map.holes++; map->as.map.keyed = 0;
+    map->as.map.len--; map->as.map.holes++; map->as.map.keyed = 0; map->as.map.removed++;
     while (map->as.map.holes && !map->as.map.items[map_used(map) - 1].key) map->as.map.holes--;
     while (map->as.map.holes && !map->as.map.items[0].key) {
         map->as.map.items++; map->as.map.front++; map->as.map.cap--; map->as.map.holes--;
@@ -8040,8 +8044,8 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         v->as.iterator.source = spy_retain(source);
         if (special_dispatch(source)) v->as.iterator.kind = I_GETITEM;
         if (source->type == SPY_TEMPLATE) v->as.iterator.kind = I_TEMPLATE;
-        if (is_dict(source) || source->type == SPY_SET || source->type == SPY_FROZENSET) v->as.iterator.size = source->as.map.len;
-        if (is_view(source)) v->as.iterator.size = source->as.bound.self->as.map.len;
+        SPYValue *map = is_view(source) ? source->as.bound.self : source;
+        if (is_dict(map) || is_set(map)) { v->as.iterator.size = map->as.map.len; v->as.iterator.removed = map->as.map.removed; }
     }
     return v;
 }
@@ -8196,20 +8200,16 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     case I_SEQUENCE: case I_REVERSED: {
         SPYValue *sized = is_view(source) ? source->as.bound.self : source;
         int reversed = v->as.iterator.kind == I_REVERSED;
-        size_t at = v->as.iterator.index;
         if ((sized->type == SPY_DICT || ((sized->type == SPY_SET || sized->type == SPY_FROZENSET) && !reversed)) && v->as.iterator.size != sized->as.map.len) {
             spy_error(c, "RuntimeError", sized->type == SPY_DICT ? "dictionary changed size during iteration" : "Set changed size during iteration");
             v->as.iterator.done = 1;
-        } else if (sized->type == SPY_DICT && !reversed && at && v->as.iterator.last &&
-                   (at > sized->as.map.len || (const void *)map_items(sized)[at - 1].key != v->as.iterator.last)) {
-            /* The key last produced has moved: keys were removed and added
-             * (26.1.4). It is compared by identity only, never used. */
+        } else if (sized->type == SPY_DICT && v->as.iterator.removed != sized->as.map.removed) {
+            /* Keys were removed, and as many added (26.1.4). */
             spy_error(c, "RuntimeError", "dictionary keys changed during iteration");
             v->as.iterator.done = 1;
         } else if (!reversed) {
             result = source->type == SPY_STRING ? string_char(c, source, v->as.iterator.index++, v->as.iterator.cursor) :
                 iter_at(c, source, v->as.iterator.index++);
-            if (result && sized->type == SPY_DICT && at < sized->as.map.len) v->as.iterator.last = map_items(sized)[at].key;
         }
         else if (v->as.iterator.index && source->type == SPY_INSTANCE) {
             /* reversed_next over a sequence: stop at IndexError or StopIteration. */
@@ -12535,6 +12535,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             Entry *items = map_items(self), *storage = map_storage(self);
             size_t len = self->as.map.len;
             map_unindex(self);
+            self->as.map.removed += len != 0;
             self->as.map.items = NULL; self->as.map.len = self->as.map.cap = self->as.map.front = 0;
             for (size_t i = 0; i < len; i++) { spy_release(items[i].key); spy_release(items[i].value); }
             mem_free(storage);
@@ -13767,7 +13768,12 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
             SPYValue *items = spy_list(c), *probe = items ? get_iterator(c, pair) : NULL;
             if (!probe && error_is(c, "TypeError")) { spy_clear_error(c); spy_error(c, "TypeError", "object is not iterable"); }
             spy_release(probe);
-            if (items && !c->error_type[0] && !extend_display(c, items, pair)) {
+            if (items && !c->error_type[0]) extend_display(c, items, pair);
+            if (error_is(c, "TypeError")) {
+                char note[96];
+                snprintf(note, sizeof(note), "Cannot convert dictionary update sequence element #%zu to a sequence", index);
+                error_note(c, note);
+            } else if (items && !c->error_type[0]) {
                 if (items->as.seq.len != 2)
                     errorf(c, "ValueError", "dictionary update sequence element #%zu has length %zu; 2 is required", index, items->as.seq.len);
                 else map_set(c, dict, items->as.seq.items[0], items->as.seq.items[1]);
@@ -18232,6 +18238,15 @@ static int exception_add_note(SPYContext *c, SPYValue *exception, SPYValue *note
     }
     if (notes->type != SPY_LIST) { spy_error(c, "TypeError", "Cannot add note: __notes__ is not a list"); return -1; }
     return sequence_append(c, notes, note);
+}
+/* Add text to the notes of the exception being raised. */
+static void error_note(SPYContext *c, const char *text) {
+    materialize_error(c);
+    ErrorState error = take_error(c);
+    SPYValue *note = spy_string(c, text, strlen(text));
+    if (note) exception_add_note(c, error.value, note);
+    spy_release(note);
+    restore_error(c, &error);
 }
 static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
     static const char *names[] = {"__new__", "__init_subclass__", "__class_getitem__"};
@@ -25174,6 +25189,7 @@ execution_fail:
         if (id == B_REVERSED && (is_dict(a) || is_view(a))) {
             SPYValue *map = is_dict(a) ? a : a->as.bound.self;
             v->as.iterator.index = v->as.iterator.size = map->as.map.len;
+            v->as.iterator.removed = map->as.map.removed;
         } else if (id == B_REVERSED) v->as.iterator.index =
             (a->type == SPY_STRING || a->type == SPY_BYTES) ? string_length(a) : a->as.seq.len;
         return v;

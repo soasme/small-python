@@ -536,7 +536,10 @@ integers. Numeric hashes preserve equality across integers, floats, and complex
 numbers. Tuples cache successful hashes; slices and ranges are hashable when
 their components permit it. String/bytes hashes use unsalted FNV-1a with its
 high half folded into the low, which PLS-315 leaves to the implementation;
-there is no per-process randomization.
+there is no per-process randomization. A dict counts the keys it removes, and its
+iterators compare the count: once keys were removed and as many added, the
+next `__next__` raises "dictionary keys changed during iteration" instead of
+ending (PLS-315 26.1.4).
 Numeric and compound hash algorithms adapt CPython's implementation under its
 [license](licenses/python.txt).
 

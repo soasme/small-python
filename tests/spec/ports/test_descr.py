@@ -13,11 +13,6 @@ _testcapi = None
 xxsubtype = None
 
 
-def check_impl_detail(**guards):
-    """(Ported) the messages these checks compare are those of PLS-315."""
-    return guards.get("cpython", True)
-
-
 def impl_detail(msg=None, **guards):
     """(Ported) CPython implementation details are outside PLS-315."""
     return unittest.skip("(Ported) " + (msg or "CPython implementation detail"))
@@ -40,7 +35,6 @@ def subTests(arg_names, arg_values):
     return decorator
 
 
-support.check_impl_detail = check_impl_detail
 support.impl_detail = impl_detail
 support.subTests = subTests
 support.HAVE_PY_DOCSTRINGS = True  # (Ported) docstrings are kept (Annex D)
