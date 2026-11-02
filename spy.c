@@ -20662,7 +20662,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         }
         case BC_FALSE:
             a = machine_pop(m);
-            if (!(truth_known ? truth_known - 1 : spy_truth(a))) pc = ins->target;
+            if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : spy_truth(a))) pc = ins->target;
             break;
         case BC_SHORT: {
             int truth = truth_known ? truth_known - 1 : !!spy_truth(m->stack[m->len - 1]);

@@ -184,6 +184,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A comprehension reuses its environment](#a-comprehension-reuses-its-environment) | `[k for k in range(3)]`: -5.5%; M2: strings -0.7% |
 | [A growing buffer moves through the spare blocks](#a-growing-buffer-moves-through-the-spare-blocks) | M2: strings -6.8%, peak memory 11.7 → 3.1 MiB |
 | [A machine step keeps its place in a local](#a-machine-step-keeps-its-place-in-a-local) | -1.2% (generators); M2: generators -2.7% |
+| [A machine jump reads a bool's truth](#a-machine-jump-reads-a-bools-truth) | -1.5% (generators); M2: generators -3.4% |
 
 ### Releasing a number or string frees it at once
 
@@ -1336,6 +1337,16 @@ release. Instructions: generators -1.2%, strings -0.2%, sort -0.1%, the
 rest unchanged; on the machine micro-benchmark of a `while` loop that
 holds a `yield`, about 1.6 instructions a step. Wall time averaged over
 eight code layouts: generators -2.7%, the rest within 1%.
+
+### A machine jump reads a bool's truth
+
+A test whose comparison has an operand that is not a leaf, such as
+`x % 2 == 0`, compiles to `BC_COMPARE` and then `BC_FALSE`, and
+`BC_FALSE` asked `spy_truth` for the truth of the bool the comparison
+left. It now reads a bool's value itself, as `BC_TEST` does.
+Instructions: generators -1.5% (GCC) and -1.6% (clang), the rest
+unchanged. Wall time averaged over eight code layouts: generators -3.4%,
+the rest within 0.6%.
 
 ### A profile-guided build
 
