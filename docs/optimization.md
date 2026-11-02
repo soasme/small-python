@@ -185,6 +185,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A growing buffer moves through the spare blocks](#a-growing-buffer-moves-through-the-spare-blocks) | M2: strings -6.8%, peak memory 11.7 → 3.1 MiB |
 | [A machine step keeps its place in a local](#a-machine-step-keeps-its-place-in-a-local) | -1.2% (generators); M2: generators -2.7% |
 | [A machine jump reads a bool's truth](#a-machine-jump-reads-a-bools-truth) | -1.5% (generators); M2: generators -3.4% |
+| [A negated number is a constant](#a-negated-number-is-a-constant) | `while` testing `i == -1`: -22%; M2: -27%; programs within 0.6% |
 
 ### Releasing a number or string frees it at once
 
@@ -1347,6 +1348,19 @@ left. It now reads a bool's value itself, as `BC_TEST` does.
 Instructions: generators -1.5% (GCC) and -1.6% (clang), the rest
 unchanged. Wall time averaged over eight code layouts: generators -3.4%,
 the rest within 0.6%.
+
+### A negated number is a constant
+
+`-1` is a unary minus applied to the literal `1`, and the walker
+negated it, allocating a new number, each time it ran. CPython folds a
+negated number into one constant when it compiles. The compiler now does
+too: after the literals get their values, a `-` whose operand has a
+constant (a number, or a negation already folded) gets the negated value
+as its own constant, so it is a leaf the fast paths read in place. A
+function looping 300,000 times over `if i == -1:` took 22% fewer
+instructions and 27% less time on the M2. The bench programs use negative
+numbers only while setting up, so their instructions are unchanged; their
+wall time averaged over eight code layouts is within 0.6%.
 
 ### A profile-guided build
 

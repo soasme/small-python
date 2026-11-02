@@ -7906,6 +7906,10 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
             if (n->kind == N_ASSIGN && n->op == '=' && !n->args && n->a->kind == N_TUPLE && n->b->kind == N_TUPLE &&
                 paired_items(n->a->args, n->b->args)) n->flags |= F_PAIRED;
         }
+        /* A negated number is a constant, as CPython folds it; the list
+         * runs newest first, so an inner negation folds before its outer. */
+        for (Node *n = unit->as.unit.nodes; n && !c->error_type[0]; n = n->allocated)
+            if (n->kind == N_UNARY && n->op == '-' && n->a->constant) n->constant = unary(c, '-', n->a->constant);
         /* The compiler's own errors follow every symbol table error. */
         if (!c->error_type[0] && p.deferred) {
             c->line = p.deferred_line; p.error_start = p.deferred_start; p.error_end = p.deferred_end;
