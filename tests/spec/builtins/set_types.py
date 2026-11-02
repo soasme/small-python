@@ -109,3 +109,82 @@ if hash(1 << 40) == 1 << 40:   # a 64-bit hash width (Annex D)
     for value in (frozenset(), frozenset({1}), frozenset({1, 2, 3}), frozenset({"a", None, 2.5})):
         assert_eq(hash(value), frozenset_hash(value), repr(value))
 assert_eq(hash(frozenset([1, 2])), hash(frozenset([2, 1])))
+
+# A set subclass argument is looked up as a frozenset too; remove's KeyError
+# has the argument itself.
+for key in ({5}, MySet([5])):
+    nested = {frozenset({5})}
+    assert_true(key in nested)
+    nested.discard(key)
+    assert_eq(nested, set())
+    error = assert_raises(KeyError, nested.remove, key)
+    assert_is(error.args[0], key)
+
+# A recursive repr shows the type name; the reduction lists the elements.
+class Wrapper:
+    def __repr__(self):
+        return repr(self.value)
+for kind, shown in ((set, "{set(...)}"), (frozenset, "frozenset({frozenset(...)})"),
+                    (MySet, "MySet({MySet(...)})"), (MyFrozen, "MyFrozen({MyFrozen(...)})")):
+    w = Wrapper()
+    w.value = kind([w])
+    assert_eq(repr(w.value), shown)
+assert_eq({1}.__reduce__(), (set, ([1],), None))
+assert_eq(frozenset().__reduce_ex__(0), (frozenset, ([],), None))
+tagged = MyFrozen([2])
+tagged.tag = 3
+assert_eq(tagged.__reduce__(), (MyFrozen, ([2],), {"tag": 3}))
+assert_eq(pickle.loads(pickle.dumps(tagged)).tag, 3)
+
+# Copying stored keys reuses their hashes (26).
+class Counted:
+    calls = 0
+    def __hash__(self):
+        Counted.calls += 1
+        return 7
+keys = dict.fromkeys(Counted() for i in range(3))
+elements = set(keys)
+for copy in (lambda: set(keys), lambda: frozenset(elements), lambda: MySet(elements), lambda: set().update(keys),
+             lambda: elements.union(keys), lambda: elements.difference(keys), lambda: elements ^ frozenset(elements),
+             lambda: dict.fromkeys(elements), lambda: dict(keys)):
+    Counted.calls = 0
+    copy()
+    assert_eq(Counted.calls, 0)
+
+# issuperset and isdisjoint stop reading an iterable once decided, and
+# issubset and intersection once every element is found.
+items = iter([1, 2, 3])
+assert_false({1}.isdisjoint(items))
+assert_eq(list(items), [2, 3])
+items = iter([1, 2, 3])
+assert_false({2}.issuperset(items))
+assert_eq(list(items), [2, 3])
+items = iter([5, 2, 3])
+assert_true({2}.issubset(items))
+assert_eq(list(items), [3])
+items = iter([5, 2, 3])
+assert_eq({2}.intersection(items), {2})
+assert_eq(list(items), [3])
+
+# Comparisons may empty the operand being merged; the merge stays safe.
+class Clears:
+    def __hash__(self):
+        return 0
+    def __eq__(self, other):
+        operand.clear()
+        return False
+for merge in ("update", "symmetric_difference_update", "union", "symmetric_difference"):
+    operand = set()
+    operand = {Clears() for i in range(10)}
+    getattr({0}, merge)(operand)
+
+# A subset test against a set keeps no reference to it.
+reclaimed = []
+class Finalized:
+    def __del__(self):
+        reclaimed.append(True)
+operand = {Finalized()}
+assert_true(set().issubset(operand))
+del operand
+host.collect()
+assert_eq(reclaimed, [True])

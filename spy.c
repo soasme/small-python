@@ -406,6 +406,7 @@ static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
 static const char *type_name(SPYValue *);
 static const char *type_fqname(SPYValue *, char *, size_t);
 static SPYValue *set_copy_type(SPYContext *, SPYValue *, int);
+static SPYValue *set_key(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static int set_subset(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
@@ -414,6 +415,8 @@ static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static int length_result(SPYContext *, SPYValue *, int64_t *);
 static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
+enum { SET_UNION, SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC };
+static int set_combine(SPYContext *, SPYValue *, int, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
 static void set_remove_at(SPYValue *, size_t);
 static SPYValue *active_exception(SPYContext *c) {
@@ -3339,24 +3342,19 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         spy_release(list);
         return status ? -1 : 0;
     }
-    case SPY_FROZENSET:
-        if (!v->as.map.len) return puts_buffer(b, "frozenset()");
-        if (puts_buffer(b, "frozenset(")) return -1;
-        v->type = SPY_SET;
-        int status = format_value(b, v, 1);
-        v->type = SPY_FROZENSET;
-        return status || puts_buffer(b, ")") ? -1 : 0;
-    case SPY_LIST: case SPY_TUPLE: case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: {
+    case SPY_LIST: case SPY_TUPLE: case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: case SPY_FROZENSET: {
         if (v->type == SPY_FROZENDICT) {
             if (!v->as.map.len) return puts_buffer(b, "frozendict()");
             if (puts_buffer(b, "frozendict(")) return -1;
         }
-        if (v->type == SPY_SET && !v->as.map.len) return puts_buffer(b, "set()");
+        int set = v->type == SPY_SET || v->type == SPY_FROZENSET;
+        if (set && !v->as.map.len) return puts_buffer(b, v->type == SPY_SET ? "set()" : "frozenset()");
         int entered = repr_enter(b->ctx, v);
-        if (entered) return entered < 0 ? -1 : puts_buffer(b, v->type == SPY_LIST ? "[...]" : v->type == SPY_FROZENDICT ? "{...})" : v->type == SPY_DICT ? "{...}" : "(...)");
+        if (entered) return entered < 0 ? -1 : puts_buffer(b, v->type == SPY_LIST ? "[...]" : v->type == SPY_FROZENDICT ? "{...})" : v->type == SPY_DICT ? "{...}" :
+                                                              v->type == SPY_SET ? "set(...)" : v->type == SPY_FROZENSET ? "frozenset(...)" : "(...)");
         if (deeper(b->ctx, " while getting the repr of an object")) { repr_leave(b->ctx); return -1; }
-        int dict = is_dict(v) || v->type == SPY_SET;
-        int status = puts_buffer(b, dict ? "{" : v->type == SPY_LIST ? "[" : "(");
+        int dict = is_dict(v) || set;
+        int status = (v->type == SPY_FROZENSET && puts_buffer(b, "frozenset(")) || puts_buffer(b, dict ? "{" : v->type == SPY_LIST ? "[" : "(");
         /* Items are read by index: a nested repr may resize the container. */
         for (size_t i = 0; !status && i < (dict ? v->as.map.len : v->as.seq.len); i++) {
             if (i && puts_buffer(b, ", ")) { status = -1; break; }
@@ -3373,7 +3371,7 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         if (!status && v->type == SPY_TUPLE && v->as.seq.len == 1) status = puts_buffer(b, ",");
         b->ctx->depth--; repr_leave(b->ctx);
         return status || puts_buffer(b, dict ? "}" : v->type == SPY_LIST ? "]" : ")") ||
-            (v->type == SPY_FROZENDICT && puts_buffer(b, ")")) ? -1 : 0;
+            ((v->type == SPY_FROZENDICT || v->type == SPY_FROZENSET) && puts_buffer(b, ")")) ? -1 : 0;
     }
     case SPY_FUNCTION: {
         SPYValue *qualname = name_local(v->as.function.metadata, "__qualname__");
@@ -3472,9 +3470,13 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         if (base && !repr && base->type != SPY_STRING && base->type != SPY_BYTES && base->type != SPY_BYTEARRAY)
             base = builtin_base(b->ctx, v, "__repr__", NULL);
         if (base && (base->type == SPY_SET || base->type == SPY_FROZENSET || base->type == SPY_FROZENDICT || base->type == SPY_BYTEARRAY)) {
-            /* These reprs name the actual type, unlike list and dict. */
+            /* These reprs name the actual type, unlike list and dict, and
+             * so does the placeholder of a recursive one. */
+            int entered = repr_enter(b->ctx, v);
+            if (entered) return entered < 0 || puts_buffer(b, type_name(v)) || puts_buffer(b, "(...)") ? -1 : 0;
             Buffer inner = {.ctx = b->ctx};
             int status = format_value(&inner, base, 1);
+            repr_leave(b->ctx);
             size_t skip = 0;
             const char *text = inner.data ? inner.data : "";
             if (base->type == SPY_SET && base->as.map.len) skip = 0;
@@ -9755,14 +9757,14 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
                 result = found && (found == expected || equal(found, expected, 0));
                 spy_release(key); spy_release(expected); spy_release(found);
             }
-        } else if (is_dict(b) || b->type == SPY_SET || b->type == SPY_FROZENSET) {
+        } else if (is_dict(b)) {
+            result = map_find(b, a) >= 0;
+            if (c->error_type[0]) return NULL;
+        } else if (b->type == SPY_SET || b->type == SPY_FROZENSET) {
             int64_t hash;
-            if (!is_dict(b) && a->type == SPY_SET && hash_value(c, a, &hash)) {
-                spy_clear_error(c);
-                SPYValue *frozen = set_copy_type(c, a, SPY_FROZENSET);
-                result = frozen ? map_find(b, frozen) >= 0 : 0;
-                spy_release(frozen);
-            } else result = map_find(b, a) >= 0;
+            SPYValue *key = set_key(c, b, a, &hash);
+            result = key && map_find_hash(b, key, hash) >= 0;
+            spy_release(key);
             if (c->error_type[0]) return NULL;
         } else if (b->type == SPY_BYTEARRAY) {
             SPYValue view = {.ctx = b->ctx, .type = SPY_BYTES, .as.string = b->as.string};
@@ -13723,6 +13725,12 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
     /* A plain list or tuple copies its items at once. */
     if ((result->type == SPY_LIST || result->type == SPY_TUPLE) && (source->type == SPY_LIST || source->type == SPY_TUPLE))
         return spend(c, source->as.seq.len) ? -1 : sequence_extend(c, result, source, 0, 1, source->as.seq.len);
+    /* Any set, and an exact dict or frozendict, give their stored hashes. */
+    if (is_set(result)) {
+        SPYValue *stored = is_dict(source) ? source : builtin_value(c, source, SPY_SET);
+        if (!stored) stored = builtin_value(c, source, SPY_FROZENSET);
+        if (stored) return set_combine(c, result, SET_UNION, stored);
+    }
     SPYValue *iterator = get_iterator(c, source);
     if (!iterator && result->type != SPY_SET && result->type != SPY_FROZENSET && !iterable_type(source) && error_is(c, "TypeError")) {
         spy_clear_error(c);
@@ -23315,6 +23323,17 @@ static void set_remove_at(SPYValue *set, size_t i) {
     Entry old = map_remove(set, i);
     spy_release(old.key); spy_release(old.value);
 }
+/* The element to look key up as, with its hash: a set (a subclass's too)
+ * whose hashing raises TypeError is looked up as the equivalent frozenset. */
+static SPYValue *set_key(SPYContext *c, SPYValue *set, SPYValue *key, int64_t *hash) {
+    if (!map_hash(c, set, key, hash)) return spy_retain(key);
+    SPYValue *items = error_is(c, "TypeError") ? builtin_value(c, key, SPY_SET) : NULL;
+    if (!items) return NULL;
+    spy_clear_error(c);
+    SPYValue *frozen = set_copy_type(c, items, SPY_FROZENSET);
+    if (frozen && hash_value(c, frozen, hash)) { spy_release(frozen); return NULL; }
+    return frozen;
+}
 /* Borrow a set operand, or build a temporary set from any iterable. */
 static SPYValue *set_operand(SPYContext *c, SPYValue *value, int any_iterable) {
     SPYValue *actual = builtin_value(c, value, SPY_SET);
@@ -23333,26 +23352,21 @@ static SPYValue *set_copy_type(SPYContext *c, SPYValue *source, int type) {
     }
     return copy;
 }
-enum { SET_UNION, SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC };
 /* Combine into result in place. */
 static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other) {
-    if (op == SET_UNION) {
-        for (size_t i = 0; i < other->as.map.len; i++) {
-            Entry *entry = &map_items(other)[i];
-            int found = set_contains(c, result, entry->key, entry->hash);
-            if (found < 0 || (!found && map_append(c, result, entry->key, c->none, entry->hash))) return -1;
+    if (op == SET_UNION || op == SET_SYMMETRIC) {
+        /* Comparisons may mutate other: each entry is held while compared. */
+        int status = 0;
+        for (size_t i = 0; i < other->as.map.len && !status; i++) {
+            Entry entry = map_items(other)[i];
+            spy_retain(entry.key);
+            ptrdiff_t found = map_find_hash(result, entry.key, entry.hash);
+            if (c->error_type[0]) status = -1;
+            else if (found < 0) status = map_append(c, result, entry.key, c->none, entry.hash);
+            else if (op == SET_SYMMETRIC) set_remove_at(result, (size_t)found);
+            spy_release(entry.key);
         }
-        return 0;
-    }
-    if (op == SET_SYMMETRIC) {
-        for (size_t i = 0; i < other->as.map.len; i++) {
-            Entry *entry = &map_items(other)[i];
-            ptrdiff_t found = map_find_hash(result, entry->key, entry->hash);
-            if (c->error_type[0]) return -1;
-            if (found >= 0) set_remove_at(result, (size_t)found);
-            else if (map_append(c, result, entry->key, c->none, entry->hash)) return -1;
-        }
-        return 0;
+        return status;
     }
     /* Decide every entry before removing any: a removal leaves a hole that
      * the next positional read would compact. */
@@ -23454,26 +23468,31 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
     if (!self || positional_only(c, name_local(c->types[type], "__name__")->as.string.data, set_names[which], one, one ? 1 : SIZE_MAX, argc - 1, keywords))
         return NULL;
     if (which >= 8) {
-        if (which == 8 && !set_operand(c, argv[1], 0)) {
+        SPYValue *other = set_operand(c, argv[1], 0);
+        int result = 1;
+        if (!other && which == 8) {
             SPYValue *common = set_intersect_iterable(c, self, argv[1]);
-            int subset = common && common->as.map.len == self->as.map.len;
+            result = common && common->as.map.len == self->as.map.len;
             spy_release(common);
-            return c->error_type[0] ? NULL : spy_bool(c, subset);
-        }
-        SPYValue *other = set_operand(c, argv[1], 1);
-        if (!other) return NULL;
-        int result;
-        if (which == 8) result = set_subset(c, self, other);
-        else if (which == 9) result = set_subset(c, other, self);
-        else {
-            result = 1;
-            for (size_t i = 0; i < self->as.map.len && result > 0; i++) {
-                int found = (i & 15) == 15 && spend(c, 1) ? -1 : set_contains(c, other, map_items(self)[i].key, map_items(self)[i].hash);
-                result = found < 0 ? -1 : !found;
+        } else if (!other) {
+            /* issuperset and isdisjoint read another iterable only until
+             * an element decides the result. */
+            SPYValue *iterator = get_iterator(c, argv[1]), *item;
+            while (iterator && result > 0 && (item = native_next(c, iterator))) {
+                int64_t hash;
+                int found = map_hash(c, self, item, &hash) ? -1 : set_contains(c, self, item, hash);
+                result = found < 0 ? -1 : which == 9 ? found : !found;
+                spy_release(item);
             }
+            spy_release(iterator);
+        } else if (which == 8) result = set_subset(c, self, other);
+        else if (which == 9) result = set_subset(c, other, self);
+        else for (size_t i = 0; i < self->as.map.len && result > 0; i++) {
+            int found = (i & 15) == 15 && spend(c, 1) ? -1 : set_contains(c, other, map_items(self)[i].key, map_items(self)[i].hash);
+            result = found < 0 ? -1 : !found;
         }
         spy_release(other);
-        return result < 0 ? NULL : spy_bool(c, result);
+        return result < 0 || c->error_type[0] ? NULL : spy_bool(c, result);
     }
     SPYValue *result = which < 4 ? set_copy_type(c, self, self->type) : spy_retain(self);
     for (size_t i = 1; result && i < argc; i++) {
@@ -23494,8 +23513,8 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
     spy_release(result);
     return spy_none(c);
 }
-enum { SET_ADD, SET_DISCARD, SET_REMOVE, SET_POP, SET_CLEAR, SET_COPY };
-static const char *const set_item_names[] = {"add", "discard", "remove", "pop", "clear", "copy"};
+enum { SET_ADD, SET_DISCARD, SET_REMOVE, SET_POP, SET_CLEAR, SET_COPY, SET_REDUCE };
+static const char *const set_item_names[] = {"add", "discard", "remove", "pop", "clear", "copy", "__reduce__"};
 static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)((intptr_t)data >> 8), which = (int)((intptr_t)data & 255);
     SPYValue *self = method_self(c, argc, argv, type, set_item_names[which]);
@@ -23506,20 +23525,13 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
     switch (which) {
     case SET_ADD: return set_add(c, self, args[0]) ? NULL : spy_none(c);
     case SET_DISCARD: case SET_REMOVE: {
-        SPYValue *key = args[0], *frozen = NULL;
         int64_t hash;
-        if (map_hash(c, self, key, &hash)) {
-            /* A set argument is looked up as the equivalent frozenset. */
-            if (!error_is(c, "TypeError") || !builtin_value(c, key, SPY_SET)) return NULL;
-            spy_clear_error(c);
-            frozen = set_copy_type(c, builtin_value(c, key, SPY_SET), SPY_FROZENSET);
-            if (!frozen || hash_value(c, frozen, &hash)) { spy_release(frozen); return NULL; }
-            key = frozen;
-        }
+        SPYValue *key = set_key(c, self, args[0], &hash);
+        if (!key) return NULL;
         ptrdiff_t found = map_find_hash(self, key, hash);
         if (found >= 0) set_remove_at(self, (size_t)found);
-        else if (!c->error_type[0] && which == SET_REMOVE) missing_key(c, key);
-        spy_release(frozen);
+        else if (!c->error_type[0] && which == SET_REMOVE) missing_key(c, args[0]);
+        spy_release(key);
         return c->error_type[0] ? NULL : spy_none(c);
     }
     case SET_POP: {
@@ -23531,6 +23543,19 @@ static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *ar
     case SET_CLEAR:
         while (self->as.map.len) set_remove_at(self, map_used(self) - 1);
         return spy_none(c);
+    case SET_REDUCE: {
+        /* (type, (list of the items,), state), as set_reduce does. */
+        SPYValue *items = spy_list(c);
+        for (size_t i = 0; items && i < self->as.map.len; i++)
+            if (sequence_append(c, items, map_items(self)[i].key)) { spy_release(items); items = NULL; }
+        SPYValue *args = items ? spy_tuple(c, 1, &items) : NULL;
+        SPYValue *getstate = args ? attribute(c, argv[0], "__getstate__") : NULL;
+        SPYValue *state = getstate ? call(c, getstate, 0, NULL) : NULL;
+        SPYValue *parts[] = {value_class(c, argv[0]), args, state};
+        SPYValue *result = state ? spy_tuple(c, 3, parts) : NULL;
+        spy_release(items); spy_release(args); spy_release(getstate); spy_release(state);
+        return result;
+    }
     default:
         if (self->type == SPY_FROZENSET && argv[0]->type == SPY_FROZENSET) return spy_retain(self);
         return set_copy_type(c, self, self->type);
@@ -26188,7 +26213,7 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     if (!fresh) return NULL;
     if (type == SPY_DICT) {
         for (size_t i = 0; i < fresh->as.map.len; i++)
-            if (map_set(c, self, map_items(fresh)[i].key, map_items(fresh)[i].value)) break;
+            if (map_set_hash(c, self, map_items(fresh)[i].key, map_items(fresh)[i].value, map_items(fresh)[i].hash)) break;
     } else swap_contents(self, fresh);
     spy_release(fresh);
     return c->error_type[0] ? NULL : spy_none(c);
@@ -27041,9 +27066,9 @@ static int register_type_methods(SPYContext *c) {
         if (register_method(c, SPY_SET, set_names[i], set_method, ((intptr_t)SPY_SET << 8) | i, METHOD_INSTANCE)) return -1;
         if ((i < 4 || i >= 8) && register_method(c, SPY_FROZENSET, set_names[i], set_method, ((intptr_t)SPY_FROZENSET << 8) | i, METHOD_INSTANCE)) return -1;
     }
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i <= SET_REDUCE; i++) {
         if (register_method(c, SPY_SET, set_item_names[i], set_item_method, ((intptr_t)SPY_SET << 8) | i, METHOD_INSTANCE)) return -1;
-        if (i == SET_COPY && register_method(c, SPY_FROZENSET, "copy", set_item_method, ((intptr_t)SPY_FROZENSET << 8) | i, METHOD_INSTANCE)) return -1;
+        if (i >= SET_COPY && register_method(c, SPY_FROZENSET, set_item_names[i], set_item_method, ((intptr_t)SPY_FROZENSET << 8) | i, METHOD_INSTANCE)) return -1;
     }
     return register_method(c, SPY_STRING, "encode", str_encode, 0, METHOD_INSTANCE) ||
         register_method(c, SPY_STRING, "maketrans", str_maketrans, 0, METHOD_STATIC) ||
