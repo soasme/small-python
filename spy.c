@@ -12083,11 +12083,11 @@ search:;
         first = string_offset(self, (size_t)start, self->as.string.cursor);
         last = string_offset(self, (size_t)end, self->as.string.cursor);
     }
-    SPYValue *sub = argv[0];
-    size_t count = tail && sub->type == SPY_TUPLE ? sub->as.seq.len : 1;
+    SPYValue *sub = argv[0], *choices = tail ? builtin_value(c, sub, SPY_TUPLE) : NULL;
+    size_t count = choices ? choices->as.seq.len : 1;
     for (size_t i = 0; i < count; i++) {
         if ((i & 63) == 63 && spend(c, 1)) return NULL;
-        SPYValue *part = tail && sub->type == SPY_TUPLE ? sub->as.seq.items[i] : sub;
+        SPYValue *part = choices ? choices->as.seq.items[i] : sub;
         const char *needle;
         size_t size;
         char byte;
@@ -12102,9 +12102,9 @@ search:;
             if (!text && self->type == SPY_BYTES) text = builtin_value(c, part, SPY_BYTEARRAY);
             if (!text) {
                 const char *what = self->type == SPY_STRING ? "str" : "bytes";
-                if (tail && sub->type == SPY_TUPLE && self->type == SPY_STRING)
+                if (choices && self->type == SPY_STRING)
                     return errorf(c, "TypeError", "tuple for %s must only contain str, not %s", name, type_name(part));
-                if (tail && sub->type == SPY_TUPLE) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(part));
+                if (choices) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(part));
                 if (tail) return errorf(c, "TypeError", "%s first arg must be %s or a tuple of %s, not %s", name, what, what, type_name(part));
                 if (self->type == SPY_STRING)
                     return errorf(c, "TypeError", "%s() argument 1 must be str, not %s", name, part->type == SPY_NONE ? "None" : type_name(part));
@@ -17176,10 +17176,11 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     return status;
 }
 /* type.__new__(meta, name, bases, namespace, **keywords). */
-static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *bases, SPYValue *namespace, SPYValue *keywords) {
+static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *given, SPYValue *namespace, SPYValue *keywords) {
     SPYValue *storage = dictionary_value(c, namespace), *text = builtin_value(c, name, SPY_STRING);
+    SPYValue *bases = builtin_value(c, given, SPY_TUPLE);
     if (!text) return errorf(c, "TypeError", "type.__new__() argument 1 must be str, not %s", type_name(name));
-    if (bases->type != SPY_TUPLE) return errorf(c, "TypeError", "type.__new__() argument 2 must be tuple, not %s", type_name(bases));
+    if (!bases) return errorf(c, "TypeError", "type.__new__() argument 2 must be tuple, not %s", type_name(given));
     if (!storage) return errorf(c, "TypeError", "type.__new__() argument 3 must be dict or frozendict, not %s", type_name(namespace));
     /* Bases are taken as they are: a class statement resolves MRO entries. */
     for (size_t i = 0; i < bases->as.seq.len; i++) {
@@ -17198,7 +17199,7 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
         if (allocator && allocator != name_local(c->types[SPY_CLASS], "__new__")) {
             SPYValue *method = descriptor_get(c, allocator, NULL, winner);
             SPYValue *bound = method ? bind_method(c, winner, method) : NULL;
-            SPYValue *args[] = {name, bases, namespace};
+            SPYValue *args[] = {name, given, namespace};
             SPYValue *result = bound ? call_keywords(c, bound, 3, args, keywords) : NULL;
             spy_release(bound); spy_release(method);
             return result;
@@ -19384,6 +19385,8 @@ static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
     if (v->type == SPY_TUPLE || v->type == SPY_STRING || (bytes && (v->type == SPY_BYTES || v->type == SPY_BYTEARRAY))) return 0;
     if (v->type == SPY_DICT || v->type == SPY_LIST || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY || v->type == SPY_RANGE) return 1;
     if (v->type == SPY_INSTANCE && (builtin_value(c, v, SPY_TUPLE) || builtin_value(c, v, SPY_STRING))) return 0;
+    /* A subclass instance subscripts as its builtin base does. */
+    if (v->type == SPY_INSTANCE && v->as.map.base && percent_mapping(c, v->as.map.base, bytes)) return 1;
     return special_dispatch(v) && percent_has(c, v, "__getitem__");
 }
 static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args) {
@@ -20986,11 +20989,12 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
         if (sub) return a == target ? 1 : recursive_issubclass(c, a, target);
         return object_isinstance(c, a, target);
     }
-    if (target->type == SPY_TUPLE) {
+    SPYValue *choices = builtin_value(c, target, SPY_TUPLE);
+    if (choices) {
         int result = 0;
-        for (size_t i = 0; i < target->as.seq.len && !result; i++) {
+        for (size_t i = 0; i < choices->as.seq.len && !result; i++) {
             if (((i & 15) == 15 && spend(c, 1)) || deeper(c, sub ? " in __subclasscheck__" : " in __instancecheck__")) return -1;
-            result = instance_check(c, a, target->as.seq.items[i], sub, 0);
+            result = instance_check(c, a, choices->as.seq.items[i], sub, 0);
             c->depth--;
         }
         return result;
@@ -23264,8 +23268,9 @@ static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
     (void)data;
     if (positional_only(c, class_tname(argv[0]), "fromhex", 1, 1, argc - 1, keywords)) return NULL;
     SPYValue *const *args = argv + 1;
-    if (args[0]->type != SPY_STRING) return spy_error(c, "TypeError", "bad argument type for built-in operation");
-    const char *s = args[0]->as.string.data, *end = s + args[0]->as.string.len;
+    SPYValue *text = builtin_value(c, args[0], SPY_STRING);
+    if (!text) return spy_error(c, "TypeError", "bad argument type for built-in operation");
+    const char *s = text->as.string.data, *end = s + text->as.string.len;
     while (s < end && isspace((unsigned char)*s)) s++;
     while (end > s && isspace((unsigned char)end[-1])) end--;
     int negative = 0;

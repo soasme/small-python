@@ -1,5 +1,5 @@
-# spec: PLS-315 5.2.7, 10.4.2, 19.3.16, 21.4.1, 22.4.1, 23.1, 23.3.1, 24.1.3
-# description: str subclass instances meet a str requirement: class and function names, encodings, format specs, translation tables, complex text, and hex separators.
+# spec: PLS-315 5.2.7, 10.4.2, 19.3.16, 19.3.21, 19.3.22, 21.4.1, 22.3, 22.4.1, 23.1.4, 23.3.1, 23.6, 24.1.3
+# description: subclass instances meet builtin type requirements: str names, encodings, format specs, translation tables, complex text and hex separators; tuple class and prefix choices and bases; dict subclass mappings.
 from harness import *
 
 
@@ -87,3 +87,24 @@ assert_eq(str(assert_raises(TypeError, b"ab".hex, 5)), "object of type 'int' has
 assert_eq(bytes.fromhex(S("61 62")), b"ab")
 assert_eq(bytes.fromhex(memoryview(b"6162")), b"ab")
 assert_eq(bytearray.fromhex(B(b"61")), bytearray(b"a"))
+
+# float.fromhex reads a str subclass's text.
+assert_eq(float.fromhex(S("0x1p1")), 2.0)
+
+# A tuple subclass is a tuple of choices, searched by its items.
+class Choices(tuple):
+    def __iter__(self):
+        raise AssertionError("the items are read directly")
+assert_true(isinstance(1, Choices((str, int))))
+assert_true(issubclass(bool, Choices((int,))))
+assert_true("abc".startswith(Choices(("x", "a"))))
+assert_true("abc".endswith(Choices(("c",))))
+assert_true(b"abc".startswith(Choices((b"a",))))
+assert_eq(str(assert_raises(TypeError, "abc".startswith, Choices((1,)))), "tuple for startswith must only contain str, not int")
+assert_eq(type("X", Choices((object,)), {}).__bases__, (object,))
+
+# A dict subclass is a mapping for %-formatting.
+class Mapping(dict):
+    pass
+assert_eq("%(a)s-%(b)d" % Mapping(a="x", b=2), "x-2")
+assert_eq(b"%(a)s" % Mapping({b"a": b"y"}), b"y")
