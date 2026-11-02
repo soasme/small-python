@@ -66,6 +66,7 @@ Contents | - navigation
 7 Abstract Operations > 7.4 Call operations > 7.4.2 CallFunction ( *f*, *args*, *kwargs* ) | Calls, FunctionObjects
 7 Abstract Operations > 7.4 Call operations > 7.4.3 BindArguments ( *f*, *frame*, *args*, *kwargs* ) | Calls
 7 Abstract Operations > 7.4 Call operations > 7.4.4 Argument binding of built-in functions | BuiltinsObjects, BuiltinsIter
+7 Abstract Operations > 7.4 Call operations > 7.4.5 KeywordSuggestion ( *name*, *candidates* ) | KeywordSuggestion
 7 Abstract Operations > 7.5 Type conversion | = sections
 7 Abstract Operations > 7.5 Type conversion > 7.5.1 ToBoolean ( *o* ) | Truth
 7 Abstract Operations > 7.5 Type conversion > 7.5.2 Length ( *o* ) | BuiltinsObjects, Containers
