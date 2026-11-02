@@ -20480,15 +20480,18 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
      * uses that rather than calling __bool__ again, as CPython's jumps do. */
     int known = 0;
     Instruction *code = m->code->items;
+    size_t pc = m->pc;
     for (;;) {
         int truth_known = known;
         known = 0;
         if (c->error_type[0]) { spy_release(flow.value); flow = (Result){FLOW_ERROR, NULL}; }
         if (flow.flow != FLOW_NORMAL) {
+            m->pc = pc;
             if (!machine_unwind(c, m, &f, &flow)) return flow;
+            pc = m->pc;
             if (c->error_type[0]) continue;
         }
-        Instruction *ins = &code[m->pc++];
+        Instruction *ins = &code[pc++];
         Node *n = ins->node;
         if (n) { if (tick(c, &f, n)) continue; }
         else if (n = generator->as.generator.node, !quiet(c, &f)) {
@@ -20499,6 +20502,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
         }
         SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
+        /* A step that owns no operand continues past their release. */
         switch (ins->op) {
         case BC_EVAL:
             if (ins->arg) {
@@ -20506,7 +20510,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 machine_push(c, m, eval_tested(c, &f, n, &truth));
                 if (truth >= 0) known = truth + 1;
             } else machine_push(c, m, eval(c, &f, n));
-            break;
+            continue;
         case BC_OPERATE:
             /* Its operands taken at hand, as on eval's operator fast path. */
             x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
@@ -20514,17 +20518,17 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             value = y ? operator_fast(c, n, x, y) : NULL;
             if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
             machine_push(c, m, value);
-            break;
+            continue;
         case BC_LOAD:
             /* A literal or a name found along the fast path, without eval. */
             value = leaf_operand(&f, n);
-            machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n)); break;
+            machine_push(c, m, value ? spy_retain(value) : eval(c, &f, n)); continue;
         case BC_EXEC: {
             /* An assignment, ticked as this step, needs no statement dispatch. */
-            if (n->kind == N_ASSIGN) { assign_step(c, &f, n); break; }
+            if (n->kind == N_ASSIGN) { assign_step(c, &f, n); continue; }
             flow = execute_statements(c, &f, n, 1);
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
-            break;
+            continue;
         }
         case BC_NONE: machine_push(c, m, spy_none(c)); break;
         case BC_POP: spy_release(machine_pop(m)); break;
@@ -20548,7 +20552,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             if (value && ins->arg && spy_truth(value)) { spy_release(value); value = spy_retain(b); }
             else {
                 if (value && c->error_type[0]) { spy_release(value); value = NULL; }
-                m->pc = ins->target;
+                pc = ins->target;
             }
             machine_push(c, m, value); break;
         }
@@ -20634,13 +20638,13 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         case BC_NAMED: name_set(c, f.env, n->text, m->stack[m->len - 1]); break;
         case BC_JUMP:
             /* A backward jump shows a trace function its line again. */
-            if (watched(c) && ins->target < m->pc) {
+            if (watched(c) && ins->target < pc) {
                 if (loop_pass(c)) break;
                 if (c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
             }
-            m->pc = ins->target; break;
+            pc = ins->target; continue;
         case BC_PATTERN:
-            if (!match_case(c, &f, n, m->stack[m->len - 1])) m->pc = ins->target;
+            if (!match_case(c, &f, n, m->stack[m->len - 1])) pc = ins->target;
             break;
         case BC_TEST: {
             /* BC_OPERATE then BC_FALSE, a comparison of numbers making no bool. */
@@ -20653,16 +20657,16 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 if (!(a = value)) break;
                 truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : spy_truth(a);
             }
-            if (!truth) m->pc = ins->target;
+            if (!truth) pc = ins->target;
             break;
         }
         case BC_FALSE:
             a = machine_pop(m);
-            if (!(truth_known ? truth_known - 1 : spy_truth(a))) m->pc = ins->target;
+            if (!(truth_known ? truth_known - 1 : spy_truth(a))) pc = ins->target;
             break;
         case BC_SHORT: {
             int truth = truth_known ? truth_known - 1 : !!spy_truth(m->stack[m->len - 1]);
-            if ((ins->arg == O_OR) == truth) { m->pc = ins->target; known = truth + 1; }
+            if ((ins->arg == O_OR) == truth) { pc = ins->target; known = truth + 1; }
             else spy_release(machine_pop(m));
             break;
         }
@@ -20672,7 +20676,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 if (!(value = value ? spy_retain(value) : eval(c, &f, n->a))) break;
             } else value = machine_pop(m);
             m->awaiting = AWAIT_YIELD; m->drop = ins->arg >> 1;
-            return (Result){FLOW_YIELD, value};
+            m->pc = pc; return (Result){FLOW_YIELD, value};
         case BC_DELEGATE:
             a = machine_pop(m);
             m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
@@ -20682,8 +20686,8 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             if (m->delegate) {
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
                 value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
-                if (value) { spy_release(a); return (Result){FLOW_YIELD, value}; }
-                finish_delegate(c, m);
+                if (value) { spy_release(a); m->pc = pc; return (Result){FLOW_YIELD, value}; }
+                m->pc = pc; finish_delegate(c, m); pc = m->pc;
             }
             break;
         case BC_FLOW:
@@ -20704,12 +20708,12 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 if (a) m->delegate = await_iterator(c, a, "__anext__");
                 if (m->delegate) {
                     value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
-                    if (value) { spy_release(a); return (Result){FLOW_YIELD, value}; }
+                    if (value) { spy_release(a); m->pc = pc; return (Result){FLOW_YIELD, value}; }
                 }
-                finish_delegate(c, m);
+                m->pc = pc; finish_delegate(c, m); pc = m->pc;
             } else {
                 a = iterator_next(c, m->blocks[m->block_len - 1].value);
-                if (!a) m->pc = ins->target;
+                if (!a) pc = ins->target;
                 else { machine_push(c, m, a); a = NULL; }
             }
             break;
@@ -20720,7 +20724,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             Block *block = &m->blocks[m->block_len - 1];
             a = ins->arg ? machine_pop(m) : NULL;
             int match = a ? exception_matches(c, block->error->value, a) : 1;
-            if (!match) m->pc = ins->target;
+            if (!match) pc = ins->target;
             else if (match > 0 && n->c) {
                 block->name = n->c; store_target(c, &f, n->c, block->error->value);
             }
@@ -20738,9 +20742,9 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         case BC_STAR_MATCH: {
             a = machine_pop(m);
             SPYValue *state = m->blocks[m->block_len - 1].value, *match = NULL, *rest = NULL;
-            if (state->as.seq.items[0] == c->none) { m->pc = ins->target; break; }
+            if (state->as.seq.items[0] == c->none) { pc = ins->target; break; }
             if (star_match(c, state->as.seq.items[0], a, &match, &rest)) break;
-            if (!match) { spy_release(rest); m->pc = ins->target; break; }
+            if (!match) { spy_release(rest); pc = ins->target; break; }
             spy_release(state->as.seq.items[0]); state->as.seq.items[0] = rest ? rest : spy_none(c);
             Block *inner = push_block(c, m, BLOCK_EXCEPT, ins);
             if (!inner) { spy_release(match); break; }
@@ -20757,7 +20761,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             Block *outer = &m->blocks[m->block_len - 1];
             if (raised) sequence_append(c, outer->value->as.seq.items[1], raised);
             spy_release(raised);
-            if (ins->op == BC_STAR_DONE) m->pc = ins->target;
+            if (ins->op == BC_STAR_DONE) pc = ins->target;
             break;
         }
         case BC_BUILDER: machine_push(c, m, spy_string(c, "__build_class__", 15)); break;
@@ -20793,7 +20797,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             spy_release(result); break;
         }
         case BC_LEAVE:
-            machine_unwind(c, m, &f, &flow); break;
+            m->pc = pc; machine_unwind(c, m, &f, &flow); pc = m->pc; break;
         case BC_END_FINALLY: {
             Block *block = &m->blocks[m->block_len - 1];
             flow = (Result){block->flow, block->value}; block->value = NULL;

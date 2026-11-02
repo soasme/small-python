@@ -183,6 +183,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A list, tuple or range iterates without a protocol search](#a-list-tuple-or-range-iterates-without-a-protocol-search) | `[k for k in range(3)]`: -4%; M2: nbody -1.5%, strings -1.1% |
 | [A comprehension reuses its environment](#a-comprehension-reuses-its-environment) | `[k for k in range(3)]`: -5.5%; M2: strings -0.7% |
 | [A growing buffer moves through the spare blocks](#a-growing-buffer-moves-through-the-spare-blocks) | M2: strings -6.8%, peak memory 11.7 → 3.1 MiB |
+| [A machine step keeps its place in a local](#a-machine-step-keeps-its-place-in-a-local) | -1.2% (generators); M2: generators -2.7% |
 
 ### Releasing a number or string frees it at once
 
@@ -1322,6 +1323,19 @@ block from the spare lists and returns the old one there; only a resize
 between two large sizes calls `realloc`. Peak memory of `strings`:
 11.7 → 3.1 MiB. Wall time averaged over eight code layouts: strings
 -6.8%, the rest within 0.5%.
+
+### A machine step keeps its place in a local
+
+The machine read and wrote `m->pc` in memory on every step, and every
+step ran the release of its two owned operands, although most own none.
+The program counter is now a local of `run_machine`, written back only
+where `machine_unwind` or `finish_delegate` reads it and where the
+generator suspends, and the steps that own no operand (`BC_EVAL`,
+`BC_OPERATE`, `BC_LOAD`, `BC_EXEC`, `BC_JUMP`) continue past the
+release. Instructions: generators -1.2%, strings -0.2%, sort -0.1%, the
+rest unchanged; on the machine micro-benchmark of a `while` loop that
+holds a `yield`, about 1.6 instructions a step. Wall time averaged over
+eight code layouts: generators -2.7%, the rest within 1%.
 
 ### A profile-guided build
 
