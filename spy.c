@@ -8476,11 +8476,25 @@ static int length_result(SPYContext *c, SPYValue *result, int64_t *length) {
     else { *length = index->as.integer_data.small; status = 0; }
     spy_release(index); return status;
 }
-static int index_value(SPYContext *c, SPYValue *value, int64_t *result) {
+/* An integer argument within -limit-1 .. limit, else OverflowError(message). */
+static int index_in(SPYContext *c, SPYValue *value, int64_t *result, int64_t limit, const char *message) {
     SPYValue *index = index_object(c, value);
     if (!index) return -1;
-    int status = spy_as_int(c, index, result);
-    spy_release(index); return status;
+    int64_t small = index->as.integer_data.small;
+    int bad = index->as.integer_data.big || small > limit || small < -limit - 1;
+    if (bad) spy_error(c, "OverflowError", message);
+    else *result = small;
+    spy_release(index); return -bad;
+}
+/* A size or position argument, as PyLong_AsSsize_t converts it. */
+static int index_value(SPYContext *c, SPYValue *value, int64_t *result) {
+    return index_in(c, value, result, INT64_MAX, "Python int too large to convert to C ssize_t");
+}
+static int index_size(SPYContext *c, SPYValue *value, int64_t *result) {
+    return index_in(c, value, result, INT64_MAX, "cannot fit 'int' into an index-sized integer");
+}
+static int index_int(SPYContext *c, SPYValue *value, int64_t *result) {
+    return index_in(c, value, result, INT_MAX, "Python int too large to convert to C int");
 }
 static SPYValue *slice_bound(SPYContext *c, SPYValue *value, SPYValue *length,
                            SPYValue *lower, SPYValue *upper, SPYValue *fallback) {
@@ -9329,6 +9343,7 @@ static SPYValue *dict_union(SPYContext *c, SPYValue *a, SPYValue *b) {
     return result;
 }
 static SPYValue *buffer_bytes(SPYContext *, SPYValue *, SPYValue **);
+static int byte_value(SPYContext *, SPYValue *, unsigned char *);
 /* The operator a binary operation's TypeError names. */
 static const char *binary_symbol(int op) {
     static const struct { int op; const char *text; } names[] = {
@@ -9819,10 +9834,10 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         } else if (b->type == SPY_BYTEARRAY) {
             SPYValue view = {.ctx = b->ctx, .type = SPY_BYTES, .as.string = b->as.string};
             return comparison(c, op, a->type == SPY_BYTEARRAY ? &(SPYValue){.type = SPY_BYTES, .as.string = a->as.string} : a, &view);
-        } else if (b->type == SPY_BYTES && is_int(a)) {
-            if (a->as.integer_data.big || a->as.integer_data.small < 0 || a->as.integer_data.small > 255)
-                return spy_error(c, "ValueError", "byte must be in range(0, 256)");
-            result = memchr(b->as.string.data, (int)a->as.integer_data.small, b->as.string.len) != NULL;
+        } else if (b->type == SPY_BYTES && (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__")))) {
+            unsigned char byte;
+            if (byte_value(c, a, &byte)) return NULL;
+            result = memchr(b->as.string.data, byte, b->as.string.len) != NULL;
         } else if (b->type == SPY_BYTES) {
             SPYValue *copy, *needle = buffer_bytes(c, a, &copy);
             if (!needle) return c->error_type[0] ? NULL : errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(a));
@@ -12125,13 +12140,11 @@ search:;
         SPYValue *part = choices ? choices->as.seq.items[i] : sub;
         const char *needle;
         size_t size;
-        char byte;
+        unsigned char byte;
         if (self->type == SPY_BYTES && !tail && (is_int(part) ||
             (part->type == SPY_INSTANCE && class_lookup(part->as.map.parent, "__index__")))) {
-            int64_t code;
-            if (slice_index(c, part, &code)) return NULL;
-            if (code < 0 || code > 255) return spy_error(c, "ValueError", "byte must be in range(0, 256)");
-            byte = (char)(unsigned char)code; needle = &byte; size = 1;
+            if (byte_value(c, part, &byte)) return NULL;
+            needle = (char *)&byte; size = 1;
         } else {
             SPYValue *text = builtin_value(c, part, self->type);
             if (!text && self->type == SPY_BYTES) text = builtin_value(c, part, SPY_BYTEARRAY);
@@ -16544,7 +16557,7 @@ static int bytearray_resize(SPYContext *, SPYValue *, size_t);
 /* list *= rhs, in place. */
 static NO_INLINE SPYValue *list_repeat(SPYContext *c, SPYValue *old, SPYValue *rhs) {
     int64_t count;
-    if (index_value(c, rhs, &count)) return NULL;
+    if (index_size(c, rhs, &count)) return NULL;
     size_t len = old->as.seq.len;
     if (count <= 0) {
         old->as.seq.len = 0;
@@ -21834,7 +21847,7 @@ static SPYValue *traceback_construct(SPYContext *c, size_t argc, SPYValue *const
     if (args[0]->type != SPY_NONE && args[0]->type != SPY_TRACEBACK)
         return errorf(c, "TypeError", "expected traceback object or None, got '%s'", type_name(args[0]));
     if (args[1]->type != SPY_FRAME) return errorf(c, "TypeError", "traceback() argument 'tb_frame' must be frame, not %s", type_name(args[1]));
-    if (index_value(c, args[2], &lasti) || index_value(c, args[3], &line)) return NULL;
+    if (index_int(c, args[2], &lasti) || index_int(c, args[3], &line)) return NULL;
     SPYValue *tb = value_new(c, SPY_TRACEBACK);
     if (!tb) return NULL;
     tb->as.traceback.next = args[0]->type == SPY_NONE ? NULL : spy_retain(args[0]);
@@ -22598,8 +22611,8 @@ static SPYValue *text_expandtabs(SPYContext *c, size_t argc, SPYValue *const *ar
     static const char *const names[] = {"tabsize"};
     SPYValue *self = method_self(c, argc, argv, type, "expandtabs"), *args[1];
     if (!self || parse_arguments(c, "expandtabs", argc - 1, argv + 1, keywords, names, 1, 0, 0, args)) return NULL;
-    int64_t size;
-    if (optional_size(c, args[0], 8, &size)) return NULL;
+    int64_t size = 8;
+    if (args[0] && index_int(c, args[0], &size)) return NULL;
     Units text, out = {.ctx = c};
     if (units_from(c, self, &text)) return NULL;
     size_t column = 0;
@@ -24460,7 +24473,7 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
         for (int k = 1; op == MV_INDEX && k < 3; k++) {
             if (!args[k] || args[k]->type == SPY_NONE) continue;
             int64_t bound;
-            if (index_value(c, args[k], &bound)) return NULL;
+            if (search_bound(c, args[k], &bound)) return NULL;
             if (bound < 0) { bound += memory_shape(m)[0]; if (bound < 0) bound = 0; }
             if (bound > memory_shape(m)[0]) bound = memory_shape(m)[0];
             if (k == 1) start = (ptrdiff_t)bound; else stop = (ptrdiff_t)bound;
@@ -24498,20 +24511,26 @@ static int bytearray_resize(SPYContext *c, SPYValue *array, size_t len) {
     return 0;
 }
 static int byte_value(SPYContext *c, SPYValue *value, unsigned char *out) {
-    int64_t byte;
-    if (index_value(c, value, &byte)) return -1;
-    if (byte < 0 || byte > 255) { spy_error(c, "ValueError", "byte must be in range(0, 256)"); return -1; }
-    *out = (unsigned char)byte;
-    return 0;
+    SPYValue *index = index_object(c, value);
+    if (!index) return -1;
+    int64_t byte = index->as.integer_data.small;
+    int bad = index->as.integer_data.big || byte < 0 || byte > 255;
+    if (bad) spy_error(c, "ValueError", "byte must be in range(0, 256)");
+    else *out = (unsigned char)byte;
+    spy_release(index); return -bad;
 }
-/* Collect bytes from a bytes-like object or an iterable of integers. */
-static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out) {
+/* Collect bytes from a bytes-like object or an iterable of integers; refusal
+ * formats the TypeError for a value that is neither. */
+static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out, const char *refusal) {
     SPYValue *copy, *actual = buffer_bytes(c, source, &copy);
     if (actual) { int status = append(out, actual->as.string.data, actual->as.string.len); spy_release(copy); return status; }
     if (c->error_type[0]) return -1;
-    if (source->type == SPY_STRING) { spy_error(c, "TypeError", "cannot extend bytearray with str"); return -1; }
+    if (builtin_value(c, source, SPY_STRING)) { spy_error(c, "TypeError", "expected iterable of integers; got: 'str'"); return -1; }
     SPYValue *iterator = get_iterator(c, source), *item;
-    if (!iterator) return -1;
+    if (!iterator) {
+        if (error_is(c, "TypeError")) { spy_clear_error(c); errorf(c, "TypeError", refusal, type_name(source)); }
+        return -1;
+    }
     while (!c->error_type[0] && (item = native_next(c, iterator))) {
         unsigned char byte;
         if (!byte_value(c, item, &byte)) append(out, (char *)&byte, 1);
@@ -24539,7 +24558,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         return spy_none(c);
     case BA_EXTEND: {
         Buffer out = {.ctx = c};
-        if (length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out)) { mem_free(out.data); return NULL; }
+        if (length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out, "can't extend bytearray with %s")) { mem_free(out.data); return NULL; }
         len = self->as.string.len;
         if (out.len > SIZE_MAX - len - 1) { mem_free(out.data); return spy_error(c, "MemoryError", "bytearray is too large"); }
         if (bytearray_resize(c, self, len + out.len)) { mem_free(out.data); return NULL; }
@@ -24647,7 +24666,7 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
             spy_error(c, "TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)"); return -1;
         }
         Buffer bytes = {.ctx = c};
-        int status = collect_bytes(c, item, &bytes);
+        int status = collect_bytes(c, item, &bytes, "cannot convert '%s' object to bytearray");
         SPYValue *copy = status ? NULL : bytearray_new(c, bytes.data, bytes.len);
         mem_free(bytes.data);
         status = copy ? bytearray_set(c, array, key, copy) : -1;
@@ -24920,7 +24939,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (a->type != SPY_STRING) return spy_error(c, "TypeError", "module name must be a string");
         if (strlen(a->as.string.data) != a->as.string.len) return spy_error(c, "ValueError", "module name contains a null character");
         int64_t level = 0;
-        if (argc == 5 && index_value(c, argv[4], &level)) return NULL;
+        if (argc == 5 && index_int(c, argv[4], &level)) return NULL;
         char *absolute = absolute_name(c, a->as.string.data, argc > 1 ? argv[1] : NULL, level);
         SPYValue *module = absolute ? import_module(c, absolute) : NULL;
         if (module && argc > 3 && spy_truth(argv[3])) {
@@ -24960,7 +24979,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (text && (text == a || !class_lookup(a->as.map.parent, "__bytes__"))) return spy_error(c, "TypeError", "string argument without an encoding");
         if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) {
             int64_t len;
-            if (index_value(c, a, &len)) return NULL;
+            if (index_size(c, a, &len)) return NULL;
             if (len < 0) return spy_error(c, "ValueError", "negative count");
             if ((uint64_t)len >= SIZE_MAX) return spy_error(c, "OverflowError", "byte string too large");
             SPYValue *result = value_new(c, SPY_BYTES);
@@ -27015,17 +27034,20 @@ static SPYValue *bytes_maketrans(SPYContext *c, size_t argc, SPYValue *const *ar
     (void)data;
     SPYValue *args[2];
     if (parse_arguments(c, "maketrans", argc, argv, keywords, NULL, 2, 2, 0, args)) return NULL;
-    SPYValue *text[2];
-    for (int i = 0; i < 2; i++) {
-        text[i] = builtin_value(c, args[i], SPY_BYTES);
-        if (!text[i]) text[i] = builtin_value(c, args[i], SPY_BYTEARRAY);
-        if (!text[i]) return errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(args[i]));
-    }
-    if (text[0]->as.string.len != text[1]->as.string.len) return spy_error(c, "ValueError", "maketrans arguments must have same length");
+    SPYValue *text[2], *copy[2] = {NULL, NULL}, *result = NULL;
+    for (int i = 0; i < 2; i++)
+        if (!(text[i] = buffer_bytes(c, args[i], &copy[i]))) {
+            if (!c->error_type[0]) errorf(c, "TypeError", "a bytes-like object is required, not '%s'", type_name(args[i]));
+            goto done;
+        }
+    if (text[0]->as.string.len != text[1]->as.string.len) { spy_error(c, "ValueError", "maketrans arguments must have same length"); goto done; }
     char table[256];
     for (int i = 0; i < 256; i++) table[i] = (char)i;
     for (size_t i = 0; i < text[0]->as.string.len; i++) table[(unsigned char)text[0]->as.string.data[i]] = text[1]->as.string.data[i];
-    return spy_bytes(c, table, 256);
+    result = spy_bytes(c, table, 256);
+done:
+    spy_release(copy[0]); spy_release(copy[1]);
+    return result;
 }
 /* float.from_number and complex.from_number: numbers only, never strings. */
 static SPYValue *from_number(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
