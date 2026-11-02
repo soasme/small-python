@@ -1705,6 +1705,16 @@ class random:
         return seq[cls.randrange(len(seq))]
 
     @classmethod
+    def choices(cls, population, k=1):
+        # One generator step per item, inlined: tests draw thousands.
+        state, n, result = cls._state, len(population), []
+        for _ in range(k):
+            state = (state * 1103515245 + 12345) % 2 ** 31
+            result.append(population[(state >> 16) % n])
+        cls._state = state
+        return result
+
+    @classmethod
     def shuffle(cls, items):
         for i in range(len(items) - 1, 0, -1):
             j = cls.randrange(i + 1)

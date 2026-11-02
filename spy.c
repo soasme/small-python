@@ -9836,8 +9836,12 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             spy_release(key);
             if (c->error_type[0]) return NULL;
         } else if (b->type == SPY_BYTEARRAY) {
+            /* The export keeps the view's storage while the needle converts. */
+            b->as.string.exports++;
             SPYValue view = {.ctx = b->ctx, .type = SPY_BYTES, .as.string = b->as.string};
-            return comparison(c, op, a->type == SPY_BYTEARRAY ? &(SPYValue){.type = SPY_BYTES, .as.string = a->as.string} : a, &view);
+            SPYValue *found = comparison(c, op, a->type == SPY_BYTEARRAY ? &(SPYValue){.type = SPY_BYTES, .as.string = a->as.string} : a, &view);
+            b->as.string.exports--;
+            return found;
         } else if (b->type == SPY_BYTES && (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__")))) {
             unsigned char byte;
             if (byte_value(c, a, &byte)) return NULL;
@@ -12250,13 +12254,27 @@ search:;
     }
     return spy_bool(c, 0);
 }
+/* CPython's bytearray methods hold a buffer of the array while Python code
+ * they call runs, so that code cannot resize it: f runs with the receiver's
+ * bytearray exported. */
+static SPYValue *exported(SPYContext *c, SPYNativeKeywords f, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    SPYValue *array = argc ? builtin_value(c, argv[0], SPY_BYTEARRAY) : NULL;
+    if (array) array->as.string.exports++;
+    SPYValue *result = f(c, argc, argv, keywords, data);
+    if (array) array->as.string.exports--;
+    return result;
+}
 static SPYValue *string_search_method(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int descriptor = (int)(intptr_t)data, type = descriptor >> 16, method = descriptor & 65535;
     SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
     if (!self) return spy_error(c, "TypeError", "string method requires an instance of its type");
     if (self->type != SPY_BYTEARRAY) return string_search(c, self, method, argc - 1, argv + 1);
+    /* The export keeps the view's storage while the arguments convert. */
+    self->as.string.exports++;
     SPYValue view = {.ctx = self->ctx, .type = SPY_BYTES, .as.string = self->as.string};
-    return string_search(c, &view, method, argc - 1, argv + 1);
+    SPYValue *result = string_search(c, &view, method, argc - 1, argv + 1);
+    self->as.string.exports--;
+    return result;
 }
 /* CPython's arity errors: METH_NOARGS and METH_O methods name their type,
  * positional-only ranges use _PyArg_CheckPositional's wording. */
@@ -19501,7 +19519,7 @@ static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
     if (v->type == SPY_INSTANCE && v->as.map.base && percent_mapping(c, v->as.map.base, bytes)) return 1;
     return special_dispatch(v) && percent_has(c, v, "__getitem__");
 }
-static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args) {
+static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) {
     int bytes = format->type != SPY_STRING;
     const char *s = format->as.string.data;
     size_t n = format->as.string.len;
@@ -19649,6 +19667,14 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
     if (!c->error_type[0]) result = format->type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
         bytes ? spy_bytes(c, out.data ? out.data : "", out.len) : spy_string(c, out.data ? out.data : "", out.len);
     mem_free(out.data); return result;
+}
+/* A bytearray format stays exported while the values run Python code. */
+static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args) {
+    if (format->type != SPY_BYTEARRAY) return percent_build(c, format, args);
+    format->as.string.exports++;
+    SPYValue *result = percent_build(c, format, args);
+    format->as.string.exports--;
+    return result;
 }
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
@@ -22504,6 +22530,9 @@ fail:
     mem_free(text.items); mem_free(sep.items); spy_release(list);
     return NULL;
 }
+static SPYValue *bytearray_split(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    return exported(c, text_split, argc, argv, keywords, data);
+}
 static int memchr_units(const uint32_t *items, size_t len, uint32_t code) {
     for (size_t i = 0; i < len; i++) if (items[i] == code) return 1;
     return 0;
@@ -22514,12 +22543,13 @@ static SPYValue *text_strip(SPYContext *c, size_t argc, SPYValue *const *argv, S
     SPYValue *self = method_self(c, argc, argv, type, strip_names[sides]), *args[1];
     if (!self || parse_arguments(c, strip_names[sides], argc - 1, argv + 1, keywords, NULL, 1, 0, 0, args)) return NULL;
     Units text, chars = {0};
-    if (units_from(c, self, &text)) return NULL;
     int whitespace = !args[0] || args[0]->type == SPY_NONE;
-    if (!whitespace && type == SPY_STRING && !builtin_value(c, args[0], SPY_STRING)) {
-        mem_free(text.items); return errorf(c, "TypeError", "%s arg must be None or str", strip_names[sides]);
-    }
-    if (!whitespace && text_argument(c, self, args[0], "strip arg", &chars)) { mem_free(text.items); return NULL; }
+    if (!whitespace && type == SPY_STRING && !builtin_value(c, args[0], SPY_STRING))
+        return errorf(c, "TypeError", "%s arg must be None or str", strip_names[sides]);
+    /* The arguments convert before the text is read, as a bytearray's
+     * argument may resize it. */
+    if (!whitespace && text_argument(c, self, args[0], "strip arg", &chars)) return NULL;
+    if (units_from(c, self, &text)) { mem_free(chars.items); return NULL; }
     size_t start = 0, end = text.len;
 #define STRIPPED(code) (whitespace ? character_is(type, C_SPACE, code) : \
         memchr_units(chars.items, chars.len, code))
@@ -22553,11 +22583,10 @@ static SPYValue *text_replace(SPYContext *c, size_t argc, SPYValue *const *argv,
     if (optional_size(c, args[2], -1, &limit)) return NULL;
     if ((self->type == SPY_STRING || self->type == SPY_BYTES) && args[0]->type == self->type && args[1]->type == self->type &&
         args[0]->as.string.len) return bytes_replace(c, self, args[0], args[1], limit);
-    Units text, old = {0}, replacement = {0}, out = {.ctx = c};
-    if (units_from(c, self, &text)) return NULL;
+    Units text = {0}, old = {0}, replacement = {0}, out = {.ctx = c};
     SPYValue *result = NULL;
     if (text_argument(c, self, args[0], "replace() argument 1 must be str", &old) ||
-        text_argument(c, self, args[1], "replace() argument 2 must be str", &replacement)) goto done;
+        text_argument(c, self, args[1], "replace() argument 2 must be str", &replacement) || units_from(c, self, &text)) goto done;
     size_t start = 0, count = 0;
     if (!old.len) {
         for (size_t i = 0; i <= text.len; i++) {
@@ -22651,12 +22680,11 @@ static SPYValue *text_affix(SPYContext *c, size_t argc, SPYValue *const *argv, S
     const char *name = suffix ? "removesuffix" : "removeprefix";
     SPYValue *self = method_self(c, argc, argv, type, name), *args[1];
     if (!self || parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
-    Units text, affix = {0};
-    if (units_from(c, self, &text)) return NULL;
+    Units text = {0}, affix = {0};
     SPYValue *result = NULL;
     char what[64];
     snprintf(what, sizeof(what), "%s() argument must be str", name);
-    if (!text_argument(c, self, args[0], what, &affix)) {
+    if (!text_argument(c, self, args[0], what, &affix) && !units_from(c, self, &text)) {
         size_t start = 0, end = text.len;
         if (affix.len <= text.len && !memcmp(text.items + (suffix ? text.len - affix.len : 0), affix.items, affix.len * sizeof(uint32_t))) {
             if (suffix) end -= affix.len; else start = affix.len;
@@ -22693,25 +22721,37 @@ static SPYValue *text_expandtabs(SPYContext *c, size_t argc, SPYValue *const *ar
     mem_free(text.items); mem_free(out.items);
     return result;
 }
+/* Like CPython, join snapshots an iterable into a list (a list or tuple is
+ * used directly), so an item's __buffer__ may change the sequence's size. */
 static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)(intptr_t)data;
     SPYValue *self = method_self(c, argc, argv, type, "join"), *args[1];
     if (!self || parse_arguments(c, "join", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
-    SPYValue *iterator = get_iterator(c, args[0]), *item;
-    if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
-    if (!iterator) return NULL;
+    SPYValue *seq = args[0];
+    if (seq->type == SPY_LIST || seq->type == SPY_TUPLE) spy_retain(seq);
+    else {
+        SPYValue *iterator = get_iterator(c, seq);
+        if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
+        if (!iterator || !(seq = value_new(c, SPY_LIST)) || extend_display(c, seq, iterator)) seq = (spy_release(seq), NULL);
+        spy_release(iterator);
+        if (!seq) return NULL;
+    }
     Buffer out = {.ctx = c};
-    for (size_t i = 0; !c->error_type[0] && (item = native_next(c, iterator)); i++) {
-        SPYValue *copy, *actual = buffer_bytes(c, item, &copy);
-        if (!actual && !c->error_type[0]) errorf(c, "TypeError", "sequence item %zu: expected a bytes-like object, %s found", i, type_name(item));
-        else if (actual && (!i || !append(&out, self->as.string.data, self->as.string.len))) append(&out, actual->as.string.data, actual->as.string.len);
+    for (size_t i = 0, n = seq->as.seq.len; !c->error_type[0] && i < n; i++) {
+        SPYValue *item = spy_retain(seq->as.seq.items[i]), *copy, *actual = buffer_bytes(c, item, &copy);
+        if (!actual) { spy_clear_error(c); errorf(c, "TypeError", "sequence item %zu: expected a bytes-like object, %s found", i, type_name(item)); }
+        else if (seq->as.seq.len != n) spy_error(c, "RuntimeError", "sequence changed size during iteration");
+        else if (!i || !append(&out, self->as.string.data, self->as.string.len)) append(&out, actual->as.string.data, actual->as.string.len);
         spy_release(copy); spy_release(item);
     }
-    spy_release(iterator);
+    spy_release(seq);
     SPYValue *result = c->error_type[0] ? NULL : type == SPY_BYTEARRAY ?
         bytearray_new(c, out.data ? out.data : "", out.len) : spy_bytes(c, out.data ? out.data : "", out.len);
     mem_free(out.data);
     return result;
+}
+static SPYValue *bytearray_join(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    return exported(c, bytes_join, argc, argv, keywords, data);
 }
 /* Codecs: UTF-8, ASCII, Latin-1 and Latin-9 with common error handlers. */
 static SPYValue *text_encode(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
@@ -23068,6 +23108,9 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     mem_free(out.data);
     return result;
 }
+static SPYValue *bytearray_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    return exported(c, bytes_hex, argc, argv, keywords, data);
+}
 static SPYValue *bytes_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     if (positional_only(c, class_tname(argv[0]), "fromhex", 1, 1, argc - 1, keywords)) return NULL;
     SPYValue *copy = NULL, *text = builtin_value(c, argv[1], SPY_STRING);
@@ -23301,7 +23344,7 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
         SPYValue *index = index_object(c, item);
         if (index) {
             if (index->as.integer_data.big || index->as.integer_data.small < 0 || index->as.integer_data.small > 255)
-                spy_error(c, "ValueError", "bytes must be in range(0, 256)");
+                spy_error(c, "ValueError", target[5] ? "byte must be in range(0, 256)" : "bytes must be in range(0, 256)");
             else {
                 char byte = (char)index->as.integer_data.small;
                 append(&out, &byte, 1);
@@ -24636,12 +24679,21 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         self->as.string.data[len] = (char)byte;
         return spy_none(c);
     case BA_EXTEND: {
+        /* A buffer's bytes land where the array ended before its __buffer__
+         * ran, as CPython assigns self[len:len]; an iterable's at the end. */
         Buffer out = {.ctx = c};
-        if (length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out, "can't extend bytearray with %s")) { mem_free(out.data); return NULL; }
+        size_t at = self->as.string.len;
+        SPYValue *copy, *actual = buffer_bytes(c, args[0], &copy);
+        int status = actual ? append(&out, actual->as.string.data, actual->as.string.len) : c->error_type[0] ||
+            length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out, "can't extend bytearray with %s");
+        spy_release(copy);
+        if (status) { mem_free(out.data); return NULL; }
         len = self->as.string.len;
+        if (!actual || at > len) at = len;
         if (out.len > SIZE_MAX - len - 1) { mem_free(out.data); return spy_error(c, "MemoryError", "bytearray is too large"); }
         if (bytearray_resize(c, self, len + out.len)) { mem_free(out.data); return NULL; }
-        if (out.len) memcpy(self->as.string.data + len, out.data, out.len);
+        memmove(self->as.string.data + at + out.len, self->as.string.data + at, len - at);
+        if (out.len) memcpy(self->as.string.data + at, out.data, out.len);
         mem_free(out.data);
         return spy_none(c);
     }
@@ -26498,6 +26550,14 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     if (!self) return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'",
                              name, argc ? type_name(argv[0]) : "nothing");
     if (type == SPY_LIST && replaces(value_class(c, argv[0]), owner, "__new__")) keywords = NULL;
+    if (type == SPY_BYTEARRAY) {
+        /* Once its arguments parse, bytearray.__init__ refuses an exported
+         * array and empties it before converting the source. */
+        static const char *const names[] = {"source", "encoding", "errors"};
+        SPYValue *parsed[3];
+        if (parse_arguments(c, "bytearray", argc - 1, argv + 1, keywords, names, 3, 0, 0, parsed) ||
+            bytearray_exported(c, self) || bytearray_resize(c, self, 0)) return NULL;
+    }
     SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!fresh) return NULL;
     if (type == SPY_DICT) {
@@ -27353,8 +27413,8 @@ static int register_type_methods(SPYContext *c) {
                 register_method(c, type, predicate_names[i], text_predicate, tag | i, METHOD_INSTANCE)) return -1;
         for (int i = 0; i < 3; i++) if (register_method(c, type, strip_names[i], text_strip, tag | i, METHOD_INSTANCE)) return -1;
         for (int i = 0; i < 4; i++) if (register_method(c, type, pad_names[i], text_pad, tag | i, METHOD_INSTANCE)) return -1;
-        if (register_method(c, type, "split", text_split, tag, METHOD_INSTANCE) ||
-            register_method(c, type, "rsplit", text_split, tag | 1, METHOD_INSTANCE) ||
+        if (register_method(c, type, "split", type == SPY_BYTEARRAY ? bytearray_split : text_split, tag, METHOD_INSTANCE) ||
+            register_method(c, type, "rsplit", type == SPY_BYTEARRAY ? bytearray_split : text_split, tag | 1, METHOD_INSTANCE) ||
             register_method(c, type, "partition", text_partition, tag, METHOD_INSTANCE) ||
             register_method(c, type, "rpartition", text_partition, tag | 1, METHOD_INSTANCE) ||
             register_method(c, type, "removeprefix", text_affix, tag, METHOD_INSTANCE) ||
@@ -27363,9 +27423,9 @@ static int register_type_methods(SPYContext *c) {
             register_method(c, type, "expandtabs", text_expandtabs, type, METHOD_INSTANCE)) return -1;
         if (type != SPY_STRING && (
             register_method(c, type, "decode", bytes_decode_method, type, METHOD_INSTANCE) ||
-            register_method(c, type, "hex", bytes_hex, type, METHOD_INSTANCE) ||
+            register_method(c, type, "hex", type == SPY_BYTEARRAY ? bytearray_hex : bytes_hex, type, METHOD_INSTANCE) ||
             register_method(c, type, "fromhex", bytes_fromhex, type, METHOD_CLASS) ||
-            register_method(c, type, "join", bytes_join, type, METHOD_INSTANCE) ||
+            register_method(c, type, "join", type == SPY_BYTEARRAY ? bytearray_join : bytes_join, type, METHOD_INSTANCE) ||
             register_method(c, type, "translate", bytes_translate, type, METHOD_INSTANCE))) return -1;
     }
     for (int i = 0; i < 8; i++)
