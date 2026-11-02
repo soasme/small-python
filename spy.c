@@ -1981,6 +1981,12 @@ static int64_t hash_double(SPYValue *owner, double value) {
     hash = ((hash << exponent) & HASH_MODULUS) | (hash >> (61 - exponent));
     return hash_signed(value < 0 ? 0 - hash : hash);
 }
+/* A NaN hashes by the identity of its owner, the instance itself. */
+static int64_t hash_number(SPYValue *owner, SPYValue *number) {
+    if (number->type == SPY_FLOAT) return hash_double(owner, number->as.real);
+    return hash_signed((uint64_t)hash_double(owner, creal(number->as.number)) +
+                       UINT64_C(1000003) * (uint64_t)hash_double(owner, cimag(number->as.number)));
+}
 static int hash_value(SPYContext *, SPYValue *, int64_t *);
 static int memory_hash(SPYContext *, SPYValue *, int64_t *);
 static uint64_t hash_lane(uint64_t hash, int64_t part) {
@@ -2015,11 +2021,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     /* None's hash is a constant, as in CPython 3.12+. */
     case SPY_NONE: *result = 0xFCA86420; return 0;
     case SPY_BOOL: case SPY_INT: *result = hash_integer(value); return *result == -1 ? -1 : 0;
-    case SPY_FLOAT: *result = hash_double(value, value->as.real); return 0;
-    case SPY_COMPLEX:
-        *result = hash_signed((uint64_t)hash_double(value, creal(value->as.number)) +
-                             UINT64_C(1000003) * (uint64_t)hash_double(value, cimag(value->as.number)));
-        return 0;
+    case SPY_FLOAT: case SPY_COMPLEX: *result = hash_number(value, value); return 0;
     case SPY_STRING: case SPY_BYTES:
         if (!value->as.string.hash) value->as.string.hash = text_hash(value->as.string.data, value->as.string.len);
         *result = value->as.string.hash; return 0;
@@ -2049,6 +2051,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         SPYValue *base = builtin_base(c, value, "__hash__", NULL);
         if (base) {
             if (base->type == SPY_LIST || base->type == SPY_DICT || base->type == SPY_SET || base->type == SPY_BYTEARRAY) break;
+            if (base->type == SPY_FLOAT || base->type == SPY_COMPLEX) { *result = hash_number(value, base); return 0; }
             return hash_value(c, base, result);
         }
         SPYValue *method = special_method(c, value, "__hash__");
@@ -9584,8 +9587,8 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             break;
         }
         case T_POW:
-            if (!x && y < 0) return spy_error(c, "ZeroDivisionError", "zero to a negative power");
-            if (x < 0 && floor(y) != y) return complex_binary(c, op, a, b);
+            if (!x && y < 0 && isfinite(y)) return spy_error(c, "ZeroDivisionError", "zero to a negative power");
+            if (x < 0 && isfinite(x) && isfinite(y) && floor(y) != y) return complex_binary(c, op, a, b);
             r = pow(x, y);
             if (isinf(r) && isfinite(x) && isfinite(y)) return range_overflow(c);
             break;
@@ -23281,11 +23284,18 @@ static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
     else if (same_word(s, rest, "nan")) value = NAN;
     else {
         if (rest >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
-        int digits = 0, exponent = 0;
-        while (s < end && hex_digit((unsigned char)*s) >= 0) { value = value * 16 + hex_digit((unsigned char)*s++); digits++; }
-        if (s < end && *s == '.') {
-            s++;
-            while (s < end && hex_digit((unsigned char)*s) >= 0) { value = value * 16 + hex_digit((unsigned char)*s++); exponent -= 4; digits++; }
+        /* The value is mantissa * 2**exponent exactly, but for the digits
+         * past 60 bits, of which sticky tells only whether any is nonzero. */
+        uint64_t mantissa = 0;
+        int64_t exponent = 0;
+        int digits = 0, sticky = 0, fraction = 0;
+        for (;; s++) {
+            if (s < end && *s == '.' && !fraction) { fraction = 1; continue; }
+            int digit = s < end ? hex_digit((unsigned char)*s) : -1;
+            if (digit < 0) break;
+            digits = 1;
+            if (mantissa >> 56) { sticky |= digit != 0; exponent += fraction ? 0 : 4; }
+            else { mantissa = mantissa * 16 + (uint64_t)digit; exponent -= fraction ? 4 : 0; }
         }
         if (!digits) return spy_error(c, "ValueError", "invalid hexadecimal floating-point string");
         if (s < end && (*s == 'p' || *s == 'P')) {
@@ -23295,10 +23305,24 @@ static SPYValue *float_fromhex(SPYContext *c, size_t argc, SPYValue *const *argv
             if (s < end && (*s == '+' || *s == '-')) sign = *s++ == '-' ? -1 : 1;
             if (s == end || !isdigit((unsigned char)*s)) return spy_error(c, "ValueError", "invalid hexadecimal floating-point string");
             while (s < end && isdigit((unsigned char)*s)) { if (power < 100000) power = power * 10 + (*s - '0'); s++; }
-            exponent += (int)(sign * power);
+            exponent += sign * power;
         }
         if (s != end) return spy_error(c, "ValueError", "invalid hexadecimal floating-point string");
-        value = ldexp(value, exponent);
+        if (mantissa) {
+            /* Round once, half to even, to 53 bits or to the fewer bits a
+             * subnormal keeps. */
+            int bits = 0;
+            for (uint64_t top = mantissa; top; top >>= 1) bits++;
+            int64_t top = exponent + bits - 1, shift = bits - (top < -1022 ? top + 1075 : 53);
+            if (shift > bits) mantissa = 0;
+            else if (shift > 0) {
+                uint64_t rest = mantissa & ((UINT64_C(1) << shift) - 1), half = UINT64_C(1) << (shift - 1);
+                mantissa >>= shift;
+                mantissa += rest > half || (rest == half && (sticky || (mantissa & 1)));
+                exponent += shift;
+            }
+        }
+        value = ldexp((double)mantissa, (int)(exponent > 2000 ? 2000 : exponent));
         if (isinf(value)) return spy_error(c, "OverflowError", "hexadecimal value too large to represent as a float");
     }
     SPYValue *result = spy_float(c, negative ? -value : value);
