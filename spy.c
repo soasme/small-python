@@ -388,6 +388,7 @@ static SPYValue *closure_names(SPYContext *, Node *, int);
 static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, Node *);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
+static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
 static SPYValue *builtin_value_base(SPYContext *, SPYValue *, int);
 /* v itself when it is of the builtin type, else the value of that type a
@@ -10099,6 +10100,66 @@ static int property_init(SPYContext *c, SPYValue *self, SPYValue *p, SPYValue *c
     if (status && !p->as.property.getter_doc && error_is(c, "AttributeError")) { spy_clear_error(c); status = 0; }
     return status;
 }
+enum { SUGGEST_MOVE = 2, SUGGEST_CASE = 1, SUGGEST_MAX_STRING = 40, SUGGEST_MAX_ITEMS = 750 };
+/* Python/suggestions.c: Levenshtein distance over UTF-8 bytes. */
+static int suggestion_cost(char a, char b) {
+    if ((a & 31) != (b & 31)) return SUGGEST_MOVE;
+    if (a == b) return 0;
+    if ('A' <= a && a <= 'Z') a += 'a' - 'A';
+    if ('A' <= b && b <= 'Z') b += 'a' - 'A';
+    return a == b ? SUGGEST_CASE : SUGGEST_MOVE;
+}
+static size_t levenshtein(const char *a, size_t a_size, const char *b, size_t b_size, size_t max_cost) {
+    size_t buffer[SUGGEST_MAX_STRING];
+    if (a == b) return 0;
+    while (a_size && b_size && a[0] == b[0]) { a++; a_size--; b++; b_size--; }
+    while (a_size && b_size && a[a_size - 1] == b[b_size - 1]) { a_size--; b_size--; }
+    if (!a_size || !b_size) return (a_size + b_size) * SUGGEST_MOVE;
+    if (a_size > SUGGEST_MAX_STRING || b_size > SUGGEST_MAX_STRING) return max_cost + 1;
+    if (b_size < a_size) {
+        const char *t = a; a = b; b = t;
+        size_t t_size = a_size; a_size = b_size; b_size = t_size;
+    }
+    if ((b_size - a_size) * SUGGEST_MOVE > max_cost) return max_cost + 1;
+    size_t tmp = SUGGEST_MOVE;
+    for (size_t i = 0; i < a_size; i++) { buffer[i] = tmp; tmp += SUGGEST_MOVE; }
+    size_t result = 0;
+    for (size_t b_index = 0; b_index < b_size; b_index++) {
+        char code = b[b_index];
+        size_t distance = result = b_index * SUGGEST_MOVE, minimum = SIZE_MAX;
+        for (size_t index = 0; index < a_size; index++) {
+            size_t substitute = distance + suggestion_cost(code, a[index]);
+            distance = buffer[index];
+            size_t insert_delete = (result < distance ? result : distance) + SUGGEST_MOVE;
+            result = insert_delete < substitute ? insert_delete : substitute;
+            buffer[index] = result;
+            if (result < minimum) minimum = result;
+        }
+        if (minimum > max_cost) return max_cost + 1;
+    }
+    return result;
+}
+/* One candidate of _Py_CalculateSuggestions: *best keeps the closest item
+ * to name within a third of their characters, at *distance. */
+static void suggest(const char *name, const char *item, const char **best, size_t *distance) {
+    if (!strcmp(item, name)) return;
+    size_t name_size = strlen(name), item_size = strlen(item), max_distance = (name_size + item_size + 3) * SUGGEST_MOVE / 6;
+    if (*distance - 1 < max_distance) max_distance = *distance - 1;
+    size_t found = levenshtein(name, name_size, item, item_size, max_distance);
+    if (found <= max_distance) { *best = item; *distance = found; }
+}
+static const char *suggestion(const char *name, const char *const *items, size_t n) {
+    const char *best = NULL;
+    size_t distance = SIZE_MAX;
+    for (size_t i = 0; i < n; i++) suggest(name, items[i], &best, &distance);
+    return best;
+}
+/* A keyword naming no parameter; near is the suggested keyword parameter. */
+static int unexpected_keyword(SPYContext *c, const char *function, const char *key, const char *near) {
+    errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'%s%s%s", function, key, near ? ". Did you mean '" : "",
+           near ? near : "", near ? "'?" : "");
+    return -1;
+}
 /* property(fget=None, fset=None, fdel=None, doc=None) arguments. */
 static int property_arguments(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, SPYValue *args[4]) {
     static const char *const names[] = {"fget", "fset", "fdel", "doc"};
@@ -10110,7 +10171,7 @@ static int property_arguments(SPYContext *c, size_t argc, SPYValue *const *argv,
         const char *key = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
         size_t at = 0;
         while (at < 4 && strcmp(key, names[at])) at++;
-        if (at == 4) { errorf(c, "TypeError", "property() got an unexpected keyword argument '%s'", key); return -1; }
+        if (at == 4) return unknown_keywords(c, "property", keywords, names, 4);
         if (at < argc) { errorf(c, "TypeError", "argument for property() given by name ('%s') and position (%zu)", key, at + 1); return -1; }
         args[at] = entry->value;
     }
@@ -12398,10 +12459,10 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
     SPYValue *values[FIELDS] = {0}, *base = NULL, *copy = NULL, *replaced = NULL;
     int64_t numbers[7] = {0};
     for (size_t i = 0; changes && i < changes->as.map.len; i++) {
-        const char *name = map_items(changes)[i].key->as.string.data;
+        const char *name = builtin_value(c, map_items(changes)[i].key, SPY_STRING)->as.string.data;
         size_t known = 0;
         while (known < FIELDS && strcmp(names[known], name)) known++;
-        if (known == FIELDS) return errorf(c, "TypeError", "replace() got an unexpected keyword argument '%s'", name);
+        if (known == FIELDS) { unknown_keywords(c, "replace", changes, names, FIELDS); return NULL; }
     }
     for (size_t i = 0; i < FIELDS && !c->error_type[0]; i++) {
         SPYValue *given = changes ? name_local(changes, names[i]) : NULL;
@@ -15272,7 +15333,14 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
                     puts_buffer(&names, param->text);
                 }
             if (names.len) errorf(c, "TypeError", "%s() got some positional-only arguments passed as keyword arguments: '%s'", name, names.data);
-            else errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, keyword);
+            else {
+                /* CPython suggests among the parameters a keyword can name. */
+                const char *near = NULL;
+                size_t distance = SIZE_MAX, candidates = 0;
+                for (Node *param = params; param; param = param->next)
+                    if (param->op == P_POSITIONAL || param->op == P_KWONLY) { candidates++; suggest(keyword, param->text, &near, &distance); }
+                unexpected_keyword(c, name, keyword, candidates < SUGGEST_MAX_ITEMS ? near : NULL);
+            }
             mem_free(names.data); return -1;
         }
     }
@@ -15437,8 +15505,17 @@ static SPYValue *call_native_method(SPYContext *c, SPYValue *self, int method, S
     if (deeper(c, " while calling a Python object")) return NULL;
     return call_result(c, call_method(c, self, method, name, argc, argv, NULL));
 }
+/* A module with a callable attribute of its own name, as pprint.pprint,
+ * suggests calling that; any error looking for it is dropped. */
 static void not_callable(SPYContext *c, SPYValue *fn) {
-    errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
+    SPYValue *name = fn->type == SPY_MODULE ? name_local(fn, "__name__") : NULL;
+    name = name ? builtin_value(c, name, SPY_STRING) : NULL;
+    SPYValue *attr = name ? attribute(c, fn, name->as.string.data) : NULL;
+    if (!attr) spy_clear_error(c);
+    if (attr && callable_value(c, attr))
+        errorf(c, "TypeError", "'module' object is not callable. Did you mean: '%s.%s(...)'?", name->as.string.data, name->as.string.data);
+    else errorf(c, "TypeError", "'%s' object is not callable", type_name(fn));
+    spy_release(attr);
 }
 static SPYValue *template_construct(SPYContext *, int, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *mappingproxy_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -17723,11 +17800,15 @@ static SPYValue *exit_builtin(SPYContext *c, size_t argc, SPYValue *const *argv,
     (void)data;
     SPYValue *code = argc ? argv[0] : NULL;
     if (argc > 1) return errorf(c, "TypeError", "Quitter.__call__() takes from 1 to 2 positional arguments but %zu were given", argc + 1);
+    /* Keywords bind as for the function Quitter.__call__(self, code=None). */
+    static const char *const names[] = {"self", "code"};
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         SPYValue *key = map_items(keywords)[i].key;
-        if (strcmp(key->as.string.data, "code"))
-            return errorf(c, "TypeError", "Quitter.__call__() got an unexpected keyword argument '%s'", key->as.string.data);
-        if (code) return spy_error(c, "TypeError", "Quitter.__call__() got multiple values for argument 'code'");
+        int self = keyword_matches(c, key, names[0]), named = !self && !c->error_type[0] && keyword_matches(c, key, names[1]);
+        const char *text = builtin_value(c, key, SPY_STRING)->as.string.data;
+        if (c->error_type[0]) return NULL;
+        if (self || (named && code)) return errorf(c, "TypeError", "Quitter.__call__() got multiple values for argument '%s'", text);
+        if (!named) { unexpected_keyword(c, "Quitter.__call__", text, suggestion(text, names, 2)); return NULL; }
         code = map_items(keywords)[i].value;
     }
     SPYValue *exception = call(c, name_local(c->classes, "SystemExit"), code ? 1 : 0, &code);
@@ -18076,60 +18157,6 @@ static const char *const python_keywords[] = {
     "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
     "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
     "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"};
-enum { SUGGEST_MOVE = 2, SUGGEST_CASE = 1, SUGGEST_MAX_STRING = 40 };
-/* Python/suggestions.c: Levenshtein distance over UTF-8 bytes. */
-static int suggestion_cost(char a, char b) {
-    if ((a & 31) != (b & 31)) return SUGGEST_MOVE;
-    if (a == b) return 0;
-    if ('A' <= a && a <= 'Z') a += 'a' - 'A';
-    if ('A' <= b && b <= 'Z') b += 'a' - 'A';
-    return a == b ? SUGGEST_CASE : SUGGEST_MOVE;
-}
-static size_t levenshtein(const char *a, size_t a_size, const char *b, size_t b_size, size_t max_cost) {
-    size_t buffer[SUGGEST_MAX_STRING];
-    if (a == b) return 0;
-    while (a_size && b_size && a[0] == b[0]) { a++; a_size--; b++; b_size--; }
-    while (a_size && b_size && a[a_size - 1] == b[b_size - 1]) { a_size--; b_size--; }
-    if (!a_size || !b_size) return (a_size + b_size) * SUGGEST_MOVE;
-    if (a_size > SUGGEST_MAX_STRING || b_size > SUGGEST_MAX_STRING) return max_cost + 1;
-    if (b_size < a_size) {
-        const char *t = a; a = b; b = t;
-        size_t t_size = a_size; a_size = b_size; b_size = t_size;
-    }
-    if ((b_size - a_size) * SUGGEST_MOVE > max_cost) return max_cost + 1;
-    size_t tmp = SUGGEST_MOVE;
-    for (size_t i = 0; i < a_size; i++) { buffer[i] = tmp; tmp += SUGGEST_MOVE; }
-    size_t result = 0;
-    for (size_t b_index = 0; b_index < b_size; b_index++) {
-        char code = b[b_index];
-        size_t distance = result = b_index * SUGGEST_MOVE, minimum = SIZE_MAX;
-        for (size_t index = 0; index < a_size; index++) {
-            size_t substitute = distance + suggestion_cost(code, a[index]);
-            distance = buffer[index];
-            size_t insert_delete = (result < distance ? result : distance) + SUGGEST_MOVE;
-            result = insert_delete < substitute ? insert_delete : substitute;
-            buffer[index] = result;
-            if (result < minimum) minimum = result;
-        }
-        if (minimum > max_cost) return max_cost + 1;
-    }
-    return result;
-}
-/* _Py_CalculateSuggestions over the keyword list. */
-static const char *keyword_suggestion(const char *name) {
-    size_t name_size = strlen(name), best_distance = SIZE_MAX;
-    const char *best = NULL;
-    for (size_t i = 0; i < sizeof(python_keywords) / sizeof(*python_keywords); i++) {
-        const char *item = python_keywords[i];
-        if (!strcmp(item, name)) continue;
-        size_t item_size = strlen(item), max_distance = (name_size + item_size + 3) * SUGGEST_MOVE / 6;
-        if (best_distance - 1 < max_distance) max_distance = best_distance - 1;
-        size_t distance = levenshtein(name, name_size, item, item_size, max_distance);
-        if (distance > max_distance) continue;
-        if (!best || distance < best_distance) { best = item; best_distance = distance; }
-    }
-    return best;
-}
 /* difflib.SequenceMatcher(None, a, b) over code points, without junk: the
  * total size of get_matching_blocks(). */
 static size_t matching_size(const uint32_t *a, size_t alo, size_t ahi, const uint32_t *b, size_t blo, size_t bhi) {
@@ -18349,7 +18376,7 @@ static char *keyword_typo(SPYContext *c, SPYValue *exception) {
         if (--left < 0) break;
         const char *matches[4];
         size_t n = 0;
-        const char *best = keyword_suggestion(tokens[t].name);
+        const char *best = suggestion(tokens[t].name, python_keywords, sizeof(python_keywords) / sizeof(*python_keywords));
         if (best) matches[n++] = best;
         const char *close[3];
         size_t found = close_keywords(tokens[t].name, close);
@@ -21343,14 +21370,15 @@ done:
 }
 static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     (void)argv;
+    static const char *const names[] = {"key", "reverse"};
     if (argc > 2) return errorf(c, "TypeError", "sort() takes at most 2 arguments (%zu given)", argc);
     if (argc) return spy_error(c, "TypeError", "sort() takes no positional arguments");
     if (keyword_limit(c, "sort", keywords, 2)) return NULL;
-    SPYValue *key = keywords ? name_local(keywords, "key") : NULL;
-    SPYValue *reverse = keywords ? name_local(keywords, "reverse") : NULL;
+    SPYValue *key = keywords ? name_local(keywords, names[0]) : NULL;
+    SPYValue *reverse = keywords ? name_local(keywords, names[1]) : NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *name = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
-        if (strcmp(name, "key") && strcmp(name, "reverse")) return errorf(c, "TypeError", "sort() got an unexpected keyword argument '%s'", name);
+        if (strcmp(name, names[0]) && strcmp(name, names[1])) { unknown_keywords(c, "sort", keywords, names, 2); return NULL; }
     }
     int descending = reverse ? spy_truth(reverse) : 0;
     if (c->error_type[0]) return NULL;
@@ -21927,6 +21955,21 @@ static int import_fromlist(SPYContext *c, SPYValue *module, SPYValue *names, int
 /* Methods of builtin types live in their type dictionaries, so attribute
  * lookup, unbound access such as str.split, and inheritance share one path.
  * Each method receives its instance as argv[0]. */
+/* _PyArg_UnpackKeywords' report of keywords spelling none of the n names:
+ * the first equal to none of them is unexpected; when each equals one, as a
+ * str subclass may, they are invalid. */
+static int unknown_keywords(SPYContext *c, const char *function, SPYValue *keywords, const char *const *names, size_t n) {
+    for (size_t i = 0; i < keywords->as.map.len; i++) {
+        SPYValue *key = map_items(keywords)[i].key;
+        size_t at = 0;
+        while (at < n && !keyword_matches(c, key, names[at]) && !c->error_type[0]) at++;
+        if (c->error_type[0]) return -1;
+        const char *text = builtin_value(c, key, SPY_STRING)->as.string.data;
+        if (at == n) return unexpected_keyword(c, function, text, suggestion(text, names, n));
+    }
+    errorf(c, "TypeError", "invalid keyword argument for %s()", function);
+    return -1;
+}
 static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPYValue *const *argv,
                            SPYValue *keywords, const char *const *names, size_t count, size_t required,
                            size_t keyword_start, SPYValue **out) {
@@ -21950,12 +21993,12 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
         return -1;
     }
     for (size_t i = 0; i < count; i++) out[i] = i < argc ? argv[i] : NULL;
-    const char *unknown = NULL;
+    int unknown = 0;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         size_t at = keyword_start;
         while (at < count && strcmp(names[at], key)) at++;
-        if (at == count) { if (!unknown) unknown = key; continue; }
+        if (at == count) { unknown = 1; continue; }
         if (out[at]) {
             errorf(c, "TypeError", "argument for %s() given by name ('%s') and position (%zu)", function, key, at + 1);
             return -1;
@@ -21973,11 +22016,7 @@ static int parse_arguments(SPYContext *c, const char *function, size_t argc, SPY
             else errorf(c, "TypeError", "%s() takes at least %zu argument%s (%zu given)", function, required, required == 1 ? "" : "s", argc);
             return -1;
         }
-    if (unknown) {
-        errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", function, unknown);
-        return -1;
-    }
-    return 0;
+    return unknown ? unknown_keywords(c, function, keywords, names + keyword_start, count - keyword_start) : 0;
 }
 /* types.TracebackType(tb_next, tb_frame, tb_lasti, tb_lineno) */
 static SPYValue *traceback_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -24483,8 +24522,8 @@ static SPYValue *sentinel_construct(SPYContext *c, size_t argc, SPYValue *const 
     if (argc != 1) return errorf(c, "TypeError", "sentinel() takes exactly 1 positional argument (%zu given)", argc);
     SPYValue *repr = NULL;
     if (keywords && keywords->as.map.len) {
-        const char *keyword = map_items(keywords)[0].key->as.string.data;
-        if (strcmp(keyword, "repr")) return errorf(c, "TypeError", "sentinel() got an unexpected keyword argument '%s'", keyword);
+        const char *keyword = builtin_value(c, map_items(keywords)[0].key, SPY_STRING)->as.string.data;
+        if (strcmp(keyword, "repr")) { unknown_keywords(c, "sentinel", keywords, &(const char *){"repr"}, 1); return NULL; }
         repr = map_items(keywords)[0].value;
         if (repr->type == SPY_NONE) repr = NULL;
         else if (!builtin_value(c, repr, SPY_STRING))
@@ -24931,7 +24970,7 @@ static SPYValue *min_max(SPYContext *c, int maximum, size_t argc, SPYValue *cons
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         size_t at = !strcmp(key, names[0]) ? 0 : !strcmp(key, names[1]) ? 1 : 2;
-        if (at == 2) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key);
+        if (at == 2) { unknown_keywords(c, name, keywords, names, 2); return NULL; }
         options[at] = map_items(keywords)[i].value;
     }
     if (argc > 1 && options[1]) return errorf(c, "TypeError", "Cannot specify a default for %s() with multiple positional arguments", name);
@@ -25870,16 +25909,17 @@ static int print_text(SPYContext *c, SPYValue *file, SPYValue *text) {
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    SPYValue *sep = NULL, *end = NULL, *file = NULL, *flush = NULL;
+    static const char *const names[] = {"sep", "end", "file", "flush"};
+    SPYValue *options[4] = {NULL, NULL, NULL, NULL};
     if (keywords) for (size_t i = 0; i < keywords->as.map.len; i++) {
         Entry *entry = &map_items(keywords)[i];
         const char *name = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
-        if (!strcmp(name, "sep")) sep = entry->value;
-        else if (!strcmp(name, "end")) end = entry->value;
-        else if (!strcmp(name, "file")) file = entry->value;
-        else if (!strcmp(name, "flush")) flush = entry->value;
-        else return errorf(c, "TypeError", "print() got an unexpected keyword argument '%s'", name);
+        size_t at = 0;
+        while (at < 4 && strcmp(name, names[at])) at++;
+        if (at == 4) { unknown_keywords(c, "print", keywords, names, 4); return NULL; }
+        options[at] = entry->value;
     }
+    SPYValue *sep = options[0], *end = options[1], *file = options[2], *flush = options[3];
     if (sep && sep->type != SPY_STRING && sep->type != SPY_NONE) return errorf(c, "TypeError", "sep must be None or a string, not %s", type_name(sep));
     if (end && end->type != SPY_STRING && end->type != SPY_NONE) return errorf(c, "TypeError", "end must be None or a string, not %s", type_name(end));
     int flushing = flush && spy_truth(flush);
@@ -26327,7 +26367,10 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             int strict = 0;
             for (size_t i = 0; i < keywords->as.map.len; i++) {
                 const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
-                if (strcmp(key, "strict")) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", id == B_MAP ? "map" : "zip", key);
+                if (strcmp(key, "strict")) {
+                    unexpected_keyword(c, id == B_MAP ? "map" : "zip", key, suggestion(key, &(const char *){"strict"}, 1));
+                    return NULL;
+                }
                 strict = spy_truth(map_items(keywords)[i].value);
                 if (c->error_type[0]) return NULL;
             }
@@ -26402,14 +26445,17 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             while (fields[n]) n++;
             if (keyword_limit(c, owner, keywords, n)) return NULL;
             for (size_t i = 0; i < keywords->as.map.len; i++) {
-                const char *key = map_items(keywords)[i].key->as.string.data;
+                const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
                 size_t k = 0;
                 while (fields[k] && strcmp(fields[k], key)) k++;
-                if (!fields[k]) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", owner, key);
+                if (!fields[k]) { unexpected_keyword(c, owner, key, suggestion(key, fields, n)); return NULL; }
             }
             SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
-            for (size_t i = 0; value && i < keywords->as.map.len; i++)
-                if (set_hidden_field(c, argv[0], map_items(keywords)[i].key->as.string.data, map_items(keywords)[i].value)) { spy_release(value); value = NULL; }
+            for (size_t i = 0; value && i < keywords->as.map.len; i++) {
+                Entry *entry = &map_items(keywords)[i];
+                const char *key = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
+                if (set_hidden_field(c, argv[0], key, entry->value)) { spy_release(value); value = NULL; }
+            }
             return value;
         }
         default: break;

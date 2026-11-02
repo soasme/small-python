@@ -344,7 +344,8 @@ bench: bench/lifecycle spy
 # SANITIZERS: AddressSanitizer with leak checking and UndefinedBehaviorSanitizer
 # by default, or SANITIZERS=memory with clang for reads of uninitialized
 # memory. No report is recoverable, and every report lands in one file
-# (tests/sanitize.c), which must stay empty.
+# (tests/sanitize.c), which must hold nothing but the warnings for
+# allocations too large for the runtime, which return NULL.
 SANITIZE_CFLAGS = -O1 -g -std=c11 -Wall -Wextra -Wpedantic -fsanitize=$(SANITIZERS) -fno-sanitize-recover=all -fno-omit-frame-pointer
 SANITIZE_DIR = $(abspath $(OBJDIR))/sanitize
 sanitize:
@@ -352,7 +353,7 @@ sanitize:
 	mkdir -p $(SANITIZE_DIR)
 	$(CC) $(SANITIZE_CFLAGS) -DREPORT='"$(SANITIZE_DIR)/report"' -c tests/sanitize.c -o $(SANITIZE_DIR)/sanitize.o
 	SPY_TEST_TIMEOUT=600 $(MAKE) CFLAGS='$(SANITIZE_CFLAGS)' LDFLAGS='-fsanitize=$(SANITIZERS) $(SANITIZE_DIR)/sanitize.o' test test-binding; \
-	status=$$?; if [ -s $(SANITIZE_DIR)/report ]; then cat $(SANITIZE_DIR)/report; exit 1; fi; exit $$status
+	status=$$?; if grep -qv 'Sanitizer failed to allocate 0x' $(SANITIZE_DIR)/report; then cat $(SANITIZE_DIR)/report; exit 1; fi; exit $$status
 
 # Line and branch coverage of make test and the package tests, with clang:
 # code no test executes is code no sanitizer run has checked, so every line of
