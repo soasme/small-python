@@ -249,6 +249,11 @@ class Host:
             return [(w.category, str(w.message), w.lineno) for w in caught]
         return stop
 
+    def reissue_warning(self, category, message, line):
+        """Pass a warning that record_warnings recorded to HostWarn (18.3)
+        again, for an enclosing recorder."""
+        __import__("warnings").warn_explicit(message, category, "<spec>", line)
+
     def has_warnings(self):
         """Whether the host supplies HostWarn (18.3)."""
         try:
@@ -897,12 +902,16 @@ class _AssertWarns:
         if exc_type is not None:
             return False
         categories = self.category if isinstance(self.category, tuple) else (self.category,)
+        # As in unittest, the warnings that do not match go on to an
+        # enclosing assertWarns.
         for category, message, line in caught:
-            if issubclass(category, categories) and (self.regex is None or _search(self.regex, message)):
+            if not issubclass(category, categories) or self.regex is not None and not _search(self.regex, message):
+                host.reissue_warning(category, message, line)
+            elif self.warning is None:
                 self.warning, self.lineno = category(message), line
-                return False
-        names = ", ".join(c.__name__ for c in categories)
-        self.testcase.fail(f"{names} not triggered" + (f" matching {self.regex!r}" if self.regex else ""))
+        if self.warning is None:
+            names = ", ".join(c.__name__ for c in categories)
+            self.testcase.fail(f"{names} not triggered" + (f" matching {self.regex!r}" if self.regex else ""))
 
 
 class _SubTest:
