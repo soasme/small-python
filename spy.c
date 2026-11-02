@@ -2517,8 +2517,9 @@ static int native_kind(SPYValue *v) {
         "__new__", "__init_subclass__", "__subclasshook__", "__class_getitem__", "__length_hint__"};
     int wrapper = len > 4 && !strncmp(name, "__", 2) && !strcmp(name + len - 2, "__");
     for (size_t i = 0; wrapper && i < sizeof(methods) / sizeof(*methods); i++) if (!strcmp(name, methods[i])) wrapper = 0;
-    if (wrapper && !strcmp(name, "__contains__")) wrapper = strcmp(owner, "dict") && strcmp(owner, "set") && strcmp(owner, "frozenset");
-    if (wrapper && !strcmp(name, "__getitem__")) wrapper = strcmp(owner, "list") && strcmp(owner, "dict");
+    if (wrapper && !strcmp(name, "__contains__"))
+        wrapper = strcmp(owner, "dict") && strcmp(owner, "frozendict") && strcmp(owner, "set") && strcmp(owner, "frozenset");
+    if (wrapper && !strcmp(name, "__getitem__")) wrapper = strcmp(owner, "list") && strcmp(owner, "dict") && strcmp(owner, "frozendict");
     if (v->type == SPY_METHOD) return wrapper ? NATIVE_METHOD_WRAPPER : NATIVE_BOUND;
     return wrapper ? NATIVE_WRAPPER_DESCRIPTOR : NATIVE_METHOD_DESCRIPTOR;
 }
@@ -12313,6 +12314,21 @@ static SPYValue *method_arity(SPYContext *c, const char *owner, const char *name
     if (argc < min) return errorf(c, "TypeError", "%s expected at least %zu argument%s, got %zu", name, min, min == 1 ? "" : "s", argc);
     return errorf(c, "TypeError", "%s expected at most %zu argument%s, got %zu", name, max, max == 1 ? "" : "s", argc);
 }
+/* A built-in's keyword-only parameters, n of them, take at most n keyword
+ * arguments; _PyArg_UnpackKeywords checks the count before the names. */
+static int keyword_limit(SPYContext *c, const char *function, SPYValue *keywords, size_t n) {
+    size_t given = keywords ? keywords->as.map.len : 0;
+    if (given <= n) return 0;
+    errorf(c, "TypeError", "%s() takes at most %zu keyword argument%s (%zu given)", function, n, n == 1 ? "" : "s", given);
+    return -1;
+}
+/* A slot wrapper's n arguments, by position only; one that unpacks them
+ * by name, as __setitem__ does, names itself in the message. */
+static int wrapper_arguments(SPYContext *c, const char *name, size_t argc, SPYValue *keywords, size_t n, int named) {
+    if (keywords && keywords->as.map.len) errorf(c, "TypeError", "wrapper %s() takes no keyword arguments", name);
+    else if (argc != n) errorf(c, "TypeError", "%s%sexpected %zu argument%s, got %zu", named ? name : "", named ? " " : "", n, n == 1 ? "" : "s", argc);
+    return c->error_type[0] ? -1 : 0;
+}
 /* A method of owner taking min to max positional arguments and no keywords. */
 static int positional_only(SPYContext *c, const char *owner, const char *name, size_t min, size_t max, size_t argc, SPYValue *keywords) {
     if (keywords && keywords->as.map.len) errorf(c, "TypeError", "%s.%s() takes no keyword arguments", owner, name);
@@ -13760,7 +13776,7 @@ static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const
 static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, SPYValue *);
 static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *frame_module_name(SPYContext *, size_t);
-static const char *const *exception_keywords(SPYContext *, SPYValue *);
+static const char *const *exception_keywords(SPYContext *, SPYValue *, const char **);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *eval_comprehension(SPYContext *, Frame *, Node *);
 static SPYValue *new_generator(SPYContext *, Frame *, SPYValue *);
@@ -14866,13 +14882,13 @@ static int exception_args(SPYContext *c, SPYValue *value, size_t argc, SPYValue 
     if (!status) status = set_hidden_field(c, value, "args", args);
     spy_release(args); return status;
 }
-/* The keyword-only attributes of ImportError, AttributeError and NameError. */
-static const char *const *exception_keywords(SPYContext *c, SPYValue *cls) {
-    static const char *const import_fields[] = {"name", "path", "name_from", NULL}, *const attribute_fields[] = {"name", "obj", NULL},
-                      *const name_fields[] = {"name", NULL};
-    if (subclass(cls, name_local(c->classes, "ImportError"))) return import_fields;
-    if (subclass(cls, name_local(c->classes, "AttributeError"))) return attribute_fields;
-    if (subclass(cls, name_local(c->classes, "NameError"))) return name_fields;
+/* The keyword-only attributes of ImportError, AttributeError and NameError,
+ * and in *owner the one of those classes whose __init__ takes them. */
+static const char *const *exception_keywords(SPYContext *c, SPYValue *cls, const char **owner) {
+    static const struct { const char *owner, *const fields[4]; } kinds[] = {
+        {"ImportError", {"name", "path", "name_from", NULL}}, {"AttributeError", {"name", "obj", NULL}}, {"NameError", {"name", NULL}}};
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
+        if (subclass(cls, name_local(c->classes, kinds[i].owner))) { *owner = kinds[i].owner; return kinds[i].fields; }
     return NULL;
 }
 /* Objects/exceptions.c errnomap: OSError(errno, ...) creates the subclass for errno. */
@@ -15384,6 +15400,8 @@ static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValu
     } else if (fn->type == SPY_NATIVE || fn->type == SPY_BOUND_METHOD) {
         if (fn->type == SPY_NATIVE && fn->as.native.call == builtin)
             result = builtin_keywords(c, argc, argv, (int)(intptr_t)fn->as.native.data, keywords, fn);
+        else if (keywords && keywords->as.map.len && native_kind(fn) == NATIVE_WRAPPER_DESCRIPTOR)
+            wrapper_arguments(c, fn->as.native.name->as.string.data, argc, keywords, 0, 0);
         else if (keywords && keywords->as.map.len) {
             /* CPython names a method by its qualified name, list.append. */
             SPYValue *name = attribute(c, fn, "__qualname__");
@@ -21061,10 +21079,14 @@ static SPYValue *implicit_super(SPYContext *c) {
     SPYValue *result = super_new(c, type, self);
     spy_release(type); return result;
 }
+/* The __hash__ slot wrapper of a hashable builtin type. */
 static SPYValue *type_hash(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int type = (int)(intptr_t)data;
-    SPYValue *self = argc == 1 ? builtin_value(c, argv[0], type) : NULL;
-    if (!self) return spy_error(c, "TypeError", "__hash__ descriptor requires an instance of its type");
+    const char *owner = name_text(c->types[type], "__name__")->as.string.data;
+    if (!argc) return errorf(c, "TypeError", "descriptor '__hash__' of '%s' object needs an argument", owner);
+    SPYValue *self = builtin_value(c, argv[0], type);
+    if (!self) return errorf(c, "TypeError", "descriptor '__hash__' requires a '%s' object but received a '%s'", owner, type_name(argv[0]));
+    if (argc > 1) return errorf(c, "TypeError", "expected 0 arguments, got %zu", argc - 1);
     int64_t hash;
     return hash_value(c, self, &hash) ? NULL : spy_int(c, hash);
 }
@@ -21088,8 +21110,9 @@ static SPYValue *singleton_method(SPYContext *c, size_t argc, SPYValue *const *a
 }
 static SPYValue *type_round(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int type = (int)(intptr_t)data;
-    SPYValue *self = argc >= 1 && argc <= 2 ? builtin_value(c, argv[0], type) : NULL;
-    if (!self) return spy_error(c, "TypeError", "__round__ descriptor requires an instance of its type and optional ndigits");
+    SPYValue *self = argc ? builtin_value(c, argv[0], type) : NULL;
+    if (!self) return misapplied(c, type == SPY_INT ? "int" : "float", "__round__", argc, argv);
+    if (argc > 2) return errorf(c, "TypeError", "__round__ expected at most 1 argument, got %zu", argc - 1);
     return round_value(c, self, argc == 2 ? argv[1] : NULL);
 }
 /* isinstance()/issubclass(), as Objects/abstract.c: exact types check the
@@ -21322,6 +21345,7 @@ static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValu
     (void)argv;
     if (argc > 2) return errorf(c, "TypeError", "sort() takes at most 2 arguments (%zu given)", argc);
     if (argc) return spy_error(c, "TypeError", "sort() takes no positional arguments");
+    if (keyword_limit(c, "sort", keywords, 2)) return NULL;
     SPYValue *key = keywords ? name_local(keywords, "key") : NULL;
     SPYValue *reverse = keywords ? name_local(keywords, "reverse") : NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
@@ -23126,7 +23150,7 @@ static SPYValue *bytes_hex(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     }
     if (args[1] && index_value(c, args[1], &group)) return NULL;
     Buffer out = {.ctx = c};
-    size_t len = self->as.string.len, every = group < 0 ? (size_t)-group : (size_t)group;
+    size_t len = self->as.string.len, every = group < 0 ? 0 - (size_t)group : (size_t)group;
     for (size_t i = 0; i < len && !c->error_type[0]; i++) {
         if (sep && every && i) {
             size_t boundary = group > 0 ? (len - i) % every : i % every;
@@ -23412,6 +23436,7 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     static const char *const names[] = {"bytes", "byteorder", "signed"};
     SPYValue *args[3];
     if (parse_arguments(c, "from_bytes", argc - 1, argv + 1, keywords, names, 3, 1, 0, args)) return NULL;
+    if (argc - 1 > 2) return errorf(c, "TypeError", "from_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
     int little, is_signed = args[2] && spy_truth(args[2]);
     if (byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
     SPYValue *source = builtin_value(c, args[0], SPY_BYTES), *owned = NULL;
@@ -24557,16 +24582,19 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
     static const char *const hex_names[] = {"sep", "bytes_per_sep"}, *const cast_names[] = {"format", "shape"},
                       *const tobytes_names[] = {"order"};
     if (op == MV_EXIT) return memory_release(c, m) ? NULL : spy_none(c);
-    if (op == MV_RELEASE) {
-        if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, 0, 0, 0, args)) return NULL;
-        return memory_release(c, m) ? NULL : spy_none(c);
-    }
-    if (op == MV_REPR) return spy_repr(c, m);
     size_t count = op == MV_SETITEM ? 2 : op == MV_GETITEM || op == MV_DELITEM || op == MV_EQ || op == MV_NE || op == MV_BUFFER ||
         op == MV_RELEASE_BUFFER || op == MV_COUNT || op == MV_TOBYTES ? 1 : op == MV_HEX || op == MV_CAST ? 2 : op == MV_INDEX ? 3 : 0;
     size_t required = op == MV_TOBYTES || op == MV_HEX ? 0 : op == MV_CAST || op == MV_INDEX ? 1 : count;
     const char *const *names = op == MV_HEX ? hex_names : op == MV_CAST ? cast_names : op == MV_TOBYTES ? tobytes_names : NULL;
-    if (parse_arguments(c, name, argc - 1, argv + 1, keywords, names, count, required, 0, args)) return NULL;
+    /* The special methods up to __repr__ and the buffer protocol are slot
+     * wrappers; the rest are methods (7.4). */
+    if (op <= MV_REPR || op == MV_BUFFER || op == MV_RELEASE_BUFFER
+            ? wrapper_arguments(c, name, argc - 1, keywords, count, op == MV_SETITEM || op == MV_BUFFER || op == MV_RELEASE_BUFFER)
+            : names ? parse_arguments(c, name, argc - 1, argv + 1, keywords, names, count, required, 0, args)
+            : positional_only(c, "memoryview", name, required, count, argc - 1, keywords)) return NULL;
+    if (!names) for (size_t i = 1; i < argc; i++) args[i - 1] = argv[i];
+    if (op == MV_RELEASE) return memory_release(c, m) ? NULL : spy_none(c);
+    if (op == MV_REPR) return spy_repr(c, m);
     if (op == MV_EQ || op == MV_NE) return memory_compare(c, m, args[0], op == MV_EQ);
     if (op == MV_RELEASE_BUFFER) {
         if (args[0]->type != SPY_MEMORYVIEW) return spy_error(c, "TypeError", "expected a memoryview object");
@@ -24898,13 +24926,14 @@ static SPYValue *min_max(SPYContext *c, int maximum, size_t argc, SPYValue *cons
     static const char *const names[] = {"key", "default"};
     const char *name = maximum ? "max" : "min";
     SPYValue *options[2] = {NULL, NULL};
+    if (!argc) return errorf(c, "TypeError", "%s expected at least 1 argument, got 0", name);
+    if (keyword_limit(c, name, keywords, 2)) return NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         size_t at = !strcmp(key, names[0]) ? 0 : !strcmp(key, names[1]) ? 1 : 2;
         if (at == 2) return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key);
         options[at] = map_items(keywords)[i].value;
     }
-    if (!argc) return errorf(c, "TypeError", "%s expected at least 1 argument, got 0", name);
     if (argc > 1 && options[1]) return errorf(c, "TypeError", "Cannot specify a default for %s() with multiple positional arguments", name);
     SPYValue *key = options[0] && options[0]->type != SPY_NONE ? options[0] : NULL;
     SPYValue *iterator = argc == 1 ? get_iterator(c, argv[0]) : NULL;
@@ -25558,7 +25587,7 @@ execution_fail:
             return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'", owner, type_name(a));
         if (exception_args(c, a, argc - 1, argv + 1)) return NULL;
         /* Keyword attributes are unset unless given; ImportError keeps a lone argument as msg. */
-        const char *const *fields = id == B_EXCEPTION_INIT ? exception_keywords(c, a->as.map.parent) : NULL;
+        const char *const *fields = id == B_EXCEPTION_INIT ? exception_keywords(c, a->as.map.parent, &owner) : NULL;
         for (size_t i = 0; fields && fields[i]; i++) if (hidden_field(a, fields[i])) delete_name(a->as.map.class_cell, fields[i]);
         if (fields && subclass(a->as.map.parent, name_local(c->classes, "ImportError")) &&
             set_hidden_field(c, a, "msg", argc == 2 ? argv[1] : c->none)) return NULL;
@@ -26366,9 +26395,12 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         case B_EXCEPTION_INIT: {
             if (!argc || argv[0]->type != SPY_INSTANCE) break;
             SPYValue *cls = argv[0]->as.map.parent;
-            const char *const *fields = subclass(cls, name_local(c->classes, "BaseException")) ? exception_keywords(c, cls) : NULL;
             const char *owner = name_text(cls, "__name__")->as.string.data;
+            const char *const *fields = subclass(cls, name_local(c->classes, "BaseException")) ? exception_keywords(c, cls, &owner) : NULL;
             if (!fields) return errorf(c, "TypeError", "%s() takes no keyword arguments", owner);
+            size_t n = 0;
+            while (fields[n]) n++;
+            if (keyword_limit(c, owner, keywords, n)) return NULL;
             for (size_t i = 0; i < keywords->as.map.len; i++) {
                 const char *key = map_items(keywords)[i].key->as.string.data;
                 size_t k = 0;
@@ -26749,14 +26781,17 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         spy_release(method); return result;
     }
     if (slots[index].kind == SLOT_CALL) return call_keywords(c, value, argc, argv, keywords);
-    if (keywords && keywords->as.map.len) return errorf(c, "TypeError", "%s.%s() takes no keyword arguments", owner_name, name);
     int kind = slots[index].kind, op = slots[index].op;
     size_t expected = kind == SLOT_UNARY || kind == SLOT_BUILTIN ? 0 : 1;
     if (kind == SLOT_OTHER) expected = op == SLOT_FORMAT || op == SLOT_CONTAINS || op == SLOT_GETITEM || op == SLOT_DELITEM ? 1 : op == SLOT_SETITEM ? 2 : 0;
     if (kind == SLOT_BUILTIN && (op == B_DIVMOD)) expected = 1;
-    if ((kind == SLOT_BUILTIN && op == B_POW) || (kind == SLOT_RBINARY && op == T_POW)) {
+    int pow = (kind == SLOT_BUILTIN && op == B_POW) || (kind == SLOT_RBINARY && op == T_POW);
+    if (pow && (!keywords || !keywords->as.map.len)) {
         if (argc < 1 || argc > 2) return errorf(c, "TypeError", "expected 1 or 2 arguments, got %zu", argc);
-    } else if (argc != expected) return errorf(c, "TypeError", "expected %zu argument%s, got %zu", expected, expected == 1 ? "" : "s", argc);
+    /* A special method that is an ordinary method, such as dict.__contains__,
+     * checks its arguments as methods do (7.4). */
+    } else if (native_kind(fn) == NATIVE_WRAPPER_DESCRIPTOR ? wrapper_arguments(c, name, argc, keywords, expected, kind == SLOT_OTHER && op == SLOT_SETITEM) :
+               positional_only(c, owner_name, name, expected, expected, argc, keywords)) return NULL;
     SPYValue *other = argc ? operand_value(c, argv[0]) : NULL;
     if ((op == '*' || op == T_MULEQ) && (kind == SLOT_BINARY || kind == SLOT_RBINARY || kind == SLOT_INPLACE) &&
         (type == SPY_LIST || type == SPY_TUPLE || type == SPY_STRING || type == SPY_BYTES || type == SPY_BYTEARRAY)) {
@@ -27283,9 +27318,11 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
     if (op >= TYPE_DIR && (!argc || argv[0]->type != SPY_CLASS))
         return errorf(c, "TypeError", "descriptor '%s' for 'type' objects doesn't apply to a '%s' object", name, argc ? type_name(argv[0]) : "nothing");
     if (!argc) return errorf(c, "TypeError", "unbound method object.%s() needs an argument", name);
-    SPYValue *args[1];
     size_t count = op == OBJ_DIR || op == OBJ_SIZEOF || op == TYPE_DIR ? 0 : 1;
-    if (parse_arguments(c, name, argc - 1, argv + 1, keywords, NULL, count, count, 0, args)) return NULL;
+    if (op < TYPE_OR) { if (positional_only(c, op >= TYPE_DIR ? "type" : "object", name, count, count, argc - 1, keywords)) return NULL; }
+    /* type.__or__ and __ror__ are slot wrappers. */
+    else if (wrapper_arguments(c, name, argc - 1, keywords, 1, 0)) return NULL;
+    SPYValue *args[1] = {count ? argv[1] : NULL};
     switch (op) {
     case OBJ_DIR: case TYPE_DIR: return directory_of(c, argv[0], 1);
     case OBJ_SIZEOF: return spy_int(c, (int64_t)sizeof(SPYValue));
@@ -27670,7 +27707,8 @@ SPYContext *spy_context_new(void) {
         cls->as.map.flags = 2;
         c->native_types[i] = cls;
     }
-    static const int hashed_types[] = {SPY_NONE, SPY_INT, SPY_FLOAT, SPY_COMPLEX, SPY_STRING, SPY_BYTES, SPY_TUPLE, SPY_SLICE, SPY_RANGE, SPY_FROZENDICT};
+    static const int hashed_types[] = {SPY_NONE, SPY_INT, SPY_FLOAT, SPY_COMPLEX, SPY_STRING, SPY_BYTES, SPY_TUPLE, SPY_SLICE, SPY_RANGE, SPY_FROZENDICT,
+                                       SPY_FROZENSET};
     for (size_t i = 0; i < sizeof(hashed_types) / sizeof(*hashed_types); i++) {
         SPYValue *method = value_new(c, SPY_NATIVE);
         if (!method) { spy_release(module); goto fail; }
