@@ -381,9 +381,9 @@ def fqname(cls):
 
 
 # Doctests: CPython's interactive examples, run without the doctest module.
-# Each example is compiled as interactive input; an expression's value is
-# displayed with repr(), print() output is captured through the example
-# globals, and an exception is compared by its last formatted line. The
+# Each example runs as interactive input, the value of each expression
+# statement displayed with repr() through the display hook (B.3.4); print()
+# output is captured through the example globals, and an exception is compared by its last formatted line. The
 # option directives behave as doctest's: ELLIPSIS, NORMALIZE_WHITESPACE,
 # IGNORE_EXCEPTION_DETAIL, DONT_ACCEPT_BLANKLINE, DONT_ACCEPT_TRUE_FOR_1, SKIP.
 
@@ -510,6 +510,9 @@ def run_doctests(name, text, setup="", globs=None):
         if end is not None and not isinstance(end, str):
             raise TypeError(f"end must be None or a string, not {type(end).__name__}")
         output.append((" " if sep is None else sep).join(str(arg) for arg in args) + ("\n" if end is None else end))
+    def display(value):
+        if value is not None:
+            output.append(repr(value) + "\n")
     namespace = dict(globs or {})
     namespace["__name__"] = name
     namespace["print"] = capture
@@ -522,22 +525,16 @@ def run_doctests(name, text, setup="", globs=None):
         output.clear()
         filename = f"<doctest {name}[{index}]>"
         error = None
+        hook = host.display_hook()
+        host.set_display_hook(display)
         try:
-            compile(source, filename, "single")
-            try:
-                code = compile(source, filename, "eval")
-            except SyntaxError:
-                code = None
-            if code is not None:
-                value = eval(code, namespace)
-                if value is not None:
-                    output.append(repr(value) + "\n")
-            else:
-                exec(compile(source, filename, "exec"), namespace)
+            exec(compile(source, filename, "single"), namespace)
         except KeyboardInterrupt:
             raise
         except BaseException as caught:
             error = caught
+        finally:
+            host.set_display_hook(hook)
         got = "".join(output)
         if got and not got.endswith("\n"):
             got += "\n"

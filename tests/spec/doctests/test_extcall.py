@@ -469,13 +469,11 @@ A PyCFunction that takes only positional parameters should allow an
 empty keyword dictionary to pass without a complaint, but raise a
 TypeError if te dictionary is not empty
 
-(Ported: print() shows the values the interactive loop would display.)
-
     >>> try:
     ...     silence = id(1, *{})
-    ...     print(True)
+    ...     True
     ... except:
-    ...     print(False)
+    ...     False
     True
 
     >>> id(1, **{'foo': 1})
