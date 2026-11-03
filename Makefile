@@ -21,7 +21,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor
+.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
 all: spy spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -268,6 +268,34 @@ go/licenses/%: docs/licenses/%
 test-go: go-vendor spy-worker
 	cd go && go vet ./... && go test ./...
 
+# The Java artifacts (java/, docs/packaging/java.md). Each jar carries its
+# native files under native/<platform>/: the JNI library, the engine with
+# spy-jni.c, and the worker. java-native builds them for this platform.
+JAVA_HOME ?= $(shell java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.home = //p')
+JAVA_OS := $(shell uname -s | sed -e 's/^Darwin$$/macos/' -e 's/^Linux$$/linux/' -e 's/^MINGW.*/windows/')
+JAVA_ARCH := $(shell uname -m | sed -e 's/^aarch64$$/arm64/' -e 's/^amd64$$/x86_64/')
+JNI_OS = $(if $(filter macos,$(JAVA_OS)),darwin,$(if $(filter windows,$(JAVA_OS)),win32,$(JAVA_OS)))
+JNI_LIBRARY = $(if $(filter macos,$(JAVA_OS)),libspyjni.dylib,$(if $(filter windows,$(JAVA_OS)),spyjni.dll,libspyjni.so))
+JAVA_EXE = $(if $(filter windows,$(JAVA_OS)),.exe)
+JAVA_NATIVE = native/$(JAVA_OS)-$(JAVA_ARCH)
+JNI_LDFLAGS ?=
+java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY): java/small-python/src/main/c/spy-jni.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fPIC -shared -I. -I"$(JAVA_HOME)/include" -I"$(JAVA_HOME)/include/$(JNI_OS)" $(filter %.c,$^) $(JNI_LDFLAGS) $(LDLIBS) -o $@
+java/small-python-worker/$(JAVA_NATIVE)/spy-worker$(JAVA_EXE): spy-worker
+	mkdir -p $(dir $@)
+	cp spy-worker$(JAVA_EXE) $@
+java/licenses/%: docs/licenses/%
+	mkdir -p java/licenses
+	cp $< $@
+java/licenses/LICENSE: LICENSE
+	mkdir -p java/licenses
+	cp $< $@
+java-native: java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY) java/licenses/LICENSE java/licenses/python.txt java/licenses/unicode.txt
+
+test-java: java-native
+	cd java && mvn -B -q verify
+
 # libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.
 # Apple clang lacks libFuzzer; on macOS use FUZZ_CC=$$(brew --prefix llvm)/bin/clang.
 FUZZ_CC ?= clang
@@ -383,4 +411,4 @@ coverage:
 
 clean:
 	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
-	rm -rf $(OBJDIR)
+	rm -rf $(OBJDIR) java/licenses java/*/native java/*/target
