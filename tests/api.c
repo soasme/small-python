@@ -871,6 +871,39 @@ int main(void) {
     assert(!strcmp(spy_error_type(c), "MemoryError") && spy_stopped(c) == SPY_STOP_MEMORY);
     assert(integer(c, spy_eval(c, "caught", "caught.py")) == 0);
     spy_set_memory_limit(c, 0);
+    /* spy_set_limit sets every limit; output going over its limit stops the
+     * call like a spent budget, and the next call writes again. */
+    assert(!spy_set_limit(c, SPY_LIMIT_MEMORY, 1 << 30) && spy_get_limit(c, SPY_LIMIT_MEMORY) == 1 << 30);
+    assert(!spy_set_limit(c, SPY_LIMIT_MEMORY, 0) && !spy_set_limit(c, SPY_LIMIT_STEPS, 0) && !spy_get_limit(c, SPY_LIMIT_STEPS));
+    assert(!spy_set_limit(c, SPY_LIMIT_OUTPUT, 8) && spy_get_limit(c, SPY_LIMIT_OUTPUT) == 8);
+    o.len = 0;
+    assert(spy_exec(c, "print('1234')\ntry:\n    print('56789')\nexcept BaseException:\n    print('caught')", "output.py") == -1);
+    assert(!strcmp(o.text, "1234\n") && spy_stopped(c) == SPY_STOP_OUTPUT);
+    assert(!strcmp(spy_error_type(c), "RuntimeError") && !strcmp(spy_error_message(c), "output limit exceeded"));
+    o.len = 0;
+    execute(c, "import sys\nsys.stdout.write('1234567')");
+    assert(!strcmp(o.text, "1234567"));
+    assert(!spy_set_limit(c, SPY_LIMIT_OUTPUT, 0));
+    assert(!spy_set_limit(c, SPY_LIMIT_RECURSION, 40) && spy_get_limit(c, SPY_LIMIT_RECURSION) == 40);
+    assert(spy_exec(c, "def down(n): return down(n + 1)\ndown(0)", "recursion.py") == -1 && !strcmp(spy_error_type(c), "RecursionError"));
+    assert(integer(c, spy_eval(c, "sys.getrecursionlimit()", "limit.py")) == 40);
+    assert(!spy_set_limit(c, SPY_LIMIT_RECURSION, 1000));
+    assert(!spy_set_limit(c, SPY_LIMIT_INT_DIGITS, 640) && spy_get_limit(c, SPY_LIMIT_INT_DIGITS) == 640);
+    assert(spy_exec(c, "str(10 ** 700)", "digits.py") == -1 && !strcmp(spy_error_type(c), "ValueError"));
+    assert(!spy_set_limit(c, SPY_LIMIT_INT_DIGITS, 0));
+    execute(c, "assert len(str(10 ** 5000)) == 5001");
+    assert(!spy_set_limit(c, SPY_LIMIT_INT_DIGITS, 4300));
+    size_t stack = spy_get_limit(c, SPY_LIMIT_STACK);
+    assert(stack == 4 << 20 && !spy_set_limit(c, SPY_LIMIT_STACK, 64 << 10) && !spy_set_limit(c, SPY_LIMIT_RECURSION, 100000));
+    assert(spy_exec(c, "down(0)", "stack.py") == -1 && !strcmp(spy_error_type(c), "RecursionError"));
+    assert(!spy_set_limit(c, SPY_LIMIT_STACK, stack) && !spy_set_limit(c, SPY_LIMIT_RECURSION, 1000));
+    spy_clear_error(c);
+    static const int bad[][2] = {{SPY_LIMIT_RECURSION, 0}, {SPY_LIMIT_INT_DIGITS, 100}, {SPY_LIMIT_STACK, 0}, {99, 1}};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        assert(spy_set_limit(c, bad[i][0], (size_t)bad[i][1]) == -1 && !strcmp(spy_error_type(c), "ValueError"));
+        spy_clear_error(c);
+    }
+    assert(!spy_get_limit(c, 99));
     /* The interrupt is polled at least every 4096 steps; it stops the call
      * like a spent budget, and the next call runs normally. */
     int polls = 0;

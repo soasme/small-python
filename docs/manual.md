@@ -889,13 +889,25 @@ engine reads no clock: a host bounds wall or CPU time, or offers a cancel
 button, by reading its own in the callback, which must not call into the
 engine.
 
-A spent budget, a refused allocation or an interrupt stops the call: every
-further step fails with `RuntimeError` (steps, interrupt) or `MemoryError`
-(memory), so no handler or `finally` body runs, and finalizers that become
-due wait for the next outermost call, which runs normally. `spy_stopped`
-returns `SPY_STOP_STEPS`, `SPY_STOP_MEMORY` or `SPY_STOP_INTERRUPT` after
-such a call and zero after any other, which tells a stop from the same
-error raised by the program.
+`spy_set_limit(ctx, limit, value)` sets each limit through one call, and
+`spy_get_limit` reads it back. `SPY_LIMIT_STEPS` and `SPY_LIMIT_MEMORY` are
+the two above. `SPY_LIMIT_OUTPUT` bounds the bytes each outermost call
+writes to the output and error streams; zero means unlimited.
+`SPY_LIMIT_RECURSION` and `SPY_LIMIT_INT_DIGITS` set the recursion limit and
+the int-string conversion limit (PLS-315 B.6), which a program with `sys`
+can change too. `SPY_LIMIT_STACK` sets the bytes of C stack the engine may
+use before `RecursionError`, 4 MiB by default, for a host that runs it on a
+smaller stack, such as a thread or WebAssembly. A value out of range or an
+unknown limit fails with `ValueError`.
+
+A spent budget, a refused allocation, output past its limit or an
+interrupt stops the call: every further step fails with `RuntimeError`
+(steps, output, interrupt) or `MemoryError` (memory), so no handler or
+`finally` body runs, and finalizers that become due wait for the next
+outermost call, which runs normally. `spy_stopped` returns
+`SPY_STOP_STEPS`, `SPY_STOP_MEMORY`, `SPY_STOP_OUTPUT` or
+`SPY_STOP_INTERRUPT` after such a call and zero after any other, which
+tells a stop from the same error raised by the program.
 
 `spy_set_policy` installs a callback asked before each sensitive action, as
 CPython's audit hooks (PEP 578) are, with an event name and a tuple of its

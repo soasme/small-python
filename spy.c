@@ -329,6 +329,7 @@ struct SPYContext {
     void *read_data;
     SPYPolicy policy;
     void *policy_data;
+    size_t output_limit, output_used; /* Bytes of output each outermost call may write, and has. */
     char error_message[256], filename[256];
     char *error_text; /* The whole message when error_message cuts it short, owned. */
     SPYValue *filename_from; /* The unit whose filename tick last copied into filename, or NULL; borrowed. */
@@ -512,11 +513,12 @@ static NO_INLINE int halt(SPYContext *c, int reason) {
     if (!c->stopped) { c->stopped = reason; c->stopped_fuel = c->fuel; }
     c->fuel = 0; c->quiet_unit = NULL;
     if (c->stopped == SPY_STOP_MEMORY) spy_error(c, "MemoryError", "memory limit exceeded");
-    else spy_error(c, "RuntimeError", c->stopped == SPY_STOP_INTERRUPT ? "execution interrupted" : "execution step limit exceeded");
+    else spy_error(c, "RuntimeError", c->stopped == SPY_STOP_INTERRUPT ? "execution interrupted" :
+                                      c->stopped == SPY_STOP_OUTPUT ? "output limit exceeded" : "execution step limit exceeded");
     return -1;
 }
 static void watch(SPYContext *c) {
-    c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit || c->interrupt;
+    c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit || c->output_limit || c->interrupt;
 }
 /* Where the countdown next stops for the interrupt: 4096 steps on, or at
  * zero without one, where spend stops. */
@@ -11437,7 +11439,7 @@ static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     return n->attr_kind;
 }
 /* The attribute node n read from v, with n remembering how v's class answers. */
-static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
+static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
     int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
     if (kind != ATTR_SLOW) {
         Entry *e = dict_slot(v, n->b);
@@ -11448,7 +11450,7 @@ static SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
-static int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
+static HOT int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
     if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->text, value);
     Entry *e = dict_slot(v, n->b);
     if (e && e->key->type == SPY_STRING) {
@@ -15961,6 +15963,7 @@ static int output_flush(SPYContext *c, int error) {
     spy_error(c, "OSError", "output flush failed");
     return -1;
 }
+static int output_write(SPYContext *, int, const char *, size_t);
 static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits"};
     int id = (int)(intptr_t)data;
@@ -15993,11 +15996,8 @@ static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, v
          * error stream for sys.stderr; text is already a str. */
         if (id == SYS_FLUSH) return output_flush(c, argc && truthy(argv[0])) ? NULL : spy_none(c);
         if (argc < 1 || argc > 2 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "write() argument must be str");
-        int error = argc == 2 && truthy(argv[1]) && c->error_write;
-        SPYWrite write = error ? c->error_write : c->write;
-        if (!write) return spy_error(c, "OSError", "no output callback installed");
-        if (write(c, error ? c->error_data : c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
-        return spy_none(c);
+        int error = argc == 2 && truthy(argv[1]);
+        return output_write(c, error, argv[0]->as.string.data, argv[0]->as.string.len) ? NULL : spy_none(c);
     }
     if (id == SYS_FRAME_MODULE) {
         /* _getframemodulename(depth): its own wrapper frame is skipped. A
@@ -19296,9 +19296,7 @@ static int display_value(SPYContext *c, SPYValue *value) {
         else if (file->type != SPY_NONE && !print_text(c, file, text) && (newline = spy_string(c, "\n", 1)))
             print_text(c, file, newline);
         spy_release(file); spy_release(newline);
-    } else if (!c->write) spy_error(c, "OSError", "no output callback installed");
-    else if (c->write(c, c->write_data, text->as.string.data, text->as.string.len) ||
-             c->write(c, c->write_data, "\n", 1)) spy_error(c, "OSError", "output failed");
+    } else if (!output_write(c, 0, text->as.string.data, text->as.string.len)) output_write(c, 0, "\n", 1);
     spy_release(text);
     return c->error_type[0] ? -1 : name_set(c, c->builtins, "_", value);
 }
@@ -25970,8 +25968,7 @@ static int print_text(SPYContext *c, SPYValue *file, SPYValue *text) {
         SPYValue *method = attribute(c, file, "write");
         SPYValue *result = method ? call(c, method, 1, &text) : NULL;
         spy_release(method); spy_release(result);
-    } else if (!c->write) spy_error(c, "OSError", "no output callback installed");
-    else if (c->write(c, c->write_data, text->as.string.data, text->as.string.len)) spy_error(c, "OSError", "output failed");
+    } else output_write(c, 0, text->as.string.data, text->as.string.len);
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -28061,6 +28058,18 @@ void spy_context_free(SPYContext *c) {
         for (MemHead *b = c->spare_blocks[k], *next; b; b = next) { cache_take(b, sizeof(*b) + (k + 1) * 16); next = b->next; free(b); }
     free(c);
 }
+/* Writes to the host output, or with error the error stream, within the
+ * output limit. */
+static int output_write(SPYContext *c, int error, const char *text, size_t n) {
+    int own = error && c->error_write;
+    SPYWrite write = own ? c->error_write : c->write;
+    if (!write) { spy_error(c, "OSError", "no output callback installed"); return -1; }
+    if (c->output_limit && n > c->output_limit - c->output_used) return halt(c, SPY_STOP_OUTPUT);
+    c->output_used += n;
+    if (!write(c, own ? c->error_data : c->write_data, text, n)) return 0;
+    spy_error(c, "OSError", "output failed");
+    return -1;
+}
 void spy_set_output(SPYContext *c, SPYWrite write, SPYFlush flush, void *data) { c->write = write; c->flush = flush; c->write_data = data; }
 void spy_set_error_output(SPYContext *c, SPYWrite write, SPYFlush flush, void *data) {
     c->error_write = write; c->error_flush = flush; c->error_data = data;
@@ -28081,6 +28090,30 @@ void spy_set_interrupt(SPYContext *c, SPYInterrupt interrupt, void *data) {
 void spy_set_memory_limit(SPYContext *c, size_t limit) { c->memory_limit = limit; watch(c); }
 size_t spy_memory_used(const SPYContext *c) { return c->memory; }
 int spy_stopped(const SPYContext *c) { return c->stopped; }
+int spy_set_limit(SPYContext *c, int limit, size_t value) {
+    switch (limit) {
+    case SPY_LIMIT_STEPS: spy_set_step_limit(c, value); return 0;
+    case SPY_LIMIT_MEMORY: spy_set_memory_limit(c, value); return 0;
+    case SPY_LIMIT_OUTPUT: c->output_limit = value; watch(c); return 0;
+    case SPY_LIMIT_RECURSION: if (value <= c->py_depth) break; c->recursion_limit = value; return 0;
+    case SPY_LIMIT_INT_DIGITS: if (value && value < 640) break; c->int_max_str_digits = value; return 0;
+    case SPY_LIMIT_STACK: if (!value) break; c->stack_size = value; return 0;
+    default: spy_error(c, "ValueError", "unknown limit"); return -1;
+    }
+    spy_error(c, "ValueError", "limit value out of range");
+    return -1;
+}
+size_t spy_get_limit(const SPYContext *c, int limit) {
+    switch (limit) {
+    case SPY_LIMIT_STEPS: return c->step_limit;
+    case SPY_LIMIT_MEMORY: return c->memory_limit;
+    case SPY_LIMIT_OUTPUT: return c->output_limit;
+    case SPY_LIMIT_RECURSION: return c->recursion_limit;
+    case SPY_LIMIT_INT_DIGITS: return c->int_max_str_digits;
+    case SPY_LIMIT_STACK: return c->stack_size;
+    default: return 0;
+    }
+}
 size_t spy_steps_used(const SPYContext *c) {
     return (c->step_limit ? c->step_limit : SIZE_MAX) - (c->stopped ? c->stopped_fuel : c->fuel);
 }
@@ -28103,7 +28136,7 @@ static void enter(SPYContext *c) {
     if (c->entries++) return;
     c->fuel = c->step_limit ? c->step_limit : SIZE_MAX;
     schedule_poll(c);
-    c->stopped = 0;
+    c->stopped = 0; c->output_used = 0;
 }
 static SPYValue *leave(SPYContext *c, SPYValue *result) { c->entries--; return result; }
 SPYValue *spy_eval(SPYContext *c, const char *source, const char *filename) {
