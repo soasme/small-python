@@ -76,6 +76,8 @@ itself has no default and raises `OSError` from `print` without one.
 | `SetOutput(w)`, `SetLoader(f)` | `spy_set_output` with an `io.Writer`, `spy_set_module_loader` |
 | `Mount(directory, path, readOnly)` | `spy_mount`; an empty `path` is `NULL` |
 | `SetStepLimit(n)`, `StepsUsed()`, `SetOptimize(level)`, `Collect()` | the same names |
+| `SetLimit(limit, n)`, `Limit(limit)` | `spy_set_limit`, `spy_get_limit` |
+| `SetPolicy(f)`, `CheckPolicy(event, args...)` | `spy_set_policy` (an error refuses), `spy_policy_check` |
 | `ToValue(x)` | the conversions of §3.3 |
 | `Close()` | `spy_context_free` |
 

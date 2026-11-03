@@ -25,6 +25,11 @@ static SPYValue *load_module(SPYContext *c, void *rt, const char *name) {
     return goLoad(c, (uintptr_t)rt, (char *)name);
 }
 
+static int check_policy(SPYContext *c, void *rt, const char *event, SPYValue *args) {
+    (void)rt;
+    return goPolicy(c, (char *)event, args);
+}
+
 void spy_go_bind(SPYContext *c, uintptr_t rt) {
     spy_set_opaque(c, (void *)rt);
 }
@@ -43,6 +48,10 @@ int spy_go_new_module(SPYContext *c, const char *name) {
 
 void spy_go_set_output(SPYContext *c, int on) {
     spy_set_output(c, on ? write_output : NULL, NULL, spy_get_opaque(c));
+}
+
+void spy_go_set_policy(SPYContext *c, int on) {
+    spy_set_policy(c, on ? check_policy : NULL, NULL);
 }
 
 void spy_go_set_loader(SPYContext *c, int on) {

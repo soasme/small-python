@@ -38,6 +38,7 @@ SPYValue *spy_go_native(SPYContext *, const char *, uintptr_t);
 int spy_go_new_module(SPYContext *, const char *);
 void spy_go_set_output(SPYContext *, int);
 void spy_go_set_loader(SPYContext *, int);
+void spy_go_set_policy(SPYContext *, int);
 */
 import "C"
 
@@ -71,6 +72,7 @@ type Runtime struct {
 	self    cgo.Handle
 	output  io.Writer
 	loader  func(name string) (source string, ok bool)
+	policy  func(event string, args []*Value) error
 	modules map[string]func(rt *Runtime, module *Value) error
 
 	// Values the garbage collector dropped, released on the next call.
@@ -267,6 +269,64 @@ func (rt *Runtime) SetStepLimit(limit uint) {
 	if rt.enter() == nil {
 		C.spy_set_step_limit(rt.ctx, C.size_t(limit))
 	}
+}
+
+// A Limit names one of the bounds SetLimit sets.
+type Limit int
+
+const (
+	LimitSteps     Limit = C.SPY_LIMIT_STEPS      // steps of each top-level call; 0 is unlimited
+	LimitMemory    Limit = C.SPY_LIMIT_MEMORY     // bytes the engine holds; 0 is unlimited
+	LimitOutput    Limit = C.SPY_LIMIT_OUTPUT     // bytes each top-level call prints; 0 is unlimited
+	LimitRecursion Limit = C.SPY_LIMIT_RECURSION  // Python call depth
+	LimitIntDigits Limit = C.SPY_LIMIT_INT_DIGITS // int-str conversion digits; 0 is unlimited
+	LimitStack     Limit = C.SPY_LIMIT_STACK      // bytes of C stack the engine may use
+)
+
+// SetLimit sets one limit. A spent step, memory or output limit stops the
+// call with RuntimeError (MemoryError for memory) that no handler catches.
+func (rt *Runtime) SetLimit(limit Limit, value uint) error {
+	if err := rt.enter(); err != nil {
+		return err
+	}
+	return rt.check(C.spy_set_limit(rt.ctx, C.int(limit), C.size_t(value)))
+}
+
+// Limit returns a limit's current value.
+func (rt *Runtime) Limit(limit Limit) uint {
+	if rt.enter() != nil {
+		return 0
+	}
+	return uint(C.spy_get_limit(rt.ctx, C.int(limit)))
+}
+
+// SetPolicy asks policy before open, a module's first import, exec, eval
+// or compile of a string, and input, with the event's name ("open",
+// "import", "exec", "input") and arguments. A non-nil error refuses: an
+// *Exception raises its type, any other error PermissionError. nil removes
+// the policy.
+func (rt *Runtime) SetPolicy(policy func(event string, args []*Value) error) {
+	if rt.enter() != nil {
+		return
+	}
+	rt.policy = policy
+	C.spy_go_set_policy(rt.ctx, truth(policy != nil))
+}
+
+// CheckPolicy asks the policy about an event of the host's own, such as a
+// network request from a Go function; nil when allowed or no policy is set.
+func (rt *Runtime) CheckPolicy(event string, args ...any) error {
+	name, err := rt.name(event)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(name))
+	tuple, err := rt.ref(Tuple(args))
+	if err != nil {
+		return err
+	}
+	defer C.spy_release(tuple)
+	return rt.check(C.spy_policy_check(rt.ctx, name, tuple))
 }
 
 // StepsUsed returns the steps the running or last top-level Eval or Exec
@@ -471,6 +531,30 @@ func goWrite(h C.uintptr_t, text *C.char, n C.size_t) (status C.int) {
 		return -1
 	}
 	return 0
+}
+
+//export goPolicy
+func goPolicy(c *C.SPYContext, event *C.char, args *C.SPYValue) C.int {
+	rt := runtimeOf(c)
+	result := rt.guard(func() (*C.SPYValue, error) {
+		var items []*Value
+		for item, err := range newValue(rt, C.spy_retain(args)).Iter() {
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+		}
+		if err := rt.policy(C.GoString(event), items); err != nil {
+			var e *Exception
+			if !errors.As(err, &e) {
+				e = &Exception{Type: "PermissionError", Message: err.Error()}
+			}
+			return nil, e
+		}
+		return C.spy_none(c), nil
+	})
+	C.spy_release(result)
+	return truth(result == nil)
 }
 
 //export goLoad

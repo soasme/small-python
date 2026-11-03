@@ -1,7 +1,9 @@
 package spy_test
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -262,4 +264,43 @@ func must[T any](v T, err error) T {
 		panic(err)
 	}
 	return v
+}
+
+func TestLimits(t *testing.T) {
+	rt := newRuntime(t)
+	var out bytes.Buffer
+	rt.SetOutput(&out)
+	if err := rt.SetLimit(spy.LimitOutput, 4); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, rt.Limit(spy.LimitOutput), uint(4))
+	equal(t, exception(t, rt.Exec("print('hello')")).Message, "output limit exceeded")
+	equal(t, out.String(), "")
+	equal(t, exception(t, rt.SetLimit(spy.LimitIntDigits, 100)).Type, "ValueError")
+}
+
+func TestPolicy(t *testing.T) {
+	rt := newRuntime(t)
+	var events []string
+	rt.SetPolicy(func(event string, args []*spy.Value) error {
+		events = append(events, fmt.Sprintf("%s/%d", event, len(args)))
+		switch event {
+		case "exec":
+			return errors.New("no exec here")
+		case "net.fetch":
+			return spy.Raise("ConnectionRefusedError", "blocked host")
+		}
+		return nil
+	})
+	e := exception(t, rt.Exec("exec('1')"))
+	equal(t, e.Type+": "+e.Message, "PermissionError: no exec here")
+	equal(t, exception(t, rt.CheckPolicy("net.fetch", "https://example.com")).Type, "ConnectionRefusedError")
+	if err := rt.CheckPolicy("storage.save"); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, strings.Join(events, " "), "exec/1 net.fetch/1 storage.save/0")
+	rt.SetPolicy(nil)
+	if err := rt.Exec("exec('1')"); err != nil {
+		t.Fatal(err)
+	}
 }

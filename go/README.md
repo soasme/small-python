@@ -230,9 +230,30 @@ type name and message, not by identity.
 
 `rt.SetStepLimit(n)` bounds the evaluation steps of each top-level `Eval` or
 `Exec`; past it the engine raises `RuntimeError` and the runtime stays
-usable. It counts work, not memory: `'x' * 10**9` takes few steps. The
-in-process engine has no memory limit or timeout; use `worker` for those.
-`rt.SetOptimize(1)` and `rt.SetOptimize(2)` act as `python -O` and `-OO`.
+usable. It counts work, not memory: `'x' * 10**9` takes few steps.
+`rt.SetLimit(spy.LimitMemory, bytes)` bounds memory, and `LimitOutput`,
+`LimitRecursion`, `LimitIntDigits` and `LimitStack` the rest;
+`rt.Limit(limit)` reads one back. The in-process engine has no timeout;
+use `worker` for one. `rt.SetOptimize(1)` and `rt.SetOptimize(2)` act as
+`python -O` and `-OO`.
+
+### Policy
+
+`rt.SetPolicy(f)` asks `f(event, args)` before `open` (`"open"`), a module's
+first import (`"import"`), `exec`, `eval` or `compile` of a string
+(`"exec"`) and `input` (`"input"`). Returning an error refuses the action:
+a `*spy.Exception` raises its own type, any other error `PermissionError`.
+A Go function asks the same policy about its own actions, such as a network
+request, with `rt.CheckPolicy("net.fetch", url)`.
+
+```go
+rt.SetPolicy(func(event string, args []*spy.Value) error {
+	if event == "exec" {
+		return errors.New("exec is disabled")
+	}
+	return nil
+})
+```
 
 ### Lifetime and goroutines
 
