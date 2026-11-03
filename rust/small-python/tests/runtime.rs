@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use small_python::{Error, Runtime, Value};
+use small_python::{Error, Limit, Runtime, Value};
 
 #[test]
 fn evaluates_and_converts() {
@@ -199,4 +199,37 @@ fn serde_round_trip() {
 #[test]
 fn floats_accept_ints() {
     assert_eq!(Runtime::new().unwrap().eval::<f64>("2").unwrap(), 2.0);
+}
+
+#[test]
+fn limits() {
+    let rt = Runtime::new().unwrap();
+    let printed = Arc::new(Mutex::new(String::new()));
+    let sink = printed.clone();
+    rt.set_output(move |text| sink.lock().unwrap().push_str(text));
+    rt.set_limit(Limit::Output, 4).unwrap();
+    assert_eq!(rt.limit(Limit::Output), 4);
+    assert_eq!(rt.exec("print('hello')").unwrap_err().message, "output limit exceeded");
+    assert_eq!(*printed.lock().unwrap(), "");
+    assert_eq!(rt.set_limit(Limit::IntDigits, 100).unwrap_err().type_name, "ValueError");
+}
+
+#[test]
+fn policy() {
+    let rt = Runtime::new().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let log = events.clone();
+    rt.set_policy(move |_, event, args| {
+        log.lock().unwrap().push(format!("{event}/{}", args.len()));
+        match event {
+            "exec" => Err(Error::new("PermissionError", "no exec here")),
+            "net.fetch" => Err(Error::new("ConnectionRefusedError", "blocked host")),
+            _ => Ok(()),
+        }
+    });
+    let error = rt.exec("exec('1')").unwrap_err();
+    assert_eq!((error.type_name.as_str(), error.message.as_str()), ("PermissionError", "no exec here"));
+    assert_eq!(rt.check_policy("net.fetch", ("https://example.com",)).unwrap_err().type_name, "ConnectionRefusedError");
+    rt.check_policy("storage.save", ()).unwrap();
+    assert_eq!(events.lock().unwrap().join(" "), "exec/1 net.fetch/1 storage.save/0");
 }

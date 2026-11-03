@@ -80,6 +80,16 @@ pub const SPY_MEMBER_DESCRIPTOR: SPYType = 52;
 pub const SPY_GETSET_DESCRIPTOR: SPYType = 53;
 
 pub const SPY_MOUNT_READ_ONLY: c_int = 1;
+pub const SPY_STOP_STEPS: c_int = 1;
+pub const SPY_STOP_MEMORY: c_int = 2;
+pub const SPY_STOP_INTERRUPT: c_int = 3;
+pub const SPY_STOP_OUTPUT: c_int = 4;
+pub const SPY_LIMIT_STEPS: c_int = 0;
+pub const SPY_LIMIT_MEMORY: c_int = 1;
+pub const SPY_LIMIT_OUTPUT: c_int = 2;
+pub const SPY_LIMIT_RECURSION: c_int = 3;
+pub const SPY_LIMIT_INT_DIGITS: c_int = 4;
+pub const SPY_LIMIT_STACK: c_int = 5;
 
 pub type SPYNative = unsafe extern "C" fn(*mut SPYContext, usize, *const *mut SPYValue, *mut c_void) -> *mut SPYValue;
 pub type SPYNativeKeywords =
@@ -89,6 +99,7 @@ pub type SPYFlush = unsafe extern "C" fn(*mut SPYContext, *mut c_void) -> c_int;
 pub type SPYModuleLoader = unsafe extern "C" fn(*mut SPYContext, *mut c_void, *const c_char) -> *mut SPYValue;
 pub type SPYReadLine = unsafe extern "C" fn(*mut SPYContext, *mut c_void) -> *mut SPYValue;
 pub type SPYModuleInit = unsafe extern "C" fn(*mut SPYContext, *mut SPYValue) -> c_int;
+pub type SPYPolicy = unsafe extern "C" fn(*mut SPYContext, *mut c_void, *const c_char, *mut SPYValue) -> c_int;
 
 extern "C" {
     pub fn spy_context_new() -> *mut SPYContext;
@@ -109,6 +120,11 @@ extern "C" {
     pub fn spy_mount(c: *mut SPYContext, directory: *const c_char, path: *const c_char, flags: c_int) -> c_int;
     pub fn spy_set_step_limit(c: *mut SPYContext, limit: usize);
     pub fn spy_steps_used(c: *const SPYContext) -> usize;
+    pub fn spy_stopped(c: *const SPYContext) -> c_int;
+    pub fn spy_set_limit(c: *mut SPYContext, limit: c_int, value: usize) -> c_int;
+    pub fn spy_get_limit(c: *const SPYContext, limit: c_int) -> usize;
+    pub fn spy_set_policy(c: *mut SPYContext, policy: Option<SPYPolicy>, data: *mut c_void);
+    pub fn spy_policy_check(c: *mut SPYContext, event: *const c_char, args: *mut SPYValue) -> c_int;
     pub fn spy_set_optimize(c: *mut SPYContext, level: c_int);
     pub fn spy_collect(c: *mut SPYContext) -> usize;
     pub fn spy_live_values(c: *const SPYContext) -> usize;

@@ -52,12 +52,44 @@ type HostFn = Box<dyn for<'a> Fn(&'a Runtime, Args<'a>) -> Result<Value<'a>> + S
 type Output = Box<dyn FnMut(&str) + Send>;
 type Loader = Box<dyn FnMut(&str) -> Option<String> + Send>;
 type ModuleInit = Arc<dyn for<'a> Fn(&'a Runtime, &Value<'a>) -> Result<()> + Send + Sync>;
+type Policy = Box<dyn for<'a> FnMut(&'a Runtime, &str, &[Value<'a>]) -> Result<()> + Send>;
+
+/// A bound [`Runtime::set_limit`] sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// Steps of each top-level call; 0 is unlimited.
+    Steps,
+    /// Bytes the engine holds; 0 is unlimited.
+    Memory,
+    /// Bytes each top-level call prints; 0 is unlimited.
+    Output,
+    /// Python call depth.
+    Recursion,
+    /// Digits of an int-str conversion; 0 is unlimited, else at least 640.
+    IntDigits,
+    /// Bytes of C stack the engine may use.
+    Stack,
+}
+
+impl Limit {
+    fn id(self) -> c_int {
+        match self {
+            Limit::Steps => ffi::SPY_LIMIT_STEPS,
+            Limit::Memory => ffi::SPY_LIMIT_MEMORY,
+            Limit::Output => ffi::SPY_LIMIT_OUTPUT,
+            Limit::Recursion => ffi::SPY_LIMIT_RECURSION,
+            Limit::IntDigits => ffi::SPY_LIMIT_INT_DIGITS,
+            Limit::Stack => ffi::SPY_LIMIT_STACK,
+        }
+    }
+}
 
 /// What the context's callbacks reach through its opaque pointer.
 #[derive(Default)]
 struct Hooks {
     output: RefCell<Option<Output>>,
     loader: RefCell<Option<Loader>>,
+    policy: RefCell<Option<Policy>>,
     modules: RefCell<HashMap<String, ModuleInit>>,
 }
 
@@ -191,6 +223,39 @@ impl Runtime {
         unsafe { ffi::spy_set_step_limit(self.ctx(), limit) }
     }
 
+    /// Sets one limit. A spent step, memory or output limit stops the call
+    /// with `RuntimeError` (`MemoryError` for memory) that no handler catches.
+    pub fn set_limit(&self, limit: Limit, value: usize) -> Result<()> {
+        self.check(unsafe { ffi::spy_set_limit(self.ctx(), limit.id(), value) })
+    }
+
+    /// A limit's current value.
+    pub fn limit(&self, limit: Limit) -> usize {
+        unsafe { ffi::spy_get_limit(self.ctx(), limit.id()) }
+    }
+
+    /// Asks `policy` before `open` (`"open"`), a module's first import
+    /// (`"import"`), `exec`, `eval` or `compile` of a string (`"exec"`) and
+    /// `input` (`"input"`), with the event's arguments. An error refuses the
+    /// action and is raised in its place.
+    pub fn set_policy(
+        &self,
+        policy: impl for<'a> FnMut(&'a Runtime, &str, &[Value<'a>]) -> Result<()> + Send + 'static,
+    ) {
+        *self.hooks().policy.borrow_mut() = Some(Box::new(policy));
+        unsafe { ffi::spy_set_policy(self.ctx(), Some(check_policy), std::ptr::null_mut()) };
+    }
+
+    /// Asks the policy about an event of the host's own, such as a network
+    /// request from a host function; `Ok` when allowed or no policy is set.
+    pub fn check_policy(&self, event: &str, args: impl IntoArgs) -> Result<()> {
+        let event = c_name(event)?;
+        let args = args.into_args(self)?;
+        let argv: Vec<_> = args.iter().map(Value::as_ptr).collect();
+        let tuple = self.wrap(unsafe { ffi::spy_tuple(self.ctx(), argv.len(), argv.as_ptr()) })?;
+        self.check(unsafe { ffi::spy_policy_check(self.ctx(), event.as_ptr(), tuple.as_ptr()) })
+    }
+
     /// The steps the running or last top-level `eval` or `exec` spent; calls
     /// spend only while a step limit is set.
     pub fn steps_used(&self) -> usize {
@@ -314,7 +379,34 @@ unsafe extern "C" fn write_output(_: *mut ffi::SPYContext, data: *mut c_void, te
     }
 }
 
-unsafe extern "C" fn load_module(c: *mut ffi::SPYContext, data: *mut c_void, name: *const c_char) -> *mut ffi::SPYValue {
+unsafe extern "C" fn check_policy(
+    c: *mut ffi::SPYContext,
+    _: *mut c_void,
+    event: *const c_char,
+    args: *mut ffi::SPYValue,
+) -> c_int {
+    let rt = Runtime::borrowed(c);
+    let result = guard(c, || {
+        let event = CStr::from_ptr(event).to_string_lossy();
+        let tuple = Value::from_raw(&rt, NonNull::new_unchecked(ffi::spy_retain(args)));
+        let args = tuple.iter()?.collect::<Result<Vec<_>>>()?;
+        if let Some(policy) = rt.hooks().policy.borrow_mut().as_mut() {
+            policy(&rt, &event, &args)?;
+        }
+        Ok(ffi::spy_none(c))
+    });
+    if result.is_null() {
+        return -1;
+    }
+    ffi::spy_release(result);
+    0
+}
+
+unsafe extern "C" fn load_module(
+    c: *mut ffi::SPYContext,
+    data: *mut c_void,
+    name: *const c_char,
+) -> *mut ffi::SPYValue {
     let hooks = &*data.cast::<Hooks>();
     let name = CStr::from_ptr(name).to_string_lossy();
     let source = catch_unwind(AssertUnwindSafe(|| hooks.loader.borrow_mut().as_mut().and_then(|load| load(&name))));
