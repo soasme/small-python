@@ -71,7 +71,7 @@ impl IntoPy for bool {
 impl FromPy<'_> for bool {
     fn from_py(value: &Value<'_>) -> Result<Self> {
         if value.kind() == ffi::SPY_BOOL {
-            Ok(value.truth())
+            value.truth()
         } else {
             Err(Error::type_error("expected bool"))
         }

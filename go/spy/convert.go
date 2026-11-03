@@ -304,7 +304,7 @@ func (rt *Runtime) decodeInto(v *C.SPYValue, out reflect.Value) error {
 		if typ != C.SPY_BOOL {
 			return Raise("TypeError", "expected bool")
 		}
-		out.SetBool(C.spy_truth(v) != 0)
+		out.SetBool(C.spy_truth(c, v) != 0)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		var n C.int64_t
 		if C.spy_as_int(c, v, &n) != 0 {

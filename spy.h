@@ -131,9 +131,9 @@ int spy_as_float(SPYContext *, SPYValue *, double *);
  * which may be NULL. NULL with TypeError for any other type. */
 const char *spy_as_string(SPYContext *, SPYValue *, size_t *);
 const unsigned char *spy_as_bytes(SPYContext *, SPYValue *, size_t *);
-/* Python truth, through __bool__ and __len__. A failing method yields 0 with
- * the context's error set. */
-int spy_truth(SPYValue *);
+/* Python truth, through __bool__ and __len__: 1 or 0, or -1 when a method
+ * fails. */
+int spy_truth(SPYContext *, SPYValue *);
 /* repr() and str(), as an owned SPY_STRING. */
 SPYValue *spy_repr(SPYContext *, SPYValue *);
 SPYValue *spy_str(SPYContext *, SPYValue *);

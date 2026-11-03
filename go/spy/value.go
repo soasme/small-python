@@ -37,8 +37,17 @@ func (v *Value) IsNone() bool {
 }
 
 // Truth is Python truth, as bool(value).
-func (v *Value) Truth() bool {
-	return v.rt.enter() == nil && C.spy_truth(v.ptr) != 0
+func (v *Value) Truth() (bool, error) {
+	if err := v.rt.enter(); err != nil {
+		return false, err
+	}
+	switch C.spy_truth(v.rt.ctx, v.ptr) {
+	case -1:
+		return false, v.rt.take()
+	case 0:
+		return false, nil
+	}
+	return true, nil
 }
 
 // Decode stores the value in the Go value out points to; see
@@ -210,7 +219,7 @@ func (rt *Runtime) args(argv []*C.SPYValue, keywords *C.SPYValue) (Args, error) 
 	for _, a := range argv {
 		args.Positional = append(args.Positional, newValue(rt, C.spy_retain(a)))
 	}
-	if keywords != nil && C.spy_truth(keywords) != 0 {
+	if keywords != nil && C.spy_truth(rt.ctx, keywords) != 0 {
 		if err := rt.decode(keywords, &args.Keywords); err != nil {
 			return args, err
 		}

@@ -159,7 +159,7 @@ extern "C" {
     pub fn spy_as_float(c: *mut SPYContext, v: *mut SPYValue, out: *mut f64) -> c_int;
     pub fn spy_as_string(c: *mut SPYContext, v: *mut SPYValue, n: *mut usize) -> *const c_char;
     pub fn spy_as_bytes(c: *mut SPYContext, v: *mut SPYValue, n: *mut usize) -> *const u8;
-    pub fn spy_truth(v: *mut SPYValue) -> c_int;
+    pub fn spy_truth(c: *mut SPYContext, v: *mut SPYValue) -> c_int;
     pub fn spy_repr(c: *mut SPYContext, v: *mut SPYValue) -> *mut SPYValue;
     pub fn spy_str(c: *mut SPYContext, v: *mut SPYValue) -> *mut SPYValue;
 

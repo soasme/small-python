@@ -2,7 +2,7 @@ use std::fmt;
 use std::ptr::NonNull;
 
 use crate::conv::{FromArgs, FromPy, IntoArgs, IntoPy};
-use crate::{c_name, ffi, Result, Runtime};
+use crate::{c_name, ffi, Error, Result, Runtime};
 
 /// An owned reference to an engine value. It borrows its runtime, and
 /// releases its reference when dropped.
@@ -51,8 +51,11 @@ impl<'rt> Value<'rt> {
     }
 
     /// Python truth, as `bool(value)`.
-    pub fn truth(&self) -> bool {
-        unsafe { ffi::spy_truth(self.as_ptr()) != 0 }
+    pub fn truth(&self) -> Result<bool> {
+        match unsafe { ffi::spy_truth(self.rt.ctx(), self.as_ptr()) } {
+            -1 => Err(unsafe { Error::take(self.rt.ctx()) }),
+            truth => Ok(truth != 0),
+        }
     }
 
     pub fn getattr(&self, name: &str) -> Result<Value<'rt>> {
@@ -183,7 +186,7 @@ impl<'rt> Args<'rt> {
             0 => Vec::new(),
             _ => std::slice::from_raw_parts(argv, argc).iter().map(|&v| retain(v)).collect(),
         };
-        let keywords = (!keywords.is_null()).then(|| retain(keywords)).filter(Value::truth);
+        let keywords = (!keywords.is_null()).then(|| retain(keywords)).filter(|k| k.truth().unwrap_or(false));
         Args { positional, keywords }
     }
 

@@ -429,6 +429,7 @@ enum { SET_UNION, SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC };
 static int set_combine(SPYContext *, SPYValue *, int, SPYValue *);
 static int set_contains(SPYContext *, SPYValue *, SPYValue *, int64_t);
 static void set_remove_at(SPYValue *, size_t);
+static int truthy(SPYValue *);
 static SPYValue *active_exception(SPYContext *c) {
     return c->handled ? c->handled : c->inherited_exception;
 }
@@ -1765,7 +1766,8 @@ const unsigned char *spy_as_bytes(SPYContext *c, SPYValue *v, size_t *n) {
     if (n) *n = v->as.string.len;
     return (const unsigned char *)v->as.string.data;
 }
-int spy_truth(SPYValue *v) {
+/* Python truth; a failing __bool__ or __len__ yields 0 with the error set. */
+static int truthy(SPYValue *v) {
     switch (v->type == SPY_CLASS && v->as.map.meta ? SPY_INSTANCE : v->type) {
     case SPY_NONE: return 0;
     case SPY_NOT_IMPLEMENTED:
@@ -1781,7 +1783,7 @@ int spy_truth(SPYValue *v) {
     case SPY_MAPPINGPROXY: case SPY_FRAME_LOCALS: case SPY_MEMORYVIEW: case SPY_INSTANCE: {
         SPYContext *c = v->ctx;
         SPYValue *base = builtin_base(c, v, "__bool__", "__len__");
-        if (base) return spy_truth(base);
+        if (base) return truthy(base);
         SPYValue *method = special_method_maybe(c, v, "__bool__");
         int boolean = method != NULL;
         /* __len__ is optional only behind a defined __bool__ (slot_nb_bool). */
@@ -1803,6 +1805,10 @@ int spy_truth(SPYValue *v) {
     }
     default: return 1;
     }
+}
+int spy_truth(SPYContext *c, SPYValue *v) {
+    int truth = truthy(v);
+    return c->error_type[0] ? -1 : truth;
 }
 /* Compare integers against floats without first rounding the integer to double.
  * Returns 2 for unordered (NaN). This also works where long double == double. */
@@ -1862,7 +1868,7 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
             if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE) return equal_value(x, y, depth + 1);
         }
         if (!value) return !a->ctx->error_type[0] && a == b;
-        int result = spy_truth(value); spy_release(value); return result;
+        int result = truthy(value); spy_release(value); return result;
     }
     if (a == b) return a->type == SPY_COMPLEX ? !isnan(creal(a->as.number)) && !isnan(cimag(a->as.number)) :
         a->type != SPY_FLOAT || !isnan(a->as.real);
@@ -8356,7 +8362,7 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         /* source holds (function, iterator). */
         while ((result = iterator_next(c, source->as.seq.items[1]))) {
             SPYValue *function = source->as.seq.items[0], *test = function->type == SPY_NONE ? spy_retain(result) : call(c, function, 1, &result);
-            int keep = test ? spy_truth(test) : 0;
+            int keep = test ? truthy(test) : 0;
             spy_release(test);
             if (c->error_type[0]) {
                 spy_release(result);
@@ -8671,7 +8677,7 @@ static SPYValue *iterator_state_call(SPYContext *c, size_t argc, SPYValue *const
         if (reduced || c->error_type[0]) return reduced;
     } else if (id == IT_ZIP || id == IT_MAP) {
         /* zip_setstate and map_setstate: the state's truth is strict. */
-        int strict = spy_truth(argv[1]);
+        int strict = truthy(argv[1]);
         if (c->error_type[0]) return NULL;
         it->as.iterator.size = (size_t)strict;
         return spy_none(c);
@@ -9841,7 +9847,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
                 SPYValue *value = call(c, method, 1, &a);
                 spy_release(method);
                 if (!value) return NULL;
-                result = spy_truth(value); spy_release(value);
+                result = truthy(value); spy_release(value);
                 return c->error_type[0] ? NULL : spy_bool(c, op == O_IN ? result : !result);
             }
             if (c->error_type[0]) return NULL;
@@ -10207,7 +10213,7 @@ static SPYValue *abstract_flag(SPYContext *c, SPYValue *const *callables, size_t
     for (size_t i = 0; i < n; i++) {
         SPYValue *flag = attribute(c, callables[i], "__isabstractmethod__");
         if (!flag && error_is(c, "AttributeError")) { spy_clear_error(c); continue; }
-        int truth = flag ? spy_truth(flag) : 0;
+        int truth = flag ? truthy(flag) : 0;
         spy_release(flag);
         if (c->error_type[0]) return NULL;
         if (truth) return spy_bool(c, 1);
@@ -10471,7 +10477,7 @@ static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *ot
         if (op != R_NE) return NULL;
         SPYValue *equal = rich_method(c, R_EQ, self, other);
         if (!equal) return NULL;
-        int truth = spy_truth(equal); spy_release(equal);
+        int truth = truthy(equal); spy_release(equal);
         return c->error_type[0] ? NULL : spy_bool(c, !truth);
     }
     SPYValue *result = call(c, method, 1, &other);
@@ -12738,7 +12744,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         return spend(c, i / 64) ? NULL : spy_bool(c, all);
     case M_SPLITLINES: {
         if (argc > 1) break;
-        int keepends = argc && spy_truth(argv[0]);
+        int keepends = argc && truthy(argv[0]);
         const unsigned char *text = (const unsigned char *)self->as.string.data;
         size_t start = 0, len = self->as.string.len;
         SPYValue *lines = spy_list(c);
@@ -13201,7 +13207,7 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
         }
         if (!strcmp(name, "__bases__")) return class_assign_bases(c, object, value);
         if (!strcmp(name, "__abstractmethods__")) {
-            int abstract = spy_truth(value);
+            int abstract = truthy(value);
             if (c->error_type[0]) return -1;
             object->as.map.flags = abstract ? object->as.map.flags | CLASS_ABSTRACT : object->as.map.flags & ~CLASS_ABSTRACT;
         }
@@ -13837,7 +13843,7 @@ static SPYValue *eval_tested(SPYContext *c, Frame *f, Node *n, int *truth) {
     if (n->kind != N_BINARY || (n->op != O_AND && n->op != O_OR)) return eval(c, f, n);
     SPYValue *a = eval_tested(c, f, n->a, truth);
     if (!a) return NULL;
-    if (*truth < 0) *truth = !!spy_truth(a);
+    if (*truth < 0) *truth = !!truthy(a);
     if (c->error_type[0]) { spy_release(a); return NULL; }
     if ((n->op == O_OR) == *truth) return a;
     spy_release(a);
@@ -14425,7 +14431,7 @@ static NO_INLINE SPYValue *make_function(SPYContext *c, Frame *f, Node *n) {
     return fn;
 }
 static SPYValue *unary(SPYContext *c, int op, SPYValue *a) {
-    if (op == O_NOT) return spy_bool(c, !spy_truth(a));
+    if (op == O_NOT) return spy_bool(c, !truthy(a));
     const char *special = op == '+' ? "__pos__" : op == '-' ? "__neg__" : "__invert__";
     SPYValue *base = builtin_base(c, a, special, NULL);
     if (base) return unary(c, op, base);
@@ -14692,7 +14698,7 @@ container_fail:
             else { relocate(c, n); result = comparison(c, cmp->op, a, b); }
             spy_release(a); a = b; b = NULL;
             if (!result || !cmp->next) break;
-            if (!spy_truth(result)) {
+            if (!truthy(result)) {
                 if (c->error_type[0]) { spy_release(result); result = NULL; }
                 break;
             }
@@ -14752,7 +14758,7 @@ static HOT int condition(SPYContext *c, Frame *f, Node *n) {
         if (b && truth < 0) {
             relocate(c, n);
             SPYValue *result = comparison(c, op, a, b);
-            if (result) truth = !!spy_truth(result);
+            if (result) truth = !!truthy(result);
             spy_release(result);
         }
         spy_release(a); spy_release(b);
@@ -14760,7 +14766,7 @@ static HOT int condition(SPYContext *c, Frame *f, Node *n) {
     }
     SPYValue *value = eval_tested(c, f, n, &truth);
     if (!value) return -1;
-    if (truth < 0) truth = !!spy_truth(value);
+    if (truth < 0) truth = !!truthy(value);
     spy_release(value);
     return c->error_type[0] ? -1 : truth;
 }
@@ -15850,7 +15856,7 @@ static SPYValue *gc_native(SPYContext *c, size_t argc, SPYValue *const *argv, vo
         struct timespec start, end;
         int timed = timespec_get(&start, TIME_UTC) == TIME_UTC;
 #endif
-        size_t count = collect(c, save->type == SPY_LIST ? save : NULL, argc > 1 && spy_truth(argv[1]) ? &report : NULL);
+        size_t count = collect(c, save->type == SPY_LIST ? save : NULL, argc > 1 && truthy(argv[1]) ? &report : NULL);
 #ifdef TIME_UTC
         if (timed && timespec_get(&end, TIME_UTC) == TIME_UTC)
             seconds = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
@@ -15960,7 +15966,7 @@ static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, v
          * error stream for sys.stderr; text is already a str. */
         if (id == SYS_FLUSH) return c->flush && c->flush(c->write_data) ? spy_error(c, "OSError", "output flush failed") : spy_none(c);
         if (argc < 1 || argc > 2 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "write() argument must be str");
-        int error = argc == 2 && spy_truth(argv[1]) && c->error_write;
+        int error = argc == 2 && truthy(argv[1]) && c->error_write;
         SPYWrite write = error ? c->error_write : c->write;
         if (!write) return spy_error(c, "OSError", "no output callback installed");
         if (write(error ? c->error_data : c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
@@ -16372,7 +16378,7 @@ static void lazy_cause(SPYContext *c, SPYValue *lazy) {
         SPYValue *previous = hidden_field(exception, "__cause__"), *context = hidden_field(exception, "__context__");
         SPYValue *suppress = hidden_field(exception, "__suppress_context__");
         if ((!previous || previous->type == SPY_NONE) && (!context || context->type == SPY_NONE) &&
-            (!suppress || !spy_truth(suppress))) {
+            (!suppress || !truthy(suppress))) {
             SPYValue *text = spy_string(c, message.data, message.len);
             cause = text ? new_exception(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
             spy_release(text);
@@ -16514,7 +16520,7 @@ static NO_INLINE int lazy_import(SPYContext *c, Frame *f, Node *n, Node *item) {
         SPYValue *importer = name_local(namespace_map(globals), "__name__");
         SPYValue *args[] = {importer ? importer : c->none, text, fromlist};
         SPYValue *verdict = fromlist && !c->error_type[0] ? call(c, filter, 3, args) : NULL;
-        lazy = verdict && spy_truth(verdict) ? 1 : c->error_type[0] ? -1 : 0;
+        lazy = verdict && truthy(verdict) ? 1 : c->error_type[0] ? -1 : 0;
         spy_release(verdict); spy_release(fromlist);
     }
     spy_release(text);
@@ -18818,7 +18824,7 @@ static NO_INLINE Result execute_with(SPYContext *c, Frame *f, Node *item, Node *
     spy_release(exit);
     if (!result) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
     else if (error.value) {
-        int suppress = spy_truth(result);
+        int suppress = truthy(result);
         if (c->error_type[0]) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
         else if (suppress) { spy_release(r.value); r = (Result){FLOW_NORMAL, NULL}; }
         else {
@@ -18909,7 +18915,7 @@ static int group_condition(SPYContext *c, SPYValue *exception, void *data) {
     SPYValue *condition = data;
     if (condition->type == SPY_CLASS || condition->type == SPY_TUPLE) return exception_matches(c, exception, condition);
     SPYValue *result = call(c, condition, 1, &exception);
-    int truth = result ? spy_truth(result) : -1;
+    int truth = result ? truthy(result) : -1;
     spy_release(result);
     return c->error_type[0] ? -1 : truth;
 }
@@ -19300,7 +19306,7 @@ static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
 static NO_INLINE SPYValue *evaluate_annotations(SPYContext *c, Frame *f, Node *n) {
     SPYValue *format = name_get(c, f->env, n->op == 1 ? ".format" : "format"), two = {.type = SPY_INT, .as.integer_data.small = 2};
     SPYValue *unsupported = format ? comparison(c, '>', format, &two) : NULL;
-    int raise = unsupported && spy_truth(unsupported);
+    int raise = unsupported && truthy(unsupported);
     spy_release(format); spy_release(unsupported);
     if (c->error_type[0]) return NULL;
     if (raise) return spy_error(c, "NotImplementedError", "");
@@ -19794,7 +19800,7 @@ static int match_pattern(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SP
 static int match_equal(SPYContext *c, SPYValue *subject, SPYValue *value, int identity) {
     if (identity) return subject == value;
     SPYValue *result = comparison(c, T_EQ, subject, value);
-    int truth = result ? spy_truth(result) : -1;
+    int truth = result ? truthy(result) : -1;
     spy_release(result);
     return c->error_type[0] ? -1 : truth;
 }
@@ -20334,7 +20340,7 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none,
                                error.value ? error.value : c->none, exception_traceback(c, error.value)};
             SPYValue *result = call(c, b->value, 3, args);
-            int suppress = result && error.type[0] && spy_truth(result);
+            int suppress = result && error.type[0] && truthy(result);
             spy_release(result); spy_release(c->handled); c->handled = outer;
             size_t target = b->target;
             pop_block(c, m, f);
@@ -20563,7 +20569,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             b = machine_pop(m); a = machine_pop(m);
             int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
             value = order >= 0 ? spy_bool(c, order) : comparison(c, n->op, a, b);
-            if (value && ins->arg && spy_truth(value)) { spy_release(value); value = spy_retain(b); }
+            if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(b); }
             else {
                 if (value && c->error_type[0]) { spy_release(value); value = NULL; }
                 pc = ins->target;
@@ -20669,17 +20675,17 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 value = y ? operator_fast(c, n, x, y) : NULL;
                 if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
                 if (!(a = value)) break;
-                truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : spy_truth(a);
+                truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a);
             }
             if (!truth) pc = ins->target;
             break;
         }
         case BC_FALSE:
             a = machine_pop(m);
-            if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : spy_truth(a))) pc = ins->target;
+            if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a))) pc = ins->target;
             break;
         case BC_SHORT: {
-            int truth = truth_known ? truth_known - 1 : !!spy_truth(m->stack[m->len - 1]);
+            int truth = truth_known ? truth_known - 1 : !!truthy(m->stack[m->len - 1]);
             if ((ins->arg == O_OR) == truth) { pc = ins->target; known = truth + 1; }
             else spy_release(machine_pop(m));
             break;
@@ -20843,7 +20849,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         case BC_END_AWITH: {
             a = machine_pop(m);
             Block *block = &m->blocks[m->block_len - 1];
-            int suppress = block->error && spy_truth(a);
+            int suppress = block->error && truthy(a);
             flow = (Result){suppress ? FLOW_NORMAL : block->flow, block->value};
             block->value = NULL;
             if (block->error && !suppress && !c->error_type[0]) restore_error(c, block->error);
@@ -21243,7 +21249,7 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
         c->depth--;
         spy_release(hook);
         if (!value) return -1;
-        int truth = spy_truth(value);
+        int truth = truthy(value);
         spy_release(value);
         return c->error_type[0] ? -1 : truth;
     }
@@ -21281,7 +21287,7 @@ static ALWAYS_INLINE int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
         if (i == n) return a->as.seq.len < b->as.seq.len;
     }
     SPYValue *value = comparison(c, '<', a, b);
-    less = value ? spy_truth(value) : 0;
+    less = value ? truthy(value) : 0;
     spy_release(value);
     return less;
 }
@@ -21398,7 +21404,7 @@ static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValu
         const char *name = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
         if (strcmp(name, names[0]) && strcmp(name, names[1])) { unknown_keywords(c, "sort", keywords, names, 2); return NULL; }
     }
-    int descending = reverse ? spy_truth(reverse) : 0;
+    int descending = reverse ? truthy(reverse) : 0;
     if (c->error_type[0]) return NULL;
     SPYValue *working = spy_list(c);
     if (!working) return NULL;
@@ -23387,7 +23393,7 @@ static SPYValue *int_to_bytes(SPYContext *c, size_t argc, SPYValue *const *argv,
     if (!self || parse_arguments(c, "to_bytes", argc - 1, argv + 1, keywords, names, 3, 0, 0, args)) return NULL;
     if (argc - 1 > 2) return errorf(c, "TypeError", "to_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
     int64_t length = 1;
-    int little, is_signed = args[2] && spy_truth(args[2]);
+    int little, is_signed = args[2] && truthy(args[2]);
     if ((args[0] && index_value(c, args[0], &length)) || byteorder_argument(c, "to_bytes", args[1], &little)) return NULL;
     if (length < 0) return spy_error(c, "ValueError", "length cannot be negative");
     if ((uint64_t)length > SIZE_MAX / 2) return spy_error(c, "OverflowError", "length too large");
@@ -23494,7 +23500,7 @@ static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *arg
     SPYValue *args[3];
     if (parse_arguments(c, "from_bytes", argc - 1, argv + 1, keywords, names, 3, 1, 0, args)) return NULL;
     if (argc - 1 > 2) return errorf(c, "TypeError", "from_bytes() takes at most 2 positional arguments (%zu given)", argc - 1);
-    int little, is_signed = args[2] && spy_truth(args[2]);
+    int little, is_signed = args[2] && truthy(args[2]);
     if (byteorder_argument(c, "from_bytes", args[1], &little)) return NULL;
     SPYValue *source = builtin_value(c, args[0], SPY_BYTES), *owned = NULL;
     if (!source) source = builtin_value(c, args[0], SPY_BYTEARRAY);
@@ -24123,7 +24129,7 @@ static int memory_pack(SPYContext *c, const char *code, unsigned char *p, SPYVal
         return 0;
     }
     if (code[0] == '?') {
-        int truth = spy_truth(value);
+        int truth = truthy(value);
         if (c->error_type[0]) return -1;
         _Bool x = truth != 0; memcpy(p, &x, sizeof(x));
         return 0;
@@ -25005,7 +25011,7 @@ static SPYValue *min_max(SPYContext *c, int maximum, size_t argc, SPYValue *cons
         int better = !best;
         if (best) {
             SPYValue *test = comparison(c, maximum ? '>' : '<', item_key, best_key);
-            better = test && spy_truth(test);
+            better = test && truthy(test);
             spy_release(test);
         }
         if (better && !c->error_type[0]) {
@@ -25209,7 +25215,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (argc == 5 && index_int(c, argv[4], &level)) return NULL;
         char *absolute = absolute_name(c, a->as.string.data, argc > 1 ? argv[1] : NULL, level);
         SPYValue *module = absolute ? import_module(c, absolute) : NULL;
-        if (module && argc > 3 && spy_truth(argv[3])) {
+        if (module && argc > 3 && truthy(argv[3])) {
             if (name_local(module, "__path__")) import_fromlist(c, module, argv[3], 0);
         } else if (module && a->as.string.len) {
             /* Without a fromlist, the module the first part of name resolved to. */
@@ -25774,7 +25780,7 @@ execution_fail:
             }
             if (!item) break;
             if (id == B_ALL || id == B_ANY) {
-                int truth = spy_truth(item); spy_release(item);
+                int truth = truthy(item); spy_release(item);
                 if ((id == B_ALL && !truth) || (id == B_ANY && truth)) { spy_release(iterator); return spy_bool(c, truth); }
             } else {
                 SPYValue *next = result ? binary(c, '+', result, item) : NULL;
@@ -25789,7 +25795,7 @@ execution_fail:
     }
     case B_BOOL: {
         if (argc > 1) goto arity;
-        return spy_bool(c, argc && spy_truth(a));
+        return spy_bool(c, argc && truthy(a));
     }
     case B_STR: {
         if (argc > 3) goto arity;
@@ -25940,7 +25946,7 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
     SPYValue *sep = options[0], *end = options[1], *file = options[2], *flush = options[3];
     if (sep && sep->type != SPY_STRING && sep->type != SPY_NONE) return errorf(c, "TypeError", "sep must be None or a string, not %s", type_name(sep));
     if (end && end->type != SPY_STRING && end->type != SPY_NONE) return errorf(c, "TypeError", "end must be None or a string, not %s", type_name(end));
-    int flushing = flush && spy_truth(flush);
+    int flushing = flush && truthy(flush);
     if (c->error_type[0]) return NULL;
     if (file && file->type == SPY_NONE) file = NULL;
     /* Without sys, output goes to the host; afterwards through sys.stdout. */
@@ -25988,13 +25994,13 @@ static SPYValue *compile_builtin(SPYContext *c, size_t argc, SPYValue *const *ar
         if (!fits) { if (!c->error_type[0]) spy_error(c, "OverflowError", "Python int too large to convert to C int"); return NULL; }
         if (slots[i]) *slots[i] = value;
     }
-    if (args[4] && spy_truth(args[4]) < 0) return NULL;
+    if (args[4] && truthy(args[4]) < 0) return NULL;
     if (flags & ~(int64_t)CF_ALLOWED) return spy_error(c, "ValueError", "compile(): unrecognised flags");
     if (optimize < -1 || optimize > 2) return spy_error(c, "ValueError", "compile(): invalid optimize value");
     if (args[6] && args[6]->type != SPY_NONE && !builtin_value(c, args[6], SPY_STRING))
         return errorf(c, "TypeError", "compile() argument 'module' must be str or None, not %s", type_name(args[6]));
     if (flags & CF_ONLY_AST) return spy_error(c, "NotImplementedError", "compile() cannot produce an AST without the ast module");
-    int saved = c->compile_flags, inherit = !args[4] || !spy_truth(args[4]);
+    int saved = c->compile_flags, inherit = !args[4] || !truthy(args[4]);
     c->compile_flags = (int)(flags & CF_FUTURE_MASK) | (inherit ? caller_future_flags(c) : 0);
     int optimized = c->optimize;
     if (optimize >= 0) c->optimize = (int)optimize;
@@ -26389,7 +26395,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
                     unexpected_keyword(c, id == B_MAP ? "map" : "zip", key, suggestion(key, &(const char *){"strict"}, 1));
                     return NULL;
                 }
-                strict = spy_truth(map_items(keywords)[i].value);
+                strict = truthy(map_items(keywords)[i].value);
                 if (c->error_type[0]) return NULL;
             }
             SPYValue *result = builtin(c, argc, argv, (void *)(intptr_t)id);
@@ -26903,7 +26909,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
                 else if (c->error_type[0]) return NULL;
                 else result = spy_retain(self == argv[0] ? c->booleans[1] : c->not_implemented);
                 if (!result || result == c->not_implemented) return result;
-                int truth = spy_truth(result);
+                int truth = truthy(result);
                 spy_release(result);
                 return c->error_type[0] ? NULL : spy_bool(c, !truth);
             }
@@ -26952,7 +26958,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         return (type == SPY_DICT || type == SPY_FROZENDICT) ? dict_subscript(c, value, self, argv[0]) : get_index(c, value, argv[0]);
     case SLOT_SETITEM: return set_index(c, value, argv[0], argv[1]) ? NULL : spy_none(c);
     case SLOT_DELITEM: return delete_index(c, value, argv[0]) ? NULL : spy_none(c);
-    case SLOT_BOOL: return spy_bool(c, spy_truth(value));
+    case SLOT_BOOL: return spy_bool(c, truthy(value));
     case SLOT_COMPLEX: return spy_retain(value);
     default: /* SLOT_TRUNC, SLOT_FLOOR, SLOT_CEIL */
         if (value->type != SPY_FLOAT) return builtin(c, 1, &value, (void *)(intptr_t)B_INT);
@@ -27296,7 +27302,7 @@ static SPYValue *bytes_splitlines(SPYContext *c, size_t argc, SPYValue *const *a
     int type = (int)(intptr_t)data;
     SPYValue *self = method_self(c, argc, argv, type, "splitlines"), *args[1];
     if (!self || parse_arguments(c, "splitlines", argc - 1, argv + 1, keywords, names, 1, 0, 0, args)) return NULL;
-    int keepends = args[0] ? spy_truth(args[0]) : 0;
+    int keepends = args[0] ? truthy(args[0]) : 0;
     if (c->error_type[0]) return NULL;
     const char *text = self->as.string.data;
     size_t len = self->as.string.len, start = 0;
@@ -27397,7 +27403,7 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
     default: {
         SPYValue *unionable = call_intrinsic(c, "_unionable", 1, args);
         if (!unionable) return NULL;
-        int truth = spy_truth(unionable);
+        int truth = truthy(unionable);
         spy_release(unionable);
         if (!truth) return spy_retain(c->not_implemented);
         SPYValue *operands[] = {op == TYPE_OR ? argv[0] : args[0], op == TYPE_OR ? args[0] : argv[0]};

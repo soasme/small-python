@@ -217,11 +217,11 @@ value and valid while it lives; its length goes to the size_t pointer, which
 may be NULL. NULL with TypeError for any other type.
 
 ```c
-int spy_truth(SPYValue *);
+int spy_truth(SPYContext *, SPYValue *);
 ```
 
-Python truth, through __bool__ and __len__. A failing method yields 0 with
-the context's error set.
+Python truth, through __bool__ and __len__: 1 or 0, or -1 when a method
+fails.
 
 ```c
 SPYValue *spy_repr(SPYContext *, SPYValue *);

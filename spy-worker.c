@@ -270,7 +270,7 @@ static int encode(Buffer *b, SPYValue *v, int depth) {
     if (depth > MAX_DEPTH) { spy_error(c, "RecursionError", "value is too deeply nested to convert"); return -1; }
     switch (type) {
     case SPY_NONE: put_byte(b, 'N'); return 0;
-    case SPY_BOOL: put_byte(b, spy_truth(v) ? 'T' : 'F'); return 0;
+    case SPY_BOOL: put_byte(b, spy_truth(c, v) ? 'T' : 'F'); return 0;
     case SPY_INT: {
         int64_t n;
         if (!spy_as_int(c, v, &n)) { put_int(b, n); return 0; }
@@ -556,7 +556,7 @@ static void raise_failure(SPYValue *failure) {
         while (base && iterator && !cls && (name = spy_next(c, iterator))) {
             SPYValue *found = spy_get_item(c, w.helper[H_BUILTINS], name), *pair[2] = {found, base};
             SPYValue *is = found && spy_type(found) == SPY_CLASS ? helper_call(H_ISSUBCLASS, 2, pair) : NULL;
-            if (is && spy_truth(is)) cls = spy_retain(found);
+            if (is && spy_truth(c, is)) cls = spy_retain(found);
             spy_release(is); spy_release(found); spy_release(name);
             spy_clear_error(c);
         }
@@ -752,7 +752,7 @@ static void initialize(Cursor *k) {
     spy_set_memory_limit(c, (size_t)memory);
     if (timeout) spy_set_interrupt(c, expired, NULL);
     spy_release(time_limit);
-    int failed = spy_truth(std) && spy_std_init(c);
+    int failed = spy_truth(c, std) && spy_std_init(c);
     spy_release(std); spy_release(n); spy_release(count); spy_release(options);
     send_result(failed ? NULL : spy_string(c, SPY_VERSION, strlen(SPY_VERSION)));
 }
@@ -821,13 +821,13 @@ static void serve(unsigned char *message, size_t len) {
         const char *host = directory ? spy_as_string(c, directory, NULL) : NULL;
         int failed = !host || !path || !read_only;
         if (!failed && sealed) failed = !spy_error(c, "PermissionError", "cannot mount after code has run");
-        if (!failed) failed = spy_mount(c, host, spy_as_string(c, path, NULL), spy_truth(read_only) ? SPY_MOUNT_READ_ONLY : 0);
+        if (!failed) failed = spy_mount(c, host, spy_as_string(c, path, NULL), spy_truth(c, read_only) ? SPY_MOUNT_READ_ONLY : 0);
         if (!failed) {
             struct Mount *grown = realloc(mounts, (mounts_len + 1) * sizeof(*grown));
             char *copy = malloc(strlen(host) + 1);
             if (!grown || !copy) exit(1);
             mounts = grown;
-            mounts[mounts_len++] = (struct Mount){strcpy(copy, host), spy_truth(read_only)};
+            mounts[mounts_len++] = (struct Mount){strcpy(copy, host), spy_truth(c, read_only)};
         }
         send_status(failed);
         spy_release(directory); spy_release(path); spy_release(read_only);

@@ -249,7 +249,7 @@ impl<'de, 'rt> de::Deserializer<'de> for &Value<'rt> {
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         match self.kind() {
             ffi::SPY_NONE => visitor.visit_unit(),
-            ffi::SPY_BOOL => visitor.visit_bool(self.truth()),
+            ffi::SPY_BOOL => visitor.visit_bool(self.truth()?),
             ffi::SPY_INT => visitor.visit_i64(self.extract()?),
             ffi::SPY_FLOAT => visitor.visit_f64(self.extract()?),
             ffi::SPY_STRING => visitor.visit_string(self.extract()?),

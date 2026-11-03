@@ -326,6 +326,13 @@ int main(void) {
     execute(c, "x = 19");
     assert(integer(c, spy_get_global(c, "x")) == 19);
     assert(integer(c, spy_eval(c, "x + 23", "api.py")) == 42);
+    /* spy_truth reports a failing __bool__ as -1 with the error pending. */
+    execute(c, "class Failing:\n    def __bool__(self): 1 / 0");
+    SPYValue *items[3] = {spy_eval(c, "[0]", "api.py"), spy_eval(c, "[]", "api.py"), spy_eval(c, "Failing()", "api.py")};
+    assert(spy_truth(c, items[0]) == 1 && spy_truth(c, items[1]) == 0);
+    assert(spy_truth(c, items[2]) == -1 && !strcmp(spy_error_type(c), "ZeroDivisionError"));
+    spy_clear_error(c);
+    for (size_t i = 0; i < 3; i++) spy_release(items[i]);
 
     /* Arbitrary integers stay owned Python values; the fixed-width C accessor
      * rejects overflow instead of truncating. Large limbs must be reclaimed. */
