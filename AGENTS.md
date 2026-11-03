@@ -207,6 +207,9 @@
 - Conformance to PLS-315 is established by the specification tests in
   `tests/spec` and the TLA+ models in `tests/tla`, and by nothing else. Both
   model the standard; neither depends on the upstream CPython tree at run time.
+- A feature change keeps the TLA+ models in sync: update or add the model
+  that describes the changed behaviour, language or host-facing (policy,
+  limits, memory, bundling), and pass `make test-tla` before committing.
 - Spec tests are test262-style: small, self-checking, core-only scripts that
   name the clauses they exercise. Write each from the standard's text, then run
   it on spy and on the pinned CPython oracle (`make test-spec-oracle`). When
