@@ -304,6 +304,7 @@ Trust your discomfort. If something feels ugly, find out why and fix it. Check w
 * **Is redesigned.** Expect the first draft/implementation to be wrong. Rewrite it when you see better.
 * **Can borrow.** Copy good designs, then adopt. Imitation teaches taste.
 * **May be odd.** A bold or unusual choice is fine when it is simpler or truer.
+* **Keep stable, strong, and speedy.** API stability, rock solid testing and verification, and high performance are features.
 * **Polishing.** Good code does not yield once at a time. They come after iterations until no extra can be simplified or trimmed.
 
 These preferences do not authorize sending messages, publishing, or pushing
