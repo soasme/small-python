@@ -259,6 +259,15 @@ func TestClosedRuntime(t *testing.T) {
 	}
 }
 
+func TestClosingFromAHostFunctionFails(t *testing.T) {
+	rt := newRuntime(t)
+	rt.Define("shut", func(rt *spy.Runtime, _ spy.Args) (any, error) {
+		return nil, rt.Close()
+	})
+	equal(t, exception(t, rt.Exec("shut()")).Type, "RuntimeError")
+	equal(t, eval[int](t, rt, "1 + 1"), 2)
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)

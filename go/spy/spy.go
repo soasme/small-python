@@ -59,6 +59,9 @@ const Version = C.SPY_VERSION
 // ErrClosed is returned by every operation on a closed runtime.
 var ErrClosed = errors.New("spy: the runtime is closed")
 
+// ErrRunning is Close's error inside one of the runtime's callbacks.
+var ErrRunning = errors.New("spy: cannot close the runtime while it runs a host function")
+
 // Func is a host function. It receives the runtime it runs in and the
 // call's arguments; its result converts as by [Runtime.ToValue], and its
 // error raises an exception (see [Raise]).
@@ -74,6 +77,9 @@ type Runtime struct {
 	loader  func(name string) (source string, ok bool)
 	policy  func(event string, args []*Value) error
 	modules map[string]func(rt *Runtime, module *Value) error
+
+	// The callbacks running; the engine runs beneath them.
+	callbacks int
 
 	// Values the garbage collector dropped, released on the next call.
 	mu       sync.Mutex
@@ -109,8 +115,13 @@ func NewBare() (*Runtime, error) {
 }
 
 // Close frees the context and every value in it. Values of a closed
-// runtime return [ErrClosed].
+// runtime return [ErrClosed]. Closing from a host function, module
+// initializer, loader, output, or policy of the runtime fails with
+// [ErrRunning], as the engine is running beneath it.
 func (rt *Runtime) Close() error {
+	if rt.callbacks > 0 {
+		return ErrRunning
+	}
 	rt.mu.Lock()
 	closed := rt.closed
 	rt.closed = true
@@ -461,7 +472,9 @@ func runtimeOf(c *C.SPYContext) *Runtime {
 // guard runs a Go callback for the engine, turning its error or panic into
 // an engine exception.
 func (rt *Runtime) guard(f func() (*C.SPYValue, error)) (result *C.SPYValue) {
+	rt.callbacks++
 	defer func() {
+		rt.callbacks--
 		if p := recover(); p != nil {
 			result = rt.raise(&Exception{Type: "RuntimeError", Message: fmt.Sprint("a Go callback panicked: ", p)})
 		}
@@ -522,7 +535,9 @@ func goInit(c *C.SPYContext, module *C.SPYValue) C.int {
 //export goWrite
 func goWrite(h C.uintptr_t, text *C.char, n C.size_t) (status C.int) {
 	rt := cgo.Handle(h).Value().(*Runtime)
+	rt.callbacks++
 	defer func() {
+		rt.callbacks--
 		if recover() != nil {
 			status = -1
 		}
@@ -560,7 +575,9 @@ func goPolicy(c *C.SPYContext, event *C.char, args *C.SPYValue) C.int {
 //export goLoad
 func goLoad(c *C.SPYContext, h C.uintptr_t, name *C.char) (source *C.SPYValue) {
 	rt := cgo.Handle(h).Value().(*Runtime)
+	rt.callbacks++
 	defer func() {
+		rt.callbacks--
 		if recover() != nil {
 			source = nil
 		}
