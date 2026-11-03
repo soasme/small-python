@@ -69,7 +69,10 @@ To prepare a release, preview the version bump:
 python3 tools/bumpversion.py patch
 ```
 
-Use `major`, `minor`, or `patch`. Every package shares the engine's
+Use `major`, `minor`, or `patch`, or `current` when the tree already
+carries the next version: an incompatible C API change moves every version
+file ahead of the last release, as `make check-api` requires, and the
+release then only tags it. Every package shares the engine's
 version, so the script clones `origin` into a temporary directory and bumps
 `VERSION`, `spy.h`, the manual, the Python and npm packages, the Rust crates
 and the todo example's dependency on them, with their lockfiles and the

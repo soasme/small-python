@@ -3,7 +3,9 @@
 
 Every package shares the engine's version: VERSION, spy.h, the manual, the
 Python and npm packages, and the Rust crates, with the version fixtures of
-their tests.
+their tests. "current" releases the version the tree already carries, which
+an incompatible API change sets ahead of the last release (docs/manual.md,
+3.4.8 Stability).
 The tag publishes all of them (.github/workflows/publish.yml)."""
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ def replace(path: Path, old: str, new: str, count: int) -> None:
 
 
 def bumped(version: str, part: str) -> str:
+    if part == "current":
+        return version
     major, minor, patch = map(int, version.split("."))
     if part == "major":
         return f"{major + 1}.0.0"
@@ -59,7 +63,7 @@ def bumped(version: str, part: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("part", choices=("major", "minor", "patch"))
+    parser.add_argument("part", choices=("major", "minor", "patch", "current"))
     parser.add_argument(
         "-y", "--yes", action="store_true", help="commit, tag, and push the release"
     )
@@ -78,12 +82,13 @@ def main() -> None:
         if run("git", "tag", "--list", tag, cwd=clone):
             raise RuntimeError(f"Tag {tag} already exists.")
 
-        replace(clone / "VERSION", old, version, 1)
-        replace(clone / "docs/manual.md", f"Version {old}", f"Version {version}", 1)
-        for name, count in QUOTED.items():
-            replace(clone / name, f'"{old}"', f'"{version}"', count)
-        run_checked("uv", "lock", cwd=clone / "python")
-        run_checked("cargo", "update", "--workspace", cwd=clone / "rust")
+        if version != old:
+            replace(clone / "VERSION", old, version, 1)
+            replace(clone / "docs/manual.md", f"Version {old}", f"Version {version}", 1)
+            for name, count in QUOTED.items():
+                replace(clone / name, f'"{old}"', f'"{version}"', count)
+            run_checked("uv", "lock", cwd=clone / "python")
+            run_checked("cargo", "update", "--workspace", cwd=clone / "rust")
 
         package = clone / "python"
         run_checked("uv", "build", cwd=package)
@@ -99,8 +104,9 @@ def main() -> None:
         print("Release plan:", flush=True)
         run_checked("git", "diff", "--", *RELEASE_FILES, cwd=clone)
         if args.yes:
-            run_checked("git", "add", *RELEASE_FILES, cwd=clone)
-            run_checked("git", "commit", "-m", f"chore(release): {version}", cwd=clone)
+            if version != old:
+                run_checked("git", "add", *RELEASE_FILES, cwd=clone)
+                run_checked("git", "commit", "-m", f"chore(release): {version}", cwd=clone)
             run_checked("git", "tag", tag, cwd=clone)
             run_checked(
                 "git",
