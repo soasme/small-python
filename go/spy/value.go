@@ -15,6 +15,10 @@ import (
 
 // A Value is a reference to an engine value. The garbage collector releases
 // it once it is unreachable; it never outlives its runtime's Close.
+//
+// The engine borrows ptr while a method runs, and a host function it calls
+// may release what the collector dropped, so each method keeps its value
+// alive until it returns (tests/tla/SpyGo.tla).
 type Value struct {
 	rt  *Runtime
 	ptr *C.SPYValue
@@ -33,11 +37,13 @@ func (v *Value) Runtime() *Runtime {
 
 // IsNone reports whether the value is None.
 func (v *Value) IsNone() bool {
+	defer runtime.KeepAlive(v)
 	return v.rt.enter() == nil && C.spy_type(v.ptr) == C.SPY_NONE
 }
 
 // Truth is Python truth, as bool(value).
 func (v *Value) Truth() (bool, error) {
+	defer runtime.KeepAlive(v)
 	if err := v.rt.enter(); err != nil {
 		return false, err
 	}
@@ -53,6 +59,7 @@ func (v *Value) Truth() (bool, error) {
 // Decode stores the value in the Go value out points to; see
 // [Runtime.ToValue] for the correspondence.
 func (v *Value) Decode(out any) error {
+	defer runtime.KeepAlive(v)
 	if err := v.rt.enter(); err != nil {
 		return err
 	}
@@ -61,6 +68,7 @@ func (v *Value) Decode(out any) error {
 
 // GetAttr is getattr(value, name).
 func (v *Value) GetAttr(name string) (*Value, error) {
+	defer runtime.KeepAlive(v)
 	cname, err := v.rt.name(name)
 	if err != nil {
 		return nil, err
@@ -71,6 +79,7 @@ func (v *Value) GetAttr(name string) (*Value, error) {
 
 // SetAttr is setattr(value, name, item).
 func (v *Value) SetAttr(name string, item any) error {
+	defer runtime.KeepAlive(v)
 	i, err := v.rt.ref(item)
 	if err != nil {
 		return err
@@ -86,6 +95,7 @@ func (v *Value) SetAttr(name string, item any) error {
 
 // GetItem is value[key].
 func (v *Value) GetItem(key any) (*Value, error) {
+	defer runtime.KeepAlive(v)
 	k, err := v.rt.ref(key)
 	if err != nil {
 		return nil, err
@@ -96,6 +106,7 @@ func (v *Value) GetItem(key any) (*Value, error) {
 
 // SetItem is value[key] = item.
 func (v *Value) SetItem(key, item any) error {
+	defer runtime.KeepAlive(v)
 	k, err := v.rt.ref(key)
 	if err != nil {
 		return err
@@ -116,6 +127,7 @@ func (v *Value) Call(args ...any) (*Value, error) {
 
 // CallKeywords calls the value with positional and keyword arguments.
 func (v *Value) CallKeywords(args []any, kwargs map[string]any) (*Value, error) {
+	defer runtime.KeepAlive(v)
 	argv := make([]*C.SPYValue, 0, len(args))
 	defer func() {
 		for _, a := range argv {
@@ -146,6 +158,7 @@ func (v *Value) CallKeywords(args []any, kwargs map[string]any) (*Value, error) 
 // error that ended the iteration.
 func (v *Value) Iter() iter.Seq2[*Value, error] {
 	return func(yield func(*Value, error) bool) {
+		defer runtime.KeepAlive(v)
 		if err := v.rt.enter(); err != nil {
 			yield(nil, err)
 			return
@@ -155,6 +168,7 @@ func (v *Value) Iter() iter.Seq2[*Value, error] {
 			yield(nil, err)
 			return
 		}
+		defer runtime.KeepAlive(it)
 		for {
 			if err := v.rt.enter(); err != nil {
 				yield(nil, err)
@@ -174,6 +188,7 @@ func (v *Value) Iter() iter.Seq2[*Value, error] {
 
 // Repr is repr(value).
 func (v *Value) Repr() (string, error) {
+	defer runtime.KeepAlive(v)
 	if err := v.rt.enter(); err != nil {
 		return "", err
 	}
@@ -182,6 +197,7 @@ func (v *Value) Repr() (string, error) {
 
 // Str is str(value).
 func (v *Value) Str() (string, error) {
+	defer runtime.KeepAlive(v)
 	if err := v.rt.enter(); err != nil {
 		return "", err
 	}

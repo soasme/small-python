@@ -84,7 +84,10 @@ itself has no default and raises `OSError` from `print` without one.
 A runtime is not safe for concurrent use, as most Go types; it may move
 between goroutines, since a context holds no thread-affine state. A host
 function receives the runtime it runs in. `Close` frees the context; every
-later operation on the runtime or its values returns `ErrClosed`.
+later operation on the runtime or its values returns `ErrClosed`. From a
+host function, module initializer, loader, output, or policy of the
+runtime, `Close` returns `ErrRunning` instead, as the engine is running
+beneath it.
 
 ### 3.2 Values
 
@@ -94,6 +97,12 @@ unreachable, and the runtime releases the queue on the goroutine of its next
 call into the engine: the context is never touched by the collector's
 goroutine. After `Close` the queue is dropped, because `spy_context_free`
 frees every value itself.
+
+A method of a `*Value` passes its pointer to the engine, and a host
+function the engine calls may release the queue; so every method keeps its
+value alive (`runtime.KeepAlive`) until it returns, or a temporary such as
+`must(rt.Eval("f")).Call(g)` could be released while it runs.
+`tests/tla/SpyGo.tla` models these lifetimes.
 
 Its methods are `Decode`, `GetAttr`, `SetAttr`, `GetItem`, `SetItem`,
 `Call`, `CallKeywords`, `Iter` (an `iter.Seq2[*Value, error]`), `Truth`,
@@ -201,9 +210,9 @@ raises `PermissionError`, with the error as its cause.
 
 A runtime is not safe for concurrent use. A host function is
 `func(rt *Runtime, args []any, kwargs map[string]any) (any, error)`; through
-the runtime it receives it may make nested requests, but `Eval` and `Exec`
-return an error matching `ErrInvalid` there. `Close` closes the worker's
-input and waits up to a second for it to exit.
+the runtime it receives it may make nested requests, but `Eval`, `Exec`,
+and `Close` return an error matching `ErrInvalid` there. `Close` closes the
+worker's input and waits up to a second for it to exit.
 
 ### 4.3 Values
 
@@ -220,7 +229,10 @@ round-trips unchanged; a string that is not UTF-8 in that sense fails with
 
 `*Object` is a handle to an engine value. When the garbage collector finds
 one unreachable, its id is queued and released with the next message
-(`RELEASE`). Objects are equal when they are the same pointer.
+(`RELEASE`). The notice is sent before that message is encoded, so a handle
+the message carries, reachable until then, is released only after it.
+Objects are equal when they are the same pointer. `tests/tla/SpyGoWorker.tla`
+models the turns, handle releases, timeouts, and closing.
 
 ### 4.4 Errors
 
@@ -229,7 +241,7 @@ one unreachable, its id is queued and released with the next message
 | `*Exception` | An engine exception escaped: `Type`, `Message`, `Filename`, `Line`, `Object` (an `*Object`), and `Cause`, which `Unwrap` returns. |
 | `*WorkerError` | The worker was lost (`protocol.md` §8); `State` is its `*os.ProcessState` when it exited on its own. |
 | `*TimeoutError` | The operation ran past the timeout; the engine stopped it and the runtime stays open, unless the worker did not stop within the grace period and was terminated. |
-| matches `ErrInvalid` | Misuse: a closed runtime, a value of another runtime, a message over the limit, `Eval` in a host function. |
+| matches `ErrInvalid` | Misuse: a closed runtime, a value of another runtime, a message over the limit, `Eval` or `Close` in a host function. |
 
 A host function's error becomes the failure of `protocol.md` §7.4: an
 `*Exception` carrying an object of this runtime re-raises it unchanged;
@@ -267,10 +279,11 @@ make spy-worker            # the worker the worker tests run
 The tests cover conversion in both directions, structs and maps, exceptions
 and their lines, host functions with errors, keywords, and panics, modules,
 the loader and output, limits, values of another runtime, closed runtimes,
-and values the garbage collector releases; for the worker, the ports of the
+closing from a host function, and values the garbage collector releases,
+including one whose method is still running; for the worker, the ports of the
 Rust crate's tests: nested callbacks, causes, object operations and handle
 release, a timeout that excludes host time, workers killed by `SIGSEGV`,
-`SIGABRT`, and `SIGKILL`, a panicking host function, and the sealed sandbox
+`SIGABRT`, and `SIGKILL`, a panicking or closing host function, and the sealed sandbox
 on macOS. They pass under `go test -race`.
 
 ## 6 Publishing

@@ -526,10 +526,14 @@ func (rt *Runtime) Closed() bool {
 }
 
 // Close ends the worker: it closes the worker's input, waits a second for
-// it to exit, and terminates it otherwise.
+// it to exit, and terminates it otherwise. In a host function of the
+// runtime it fails with [ErrInvalid], as eval and exec do.
 func (rt *Runtime) Close() error {
 	if rt.closed {
 		return nil
+	}
+	if rt.callbacks > 0 {
+		return invalid("cannot close the runtime while a host function of it is running")
 	}
 	rt.closed = true
 	if rt.lost == nil {
@@ -574,6 +578,9 @@ func (rt *Runtime) run(kind byte, fields ...any) (any, error) {
 			rt.deadline = time.Time{}
 		}
 	}()
+	if err := rt.notice(); err != nil {
+		return nil, err
+	}
 	data, err := message(kind, rt.shared, fields...)
 	if err != nil {
 		return nil, err
@@ -620,32 +627,36 @@ func (rt *Runtime) awaitReply() ([]byte, error) {
 	}
 }
 
-// send sends data, after a notice of the handles released since the last.
-func (rt *Runtime) send(data []byte) error {
+// notice sends the notice of the handles released since the last one. It
+// goes before the next message is encoded: a handle in that message stays
+// reachable until then, so its release comes in a later notice
+// (tests/tla/SpyGoWorker.tla).
+func (rt *Runtime) notice() error {
 	rt.shared.mu.Lock()
 	released := rt.shared.released
 	rt.shared.released = nil
 	rt.shared.mu.Unlock()
-	messages := [][]byte{data}
-	if len(released) > 0 {
-		ids := make(Tuple, len(released))
-		for i, id := range released {
-			ids[i] = id
-		}
-		notice, err := message(msgRelease, rt.shared, ids)
-		if err != nil {
-			return err
-		}
-		messages = [][]byte{notice, data}
+	if len(released) == 0 {
+		return nil
 	}
-	for _, m := range messages {
-		select {
-		case rt.to <- m:
-		case <-rt.expiry():
-			return rt.lose(&TimeoutError{rt.timeout})
-		}
+	ids := make(Tuple, len(released))
+	for i, id := range released {
+		ids[i] = id
 	}
-	return nil
+	notice, err := message(msgRelease, rt.shared, ids)
+	if err != nil {
+		return err
+	}
+	return rt.send(notice)
+}
+
+func (rt *Runtime) send(data []byte) error {
+	select {
+	case rt.to <- data:
+		return nil
+	case <-rt.expiry():
+		return rt.lose(&TimeoutError{rt.timeout})
+	}
 }
 
 // expiry fires at the deadline, or never without one.
@@ -777,6 +788,9 @@ func (rt *Runtime) serve(request []byte) error {
 		return rt.lost
 	}
 	if err != nil {
+		return err
+	}
+	if err := rt.notice(); err != nil {
 		return err
 	}
 	var reply []byte
