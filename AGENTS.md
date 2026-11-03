@@ -204,6 +204,24 @@
 
 ## Tests and evidence
 
+- Verification is the work; code is the smaller part. Before writing code,
+  list what the change can break and the evidence that would show it: tests
+  of every failure path, the TLA+ model, measurements, and each platform.
+  A change is done when that evidence exists, not when the code compiles.
+- Every shipped tool (`spy`, `spyc`, `spy-worker`, the library, the
+  packages) carries the same evidence as the engine: tests of its outputs and
+  failure paths, a TLA+ model of its host-facing contract (what it writes,
+  leaves behind, and returns on each failure), and a measurement of its
+  user-visible cost (start-up, build time, size) in `docs/benchmark.md`.
+- Test where it ships. Each platform in the release matrix (`publish.yml`)
+  builds every shipped tool and runs a smoke test of each; a tool that cannot
+  work on a platform says so at run time, as qjsc does without `CONFIG_CC`.
+  A release archive holds what its tools need to run. Only a native run
+  verifies a platform; an emulated container (qemu) is not evidence.
+- Cite evidence that sees the change. A check that passes without exercising
+  it, such as an unchanged model or a benchmark of untouched code, is named as
+  such, not counted. Remeasure a performance difference, alternating the
+  programs over rounds, before reporting it.
 - Conformance to PLS-315 is established by the specification tests in
   `tests/spec` and the TLA+ models in `tests/tla`, and by nothing else. Both
   model the standard; neither depends on the upstream CPython tree at run time.
