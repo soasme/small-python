@@ -46,6 +46,19 @@ static SPYValue *loader(SPYContext *c, void *data, const char *name) {
     const char *source = "answer = 42\ndef add(x):\n    return x + answer\n";
     return spy_bytes(c, source, strlen(source));
 }
+/* A policy that logs each event with its argument count, refuses those named
+ * in data, and raises its own error for "custom". */
+typedef struct { const char *refuse; char log[256]; } Policy;
+static int policy(SPYContext *c, void *data, const char *event, SPYValue *args) {
+    Policy *p = data;
+    size_t len = strlen(p->log), n = 0;
+    SPYValue *iterator = spy_iter(c, args), *item;
+    while ((item = spy_next(c, iterator))) { n++; spy_release(item); }
+    spy_release(iterator);
+    snprintf(p->log + len, sizeof(p->log) - len, "%s/%zu ", event, n);
+    if (!strcmp(event, "custom")) { spy_error(c, "ValueError", "custom refusal"); return -1; }
+    return strstr(p->refuse, event) != NULL;
+}
 /* Lines for input(), from a NULL-terminated list. */
 static SPYValue *read_line(SPYContext *c, void *data) {
     const char ***lines = data;
@@ -741,6 +754,29 @@ int main(void) {
     assert(spy_exec(c, "import text", "api.py") == -1);
     assert(!strcmp(spy_error_message(c), "module loader returned str, not bytes"));
     spy_clear_error(c);
+
+    /* The policy sees each engine event once, with its arguments; a refusal
+     * is PermissionError unless the policy raised its own. */
+    assert(!spy_policy_check(c, "custom", NULL));
+    Policy rules = {"open input import", ""};
+    spy_set_policy(c, policy, &rules);
+    execute(c, "exec('y = 1')\nassert eval('y + 1') == 2\ncompile(b'z', 'f', 'exec')\nexec(compile('w = 3', 'f', 'exec'))");
+    assert(!strcmp(rules.log, "exec/1 exec/1 exec/1 exec/1 "));
+    static const char *const refused[][2] = {
+        {"open('data.txt')", "open is not allowed by the host policy"},
+        {"input('> ')", "input is not allowed by the host policy"},
+        {"import other", "import is not allowed by the host policy"}};
+    for (size_t i = 0; i < sizeof(refused) / sizeof(*refused); i++) {
+        assert(spy_exec(c, refused[i][0], "policy.py") == -1);
+        assert(!strcmp(spy_error_type(c), "PermissionError") && !strcmp(spy_error_message(c), refused[i][1]));
+    }
+    execute(c, "import sample");
+    assert(!strcmp(rules.log, "exec/1 exec/1 exec/1 exec/1 open/2 input/1 import/1 "));
+    SPYValue *none = spy_none(c), *args = spy_tuple(c, 1, &none);
+    assert(spy_policy_check(c, "custom", args) == -1 && !strcmp(spy_error_type(c), "ValueError"));
+    spy_clear_error(c);
+    spy_release(args); spy_release(none);
+    spy_set_policy(c, NULL, NULL);
 
     /* The suggestion tokenizes the failing lines as tokenize does: numbers,
      * prefixed, escaped and triple-quoted strings, comments, continuations

@@ -14,6 +14,7 @@ the pieces fit together.
 - [Errors](#errors)
 - [Modules](#modules)
 - [Host services](#host-services)
+- [Policy](#policy)
 - [Limits and collection](#limits-and-collection)
 
 ## Conventions
@@ -351,6 +352,27 @@ open() reaches only host directories mounted with spy_mount, at an absolute
 path (NULL: the directory's own resolved path); paths are resolved inside
 the mount, so symbolic links cannot leave it. The first mount is the working
 directory for relative paths. Without a mount nothing is readable.
+
+## Policy
+
+```c
+typedef int (*SPYPolicy)(SPYContext *, void *, const char *event, SPYValue *args);
+void spy_set_policy(SPYContext *, SPYPolicy, void *);
+```
+
+Asked before a sensitive action, with an event name and a tuple of its
+arguments. The engine asks for "open" (file, mode), "import" (name, on the
+module's first load), "exec" (the source string of exec, eval or compile)
+and "input" (the prompt, if any); hosts ask for their own events with
+spy_policy_check. Return 0 to allow; nonzero refuses with PermissionError,
+unless the policy set an error of its own.
+
+```c
+int spy_policy_check(SPYContext *, const char *event, SPYValue *args);
+```
+
+Ask the policy about an event: 0 when allowed or no policy is set, or -1
+with the error set.
 
 ## Limits and collection
 

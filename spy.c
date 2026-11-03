@@ -327,6 +327,8 @@ struct SPYContext {
     void *loader_data;
     SPYReadLine read_line;
     void *read_data;
+    SPYPolicy policy;
+    void *policy_data;
     char error_message[256], filename[256];
     char *error_text; /* The whole message when error_message cuts it short, owned. */
     SPYValue *filename_from; /* The unit whose filename tick last copied into filename, or NULL; borrowed. */
@@ -16102,6 +16104,13 @@ static SPYValue *cached_module(SPYContext *c, const char *name, SPYValue *cached
     error_name_set(c, name, strlen(name));
     return NULL;
 }
+/* Ask the host policy about event, with n arguments; only while one is set. */
+static NO_INLINE int policy_event(SPYContext *c, const char *event, size_t n, SPYValue *const *items) {
+    SPYValue *args = spy_tuple(c, n, items);
+    int status = args ? spy_policy_check(c, event, args) : -1;
+    spy_release(args);
+    return status;
+}
 static SPYValue *load_source_module(SPYContext *c, const char *name) {
     SPYValue *cached = name_local(c->modules, name);
     if (cached) return cached_module(c, name, cached);
@@ -16129,6 +16138,12 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         if (!name_local(parent, "__path__")) {
             spy_release(parent); return errorf(c, "ModuleNotFoundError", "parent of '%s' is not a package", name);
         }
+    }
+    if (c->policy) {
+        SPYValue *module_name = spy_string(c, name, strlen(name));
+        int denied = !module_name || policy_event(c, "import", 1, &module_name);
+        spy_release(module_name);
+        if (denied) { spy_release(parent); return NULL; }
     }
     SPYValue *source = NULL;
     int package = 0, namespace = 0;
@@ -25397,6 +25412,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
                 }
                 text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
             }
+            if (text && c->policy && policy_event(c, "exec", 1, &a)) { spy_release(text); goto execution_fail; }
             /* exec and eval inherit the running code's future statements. */
             int flags = c->compile_flags;
             if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
@@ -28036,6 +28052,12 @@ void spy_set_error_output(SPYContext *c, SPYWrite write, SPYFlush flush, void *d
 }
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
+void spy_set_policy(SPYContext *c, SPYPolicy policy, void *data) { c->policy = policy; c->policy_data = data; }
+int spy_policy_check(SPYContext *c, const char *event, SPYValue *args) {
+    if (!c->policy || (!c->policy(c, c->policy_data, event, args) && !c->error_type[0])) return 0;
+    errorf(c, "PermissionError", "%s is not allowed by the host policy", event);
+    return -1;
+}
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; watch(c); }
 void spy_set_interrupt(SPYContext *c, SPYInterrupt interrupt, void *data) {
     c->interrupt = interrupt; c->interrupt_data = data; c->quiet_unit = NULL;
@@ -28139,6 +28161,7 @@ static SPYValue *input_builtin(SPYContext *c, size_t argc, SPYValue *const *argv
     (void)data;
     if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "input() takes no keyword arguments");
     if (argc > 1) return errorf(c, "TypeError", "input expected at most 1 argument, got %zu", argc);
+    if (c->policy && policy_event(c, "input", argc, argv)) return NULL;
     if (output_flush(c, 0)) return NULL;
     if (argc) {
         SPYValue *text = stringify(c, argv[0], 0);
@@ -28268,6 +28291,7 @@ static SPYValue *file_native(SPYContext *c, size_t argc, SPYValue *const *argv, 
         else if (m[0] == 'a') flags |= O_CREAT | O_APPEND;
         else if (m[0] == 'x') flags |= O_CREAT | O_EXCL;
         else if (m[0] != 'r') return errorf(c, "ValueError", "invalid mode: '%s'", m);
+        if (c->policy && policy_event(c, "open", 2, (SPYValue *const[]){argv[0], mode})) return NULL;
         if (c->files_len == c->files_cap) {
             size_t cap = c->files_cap ? c->files_cap * 2 : 8;
             int *files = mem_realloc(c, c->files, cap * sizeof(*files));

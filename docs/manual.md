@@ -897,8 +897,22 @@ returns `SPY_STOP_STEPS`, `SPY_STOP_MEMORY` or `SPY_STOP_INTERRUPT` after
 such a call and zero after any other, which tells a stop from the same
 error raised by the program.
 
+`spy_set_policy` installs a callback asked before each sensitive action, as
+CPython's audit hooks (PEP 578) are, with an event name and a tuple of its
+arguments: `open` (file, mode) before a file is opened, `import` (name)
+before a module first loads, but not when the module cache serves it,
+`exec` (the source) before `exec`, `eval` or `compile` parses a string, and
+`input` (the prompt, if given) before `input` writes it. Imports the standard
+layer makes are events too: `sys` imports `_spy`. A zero return allows the
+action; any other refuses it with `PermissionError`, unless the callback set
+an error of its own. Hosts ask the same callback about their own actions,
+such as a network request from a host function, with
+`spy_policy_check(ctx, event, args)`, which returns 0 when no policy is set.
+The core itself has no network access.
+
 Budgets bound what a program can spend: steps, the bytes the engine holds
-and, through the interrupt, time. They do not make a context an isolation
+and, through the interrupt, time; the policy bounds what it may reach. They
+do not make a context an isolation
 boundary: the program runs in the host's process, so a defect in the engine
 can reach the host. The packages' worker
 ([packaging/protocol.md](packaging/protocol.md)) adds a process and the

@@ -210,6 +210,19 @@ void spy_set_input(SPYContext *, SPYReadLine, void *);
 enum { SPY_MOUNT_READ_ONLY = 1 };
 int spy_mount(SPYContext *, const char *directory, const char *path, int flags);
 
+/* == Policy ==
+ * Asked before a sensitive action, with an event name and a tuple of its
+ * arguments. The engine asks for "open" (file, mode), "import" (name, on
+ * the module's first load), "exec" (the source string of exec, eval or
+ * compile) and "input" (the prompt, if any); hosts ask for their own events
+ * with spy_policy_check. Return 0 to allow; nonzero refuses with
+ * PermissionError, unless the policy set an error of its own. */
+typedef int (*SPYPolicy)(SPYContext *, void *, const char *event, SPYValue *args);
+void spy_set_policy(SPYContext *, SPYPolicy, void *);
+/* Ask the policy about an event: 0 when allowed or no policy is set, or -1
+ * with the error set. */
+int spy_policy_check(SPYContext *, const char *event, SPYValue *args);
+
 /* == Limits and collection == */
 
 /* Steps for each outermost call (docs/metering.md); zero means unlimited. */
