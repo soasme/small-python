@@ -52,6 +52,8 @@ upstream Cython suite.
   and host-loaded modules.
 - Reference counting with iterative destruction and explicit cycle collection.
 - A command-line interpreter and a basic interactive shell.
+- Native modules: shared libraries that a program imports without
+  rebuilding its host.
 - C source generation for programs that run without a Python installation or
   the original Python source file.
 - Local semantic checks, a pinned CPython oracle and test inventory, and adapters
@@ -669,16 +671,21 @@ attributes (PEP 562). Failed imports set `ImportError.name`. A missing `from`
 name reports the module, its file, and `name_from`, as CPython does.
 
 For `pkg.mod`, the core first requests `pkg.mod.__init__` from the callback,
-then `pkg.mod` if no package source exists. The CLI maps dots to directory
-separators and reads the resulting `.py` file under the original script
-directory, or the current directory for stdin and `-c`. There is no default
-filesystem loader in an embedded context. Relative imports use `__package__`.
+then `pkg.mod` if no package source exists. Asked for `pkg.mod`, the callback
+may register it with `spy_new_module` instead of returning source; the
+import then runs that init, as it does for a native module (3.4.9). The CLI
+maps dots to directory separators and reads the resulting `.py` file under
+the original script directory, or the current directory for stdin and `-c`.
+A regular file with `.so` in place of `.py` (`.dll` on Windows) is a native
+module and comes first, as CPython's extension modules do; a package's
+`__init__` is always source. There is no default filesystem loader in an
+embedded context. Relative imports use `__package__`.
 Import statements honor the frame's builtin `__import__` function; the default
 implementation loads sources through the callback. The `builtins` module exposes
 the context's builtin namespace directly and needs no loader.
 
-Module specs, namespace packages, package search paths, meta-path finders,
-and extension loading are host services (PLS-315 Annex B) that the `spy`
+Module specs, package search paths, meta-path finders, and CPython
+extension modules are host services (PLS-315 Annex B) that the `spy`
 command's loader does not provide.
 
 Python 3.15 lazy imports (`lazy import`, `lazy from ... import`) bind
@@ -703,7 +710,8 @@ register it as `_spy`; a context where none did has no such module. A standard
 layer, `spy-std.c` (`libspy-std.a`, declared in `spy-std.h`), supplies the host
 modules `sys` and `gc`, written on those primitives and specified, after
 CPython 3.15, by [PLS-STD-315](standards/std.md). `spy_std_init_module`
-registers one of them and `spy_std_init` all of them. The `spy` command calls
+registers one of them and `spy_std_init` all of them; it also loads native
+modules (3.4.9). The `spy` command calls
 `spy_std_init`, `spyc -M` names the modules a generated program registers, and
 the conformance driver `tests/run-spec` registers none, only `_spy`. Their
 Python sources live in `modules/` and are embedded into `spy-std-modules.h`; an
@@ -960,6 +968,61 @@ The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
 names it puts in `_spy` serve the standard layer and may change in any
 release. Hosts and their Python code should reach those facilities through
 the standard layer's `sys` and `gc`, not `_spy`.
+
+#### 3.4.9 Native modules
+
+A native module is a shared library that defines one module, as QuickJS's
+`.so` modules do: a program imports it without rebuilding its host. Its
+source includes `spy-module.h` and marks the module's init, a
+`SPYModuleInit` named `spy_init_` and the module's last name, with
+`SPY_MODULE` ([examples/fib.c](../examples/fib.c)):
+
+```c
+#include "spy-module.h"
+
+SPY_MODULE int spy_init_fib(SPYContext *c, SPYValue *module) {
+    SPYValue *function = spy_native(c, "fib", fib, NULL, NULL);
+    int status = function ? spy_set_attr(c, module, "fib", function) : -1;
+    spy_release(function);
+    return status;
+}
+```
+
+```sh
+cc -shared -fPIC -DSPY_SHARED_MODULE -I. examples/fib.c -o examples/fib.so
+./spy examples/test_fib.py
+```
+
+With `SPY_SHARED_MODULE` defined, every `spy.h` call goes through a table of
+function pointers that the host hands the library as it loads it, as
+SQLite's loadable extensions do. The library needs no symbol from the
+engine and exports only `spy_module` and its init, so it loads into the
+statically linked `spy` of the release archives and into any host that
+links the standard layer. Without `SPY_SHARED_MODULE`, the same source is an
+ordinary C module that a host links and registers with `spy_new_module`.
+`make api-reference` generates `spy-module.h` from `spy.h`. Within
+compatible releases (3.4.8) the table only grows at its end, which `make
+check-api` enforces, so a library loads into an engine of its header's
+series that is as new as the header or newer; any other is refused.
+
+`spy_std_load_native(ctx, name, path)` asks the policy about `dlopen` with
+`(name, path)`, opens the library (`dlopen` with `RTLD_NOW | RTLD_LOCAL`, or
+`LoadLibrary`), finds `spy_module` and `spy_init_` followed by the last name,
+checks the version, hands over the table and registers the init with
+`spy_new_module`. Any failure raises `ImportError`, with the system's
+message or the symbol that is missing as CPython's extension loader words
+it, and closes the library. A loaded library is never closed, since values
+anywhere in the process may hold its functions; as for any registered
+module, the context runs its init on each first import, so an init that
+failed runs again on the next import without reopening the library. A
+library holds one table: one that another copy of the engine in the same
+process linked is refused.
+
+Native code is not sandboxed. It runs in the host's process with the host's
+rights, outside the mounts and the policy, and outside the step and memory
+budgets, which count only the work and memory it asks of the engine.
+Allowing `dlopen` trusts the library completely. Where the platform has no
+shared libraries (WebAssembly), `spy_std_load_native` raises `ImportError`.
 
 ### 3.5 Python binding
 
