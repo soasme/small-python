@@ -131,9 +131,16 @@ Execute a source file or command:
 Generate and compile a standalone program:
 
 ```sh
-./spyc -o hello.c examples/hello.py
-cc -std=c11 -Os -I. hello.c spy.c -lm -o hello
+./spyc -o hello examples/hello.py
 ./hello
+```
+
+As `qjsc`, `spyc` runs the C compiler of its own build on the C file it
+generates; `spyc -e -o hello.c` writes that file instead, for any compiler:
+
+```sh
+./spyc -e -o hello.c examples/hello.py
+cc -std=c11 -Os -I. hello.c spy.c -lm -o hello
 ```
 
 The executable embeds its source and interpreter. It requires neither a Python
@@ -167,8 +174,9 @@ arbitrary CPython switches are not implemented.
 #### 2.3.2 `spyc` program generator
 
 ```text
-usage: spyc [options] -o program.c (input.py | -m module)
-       spyc -c [options] -o modules.c (input.py | -m module)...
+usage: spyc [options] [-o program] (input.py | -m module)
+       spyc -e [options] [-o program.c] (input.py | -m module)
+       spyc -c [options] [-o modules.c] (input.py | -m module)...
 ```
 
 `spyc` bundles a program and the modules it imports into one C translation
@@ -179,13 +187,16 @@ import fails the build unless the program guards it with `try`/`except
 ImportError`. `-x` leaves a module to the host, `-D` adds modules that only
 dynamic imports name, as `qjsc -D` does, and `-M` registers a module of the
 standard layer, which the program then links (`spy-std.c`). `-O`, `-OO`,
-`--minify`, `--metafile`, `--deps`, and `--analyze` complete the options.
-Without `-c` the file has a `main` that runs the entry. With `-c` (as
-`qjsc -c`) it holds each entry's source as `const char spy_name[]` (`game.py`
-gives `spy_game`) and the loader `spy_name_load`, for a host whose own `main`
-registers its C modules; [`examples/pong`](../examples/pong) is one. The user
-invokes the C compiler; spyc runs no shell or compiler, and produces no
-native code or bytecode for Python functions. [Building programs](build.md)
+`--minify`, `--metafile`, `--deps`, `--analyze`, and `-v` complete the options.
+As `qjsc`, spyc outputs an executable (`a.out` without `-o`): it compiles a C
+file with a `main` that runs the entry, using the compiler and link flags of
+its own build, against the `spy.h` and libraries beside it or under the
+installation prefix; `-v` prints that command. `-e` (as `qjsc -e`) writes the C
+file instead (`out.c` without `-o`). With `-c` (as `qjsc -c`) the file holds
+each entry's source as `const char spy_name[]` (`game.py` gives `spy_game`)
+and the loader `spy_name_load`, for a host whose own `main` registers its C
+modules; [`examples/pong`](../examples/pong) is one. spyc produces no native
+code or bytecode for Python functions. [Building programs](build.md)
 is the full reference.
 
 ### 2.4 Local tests
@@ -1093,8 +1104,9 @@ optimizer or stable serialized-program format.
 which registers the standard modules named with `-M`; with `-c` it emits the
 arrays and the loader alone. Imported modules are bundled in a table sorted by
 the names the engine probes, behind a generated `SPYModuleLoader`
-([build.md](build.md)). The C compiler links it with `spy.c` or `libspy.a`,
-and with `spy-std.c` when it names any. The program still parses source at
+([build.md](build.md)). The C compiler, which spyc runs unless `-e` or `-c`
+asks for the C file, links it with `spy.c` or `libspy.a`, and with
+`spy-std.c` when it names any. The program still parses source at
 startup. Source
 embedding is deliberately described separately from native Python compilation.
 

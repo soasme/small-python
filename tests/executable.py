@@ -26,13 +26,46 @@ for options, extra, expected in [([], [], "standalone 45 True\n"),
         generated = directory / "hello generated.c"
         binary = directory / "hello program"
         source.write_text(PROGRAM, encoding="utf-8")
-        subprocess.run([str(ROOT / "spyc"), *options, "-o", str(generated), str(source)], check=True)
+        subprocess.run([str(ROOT / "spyc"), "-e", *options, "-o", str(generated), str(source)], check=True)
         build(generated, *extra, binary=binary)
         source.unlink()
         generated.unlink()
         result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
         assert result.stdout == expected, result
 print("Standalone C generation, compilation, and execution passed")
+
+# Without -e or -c, spyc builds the executable itself, as qjsc does: with its
+# build's compiler, against the spy.h and libraries beside it; -v shows the
+# command, and the name defaults to a.out (out.c with -e).
+for options, library, expected in [([], "libspy.a", "standalone 45 True\n"),
+                                   (["-M", "sys"], "libspy-std.a", "standalone 45 False\n")]:
+    with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+        directory = Path(temp)
+        source = directory / "hello source.py"
+        source.write_text(PROGRAM, encoding="utf-8")
+        result = subprocess.run([str(ROOT / "spyc"), "-v", *options, str(source)],
+                                cwd=directory, check=True, capture_output=True, text=True)
+        assert f"-I {ROOT} " in result.stdout and f" {ROOT / library} " in result.stdout, result.stdout
+        subprocess.run([str(ROOT / "spyc"), "-e", str(source)], cwd=directory, check=True)
+        assert (directory / "out.c").exists()
+        source.unlink()
+        result = subprocess.run(["./a.out"], check=True, capture_output=True, text=True, cwd=directory)
+        assert result.stdout == expected, result
+
+# The build fails with status 1 when the C file cannot be written or the
+# compiler cannot run, and -e and -c together are a usage error.
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    directory = Path(temp)
+    (directory / "one.py").write_text("print(1)\n", encoding="utf-8")
+    for env, status, message in [({"TMPDIR": str(directory / "missing")}, 1, "spyc: error: cannot write"),
+                                 ({"PATH": str(directory / "missing")}, 1, "spyc: error: cannot run"),
+                                 ({}, 2, "usage:")]:
+        args = ["-e", "-c"] if not env else []
+        result = subprocess.run([str(ROOT / "spyc"), *args, "one.py"], cwd=directory, capture_output=True, text=True,
+                                env={**os.environ, **env})
+        assert result.returncode == status and result.stderr.startswith(message), result
+        assert not (directory / "a.out").exists()
+print("Executable output passed")
 
 # spyc -c writes only the source, named after the input, for a host's main.
 HOST = """#include "spy.h"
@@ -98,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     source, helper = Path(temp) / "main.py", Path(temp) / "helper.py"
     source.write_text("import helper\n", encoding="utf-8")
     helper.write_text("x = 1\n" * 3, encoding="utf-8")
-    result = subprocess.run([str(ROOT / "spyc"), "--analyze", "-o", str(Path(temp) / "main.c"), str(source)],
+    result = subprocess.run([str(ROOT / "spyc"), "-e", "--analyze", "-o", str(Path(temp) / "main.c"), str(source)],
                             capture_output=True, text=True, check=True)
     assert [line.rsplit(None, 1) for line in result.stderr.splitlines()[1:]] == [
         [" " * 4 + str(helper), "18"], [" " * 4 + str(source), "14"]], result.stderr

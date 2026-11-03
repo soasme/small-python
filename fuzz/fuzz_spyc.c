@@ -52,7 +52,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     char *argv[16] = {"spyc"};
     int argc = 1;
     if (options & 1) argv[argc++] = "--minify";
-    if (options & 2) argv[argc++] = "-c";
+    argv[argc++] = options & 2 ? "-c" : "-e";
     if (options & 4) argv[argc++] = "-O";
     if (options & 8) argv[argc++] = "-Werror";
     if (options & 16) { argv[argc++] = "-D"; argv[argc++] = "pkg.*"; }

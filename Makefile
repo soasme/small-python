@@ -60,9 +60,13 @@ wasm: javascript/spy-worker.wasm
 test-javascript: javascript/spy-worker.wasm
 	cd javascript && node --test test/*.test.js
 
-# spyc parses with the engine itself, as qjsc compiles with quickjs.c.
+# spyc parses with the engine itself, as qjsc compiles with quickjs.c. It
+# builds executables with this build's compiler and link flags, so a
+# sanitizer or coverage build's spyc links its own libspy.a.
 spyc: $(OBJDIR)/spyc.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(OBJDIR)/spyc.o: CPPFLAGS += -DCONFIG_CC='"$(CC) $(LDFLAGS)"' -DCONFIG_PREFIX='"$(PREFIX)"'
 
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^

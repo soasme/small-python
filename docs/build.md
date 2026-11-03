@@ -15,8 +15,8 @@
 
 ## 1 Introduction
 
-`spyc` turns a Python program into one C translation unit. Today it embeds a
-single source file. The bundler follows the program's imports, as
+`spyc` turns a Python program into one C translation unit and, as `qjsc`
+does, compiles it into an executable unless asked for the C file. The bundler follows the program's imports, as
 [esbuild](https://esbuild.github.io/) follows a JavaScript program's, and
 embeds every module the program reaches. The program then runs without any
 Python file at run time.
@@ -38,8 +38,9 @@ the command-line features that fit a Python program, as
 
 ### 1.1 Goals
 
-- One `.c` file for a program and all its modules. It needs only `libspy.a`,
-  plus `libspy-std.a` when `-M` names a standard module.
+- One `.c` file for a program and all its modules, compiled into an
+  executable by default. It needs only `libspy.a`, plus `libspy-std.a` when
+  `-M` names a standard module.
 - Import semantics identical to the unbundled program run by the pinned
   CPython 3.15 with the same search path: the same modules found, the same
   failures, the same `__name__` and `__package__`, and `__path__` on the same
@@ -68,24 +69,27 @@ the command-line features that fit a Python program, as
 ## 2 Usage
 
 ```text
-usage: spyc [options] -o program.c (entry.py | -m module)
-       spyc -c [options] -o modules.c (entry.py | -m module)...
+usage: spyc [options] [-o program] (entry.py | -m module)
+       spyc -e [options] [-o program.c] (entry.py | -m module)
+       spyc -c [options] [-o modules.c] (entry.py | -m module)...
 ```
 
 ```sh
-spyc -o app.c app.py                      # app.py and everything it imports
+spyc -o app app.py                        # app.py and everything it imports
+spyc -e -o app.c app.py                   # the same program as C
 cc -O2 -I. app.c libspy.a -lm -o app
 
 spyc -I lib -x raylib -c -o game_py.c game.py   # for a host that registers raylib
-spyc -D plugins.* -o app.c app.py               # plus every module of plugins
-spyc -O --minify --metafile app.json -o app.c app.py
+spyc -D plugins.* -o app app.py                 # plus every module of plugins
+spyc -O --minify --metafile app.json -o app app.py
 ```
 
 ### 2.1 Options
 
 | Option | Meaning |
 | --- | --- |
-| `-o FILE` | The C file to write. It may not be an input. |
+| `-o FILE` | The executable or C file to write; `a.out`, or `out.c` with `-e` or `-c`, by default. It may not be an input. |
+| `-e` | Write the C file with its `main` instead of compiling it, as `qjsc -e` ([5.3](#53-executable-output)). |
 | `-c` | Write only the embedded sources and the loader, for a host's own `main` ([5.2](#52-library-output--c)). Several entries are allowed. |
 | `-m MODULE` | Run `MODULE` as `__main__`, as `python -m` does. |
 | `-M MODULE` | Register a standard module (`spy-std.c`), as today. Imports of it are not bundled. |
@@ -100,9 +104,10 @@ spyc -O --minify --metafile app.json -o app.c app.py
 | `--deps FILE` | Write a make dependency rule ([7.2](#72-dependency-file)). |
 | `--analyze` | Print each bundled module's size to stderr. |
 | `-Werror` | Treat warnings as errors. |
+| `-v` | Print the compiler command ([5.3](#53-executable-output)). |
 
-spyc exits with 0 on success, 1 when the build fails, and 2 for a usage
-error. It writes the output only on success.
+spyc exits with 0 on success, 1 when the build or the C compiler fails, and
+2 for a usage error. It writes the output only on success.
 
 ### 2.2 Entry points
 
@@ -246,8 +251,8 @@ program must then name what it may load with `-D`, as `qjsc -D` names the
 modules a JavaScript `import()` may load:
 
 ```sh
-spyc -D plugins.csv -D plugins.json -o app.c app.py   # these two
-spyc -D 'plugins.*' -o app.c app.py                   # every module under plugins
+spyc -D plugins.csv -D plugins.json -o app app.py     # these two
+spyc -D 'plugins.*' -o app app.py                     # every module under plugins
 ```
 
 `-D PKG.*` includes every module and package found under `PKG`, at any
@@ -331,6 +336,25 @@ To load more modules from disk, the host's own loader calls `spy_game_load`
 first and falls back to its own search. Several entries share one table, and
 a module that two entries import is embedded once. This is what esbuild's
 code splitting gives, and in C it costs nothing more.
+
+### 5.3 Executable output
+
+Without `-e` or `-c`, spyc compiles the C file of [5.1](#51-the-module-table)
+as `qjsc` does. It writes the file under `TMPDIR` (or `/tmp`), runs
+
+```text
+CONFIG_CC -O2 -I INCLUDE -o OUTPUT -x c FILE -x none [LIB/libspy-std.a] LIB/libspy.a -lm
+```
+
+and removes the file. `CONFIG_CC` is the compiler and link flags spyc was
+built with (`$(CC) $(LDFLAGS)`), so a sanitizer or coverage build links its
+own `libspy.a`. `INCLUDE` and `LIB` are the directory of the `spyc` that ran
+when `spy.h` is there (a build tree), and otherwise `PREFIX/include` and
+`PREFIX/lib` of `make install`. `libspy-std.a` is linked when `-M` names a
+standard module. `-v` prints the command. The build fails with the
+compiler's diagnostics when it fails, and spyc exits with 1. Unlike `qjsc`,
+spyc links no `-ldl` or `-lpthread`, which the engine does not use, and
+names its temporary file with `mkstemp`.
 
 ## 6 Source transforms
 
@@ -501,8 +525,9 @@ calls of the name `__import__`, and for the `try` statements that guard them.
 
 The resolver ([3.1](#31-search-roots)) uses only C11 file operations:
 `fopen` to read a file, and one portable directory listing so that names are
-compared by exact spelling. The listing is the only POSIX call in spyc, and
-spyc keeps it apart from the engine.
+compared by exact spelling. That listing and the compiler run of
+[5.3](#53-executable-output) (`mkstemp`, `posix_spawnp`) are spyc's only
+POSIX calls, and spyc keeps them apart from the engine.
 
 ### 9.2 Minification
 
@@ -566,14 +591,19 @@ TEXT` marks a build that must fail with an error containing `TEXT`.
    program's run: an import guarded only by its caller (`guard_scope.py`),
    or a `-D` name the program never imports. `# oracle: skip` exempts
    options that have no CPython equivalent (`--alias`).
-2. **Build.** spyc builds the test twice, from two copies of the tree at
-   different paths, and the two outputs must be identical. The metafile's
+2. **Build.** spyc writes the C file (`-e`, or the test's `-c`) twice,
+   from two copies of the tree at different paths, and the two outputs must
+   be identical. The metafile's
    inputs must be exactly the `# bundles:` list, and the `--deps` rule must
    name the same files.
 3. **Run.** The C file is compiled against `libspy.a` (and `libspy-std.a` for
    `-M`). For `-c`, a generated host installs the loader and runs each entry.
    The program runs in an empty directory, so no source file is available.
    It must pass.
+
+`tests/executable.py` checks the executable output of
+[5.3](#53-executable-output): the default name, `-M`, `-v`, and the failures
+to write the C file and to run the compiler.
 
 `make test-build` runs the suite against `./spyc`, and `make test` includes
 it; `make test-build-oracle` adds the oracle phase, and

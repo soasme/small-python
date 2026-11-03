@@ -1,17 +1,35 @@
 /* spyc: bundle a Python program and the modules it imports into one C
  * translation unit (docs/build.md). As QuickJS's qjsc, it compiles with the
  * engine (spy.c) so the build parses exactly what the program runs; a normal
- * C compiler then links the result with libspy.a. No shell, compiler, or
- * platform process API is hidden here.
+ * C compiler then links the result with libspy.a. As qjsc, spyc runs that
+ * compiler itself unless -e (C with main) or -c (C alone) asks for the C
+ * file; it runs no shell.
  *
  * Modules are found as CPython's path finder finds them over the search
  * roots, embedded byte for byte, and served at run time by a generated
  * SPYModuleLoader whose keys are the names the engine probes:
  * NAME.__init__ for a package, NAME for a module, NAME.__namespace__ for a
  * namespace package. */
+#if !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "spy.c"
 #include "host.h"
 #include <dirent.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char **environ;
+
+/* The compiler and link flags of spyc's own build, and where make install
+ * puts spy.h and the libraries, as qjsc's CONFIG_CC and CONFIG_PREFIX. */
+#ifndef CONFIG_CC
+#define CONFIG_CC "cc"
+#endif
+#ifndef CONFIG_PREFIX
+#define CONFIG_PREFIX "/usr/local"
+#endif
 
 enum { NONE, MODULE, PACKAGE, NAMESPACE, EXTERNAL, REGISTERED };
 
@@ -506,6 +524,48 @@ static int write_file(const char *path, const Buffer *data) {
     if (failed) fprintf(stderr, "spyc: error: cannot write %s\n", path);
     return failed;
 }
+/* The executable: CONFIG_CC compiles the C file, written to a temporary
+ * file, against spy.h and the libraries beside spyc in a build tree, as
+ * qjsc finds quickjs.h, or else under CONFIG_PREFIX. */
+static int compile(const char *self, const char *output, const Buffer *c, int standard, int verbose) {
+    const char *temp = getenv("TMPDIR");
+    char *source = concat(temp && *temp ? temp : "/tmp", "/spyc.XXXXXX", "");
+    int fd = mkstemp(source);
+    if (fd < 0) { fprintf(stderr, "spyc: error: cannot write %s\n", source); free(source); return 1; }
+    close(fd);
+    const char *slash = strrchr(self, '/');
+    char *dir = slash ? slice(self, (size_t)(slash - self)) : concat(".", "", "");
+    char *header = concat(dir, "/spy.h", "");
+    FILE *probe = fopen(header, "rb");
+    int tree = probe != NULL;
+    if (probe) fclose(probe);
+    char *include = tree ? concat(dir, "", "") : concat(CONFIG_PREFIX, "/include", "");
+    char *lib = tree ? concat(dir, "", "") : concat(CONFIG_PREFIX, "/lib", "");
+    Strings args = {0};
+    for (const char *p = CONFIG_CC; *(p += strspn(p, " "));) {
+        size_t n = strcspn(p, " ");
+        push(&args, slice(p, n));
+        p += n;
+    }
+    const char *fixed[] = {"-O2", "-I", include, "-o", output, "-x", "c", source, "-x", "none"};
+    for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) push(&args, concat(fixed[i], "", ""));
+    if (standard) push(&args, concat(lib, "/libspy-std.a", ""));
+    push(&args, concat(lib, "/libspy.a", ""));
+    push(&args, concat("-lm", "", ""));
+    push(&args, NULL);
+    for (size_t i = 0; verbose && args.items[i]; i++) printf("%s%s", args.items[i], args.items[i + 1] ? " " : "\n");
+    fflush(stdout);
+    int status = write_file(source, c), code = 0, error = 0;
+    pid_t pid = 0;
+    if (!status && (error = posix_spawnp(&pid, args.items[0], NULL, NULL, args.items, environ))) {
+        fprintf(stderr, "spyc: error: cannot run %s: %s\n", args.items[0], strerror(error));
+        status = 1;
+    }
+    if (!status) status = waitpid(pid, &code, 0) != pid || !WIFEXITED(code) || WEXITSTATUS(code);
+    unlink(source);
+    free(source); free(dir); free(header); free(include); free(lib); free_strings(&args);
+    return status;
+}
 /* A C identifier for an entry: spy_ and its name, as spyc -c names it. */
 static char *c_name(const char *entry, int module) {
     const char *base = module ? entry : strrchr(entry, '/') ? strrchr(entry, '/') + 1 : entry;
@@ -521,17 +581,18 @@ static char *c_name(const char *entry, int module) {
 typedef struct { char *file, *package, *symbol; Module module; } EntryPoint;
 
 static int usage(void) {
-    fputs("usage: spyc [options] -o program.c (input.py | -m module)\n"
-          "       spyc -c [options] -o modules.c (input.py | -m module)...\n"
+    fputs("usage: spyc [options] [-o program] (input.py | -m module)\n"
+          "       spyc -e [options] [-o program.c] (input.py | -m module)\n"
+          "       spyc -c [options] [-o modules.c] (input.py | -m module)...\n"
           "options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,\n"
-          "         -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror\n", stderr);
+          "         -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror, -v\n", stderr);
     return 2;
 }
 int main(int argc, char **argv) {
     Build b = {0};
     Strings files = {0}, mains = {0}, includes = {0};
     const char *output = NULL, *metafile = NULL, *deps = NULL, *loader_name = NULL;
-    int bare = 0, analyze = 0, werror = 0, optimize = 0, status = 0;
+    int bare = 0, with_main = 0, verbose = 0, analyze = 0, werror = 0, optimize = 0, status = 0;
     EntryPoint *list = NULL;
     size_t entries = 0, sources = 0;
     Module **table = NULL, **inputs = NULL;
@@ -544,6 +605,8 @@ int main(int argc, char **argv) {
         if (takes && !value) { status = usage(); goto done; }
         if (takes) i++;
         if (!strcmp(a, "-c")) bare = 1;
+        else if (!strcmp(a, "-e")) with_main = 1;
+        else if (!strcmp(a, "-v")) verbose = 1;
         else if (!strcmp(a, "--analyze")) analyze = 1;
         else if (!strcmp(a, "-Werror")) werror = 1;
         else if (!strcmp(a, "--minify")) b.minify = 1;
@@ -572,7 +635,9 @@ int main(int argc, char **argv) {
         else push(&files, concat(a, "", ""));
     }
     entries = files.len + mains.len;
-    if (!output || !entries || (!bare && entries > 1) || (bare && (b.registered.len || optimize))) { status = usage(); goto done; }
+    if (!entries || (bare && with_main) || (!bare && entries > 1) || (bare && (b.registered.len || optimize))) { status = usage(); goto done; }
+    int executable = !bare && !with_main;
+    if (!output) output = executable ? "a.out" : "out.c";
     for (size_t i = 0; i < files.len; i++) if (!strcmp(files.items[i], output)) { status = usage(); goto done; }
 
     /* The first root is the entry's directory, or the working directory for -m. */
@@ -732,7 +797,7 @@ int main(int argc, char **argv) {
                   "    return status ? 1 : 0;\n}\n");
     }
 
-    if (write_file(output, &out)) { status = 1; goto done; }
+    if (executable ? compile(argv[0], output, &out, b.registered.len > 0, verbose) : write_file(output, &out)) { status = 1; goto done; }
 
     if (metafile) {
         put(&meta, "{\n  \"inputs\": {");

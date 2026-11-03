@@ -58,8 +58,7 @@ Run a script or the interactive shell:
 Compile a script into a standalone program:
 
 ```sh
-./spyc -o hello.c examples/hello.py
-cc -std=c11 -Os -I. hello.c spy.c -lm -o hello
+./spyc -o hello examples/hello.py
 ./hello
 ```
 

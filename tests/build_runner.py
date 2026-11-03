@@ -138,7 +138,8 @@ def build_phase(path, fields, spyc, cc):
             directory = Path(temp) / copy
             directory.mkdir()
             entry = stage(path, directory, module)
-            command = [str(spyc), *flags, "--metafile", "meta.json", "--deps", "program.d", "-o", "program.c"]
+            command = [str(spyc), *flags, *([] if "-c" in flags else ["-e"]),
+                       "--metafile", "meta.json", "--deps", "program.d", "-o", "program.c"]
             command += ([] if module else [str(entry)]) + entries
             code, output = run(command, directory)
             if negative:
