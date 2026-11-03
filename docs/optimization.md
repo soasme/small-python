@@ -189,6 +189,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A float power from a positive base skips the dispatch](#a-float-power-from-a-positive-base-skips-the-dispatch) | -3.4% (nbody); M2: nbody -3.1% |
 | [A dying number returns to its spare list directly](#a-dying-number-returns-to-its-spare-list-directly) | -5.6% (loop, nbody), -3.2% (generators), -2.4% (classes); M2: nbody -6.5%, loop -3.0%, classes -2.6% |
 | [Two strs concatenate before the operator dispatch](#two-strs-concatenate-before-the-operator-dispatch) | -2.9% (dicts); M2: dicts -1.6% |
+| [A Python call enters and leaves its frame inline](#a-python-call-enters-and-leaves-its-frame-inline) | -5.4% (fib), -4.2% (generators), -2.6% (classes); M2: fib -9.2%, generators -5.0%, classes -3.8% |
 
 ### Releasing a number or string frees it at once
 
@@ -1405,6 +1406,23 @@ eight code layouts: dicts -1.6%, the rest within 0.6%, except sort
 (-1.7%) and classes, which does not run `binary` (+0.4%; +1.2% on a busier
 machine, where shifting the code after `binary` by the same 192 bytes
 alone measured +0.3%).
+
+### A Python call enters and leaves its frame inline
+
+A plain call made four C calls besides running its body: `kept_env`,
+`open_locals`, `enter_frame` and `leave_frame`, each saving and
+restoring registers for a few loads and stores. Each now has an inline
+fast path, and what is rare moves to a function of its own: reaching the
+recursion limit or growing the frame array (`frame_room`), a trace, an
+error or a frame object on the way out (`leave_traced_frame`), and a new
+environment's keys (`new_locals`). Leaving tests `watch`, which every
+trace or profile function sets, instead of both settings. Instructions
+(gcc): fib -5.4%, generators -4.2%, classes -2.6%. Wall time averaged
+over eight code layouts: fib -9.2%, generators -5.0%, classes -3.8%, the
+rest within 0.5% except dicts, which makes no Python call and runs the
+same instructions (821.2 M), +0.5% to +0.6% in three runs from the code
+that follows the call path moving; aligning `store_slow`, the one hot
+unaligned function it runs there, did not change it.
 
 ### A profile-guided build
 
