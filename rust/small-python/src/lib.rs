@@ -314,22 +314,12 @@ unsafe extern "C" fn write_output(data: *mut c_void, text: *const c_char, n: usi
     }
 }
 
-extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-}
-
-unsafe extern "C" fn load_module(data: *mut c_void, name: *const c_char) -> *mut c_char {
+unsafe extern "C" fn load_module(c: *mut ffi::SPYContext, data: *mut c_void, name: *const c_char) -> *mut ffi::SPYValue {
     let hooks = &*data.cast::<Hooks>();
     let name = CStr::from_ptr(name).to_string_lossy();
     let source = catch_unwind(AssertUnwindSafe(|| hooks.loader.borrow_mut().as_mut().and_then(|load| load(&name))));
     let Ok(Some(source)) = source else { return std::ptr::null_mut() };
-    // The engine frees the source with free().
-    let copy = malloc(source.len() + 1).cast::<u8>();
-    if !copy.is_null() {
-        std::ptr::copy_nonoverlapping(source.as_ptr(), copy, source.len());
-        *copy.add(source.len()) = 0;
-    }
-    copy.cast()
+    ffi::spy_bytes(c, source.as_ptr().cast(), source.len())
 }
 
 /// Text for the engine's own messages: an interior NUL ends it.

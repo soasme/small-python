@@ -385,7 +385,7 @@ static void scan(Build *b, Module *m, const char *package) {
     if (file) fclose(file);
     if (!m->source) { fprintf(stderr, "spyc: error: cannot read %s\n", m->path); b->errors++; return; }
     m->bytes = strlen(m->source);
-    SPYValue *unit = parse(b->c, m->source, m->path);
+    SPYValue *unit = parse(b->c, m->source, m->bytes, m->path);
     if (!unit) {
         fprintf(stderr, "%s:%zu: error: %s\n", m->path, spy_error_line(b->c), spy_error_display(b->c));
         spy_clear_error(b->c);
@@ -676,19 +676,15 @@ int main(int argc, char **argv) {
         put(&out, ", %s, sizeof %s},\n", m->array, m->array);
     }
     put(&out, "    {NULL, NULL, 0}\n};\n");
-    put(&out, "/* A SPYModuleLoader over the bundled modules: a malloc copy of the\n"
-              " * source the engine asks for by name, or NULL. */\n"
-              "%schar *%s(void *data, const char *name) {\n"
+    put(&out, "/* A SPYModuleLoader over the bundled modules: the source the engine\n"
+              " * asks for by name, as bytes, or NULL. */\n"
+              "%sSPYValue *%s(SPYContext *c, void *data, const char *name) {\n"
               "    size_t low = 0, high = sizeof modules / sizeof *modules - 1;\n"
               "    (void)data;\n"
               "    while (low < high) {\n"
               "        size_t middle = low + (high - low) / 2;\n"
               "        int order = strcmp(name, modules[middle].name);\n"
-              "        if (!order) {\n"
-              "            char *source = malloc(modules[middle].size);\n"
-              "            if (source) memcpy(source, modules[middle].source, modules[middle].size);\n"
-              "            return source;\n"
-              "        }\n"
+              "        if (!order) return spy_bytes(c, modules[middle].source, modules[middle].size - 1);\n"
               "        if (order < 0) high = middle; else low = middle + 1;\n"
               "    }\n"
               "    return NULL;\n}\n", bare ? "" : "static ", bare ? loader : "load");

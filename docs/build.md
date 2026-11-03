@@ -294,7 +294,7 @@ static const struct { const char *name, *source; size_t size; } modules[] = {
     {"pkg.__init__", m1, sizeof m1 - 1},
     {"pkg.sub", m2, sizeof m2 - 1},
 };
-static char *load(void *data, const char *name) { /* binary search, malloc copy */ }
+static SPYValue *load(SPYContext *c, void *data, const char *name) { /* binary search, spy_bytes */ }
 int main(void) {
     /* spy_context_new, the -M modules, output callbacks, as today */
     spy_set_module_loader(c, load, NULL);
@@ -316,7 +316,7 @@ them:
 ```c
 const char spy_game[] = {...};                   /* game.py */
 const char spy_level[] = {...};                  /* level.py, a second entry */
-char *spy_game_load(void *data, const char *name);  /* a SPYModuleLoader; data is unused */
+SPYValue *spy_game_load(SPYContext *c, void *data, const char *name);  /* a SPYModuleLoader; data is unused */
 ```
 
 The host installs the loader and runs an entry:

@@ -7990,8 +7990,8 @@ static int caller_future_flags(SPYContext *c) {
     return unit && unit->type == V_UNIT ? unit->as.unit.future_flags : 0;
 }
 static SPYValue *decode_source(SPYContext *, const char *, size_t, const char *);
-static SPYValue *parse(SPYContext *c, const char *source, const char *filename) {
-    SPYValue *text = decode_source(c, source, strlen(source), filename);
+static SPYValue *parse(SPYContext *c, const char *source, size_t len, const char *filename) {
+    SPYValue *text = decode_source(c, source, len, filename);
     SPYValue *unit = text ? parse_source(c, text->as.string.data, filename, NULL) : NULL;
     spy_release(text);
     return unit;
@@ -16130,22 +16130,23 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
             spy_release(parent); return errorf(c, "ModuleNotFoundError", "parent of '%s' is not a package", name);
         }
     }
-    char *source = NULL;
+    SPYValue *source = NULL;
     int package = 0, namespace = 0;
     Buffer filename = {.ctx = c};
     if (!init) {
         Buffer init = {.ctx = c};
-        if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c->loader_data, init.data);
+        if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c, c->loader_data, init.data);
         mem_free(init.data);
         package = source != NULL;
-        if (!source && !c->error_type[0]) source = c->loader(c->loader_data, name);
+        if (!source && !c->error_type[0]) source = c->loader(c, c->loader_data, name);
         if (!source && !c->error_type[0]) {
             Buffer probe = {.ctx = c};
-            char *marker = puts_buffer(&probe, name) || puts_buffer(&probe, ".__namespace__") ? NULL : c->loader(c->loader_data, probe.data);
+            SPYValue *marker = puts_buffer(&probe, name) || puts_buffer(&probe, ".__namespace__") ? NULL : c->loader(c, c->loader_data, probe.data);
             mem_free(probe.data);
             package = namespace = marker != NULL;
-            free(marker);
+            spy_release(marker);
         }
+        if (source && source->type != SPY_BYTES) errorf(c, "TypeError", "module loader returned %s, not bytes", type_name(source));
         if (!source && !namespace) {
             spy_release(parent);
             if (c->error_type[0]) return NULL;
@@ -16159,11 +16160,11 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
         }
         puts_buffer(&filename, package ? "/__init__.py" : ".py");
     }
-    SPYValue *unit = c->error_type[0] || init || namespace ? NULL : parse(c, source, filename.data);
+    SPYValue *unit = c->error_type[0] || init || namespace ? NULL : parse(c, source->as.string.data, source->as.string.len, filename.data);
     /* __file__ is the loader-relative name that tracebacks show. */
     SPYValue *file = unit ? spy_string(c, filename.data, filename.len) : NULL;
     mem_free(filename.data);
-    free(source);
+    spy_release(source);
     if (!unit && !init && !namespace) { spy_release(parent); return NULL; }
     if (unit && !file) { spy_release(unit); spy_release(parent); return NULL; }
     SPYValue *module = value_new(c, SPY_MODULE);
@@ -16241,7 +16242,7 @@ static SPYValue *load_intrinsics(SPYContext *c) {
     Buffer source = {.ctx = c};
     for (size_t i = 0; !failed && i < sizeof(intrinsics_source) / sizeof(*intrinsics_source); i++)
         failed = puts_buffer(&source, intrinsics_source[i]);
-    SPYValue *unit = failed ? NULL : parse(c, source.data, "<intrinsics>");
+    SPYValue *unit = failed ? NULL : parse(c, source.data, source.len, "<intrinsics>");
     mem_free(source.data);
     if (!unit) { spy_release(module); return NULL; }
     Frame frame = {module, unit, 0};
@@ -28049,7 +28050,7 @@ size_t spy_steps_used(const SPYContext *c) {
 void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c);
-    SPYValue *unit = parse(c, source, filename ? filename : "<string>");
+    SPYValue *unit = parse(c, source, strlen(source), filename ? filename : "<string>");
     if (!unit) return NULL;
     Frame frame = {c->globals, unit, interactive};
     Result result = execute_module(c, &frame);
@@ -28146,13 +28147,18 @@ static SPYValue *input_builtin(SPYContext *c, size_t argc, SPYValue *const *argv
         if (status || c->error_type[0]) return NULL;
         if (output_flush(c, 0)) return NULL;
     }
-    char *line = c->read_line ? c->read_line(c->read_data) : NULL;
+    SPYValue *line = c->read_line ? c->read_line(c, c->read_data) : NULL;
     if (!line) return c->error_type[0] ? NULL : spy_error(c, "EOFError", "EOF when reading a line");
-    size_t len = strlen(line);
-    if (len && line[len - 1] == '\n') len--;
-    if (len && line[len - 1] == '\r') len--;
-    SPYValue *result = spy_string(c, line, len);
-    free(line);
+    if (line->type != SPY_STRING) {
+        errorf(c, "TypeError", "input reader returned %s, not str", type_name(line));
+        spy_release(line); return NULL;
+    }
+    size_t len = line->as.string.len;
+    if (len && line->as.string.data[len - 1] == '\n') len--;
+    if (len && line->as.string.data[len - 1] == '\r') len--;
+    if (len == line->as.string.len) return line;
+    SPYValue *result = spy_string(c, line->as.string.data, len);
+    spy_release(line);
     return result;
 }
 static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
@@ -28381,7 +28387,7 @@ int spy_exec_module(SPYContext *c, SPYValue *module, const char *source, const c
     if (!same_context(c, module)) return -1;
     if (module->type != SPY_MODULE) { spy_error(c, "TypeError", "spy_exec_module() requires a module"); return -1; }
     enter(c);
-    SPYValue *unit = parse(c, source, filename ? filename : "<string>");
+    SPYValue *unit = parse(c, source, strlen(source), filename ? filename : "<string>");
     Frame frame = {module, unit, 0};
     Result result = unit ? execute_module(c, &frame) : (Result){FLOW_ERROR, NULL};
     spy_release(result.value); spy_release(unit);

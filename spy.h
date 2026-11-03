@@ -162,13 +162,13 @@ SPYValue *spy_error_value(SPYContext *);
 
 /* == Modules == */
 
-/* Return malloc-allocated, NUL-terminated source bytes, or NULL if absent.
- * The runtime decodes encoding declarations and frees source.
- * For a module "pkg.mod", it probes "pkg.mod.__init__" (package) first,
- * then "pkg.mod", then "pkg.mod.__namespace__", where any non-NULL result
- * makes a namespace package (PEP 420) without source. The host controls
- * search paths and source storage. */
-typedef char *(*SPYModuleLoader)(void *, const char *);
+/* Return the module's source as an owned bytes value, or NULL if absent (or
+ * with an error set, which fails the import). The runtime decodes encoding
+ * declarations. For a module "pkg.mod", it probes "pkg.mod.__init__"
+ * (package) first, then "pkg.mod", then "pkg.mod.__namespace__", where any
+ * non-NULL result makes a namespace package (PEP 420) without source. The
+ * host controls search paths and source storage. */
+typedef SPYValue *(*SPYModuleLoader)(SPYContext *, void *, const char *);
 void spy_set_module_loader(SPYContext *, SPYModuleLoader, void *);
 /* Register a module, as QuickJS's JS_NewCModule. It is found before the
  * loader; its first import creates the module object, with __name__,
@@ -198,10 +198,10 @@ void spy_set_output(SPYContext *, SPYWrite, SPYFlush, void *);
 /* Output for error text (the standard layer's sys.stderr), with its flush;
  * shares the output callbacks until set. */
 void spy_set_error_output(SPYContext *, SPYWrite, SPYFlush, void *);
-/* Return a malloc-allocated, NUL-terminated UTF-8 line for input(), with or
- * without its line ending, or NULL at the end of input (EOFError). Without a
+/* Return a line for input() as an owned str, with or without its line ending,
+ * or NULL at the end of input (EOFError) or with an error set. Without a
  * reader, input() raises EOFError. */
-typedef char *(*SPYReadLine)(void *);
+typedef SPYValue *(*SPYReadLine)(SPYContext *, void *);
 void spy_set_input(SPYContext *, SPYReadLine, void *);
 /* open() reaches only host directories mounted with spy_mount, at an absolute
  * path (NULL: the directory's own resolved path); paths are resolved inside

@@ -86,8 +86,8 @@ pub type SPYNativeKeywords =
     unsafe extern "C" fn(*mut SPYContext, usize, *const *mut SPYValue, *mut SPYValue, *mut c_void) -> *mut SPYValue;
 pub type SPYWrite = unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int;
 pub type SPYFlush = unsafe extern "C" fn(*mut c_void) -> c_int;
-pub type SPYModuleLoader = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
-pub type SPYReadLine = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
+pub type SPYModuleLoader = unsafe extern "C" fn(*mut SPYContext, *mut c_void, *const c_char) -> *mut SPYValue;
+pub type SPYReadLine = unsafe extern "C" fn(*mut SPYContext, *mut c_void) -> *mut SPYValue;
 pub type SPYModuleInit = unsafe extern "C" fn(*mut SPYContext, *mut SPYValue) -> c_int;
 
 extern "C" {

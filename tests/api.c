@@ -35,22 +35,21 @@ static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     if (argc != 1) return spy_error(c, "TypeError", "call_back expects one argument");
     return spy_call(c, argv[0], 0, NULL);
 }
-static char *loader(void *data, const char *name) {
+static SPYValue *loader(SPYContext *c, void *data, const char *name) {
     int *calls = data;
     (*calls)++;
+    if (!strcmp(name, "text")) return spy_string(c, "x = 1", 5);
     if (strcmp(name, "sample")) return NULL;
     const char *source = "answer = 42\ndef add(x):\n    return x + answer\n";
-    char *copy = malloc(strlen(source) + 1);
-    if (copy) strcpy(copy, source);
-    return copy;
+    return spy_bytes(c, source, strlen(source));
 }
 /* Lines for input(), from a NULL-terminated list. */
-static char *read_line(void *data) {
+static SPYValue *read_line(SPYContext *c, void *data) {
     const char ***lines = data;
     if (!**lines) return NULL;
-    char *copy = malloc(strlen(**lines) + 1);
-    if (copy) strcpy(copy, *(*lines)++);
-    return copy;
+    const char *line = *(*lines)++;
+    if (!strcmp(line, "bytes")) return spy_bytes(c, line, strlen(line));
+    return spy_string(c, line, strlen(line));
 }
 static int64_t integer(SPYContext *c, SPYValue *v) {
     int64_t n;
@@ -311,11 +310,13 @@ int main(void) {
     spy_clear_error(c);
     /* input() writes its prompt, flushes, and strips the line ending. */
     assert(spy_exec(c, "input()", "input.py") == -1 && !strcmp(spy_error_type(c), "EOFError"));
-    const char *lines[] = {"first\n", "second", NULL}, **cursor = lines;
+    const char *lines[] = {"first\n", "second", "bytes", NULL}, **cursor = lines;
     spy_set_input(c, read_line, &cursor);
     o.len = 0; o.flushes = 0;
     execute(c, "assert input('> ') == 'first'\nassert input() == 'second'\n");
     assert(!strcmp(o.text, "> ") && o.flushes == 3);
+    assert(spy_exec(c, "input()", "input.py") == -1 && !strcmp(spy_error_message(c), "input reader returned bytes, not str"));
+    spy_clear_error(c);
     assert(spy_exec(c, "input()", "input.py") == -1 && !strcmp(spy_error_type(c), "EOFError"));
     spy_set_input(c, NULL, NULL);
     assert(!spy_define(c, "twice", twice, NULL));
@@ -730,6 +731,9 @@ int main(void) {
         spy_collect(c);
         assert(spy_live_values(c) == display_baseline);
     }
+    assert(spy_exec(c, "import text", "api.py") == -1);
+    assert(!strcmp(spy_error_message(c), "module loader returned str, not bytes"));
+    spy_clear_error(c);
 
     /* The suggestion tokenizes the failing lines as tokenize does: numbers,
      * prefixed, escaped and triple-quoted strings, comments, continuations

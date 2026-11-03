@@ -474,7 +474,7 @@ func goWrite(h C.uintptr_t, text *C.char, n C.size_t) (status C.int) {
 }
 
 //export goLoad
-func goLoad(h C.uintptr_t, name *C.char) (source *C.char) {
+func goLoad(c *C.SPYContext, h C.uintptr_t, name *C.char) (source *C.SPYValue) {
 	rt := cgo.Handle(h).Value().(*Runtime)
 	defer func() {
 		if recover() != nil {
@@ -485,6 +485,7 @@ func goLoad(h C.uintptr_t, name *C.char) (source *C.char) {
 	if !ok {
 		return nil
 	}
-	// The engine frees the source with free().
-	return C.CString(text)
+	s := C.CString(text)
+	defer C.free(unsafe.Pointer(s))
+	return C.spy_bytes(c, unsafe.Pointer(s), C.size_t(len(text)))
 }

@@ -11,7 +11,7 @@
 
 typedef struct { char *text; size_t len; } Output;
 typedef struct { int argc; char **argv; } ModulePaths;
-static char *load_module(void *data, const char *name) {
+static SPYValue *load_module(SPYContext *c, void *data, const char *name) {
     ModulePaths *paths = data;
     size_t len = strlen(name);
     char *module = NULL;
@@ -21,13 +21,13 @@ static char *load_module(void *data, const char *name) {
         memcpy(module, name, len - 9); module[len - 9] = 0;
     }
     for (int i = 1; i < paths->argc; i += 2) {
-        char *source = host_load_module(paths->argv[i + 1], name);
+        SPYValue *source = host_load_module(c, paths->argv[i + 1], name);
         if (source) { free(module); return source; }
         /* An earlier plain module shadows a later package. The core probes
          * package.__init__ first, then retries the plain module name. */
         if (module) {
-            source = host_load_module(paths->argv[i + 1], module);
-            if (source) { free(source); break; }
+            source = host_load_module(c, paths->argv[i + 1], module);
+            if (source) { spy_release(source); break; }
         }
     }
     free(module);

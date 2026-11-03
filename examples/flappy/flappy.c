@@ -215,7 +215,7 @@ static int raylib_init(SPYContext *c, SPYValue *module) {
 /* The bundle spyc -c -N flappy writes: the entry's source and a loader
  * for every module it imports. */
 extern const char spy_flappy[];
-char *flappy_load(void *, const char *);
+SPYValue *flappy_load(SPYContext *, void *, const char *);
 
 int main(void) {
     SPYContext *c = spy_context_new();

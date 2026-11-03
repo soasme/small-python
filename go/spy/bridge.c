@@ -20,8 +20,8 @@ static int write_output(void *rt, const char *text, size_t n) {
     return goWrite((uintptr_t)rt, (char *)text, n);
 }
 
-static char *load_module(void *rt, const char *name) {
-    return goLoad((uintptr_t)rt, (char *)name);
+static SPYValue *load_module(SPYContext *c, void *rt, const char *name) {
+    return goLoad(c, (uintptr_t)rt, (char *)name);
 }
 
 void spy_go_bind(SPYContext *c, uintptr_t rt) {

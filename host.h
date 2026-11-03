@@ -36,7 +36,7 @@ static char *host_read(FILE *file) {
 
 /* The core probes package.__init__ before package, then package.__namespace__
  * for a directory without __init__.py (PEP 420). Search policy stays here. */
-static inline char *host_load_module(void *data, const char *name) {
+static inline SPYValue *host_load_module(SPYContext *c, void *data, const char *name) {
     const char *directory = data;
     size_t prefix = strlen(directory), len = strlen(name);
     static const char namespace_suffix[] = ".__namespace__";
@@ -58,14 +58,16 @@ static inline char *host_load_module(void *data, const char *name) {
         path[prefix + len] = 0;
         int found = !stat(path, &info) && S_ISDIR(info.st_mode);
         free(path);
-        return found ? calloc(1, 1) : NULL;
+        return found ? spy_none(c) : NULL;
     }
     memcpy(path + prefix + len, ".py", 4);
     FILE *file = fopen(path, "rb");
     free(path);
     if (!file) return NULL;
     char *source = host_read(file);
-    fclose(file); return source;
+    fclose(file);
+    SPYValue *bytes = source ? spy_bytes(c, source, strlen(source)) : NULL;
+    free(source); return bytes;
 }
 
 /* Console callbacks and the process status shared by the spy command and
@@ -75,7 +77,7 @@ static inline int host_output(void *data, const char *s, size_t n) {
 }
 static inline int host_flush(void *data) { return fflush(data); }
 /* One line of standard input for input(), or NULL at its end. */
-static inline char *host_read_line(void *data) {
+static inline SPYValue *host_read_line(SPYContext *c, void *data) {
     size_t len = 0, size = 128;
     char *line = malloc(size);
     int ch;
@@ -88,9 +90,8 @@ static inline char *host_read_line(void *data) {
         line[len++] = (char)ch;
         if (ch == '\n') break;
     }
-    if (line && !len) { free(line); return NULL; }
-    if (line) line[len] = 0;
-    return line;
+    SPYValue *text = line && len ? spy_string(c, line, len) : NULL;
+    free(line); return text;
 }
 static inline void host_report(SPYContext *c) {
     fprintf(stderr, "%s:%zu: %s: %s\n", spy_error_filename(c), spy_error_line(c),

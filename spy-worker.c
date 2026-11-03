@@ -631,7 +631,7 @@ static int output(void *data, const char *s, size_t n) {
     spy_release(v);
     return v ? 0 : -1;
 }
-static char *load(void *data, const char *name) {
+static SPYValue *load(SPYContext *c, void *data, const char *name) {
     (void)data;
     Buffer b = {0};
     begin(&b, LOAD);
@@ -639,13 +639,11 @@ static char *load(void *data, const char *name) {
     SPYValue *v = request(&b);
     if (!v || spy_type(v) == SPY_NONE) { spy_release(v); return NULL; }
     size_t n;
-    const char *s = spy_type(v) == SPY_STRING ? spy_as_string(w.c, v, &n) : NULL;
+    const char *s = spy_type(v) == SPY_STRING ? spy_as_string(c, v, &n) : NULL;
     if (!s) violation();
-    char *copy = malloc(n + 1);
-    if (!copy) exit(1);
-    memcpy(copy, s, n + 1);
+    SPYValue *source = spy_bytes(c, s, n);
     spy_release(v);
-    return copy;
+    return source;
 }
 
 /* A registered module: its members, then its source with filename <name>. */

@@ -7,6 +7,9 @@
   - spy_set_output() and spy_set_error_output() take the stream's flush
     callback; spy_set_flush() is removed, and sys.stderr.flush() reaches
     the error stream's flush
+  - SPYModuleLoader and SPYReadLine receive the context and return owned
+    values (bytes source, str line) instead of malloc buffers, so host
+    and engine never share an allocator
 
 2026-11-03 0.5.0:
 

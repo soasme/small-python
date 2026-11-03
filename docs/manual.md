@@ -648,8 +648,9 @@ semantics. The parser, evaluator, value storage, and collector are C11.
 
 ### 3.2 Modules
 
-The core accepts a host module-loader callback. The callback returns an owned,
-`malloc`-allocated source buffer; the engine frees it after parsing. Each
+The core accepts a host module-loader callback. The callback receives the
+context and returns the source as an owned bytes value, which the engine
+decodes and parses like a file (PEP 263, BOM, null-byte check). Each
 context caches modules by name. A module is cached before execution to support
 simple circular imports. Failed initialization removes that module's cache
 entry. Each source module has a namespace, `__name__`, and `__package__`.
@@ -851,9 +852,9 @@ callbacks.
 which writes CPython's traceback display to `sys.stderr`; the `spy` command
 reports uncaught exceptions with it, on standard error. `print(file=...)` uses the Python object's
 `write` and `flush` methods.
-`spy_set_input` installs the line reader behind `input()`: it returns a
-malloc-allocated UTF-8 line, with or without its line ending, or NULL at the
-end of input. Without a reader, `input()` raises `EOFError`; the `spy` command
+`spy_set_input` installs the line reader behind `input()`: it receives the
+context and returns an owned str, with or without its line ending, or NULL at
+the end of input. Without a reader, `input()` raises `EOFError`; the `spy` command
 reads standard input.
 
 `spy_set_optimize` sets the optimization level (PLS-315 B.6), as `python -O`
