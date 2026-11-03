@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.TreeMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 class InterpreterTest {
@@ -257,6 +259,7 @@ class InterpreterTest {
     }
 
     @Test
+    @DisabledOnOs(value = OS.WINDOWS, disabledReason = "the engine has no file system support on Windows")
     void mounts(@TempDir Path dir) throws IOException {
         Files.writeString(dir.resolve("note.txt"), "from the host");
         py.mount(dir, "/data", true);

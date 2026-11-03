@@ -288,7 +288,8 @@ make java-native    # this platform's JNI library and worker, into java/*/native
 `$PATH`. The tests are the ports of the Go module's: conversion in both
 directions, records and maps, exceptions and their lines, host functions
 with errors, keywords, and `Error`s, modules, the loader and output, limits,
-the policy, mounts, threads taking turns, values of another interpreter,
+the policy, mounts (not on Windows, where the engine has no file system
+support), threads taking turns, values of another interpreter,
 closed interpreters, and values the garbage collector releases; for the
 worker, nested callbacks, causes, object operations and handle release, a
 timeout that excludes host time, workers killed by `SIGSEGV`, `SIGABRT`,

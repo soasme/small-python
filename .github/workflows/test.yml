@@ -69,8 +69,8 @@ jobs:
           java-version: '17'
       - run: make test-java
 
-  # The Python package and the Java artifacts on Windows; the workers and the
-  # JNI library are built with the runner's MinGW-w64 GCC (python/setup.py).
+  # The Python package on Windows; its worker is built with the runner's
+  # MinGW-w64 GCC (python/setup.py).
   windows:
     runs-on: windows-latest
     steps:
@@ -81,6 +81,13 @@ jobs:
       - run: gcc --version
       - run: pip install ./python
       - run: python -m unittest discover -s python/tests
+
+  # The Java artifacts on Windows, their JNI library and worker built with
+  # the runner's MinGW-w64 GCC.
+  windows-java:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
