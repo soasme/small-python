@@ -28064,7 +28064,9 @@ static int output_write(SPYContext *c, int error, const char *text, size_t n) {
     int own = error && c->error_write;
     SPYWrite write = own ? c->error_write : c->write;
     if (!write) { spy_error(c, "OSError", "no output callback installed"); return -1; }
-    if (c->output_limit && n > c->output_limit - c->output_used) return halt(c, SPY_STOP_OUTPUT);
+    /* A host function may have lowered the limit below what was written. */
+    if (c->output_limit && (c->output_used > c->output_limit || n > c->output_limit - c->output_used))
+        return halt(c, SPY_STOP_OUTPUT);
     c->output_used += n;
     if (!write(c, own ? c->error_data : c->write_data, text, n)) return 0;
     spy_error(c, "OSError", "output failed");

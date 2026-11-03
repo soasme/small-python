@@ -22,6 +22,14 @@ static int flush_output(SPYContext *c, void *data) {
     if (o->fail_flush == 2) spy_error(c, "BrokenPipeError", "host pipe closed");
     return o->fail_flush;
 }
+/* Sets the output limit from inside a call. */
+static SPYValue *limit_output(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)argc; (void)data;
+    int64_t n;
+    if (spy_as_int(c, argv[0], &n) || spy_set_limit(c, SPY_LIMIT_OUTPUT, (size_t)n)) return NULL;
+    return spy_none(c);
+}
+
 static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)data;
     int64_t n;
@@ -883,6 +891,11 @@ int main(void) {
     o.len = 0;
     execute(c, "import sys\nsys.stdout.write('1234567')");
     assert(!strcmp(o.text, "1234567"));
+    /* A limit lowered below what the call printed stops the next write. */
+    assert(!spy_define(c, "limit_output", limit_output, NULL) && !spy_set_limit(c, SPY_LIMIT_OUTPUT, 0));
+    o.len = 0;
+    assert(spy_exec(c, "print('12')\nlimit_output(1)\nprint('3')", "lowered.py") == -1);
+    assert(!strcmp(o.text, "12\n") && spy_stopped(c) == SPY_STOP_OUTPUT);
     assert(!spy_set_limit(c, SPY_LIMIT_OUTPUT, 0));
     assert(!spy_set_limit(c, SPY_LIMIT_RECURSION, 40) && spy_get_limit(c, SPY_LIMIT_RECURSION) == 40);
     assert(spy_exec(c, "def down(n): return down(n + 1)\ndown(0)", "recursion.py") == -1 && !strcmp(spy_error_type(c), "RecursionError"));
