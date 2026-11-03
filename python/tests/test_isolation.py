@@ -191,16 +191,16 @@ class LimitTest(unittest.TestCase):
 
         def policy(event, args):
             events.append((event, args))
-            if event == "open":
-                raise PermissionError("no files")
+            if args != ("6 * 7",):
+                raise PermissionError("no source")
 
         with Runtime(policy=policy) as rt:
             self.assertEqual(rt.eval("eval('6 * 7')"), 42)
             with self.assertRaises(Error) as cm:
-                rt.exec("open('/etc/passwd')")
-            self.assertEqual((cm.exception.type, cm.exception.message), ("PermissionError", "no files"))
+                rt.exec("exec('x = 1')")
+            self.assertEqual((cm.exception.type, cm.exception.message), ("PermissionError", "no source"))
             self.assertIsInstance(cm.exception.__cause__, PermissionError)
-            self.assertEqual(events, [("exec", ("6 * 7",)), ("open", ("/etc/passwd", "r"))])
+            self.assertEqual(events, [("exec", ("6 * 7",)), ("exec", ("x = 1",))])
             with self.assertRaises(Error) as cm:
                 rt.exec("exec('\\udc80')")
             self.assertEqual(cm.exception.type, "UnicodeEncodeError")
