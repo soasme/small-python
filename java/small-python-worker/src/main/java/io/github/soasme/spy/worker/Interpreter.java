@@ -383,6 +383,9 @@ public final class Interpreter implements AutoCloseable {
         if (closed) {
             return;
         }
+        if (callbacks > 0) {
+            throw new IllegalStateException("cannot close the interpreter while a host function of it is running");
+        }
         closed = true;
         if (lost == null) {
             to.offer(CLOSE);
@@ -474,6 +477,7 @@ public final class Interpreter implements AutoCloseable {
         }
         depth++;
         try {
+            notice();
             byte[] data = Wire.message(kind, this, fields);
             if (data.length - 4 > limit) {
                 throw new IllegalArgumentException("message exceeds the limit");
@@ -511,16 +515,23 @@ public final class Interpreter implements AutoCloseable {
         }
     }
 
-    /** Sends data, after a notice of the handles released since the last message. */
-    private void send(byte[] data) {
+    /**
+     * Sends the notice of the handles released since the last one. It goes
+     * before the next message is encoded: a handle in that message stays
+     * reachable until then, so its release comes in a later notice.
+     */
+    private void notice() {
         List<Object> ids = new ArrayList<>();
         for (Long id; (id = released.poll()) != null; ) {
             ids.add(id);
         }
+        if (!ids.isEmpty()) {
+            send(Wire.message(RELEASE, this, new PyTuple(ids)));
+        }
+    }
+
+    private void send(byte[] data) {
         try {
-            if (!ids.isEmpty()) {
-                offer(Wire.message(RELEASE, this, new PyTuple(ids)));
-            }
             offer(data);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -649,6 +660,7 @@ public final class Interpreter implements AutoCloseable {
         if (lost != null) {
             throw lost;
         }
+        notice();
         Throwable failed = outcome.failed();
         byte[] reply = null;
         if (failed == null) {

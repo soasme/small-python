@@ -103,7 +103,9 @@ send output to `System.out`, as the worker does.
 Every method of an interpreter and of its values is `synchronized` on the
 interpreter: a context is never entered by two threads at once, and a
 host function, which runs on the calling thread, may call back into it.
-After `close` every operation throws `IllegalStateException`.
+After `close` every operation throws `IllegalStateException`. `close`
+itself throws it from a host function, module initializer, loader,
+output, or policy of the interpreter, as the engine is running beneath it.
 
 `spy-jni.c` maps each C function to one static native method of the
 package-private `Native` class, passing contexts and values as `long`
@@ -121,6 +123,12 @@ queues the reference when the object becomes unreachable, and the
 interpreter releases the queue on the thread of its next operation: the
 context is never touched by the cleaner's thread. After `close` the queue
 is dropped, because `spy_context_free` frees every value itself.
+
+A method of a `PyObject` passes its pointer to the engine, and a host
+function the engine calls may release the queue; so every method keeps its
+object reachable (`Reference.reachabilityFence`) until it returns, or a
+temporary such as `py.eval("f").call(g)` could be released while it runs.
+`tests/tla/SpyJava.tla` models these lifetimes.
 
 Its methods are `as`, `toJava`, `getAttr`, `setAttr`, `getItem`, `setItem`,
 `call`, `callKeywords`, `iterator` (it is an `Iterable<PyObject>`),
@@ -224,8 +232,8 @@ Operations are `synchronized` on the interpreter. A host function is
 `(rt, args, kwargs) -> result`, with the positional arguments as a
 `List<Object>` and the keyword arguments as a `Map<String, Object>`;
 through the interpreter it receives it may make nested requests, but
-`eval` and `exec` throw `IllegalStateException` there. `close` closes the
-worker's input and waits up to a second for it to exit.
+`eval`, `exec`, and `close` throw `IllegalStateException` there. `close`
+closes the worker's input and waits up to a second for it to exit.
 
 ### 4.2 Values
 
@@ -242,7 +250,10 @@ what the worker sends. Strings are as in §3.3: a lone surrogate is a lone
 
 `PyObject` is a handle to an engine value. When the garbage collector finds
 one unreachable, a `Cleaner` queues its id, released with the next message
-(`RELEASE`). Handles are equal only to themselves.
+(`RELEASE`). The notice is sent before that message is encoded, so a handle
+the message carries, reachable until then, is released only after it.
+Handles are equal only to themselves. `tests/tla/SpyJavaWorker.tla` models
+the turns, handle releases, timeouts, and closing.
 
 ### 4.3 Errors
 
@@ -290,10 +301,11 @@ directions, records and maps, exceptions and their lines, host functions
 with errors, keywords, and `Error`s, modules, the loader and output, limits,
 the policy, mounts (not on Windows, where the engine has no file system
 support), threads taking turns, values of another interpreter,
-closed interpreters, and values the garbage collector releases; for the
+closed interpreters, closing from a host function, and values the garbage
+collector releases, including one whose method is still running; for the
 worker, nested callbacks, causes, object operations and handle release, a
 timeout that excludes host time, workers killed by `SIGSEGV`, `SIGABRT`,
-and `SIGKILL`, an `Error` in a host function, a worker that cannot start,
+and `SIGKILL`, an `Error` or `close` in a host function, a worker that cannot start,
 and the sealed sandbox on macOS. Both check that the engine's version is
 the artifacts'.
 

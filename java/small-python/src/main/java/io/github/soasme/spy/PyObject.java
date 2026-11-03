@@ -1,9 +1,11 @@
 package io.github.soasme.spy;
 
+import java.lang.ref.Reference;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.function.Supplier;
 
 /**
  * A reference to an engine value. The garbage collector releases it once it
@@ -25,6 +27,21 @@ public final class PyObject implements Iterable<PyObject> {
         return () -> rt.drop(ptr);
     }
 
+    /**
+     * f's result, on the runtime. The engine borrows ptr until f returns, and
+     * a host function it calls may release what the collector dropped, so
+     * this value stays reachable until then (tests/tla/SpyJava.tla).
+     */
+    private <T> T with(Supplier<T> f) {
+        synchronized (rt) {
+            try {
+                return f.get();
+            } finally {
+                Reference.reachabilityFence(this);
+            }
+        }
+    }
+
     /** The runtime the value belongs to. */
     public Interpreter runtime() {
         return rt;
@@ -32,21 +49,21 @@ public final class PyObject implements Iterable<PyObject> {
 
     /** Whether the value is None. */
     public boolean isNone() {
-        synchronized (rt) {
+        return with(() -> {
             rt.enter();
             return Native.type(ptr) == Native.NONE;
-        }
+        });
     }
 
     /** Python truth, as {@code bool(value)}. */
     public boolean truth() {
-        synchronized (rt) {
+        return with(() -> {
             int truth = Native.truth(rt.enter(), ptr);
             if (truth < 0) {
                 throw Native.takeError(rt.context());
             }
             return truth != 0;
-        }
+        });
     }
 
     /**
@@ -59,10 +76,10 @@ public final class PyObject implements Iterable<PyObject> {
      */
     @SuppressWarnings("unchecked") // a primitive type's Class<T> is that of its box
     public <T> T as(Class<T> type) {
-        synchronized (rt) {
+        return with(() -> {
             rt.enter();
             return (T) Convert.decode(rt, ptr, type);
-        }
+        });
     }
 
     /**
@@ -78,38 +95,37 @@ public final class PyObject implements Iterable<PyObject> {
 
     /** {@code getattr(value, name)}. */
     public PyObject getAttr(String name) {
-        synchronized (rt) {
-            return rt.wrap(Native.getAttr(rt.enter(), ptr, Interpreter.name(name)));
-        }
+        return with(() -> rt.wrap(Native.getAttr(rt.enter(), ptr, Interpreter.name(name))));
     }
 
     /** {@code setattr(value, name, item)}. */
     public void setAttr(String name, Object item) {
-        synchronized (rt) {
+        with(() -> {
             long i = rt.ref(item);
             try {
                 rt.check(Native.setAttr(rt.context(), ptr, Interpreter.name(name), i));
             } finally {
                 Native.release(i);
             }
-        }
+            return null;
+        });
     }
 
     /** {@code value[key]}. */
     public PyObject getItem(Object key) {
-        synchronized (rt) {
+        return with(() -> {
             long k = rt.ref(key);
             try {
                 return rt.wrap(Native.getItem(rt.context(), ptr, k));
             } finally {
                 Native.release(k);
             }
-        }
+        });
     }
 
     /** {@code value[key] = item}. */
     public void setItem(Object key, Object item) {
-        synchronized (rt) {
+        with(() -> {
             long k = rt.ref(key);
             try {
                 long i = rt.ref(item);
@@ -121,7 +137,8 @@ public final class PyObject implements Iterable<PyObject> {
             } finally {
                 Native.release(k);
             }
-        }
+            return null;
+        });
     }
 
     /** Calls the value with positional arguments. */
@@ -131,7 +148,7 @@ public final class PyObject implements Iterable<PyObject> {
 
     /** Calls the value with positional and keyword arguments. */
     public PyObject callKeywords(List<?> args, Map<String, ?> kwargs) {
-        synchronized (rt) {
+        return with(() -> {
             long[] argv = new long[args.size()];
             long keywords = 0;
             try {
@@ -147,61 +164,55 @@ public final class PyObject implements Iterable<PyObject> {
                 }
                 Native.release(keywords);
             }
-        }
+        });
     }
 
     /** Iterates the value as a for loop does; an exception ending the iteration is thrown from {@code hasNext}. */
     @Override
     public Iterator<PyObject> iterator() {
-        synchronized (rt) {
-            PyObject it = rt.wrap(Native.iter(rt.enter(), ptr));
-            return new Iterator<>() {
-                private PyObject next;
-                private boolean done;
+        PyObject it = with(() -> rt.wrap(Native.iter(rt.enter(), ptr)));
+        return new Iterator<>() {
+            private PyObject next;
+            private boolean done;
 
-                @Override
-                public boolean hasNext() {
-                    synchronized (rt) {
-                        if (next == null && !done) {
-                            long item = Native.next(rt.enter(), it.ptr);
-                            if (item != 0) {
-                                next = new PyObject(rt, item);
-                            } else {
-                                done = true;
-                                if (Native.errorPending(rt.context())) {
-                                    throw Native.takeError(rt.context());
-                                }
+            @Override
+            public boolean hasNext() {
+                return it.with(() -> {
+                    if (next == null && !done) {
+                        long item = Native.next(rt.enter(), it.ptr);
+                        if (item != 0) {
+                            next = new PyObject(rt, item);
+                        } else {
+                            done = true;
+                            if (Native.errorPending(rt.context())) {
+                                throw Native.takeError(rt.context());
                             }
                         }
-                        return next != null;
                     }
-                }
+                    return next != null;
+                });
+            }
 
-                @Override
-                public PyObject next() {
-                    if (!hasNext()) {
-                        throw new NoSuchElementException();
-                    }
-                    PyObject item = next;
-                    next = null;
-                    return item;
+            @Override
+            public PyObject next() {
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
                 }
-            };
-        }
+                PyObject item = next;
+                next = null;
+                return item;
+            }
+        };
     }
 
     /** {@code repr(value)}. */
     public String repr() {
-        synchronized (rt) {
-            return rt.wrap(Native.repr(rt.enter(), ptr)).as(String.class);
-        }
+        return with(() -> rt.wrap(Native.repr(rt.enter(), ptr)).as(String.class));
     }
 
     /** {@code str(value)}. */
     public String str() {
-        synchronized (rt) {
-            return rt.wrap(Native.str(rt.enter(), ptr)).as(String.class);
-        }
+        return with(() -> rt.wrap(Native.str(rt.enter(), ptr)).as(String.class));
     }
 
     /** {@code str(value)}, or a placeholder naming why it cannot be had. */

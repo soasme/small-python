@@ -227,6 +227,33 @@ class InterpreterTest {
     }
 
     @Test
+    void closingFromAHostFunctionIsRefused() {
+        py.define("shut", (rt, args) -> {
+            rt.close();
+            return null;
+        });
+        assertEquals("RuntimeError", raises(() -> py.exec("shut()")).getType());
+        assertEquals(2L, eval("1 + 1", Long.class));
+    }
+
+    @Test
+    void aValueOutlivesTheCallsOfItsOwnMethods() {
+        // The lambda's PyObject is unreachable once call() has its ptr;
+        // churn releases what the collector dropped while the call runs.
+        py.define("churn", (rt, args) -> {
+            for (int i = 0; i < 10; i++) {
+                System.gc();
+                Thread.sleep(5);
+                rt.collect();
+            }
+            return null;
+        });
+        for (int i = 0; i < 5; i++) {
+            assertEquals(List.of(0L, 1L, 2L), py.eval("lambda: (churn(), list(range(3)))[1]").call().as(List.class));
+        }
+    }
+
+    @Test
     void releasedValuesAreFreed() throws InterruptedException {
         py.exec("freed = []\nclass Box:\n    def __del__(self): freed.append(1)");
         for (int i = 0; i < 100; i++) {

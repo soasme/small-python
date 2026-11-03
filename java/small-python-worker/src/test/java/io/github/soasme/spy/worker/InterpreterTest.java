@@ -118,6 +118,11 @@ class InterpreterTest {
         assertEquals("key,other", py.eval("named(key=1, other=2)"));
         py.define("nested_eval", (rt, args, kwargs) -> rt.eval("1"));
         assertEquals("ValueError", raises(() -> py.eval("nested_eval()")).getType());
+        py.define("shut", (rt, args, kwargs) -> {
+            rt.close();
+            return null;
+        });
+        assertEquals("ValueError", raises(() -> py.eval("shut()")).getType());
         PyFunction twice = py.function("twice", (rt, args, kwargs) -> (Long) args.get(0) * 2);
         assertEquals(84L, py.callKeywords(twice, List.of(42L), Map.of()));
         assertEquals("twice", ((PyObject) py.eval("lambda f: f")).call(twice) instanceof PyObject f

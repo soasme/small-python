@@ -35,6 +35,8 @@ public final class Interpreter implements AutoCloseable {
     private ModuleLoader loader;
     private Policy policy;
     private final Map<String, ModuleInit> modules = new HashMap<>();
+    // The callbacks below that are running: the engine is running beneath them.
+    private int callbacks;
     // Values the garbage collector found unreachable, released on the next call.
     private final ConcurrentLinkedQueue<Long> released = new ConcurrentLinkedQueue<>();
 
@@ -66,9 +68,17 @@ public final class Interpreter implements AutoCloseable {
         return Native.version();
     }
 
-    /** Frees the context and every value in it. Closing again does nothing. */
+    /**
+     * Frees the context and every value in it. Closing again does nothing.
+     * Closing from a host function, module initializer, loader, output, or
+     * policy of this runtime throws {@link IllegalStateException}, as the
+     * engine is running beneath it.
+     */
     @Override
     public synchronized void close() {
+        if (callbacks > 0) {
+            throw new IllegalStateException("cannot close the runtime while it runs a host function");
+        }
         if (ctx != 0) {
             Native.contextFree(ctx);
             ctx = 0;
@@ -222,6 +232,7 @@ public final class Interpreter implements AutoCloseable {
     // the engine. None throws: a failure becomes the engine's exception.
 
     long callHost(HostFunction f, long[] argv, long keywords) {
+        callbacks++;
         try {
             List<PyObject> positional = new ArrayList<>(argv.length);
             for (long a : argv) {
@@ -238,10 +249,13 @@ public final class Interpreter implements AutoCloseable {
         } catch (Throwable e) {
             raise(e, "RuntimeError");
             return 0;
+        } finally {
+            callbacks--;
         }
     }
 
     int initModule(long module) {
+        callbacks++;
         try {
             PyObject m = new PyObject(this, Native.retain(module));
             String name = m.getAttr("__name__").as(String.class);
@@ -254,28 +268,37 @@ public final class Interpreter implements AutoCloseable {
         } catch (Throwable e) {
             raise(e, "RuntimeError");
             return -1;
+        } finally {
+            callbacks--;
         }
     }
 
     int write(String text) {
+        callbacks++;
         try {
             output.append(text);
             return 0;
         } catch (IOException | RuntimeException e) {
             return -1;
+        } finally {
+            callbacks--;
         }
     }
 
     String load(String name) {
+        callbacks++;
         try {
             return loader.load(name);
         } catch (Throwable e) {
             raise(e, "RuntimeError");
             return null;
+        } finally {
+            callbacks--;
         }
     }
 
     int policy(String event, long args) {
+        callbacks++;
         try {
             List<PyObject> items = new ArrayList<>();
             new PyObject(this, Native.retain(args)).forEach(items::add);
@@ -284,6 +307,8 @@ public final class Interpreter implements AutoCloseable {
         } catch (Throwable e) {
             raise(e, "PermissionError");
             return -1;
+        } finally {
+            callbacks--;
         }
     }
 
