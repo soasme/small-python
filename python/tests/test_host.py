@@ -185,6 +185,15 @@ class ReentryTest(unittest.TestCase):
                     self.assertEqual(cm.exception.type, "RuntimeError")
             self.assertFalse(rt.closed)
 
+    def test_returning_the_only_reference_to_an_object(self):
+        # Its release must follow the reply that carries it
+        # (tests/tla/SpyPythonWorker.tla).
+        with Runtime() as rt:
+            rt.exec("o = object()")
+            rt.define("fresh", lambda: rt["o"])
+            for _ in range(3):
+                self.assertIs(rt.eval("fresh() is o"), True)
+
     def test_other_runtimes_are_usable(self):
         with Runtime() as rt, Runtime() as other:
             rt.define("ask", lambda: other.eval("6 * 7"))
