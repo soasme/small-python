@@ -8,8 +8,9 @@ from small_python import Runtime, Object, Error, WorkerError, Timeout, SPY_VERSI
 ## `Runtime`
 
 ```python
-Runtime(*, std=True, step_limit=0, memory_limit=0, timeout=None,
-        output=None, loader=None, message_limit=64 << 20)
+Runtime(*, std=True, step_limit=0, memory_limit=0, output_limit=0,
+        timeout=None, output=None, loader=None, policy=None,
+        message_limit=64 << 20)
 ```
 
 An independent engine context with its own globals and modules, running in
@@ -21,9 +22,11 @@ cannot start.
 | `std` | Register the standard modules (`sys` and `gc`). |
 | `step_limit` | Maximum evaluation steps, counted from the start of each `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. Must be `>= 0`. |
 | `memory_limit` | Bytes the engine may hold allocated; `0` is unlimited. Exceeding it stops the operation with `MemoryError`, which code cannot catch; the runtime keeps working. |
+| `output_limit` | Bytes each top-level `eval` or `exec` may print; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `timeout` | Seconds one operation may run in the worker, or `None`. Time spent in host functions, `output`, and `loader` does not count. Exceeding it stops the operation and raises `Timeout`; the runtime stays open. |
 | `output` | Callable receiving each piece of printed text; `None` writes to `sys.stdout`. |
 | `loader` | Callable mapping a module name to its source `str`, or `None` when there is no such module. |
+| `policy` | Callable `policy(event, args)` asked before the engine opens a file (`"open"`: file and mode), imports a module for the first time (`"import"`: name), executes source text with `exec`, `eval` or `compile` (`"exec"`: source), or reads `input` (`"input"`: the prompt, if given). Raising refuses the event; the exception reaches the engine as a host function's does. |
 | `message_limit` | Largest message between the runtime and its worker, in bytes. A value too large to send raises `ValueError` (from Python) or `OverflowError` (in the engine). |
 
 ### Running code

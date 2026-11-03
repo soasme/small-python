@@ -194,6 +194,9 @@ type Options struct {
 	// MemoryLimit bounds the bytes the engine may hold; 0 is unlimited.
 	// Exceeding it raises MemoryError in the engine.
 	MemoryLimit uint64
+	// OutputLimit bounds the bytes each top-level Eval or Exec may print;
+	// 0 is unlimited. Exceeding it raises RuntimeError in the engine.
+	OutputLimit uint64
 	// Timeout bounds the time one operation may spend running in the
 	// worker, host functions excluded; 0 is unlimited. Exceeding it stops
 	// the operation with a *TimeoutError.
@@ -208,6 +211,12 @@ type Options struct {
 	// package), then pkg.mod; source for pkg.mod.__namespace__ makes a
 	// namespace package.
 	Loader func(name string) (source string, ok bool)
+	// Policy is asked before the engine opens a file ("open": file, mode),
+	// imports a module for the first time ("import": name), executes source
+	// text ("exec": source), or reads input ("input": prompt, if given). An
+	// error refuses the event; one that is not an *Exception raises
+	// PermissionError.
+	Policy func(event string, args Tuple) error
 	// Worker is the spy-worker executable; empty means the one on $PATH.
 	Worker string
 }
@@ -232,6 +241,7 @@ type Runtime struct {
 	functions []Func
 	output    io.Writer
 	loader    func(string) (string, bool)
+	policy    func(string, Tuple) error
 	failure   *failure
 	tokens    uint64
 	depth     int
@@ -288,12 +298,15 @@ func New(opts Options) (*Runtime, error) {
 		limit:   opts.MessageLimit,
 		output:  opts.Output,
 		loader:  opts.Loader,
+		policy:  opts.Policy,
 	}
 	rt.from = reader(stdout, opts.MessageLimit, rt.done)
 	options := Dict{
 		{"std", !opts.Bare},
 		{"step_limit", opts.StepLimit},
 		{"memory_limit", opts.MemoryLimit},
+		{"output_limit", opts.OutputLimit},
+		{"policy", opts.Policy != nil},
 		{"timeout", opts.Timeout.Seconds()},
 		{"message_limit", opts.MessageLimit},
 	}
@@ -594,7 +607,10 @@ func (rt *Runtime) awaitReply() ([]byte, error) {
 		switch message[0] {
 		case msgResult, msgRaise:
 			return message, nil
-		case msgHost, msgLoad, msgOutput:
+		case msgHost, msgLoad, msgOutput, msgPolicy:
+			if message[0] == msgPolicy && rt.policy == nil {
+				return nil, rt.violation("unexpected message kind 0x24")
+			}
 			if err := rt.serve(message); err != nil {
 				return nil, err
 			}
@@ -703,6 +719,7 @@ func (rt *Runtime) end() {
 	rt.failure = nil
 	rt.output = nil
 	rt.loader = nil
+	rt.policy = nil
 }
 
 // engineError is the exception of a worker's RAISE.
@@ -815,6 +832,21 @@ func (rt *Runtime) dispatch(request []byte) (value any, failed error, err error)
 			}
 		}
 		return nil, nil, nil
+	case msgPolicy:
+		fields, err := rt.decode(request, 2)
+		if err != nil {
+			return nil, nil, err
+		}
+		event, isString := fields[0].(string)
+		args, isTuple := fields[1].(Tuple)
+		if !isString || !isTuple {
+			return nil, nil, rt.violation("malformed policy event")
+		}
+		var e *Exception
+		if failed = rt.policy(event, args); failed != nil && !errors.As(failed, &e) {
+			failed = &Exception{Type: "PermissionError", Message: failed.Error(), Cause: failed}
+		}
+		return nil, failed, nil
 	default:
 		fields, err := rt.decode(request, 1)
 		if err != nil {

@@ -302,6 +302,7 @@ impl std::error::Error for Error {
 type HostFn = Arc<dyn Fn(&mut Runtime, Vec<Value>, Vec<(String, Value)>) -> Result<Value> + Send + Sync>;
 type Output = Box<dyn FnMut(&str) + Send>;
 type Loader = Box<dyn FnMut(&str) -> Option<String> + Send>;
+type Policy = Box<dyn FnMut(&str, Vec<Value>) -> Result<()> + Send>;
 
 /// The comparison of [`Runtime::compare`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,10 +320,12 @@ pub struct Builder {
     std: bool,
     step_limit: u64,
     memory_limit: u64,
+    output_limit: u64,
     timeout: Option<Duration>,
     message_limit: u32,
     output: Option<Output>,
     loader: Option<Loader>,
+    policy: Option<Policy>,
     worker: Option<PathBuf>,
 }
 
@@ -332,10 +335,12 @@ impl Default for Builder {
             std: true,
             step_limit: 0,
             memory_limit: 0,
+            output_limit: 0,
             timeout: None,
             message_limit: 64 << 20,
             output: None,
             loader: None,
+            policy: None,
             worker: None,
         }
     }
@@ -359,6 +364,13 @@ impl Builder {
     /// `MemoryError` in the engine.
     pub fn memory_limit(mut self, limit: u64) -> Builder {
         self.memory_limit = limit;
+        self
+    }
+
+    /// Bytes each top-level `eval` or `exec` may print; 0 is unlimited.
+    /// Exceeding it raises `RuntimeError` in the engine.
+    pub fn output_limit(mut self, limit: u64) -> Builder {
+        self.output_limit = limit;
         self
     }
 
@@ -387,6 +399,16 @@ impl Builder {
     /// for `pkg.mod.__namespace__` makes a namespace package.
     pub fn loader(mut self, loader: impl FnMut(&str) -> Option<String> + Send + 'static) -> Builder {
         self.loader = Some(Box::new(loader));
+        self
+    }
+
+    /// Asked before the engine opens a file (`"open"`: file, mode), imports
+    /// a module for the first time (`"import"`: name), executes source text
+    /// (`"exec"`: source), or reads input (`"input"`: prompt, if given). An
+    /// error refuses the event; one that is not [`Error::Python`] raises
+    /// `PermissionError`.
+    pub fn policy(mut self, policy: impl FnMut(&str, Vec<Value>) -> Result<()> + Send + 'static) -> Builder {
+        self.policy = Some(Box::new(policy));
         self
     }
 
@@ -431,6 +453,7 @@ impl Builder {
             functions: Vec::new(),
             output: self.output,
             loader: self.loader,
+            policy: self.policy,
             failure: None,
             tokens: 0,
             depth: 0,
@@ -441,6 +464,8 @@ impl Builder {
             ("std".into(), self.std.into()),
             ("step_limit".into(), int(self.step_limit)),
             ("memory_limit".into(), int(self.memory_limit)),
+            ("output_limit".into(), int(self.output_limit)),
+            ("policy".into(), rt.policy.is_some().into()),
             ("timeout".into(), Value::Float(self.timeout.map_or(0.0, |timeout| timeout.as_secs_f64()))),
             ("message_limit".into(), self.message_limit.into()),
         ]);
@@ -475,6 +500,7 @@ pub struct Runtime {
     functions: Vec<HostFn>,
     output: Option<Output>,
     loader: Option<Loader>,
+    policy: Option<Policy>,
     failure: Option<(u64, Error)>,
     tokens: u64,
     depth: usize,
@@ -754,6 +780,7 @@ impl Runtime {
             let message = self.receive()?;
             match message[0] {
                 wire::RESULT | wire::RAISE => return Ok(message),
+                wire::POLICY if self.policy.is_some() => self.serve(&message)?,
                 wire::HOST | wire::LOAD | wire::OUTPUT => self.serve(&message)?,
                 kind => return Err(self.violation(&format!("unexpected message kind {kind:#x}"))),
             }
@@ -785,10 +812,9 @@ impl Runtime {
             Ok(Received::Message(message)) => Ok(message),
             Ok(Received::Violation(what)) => Err(self.violation(&what)),
             Ok(Received::End) | Err(RecvTimeoutError::Disconnected) => Err(self.exited()),
-            Err(RecvTimeoutError::Timeout) => Err(self.lose(Error::Worker {
-                message: "the worker did not stop at the timeout".into(),
-                status: None,
-            })),
+            Err(RecvTimeoutError::Timeout) => {
+                Err(self.lose(Error::Worker { message: "the worker did not stop at the timeout".into(), status: None }))
+            }
         }
     }
 
@@ -835,6 +861,7 @@ impl Runtime {
         self.failure = None;
         self.output = None;
         self.loader = None;
+        self.policy = None;
     }
 
     // Errors from the engine.
@@ -942,6 +969,16 @@ impl Runtime {
                 };
                 let source = self.loader.as_mut().and_then(|load| load(&name));
                 Ok(Ok(source.into()))
+            }
+            wire::POLICY => {
+                let [Value::Str(event), Value::Tuple(args)] = self.decode(message)? else {
+                    return Err(self.violation("malformed policy event"));
+                };
+                let policy = self.policy.as_mut().expect("asked only with a policy");
+                Ok(policy(&event, args).map(|()| Value::None).map_err(|error| match error {
+                    Error::Python(_) => error,
+                    error => Error::python("PermissionError", error.to_string()),
+                }))
             }
             _ => {
                 let [Value::Str(text)] = self.decode(message)? else {

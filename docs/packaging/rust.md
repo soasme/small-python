@@ -174,12 +174,14 @@ deployments without a writable cache.
 
 ### 4.2 Runtime
 
-`Runtime::builder()` takes `std`, `step_limit`, `memory_limit`, `timeout`,
-`message_limit`, `output`, `loader`, and `worker`, with the defaults and
+`Runtime::builder()` takes `std`, `step_limit`, `memory_limit`,
+`output_limit`, `timeout`, `message_limit`, `output`, `loader`, `policy`, and
+`worker`, with the defaults and
 meaning of the Python package's arguments (`python.md` §3.1); `spawn()`
 starts the worker as `protocol.md` §9 describes (empty environment, working
 directory `/`, its own process group, only descriptors 0 to 2) and sends
-`INIT`. `Runtime::new()` uses the defaults.
+`INIT`. `Runtime::new()` uses the defaults. A `policy` error that is not
+`Error::Python` raises `PermissionError`.
 
 | Method | Message |
 |---|---|

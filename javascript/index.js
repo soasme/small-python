@@ -86,16 +86,18 @@ export class Runtime {
 
   constructor(token, options) {
     if (token !== CREATE) throw new TypeError("use Runtime.create()");
-    const { stepLimit = 0, memoryLimit = 0, timeout, output, loader, messageLimit = 64 * 2 ** 20 } = options;
-    for (const [name, limit] of [["stepLimit", stepLimit], ["memoryLimit", memoryLimit]])
+    const { stepLimit = 0, memoryLimit = 0, outputLimit = 0, timeout, output, loader, policy, messageLimit = 64 * 2 ** 20 } = options;
+    for (const [name, limit] of [["stepLimit", stepLimit], ["memoryLimit", memoryLimit], ["outputLimit", outputLimit]])
       if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError(`${name} must be an integer >= 0`);
     if (!Number.isSafeInteger(messageLimit) || messageLimit < 1 || messageLimit > 0xffffffff)
       throw new RangeError("messageLimit must be an integer from 1 to 2**32 - 1");
     if (timeout !== undefined && !(timeout > 0)) throw new RangeError("timeout must be positive or undefined");
-    if ((output !== undefined && typeof output !== "function") || (loader !== undefined && typeof loader !== "function"))
-      throw new TypeError("output and loader must be functions or undefined");
+    if ([output, loader, policy].some((f) => f !== undefined && typeof f !== "function"))
+      throw new TypeError("output, loader and policy must be functions or undefined");
     this._stepLimit = stepLimit;
     this._memoryLimit = memoryLimit;
+    this._outputLimit = outputLimit;
+    this._policy = policy;
     this._timeout = timeout;
     this._output = output;
     this._loader = loader;
@@ -150,6 +152,7 @@ export class Runtime {
     this._worker.postMessage({ module, pages: INITIAL_PAGES, maximum: Math.min(limit, MAX_PAGES), inbox: this._inbox });
     this.version = await this._run(wire.INIT, [{
       std: Boolean(std), step_limit: this._stepLimit, memory_limit: this._memoryLimit,
+      output_limit: this._outputLimit, policy: this._policy !== undefined,
       timeout: (this._timeout ?? 0) / 1000, message_limit: this._messageLimit,
     }]);
   }
@@ -206,7 +209,8 @@ export class Runtime {
     for (;;) {
       const reader = await this._next();
       if (reader.kind === wire.RESULT || reader.kind === wire.RAISE) return reader;
-      if (reader.kind !== wire.HOST && reader.kind !== wire.LOAD && reader.kind !== wire.OUTPUT)
+      if (![wire.HOST, wire.LOAD, wire.OUTPUT, wire.POLICY].includes(reader.kind) ||
+          (reader.kind === wire.POLICY && this._policy === undefined))
         throw this._violation(`unexpected message kind 0x${reader.kind.toString(16)}`);
       await this._serve(reader);
     }
@@ -415,6 +419,10 @@ export class Runtime {
         const [name] = this._decode(reader, 1);
         if (typeof name !== "string") throw this._violation("malformed load");
         run = () => this._load(name);
+      } else if (reader.kind === wire.POLICY) {
+        const [event, args] = this._decode(reader, 2);
+        if (typeof event !== "string" || !Array.isArray(args)) throw this._violation("malformed policy event");
+        run = async () => { await this._policy(event, args); return null; };
       } else {
         const [text] = this._decode(reader, 1);
         if (typeof text !== "string") throw this._violation("malformed output");
@@ -433,7 +441,10 @@ export class Runtime {
       reply = wire.message(wire.RESULT, [result], (value) => this._reference(value));
     } catch (e) {
       if (this._lost) throw this._lost;
-      reply = wire.message(wire.RAISE, [this._failureOf(e)], (value) => this._reference(value));
+      const failure = this._failureOf(e);
+      // A refusal that names no Python exception is a PermissionError.
+      if (reader.kind === wire.POLICY && failure.classes) failure.classes = new Tuple([...failure.classes.items, "PermissionError"]);
+      reply = wire.message(wire.RAISE, [failure], (value) => this._reference(value));
     } finally {
       this._levels.pop();
       if (remaining !== null && !this._lost) this._startTimer(remaining);

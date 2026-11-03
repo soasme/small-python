@@ -179,9 +179,11 @@ embedded, because Go has no build scripts to compile it (§7).
 `New(Options)` starts the worker as `protocol.md` §9 describes (empty
 environment, working directory `/`, its own process group, only descriptors
 0 to 2) and sends `INIT`. The zero `Options` is the default: `Bare` leaves
-out the standard layer, `StepLimit`, `MemoryLimit`, and `Timeout` are
-unlimited at 0, `MessageLimit` 0 is 64 MiB, `Output` nil is `os.Stdout`,
-and `Loader` nil answers no module.
+out the standard layer, `StepLimit`, `MemoryLimit`, `OutputLimit`, and
+`Timeout` are unlimited at 0, `MessageLimit` 0 is 64 MiB, `Output` nil is
+`os.Stdout`, `Loader` nil answers no module, and `Policy` nil allows every
+event. A `Policy` error refuses the event; one that is not an `*Exception`
+raises `PermissionError`, with the error as its cause.
 
 | Method | Message |
 |---|---|

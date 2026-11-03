@@ -34,6 +34,7 @@ const (
 	msgHost    = 0x21
 	msgLoad    = 0x22
 	msgOutput  = 0x23
+	msgPolicy  = 0x24
 	msgResult  = 0x40
 	msgRaise   = 0x41
 )

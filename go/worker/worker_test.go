@@ -2,6 +2,7 @@ package worker_test
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"os"
@@ -284,6 +285,43 @@ func TestLimits(t *testing.T) {
 	}
 	equal(t, exception(t, rt.Exec("x = 'a' * (64 << 20)")).Type, "MemoryError")
 	equal(t, eval(t, rt, "1 + 1"), int64(2))
+}
+
+func TestOutputLimit(t *testing.T) {
+	var printed strings.Builder
+	rt := start(t, worker.Options{OutputLimit: 8, Output: &printed})
+	e := exception(t, rt.Exec("print('1234')\ntry:\n    print('56789')\nexcept BaseException:\n    print('caught')"))
+	equal(t, e.Type+": "+e.Message, "RuntimeError: output limit exceeded")
+	equal(t, printed.String(), "1234\n")
+	if err := rt.Exec("print('again')"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPolicy(t *testing.T) {
+	var events []string
+	refused := errors.New("no files")
+	rt := start(t, worker.Options{
+		Loader: func(string) (string, bool) { return "", true },
+		Policy: func(event string, args worker.Tuple) error {
+			events = append(events, fmt.Sprint(event, args))
+			switch event {
+			case "open":
+				return refused
+			case "import":
+				return worker.Raise("TypeError", "no modules")
+			}
+			return nil
+		},
+	})
+	equal(t, eval(t, rt, "eval('6 * 7')"), int64(42))
+	e := exception(t, rt.Exec("open('/etc/passwd')"))
+	equal(t, e.Type+": "+e.Message, "PermissionError: no files")
+	if !errors.Is(e, refused) {
+		t.Fatal("the refusal is not the cause")
+	}
+	equal(t, exception(t, rt.Exec("import m")).Type, "TypeError")
+	equal(t, strings.Join(events, "; "), "exec[6 * 7]; open[/etc/passwd r]; import[m]")
 }
 
 func TestTimeoutStopsTheOperationButNotWhileTheHostRuns(t *testing.T) {

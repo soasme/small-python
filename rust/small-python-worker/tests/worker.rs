@@ -158,6 +158,48 @@ fn limits() {
 }
 
 #[test]
+fn output_limit() {
+    let printed = Arc::new(Mutex::new(String::new()));
+    let sink = printed.clone();
+    let mut rt =
+        Runtime::builder().output_limit(8).output(move |text| sink.lock().unwrap().push_str(text)).spawn().unwrap();
+    let error = rt.exec("print('1234')\ntry:\n    print('56789')\nexcept BaseException:\n    print('caught')");
+    assert_eq!(error.unwrap_err().to_string(), "RuntimeError: output limit exceeded");
+    assert_eq!(*printed.lock().unwrap(), "1234\n");
+    rt.exec("print('again')").unwrap();
+}
+
+#[test]
+fn policy() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    let mut rt = Runtime::builder()
+        .loader(|_| Some(String::new()))
+        .policy(move |event, args| {
+            seen.lock().unwrap().push((event.to_owned(), args));
+            match event {
+                "open" => Err(Error::Invalid("no files".into())),
+                "import" => Err(Error::python("TypeError", "no modules")),
+                _ => Ok(()),
+            }
+        })
+        .spawn()
+        .unwrap();
+    assert_eq!(rt.eval("eval('6 * 7')").unwrap(), int(42));
+    assert_eq!(rt.exec("open('/etc/passwd')").unwrap_err().to_string(), "PermissionError: no files");
+    assert_eq!(rt.exec("import m").unwrap_err().type_name(), Some("TypeError"));
+    let text = |s: &str| Value::Str(s.into());
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            ("exec".to_owned(), vec![text("6 * 7")]),
+            ("open".to_owned(), vec![text("/etc/passwd"), text("r")]),
+            ("import".to_owned(), vec![text("m")])
+        ]
+    );
+}
+
+#[test]
 fn timeout_stops_the_operation_but_not_while_the_host_runs() {
     let mut rt = Runtime::builder().timeout(Duration::from_millis(300)).spawn().unwrap();
     rt.define("slow", |_, _, _| {

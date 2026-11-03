@@ -177,6 +177,34 @@ class LimitTest(unittest.TestCase):
             self.assertFalse(rt["caught"])
             self.assertEqual(rt.eval("len('b' * (8 << 20))"), 8 << 20)
 
+    def test_output_limit(self):
+        printed = []
+        with Runtime(output_limit=8, output=printed.append) as rt:
+            with self.assertRaises(Error) as cm:
+                rt.exec("print('1234')\ntry:\n    print('56789')\nexcept BaseException:\n    print('caught')")
+            self.assertEqual((cm.exception.type, cm.exception.message), ("RuntimeError", "output limit exceeded"))
+            self.assertEqual("".join(printed), "1234\n")
+            rt.exec("print('again')")
+
+    def test_policy(self):
+        events = []
+
+        def policy(event, args):
+            events.append((event, args))
+            if event == "open":
+                raise PermissionError("no files")
+
+        with Runtime(policy=policy) as rt:
+            self.assertEqual(rt.eval("eval('6 * 7')"), 42)
+            with self.assertRaises(Error) as cm:
+                rt.exec("open('/etc/passwd')")
+            self.assertEqual((cm.exception.type, cm.exception.message), ("PermissionError", "no files"))
+            self.assertIsInstance(cm.exception.__cause__, PermissionError)
+            self.assertEqual(events, [("exec", ("6 * 7",)), ("open", ("/etc/passwd", "r"))])
+            with self.assertRaises(Error) as cm:
+                rt.exec("exec('\\udc80')")
+            self.assertEqual(cm.exception.type, "UnicodeEncodeError")
+
     def test_message_limit(self):
         with Runtime(message_limit=1 << 16) as rt:
             with self.assertRaises(Error) as cm:
@@ -206,9 +234,10 @@ class HostileParentTest(unittest.TestCase):
     def test_violations(self):
         def key(name, value):
             return string(name.encode()) + value
-        init = b"\x01d" + u32(5) + key("std", b"F") + b"".join(
+        init = b"\x01d" + u32(7) + key("std", b"F") + key("policy", b"F") + b"".join(
             key(name, b"i" + struct.pack("<q", n))
-            for name, n in (("step_limit", 0), ("memory_limit", 0), ("message_limit", 1 << 20), ("timeout", 0)))
+            for name, n in (("step_limit", 0), ("memory_limit", 0), ("output_limit", 0), ("message_limit", 1 << 20),
+                            ("timeout", 0)))
         cases = {
             "reply kind": b"\x7f",
             "unknown kind": b"\x20",

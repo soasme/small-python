@@ -11,12 +11,20 @@ export interface RuntimeOptions {
   stepLimit?: number;
   /** Bytes the engine may hold; 0 is unlimited. */
   memoryLimit?: number;
+  /** Bytes one top-level operation may print; 0 is unlimited. */
+  outputLimit?: number;
   /** Milliseconds one operation may run in the worker; exceeding it stops the operation with Timeout. */
   timeout?: number;
   /** Receives printed text; by default lines go to console.log. */
   output?: (text: string) => void | Promise<void>;
   /** Maps a module name to its source, or null. */
   loader?: (name: string) => string | null | undefined | Promise<string | null | undefined>;
+  /**
+   * Asked before the engine opens a file, imports a module for the first time,
+   * executes source text, or reads input; throwing refuses the event. A refusal
+   * whose name is no Python exception raises PermissionError.
+   */
+  policy?: (event: "open" | "import" | "exec" | "input", args: any[]) => void | Promise<void>;
   /** Largest message between the runtime and its worker, in bytes. */
   messageLimit?: number;
 }

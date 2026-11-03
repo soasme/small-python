@@ -30,9 +30,12 @@ exception: the engine can call it with any arguments.
 |---|---|---|---|
 | Steps | `step_limit=n` | `RuntimeError` in the engine | yes |
 | Memory | `memory_limit=bytes` | `MemoryError` in the engine | yes |
+| Output | `output_limit=bytes` | `RuntimeError` in the engine | yes |
 | Recursion | engine's own | `RecursionError` in the engine | yes |
 | Time | `timeout=seconds` | `Timeout` raised | yes |
 | Message size | `message_limit=bytes` | the value is refused | yes |
+
+A `policy` callable is asked before the engine opens a file (`"open"`: file and mode), imports a module for the first time (`"import"`: name), executes source text with `exec`, `eval` or `compile` (`"exec"`: source), or reads `input` (`"input"`: the prompt, if given). Raising refuses the event.
 
 `step_limit` counts calls, loop passes, allocation and native work in
 proportion to what it reads ([docs/metering.md](../../docs/metering.md)).

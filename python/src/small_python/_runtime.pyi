@@ -26,9 +26,11 @@ class Runtime:
         std: bool = True,
         step_limit: int = 0,
         memory_limit: int = 0,
+        output_limit: int = 0,
         timeout: float | None = None,
         output: Callable[[str], object] | None = None,
         loader: Callable[[str], str | None] | None = None,
+        policy: Callable[[str, tuple[Any, ...]], object] | None = None,
         message_limit: int = 67108864,
     ) -> None: ...
     @property

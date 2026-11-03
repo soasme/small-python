@@ -67,31 +67,37 @@ class Runtime:
     Keyword arguments: ``std`` registers the standard modules (sys and
     gc); ``step_limit`` bounds evaluation steps (0 is unlimited);
     ``memory_limit`` bounds the engine's memory in bytes (0 is unlimited);
+    ``output_limit`` bounds the bytes one operation prints (0 is unlimited);
     ``timeout`` bounds the seconds one operation may run (None is unlimited);
     ``output`` receives printed text (default ``sys.stdout.write``);
     ``loader`` maps a module name to its source, or None when not found;
+    ``policy`` is called as ``policy(event, args)`` before ``open``
+    ("open"), a module's first import ("import"), ``exec``, ``eval`` or
+    ``compile`` of a string ("exec") and ``input`` ("input"); an exception
+    it raises refuses the action and is raised in the engine instead;
     ``message_limit`` bounds a protocol message in bytes.
     """
 
-    def __init__(self, *, std=True, step_limit=0, memory_limit=0, timeout=None,
-                 output=None, loader=None, message_limit=64 << 20):
+    def __init__(self, *, std=True, step_limit=0, memory_limit=0, output_limit=0, timeout=None,
+                 output=None, loader=None, policy=None, message_limit=64 << 20):
         if hasattr(self, "_process"):
             raise RuntimeError("the runtime is already initialized")
-        for name, limit in (("step_limit", step_limit), ("memory_limit", memory_limit)):
+        for name, limit in (("step_limit", step_limit), ("memory_limit", memory_limit), ("output_limit", output_limit)):
             if not isinstance(limit, int) or limit < 0:
                 raise ValueError(f"{name} must be an int >= 0")
         if not isinstance(message_limit, int) or not 1 <= message_limit <= 0xFFFFFFFF:
             raise ValueError("message_limit must be an int from 1 to 2**32 - 1")
         if timeout is not None and not timeout > 0:
             raise ValueError("timeout must be positive or None")
-        if (output is not None and not callable(output)) or (loader is not None and not callable(loader)):
-            raise TypeError("output and loader must be callable or None")
+        if any(f is not None and not callable(f) for f in (output, loader, policy)):
+            raise TypeError("output, loader and policy must be callable or None")
         self._process = None
         self._lost = None
         self._closed = False
         self._timeout = timeout
         self._output = output
         self._loader = loader
+        self._policy = policy
         self._message_limit = message_limit
         self._functions = {}      # function id -> callable
         self._function_ids = {}   # id(callable) -> function id
@@ -113,6 +119,7 @@ class Runtime:
         self._to = self._process.stdin.fileno()
         self._from = self._process.stdout.fileno()
         options = {"std": bool(std), "step_limit": step_limit, "memory_limit": memory_limit,
+                   "output_limit": output_limit, "policy": policy is not None,
                    "timeout": float(timeout or 0), "message_limit": message_limit}
         self.version = self._run(wire.INIT, options)
 
@@ -164,7 +171,8 @@ class Runtime:
             kind = reader.data[0]
             if kind in (wire.RESULT, wire.RAISE):
                 return reader
-            if kind not in (wire.HOST, wire.LOAD, wire.OUTPUT):
+            if kind not in (wire.HOST, wire.LOAD, wire.OUTPUT, wire.POLICY) or \
+                    (kind == wire.POLICY and self._policy is None):
                 raise self._violation(f"unexpected message kind {kind:#x}")
             self._serve(kind, reader)
 
@@ -338,6 +346,11 @@ class Runtime:
             if type(name) is not str:
                 raise self._violation("malformed load")
             run = lambda: self._load(name)
+        elif kind == wire.POLICY:
+            event, args = self._decode_fields(reader, 2)
+            if type(event) is not str or type(args) is not tuple:
+                raise self._violation("malformed policy event")
+            run = lambda: self._ask_policy(event, args)
         else:
             (text,) = self._decode_fields(reader, 1)
             if type(text) is not str:
@@ -368,6 +381,9 @@ class Runtime:
             raise
         except Exception as e:
             raise _Unconvertible from e
+
+    def _ask_policy(self, event, args):
+        self._policy(event, args)
 
     def _load(self, name):
         if self._loader is None:

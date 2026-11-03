@@ -38,8 +38,15 @@ be `async`; the engine waits.
 |---|---|
 | `stepLimit` | `RuntimeError` in Python after that many steps per `eval`/`exec` |
 | `memoryLimit` | `MemoryError` in Python beyond that many bytes |
+| `outputLimit` | `RuntimeError` in Python after printing that many bytes per `eval`/`exec` |
 | `timeout` | terminates the worker after that many milliseconds; rejects with `Timeout` |
 | `messageLimit` | largest value that may cross between JavaScript and Python |
+
+A `policy(event, args)` function is asked before Python opens a file
+(`"open"`, file and mode), imports a module for the first time (`"import"`,
+name), executes source text with `exec`, `eval` or `compile` (`"exec"`,
+source), or reads `input` (`"input"`, prompt). Throwing refuses the event; an
+error not named after a Python exception raises `PermissionError`.
 
 A crash or a trap in the engine ends only its Worker: the operation rejects
 with `WorkerError` and the runtime is closed.

@@ -189,6 +189,7 @@ the bytes the engine holds now.
 | `0x21` | `HOST` | `function` int, `args` tuple, `kwargs` dict | the result |
 | `0x22` | `LOAD` | `name` str | `str` source, or `None` when absent |
 | `0x23` | `OUTPUT` | `text` str | `None` |
+| `0x24` | `POLICY` | `event` str, `args` tuple | `None` to allow |
 
 `LOAD` names are what the engine's loader receives, including the
 `.__init__` and `.__namespace__` probes; the parent maps them onto its loader
@@ -196,6 +197,11 @@ the bytes the engine holds now.
 
 A `RAISE` reply to `OUTPUT` makes the engine's write fail with its own
 `OSError`; the parent reports the cause on its side.
+
+`POLICY` is sent only when `INIT` set `policy`, for each event the engine
+asks `spy_set_policy` about (`open`, `import`, `exec`, `input`). A `RESULT`
+allows the action, whatever its value; a `RAISE` refuses it, and the engine
+raises the failure's exception in its place.
 
 ### 7.3 Object operations
 
@@ -236,9 +242,9 @@ A worker's `error` is a dict with exactly these keys:
 | `filename`, `line` | `str` and `int`: where it was raised |
 | `exception` | handle to the exception, or `None` when it could not be obtained |
 | `token` | `int`: the `token` of the parent `failure` this exception came from unchanged, or 0 |
-| `stop` | `str`: why the engine stopped the operation (`spy_stopped`): `"steps"`, `"memory"` or `"timeout"`; `""` for an exception the program raised |
+| `stop` | `str`: why the engine stopped the operation (`spy_stopped`): `"steps"`, `"memory"`, `"timeout"` or `"output"`; `""` for an exception the program raised |
 
-A parent's `failure` (to `HOST`, `LOAD`, or `OUTPUT`) is a dict of one of
+A parent's `failure` (to `HOST`, `LOAD`, `OUTPUT`, or `POLICY`) is a dict of one of
 two shapes. To re-raise an engine exception unchanged (a host function let an
 engine exception of the same runtime escape):
 
@@ -275,6 +281,8 @@ operation, its `error` carries the token.
 | `std` | `bool` | register the standard modules with `spy_std_init` |
 | `step_limit` | `int` ≥ 0 | `spy_set_step_limit`; 0 is unlimited |
 | `memory_limit` | `int` ≥ 0 | bytes the engine may hold allocated; 0 is unlimited (§10) |
+| `output_limit` | `int` ≥ 0 | bytes one top-level operation may print; 0 is unlimited |
+| `policy` | `bool` | ask the parent with `POLICY` before each policy event |
 | `timeout` | `int` or `float` ≥ 0 | seconds of the worker's own time one top-level operation may take; 0 is unlimited (§10) |
 | `message_limit` | `int` from 1 to 2³²−1 | the limit of §3, for both directions |
 

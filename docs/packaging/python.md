@@ -60,8 +60,9 @@ from small_python import Runtime, Object, Error, WorkerError, Timeout
 ### 3.1 `Runtime`
 
 ```python
-Runtime(*, std=True, step_limit=0, memory_limit=0, timeout=None,
-        output=None, loader=None, message_limit=64 << 20)
+Runtime(*, std=True, step_limit=0, memory_limit=0, output_limit=0,
+        timeout=None, output=None, loader=None, policy=None,
+        message_limit=64 << 20)
 ```
 
 Starting a runtime starts its worker and waits for its `INIT` reply. If the
@@ -72,13 +73,15 @@ worker cannot start, the constructor raises `WorkerError`.
 | `std` | Register the standard modules (`sys` and `gc`). |
 | `step_limit` | Evaluation steps per top-level `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `memory_limit` | Bytes the engine may hold; `0` is unlimited. Exceeding it stops the operation with `MemoryError`. |
+| `output_limit` | Bytes each top-level `eval` or `exec` may print; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `timeout` | Seconds a single operation may spend running in the worker, or `None`. Exceeding it stops the operation and raises `Timeout`; the runtime stays open. A worker that does not stop within a further second is terminated. |
 | `output` | Callable receiving printed text; `None` writes to `sys.stdout`. |
 | `loader` | Callable mapping a module name to source `str`, or `None` when there is none. |
+| `policy` | Callable `policy(event, args)` asked before the engine opens a file (`"open"`: file and mode), imports a module for the first time (`"import"`: name), executes source text with `exec`, `eval` or `compile` (`"exec"`: source), or reads `input` (`"input"`: the prompt, if given). Raising refuses the event; the exception reaches the engine as a host function's does. |
 | `message_limit` | Largest message in bytes, either direction. |
 
-Negative limits, a non-positive `timeout`, or a non-callable `output` or
-`loader` raise `ValueError` or `TypeError` before the worker starts.
+Negative limits, a non-positive `timeout`, or a non-callable `output`,
+`loader` or `policy` raise `ValueError` or `TypeError` before the worker starts.
 
 Running code:
 

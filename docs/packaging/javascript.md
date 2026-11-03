@@ -85,8 +85,8 @@ All methods that reach the engine return promises.
 
 ```js
 const rt = await Runtime.create({
-  std: true, stepLimit: 0, memoryLimit: 0, timeout: undefined,
-  output: undefined, loader: undefined, messageLimit: 64 * 2 ** 20,
+  std: true, stepLimit: 0, memoryLimit: 0, outputLimit: 0, timeout: undefined,
+  output: undefined, loader: undefined, policy: undefined, messageLimit: 64 * 2 ** 20,
 });
 ```
 
@@ -95,9 +95,11 @@ const rt = await Runtime.create({
 | `std` | Register the standard modules. |
 | `stepLimit` | Evaluation steps per top-level `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `memoryLimit` | Bytes the engine may hold; `0` is unlimited. Exceeding it raises `MemoryError` in the engine. |
+| `outputLimit` | Bytes each top-level `eval` or `exec` may print; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `timeout` | Milliseconds a single operation may run in the worker, or `undefined`. Exceeding it stops the operation and rejects with `Timeout`; the runtime stays open. A Worker that does not stop within a further second is terminated. |
 | `output` | `(text) => void \| Promise<void>` receiving printed text; by default each complete line goes to `console.log`, and an unfinished line when the operation ends. |
 | `loader` | `(name) => string \| null \| Promise<string \| null>` mapping module names to source. |
+| `policy` | `(event, args) => void \| Promise<void>` asked before the engine opens a file (`"open"`: file and mode), imports a module for the first time (`"import"`: name), executes source text with `exec`, `eval` or `compile` (`"exec"`: source), or reads `input` (`"input"`: the prompt, if given). Throwing refuses the event; an error whose name is no Python exception raises `PermissionError`. |
 | `messageLimit` | Largest message in bytes, either direction. |
 
 `Runtime.create` rejects with `WorkerError` when the Worker cannot start,

@@ -25,6 +25,7 @@ pub const USAGE: u8 = 0x0d;
 pub const HOST: u8 = 0x21;
 pub const LOAD: u8 = 0x22;
 pub const OUTPUT: u8 = 0x23;
+pub const POLICY: u8 = 0x24;
 pub const RESULT: u8 = 0x40;
 pub const RAISE: u8 = 0x41;
 

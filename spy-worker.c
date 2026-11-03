@@ -78,7 +78,7 @@ static void write_bytes(const void *p, size_t n) {
 
 enum {
     INIT = 0x01, EVAL, EXEC, CALL, GET, SET, DELETE, MODULE, MOUNT, COLLECT, OP, RELEASE, USAGE,
-    HOST = 0x21, LOAD, OUTPUT,
+    HOST = 0x21, LOAD, OUTPUT, POLICY,
     RESULT = 0x40, RAISE
 };
 enum { MAX_DEPTH = 200 };
@@ -483,7 +483,7 @@ static void send_raise(void) {
     put_byte(&b, exception ? 'h' : 'N');
     if (exception) put_u64(&b, handle_new(exception));
     put_str(&b, "token"); put_int(&b, token);
-    static const char *const stops[] = {"", "steps", "memory", "timeout"};
+    static const char *const stops[] = {"", "steps", "memory", "timeout", "output"};
     put_str(&b, "stop"); put_str(&b, stops[spy_stopped(c)]);
     spy_release(exception);
     spy_clear_error(c);
@@ -646,6 +646,18 @@ static SPYValue *load(SPYContext *c, void *data, const char *name) {
     return source;
 }
 
+/* The parent's policy decides each event: a RAISE refuses it. */
+static int policy(SPYContext *c, void *data, const char *event, SPYValue *args) {
+    (void)c; (void)data;
+    Buffer b = {0};
+    begin(&b, POLICY);
+    put_str(&b, event);
+    if (encode(&b, args, 1)) { free(b.data); return -1; }
+    SPYValue *v = request(&b);
+    spy_release(v);
+    return v ? 0 : -1;
+}
+
 /* A registered module: its members, then its source with filename <name>. */
 static int module_init(SPYContext *c, SPYValue *module) {
     SPYValue *name = spy_get_attr(c, module, "__name__");
@@ -736,22 +748,24 @@ static void initialize(Cursor *k) {
     SPYValue *options = decode_type(k, SPY_DICT);
     finish(k);
     if (!options || initialized) violation();
-    SPYValue *std = field(options, "std"), *n = spy_int(c, 0), *count = helper_call(H_LEN, 1, &options);
-    int64_t steps = int_field(options, "step_limit"), memory = int_field(options, "memory_limit");
+    SPYValue *std = field(options, "std"), *checked = field(options, "policy"), *n = spy_int(c, 0), *count = helper_call(H_LEN, 1, &options);
+    int64_t steps = int_field(options, "step_limit"), memory = int_field(options, "memory_limit"), output = int_field(options, "output_limit");
     int64_t limit = int_field(options, "message_limit"), keys;
     SPYValue *time_limit = field(options, "timeout");
-    if (!std || spy_type(std) != SPY_BOOL || !count || spy_as_int(c, count, &keys) || keys != 5 ||
-        steps < 0 || memory < 0 || limit < 1 || (uint64_t)limit > UINT32_MAX || !time_limit ||
+    if (!std || spy_type(std) != SPY_BOOL || !checked || spy_type(checked) != SPY_BOOL || !count || spy_as_int(c, count, &keys) ||
+        keys != 7 || steps < 0 || memory < 0 || output < 0 || limit < 1 || (uint64_t)limit > UINT32_MAX || !time_limit ||
         (spy_type(time_limit) != SPY_INT && spy_type(time_limit) != SPY_FLOAT) || spy_as_float(c, time_limit, &timeout) ||
         !(timeout >= 0)) violation();
     initialized = 1;
     message_limit = (size_t)limit;
     spy_set_step_limit(c, (size_t)steps);
     spy_set_memory_limit(c, (size_t)memory);
+    spy_set_limit(c, SPY_LIMIT_OUTPUT, (size_t)output);
+    if (spy_truth(c, checked)) spy_set_policy(c, policy, NULL);
     if (timeout) spy_set_interrupt(c, expired, NULL);
     spy_release(time_limit);
     int failed = spy_truth(c, std) && spy_std_init(c);
-    spy_release(std); spy_release(n); spy_release(count); spy_release(options);
+    spy_release(std); spy_release(checked); spy_release(n); spy_release(count); spy_release(options);
     send_result(failed ? NULL : spy_string(c, SPY_VERSION, strlen(SPY_VERSION)));
 }
 

@@ -89,6 +89,33 @@ describe("limits", () => {
     for (const options of [{ memoryLimit: -1 }, { timeout: 0 }, { messageLimit: 0 }, { stepLimit: 1.5 }])
       await assert.rejects(Runtime.create(options), RangeError);
     await assert.rejects(Runtime.create({ output: 1 }), TypeError);
+    await assert.rejects(Runtime.create({ policy: 1 }), TypeError);
+    await assert.rejects(Runtime.create({ outputLimit: -1 }), RangeError);
+  });
+
+  test("output limit", async () => {
+    const printed = [];
+    const rt = track(await Runtime.create({ outputLimit: 8, output: (text) => printed.push(text) }));
+    const error = await rt.exec("print('1234')\ntry:\n    print('56789')\nexcept BaseException:\n    print('caught')")
+      .catch((e) => e);
+    assert.deepEqual([error.type, error.message], ["RuntimeError", "output limit exceeded"]);
+    assert.equal(printed.join(""), "1234\n");
+    await rt.exec("print('again')");
+  });
+
+  test("policy", async () => {
+    const events = [];
+    const policy = async (event, args) => {
+      events.push([event, args]);
+      if (event === "exec" && args[0] !== "6 * 7") throw new Error("no source");
+      if (event === "import") throw new TypeError("no modules");
+    };
+    const rt = track(await Runtime.create({ policy, loader: () => "x = 1" }));
+    assert.equal(await rt.eval("eval('6 * 7')"), 42);
+    const refused = await rt.exec("exec('x = 1')").catch((e) => e);
+    assert.deepEqual([refused.type, refused.message], ["PermissionError", "no source"]);
+    assert.equal((await rt.exec("import m").catch((e) => e)).type, "TypeError");
+    assert.deepEqual(events, [["exec", ["6 * 7"]], ["exec", ["x = 1"]], ["import", ["m"]]]);
   });
 
   test("step limit", async () => {

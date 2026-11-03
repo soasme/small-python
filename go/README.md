@@ -299,10 +299,12 @@ The zero `worker.Options` is the default.
 | `Bare` | `false` | leave out the standard modules `sys` and `gc` |
 | `StepLimit` | unlimited | evaluation steps per top-level `Eval` or `Exec`; past it, `RuntimeError` in Python |
 | `MemoryLimit` | unlimited | bytes the engine may hold; past it, `MemoryError` in Python |
+| `OutputLimit` | unlimited | bytes each top-level `Eval` or `Exec` may print; past it, `RuntimeError` in Python |
 | `Timeout` | none | time one operation may run in the worker; past it, the worker is killed |
 | `MessageLimit` | 64 MiB | the largest value that may cross, either direction |
 | `Output` | `os.Stdout` | receives printed text |
 | `Loader` | none | maps a module name to its source, as in `spy` |
+| `Policy` | allow all | asked before `open`, a first import, `exec`/`eval`/`compile` of source, and `input`; an error refuses |
 | `Worker` | `spy-worker` on `$PATH` | the worker executable |
 
 ### Values
@@ -380,6 +382,7 @@ nothing is restarted.
 |---|---|---|---|
 | steps | `StepLimit` | `RuntimeError` in Python | yes |
 | memory | `MemoryLimit` | `MemoryError` in Python | yes |
+| output | `OutputLimit` | `RuntimeError` in Python | yes |
 | recursion | the engine | `RecursionError` in Python | yes |
 | time | `Timeout` | `*TimeoutError`, worker killed | no |
 | message size | `MessageLimit` | an `ErrInvalid` error, or the worker is killed if it sends one | yes, or no |
