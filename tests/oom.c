@@ -102,7 +102,7 @@ static size_t run(const char *source, const char *name, int *status) {
     SPYContext *c = spy_context_new();
     *status = -1;
     if (c) {
-        spy_set_output(c, discard, NULL);
+        spy_set_output(c, discard, NULL, NULL);
         spy_set_step_limit(c, 1000000);
         *status = spy_std_init(c) || spy_exec(c, source, name);
         spy_clear_error(c);

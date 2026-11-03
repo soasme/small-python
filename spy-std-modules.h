@@ -701,7 +701,7 @@ static const char *const module_sys[] = {
     "            return len(text)\n",
     "\n",
     "        def flush(self):\n",
-    "            flush()\n",
+    "            flush(self.name == \"<stderr>\")\n",
     "\n",
     "        def writable(self):\n",
     "            return True\n",

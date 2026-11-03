@@ -163,7 +163,7 @@ impl Runtime {
     /// the process's standard output.
     pub fn set_output(&self, output: impl FnMut(&str) + Send + 'static) {
         *self.hooks().output.borrow_mut() = Some(Box::new(output));
-        unsafe { ffi::spy_set_output(self.ctx(), Some(write_output), self.hooks.as_ptr().cast()) };
+        unsafe { ffi::spy_set_output(self.ctx(), Some(write_output), None, self.hooks.as_ptr().cast()) };
     }
 
     /// Maps a module name to its source, or `None` when there is none. For

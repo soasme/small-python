@@ -188,19 +188,16 @@ int spy_exec_module(SPYContext *, SPYValue *, const char *source, const char *fi
 
 /* == Host services == */
 
-/* Text output (print and sys.stdout), as UTF-8 chunks; a callback returns 0,
- * or nonzero to fail the write with OSError. Without one, print raises
- * OSError. */
+/* Text output (print and sys.stdout), as UTF-8 chunks, and its flush; both
+ * receive the data pointer and return 0, or nonzero to fail with OSError.
+ * Without a write callback print raises OSError; without a flush the output
+ * is unbuffered. */
 typedef int (*SPYWrite)(void *, const char *, size_t);
-void spy_set_output(SPYContext *, SPYWrite, void *);
-/* Optional flush for the current output callback; shares its data pointer.
- * Without it the output callback is treated as unbuffered. Setting the
- * output callback clears it. */
 typedef int (*SPYFlush)(void *);
-void spy_set_flush(SPYContext *, SPYFlush);
-/* Output for error text (the standard layer's sys.stderr); shares the output
- * callback until set. */
-void spy_set_error_output(SPYContext *, SPYWrite, void *);
+void spy_set_output(SPYContext *, SPYWrite, SPYFlush, void *);
+/* Output for error text (the standard layer's sys.stderr), with its flush;
+ * shares the output callbacks until set. */
+void spy_set_error_output(SPYContext *, SPYWrite, SPYFlush, void *);
 /* Return a malloc-allocated, NUL-terminated UTF-8 line for input(), with or
  * without its line ending, or NULL at the end of input (EOFError). Without a
  * reader, input() raises EOFError. */

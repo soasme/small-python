@@ -842,11 +842,11 @@ set and calls `init(ctx, module)`, which fills it (with `spy_set_attr`,
 `spy_native` values, or Python source through `spy_exec_module`) and returns 0,
 or -1 with an error set to fail the import. An init that sets `__path__` makes
 a package, whose submodules register under dotted names.
-`spy_set_flush` optionally supplies a flush callback using the output callback's
-data pointer. Otherwise output is treated as unbuffered. Replacing the output
-callback clears the flush callback. `spy_set_error_output` gives error text
-(the standard layer's `sys.stderr`) its own callback; without it, error text
-shares the output callback.
+The flush callback given to `spy_set_output` shares the output callback's
+data pointer; without one, output is treated as unbuffered.
+`spy_set_error_output` gives error text (the standard layer's `sys.stderr`)
+its own write and flush callbacks; without them, error text shares the output
+callbacks.
 `spy_std_report` reports the pending exception through `sys.excepthook`,
 which writes CPython's traceback display to `sys.stderr`; the `spy` command
 reports uncaught exceptions with it, on standard error. `print(file=...)` uses the Python object's

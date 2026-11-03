@@ -47,7 +47,7 @@ static void *work(void *failed) {
     for (int round = 0; round < ROUNDS; round++) {
         SPYContext *c = spy_context_new();
         if (!c || spy_std_init(c)) { *(int *)failed = 1; return NULL; }
-        spy_set_output(c, discard, NULL);
+        spy_set_output(c, discard, NULL, NULL);
         SPYValue *result = NULL;
         if (spy_exec(c, program, "<thread>") || !(result = spy_eval(c, "repr(result)", "<thread>")) ||
             strcmp(spy_as_string(c, result, NULL), "(50, 38, 1000, 100)")) {

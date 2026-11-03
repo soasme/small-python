@@ -14,8 +14,7 @@ int main(int argc, char **argv) {
     if (!source) { fputs("cannot read source\n", stderr); return 1; }
     SPYContext *c = spy_context_new();
     if (!c) { free(source); return 1; }
-    spy_set_output(c, host_output, stdout);
-    spy_set_flush(c, host_flush);
+    spy_set_output(c, host_output, host_flush, stdout);
     spy_set_input(c, host_read_line, stdin);
     spy_set_module_loader(c, host_load_module, ".");
     SPYValue *name = spy_string(c, argv[1], strlen(argv[1]));

@@ -283,7 +283,8 @@ for `stderr`. A host may bind any objects with those methods, or `None` for a
 stream it lacks.
 
 *Status:* `stdout` writes to the host output callback and `stderr` to its
-error callback (`spy_set_error_output`, the output callback until set), with
+error callback (`spy_set_error_output`, the output callback until set), and
+each `flush` calls its own stream's flush callback, with
 encoding `'utf-8'` and errors `'strict'`; `stdin` is `None` (`input` reads
 through the host's input callback instead).
 

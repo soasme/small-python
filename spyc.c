@@ -708,8 +708,7 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < b.registered.len; i++)
             put(&out, "    if (spy_std_init_module(c, \"%s\")) return 1;\n", b.registered.items[i]);
         if (optimize) put(&out, "    spy_set_optimize(c, %d);\n", optimize);
-        put(&out, "    spy_set_output(c, output, stdout);\n"
-                  "    spy_set_flush(c, flush_output);\n"
+        put(&out, "    spy_set_output(c, output, flush_output, stdout);\n"
                   "    spy_set_module_loader(c, load, NULL);\n"
                   "    int status = global(c, \"__file__\", ");
         put_string(&out, e->file);

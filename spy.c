@@ -321,6 +321,7 @@ struct SPYContext {
     SPYFlush flush;
     void *write_data;
     SPYWrite error_write; /* For the error stream; NULL shares the output. */
+    SPYFlush error_flush;
     void *error_data;
     SPYModuleLoader loader;
     void *loader_data;
@@ -15934,6 +15935,15 @@ static int gc_natives(SPYContext *c, SPYValue *module) {
 /* The sys module's runtime state. Constant metadata is Python in modules/sys.py. */
 enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_MAX_STR_DIGITS, SYS_WRITE, SYS_FLUSH, SYS_GETFRAME, SYS_FRAME_MODULE,
        SYS_GETREFCOUNT, SYS_GETALLOCATEDBLOCKS };
+/* Flushes the host output, or with error the error stream, which shares the
+ * output until it has its own callback. */
+static int output_flush(SPYContext *c, int error) {
+    int own = error && c->error_write;
+    SPYFlush flush = own ? c->error_flush : c->flush;
+    if (!flush || !flush(own ? c->error_data : c->write_data)) return 0;
+    spy_error(c, "OSError", "output flush failed");
+    return -1;
+}
 static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     static const char *const names[] = {"exception", "getrecursionlimit", "setrecursionlimit", "get_int_max_str_digits"};
     int id = (int)(intptr_t)data;
@@ -15964,7 +15974,7 @@ static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, v
     if (id == SYS_WRITE || id == SYS_FLUSH) {
         /* Host output for sys.stdout, and with a true second argument the
          * error stream for sys.stderr; text is already a str. */
-        if (id == SYS_FLUSH) return c->flush && c->flush(c->write_data) ? spy_error(c, "OSError", "output flush failed") : spy_none(c);
+        if (id == SYS_FLUSH) return output_flush(c, argc && truthy(argv[0])) ? NULL : spy_none(c);
         if (argc < 1 || argc > 2 || argv[0]->type != SPY_STRING) return spy_error(c, "TypeError", "write() argument must be str");
         int error = argc == 2 && truthy(argv[1]) && c->error_write;
         SPYWrite write = error ? c->error_write : c->write;
@@ -25967,7 +25977,7 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
             SPYValue *method = attribute(c, file, "flush");
             SPYValue *result = method ? call(c, method, 0, NULL) : NULL;
             spy_release(method); spy_release(result);
-        } else if (c->flush && c->flush(c->write_data)) spy_error(c, "OSError", "output flush failed");
+        } else output_flush(c, 0);
     }
     spy_release(file); spy_release(sep); spy_release(end); return c->error_type[0] ? NULL : spy_none(c);
 }
@@ -28019,9 +28029,10 @@ void spy_context_free(SPYContext *c) {
         for (MemHead *b = c->spare_blocks[k], *next; b; b = next) { cache_take(b, sizeof(*b) + (k + 1) * 16); next = b->next; free(b); }
     free(c);
 }
-void spy_set_output(SPYContext *c, SPYWrite write, void *data) { c->write = write; c->write_data = data; c->flush = NULL; }
-void spy_set_flush(SPYContext *c, SPYFlush flush) { c->flush = flush; }
-void spy_set_error_output(SPYContext *c, SPYWrite write, void *data) { c->error_write = write; c->error_data = data; }
+void spy_set_output(SPYContext *c, SPYWrite write, SPYFlush flush, void *data) { c->write = write; c->flush = flush; c->write_data = data; }
+void spy_set_error_output(SPYContext *c, SPYWrite write, SPYFlush flush, void *data) {
+    c->error_write = write; c->error_flush = flush; c->error_data = data;
+}
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
 void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; watch(c); }
@@ -28127,13 +28138,13 @@ static SPYValue *input_builtin(SPYContext *c, size_t argc, SPYValue *const *argv
     (void)data;
     if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "input() takes no keyword arguments");
     if (argc > 1) return errorf(c, "TypeError", "input expected at most 1 argument, got %zu", argc);
-    if (c->flush && c->flush(c->write_data)) return spy_error(c, "OSError", "output flush failed");
+    if (output_flush(c, 0)) return NULL;
     if (argc) {
         SPYValue *text = stringify(c, argv[0], 0);
         int status = text ? print_text(c, NULL, text) : -1;
         spy_release(text);
         if (status || c->error_type[0]) return NULL;
-        if (c->flush && c->flush(c->write_data)) return spy_error(c, "OSError", "output flush failed");
+        if (output_flush(c, 0)) return NULL;
     }
     char *line = c->read_line ? c->read_line(c->read_data) : NULL;
     if (!line) return c->error_type[0] ? NULL : spy_error(c, "EOFError", "EOF when reading a line");

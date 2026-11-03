@@ -46,7 +46,7 @@ static int output(void *p, const char *s, size_t n) { return fwrite(s, 1, n, p) 
 int main(void) {
     SPYContext *c = spy_context_new();
     if (!c) return 1;
-    spy_set_output(c, output, stdout);
+    spy_set_output(c, output, NULL, stdout);
     int status = spy_define(c, "answer", answer, NULL) || spy_exec(c, spy_hello_source, "hello.py");
     spy_context_free(c);
     return status;

@@ -41,7 +41,7 @@ int spy_go_new_module(SPYContext *c, const char *name) {
 }
 
 void spy_go_set_output(SPYContext *c, int on) {
-    spy_set_output(c, on ? write_output : NULL, spy_get_opaque(c));
+    spy_set_output(c, on ? write_output : NULL, NULL, spy_get_opaque(c));
 }
 
 void spy_go_set_loader(SPYContext *c, int on) {

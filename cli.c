@@ -61,9 +61,8 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "-c")) return usage();
     SPYContext *c = spy_context_new();
     if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
-    spy_set_output(c, host_output, stdout);
-    spy_set_flush(c, host_flush);
-    spy_set_error_output(c, host_output, stderr);
+    spy_set_output(c, host_output, host_flush, stdout);
+    spy_set_error_output(c, host_output, host_flush, stderr);
     spy_set_input(c, host_read_line, stdin);
     spy_set_optimize(c, optimize);
     if (spy_std_init(c)) { host_report(c); spy_context_free(c); return 1; }

@@ -283,20 +283,25 @@ int main(void) {
     SPYContext *c = spy_context_new();
     assert(c && !spy_std_init(c));
     Output o = {0};
-    spy_set_output(c, output, &o);
+    spy_set_output(c, output, NULL, &o);
     execute(c, "print('hello', 6 * 7)");
     assert(!strcmp(o.text, "hello 42\n"));
     /* The final value dies after the last statement, before spy_exec returns;
      * a registered sys reports an unraisable error before it is imported. */
     Output errors = {0};
-    spy_set_error_output(c, output, &errors);
+    spy_set_error_output(c, output, NULL, &errors);
     o.len = 0;
     execute(c, "class Last:\n    def __del__(self):\n        print('finalized')\n        1 / 0\nLast()");
     assert(!strcmp(o.text, "finalized\n"));
     assert(strstr(errors.text, "Exception ignored while calling deallocator <function Last.__del__ at ")
            && strstr(errors.text, "ZeroDivisionError: division by zero\n"));
-    spy_set_error_output(c, NULL, NULL);
-    spy_set_flush(c, flush_output);
+    /* Each stream flushes through its own callback. */
+    spy_set_error_output(c, output, flush_output, &errors);
+    execute(c, "import sys\nsys.stderr.flush()");
+    assert(errors.flushes == 1 && !o.flushes);
+    spy_set_error_output(c, NULL, NULL, NULL);
+    execute(c, "sys.stderr.flush()");
+    spy_set_output(c, output, flush_output, &o);
     execute(c, "print(end='', flush=True)");
     assert(o.flushes == 1);
     o.fail_flush = 1;
@@ -385,7 +390,7 @@ int main(void) {
         Output shown = {0};
         char source[160];
         assert(fresh && !spy_std_init(fresh));
-        spy_set_output(fresh, output, &shown);
+        spy_set_output(fresh, output, NULL, &shown);
         snprintf(source, sizeof(source), "class Late:\n    def __repr__(self):\n        import sys\n        %sreturn 'late'\nLate()\n", late[i][0]);
         SPYValue *value = spy_eval_interactive(fresh, source, "late.py");
         assert(i == 1 ? !value && !strcmp(spy_error_message(fresh), "lost sys.stdout") : value != NULL);

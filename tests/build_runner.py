@@ -111,7 +111,7 @@ static int output(void *p, const char *s, size_t n) {{ return fwrite(s, 1, n, p)
 static int entry(const char *source, const char *filename) {{
     SPYContext *c = spy_context_new();
     if (!c) return 1;
-    spy_set_output(c, output, stdout);
+    spy_set_output(c, output, NULL, stdout);
     spy_set_module_loader(c, {loader}, NULL);
     int status = spy_exec(c, source, filename);
     if (status) fprintf(stderr, "%s:%zu: %s: %s\\n", spy_error_filename(c), spy_error_line(c),

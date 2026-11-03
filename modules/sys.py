@@ -517,7 +517,7 @@ def _host_stream(write, flush):
             return len(text)
 
         def flush(self):
-            flush()
+            flush(self.name == "<stderr>")
 
         def writable(self):
             return True

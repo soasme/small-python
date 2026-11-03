@@ -95,8 +95,7 @@ extern "C" {
     pub fn spy_context_free(c: *mut SPYContext);
     pub fn spy_set_opaque(c: *mut SPYContext, opaque: *mut c_void);
     pub fn spy_get_opaque(c: *const SPYContext) -> *mut c_void;
-    pub fn spy_set_output(c: *mut SPYContext, write: Option<SPYWrite>, data: *mut c_void);
-    pub fn spy_set_flush(c: *mut SPYContext, flush: Option<SPYFlush>);
+    pub fn spy_set_output(c: *mut SPYContext, write: Option<SPYWrite>, flush: Option<SPYFlush>, data: *mut c_void);
     pub fn spy_set_module_loader(c: *mut SPYContext, loader: Option<SPYModuleLoader>, data: *mut c_void);
     pub fn spy_set_input(c: *mut SPYContext, read: Option<SPYReadLine>, data: *mut c_void);
     pub fn spy_new_module(c: *mut SPYContext, name: *const c_char, init: SPYModuleInit) -> c_int;

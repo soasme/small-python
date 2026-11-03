@@ -13,7 +13,7 @@ int main(void) {
     for (size_t i = 0; i < iterations; i++) {
         SPYContext *c = spy_context_new();
         if (!c) return 1;
-        spy_set_output(c, discard, NULL);
+        spy_set_output(c, discard, NULL, NULL);
         int status = spy_exec(c, "print('Hello, world!')", "<bench>");
         spy_context_free(c);
         if (status) return 1;

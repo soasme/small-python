@@ -220,8 +220,7 @@ char *flappy_load(void *, const char *);
 int main(void) {
     SPYContext *c = spy_context_new();
     if (!c) { fputs("cannot start\n", stderr); return 1; }
-    spy_set_output(c, host_output, stdout);
-    spy_set_flush(c, host_flush);
+    spy_set_output(c, host_output, host_flush, stdout);
     spy_set_module_loader(c, flappy_load, NULL);
     int status = spy_new_module(c, "raylib", raylib_init) || spy_exec(c, spy_flappy, "flappy.py") ? host_exit_status(c) : 0;
     if (IsWindowReady()) CloseWindow();

@@ -1082,7 +1082,7 @@ int main(int argc, char **argv) {
     }
     if (!helpers || !(w.modules = spy_dict(c))) return 1;
     spy_release(helpers);
-    spy_set_output(c, output, NULL);
+    spy_set_output(c, output, NULL, NULL);
     spy_set_module_loader(c, load, NULL);
     for (;;) {
         size_t len;

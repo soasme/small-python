@@ -151,8 +151,7 @@ extern const char spy_pong[];
 int main(void) {
     SPYContext *c = spy_context_new();
     if (!c) { fputs("cannot start\n", stderr); return 1; }
-    spy_set_output(c, host_output, stdout);
-    spy_set_flush(c, host_flush);
+    spy_set_output(c, host_output, host_flush, stdout);
     int status = spy_new_module(c, "raylib", raylib_init) || spy_exec(c, spy_pong, "pong.py") ? host_exit_status(c) : 0;
     if (IsWindowReady()) CloseWindow();
     spy_context_free(c);
