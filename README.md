@@ -97,7 +97,10 @@ calling a `raylib` module the host registers with `spy_new_module`
 [`examples/flappy`](examples/flappy) goes further: `spyc` bundles its
 game package, dynamically imported themes, and sprite, and links them with
 the engine and a static raylib into one executable
-(`make -C examples/flappy run`).
+(`make -C examples/flappy run`). [`examples/README.md`](examples/README.md)
+lists every example, including
+[Small Craft](https://github.com/soasme/small-craft), a block-building game
+that runs natively and in the browser.
 
 ## Packages
 
