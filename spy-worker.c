@@ -1022,9 +1022,10 @@ static void *watch_parent(void *data) {
     _exit(0);
 }
 #endif
-/* protocol.md 9: keep the protocol off stdin and stdout, write no core
- * files, and die with the parent. */
+/* protocol.md 9: leave the terminal's process group, keep the protocol off
+ * stdin and stdout, write no core files, and die with the parent. */
 static void hygiene(void) {
+    setpgid(0, 0); /* fails, harmlessly, for a session leader */
     in_fd = dup(0); out_fd = dup(1);
     int null = open("/dev/null", O_RDWR);
     if (in_fd < 0 || out_fd < 0 || null < 0 || dup2(null, 0) < 0 || dup2(2, 1) < 0) exit(1);
@@ -1065,9 +1066,11 @@ static HANDLE open_parent(void) {
         CompareFileTime(&born, &mine) > 0) _exit(0);
     return parent;
 }
-/* protocol.md 9 on Windows: the protocol off stdin and stdout in binary
- * mode, no crash dialogs, and a thread that ends the worker with the parent. */
+/* protocol.md 9 on Windows: Ctrl+C ignored, the protocol off stdin and
+ * stdout in binary mode, no crash dialogs, and a thread that ends the worker
+ * with the parent. */
 static void hygiene(void) {
+    SetConsoleCtrlHandler(NULL, TRUE);
     in_fd = _dup(0); out_fd = _dup(1);
     int null = _open("NUL", _O_RDWR);
     if (in_fd < 0 || out_fd < 0 || null < 0 || _dup2(null, 0) < 0 || _dup2(2, 1) < 0) exit(1);

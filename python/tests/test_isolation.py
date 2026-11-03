@@ -226,18 +226,35 @@ class LimitTest(unittest.TestCase):
                 Runtime(**options)
 
 
+def key(name, value):
+    return string(name.encode()) + value
+
+
 class HostileParentTest(unittest.TestCase):
     """The worker trusts its parent and exits with status 3 on a bad message."""
+    init = b"\x01d" + u32(7) + key("std", b"F") + key("policy", b"F") + b"".join(
+        key(name, b"i" + struct.pack("<q", n))
+        for name, n in (("step_limit", 0), ("memory_limit", 0), ("output_limit", 0), ("message_limit", 1 << 20),
+                        ("timeout", 0)))
+
     def frame(self, payload):
         return u32(len(payload)) + payload
 
+    @unittest.skipIf(sys.platform == "win32", "no process groups")
+    def test_own_process_group(self):
+        """A parent that cannot start the worker in its own group (Java) still
+        keeps the terminal's Ctrl+C from it."""
+        worker = subprocess.Popen([runtime_module.WORKER], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        with worker:
+            worker.stdin.write(self.frame(self.init))
+            worker.stdin.flush()
+            self.assertEqual(worker.stdout.read(5)[4], 0x40)
+            self.assertEqual(os.getpgid(worker.pid), worker.pid)
+            self.assertNotEqual(os.getpgid(worker.pid), os.getpgrp())
+            worker.stdin.close()
+
     def test_violations(self):
-        def key(name, value):
-            return string(name.encode()) + value
-        init = b"\x01d" + u32(7) + key("std", b"F") + key("policy", b"F") + b"".join(
-            key(name, b"i" + struct.pack("<q", n))
-            for name, n in (("step_limit", 0), ("memory_limit", 0), ("output_limit", 0), ("message_limit", 1 << 20),
-                            ("timeout", 0)))
+        init = self.init
         cases = {
             "reply kind": b"\x7f",
             "unknown kind": b"\x20",

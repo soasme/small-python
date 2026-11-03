@@ -313,11 +313,14 @@ The worker is started with an empty environment, working directory `/`, no
 inherited descriptors besides 0, 1, and 2, and in its own process group, so a
 terminal's `SIGINT` (Ctrl+C on Windows) reaches only the parent. At start it:
 
-1. moves the protocol to two fresh descriptors (in binary mode on Windows) and
+1. leaves its parent's process group with `setpgid(0, 0)`, or on Windows
+   ignores Ctrl+C, for parents that cannot start it in a group of its own
+   (Java's `ProcessBuilder`);
+2. moves the protocol to two fresh descriptors (in binary mode on Windows) and
    points 0 at `/dev/null` (`NUL`) and 1 at 2, so a stray write to stdout
    cannot corrupt the stream;
-2. sets `RLIMIT_CORE` to 0, or on Windows turns off crash dialogs;
-3. arranges to die with its parent: `prctl(PR_SET_PDEATHSIG, SIGKILL)` on
+3. sets `RLIMIT_CORE` to 0, or on Windows turns off crash dialogs;
+4. arranges to die with its parent: `prctl(PR_SET_PDEATHSIG, SIGKILL)` on
    Linux, a thread waiting on the parent with `kqueue` `NOTE_EXIT` on macOS,
    and a thread waiting on the parent's process handle on Windows. It also
    exits when its input stream ends.
