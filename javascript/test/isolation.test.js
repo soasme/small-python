@@ -38,6 +38,16 @@ describe("hostile worker", () => {
   test("silent worker times out", () => withFake("silent", 300, async (rt) => {
     await assert.rejects(rt.eval("1"), Timeout);
   }));
+
+  // The worker takes one chunk of the request and no more, so the parent
+  // waits to write the rest; closing must end that wait
+  // (tests/tla/SpyJavaScriptWorker.tla).
+  test("closing ends a stalled write", () => withFake("silent", 10000, async (rt) => {
+    const pending = rt.eval(`'${"x".repeat(200 * 1024)}'`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    rt.close();
+    await assert.rejects(pending, /closed/);
+  }));
 });
 
 describe("limits", () => {
