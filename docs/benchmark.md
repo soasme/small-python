@@ -177,6 +177,33 @@ run alternately on the same day, 0.5.0 (`f1f274d`) took 188.86–190.60 µs
 and 0.6.0 189.12–190.13 µs, and `sort` 129.8 and 129.4 ms. The Mach-O `__TEXT` segment of `spy` is 1,392,640 bytes and the
 executable 1,509,472 bytes.
 
+## Programs built with spyc
+
+`spyc` is measured for what it costs a user: the time a build takes and the
+program it builds. `python3 bench/spyc.py` (part of `make bench`) builds
+`bench/programs/startup.py` seven times each way and times the median, then
+alternates `spy startup.py` with the built program over ten rounds of 30
+runs and reports the median of the round medians. Every run's output must
+match `spy`'s. Measured after 0.6.0, when spyc began to build executables
+itself, on the platform above with `make` (Apple Clang 17, `-O2`); spyc runs
+`cc -O2`:
+
+| Measure | Result |
+| --- | ---: |
+| Build, executable (default) | 58.8 ms |
+| Build, C only (`-e`) | 2.7 ms |
+| Start-up, `spy startup.py` | 2.49 ms (rounds 2.45–2.53) |
+| Start-up, the spyc-built program | 2.46 ms (rounds 2.45–3.02) |
+| Size of the spyc-built program | 1,459,272 bytes (`spy`: 1,509,744) |
+
+The build is the C compiler's time: spyc itself takes 2.7 ms. The built
+program starts as fast as `spy` running the source, within noise; one
+round of 30 runs on the built program was slower, which a single run would
+have reported as an 11% difference. It is smaller than `spy` because it
+links only the core (`libspy.a`), not the standard layer or the command's
+host. Compiling the 176 KB bundle of `examples/flappy` takes 51 ms at `-O0`
+and 53 ms at `-O2`, so `-O2` costs a bundle little.
+
 ## Reproducing
 
 The comparison engines are not dependencies of this repository. On macOS:
