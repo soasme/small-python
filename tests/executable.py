@@ -42,7 +42,7 @@ static SPYValue *answer(SPYContext *c, size_t argc, SPYValue *const *argv, void 
     (void)argc; (void)argv; (void)data;
     return spy_int(c, 42);
 }
-static int output(void *p, const char *s, size_t n) { return fwrite(s, 1, n, p) == n ? 0 : -1; }
+static int output(SPYContext *c, void *p, const char *s, size_t n) { (void)c; return fwrite(s, 1, n, p) == n ? 0 : -1; }
 int main(void) {
     SPYContext *c = spy_context_new();
     if (!c) return 1;

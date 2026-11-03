@@ -10,6 +10,8 @@
   - SPYModuleLoader and SPYReadLine receive the context and return owned
     values (bytes source, str line) instead of malloc buffers, so host
     and engine never share an allocator
+  - SPYWrite and SPYFlush receive the context first, as every callback
+    but the interrupt and release do; a failing one may set its own error
 - the stability promise covers spy.h; the contents of _spy are outside it
 
 2026-11-03 0.5.0:

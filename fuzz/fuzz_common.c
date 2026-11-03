@@ -9,8 +9,8 @@
 #define FUZZ_STEP_LIMIT 100000
 #define FUZZ_MEMORY_LIMIT (256 << 20)
 
-static int discard(void *data, const char *s, size_t n) {
-    (void)data; (void)s; (void)n;
+static int discard(SPYContext *c, void *data, const char *s, size_t n) {
+    (void)c; (void)data; (void)s; (void)n;
     return 0;
 }
 

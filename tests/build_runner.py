@@ -107,7 +107,7 @@ HOST = """#include "spy.h"
 #include <stdio.h>
 {declarations}
 SPYValue *{loader}(SPYContext *, void *, const char *);
-static int output(void *p, const char *s, size_t n) {{ return fwrite(s, 1, n, p) == n ? 0 : -1; }}
+static int output(SPYContext *c, void *p, const char *s, size_t n) {{ (void)c; return fwrite(s, 1, n, p) == n ? 0 : -1; }}
 static int entry(const char *source, const char *filename) {{
     SPYContext *c = spy_context_new();
     if (!c) return 1;

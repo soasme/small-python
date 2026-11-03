@@ -8,15 +8,18 @@
 #include <string.h>
 
 typedef struct { char text[4096]; size_t len; int flushes, fail_flush; } Output;
-static int output(void *data, const char *s, size_t n) {
+static int output(SPYContext *c, void *data, const char *s, size_t n) {
+    (void)c;
     Output *o = data;
     if (n >= sizeof(o->text) - o->len) return -1;
     memcpy(o->text + o->len, s, n); o->len += n; o->text[o->len] = 0;
     return 0;
 }
-static int flush_output(void *data) {
+/* fail_flush 1 fails the flush; 2 fails it with the host's own error. */
+static int flush_output(SPYContext *c, void *data) {
     Output *o = data;
     o->flushes++;
+    if (o->fail_flush == 2) spy_error(c, "BrokenPipeError", "host pipe closed");
     return o->fail_flush;
 }
 static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
@@ -306,6 +309,10 @@ int main(void) {
     o.fail_flush = 1;
     assert(spy_exec(c, "print(flush=True)", "flush.py") == -1);
     assert(!strcmp(spy_error_type(c), "OSError"));
+    spy_clear_error(c);
+    o.fail_flush = 2;
+    assert(spy_exec(c, "print(flush=True)", "flush.py") == -1);
+    assert(!strcmp(spy_error_type(c), "BrokenPipeError"));
     o.fail_flush = 0;
     spy_clear_error(c);
     /* input() writes its prompt, flushes, and strips the line ending. */

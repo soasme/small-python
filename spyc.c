@@ -690,9 +690,10 @@ int main(int argc, char **argv) {
               "    return NULL;\n}\n", bare ? "" : "static ", bare ? loader : "load");
     if (!bare) {
         EntryPoint *e = &list[0];
-        put(&out, "static int output(void *p, const char *s, size_t n) {\n"
+        put(&out, "static int output(SPYContext *c, void *p, const char *s, size_t n) {\n"
+                  "    (void)c;\n"
                   "    return fwrite(s, 1, n, (FILE *)p) == n ? 0 : -1;\n}\n"
-                  "static int flush_output(void *p) { return fflush((FILE *)p); }\n"
+                  "static int flush_output(SPYContext *c, void *p) { (void)c; return fflush((FILE *)p); }\n"
                   "static int global(SPYContext *c, const char *name, const char *text) {\n"
                   "    SPYValue *value = spy_string(c, text, strlen(text));\n"
                   "    int status = !value || spy_set_global(c, name, value);\n"

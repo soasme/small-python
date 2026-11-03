@@ -822,7 +822,10 @@ Do not recursively call `spy_eval` from a callback on the same context.
 #### 3.4.6 Host services and limits
 
 `spy_set_output` installs text output; `spy_set_module_loader` installs module
-source loading. Neither service is installed by the core automatically.
+source loading. Neither service is installed by the core automatically. Every
+host callback receives the context first, except the interrupt and a native's
+release callback, which must not call into the engine. A callback that fails may set its own
+error, which takes the place of the engine's generic one.
 
 `spy_mount(ctx, directory, path, flags)` lets `open` reach a host directory
 at an absolute guest path, or at the directory's own resolved path when

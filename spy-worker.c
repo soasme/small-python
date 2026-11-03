@@ -621,13 +621,13 @@ static SPYValue *host_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     return request(&b);
 }
 /* A failed write is the engine's own OSError; the parent reports why. */
-static int output(void *data, const char *s, size_t n) {
+static int output(SPYContext *c, void *data, const char *s, size_t n) {
     (void)data;
     Buffer b = {0};
     begin(&b, OUTPUT);
     put_text(&b, 's', s, n);
     SPYValue *v = request(&b);
-    if (!v) spy_clear_error(w.c);
+    if (!v) spy_clear_error(c);
     spy_release(v);
     return v ? 0 : -1;
 }

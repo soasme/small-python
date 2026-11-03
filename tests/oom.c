@@ -90,8 +90,8 @@ char *oom_realpath(const char *path, char *resolved) {
     return copy;
 }
 
-static int discard(void *data, const char *s, size_t n) {
-    (void)data; (void)s; (void)n;
+static int discard(SPYContext *c, void *data, const char *s, size_t n) {
+    (void)c; (void)data; (void)s; (void)n;
     return 0;
 }
 

@@ -299,7 +299,7 @@ unsafe extern "C" fn init_module(c: *mut ffi::SPYContext, module: *mut ffi::SPYV
     0
 }
 
-unsafe extern "C" fn write_output(data: *mut c_void, text: *const c_char, n: usize) -> c_int {
+unsafe extern "C" fn write_output(_: *mut ffi::SPYContext, data: *mut c_void, text: *const c_char, n: usize) -> c_int {
     let hooks = &*data.cast::<Hooks>();
     let text = String::from_utf8_lossy(std::slice::from_raw_parts(text.cast::<u8>(), n));
     let written = catch_unwind(AssertUnwindSafe(|| {

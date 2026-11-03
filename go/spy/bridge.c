@@ -16,7 +16,8 @@ static int init_module(SPYContext *c, SPYValue *module) {
     return goInit(c, module);
 }
 
-static int write_output(void *rt, const char *text, size_t n) {
+static int write_output(SPYContext *c, void *rt, const char *text, size_t n) {
+    (void)c;
     return goWrite((uintptr_t)rt, (char *)text, n);
 }
 

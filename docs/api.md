@@ -316,15 +316,15 @@ Execute source with a module's namespace as its globals.
 ## Host services
 
 ```c
-typedef int (*SPYWrite)(void *, const char *, size_t);
-typedef int (*SPYFlush)(void *);
+typedef int (*SPYWrite)(SPYContext *, void *, const char *, size_t);
+typedef int (*SPYFlush)(SPYContext *, void *);
 void spy_set_output(SPYContext *, SPYWrite, SPYFlush, void *);
 ```
 
 Text output (print and sys.stdout), as UTF-8 chunks, and its flush; both
-receive the data pointer and return 0, or nonzero to fail with OSError.
-Without a write callback print raises OSError; without a flush the output is
-unbuffered.
+receive the data pointer and return 0, or nonzero to fail with OSError
+unless the callback set an error of its own. Without a write callback print
+raises OSError; without a flush the output is unbuffered.
 
 ```c
 void spy_set_error_output(SPYContext *, SPYWrite, SPYFlush, void *);

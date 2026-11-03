@@ -33,7 +33,8 @@ static SPYValue *load_module(SPYContext *c, void *data, const char *name) {
     free(module);
     return NULL;
 }
-static int capture(void *data, const char *s, size_t n) {
+static int capture(SPYContext *c, void *data, const char *s, size_t n) {
+    (void)c;
     Output *out = data;
     if (n > SIZE_MAX - out->len - 1) return -1;
     char *next = realloc(out->text, out->len + n + 1);

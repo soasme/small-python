@@ -72,10 +72,11 @@ static inline SPYValue *host_load_module(SPYContext *c, void *data, const char *
 
 /* Console callbacks and the process status shared by the spy command and
  * the test drivers. */
-static inline int host_output(void *data, const char *s, size_t n) {
+static inline int host_output(SPYContext *c, void *data, const char *s, size_t n) {
+    (void)c;
     return fwrite(s, 1, n, data) == n ? 0 : -1;
 }
-static inline int host_flush(void *data) { return fflush(data); }
+static inline int host_flush(SPYContext *c, void *data) { (void)c; return fflush(data); }
 /* One line of standard input for input(), or NULL at its end. */
 static inline SPYValue *host_read_line(SPYContext *c, void *data) {
     size_t len = 0, size = 128;

@@ -15940,7 +15940,7 @@ enum { SYS_EXCEPTION, SYS_GETRECURSIONLIMIT, SYS_SETRECURSIONLIMIT, SYS_GET_INT_
 static int output_flush(SPYContext *c, int error) {
     int own = error && c->error_write;
     SPYFlush flush = own ? c->error_flush : c->flush;
-    if (!flush || !flush(own ? c->error_data : c->write_data)) return 0;
+    if (!flush || !flush(c, own ? c->error_data : c->write_data)) return 0;
     spy_error(c, "OSError", "output flush failed");
     return -1;
 }
@@ -15979,7 +15979,7 @@ static SPYValue *sys_native(SPYContext *c, size_t argc, SPYValue *const *argv, v
         int error = argc == 2 && truthy(argv[1]) && c->error_write;
         SPYWrite write = error ? c->error_write : c->write;
         if (!write) return spy_error(c, "OSError", "no output callback installed");
-        if (write(error ? c->error_data : c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
+        if (write(c, error ? c->error_data : c->write_data, argv[0]->as.string.data, argv[0]->as.string.len)) return spy_error(c, "OSError", "output failed");
         return spy_none(c);
     }
     if (id == SYS_FRAME_MODULE) {
@@ -19267,8 +19267,8 @@ static int display_value(SPYContext *c, SPYValue *value) {
             print_text(c, file, newline);
         spy_release(file); spy_release(newline);
     } else if (!c->write) spy_error(c, "OSError", "no output callback installed");
-    else if (c->write(c->write_data, text->as.string.data, text->as.string.len) ||
-             c->write(c->write_data, "\n", 1)) spy_error(c, "OSError", "output failed");
+    else if (c->write(c, c->write_data, text->as.string.data, text->as.string.len) ||
+             c->write(c, c->write_data, "\n", 1)) spy_error(c, "OSError", "output failed");
     spy_release(text);
     return c->error_type[0] ? -1 : name_set(c, c->builtins, "_", value);
 }
@@ -25940,7 +25940,7 @@ static int print_text(SPYContext *c, SPYValue *file, SPYValue *text) {
         SPYValue *result = method ? call(c, method, 1, &text) : NULL;
         spy_release(method); spy_release(result);
     } else if (!c->write) spy_error(c, "OSError", "no output callback installed");
-    else if (c->write(c->write_data, text->as.string.data, text->as.string.len)) spy_error(c, "OSError", "output failed");
+    else if (c->write(c, c->write_data, text->as.string.data, text->as.string.len)) spy_error(c, "OSError", "output failed");
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
