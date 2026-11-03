@@ -227,21 +227,21 @@ class InterpreterTest {
     @Test
     void policy() {
         List<String> events = new ArrayList<>();
-        SecurityException refused = new SecurityException("no files");
+        SecurityException refused = new SecurityException("not that");
         Interpreter py = start(Interpreter.builder().loader(name -> "").policy((event, args) -> {
             events.add(event + args.items());
-            switch (event) {
-                case "open" -> throw refused;
-                case "import" -> throw new PythonException("TypeError", "no modules");
-                default -> {}
+            if (args.items().equals(List.of("refused"))) {
+                throw refused;
+            } else if (event.equals("import")) {
+                throw new PythonException("TypeError", "no modules");
             }
         }));
         assertEquals(42L, py.eval("eval('6 * 7')"));
-        PythonException e = raises(() -> py.exec("open('/etc/passwd')"));
-        assertEquals("PermissionError: no files", e.getMessage());
+        PythonException e = raises(() -> py.exec("exec('refused')"));
+        assertEquals("PermissionError: not that", e.getMessage());
         assertSame(refused, e.getCause());
         assertEquals("TypeError", raises(() -> py.exec("import m")).getType());
-        assertEquals(List.of("exec[6 * 7]", "open[/etc/passwd, r]", "import[m]"), events);
+        assertEquals(List.of("exec[6 * 7]", "exec[refused]", "import[m]"), events);
     }
 
     @Test
