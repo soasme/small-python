@@ -920,8 +920,13 @@ an incompatible release, after one release that marks it deprecated in
 enforces this against the last release tag by compiling that release's
 declarations against the current header. It also requires every
 declaration to be documented and `libspy.a` to export exactly the
-functions `spy.h` declares. At 0.x the minor version still breaks; 1.0
-will freeze the API and ABI under these rules.
+functions `spy.h` declares. At 0.x the minor version still breaks; 0.6 is
+the last such break, and 1.0 will freeze the API and ABI under these rules.
+
+The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
+names it puts in `_spy` serve the standard layer and may change in any
+release. Hosts and their Python code should reach those facilities through
+the standard layer's `sys` and `gc`, not `_spy`.
 
 ### 3.5 Python binding
 
