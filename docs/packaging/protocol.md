@@ -1,9 +1,9 @@
 # Worker protocol
 
 Status: specification. The packages in `python.md` and `javascript.md`, the
-`small-python-worker` crate in `rust.md`, and the Go package `worker` in
-`go.md` run the engine through this protocol; none links the engine into
-its host.
+`small-python-worker` crate in `rust.md`, the Go package `worker` in
+`go.md`, and the Java artifact `small-python-worker` in `java.md` run the
+engine through this protocol; none links the engine into its host.
 
 ## 1 Purpose
 
@@ -18,6 +18,7 @@ run each runtime in a *worker*, a separate address space that owns exactly one
 | Python | `spy-worker` executable, one process per runtime | the worker's stdin and stdout pipes | OS process |
 | Rust (`small-python-worker`) | as Python | as Python | OS process |
 | Go (`worker`) | as Python | as Python | OS process |
+| Java (`small-python-worker`) | as Python | as Python | OS process |
 | JavaScript | `spy-worker.wasm` in a Worker thread, one per runtime | `postMessage` out, a `SharedArrayBuffer` in | WebAssembly sandbox and a Worker thread |
 
 Both workers are built from the same C file, `spy-worker.c`, with only the
@@ -311,7 +312,8 @@ is gone, and a new runtime must be made.
 
 The worker is started with an empty environment, working directory `/`, no
 inherited descriptors besides 0, 1, and 2, and in its own process group, so a
-terminal's `SIGINT` (Ctrl+C on Windows) reaches only the parent. At start it:
+terminal's `SIGINT` (Ctrl+C on Windows) reaches only the parent; Java's
+`ProcessBuilder` cannot do the last (`java.md` §4.1). At start it:
 
 1. leaves its parent's process group with `setpgid(0, 0)`, or on Windows
    ignores Ctrl+C, for parents that cannot start it in a group of its own

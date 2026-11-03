@@ -104,11 +104,11 @@ that runs natively and in the browser.
 
 ## Packages
 
-Small Python is also packaged for four host languages. Every package can run
+Small Python is also packaged for five host languages. Every package can run
 each runtime in a sandboxed *worker* of its own, which sees only the
 functions, modules, and directories you give it: an engine crash, or code
 exploiting one, fails the operation instead of taking your program down.
-Rust and Go can also run the engine in your process, for trusted code and
+Rust, Go, and Java can also run the engine in your process, for trusted code and
 the lowest overhead.
 
 | Language | Install | In-process | Sandboxed worker | Documentation |
@@ -117,10 +117,11 @@ the lowest overhead.
 | JavaScript (Node.js 20+, browsers) | `npm install small-python` | | `small-python` (WebAssembly) | [javascript](javascript/README.md), [spec](docs/packaging/javascript.md) |
 | Rust | `cargo add small-python` | `small-python` | `small-python-worker` | [crates](rust/small-python/README.md), [spec](docs/packaging/rust.md) |
 | Go 1.24+ | `go get github.com/soasme/small-python/go` | `spy` | `worker` | [go](go/README.md), [spec](docs/packaging/go.md) |
+| Java 17+ | `io.github.soasme:small-python-worker` on Maven Central | `small-python` | `small-python-worker` | [java](java/README.md), [spec](docs/packaging/java.md) |
 
 The workers share one [protocol](docs/packaging/protocol.md) and one C
 file, `spy-worker.c`: a process sealed by the OS sandbox for Python, Rust,
-and Go, and a WebAssembly instance in a Worker thread for JavaScript. All of
+Go, and Java, and a WebAssembly instance in a Worker thread for JavaScript. All of
 them bound steps, memory, and time.
 
 ### Python
@@ -191,6 +192,7 @@ make test-binding     # the Python package
 make test-javascript  # the JavaScript package (wasi-sdk rebuilds its worker)
 make test-rust        # the Rust crates and the todo example
 make test-go          # the Go module
+make test-java        # the Java artifacts
 ```
 
 ## Documentation
@@ -201,7 +203,7 @@ make test-go          # the Go module
 - [Standard modules](docs/standards/std.md): the `sys` and `gc` modules, after CPython 3.15
 - [CPython's Lib](docs/python-lib.md): scope of running CPython's `Lib/` unchanged
 - [Building programs](docs/build.md): the `spyc` bundler
-- Packages: [Python](docs/packaging/python.md), [JavaScript](docs/packaging/javascript.md), [Rust](docs/packaging/rust.md), [Go](docs/packaging/go.md), and the [worker protocol](docs/packaging/protocol.md) they share
+- Packages: [Python](docs/packaging/python.md), [JavaScript](docs/packaging/javascript.md), [Rust](docs/packaging/rust.md), [Go](docs/packaging/go.md), [Java](docs/packaging/java.md), and the [worker protocol](docs/packaging/protocol.md) they share
 - [Specification tests](tests/spec/README.md)
 - [Cython compatibility baseline](docs/testing/cython.md)
 - [Contributing](AGENTS.md): architecture and code style
