@@ -34,6 +34,10 @@ static char *host_read(FILE *file) {
     return source;
 }
 
+static inline int host_ends_with(const char *s, size_t len, const char *suffix) {
+    size_t n = strlen(suffix);
+    return len > n && !strcmp(s + len - n, suffix);
+}
 /* The file of the first len bytes of a dotted module name under directory,
  * with suffix appended, or NULL for a name no file can have. */
 static inline char *host_module_path(const char *directory, const char *name, size_t len, const char *suffix) {
@@ -56,9 +60,9 @@ static inline char *host_module_path(const char *directory, const char *name, si
 static inline SPYValue *host_load_module(SPYContext *c, void *data, const char *name) {
     size_t len = strlen(name);
     static const char namespace_suffix[] = ".__namespace__";
-    size_t suffix = sizeof(namespace_suffix) - 1;
-    int namespace = len > suffix && !strcmp(name + len - suffix, namespace_suffix);
-    char *path = host_module_path(data, name, namespace ? len - suffix : len, namespace ? "" : ".py");
+    int namespace = host_ends_with(name, len, namespace_suffix);
+    if (namespace) len -= sizeof(namespace_suffix) - 1;
+    char *path = host_module_path(data, name, len, namespace ? "" : ".py");
     if (!path) return NULL;
     if (namespace) {
         struct stat info;

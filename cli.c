@@ -10,16 +10,12 @@
 #define NATIVE_SUFFIX ".so"
 #endif
 
-static int ends_with(const char *s, size_t len, const char *suffix) {
-    size_t n = strlen(suffix);
-    return len > n && !strcmp(s + len - n, suffix);
-}
 /* A shared library NAME.so (NAME.dll on Windows) is a native module,
  * found before NAME.py as CPython finds extension modules before sources.
  * Packages, and the __init__ of each, are sources. */
 static SPYValue *load_module(SPYContext *c, void *data, const char *name) {
     size_t len = strlen(name);
-    int probe = ends_with(name, len, ".__init__") || ends_with(name, len, ".__namespace__");
+    int probe = host_ends_with(name, len, ".__init__") || host_ends_with(name, len, ".__namespace__");
     char *path = probe ? NULL : host_module_path(data, name, len, NATIVE_SUFFIX);
     struct stat info;
     int native = path && !stat(path, &info) && S_ISREG(info.st_mode);
