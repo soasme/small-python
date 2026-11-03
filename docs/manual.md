@@ -335,9 +335,9 @@ The lifecycle benchmark creates a context, parses and executes a hello-world
 program with discarded output, and destroys the context. It reports average CPU
 time across 20,000 iterations. It excludes process launch and terminal I/O.
 
-On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run at `f1f274d`
-(the 0.5.0 baseline) measured 186 microseconds of CPU time per lifecycle
-(three runs: 187.37, 185.89, 186.36 µs). The Mach-O `__TEXT` segment was
+On Apple M2, macOS arm64, Apple Clang 17, `-O2`, the recorded run at `af37fe2`
+(the 0.6.0 release) measured 191 microseconds of CPU time per lifecycle
+(three runs: 191.26, 193.55, 189.18 µs; 0.5.0 measured the same on that day). The Mach-O `__TEXT` segment was
 1,392,640 bytes; the executable file was 1,509,472 bytes. These measurements
 apply to this build. They do not establish x86 performance, a worst-case
 latency bound, or the few-kilobyte size goal.

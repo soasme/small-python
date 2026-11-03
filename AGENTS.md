@@ -299,3 +299,8 @@ by the task and do not require repeated confirmation.
 * Before pushing, run the CI workflow locally with `tools/run_workflow.py`
   (`act` in Docker; `-j test` for one job). It runs the Linux jobs only.
 * Commit message should come with a brief of test or bench results.
+* Before tagging and pushing a release, re-measure `docs/benchmark.md` at the
+  release commit (`bench/compare.py`, `make bench`) and commit the report.
+  Stop at any bench issue (a regression against the last report, a wrong or
+  failing program, an engine that cannot be measured) and report it instead
+  of tagging.
