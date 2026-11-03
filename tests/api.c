@@ -46,10 +46,17 @@ static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     if (argc != 1) return spy_error(c, "TypeError", "call_back expects one argument");
     return spy_call(c, argv[0], 0, NULL);
 }
+static int fill_registered(SPYContext *c, SPYValue *module) {
+    SPYValue *value = spy_int(c, 7);
+    int status = value ? spy_set_attr(c, module, "value", value) : -1;
+    spy_release(value);
+    return status;
+}
 static SPYValue *loader(SPYContext *c, void *data, const char *name) {
     int *calls = data;
     (*calls)++;
     if (!strcmp(name, "text")) return spy_string(c, "x = 1", 5);
+    if (!strcmp(name, "registered")) { spy_new_module(c, name, fill_registered); return NULL; }
     if (strcmp(name, "sample")) return NULL;
     const char *source = "answer = 42\ndef add(x):\n    return x + answer\n";
     return spy_bytes(c, source, strlen(source));
@@ -762,6 +769,12 @@ int main(void) {
     assert(spy_exec(c, "import text", "api.py") == -1);
     assert(!strcmp(spy_error_message(c), "module loader returned str, not bytes"));
     spy_clear_error(c);
+    /* A loader may register the module it is asked for instead of returning
+     * its source: the import initializes it, with no namespace probe. */
+    int probes = calls;
+    execute(c, "import registered\nassert registered.value == 7 and not hasattr(registered, '__file__')\n");
+    execute(c, "import registered");
+    assert(calls == probes + 2);
 
     /* The policy sees each engine event once, with its arguments; a refusal
      * is PermissionError unless the policy raised its own. */

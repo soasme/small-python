@@ -4,6 +4,30 @@
 
 #include <string.h>
 
+#ifdef _WIN32
+#define NATIVE_SUFFIX ".dll"
+#else
+#define NATIVE_SUFFIX ".so"
+#endif
+
+static int ends_with(const char *s, size_t len, const char *suffix) {
+    size_t n = strlen(suffix);
+    return len > n && !strcmp(s + len - n, suffix);
+}
+/* A shared library NAME.so (NAME.dll on Windows) is a native module,
+ * found before NAME.py as CPython finds extension modules before sources.
+ * Packages, and the __init__ of each, are sources. */
+static SPYValue *load_module(SPYContext *c, void *data, const char *name) {
+    size_t len = strlen(name);
+    int probe = ends_with(name, len, ".__init__") || ends_with(name, len, ".__namespace__");
+    char *path = probe ? NULL : host_module_path(data, name, len, NATIVE_SUFFIX);
+    struct stat info;
+    int native = path && !stat(path, &info) && S_ISREG(info.st_mode);
+    if (native) spy_std_load_native(c, name, path);
+    free(path);
+    return native ? NULL : host_load_module(c, data, name);
+}
+
 /* The process status for the pending error, whose traceback, unless it is
  * a SystemExit, sys.excepthook displays as python's would. */
 static int exit_status(SPYContext *c) {
@@ -88,7 +112,7 @@ int main(int argc, char **argv) {
             memcpy(directory, filename, n); directory[n] = 0;
         }
     }
-    spy_set_module_loader(c, host_load_module, directory ? (*directory ? directory : "/") : ".");
+    spy_set_module_loader(c, load_module, directory ? (*directory ? directory : "/") : ".");
     int status;
     if (argc == 2 && !strcmp(argv[1], "-i")) status = repl(c);
     else if (argc == 3) {

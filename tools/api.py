@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REFERENCE = ROOT / "docs/api.md"
+MODULE = ROOT / "spy-module.h"
 TOKEN = re.compile(r"/\*.*?\*/|#[^\n]*|[^;/#]*(?:/(?!\*)[^;/#]*)*;", re.S)
 
 
@@ -111,6 +112,73 @@ def reference(sections):
     return "\n".join(out) + "\n"
 
 
+MODULE_PROLOGUE = """\
+/* Generated from spy.h by tools/api.py; run make api-reference after editing
+ * spy.h. */
+#ifndef SPY_MODULE_H
+#define SPY_MODULE_H
+
+#include "spy.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* == Native modules ==
+ * A native module is a shared library defining one module, which a host
+ * loads with spy_std_load_native (spy-std.h), as the spy command loads
+ * NAME.so (NAME.dll on Windows) found beside its sources. Its source includes
+ * this header and marks the module's init, a SPYModuleInit named spy_init_
+ * and the module's last name, with SPY_MODULE:
+ *
+ *     SPY_MODULE int spy_init_fib(SPYContext *c, SPYValue *module) { ... }
+ *
+ * Compiled with SPY_SHARED_MODULE defined, the library calls spy.h through
+ * the table its host sets in spy_module, so it needs no symbol from the
+ * engine and loads into statically linked hosts too. Without it, the same
+ * source is a C module that a host links and registers with spy_new_module. */
+
+/* Every spy.h function. Entries are only appended, so a module runs on any
+ * compatible engine (manual 3.4.8) as new as its header or newer. */
+typedef struct SPYModuleAPI {
+"""
+
+MODULE_EPILOGUE = """\
+/* What a shared module exports beside its init: the version of the header it
+ * was built with, and the table its host sets before calling the init. */
+typedef struct SPYModuleLink { const char *version; const SPYModuleAPI *api; } SPYModuleLink;
+
+#ifdef SPY_SHARED_MODULE
+#if defined(_WIN32)
+#define SPY_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__)
+#define SPY_EXPORT __attribute__((visibility("default")))
+#else
+#define SPY_EXPORT
+#endif
+extern SPY_EXPORT SPYModuleLink spy_module;
+#define SPY_MODULE SPY_EXPORT SPYModuleLink spy_module = {SPY_VERSION, NULL}; SPY_EXPORT
+"""
+
+
+def table(decls, previous):
+    """The table's functions: those of the previous table that spy.h still
+    declares, in its order, then the new ones in spy.h's order."""
+    declared = functions(decls)
+    kept = [name for name in re.findall(r"\(\*(spy_\w+)\)\(", previous) if name in declared]
+    return kept + [name for name in declared if name not in kept]
+
+
+def module_header(decls, previous):
+    declared, names = functions(decls), table(decls, previous)
+    fields = [re.sub(rf"\b{name}\s*\(", f"(*{name})(", " ".join(declared[name].split()), count=1) for name in names]
+    return "".join([MODULE_PROLOGUE, *(f"    {field}\n" for field in fields), "} SPYModuleAPI;\n",
+                    "/* The table's functions in its order, for the host that fills it. */\n",
+                    "#define SPY_MODULE_FUNCTIONS(X) \\\n", " \\\n".join(f"    X({name})" for name in names), "\n\n",
+                    MODULE_EPILOGUE, *(f"#define {name} (spy_module.api->{name})\n" for name in names),
+                    "#else\n#define SPY_MODULE\n#endif\n\n#ifdef __cplusplus\n}\n#endif\n#endif\n"])
+
+
 def undocumented(sections):
     return [decl for _, blocks in sections for text, decls in blocks
             for decl in decls if not text and not decl.startswith("typedef struct")]
@@ -178,6 +246,9 @@ def check(library):
     errors = [f"undocumented in spy.h: {decl}" for decl in undocumented(sections)]
     if REFERENCE.read_text() != reference(sections):
         errors.append("docs/api.md is stale; run make api-reference")
+    module = MODULE.read_text() if MODULE.exists() else ""
+    if module != module_header(decls, module):
+        errors.append("spy-module.h is stale; run make api-reference")
     exports = exported(library)
     errors += [f"{library} does not define {name}" for name in sorted(functions(decls).keys() - exports)]
     errors += [f"{library} exports {name}, which spy.h does not declare" for name in sorted(exports - functions(decls).keys())]
@@ -185,6 +256,11 @@ def check(library):
     old = git("show", f"{tag}:spy.h")
     version = (ROOT / "VERSION").read_text().strip()
     problems = incompatibilities(old, header)
+    # A release before native modules has no table to keep.
+    released = git("ls-tree", "--name-only", tag, "spy-module.h").strip()
+    old_table = table(declarations(parse(old)), git("show", f"{tag}:spy-module.h")) if released else []
+    if table(decls, module)[:len(old_table)] != old_table:
+        problems.append(f"the native-module table no longer begins with {tag}'s")
     if problems and level(version) == level(tag[1:]):
         errors += [f"incompatible with {tag} without a new {'minor' if version.startswith('0.') else 'major'} version: {p}"
                    for p in problems]
@@ -201,7 +277,9 @@ def main():
     if args.check:
         check(args.check)
     else:
-        REFERENCE.write_text(reference(parse((ROOT / "spy.h").read_text())))
+        sections = parse((ROOT / "spy.h").read_text())
+        REFERENCE.write_text(reference(sections))
+        MODULE.write_text(module_header(declarations(sections), MODULE.read_text() if MODULE.exists() else ""))
 
 
 if __name__ == "__main__":
