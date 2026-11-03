@@ -166,6 +166,11 @@ func TestHostFunctionsAndNestedRequests(t *testing.T) {
 	})
 	_, err = rt.Eval("nested_eval()")
 	equal(t, exception(t, err).Type, "ValueError")
+	rt.Define("shut", func(rt *worker.Runtime, _ []any, _ map[string]any) (any, error) {
+		return nil, rt.Close()
+	})
+	_, err = rt.Eval("shut()")
+	equal(t, exception(t, err).Type, "ValueError")
 }
 
 func TestHostErrorsComeBackAsTheirCause(t *testing.T) {
