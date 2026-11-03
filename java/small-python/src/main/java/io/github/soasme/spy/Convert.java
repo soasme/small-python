@@ -1,5 +1,6 @@
 package io.github.soasme.spy;
 
+import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.ParameterizedType;
@@ -163,7 +164,7 @@ final class Convert {
         } else if (raw == byte[].class && kind == Native.BYTES) {
             return Native.asBytes(ctx, v);
         } else if (raw == byte[].class) {
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
             each(rt, v, item -> {
                 long n = (Long) decode(rt, item, Long.class);
                 if (n < 0 || n > 255) {

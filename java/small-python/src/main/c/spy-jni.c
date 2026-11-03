@@ -143,7 +143,8 @@ static SPYValue *call(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValu
 }
 
 static void release(void *f) {
-    (*env_now())->DeleteGlobalRef(env_now(), (jobject)f);
+    JNIEnv *env = env_now();
+    (*env)->DeleteGlobalRef(env, (jobject)f);
 }
 
 static int init_module(SPYContext *c, SPYValue *module) {

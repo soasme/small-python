@@ -316,14 +316,12 @@ public final class Interpreter implements AutoCloseable {
         }
     }
 
-    /** An owned engine result, or the pending error thrown. */
+    /** made, as a PyObject. */
     PyObject wrap(long v) {
-        if (v == 0) {
-            throw Native.takeError(ctx);
-        }
-        return new PyObject(this, v);
+        return new PyObject(this, made(v));
     }
 
+    /** An owned engine result, or the pending error thrown. */
     long made(long v) {
         if (v == 0) {
             throw Native.takeError(ctx);

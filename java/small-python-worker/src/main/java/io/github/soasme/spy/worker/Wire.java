@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -78,12 +79,12 @@ final class Wire {
             }
         }
 
-        void pairs(Iterable<? extends Map.Entry<?, ?>> entries, int size, int depth) {
+        void pairs(List<PyDict.Item> items, int depth) {
             bytes.write('d');
-            u32(size);
-            for (Map.Entry<?, ?> e : entries) {
-                value(e.getKey(), depth + 1);
-                value(e.getValue(), depth + 1);
+            u32(items.size());
+            for (PyDict.Item item : items) {
+                value(item.key(), depth + 1);
+                value(item.value(), depth + 1);
             }
         }
 
@@ -102,8 +103,7 @@ final class Wire {
                 if (n.bitLength() < 64) {
                     value(n.longValue(), depth);
                 } else {
-                    field('I', ((n.signum() < 0 ? "-0x" : "0x") + n.abs().toString(16)).getBytes(
-                            java.nio.charset.StandardCharsets.US_ASCII));
+                    field('I', ((n.signum() < 0 ? "-0x" : "0x") + n.abs().toString(16)).getBytes(StandardCharsets.US_ASCII));
                 }
             } else if (x instanceof Double || x instanceof Float) {
                 bytes.write('f');
@@ -129,13 +129,11 @@ final class Wire {
             } else if (x instanceof Object[] a) {
                 items('l', List.of(a), depth);
             } else if (x instanceof PyDict d) {
-                List<Map.Entry<?, ?>> entries = new ArrayList<>();
-                for (PyDict.Item item : d.items()) {
-                    entries.add(new java.util.AbstractMap.SimpleImmutableEntry<>(item.key(), item.value()));
-                }
-                pairs(entries, entries.size(), depth);
+                pairs(d.items(), depth);
             } else if (x instanceof Map<?, ?> m) {
-                pairs(m.entrySet(), m.size(), depth);
+                List<PyDict.Item> items = new ArrayList<>(m.size());
+                m.forEach((key, value) -> items.add(new PyDict.Item(key, value)));
+                pairs(items, depth);
             } else if (x instanceof PyObject o) {
                 if (o.rt != rt) {
                     throw new IllegalArgumentException("the value belongs to another interpreter");
@@ -293,7 +291,7 @@ final class Wire {
 
         /** An int beyond 64 bits, which must be in canonical form. */
         BigInteger big() throws Violation {
-            String text = new String(bytes(), java.nio.charset.StandardCharsets.ISO_8859_1);
+            String text = new String(bytes(), StandardCharsets.ISO_8859_1);
             boolean negative = text.startsWith("-");
             String digits = negative ? text.substring(1) : text;
             if (!digits.startsWith("0x") || digits.length() == 2 || digits.charAt(2) == '0'

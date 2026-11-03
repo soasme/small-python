@@ -12,6 +12,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.Locale;
+import java.util.OptionalInt;
 
 /**
  * The spy-worker the jar carries for this platform, written once to the
@@ -46,7 +47,7 @@ final class WorkerExecutable {
         try (InputStream in = WorkerExecutable.class.getResourceAsStream("native/" + platform() + "/" + name)) {
             if (in == null) {
                 throw new WorkerException("small-python-worker has no worker for " + platform()
-                        + "; build spy-worker and name it with Interpreter.Builder.worker", java.util.OptionalInt.empty());
+                        + "; build spy-worker and name it with Interpreter.Builder.worker", OptionalInt.empty());
             }
             bytes = in.readAllBytes();
         } catch (IOException e) {
