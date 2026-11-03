@@ -1,0 +1,4 @@
+# Filled by `make java-native`, and by the publish workflow for every platform.
+/licenses/
+*/native/
+target/

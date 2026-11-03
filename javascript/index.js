@@ -231,7 +231,8 @@ export class Runtime {
       while (Atomics.load(this._control, 0) !== 0) {
         const wait = Atomics.waitAsync(this._control, 0, 1);
         if (wait.async) await Promise.race([wait.value, this._lostSignal]);
-        if (this._lost) throw this._lost;
+        const ended = this._ended();
+        if (ended) throw ended;
       }
       const n = Math.min(INBOX, data.length - at);
       this._data.set(data.subarray(at, at + n));
@@ -283,7 +284,8 @@ export class Runtime {
 
   _next() {
     if (this._frames.length) return Promise.resolve(this._frames.shift());
-    if (this._lost) return Promise.reject(this._lost);
+    const ended = this._ended();
+    if (ended) return Promise.reject(ended);
     return new Promise((resolve, reject) => { this._waiter = { resolve, reject }; });
   }
 
@@ -300,6 +302,11 @@ export class Runtime {
   }
 
   // Losing the worker (protocol.md section 8).
+
+  /** What a wait ends with once the worker is lost or closed (tests/tla/SpyJavaScriptWorker.tla). */
+  _ended() {
+    return this._lost ?? (this._closed ? new Error("the runtime is closed") : null);
+  }
 
   _violationError(what) { return new WorkerError(`the worker broke the protocol: ${what}`); }
   _violation(what) { return this._lose(this._violationError(what)); }

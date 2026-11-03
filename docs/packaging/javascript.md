@@ -117,7 +117,7 @@ Methods:
 | `registerModule(name, members = null, source = null)` | `rt.register_module`; `members` is a plain object or `Map` |
 | `collect()` | `rt.collect` |
 | `usage()` | `rt.usage`; resolves to `{ steps, memory }` |
-| `close()` | `rt.close`; synchronous: terminates the Worker |
+| `close()` | `rt.close`; synchronous: terminates the Worker, and pending operations reject; refused while a host function runs |
 | `closed` | `rt.closed` |
 | `version` | the engine version, from the `INIT` reply |
 
@@ -208,7 +208,12 @@ A proxy for an engine value held by the worker.
 Every method returns a promise; failures reject with `PythonError`. A
 `FinalizationRegistry` releases the handles of collected proxies with the
 next message; `release()` does it explicitly. After release, close, or loss,
-methods reject.
+methods reject. A message and the notice of the handles released before it
+are written in the same synchronous run, so no handle the message carries
+is released ahead of it. `close()` may come while an operation waits to
+write or to read; both waits end once the runtime is closed or lost.
+`tests/tla/SpyJavaScriptWorker.tla` models the turns, handle releases,
+timeouts, and closing.
 
 ### 3.5 Errors
 
@@ -271,5 +276,5 @@ As `python.md` §7, adapted: a Worker that exits or is terminated rejects with
 `WorkerError`; a fake Worker sending malformed messages, or nothing at all;
 `timeout` with an infinite loop and its exclusion of host time;
 `memoryLimit`; nested and parallel async callbacks; handle release; queued
-concurrent operations; and messages larger than the inbox, in both
-directions. The suite runs on every supported Node.js major version.
+concurrent operations; messages larger than the inbox, in both
+directions; and closing while a write waits for a stalled worker. The suite runs on every supported Node.js major version.

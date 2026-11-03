@@ -2,7 +2,7 @@
 """Preview a release in a temporary clone; use -y to commit, tag, and push it.
 
 Every package shares the engine's version: VERSION, spy.h, the manual, the
-Python and npm packages, and the Rust crates, with the version fixtures of
+Python and npm packages, the Rust crates, and the Java artifacts, with the version fixtures of
 their tests. "current" releases the version the tree already carries, which
 an incompatible API change sets ahead of the last release (docs/manual.md,
 3.4.8 Stability).
@@ -29,8 +29,10 @@ QUOTED = {
     "rust/small-python-sys/Cargo.toml": 1,
     "rust/small-python-worker/Cargo.toml": 1,
 }
+# Each Maven POM spells it as <version>X.Y.Z</version> once: its own or its parent's.
+POMS = ("java/pom.xml", "java/small-python/pom.xml", "java/small-python-worker/pom.xml")
 LOCKS = ("python/uv.lock", "rust/Cargo.lock")
-RELEASE_FILES = ("VERSION", "docs/manual.md", *QUOTED, *LOCKS)
+RELEASE_FILES = ("VERSION", "docs/manual.md", *QUOTED, *POMS, *LOCKS)
 
 
 def run(*args: str, cwd: Path) -> str:
@@ -87,6 +89,8 @@ def main() -> None:
             replace(clone / "docs/manual.md", f"Version {old}", f"Version {version}", 1)
             for name, count in QUOTED.items():
                 replace(clone / name, f'"{old}"', f'"{version}"', count)
+            for name in POMS:
+                replace(clone / name, f"<version>{old}</version>", f"<version>{version}</version>", 1)
             run_checked("uv", "lock", cwd=clone / "python")
             run_checked("cargo", "update", "--workspace", cwd=clone / "rust")
 
