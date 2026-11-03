@@ -762,6 +762,7 @@ impl Runtime {
     }
 
     fn request(&mut self, kind: u8, fields: &[&Value]) -> Result<Value> {
+        self.notice()?;
         let data = wire::message(kind, fields, &self.shared)?;
         if data.len() - 4 > self.message_limit as usize {
             return Err(Error::Invalid("message exceeds the limit".into()));
@@ -787,20 +788,26 @@ impl Runtime {
         }
     }
 
-    fn send(&mut self, data: Vec<u8>) -> Result<()> {
+    /// Sends the notice of the handles released since the last one. It goes
+    /// before the next message is encoded: a handle that message carries is
+    /// alive until then, so its release comes in a later notice
+    /// (tests/tla/SpyRustWorker.tla).
+    fn notice(&mut self) -> Result<()> {
         let released = std::mem::take(&mut *self.shared.released.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut messages = vec![data];
-        if !released.is_empty() {
-            let ids = Value::Tuple(released.into_iter().map(int).collect());
-            messages.insert(0, wire::message(wire::RELEASE, &[&ids], &self.shared)?);
+        if released.is_empty() {
+            return Ok(());
         }
-        for message in messages {
-            let sent = self.to.as_ref().is_some_and(|to| to.send(message).is_ok());
-            if !sent {
-                return Err(self.exited());
-            }
+        let ids = Value::Tuple(released.into_iter().map(int).collect());
+        let notice = wire::message(wire::RELEASE, &[&ids], &self.shared)?;
+        self.send(notice)
+    }
+
+    fn send(&mut self, message: Vec<u8>) -> Result<()> {
+        if self.to.as_ref().is_some_and(|to| to.send(message).is_ok()) {
+            Ok(())
+        } else {
+            Err(self.exited())
         }
-        Ok(())
     }
 
     fn receive(&mut self) -> Result<Vec<u8>> {
@@ -910,6 +917,7 @@ impl Runtime {
         if self.lost.is_some() {
             return Err(self.lost.as_ref().expect("lost").copy_lost());
         }
+        self.notice()?;
         let reply = match result? {
             Ok(value) => wire::message(wire::RESULT, &[&value], &self.shared),
             Err(error) => Err(error),

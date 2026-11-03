@@ -82,6 +82,18 @@ fn host_functions_and_nested_requests() {
 }
 
 #[test]
+fn a_host_function_may_return_the_only_clone_of_a_handle() {
+    // The handle is dropped after its reply is encoded; its release must
+    // follow the reply, not precede it (tests/tla/SpyRustWorker.tla).
+    let mut rt = Runtime::new().unwrap();
+    rt.exec("o = object()").unwrap();
+    rt.define("fresh", |rt, _, _| Ok(rt.get("o")?.unwrap_or(Value::None))).unwrap();
+    for _ in 0..3 {
+        assert_eq!(rt.eval("fresh() is o").unwrap(), Value::Bool(true));
+    }
+}
+
+#[test]
 fn host_errors_come_back_as_their_cause() {
     let mut rt = Runtime::new().unwrap();
     rt.define("fail", |_, _, _| Err(Error::host(std::io::Error::other("disk on fire")))).unwrap();

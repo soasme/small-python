@@ -92,7 +92,12 @@ requires. `Clone` retains, `Drop` releases. Its methods are `extract`,
 `getattr`, `setattr`, `get_item`, `set_item`, `call`,
 `call_with_keywords`, `iter` (an `Iterator` of `Result<Value>`), `truth`,
 `repr`, `str`, `is_none`, `kind` (the `SPY_*` type tag), and `as_ptr` /
-`into_raw` / `from_raw` for the C API. `Debug` and `Display` use `repr` and
+`into_raw` / `from_raw` for the C API. The borrows make the lifetimes safe
+without a collector: a method's `&self` keeps the value alive while the
+engine borrows it, even when a host function calls back in, and a host
+function's `&Runtime` cannot drop the context beneath the engine.
+`tests/tla/SpyRust.tla` states these rules and checks that they suffice.
+`Debug` and `Display` use `repr` and
 `str`. A value passed to another runtime is refused with `ValueError`.
 
 ### 3.3 Conversion
@@ -218,7 +223,12 @@ and `get` read them.
 
 `Object` is a handle to an engine value. Clones share the handle; when the
 last is dropped its id is queued, from any thread, and released with the
-next message (`RELEASE`). Objects are equal when they are the same handle.
+next message (`RELEASE`). The notice is sent before that message is
+encoded, so a handle the message carries, alive until then, is released
+only after it; this matters for a host function's result, which is dropped
+as soon as its reply is encoded. Objects are equal when they are the same
+handle. `tests/tla/SpyRustWorker.tla` models the turns, handle releases,
+timeouts, and closing.
 
 ### 4.4 Errors
 
@@ -289,7 +299,8 @@ The tests cover conversion in both directions, exceptions and their lines,
 host functions with errors, keywords, and panics, modules, the loader and
 output, limits, values of another runtime, moving a runtime between threads,
 and serde round trips; for the worker, nested callbacks, causes, object
-operations and handle release, a timeout that excludes host time, workers
+operations and handle release, a host function returning the only clone
+of a handle, a timeout that excludes host time, workers
 killed by `SIGSEGV`, `SIGABRT`, and `SIGKILL`, a panicking host function,
 and the sealed sandbox on macOS; and the todo application's routes, aborts,
 and page.
