@@ -107,7 +107,12 @@ spyc -O --minify --metafile app.json -o app app.py
 | `-v` | Print the compiler command ([5.3](#53-executable-output)). |
 
 spyc exits with 0 on success, 1 when the build or the C compiler fails, and
-2 for a usage error. It writes the output only on success.
+2 for a usage error. A build that fails, or that `SIGINT` or `SIGTERM`
+interrupts, leaves nothing behind: it removes every file it began to write
+(the output, metafile, or dependency rule once opened, the executable once
+the compiler started, and its temporary C file) and changes no other file.
+An interrupted build stops the compiler first, then ends by the same
+signal. `SpyBuildOutput.tla` models this ([10.1](#101-tla-model)).
 
 ### 2.2 Entry points
 
@@ -356,6 +361,17 @@ compiler's diagnostics when it fails, and spyc exits with 1. Unlike `qjsc`,
 spyc links no `-ldl` or `-lpthread`, which the engine does not use, and
 names its temporary file with `mkstemp`.
 
+The compiler runs in its own process group. On `SIGINT` or `SIGTERM`, spyc
+sends the signal to that group, waits for the compiler, kills what is left
+of the group (a linker that outlived it), and removes its files
+([2.1](#21-options)). The files a compiler makes for itself are its own: an
+interrupted Apple clang 17 left its object file in `TMPDIR` in 7 of 10 runs
+when run directly, and does so under spyc as well.
+
+On Windows spyc has no process API to run the compiler with; as `qjsc`
+without `CONFIG_CC`, it reports that executable output is not supported
+there, and `-e` writes the C file to compile instead.
+
 ## 6 Source transforms
 
 The transforms never change a line number. A traceback, `co_lines()`, a
@@ -526,8 +542,9 @@ calls of the name `__import__`, and for the `try` statements that guard them.
 The resolver ([3.1](#31-search-roots)) uses only C11 file operations:
 `fopen` to read a file, and one portable directory listing so that names are
 compared by exact spelling. That listing and the compiler run of
-[5.3](#53-executable-output) (`mkstemp`, `posix_spawnp`) are spyc's only
-POSIX calls, and spyc keeps them apart from the engine.
+[5.3](#53-executable-output) (`mkstemp`, `posix_spawnp`, `waitpid`, `kill`,
+`sigprocmask`) are spyc's only POSIX calls, and spyc keeps them apart from
+the engine.
 
 ### 9.2 Minification
 
@@ -566,6 +583,22 @@ The import system over a loader is already modeled by `Imports.tla` and
 replayed on spy. Together with this model, a bundled program imports what the
 unbundled program imports.
 
+`tests/tla/SpyBuildOutput.tla` models the files a build lands in, step by
+step as `spyc.c` writes, records, compiles, and removes them, with the
+compiler as an environment that writes the output while any of its
+processes runs and may leave a child that ignores the signal. For each mode,
+each choice of metafile and dependency rule, each old file, a failure at
+every step, and an interruption between any two steps, TLC checks that a
+successful build leaves exactly the asked files new; that a failed or
+interrupted one leaves each file as it was or removed, and removes only
+files it began to write; that neither the temporary file nor a compiler
+process outlives the build; and that every build ends. Seeded faults show
+what each check holds: dropping the cleanup on failure, the kill of what
+the signal left, the process group, or recording before `posix_spawnp`, or
+unlinking the temporary file after dropping it from the list, each breaks an
+invariant. Killing only after waiting for the compiler does not, so that
+kill makes the stop prompt rather than correct.
+
 ### 10.2 Build tests
 
 `tests/build` holds test262-style programs, one per behavior. Each program
@@ -602,8 +635,22 @@ TEXT` marks a build that must fail with an error containing `TEXT`.
    It must pass.
 
 `tests/executable.py` checks the executable output of
-[5.3](#53-executable-output): the default name, `-M`, `-v`, and the failures
-to write the C file and to run the compiler.
+[5.3](#53-executable-output) (the default name, `-M`, `-v`) and the rule of
+[2.1](#21-options) at each step the model has: an unwritable `TMPDIR`, a
+compiler that cannot run, one that fails, an unwritable output, metafile, or
+dependency rule after the files before it, and `SIGINT` and `SIGTERM` during
+the compile. Each case starts with old files and checks which remain, which
+are gone, and that no temporary file is left. For the interruptions, a
+stand-in compiler found first on `PATH` leaves a child that ignores the
+signal and writes the output later, so only stopping the whole process group
+passes; a second run interrupts the real compiler. Removing any part of the
+cleanup from `spyc.c` fails these cases, except signalling the driver alone
+before the kill of the group. A failed write of the temporary file (a full
+disk) has no test; the model covers it.
+
+`tests/archive.py` runs each shipped tool from a staged release archive
+(`tools/archive.sh`): CI does so on every release platform, and
+`publish.yml` before it packs an archive.
 
 `make test-build` runs the suite against `./spyc`, and `make test` includes
 it; `make test-build-oracle` adds the oracle phase, and

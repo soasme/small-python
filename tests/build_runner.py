@@ -145,8 +145,9 @@ def build_phase(path, fields, spyc, cc):
             if negative:
                 if code != 1 or negative not in output:
                     return False, f"expected spyc to fail with {negative!r}, got status {code}: {output[-1500:]}"
-                if (directory / "program.c").exists():
-                    return False, "a failed build wrote its output"
+                left = [name for name in ("program.c", "meta.json", "program.d") if (directory / name).exists()]
+                if left:
+                    return False, f"a failed build left {left}"
                 continue
             if code != 0:
                 return False, f"spyc: {output[-1500:]}"

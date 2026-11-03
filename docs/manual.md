@@ -195,8 +195,10 @@ installation prefix; `-v` prints that command. `-e` (as `qjsc -e`) writes the C
 file instead (`out.c` without `-o`). With `-c` (as `qjsc -c`) the file holds
 each entry's source as `const char spy_name[]` (`game.py` gives `spy_game`)
 and the loader `spy_name_load`, for a host whose own `main` registers its C
-modules; [`examples/pong`](../examples/pong) is one. spyc produces no native
-code or bytecode for Python functions. [Building programs](build.md)
+modules; [`examples/pong`](../examples/pong) is one. A failed or interrupted
+build removes the files it began to write. On Windows spyc writes C only
+(`-e` or `-c`). spyc produces no native code or bytecode for Python
+functions. [Building programs](build.md)
 is the full reference.
 
 ### 2.4 Local tests

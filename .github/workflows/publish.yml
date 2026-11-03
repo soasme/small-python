@@ -372,7 +372,9 @@ jobs:
   # spy, spyc, and spy-worker for each platform, packed with the licenses.
   # Linux and Windows link statically, so the executables need no shared
   # library beyond the system's; Windows builds with the runner's MinGW-w64
-  # GCC, as MSVC has no C11 complex numbers.
+  # GCC, as MSVC has no C11 complex numbers. An archive also holds the
+  # headers and libraries spyc builds executables with, and each tool is
+  # run from the staged archive (tools/archive.sh) before it is packed.
   binaries:
     strategy:
       matrix:
@@ -400,22 +402,24 @@ jobs:
           fi
           echo "NAME=small-python-$version-${{ matrix.platform }}" >> "$GITHUB_ENV"
 
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+
       - name: Build
-        run: make CC=gcc LDFLAGS='${{ matrix.ldflags }}' spy spyc spy-worker
+        run: make CC=gcc LDFLAGS='${{ matrix.ldflags }}' spy spyc spy-worker libspy.a libspy-std.a
         if: runner.os != 'macOS'
 
       - name: Build
-        run: make spy spyc spy-worker
+        run: make spy spyc spy-worker libspy.a libspy-std.a
         if: runner.os == 'macOS'
 
-      - name: Smoke test
-        run: ./spy${{ matrix.exe }} -c 'print(sum(range(10)))' | grep -x 45
+      - name: Stage and check
+        run: tools/archive.sh "$NAME" "${{ matrix.exe }}"
 
       - name: Pack
         run: |
-          mkdir -p "$NAME/licenses"
-          cp spy${{ matrix.exe }} spyc${{ matrix.exe }} spy-worker${{ matrix.exe }} LICENSE README.md "$NAME/"
-          cp docs/licenses/python.txt docs/licenses/unicode.txt docs/licenses/quickjs.txt "$NAME/licenses/"
           if [ "$RUNNER_OS" = Windows ]; then
             7z a "$NAME.zip" "$NAME"
           else

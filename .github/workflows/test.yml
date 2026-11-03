@@ -69,6 +69,32 @@ jobs:
           java-version: '17'
       - run: make test-java
 
+  # Each release platform builds the release archive and runs every tool
+  # from it, as publish.yml does at a tag (tools/archive.sh).
+  archive:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, ldflags: -static }
+          - { os: ubuntu-24.04-arm, ldflags: -static }
+          - { os: macos-latest }
+          - { os: macos-15-intel }
+          - { os: windows-latest, ldflags: -static, exe: .exe }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: make CC=gcc LDFLAGS='${{ matrix.ldflags }}' spy spyc spy-worker libspy.a libspy-std.a
+        if: runner.os != 'macOS'
+      - run: make spy spyc spy-worker libspy.a libspy-std.a
+        if: runner.os == 'macOS'
+      - run: tools/archive.sh archive "${{ matrix.exe }}"
+
   # The Python package on Windows; its worker is built with the runner's
   # MinGW-w64 GCC (python/setup.py).
   windows:

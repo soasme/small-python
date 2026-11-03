@@ -3,8 +3,11 @@
 import os
 from pathlib import Path
 import shlex
+import shutil
+import signal
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -52,19 +55,96 @@ for options, library, expected in [([], "libspy.a", "standalone 45 True\n"),
         result = subprocess.run(["./a.out"], check=True, capture_output=True, text=True, cwd=directory)
         assert result.stdout == expected, result
 
-# The build fails with status 1 when the C file cannot be written or the
-# compiler cannot run, and -e and -c together are a usage error.
+# A failed or interrupted build leaves nothing behind (docs/build.md 2.1): it
+# removes every file it began to write, keeps the files it did not reach, and
+# never leaves its temporary C file; SpyBuildOutput.tla models each step.
+# Every case starts with an old output, metafile and dependency rule.
+def contract(args, status, message, kept, removed, env={}, spyc=ROOT / "spyc", signal_number=None, fake=True):
+    with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+        directory = Path(temp)
+        (directory / "tmp").mkdir()
+        (directory / "one.py").write_text("print(1)\n", encoding="utf-8")
+        for name in ("prog", "prog.c", "m.json", "p.d"):
+            (directory / name).write_text("old", encoding="utf-8")
+        command = [str(spyc), *args, "one.py"]
+        environment = {**os.environ, "TMPDIR": str(directory / "tmp"), **env}
+        if signal_number and not fake:
+            # The real compiler, interrupted soon after spyc wrote its C file.
+            # Interrupted when run directly, clang may leave its own object
+            # file in TMPDIR; spyc answers for its own files, not those.
+            process = subprocess.Popen(command, cwd=directory, env=environment, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 30
+            while not any((directory / "tmp").iterdir()):
+                assert process.poll() is None and time.monotonic() < deadline, "no temporary file appeared"
+                time.sleep(0.001)
+            time.sleep(0.03)
+            process.send_signal(signal_number)
+            result = subprocess.CompletedProcess(command, process.wait(), "", process.stderr.read())
+        elif signal_number:
+            # Interrupted while the compiler runs: a stand-in, first on PATH
+            # under the compiler's name, leaves a child that ignores the
+            # signal, as a compiler's linker may, writing the output a second
+            # later, and exits first. spyc must stop the compiler's whole
+            # process group, then kill what the signal did not stop.
+            fake = directory / "bin"
+            fake.mkdir()
+            (fake / COMPILER).write_text('#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done\n'
+                                         '(trap "" INT TERM; sleep 1; echo new > "$2") &\n'
+                                         'touch "$TMPDIR/../started"; sleep 0.2\n', encoding="utf-8")
+            (fake / COMPILER).chmod(0o755)
+            environment["PATH"] = f"{fake}{os.pathsep}{environment['PATH']}"
+            process = subprocess.Popen(command, cwd=directory, env=environment, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 30
+            while not (directory / "started").exists():
+                assert process.poll() is None and time.monotonic() < deadline, "the compiler did not start"
+                time.sleep(0.001)
+            process.send_signal(signal_number)
+            result = subprocess.CompletedProcess(command, process.wait(), "", process.stderr.read())
+            (directory / "started").unlink()
+            time.sleep(2)  # a compiler left running writes the output by now
+        else:
+            result = subprocess.run(command, cwd=directory, env=environment, capture_output=True, text=True)
+        assert result.returncode == status and message in result.stderr, (args, result)
+        left = [path for path in (directory / "tmp").iterdir() if fake or path.name.startswith("spyc.")]
+        assert not left, (args, left)
+        for name in kept:
+            assert (directory / name).read_text(encoding="utf-8") == "old", (args, name)
+        for name in removed:
+            assert not (directory / name).exists(), (args, name)
+        files = [directory / name for name in ("prog", "prog.c", "m.json", "p.d")]
+        if status == 0:
+            assert all(path.read_bytes() != b"old" for path in files if path.name != "prog.c"), args
+        else:
+            assert all(not path.exists() or path.read_bytes() == b"old" for path in files), args
+
+
+aux = ["--metafile", "m.json", "--deps", "p.d"]
+# The compiler spyc runs, as -v prints it; the stand-in must be found on PATH.
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
-    directory = Path(temp)
-    (directory / "one.py").write_text("print(1)\n", encoding="utf-8")
-    for env, status, message in [({"TMPDIR": str(directory / "missing")}, 1, "spyc: error: cannot write"),
-                                 ({"PATH": str(directory / "missing")}, 1, "spyc: error: cannot run"),
-                                 ({}, 2, "usage:")]:
-        args = ["-e", "-c"] if not env else []
-        result = subprocess.run([str(ROOT / "spyc"), *args, "one.py"], cwd=directory, capture_output=True, text=True,
-                                env={**os.environ, **env})
-        assert result.returncode == status and result.stderr.startswith(message), result
-        assert not (directory / "a.out").exists()
+    (Path(temp) / "one.py").write_text("print(1)\n", encoding="utf-8")
+    COMPILER = subprocess.run([str(ROOT / "spyc"), "-v", "one.py"], cwd=temp, check=True,
+                              capture_output=True, text=True).stdout.split()[0]
+    assert "/" not in COMPILER, f"spyc runs {COMPILER} by path; build it with a compiler found on PATH"
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    alone = Path(temp) / "spyc"  # spy.h beside it, but no libspy.a: the link fails
+    shutil.copy(ROOT / "spyc", alone)
+    shutil.copy(ROOT / "spy.h", Path(temp) / "spy.h")
+    for args, status, message, kept, removed, env, spyc in [
+        ([*aux, "-o", "prog"], 0, "", [], [], {}, ROOT / "spyc"),
+        ([*aux, "-o", "prog"], 1, "cannot write", ["prog", "m.json", "p.d"], [], {"TMPDIR": "/nonexistent"}, ROOT / "spyc"),
+        ([*aux, "-o", "prog"], 1, "cannot run", ["prog", "m.json", "p.d"], [], {"PATH": "/nonexistent"}, ROOT / "spyc"),
+        ([*aux, "-o", "prog"], 1, "libspy.a", ["m.json", "p.d"], ["prog"], {}, alone),
+        (["-e", *aux, "-o", "missing/prog.c"], 1, "cannot write missing/prog.c", ["m.json", "p.d"], [], {}, ROOT / "spyc"),
+        (["--metafile", "missing/m.json", "--deps", "p.d", "-o", "prog"], 1, "cannot write missing/m.json", ["p.d"], ["prog"], {}, ROOT / "spyc"),
+        (["-e", "--metafile", "missing/m.json", "--deps", "p.d", "-o", "prog.c"], 1, "cannot write missing/m.json", ["p.d"], ["prog.c"], {}, ROOT / "spyc"),
+        (["--metafile", "m.json", "--deps", "missing/p.d", "-o", "prog"], 1, "cannot write missing/p.d", [], ["prog", "m.json"], {}, ROOT / "spyc"),
+        (["-e", "-c", "-o", "prog"], 2, "usage:", ["prog"], [], {}, ROOT / "spyc"),
+    ]:
+        contract(args, status, message, kept, removed, env, spyc)
+# Interrupted: the compiler's group is stopped and nothing is left.
+for signal_number in (signal.SIGINT, signal.SIGTERM):
+    contract([*aux, "-o", "prog"], -signal_number, "", ["m.json", "p.d"], ["prog"], signal_number=signal_number)
+    contract([*aux, "-o", "prog"], -signal_number, "", ["m.json", "p.d"], [], signal_number=signal_number, fake=False)
 print("Executable output passed")
 
 # spyc -c writes only the source, named after the input, for a host's main.

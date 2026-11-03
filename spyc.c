@@ -16,11 +16,14 @@
 #include "spy.c"
 #include "host.h"
 #include <dirent.h>
+#include <signal.h>
+#include <unistd.h>
+#ifndef _WIN32
 #include <spawn.h>
 #include <sys/wait.h>
-#include <unistd.h>
 
 extern char **environ;
+#endif
 
 /* The compiler and link flags of spyc's own build, and where make install
  * puts spy.h and the libraries, as qjsc's CONFIG_CC and CONFIG_PREFIX. */
@@ -517,22 +520,55 @@ static int by_size(const void *x, const void *y) {
     size_t a = strlen((*(Module *const *)x)->source), b = strlen((*(Module *const *)y)->source);
     return a < b ? 1 : a > b ? -1 : strcmp((*(Module *const *)x)->path, (*(Module *const *)y)->path);
 }
-static int write_file(const char *path, const Buffer *data) {
-    FILE *f = fopen(path, "wb");
+/* The files this run began to write: the output, the metafile, the
+ * dependency rule, and the temporary C file. A failed or interrupted build
+ * removes them all (docs/build.md 2.1), and an interruption stops the
+ * compiler first, so a failed build leaves nothing behind. The list only
+ * ever lists too much while it changes, so the handler, interrupting a
+ * change, at worst removes a file twice. */
+static const char *written[4];
+static volatile sig_atomic_t written_len, compiler;
+static void wrote(const char *path) { written[written_len] = path; written_len++; }
+static void discard(void) {
+    for (; written_len; written_len--) unlink(written[written_len - 1]);
+}
+static void interrupted(int sig) {
+#ifndef _WIN32
+    if (compiler) { kill(-compiler, sig); waitpid(compiler, NULL, 0); kill(-compiler, SIGKILL); }
+#endif
+    discard();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static int write_to(FILE *f, const char *path, const Buffer *data) {
     int failed = !f || fwrite(data->data, 1, data->len, f) != data->len;
     if (f && fclose(f)) failed = 1;
     if (failed) fprintf(stderr, "spyc: error: cannot write %s\n", path);
     return failed;
 }
+static int write_file(const char *path, const Buffer *data) {
+    FILE *f = fopen(path, "wb");
+    if (f) wrote(path);
+    return write_to(f, path, data);
+}
+#ifdef _WIN32
+/* As qjsc without CONFIG_CC: the C file is all spyc can give here. */
+static int compile(const char *self, const char *output, const Buffer *c, int standard, int verbose) {
+    (void)self; (void)output; (void)c; (void)standard; (void)verbose;
+    fputs("spyc: error: executable output is not supported on this platform; use -e or -c\n", stderr);
+    return 1;
+}
+#else
 /* The executable: CONFIG_CC compiles the C file, written to a temporary
  * file, against spy.h and the libraries beside spyc in a build tree, as
- * qjsc finds quickjs.h, or else under CONFIG_PREFIX. */
+ * qjsc finds quickjs.h, or else under CONFIG_PREFIX. The compiler runs in
+ * its own process group, which an interruption stops as a whole. */
 static int compile(const char *self, const char *output, const Buffer *c, int standard, int verbose) {
     const char *temp = getenv("TMPDIR");
     char *source = concat(temp && *temp ? temp : "/tmp", "/spyc.XXXXXX", "");
     int fd = mkstemp(source);
     if (fd < 0) { fprintf(stderr, "spyc: error: cannot write %s\n", source); free(source); return 1; }
-    close(fd);
+    wrote(source);
     const char *slash = strrchr(self, '/');
     char *dir = slash ? slice(self, (size_t)(slash - self)) : concat(".", "", "");
     char *header = concat(dir, "/spy.h", "");
@@ -555,17 +591,35 @@ static int compile(const char *self, const char *output, const Buffer *c, int st
     push(&args, NULL);
     for (size_t i = 0; verbose && args.items[i]; i++) printf("%s%s", args.items[i], args.items[i + 1] ? " " : "\n");
     fflush(stdout);
-    int status = write_file(source, c), code = 0, error = 0;
+    int status = write_to(fdopen(fd, "wb"), source, c), code = 0, error = 0;
+    /* Once the compiler runs it writes the output, which a failure removes.
+     * Signals wait until both are recorded. */
+    sigset_t stops, none;
+    sigemptyset(&stops); sigaddset(&stops, SIGINT); sigaddset(&stops, SIGTERM);
+    sigemptyset(&none);
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK);
+    posix_spawnattr_setsigmask(&attributes, &none);
     pid_t pid = 0;
-    if (!status && (error = posix_spawnp(&pid, args.items[0], NULL, NULL, args.items, environ))) {
-        fprintf(stderr, "spyc: error: cannot run %s: %s\n", args.items[0], strerror(error));
-        status = 1;
+    if (!status) {
+        sigprocmask(SIG_BLOCK, &stops, NULL);
+        error = posix_spawnp(&pid, args.items[0], NULL, &attributes, args.items, environ);
+        if (!error) { wrote(output); compiler = pid; }
+        sigprocmask(SIG_UNBLOCK, &stops, NULL);
     }
+    posix_spawnattr_destroy(&attributes);
+    if (error) { fprintf(stderr, "spyc: error: cannot run %s: %s\n", args.items[0], strerror(error)); status = 1; }
     if (!status) status = waitpid(pid, &code, 0) != pid || !WIFEXITED(code) || WEXITSTATUS(code);
+    compiler = 0;
+    /* The temporary file goes now; the output stays listed until the build ends. */
     unlink(source);
+    for (sig_atomic_t i = 0; i < written_len; i++)
+        if (written[i] == source) { written[i] = written[written_len - 1]; written_len--; }
     free(source); free(dir); free(header); free(include); free(lib); free_strings(&args);
     return status;
 }
+#endif
 /* A C identifier for an entry: spy_ and its name, as spyc -c names it. */
 static char *c_name(const char *entry, int module) {
     const char *base = module ? entry : strrchr(entry, '/') ? strrchr(entry, '/') + 1 : entry;
@@ -722,6 +776,8 @@ int main(int argc, char **argv) {
     loader = loader_name ? concat(loader_name, "_load", "") : concat(list[0].symbol, "_load", "");
 
     out.ctx = meta.ctx = rule.ctx = b.c;
+    signal(SIGINT, interrupted);
+    signal(SIGTERM, interrupted);
     if (bare) put(&out, "/* Generated by spyc -c. A host installs %s with spy_set_module_loader\n"
                         " * and runs an entry with spy_exec. */\n#include \"spy.h\"\n#include <stdlib.h>\n#include <string.h>\n", loader);
     else put(&out, "/* Generated by spyc. Link with %s and the C math library. */\n#include \"spy.h\"\n%s"
@@ -847,6 +903,7 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < sources; i++) fprintf(stderr, "    %s  %zu\n", inputs[i]->path, strlen(inputs[i]->source));
     }
 done:
+    if (status) discard();
     for (size_t i = 0; list && i < entries; i++) {
         free(list[i].file); free(list[i].package); free(list[i].symbol);
         free_module(&list[i].module);
