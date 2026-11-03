@@ -1018,6 +1018,13 @@ failed runs again on the next import without reopening the library. A
 library holds one table: one that another copy of the engine in the same
 process linked is refused.
 
+The release archives' `spy` for Linux is linked statically, and glibc's
+static `dlopen` warns at link time that it needs the C library of the build
+at run time. A module loads all the same, since it reaches the engine
+through the table and only its own calls reach the system's C library: a
+`spy` built on Ubuntu 24.04 (glibc 2.39) was checked importing `fib.so`
+built against glibc 2.28, 2.39 and 2.41, each on its own system.
+
 Native code is not sandboxed. It runs in the host's process with the host's
 rights, outside the mounts and the policy, and outside the step and memory
 budgets, which count only the work and memory it asks of the engine.

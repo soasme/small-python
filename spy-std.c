@@ -78,7 +78,12 @@ static const SPYModuleAPI module_api = {SPY_MODULE_FUNCTIONS(ENTRY)};
  * symbol in it; close it. */
 #if defined(_WIN32)
 static void *library_open(const char *path, char *error, size_t size) {
-    HMODULE library = LoadLibraryA(path);
+    /* LoadLibrary takes a path only with backslashes; it searches for others. */
+    char native[MAX_PATH];
+    size_t len = strlen(path);
+    if (len >= sizeof(native)) { snprintf(error, size, "%s: path too long", path); return NULL; }
+    for (size_t i = 0; i <= len; i++) native[i] = path[i] == '/' ? '\\' : path[i];
+    HMODULE library = LoadLibraryA(native);
     if (!library) {
         char reason[256];
         DWORD code = GetLastError();

@@ -42,7 +42,8 @@ def main():
     names = subprocess.run([str(spy), "-c", ENUMERATE], check=True,
                            capture_output=True, text=True).stdout.split()
     tokens = KEYWORDS + [t for line in TOKENS for t in line.split()] + TOKENS[-1:]
-    tokens += ["\n", "\n    ", "    "] + names
+    # fuzz_common.c registers a module named m_c when it is imported.
+    tokens += ["\n", "\n    ", "    ", "m_c"] + names
     seen = []
     for token in tokens:
         if token not in seen:

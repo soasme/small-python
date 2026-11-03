@@ -429,4 +429,4 @@ coverage:
 
 clean:
 	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
-	rm -rf $(OBJDIR) java/licenses java/*/native java/*/target
+	rm -rf $(OBJDIR) examples/fib.so.dSYM java/licenses java/*/native java/*/target

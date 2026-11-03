@@ -53,8 +53,13 @@ static int fails(void);
  * lasting every one after it; live: blocks not yet freed. */
 static size_t count, fail, live;
 static int lasting;
-/* A native module run() loads as fib before the program, when set. */
+/* A native module run() loads as fib when the program imports it, as the
+ * spy command's loader does, when set. */
 static const char *native;
+static SPYValue *load_native(SPYContext *c, void *data, const char *name) {
+    if (!strcmp(name, "fib")) spy_std_load_native(c, name, data);
+    return NULL;
+}
 
 static int fails(void) { return ++count == fail || (lasting && fail && count > fail); }
 void *oom_malloc(size_t n) {
@@ -108,7 +113,8 @@ static size_t run(const char *source, const char *name, int *status) {
     if (c) {
         spy_set_output(c, discard, NULL, NULL);
         spy_set_step_limit(c, 1000000);
-        *status = spy_std_init(c) || (native && spy_std_load_native(c, "fib", native)) || spy_exec(c, source, name);
+        if (native) spy_set_module_loader(c, load_native, (void *)native);
+        *status = spy_std_init(c) || spy_exec(c, source, name);
         spy_clear_error(c);
         spy_collect(c);
         spy_context_free(c);
