@@ -79,6 +79,11 @@
         <plugin>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>3.5.2</version>
+          <configuration>
+            <systemPropertyVariables>
+              <project.version>${project.version}</project.version>
+            </systemPropertyVariables>
+          </configuration>
         </plugin>
         <plugin>
           <artifactId>maven-resources-plugin</artifactId>

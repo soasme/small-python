@@ -1051,6 +1051,24 @@ package's limits, timeout, and loss rules.
 make test-go
 ```
 
+### 3.8 Java artifacts
+
+The Maven build in `java/` is specified in
+[packaging/java.md](packaging/java.md). `io.github.soasme:small-python`
+compiles `spy.c` and `spy-std.c` with one file of JNI glue, `spy-jni.c`,
+into a library its jar carries for each platform, and wraps it in a Java
+API that converts records, lists, and maps by reflection and releases
+values the garbage collector drops on the interpreter's next call;
+`io.github.soasme:small-python-worker` carries `spy-worker` for each
+platform and speaks [packaging/protocol.md](packaging/protocol.md) to it,
+with the Python package's limits, timeout, and loss rules. The entry point
+of both is `Interpreter`, as the Java convention reserves `Runtime` for
+`java.lang`.
+
+```sh
+make test-java
+```
+
 ## 4 Internals
 
 ### 4.1 Source representation

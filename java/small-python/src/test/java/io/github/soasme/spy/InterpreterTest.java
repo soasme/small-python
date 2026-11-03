@@ -155,7 +155,7 @@ class InterpreterTest {
         try (Interpreter bare = Interpreter.createBare()) {
             assertEquals("ModuleNotFoundError", raises(() -> bare.exec("import sys")).getType());
         }
-        assertTrue(Interpreter.version().matches("\\d+\\.\\d+\\.\\d+"), Interpreter.version());
+        assertEquals(System.getProperty("project.version"), Interpreter.version());
     }
 
     @Test

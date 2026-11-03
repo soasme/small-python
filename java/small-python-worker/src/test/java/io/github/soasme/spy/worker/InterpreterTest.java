@@ -48,7 +48,7 @@ class InterpreterTest {
     @Test
     void evaluatesAndConverts() {
         Interpreter py = start();
-        assertTrue(py.version().matches("\\d+\\.\\d+\\.\\d+"), py.version());
+        assertEquals(System.getProperty("project.version"), py.version());
         assertEquals(42L, py.eval("6 * 7"));
         BigInteger two64 = BigInteger.ONE.shiftLeft(64);
         assertEquals(two64, py.eval("2 ** 64"));
