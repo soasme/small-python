@@ -291,7 +291,7 @@ java/licenses/%: docs/licenses/%
 java/licenses/LICENSE: LICENSE
 	mkdir -p java/licenses
 	cp $< $@
-java-native: java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY) java/licenses/LICENSE java/licenses/python.txt java/licenses/unicode.txt
+java-native: java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY) java/small-python-worker/$(JAVA_NATIVE)/spy-worker$(JAVA_EXE) java/licenses/LICENSE java/licenses/python.txt java/licenses/unicode.txt
 
 test-java: java-native
 	cd java && mvn -B -q verify

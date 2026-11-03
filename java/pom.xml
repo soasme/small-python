@@ -36,6 +36,7 @@
 
   <modules>
     <module>small-python</module>
+    <module>small-python-worker</module>
   </modules>
 
   <properties>

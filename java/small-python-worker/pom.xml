@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.github.soasme</groupId>
+    <artifactId>small-python-parent</artifactId>
+    <version>0.6.0</version>
+  </parent>
+
+  <artifactId>small-python-worker</artifactId>
+  <name>Small Python worker</name>
+  <description>Small Python, a small Python 3.15 engine written in C11, in a sandboxed worker process.</description>
+
+  <properties>
+    <native.package>io/github/soasme/spy/worker</native.package>
+    <module.name>io.github.soasme.spy.worker</module.name>
+  </properties>
+</project>
