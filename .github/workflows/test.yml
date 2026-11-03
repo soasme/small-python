@@ -62,9 +62,15 @@ jobs:
         with:
           go-version: '1.24'
       - run: make test-go
+      # Java 17, the artifacts' baseline (docs/packaging/java.md).
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: make test-java
 
-  # The Python package on Windows; its worker is built with the runner's
-  # MinGW-w64 GCC (python/setup.py).
+  # The Python package and the Java artifacts on Windows; the workers and the
+  # JNI library are built with the runner's MinGW-w64 GCC (python/setup.py).
   windows:
     runs-on: windows-latest
     steps:
@@ -75,6 +81,12 @@ jobs:
       - run: gcc --version
       - run: pip install ./python
       - run: python -m unittest discover -s python/tests
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: make CC=gcc LDFLAGS=-static JNI_LDFLAGS=-static test-java
+        shell: bash
 
   upstream-baseline:
     runs-on: ubuntu-latest

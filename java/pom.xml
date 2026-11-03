@@ -126,6 +126,10 @@
           <plugin>
             <artifactId>maven-source-plugin</artifactId>
             <version>3.3.1</version>
+            <configuration>
+              <!-- Patterns match within each resource directory: the native files. -->
+              <excludes><exclude>*/*spyjni*</exclude><exclude>*/spy-worker*</exclude></excludes>
+            </configuration>
             <executions>
               <execution>
                 <goals><goal>jar-no-fork</goal></goals>
