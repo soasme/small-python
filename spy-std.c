@@ -79,9 +79,15 @@ static const SPYModuleAPI module_api = {SPY_MODULE_FUNCTIONS(ENTRY)};
 #if defined(_WIN32)
 static void *library_open(const char *path, char *error, size_t size) {
     HMODULE library = LoadLibraryA(path);
-    DWORD code = GetLastError();
-    if (!library && !FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0, error, (DWORD)size, NULL))
-        snprintf(error, size, "%s: error %lu", path, (unsigned long)code);
+    if (!library) {
+        char reason[256];
+        DWORD code = GetLastError();
+        DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0, reason, sizeof(reason), NULL);
+        while (n && (reason[n - 1] == '\r' || reason[n - 1] == '\n')) n--;
+        reason[n] = 0;
+        if (n) snprintf(error, size, "%s: %s", path, reason);
+        else snprintf(error, size, "%s: error %lu", path, (unsigned long)code);
+    }
     return library;
 }
 static void *library_symbol(void *library, const char *name) {

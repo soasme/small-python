@@ -20,6 +20,11 @@ endif
 ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
+# The standard layer opens native modules with dlopen, which glibc before
+# 2.34 keeps in libdl, as QuickJS's Makefile links it.
+ifeq ($(shell uname -s),Linux)
+LDLIBS += -ldl
+endif
 
 .PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
 all: spy spyc spy-worker libspy.a libspy-std.a
@@ -71,9 +76,14 @@ $(OBJDIR)/spyc.o: CPPFLAGS += -DCONFIG_CC='"$(CC) $(LDFLAGS)"' -DCONFIG_PREFIX='
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^
 
-# The standard layer (sys and gc), separate from the core like quickjs-libc.
+# The standard layer (sys, gc and native modules), separate from the core
+# like quickjs-libc.
 libspy-std.a: $(OBJDIR)/spy-std.o
 	$(AR) rcs $@ $^
+
+# A native module (spy-module.h), as QuickJS's examples/fib.so.
+examples/fib.so: examples/fib.c spy-module.h spy.h
+	$(CC) $(CFLAGS) -shared -fPIC -DSPY_SHARED_MODULE -I. $< -o $@
 
 $(OBJDIR)/%.o: %.c spy.h
 	mkdir -p $(dir $@)
@@ -96,7 +106,9 @@ $(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec
 $(OBJDIR)/spy.o $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy-unicode.h spy-intrinsics.h
 $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy.c
 $(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o $(OBJDIR)/tests/threads.o: spy-std.h
-$(OBJDIR)/spy-std.o: spy-std-modules.h
+$(OBJDIR)/spy-std.o $(OBJDIR)/tests/oom.o: spy-std-modules.h spy-module.h
+$(OBJDIR)/tests/oom.o: spy-std.c
+$(OBJDIR)/tests/api.o: spy-module.h
 
 tests/api: $(OBJDIR)/tests/api.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -189,7 +201,7 @@ tla-coverage:
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
 	install -m755 spy spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
-	install -m644 spy.h spy-std.h "$(DESTDIR)$(PREFIX)/include"
+	install -m644 spy.h spy-std.h spy-module.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
 	install -m644 docs/manual.md docs/api.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
@@ -225,15 +237,16 @@ check-unicode:
 test-unicode: spy check-unicode
 	$(CPYTHON) tests/unicode.py ./spy
 
-test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cython check-intrinsics check-api
-	./tests/api
+test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cython examples/fib.so check-intrinsics check-api
+	./tests/api examples/fib.so
 	./tests/metering
-	./tests/oom
-	./tests/threads
+	./tests/oom --native examples/fib.so
+	./tests/threads examples/fib.so
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
 	$(PYTHON) tests/std.py ./spy
+	CC='$(CC)' CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/native.py ./spy
 	CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/executable.py
 	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
 
@@ -415,5 +428,5 @@ coverage:
 	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc.c spy-std.c cli.c spy-worker.c
 
 clean:
-	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle $(FUZZERS)
+	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
 	rm -rf $(OBJDIR) java/licenses java/*/native java/*/target

@@ -1,7 +1,9 @@
 #include "../spy.h"
 #include "../spy-std.h"
+#include "../spy-module.h"
 
 #include <assert.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -250,7 +252,44 @@ static SPYValue *raise_value_error(SPYContext *c, size_t argc, SPYValue *const *
     spy_release(error);
     return NULL;
 }
-int main(void) {
+/* spy_std_load_native asks the policy before it opens a library, registers
+ * the module under any name with the init of its last name, and refuses a
+ * library that another engine in the process linked. */
+static void native_modules(const char *library) {
+    SPYContext *c = spy_context_new();
+    assert(c);
+    Policy rules = {"dlopen", ""};
+    spy_set_policy(c, policy, &rules);
+    assert(spy_std_load_native(c, "fib", library) == -1 && !strcmp(spy_error_type(c), "PermissionError"));
+    assert(!strcmp(spy_error_message(c), "dlopen is not allowed by the host policy"));
+    assert(spy_exec(c, "import fib", "native.py") == -1 && !strcmp(spy_error_type(c), "ModuleNotFoundError"));
+    spy_clear_error(c);
+    rules.refuse = "";
+    assert(!spy_std_load_native(c, "pkg.fib", library) && !spy_std_load_native(c, "fib", library));
+    execute(c, "import fib\nassert fib.fib(20) == 6765\n");
+    assert(!strcmp(rules.log, "dlopen/2 dlopen/2 dlopen/2 import/1 "));
+    assert(spy_std_load_native(c, "fib", "/nonexistent/fib.so") == -1 && !strcmp(spy_error_type(c), "ImportError"));
+    assert(strstr(spy_error_message(c), "/nonexistent/fib.so"));
+    spy_clear_error(c);
+
+    void *handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+    SPYModuleLink *link = handle ? dlsym(handle, "spy_module") : NULL;
+    assert(link && link->api);
+    const SPYModuleAPI *ours = link->api;
+    SPYModuleAPI theirs = *ours;
+    link->api = &theirs;
+    assert(spy_std_load_native(c, "fib", library) == -1 && !strcmp(spy_error_type(c), "ImportError"));
+    assert(!strcmp(spy_error_message(c), "dynamic module is linked to another engine in this process"));
+    link->api = ours;
+    dlclose(handle);
+    spy_context_free(c);
+}
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fputs("usage: tests/api LIBRARY   (a native module defining fib, as examples/fib.so)\n", stderr);
+        return 2;
+    }
+    native_modules(argv[1]);
     namespace_cycles();
     errno_classes();
     {
