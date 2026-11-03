@@ -151,8 +151,12 @@ raises `TypeError` for ordering. Objects of different runtimes are unequal.
 Deleting attributes or items raises `TypeError`.
 
 When an `Object` is collected its handle is queued and released with the next
-message to the worker. Once its runtime is closed, every operation but `repr`
-raises; once the runtime is lost, `WorkerError`.
+message to the worker. The queue is taken after that message is encoded,
+which is safe because an `Object` the message carries stays referenced, by
+the call's arguments or the host function's result, until the message is
+written. Once its runtime is closed, every operation but `repr` raises;
+once the runtime is lost, `WorkerError`. `tests/tla/SpyPythonWorker.tla`
+models the turns, handle releases, timeouts, and closing.
 
 ### 3.4 Exceptions
 
@@ -297,7 +301,8 @@ API tests:
    afterwards;
 5. nested callbacks several levels deep in both directions;
 6. handle release: creating and dropping many objects does not grow the
-   worker's table;
+   worker's table, and a host function may return the only reference to an
+   object;
 7. `KeyboardInterrupt` while waiting terminates the worker;
 8. the worker exits when the parent is killed;
 9. the worker is sandboxed once code has run (`NoNewPrivs` and `Seccomp` in
