@@ -48,10 +48,13 @@ jobs:
           node-version: '22'
       - name: Install wasi-sdk
         run: |
-          case "${{ runner.os }}-$(uname -m)" in
+          platform="${{ runner.os }}-$(uname -m)"
+          case "$platform" in
             Linux-x86_64) asset=x86_64-linux ;;
+            Linux-aarch64) asset=arm64-linux ;;
             macOS-arm64) asset=arm64-macos ;;
-            *) asset=x86_64-macos ;;
+            macOS-x86_64) asset=x86_64-macos ;;
+            *) echo "no wasi-sdk for $platform" >&2; exit 1 ;;
           esac
           curl -sSfL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-$asset.tar.gz" | tar xz
           echo "WASI_SDK=$PWD/wasi-sdk-34.0-$asset" >> "$GITHUB_ENV"

@@ -43,11 +43,20 @@ UNINSTRUMENTED static int worker(void) {
     return 0;
 #endif
 }
+/* gcc's use-after-return checking on arm64 makes each call scan the fake
+ * stack: 20 million calls of a small function take 196 s instead of 0.14 s
+ * (clang 0.08 s either way; gcc 13 and 14), and the engine's tests time out.
+ * There gcc checks locals before return only. */
+#if defined(__aarch64__) && !defined(__clang__)
+#define AFTER_RETURN "detect_stack_use_after_return=0"
+#else
+#define AFTER_RETURN "detect_stack_use_after_return=1"
+#endif
 /* An allocation larger than a runtime supports returns NULL, as malloc
  * does, so the engine raises MemoryError instead of the runtime aborting. */
 const char *__asan_default_options(void) {
-    return worker() ? "detect_stack_use_after_return=1:detect_leaks=0:handle_segv=0:allocator_may_return_null=1"
-                    : "detect_stack_use_after_return=1:detect_leaks=1:handle_segv=0:allocator_may_return_null=1";
+    return worker() ? AFTER_RETURN ":detect_leaks=0:handle_segv=0:allocator_may_return_null=1"
+                    : AFTER_RETURN ":detect_leaks=1:handle_segv=0:allocator_may_return_null=1";
 }
 const char *__ubsan_default_options(void) { return "print_stacktrace=1:handle_segv=0"; }
 const char *__msan_default_options(void) { return "handle_segv=0:allocator_may_return_null=1"; }

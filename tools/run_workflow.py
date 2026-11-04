@@ -9,7 +9,12 @@ The workflow, a file in .github/workflows or a path, is the first argument when
 given. The remaining arguments go to act unchanged. act runs each job in Docker
 on a copy of the tree (ignored files excluded), so the checkout is untouched.
 Jobs for macOS and Windows runners have no container image and are skipped;
-act reports them. The exit status is act's: nonzero when any job fails."""
+act reports them. The exit status is act's: nonzero when any job fails.
+
+Jobs run natively, in act's Ubuntu image with what GitHub's ubuntu-latest
+has and the image lacks: clang and its sanitizer runtimes, Rust, and Maven.
+Docker builds the image once and caches it. On an arm64 host the jobs run on
+arm64, not under x86_64 emulation, whose posix_spawn reports no exec failure."""
 
 import shutil
 import subprocess
@@ -18,7 +23,13 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-IMAGE = "catthehacker/ubuntu:act-latest"
+IMAGE = "small-python-act"
+DOCKERFILE = b"""FROM catthehacker/ubuntu:act-latest
+RUN apt-get update && apt-get install -y --no-install-recommends clang libclang-rt-dev maven \\
+ && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+"""
 
 
 def main():
@@ -38,10 +49,12 @@ def main():
         sys.exit("run_workflow: act is not installed (brew install act)")
     if subprocess.run(["docker", "info"], capture_output=True).returncode:
         sys.exit("run_workflow: Docker is not running")
+    if subprocess.run(["docker", "build", "-q", "-t", IMAGE, "-"], input=DOCKERFILE).returncode:
+        sys.exit("run_workflow: cannot build the runner image")
 
     with tempfile.TemporaryDirectory(prefix="act-artifacts-") as artifacts:
         command = ["act", "push", "--workflows", str(workflow),
-                   "-P", f"ubuntu-latest={IMAGE}",
+                   "-P", f"ubuntu-latest={IMAGE}", "--pull=false",
                    "--artifact-server-path", artifacts, *act_args]
         print("+", " ".join(command), flush=True)
         return subprocess.run(command, cwd=ROOT).returncode
