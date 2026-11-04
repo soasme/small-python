@@ -21260,23 +21260,24 @@ static ALWAYS_INLINE int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
 }
 /* Keys of one plain kind compare without dispatch, as CPython's
  * unsafe_*_compare do; any others go through sort_less. */
-enum { SORT_ANY, SORT_INT, SORT_FLOAT, SORT_INT_TUPLE };
+enum { SORT_ANY, SORT_INT, SORT_FLOAT, SORT_INT_TUPLE, SORT_INT_PAIR };
 static int small_int(SPYValue *v) { return v->type == SPY_INT && !v->as.integer_data.big; }
 static int sort_kind(SortItem *items, size_t len) {
     int kind = small_int(items[0].key) ? SORT_INT : items[0].key->type == SPY_FLOAT ? SORT_FLOAT :
-        items[0].key->type == SPY_TUPLE ? SORT_INT_TUPLE : SORT_ANY;
+        items[0].key->type == SPY_TUPLE ? SORT_INT_PAIR : SORT_ANY;
     for (size_t i = 0; i < len && kind != SORT_ANY; i++) {
         SPYValue *k = items[i].key;
         if (kind == SORT_INT) kind = small_int(k) ? kind : SORT_ANY;
         else if (kind == SORT_FLOAT) kind = k->type == SPY_FLOAT ? kind : SORT_ANY;
         else if (k->type != SPY_TUPLE) kind = SORT_ANY;
-        else for (size_t j = 0; j < k->as.seq.len; j++) if (!small_int(k->as.seq.items[j])) kind = SORT_ANY;
+        else {
+            if (k->as.seq.len != 2) kind = SORT_INT_TUPLE;
+            for (size_t j = 0; j < k->as.seq.len; j++) if (!small_int(k->as.seq.items[j])) kind = SORT_ANY;
+        }
     }
     return kind;
 }
 static ALWAYS_INLINE int kind_less(SPYContext *c, int kind, SPYValue *a, SPYValue *b) {
-    if (kind == SORT_INT) return a->as.integer_data.small < b->as.integer_data.small;
-    if (kind == SORT_FLOAT) return a->as.real < b->as.real;
     if (kind == SORT_INT_TUPLE) {
         size_t n = a->as.seq.len < b->as.seq.len ? a->as.seq.len : b->as.seq.len;
         for (size_t i = 0; i < n; i++) {
@@ -21287,62 +21288,84 @@ static ALWAYS_INLINE int kind_less(SPYContext *c, int kind, SPYValue *a, SPYValu
     }
     return sort_less(c, a, b);
 }
-/* Each key is evaluated once. The caller's two reversals preserve
- * stability, as does reversing only strictly descending runs. Neighbouring
- * runs then merge until one is left; the sorted items end in *result. */
-static NO_INLINE void sort_items(SPYContext *c, int kind, SortItem *items, SortItem *scratch, size_t *ends, size_t len, SortItem **result) {
-#define SORT_LESS(a, b) kind_less(c, kind, a, b)
-#define SORT_FAILED (kind == SORT_ANY && c->error_type[0])
-    SortItem *from = items, *to = scratch;
-    size_t runs = 0;
-    for (size_t start = 0, end; start < len; start = end) {
-        end = start + 1;
-        if (end < len && !SORT_FAILED && SORT_LESS(items[end].key, items[start].key)) {
-            while (++end < len && !SORT_FAILED && SORT_LESS(items[end].key, items[end - 1].key));
-            for (size_t i = start, j = end - 1; i < j; i++, j--) { SortItem swap = items[i]; items[i] = items[j]; items[j] = swap; }
-        } else while (end < len && !SORT_FAILED && !SORT_LESS(items[end].key, items[end - 1].key)) end++;
-        /* A short run grows to 32 items by binary insertion after its equals. */
-        for (size_t stop = len - start < 32 ? len : start + 32; end < stop && !SORT_FAILED; end++) {
-            SortItem item = items[end];
-            size_t lo = start, hi = end;
-            while (lo < hi && !SORT_FAILED) {
-                size_t m = lo + (hi - lo) / 2;
-                if (SORT_LESS(item.key, items[m].key)) hi = m; else lo = m + 1;
-            }
-            if (SORT_FAILED) break;
-            memmove(items + lo + 1, items + lo, (end - lo) * sizeof(*items));
-            items[lo] = item;
-        }
-        ends[runs++] = end;
-    }
-    /* A pass leaves a permutation in from, where a stop may come. */
-    for (size_t left = WORK; runs > 1 && !working(c, &left, len);) {
-        size_t merged = 0;
-        for (size_t r = 0, start = 0; r < runs; r += 2) {
-            size_t mid = ends[r], end = r + 1 < runs ? ends[r + 1] : mid;
-            size_t left = start, right = mid;
-            for (size_t out = start; out < end; out++) {
-                int take_right = left == mid;
-                if (left < mid && right < end && !SORT_FAILED) take_right = SORT_LESS(from[right].key, from[left].key);
-                to[out] = take_right && right < end ? from[right++] : from[left++];
-            }
-            ends[merged++] = start = end;
-        }
-        runs = merged;
-        SortItem *swap = from; from = to; to = swap;
-    }
-    *result = from;
-#undef SORT_LESS
-#undef SORT_FAILED
+/* Keys of the plain kinds sort as numbers held in the items themselves. */
+typedef struct { SPYValue *value; int64_t key; } IntItem;
+typedef struct { SPYValue *value; double key; } FloatItem;
+typedef struct { SPYValue *value; int64_t key, next; } PairItem;
+/* A stable merge sort of len items, ending in *result (items or scratch).
+ * Strictly descending runs are reversed, short runs grow to 32 items by
+ * binary insertion after their equals, and neighbouring runs then merge
+ * until one is left; runs already in order are copied whole. Every pass
+ * leaves a permutation in from, where a stop may come. */
+#define DEFINE_SORT(name, Item, LESS, FAILED) \
+static NO_INLINE void name(SPYContext *c, int kind, Item *items, Item *scratch, size_t *ends, size_t len, Item **result) { \
+    (void)kind; \
+    Item *from = items, *to = scratch; \
+    size_t runs = 0; \
+    for (size_t start = 0, end; start < len; start = end) { \
+        end = start + 1; \
+        if (end < len && !(FAILED) && LESS(items[end], items[start])) { \
+            while (++end < len && !(FAILED) && LESS(items[end], items[end - 1])); \
+            for (size_t i = start, j = end - 1; i < j; i++, j--) { Item swap = items[i]; items[i] = items[j]; items[j] = swap; } \
+        } else while (end < len && !(FAILED) && !LESS(items[end], items[end - 1])) end++; \
+        for (size_t stop = len - start < 32 ? len : start + 32; end < stop && !(FAILED); end++) { \
+            Item item = items[end]; \
+            size_t lo = start, hi = end; \
+            while (lo < hi && !(FAILED)) { \
+                size_t m = lo + (hi - lo) / 2; \
+                if (LESS(item, items[m])) hi = m; else lo = m + 1; \
+            } \
+            if (FAILED) break; \
+            memmove(items + lo + 1, items + lo, (end - lo) * sizeof(*items)); \
+            items[lo] = item; \
+        } \
+        ends[runs++] = end; \
+    } \
+    for (size_t left = WORK; runs > 1 && !working(c, &left, len);) { \
+        size_t merged = 0; \
+        for (size_t r = 0, start = 0; r < runs; r += 2) { \
+            size_t mid = ends[r], end = r + 1 < runs ? ends[r + 1] : mid, i = start, j = mid, out = start; \
+            if (j < end && !(FAILED) && LESS(from[j], from[j - 1])) \
+                while (i < mid && j < end && !(FAILED)) { \
+                    size_t right = LESS(from[j], from[i]); \
+                    to[out++] = from[right ? j : i]; j += right; i += !right; \
+                } \
+            memcpy(to + out, from + i, (mid - i) * sizeof(*to)); \
+            memcpy(to + out + mid - i, from + j, (end - j) * sizeof(*to)); \
+            ends[merged++] = start = end; \
+        } \
+        runs = merged; \
+        Item *swap = from; from = to; to = swap; \
+    } \
+    *result = from; \
 }
+#define KEY_LESS(a, b) kind_less(c, kind, (a).key, (b).key)
+#define NUMBER_LESS(a, b) ((a).key < (b).key)
+#define PAIR_LESS(a, b) ((a).key != (b).key ? (a).key < (b).key : (a).next < (b).next)
+DEFINE_SORT(sort_items, SortItem, KEY_LESS, kind == SORT_ANY && c->error_type[0])
+DEFINE_SORT(sort_ints, IntItem, NUMBER_LESS, 0)
+DEFINE_SORT(sort_floats, FloatItem, NUMBER_LESS, 0)
+DEFINE_SORT(sort_pairs, PairItem, PAIR_LESS, 0)
+#undef DEFINE_SORT
+#undef KEY_LESS
+#undef NUMBER_LESS
+#undef PAIR_LESS
+/* The keys' numbers into an array of twice len Items, sorted, and the
+ * values back into out; nonzero when memory runs out. */
+#define SORT_NUMBERS(Item, sort, fill) do { \
+    Item *packed = allocate_array(c, len, 2 * sizeof(Item)), *sorted = packed; \
+    if (!packed) break; \
+    for (size_t i = 0; i < len; i++) { SPYValue *k = items[i].key; packed[i].value = items[i].value; fill; } \
+    sort(c, kind, packed, packed + len, ends, len, &sorted); \
+    for (size_t i = 0; i < len; i++) out[i] = sorted[reverse ? len - i - 1 : i].value; \
+    mem_free(packed); \
+} while (0)
 static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) {
     size_t len = list->as.seq.len;
     if (len > SIZE_MAX / sizeof(SortItem)) { spy_error(c, "MemoryError", "list too large to sort"); return -1; }
-    SortItem *items = allocate_array(c, len, sizeof(*items));
-    SortItem *scratch = allocate_array(c, len, sizeof(*scratch));
+    SortItem *items = allocate_array(c, len, sizeof(*items)), *from = items, *scratch = NULL;
     size_t *ends = allocate_array(c, len, sizeof(*ends));
-    if (!items || !scratch || !ends) { mem_free(items); mem_free(scratch); mem_free(ends); return -1; }
-    SortItem *from = items;
+    if (!items || !ends) { mem_free(items); mem_free(ends); return -1; }
     size_t keys = 0;
     for (; keys < len; keys++) {
         items[keys].value = list->as.seq.items[keys];
@@ -21353,12 +21376,22 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     if (reverse) for (size_t i = 0; i < len / 2; i++) {
         SortItem swap = items[i]; items[i] = items[len - i - 1]; items[len - i - 1] = swap;
     }
-    sort_items(c, len ? sort_kind(items, len) : SORT_INT, items, scratch, ends, len, &from);
-    for (size_t i = 0; i < len; i++) list->as.seq.items[i] = from[reverse ? len - i - 1 : i].value;
+    SPYValue **out = list->as.seq.items;
+    int kind = len ? sort_kind(items, len) : SORT_INT;
+    if (kind == SORT_INT) SORT_NUMBERS(IntItem, sort_ints, packed[i].key = k->as.integer_data.small);
+    else if (kind == SORT_FLOAT) SORT_NUMBERS(FloatItem, sort_floats, packed[i].key = k->as.real);
+    else if (kind == SORT_INT_PAIR)
+        SORT_NUMBERS(PairItem, sort_pairs, (packed[i].key = k->as.seq.items[0]->as.integer_data.small,
+                                            packed[i].next = k->as.seq.items[1]->as.integer_data.small));
+    else if ((scratch = allocate_array(c, len, sizeof(*scratch)))) {
+        sort_items(c, kind, items, scratch, ends, len, &from);
+        for (size_t i = 0; i < len; i++) out[i] = from[reverse ? len - i - 1 : i].value;
+    }
 done:
     for (size_t i = 0; i < keys; i++) spy_release(from[i].key);
     mem_free(items); mem_free(scratch); mem_free(ends); return c->error_type[0] ? -1 : 0;
 }
+#undef SORT_NUMBERS
 static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     (void)argv;
     static const char *const names[] = {"key", "reverse"};
