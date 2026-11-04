@@ -69,17 +69,20 @@ def contract(args, status, message, kept, removed, env={}, spyc=ROOT / "spyc", s
         command = [str(spyc), *args, "one.py"]
         environment = {**os.environ, "TMPDIR": str(directory / "tmp"), **env}
         if signal_number and not fake:
-            # The real compiler, interrupted soon after spyc wrote its C file.
+            # The real compiler, interrupted once it runs. A build that ends
+            # before the signal arrives tests nothing; the caller runs it again.
             # Interrupted when run directly, clang may leave its own object
             # file in TMPDIR; spyc answers for its own files, not those.
             process = subprocess.Popen(command, cwd=directory, env=environment, stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 30
-            while not any((directory / "tmp").iterdir()):
-                assert process.poll() is None and time.monotonic() < deadline, "no temporary file appeared"
-                time.sleep(0.001)
-            time.sleep(0.03)
+            while subprocess.run(["pgrep", "-P", str(process.pid)], capture_output=True).returncode:
+                if process.poll() is not None:
+                    break
+                assert time.monotonic() < deadline, "the compiler did not start"
             process.send_signal(signal_number)
             result = subprocess.CompletedProcess(command, process.wait(), "", process.stderr.read())
+            if result.returncode == 0:
+                return False
         elif signal_number:
             # Interrupted while the compiler runs: a stand-in, first on PATH
             # under the compiler's name, leaves a child that ignores the
@@ -116,6 +119,7 @@ def contract(args, status, message, kept, removed, env={}, spyc=ROOT / "spyc", s
             assert all(path.read_bytes() != b"old" for path in files if path.name != "prog.c"), args
         else:
             assert all(not path.exists() or path.read_bytes() == b"old" for path in files), args
+        return True
 
 
 aux = ["--metafile", "m.json", "--deps", "p.d"]
@@ -144,7 +148,10 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
 # Interrupted: the compiler's group is stopped and nothing is left.
 for signal_number in (signal.SIGINT, signal.SIGTERM):
     contract([*aux, "-o", "prog"], -signal_number, "", ["m.json", "p.d"], ["prog"], signal_number=signal_number)
-    contract([*aux, "-o", "prog"], -signal_number, "", ["m.json", "p.d"], [], signal_number=signal_number, fake=False)
+    # The compiler may end before the signal arrives, and spyc then removes
+    # the metafile it began, so only the files' states are checked.
+    assert any(contract([*aux, "-o", "prog"], -signal_number, "", [], [], signal_number=signal_number, fake=False)
+               for _ in range(10)), "the compiler ended before every signal"
 print("Executable output passed")
 
 # spyc -c writes only the source, named after the input, for a host's main.

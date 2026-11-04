@@ -643,9 +643,10 @@ the compile. Each case starts with old files and checks which remain, which
 are gone, and that no temporary file is left. For the interruptions, a
 stand-in compiler found first on `PATH` leaves a child that ignores the
 signal and writes the output later, so only stopping the whole process group
-passes; a second run interrupts the real compiler. Removing any part of the
-cleanup from `spyc.c` fails these cases, except signalling the driver alone
-before the kill of the group. A failed write of the temporary file (a full
+passes; a second run interrupts the real compiler, which may already have
+finished, so it checks only that each file is old or gone. Removing any part
+of the cleanup from `spyc.c` fails these cases, except signalling the driver
+alone before the kill of the group. A failed write of the temporary file (a full
 disk) has no test; the model covers it.
 
 `tests/archive.py` runs each shipped tool from a staged release archive
