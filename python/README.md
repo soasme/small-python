@@ -4,7 +4,7 @@ Small Python is a small and embeddable Python runtime. This package,
 `small-python`, runs it from CPython: create isolated interpreters, run code in
 them, and give that code exactly the functions, modules, and files you choose.
 
-![logo](docs/assets/logo-sm.png)
+![logo](https://raw.githubusercontent.com/soasme/small-python/main/python/docs/assets/logo-sm.png)
 
 ## Features
 
@@ -43,11 +43,11 @@ with small_python.Runtime(step_limit=1_000_000, memory_limit=64 << 20, timeout=5
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md)
-- [Embedding guide](docs/embedding.md): host functions, modules, output, files, errors
-- [Limits and safety](docs/safety.md)
-- [API reference](docs/api.md)
-- [Development](docs/development.md): building, testing, and releasing
+- [Getting started](https://github.com/soasme/small-python/blob/main/python/docs/getting-started.md)
+- [Embedding guide](https://github.com/soasme/small-python/blob/main/python/docs/embedding.md): host functions, modules, output, files, errors
+- [Limits and safety](https://github.com/soasme/small-python/blob/main/python/docs/safety.md)
+- [API reference](https://github.com/soasme/small-python/blob/main/python/docs/api.md)
+- [Development](https://github.com/soasme/small-python/blob/main/python/docs/development.md): building, testing, and releasing
 
 ## Build
 
@@ -59,4 +59,4 @@ uv run python -c "import small_python"
 uv build
 ```
 
-See [Development](docs/development.md) for tests and the release process.
+See [Development](https://github.com/soasme/small-python/blob/main/python/docs/development.md) for tests and the release process.

@@ -41,7 +41,7 @@ n, err := spy.As[int](rt.Eval("add(40, 2)")) // 42
 
 ## Choosing a package
 
-| | [`spy`](spy) | [`worker`](worker) |
+| | [`spy`](https://github.com/soasme/small-python/tree/main/go/spy) | [`worker`](https://github.com/soasme/small-python/tree/main/go/worker) |
 |---|---|---|
 | Where the engine runs | in your process, compiled by cgo | in a `spy-worker` process of its own |
 | For | code you trust: configuration, rules, plugins you ship | code you do not: users' scripts, code written by a language model |

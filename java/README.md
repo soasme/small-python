@@ -180,5 +180,5 @@ the OS sandbox before it runs code, so mount directories first.
 make test-java      # build this platform's native files and run mvn verify
 ```
 
-The specification is [docs/packaging/java.md](../docs/packaging/java.md);
-the worker protocol is [docs/packaging/protocol.md](../docs/packaging/protocol.md).
+The specification is [docs/packaging/java.md](https://github.com/soasme/small-python/blob/main/docs/packaging/java.md);
+the worker protocol is [docs/packaging/protocol.md](https://github.com/soasme/small-python/blob/main/docs/packaging/protocol.md).
