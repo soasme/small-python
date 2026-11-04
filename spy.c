@@ -21294,7 +21294,7 @@ typedef struct { SPYValue *value; double key; } FloatItem;
 typedef struct { SPYValue *value; int64_t key, next; } PairItem;
 /* A stable merge sort of len items, ending in *result (items or scratch).
  * Strictly descending runs are reversed, short runs grow to 32 items by
- * binary insertion after their equals, and neighbouring runs then merge
+ * insertion after their equals, and neighbouring runs then merge
  * until one is left; runs already in order are copied whole. Every pass
  * leaves a permutation in from, where a stop may come. */
 #define DEFINE_SORT(name, Item, LESS, FAILED) \
@@ -21310,13 +21310,9 @@ static NO_INLINE void name(SPYContext *c, int kind, Item *items, Item *scratch, 
         } else while (end < len && !(FAILED) && !LESS(items[end], items[end - 1])) end++; \
         for (size_t stop = len - start < 32 ? len : start + 32; end < stop && !(FAILED); end++) { \
             Item item = items[end]; \
-            size_t lo = start, hi = end; \
-            while (lo < hi && !(FAILED)) { \
-                size_t m = lo + (hi - lo) / 2; \
-                if (LESS(item, items[m])) hi = m; else lo = m + 1; \
-            } \
+            size_t lo = end; \
+            while (lo > start && !(FAILED) && LESS(item, items[lo - 1])) { items[lo] = items[lo - 1]; lo--; } \
             if (FAILED) break; \
-            memmove(items + lo + 1, items + lo, (end - lo) * sizeof(*items)); \
             items[lo] = item; \
         } \
         ends[runs++] = end; \
