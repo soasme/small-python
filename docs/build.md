@@ -15,14 +15,13 @@
 
 ## 1 Introduction
 
-`spyc` turns a Python program into one C translation unit and, as `qjsc`
-does, compiles it into an executable unless asked for the C file. The bundler follows the program's imports, as
-[esbuild](https://esbuild.github.io/) follows a JavaScript program's, and
-embeds every module the program reaches. The program then runs without any
-Python file at run time.
+`spyc` turns a Python program into one C translation unit and compiles it
+into an executable, unless asked for the C file. It follows the program's
+imports and embeds every module the program reaches, so the program runs
+without any Python file at run time.
 
-Bundling must not change what the program does. esbuild hoists every module
-into one scope. Python modules are objects that a program can see in
+Bundling must not change what the program does. Python modules are objects
+that a program can see in
 `sys.modules`, in a cycle, through `__name__` and `__file__`, or by importing
 lazily. So spyc keeps each module separate. It embeds the source of each one,
 and a generated module loader returns that source when the engine asks for it.
@@ -30,11 +29,11 @@ The import system is the same one that runs unbundled programs: modules are
 cached, run once, imported parent first, and initialized lazily. A bundled
 program only gets its sources from the C file instead of from disk.
 
-This is the QuickJS arrangement: `qjsc` compiles a program and the modules it
-imports, `-D` adds modules that only a dynamic import reaches, and `-M`
-registers native modules. spyc keeps those three ideas. From esbuild it takes
-the command-line features that fit a Python program, as
-[section 8](#8-esbuild-feature-map) lists.
+Three options shape what is bundled: imports are followed from the entry,
+`-D` adds modules that only a dynamic import reaches, and `-M` registers
+standard modules the program links instead of bundling. The other options
+([2.1](#21-options)) control output and transforms; readers who know esbuild
+will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 
 ### 1.1 Goals
 
@@ -89,14 +88,14 @@ spyc -O --minify --metafile app.json -o app app.py
 | Option | Meaning |
 | --- | --- |
 | `-o FILE` | The executable or C file to write; `a.out`, or `out.c` with `-e` or `-c`, by default. It may not be an input. |
-| `-e` | Write the C file with its `main` instead of compiling it, as `qjsc -e` ([5.3](#53-executable-output)). |
+| `-e` | Write the C file with its `main` instead of compiling it ([5.3](#53-executable-output)). |
 | `-c` | Write only the embedded sources and the loader, for a host's own `main` ([5.2](#52-library-output--c)). Several entries are allowed. |
 | `-m MODULE` | Run `MODULE` as `__main__`, as `python -m` does. |
 | `-M MODULE` | Register a standard module (`spy-std.c`), as today. Imports of it are not bundled. |
 | `-I DIR` | Add a search root after the entry's. May be repeated. |
 | `-x MODULE` | External: leave `MODULE` and its submodules out of the bundle. The host provides them at run time. |
 | `-D MODULE` | Include `MODULE` even if no import names it. `-D PKG.*` includes every module under package `PKG`. |
-| `-N NAME` | Name the `-c` loader `NAME_load`, as `qjsc -N` names its output. The default `NAME` is `spy_` followed by the first entry's name. |
+| `-N NAME` | Name the `-c` loader `NAME_load`. The default `NAME` is `spy_` followed by the first entry's name. |
 | `--alias NAME=TARGET` | Resolve module `NAME`, and `NAME.sub`, to `TARGET`'s files. |
 | `-O`, `-OO` | Python's optimization levels: remove `assert` and set `__debug__` false, and with `-OO` remove docstrings ([6.1](#61-optimization-levels--o-and--oo)). |
 | `--minify` | Remove comments and needless spaces, keeping every line number ([6.2](#62-minification)). |
@@ -172,8 +171,7 @@ Symbolic links are followed. The module keeps the name it was imported by.
 `--alias NAME=TARGET` replaces the leading component(s) `NAME` with `TARGET`
 before step 3, so `NAME` and `NAME.x` load the files of `TARGET` and
 `TARGET.x`. The module is still called `NAME`, and its `__file__` follows its
-name. An alias is the build-time way to swap one implementation for another,
-which esbuild users do with `alias` and `define`.
+name. An alias is the build-time way to swap one implementation for another.
 
 ### 3.2 Discovery
 
@@ -246,14 +244,13 @@ does not resolve is left out without an error. At run time it raises
 `ModuleNotFoundError`, which the handler catches, as it would unbundled. The
 metafile records it as missing. An import counts as guarded only where it
 appears lexically inside the `try` body. A guard in a calling function does
-not count. This is esbuild's rule for `require()` inside `try`.
+not count.
 
 ## 4 Dynamic imports
 
 A computed `__import__(name)` (or `importlib.import_module(name)` in a host
 that provides `importlib`) cannot be followed. spyc warns at its line. The
-program must then name what it may load with `-D`, as `qjsc -D` names the
-modules a JavaScript `import()` may load:
+program must then name what it may load with `-D`:
 
 ```sh
 spyc -D plugins.csv -D plugins.json -o app app.py     # these two
@@ -339,13 +336,12 @@ spy_exec(c, spy_game, "game.py");
 
 To load more modules from disk, the host's own loader calls `spy_game_load`
 first and falls back to its own search. Several entries share one table, and
-a module that two entries import is embedded once. This is what esbuild's
-code splitting gives, and in C it costs nothing more.
+a module that two entries import is embedded once.
 
 ### 5.3 Executable output
 
-Without `-e` or `-c`, spyc compiles the C file of [5.1](#51-the-module-table)
-as `qjsc` does. It writes the file under `TMPDIR` (or `/tmp`), runs
+Without `-e` or `-c`, spyc compiles the C file of [5.1](#51-the-module-table).
+It writes the file under `TMPDIR` (or `/tmp`), runs
 
 ```text
 CONFIG_CC -O2 -I INCLUDE -o OUTPUT -x c FILE -x none [LIB/libspy-std.a] LIB/libspy.a -lm
@@ -357,9 +353,9 @@ own `libspy.a`. `INCLUDE` and `LIB` are the directory of the `spyc` that ran
 when `spy.h` is there (a build tree), and otherwise `PREFIX/include` and
 `PREFIX/lib` of `make install`. `libspy-std.a` is linked when `-M` names a
 standard module. `-v` prints the command. The build fails with the
-compiler's diagnostics when it fails, and spyc exits with 1. Unlike `qjsc`,
-spyc links no `-ldl` or `-lpthread`, which the engine does not use, and
-names its temporary file with `mkstemp`.
+compiler's diagnostics when it fails, and spyc exits with 1. The engine needs
+no other library (no `-ldl` or `-lpthread`), and the temporary file is named
+with `mkstemp`, so concurrent builds do not collide.
 
 The compiler runs in its own process group. On `SIGINT` or `SIGTERM`, spyc
 sends the signal to that group, waits for the compiler, kills what is left
@@ -368,9 +364,9 @@ of the group (a linker that outlived it), and removes its files
 interrupted Apple clang 17 left its object file in `TMPDIR` in 7 of 10 runs
 when run directly, and does so under spyc as well.
 
-On Windows spyc has no process API to run the compiler with; as `qjsc`
-without `CONFIG_CC`, it reports that executable output is not supported
-there, and `-e` writes the C file to compile instead.
+On Windows spyc has no process API to run the compiler with: it reports
+that executable output is not supported there, and `-e` writes the C file to
+compile instead.
 
 ## 6 Source transforms
 
@@ -401,7 +397,7 @@ and so the level; spyc rejects `-c` with `-O`.
 `--minify` rewrites each module's tokens:
 
 - Comments are removed, except a `#!` line and comments containing
-  `@license` or `@preserve`. esbuild keeps legal comments the same way.
+  `@license` or `@preserve`, which mark legal notices.
 - The source is decoded, so the result is UTF-8 and needs no encoding
   declaration.
 - Each indentation level becomes one space. Trailing spaces are removed.
@@ -424,7 +420,8 @@ size embedded.
 
 ### 7.1 Metafile
 
-`--metafile FILE` writes esbuild's metafile shape, with paths relative to the
+`--metafile FILE` writes the following JSON (esbuild's metafile shape, so its
+analyzers read it), with paths relative to the
 working directory:
 
 ```json
@@ -499,7 +496,7 @@ reason.
 | loader (js, ts, json, text, file, binary, ...) | `.py` only. Embedded data files would need an in-memory `spy_mount`, a core change kept for later. | Not ported |
 | platform | `-M` registers the standard modules a program may import without bundling them, as `--platform=node` treats Node's built-in modules. | Adapted |
 | format (iife, cjs, esm) | standalone program, or `-c` for a host | Adapted |
-| global name | `-N NAME`, as `qjsc -N` | Adapted |
+| global name | `-N NAME` | Adapted |
 | splitting | several `-c` entries share one module table | Adapted |
 | outfile | `-o FILE` | Ported |
 | outdir, outbase, entry/chunk/asset names, out extension, public path | Not ported. The output is one C file. | Not ported |
@@ -537,7 +534,7 @@ engine's parser, source decoding (PEP 263, BOMs, newline normalization),
 identifier normalization, and syntax errors, and spyc keeps no grammar of its
 own. The walk over parsed units looks for `N_IMPORT` and `N_FROM` nodes, for
 calls of the name `__import__`, and for the `try` statements that guard them.
-`spyc` grows to the engine's size, which `qjsc` does as well.
+`spyc` is therefore about as large as the engine.
 
 The resolver ([3.1](#31-search-roots)) uses only C11 file operations:
 `fopen` to read a file, and one portable directory listing so that names are
@@ -601,7 +598,7 @@ kill makes the stop prompt rather than correct.
 
 ### 10.2 Build tests
 
-`tests/build` holds test262-style programs, one per behavior. Each program
+`tests/build` holds small programs, one per behavior. Each program
 checks itself with `assert` (or `raise SystemExit` under `-O`) and carries a
 header:
 

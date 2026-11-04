@@ -1,6 +1,5 @@
 /* A raylib host for Small Python: the game is pong.py, and this file only
- * registers a "raylib" C module, as a QuickJS host would with JS_NewCModule,
- * and runs the game's source, compiled in by spyc -c. */
+ * registers a "raylib" C module and runs the game's source, compiled in by spyc -c. */
 #include "spy.h"
 #include "host.h"
 

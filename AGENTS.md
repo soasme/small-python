@@ -201,6 +201,11 @@
   consolidate and attribute those sources accurately.
 - Keep the manual factual. A roadmap item is not an implemented feature. Keep
   compatibility reports separate from normative language requirements.
+- Every document stands alone. Say what spy does in its own terms, assuming
+  only Python and C; never explain a behaviour as "as qjsc does", "like
+  esbuild", or "test262-style". Designs borrowed from other projects are
+  credited once, in the sources and licenses sections; a mapping to another
+  tool's options (build.md section 8) is an appendix, not the explanation.
 
 ## Tests and evidence
 

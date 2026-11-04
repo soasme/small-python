@@ -143,8 +143,7 @@ unlimited one, and a spent budget still fails every tick. The scattered
 `c->step_limit && ++c->steps > c->step_limit` tests became `spend` calls,
 and a bulk copy of a list or tuple spends its length at once.
 
-The interrupt callback (3.4) is polled as QuickJS polls its interrupt
-handler, at calls and backward jumps: when `fuel` has fallen 4,096 steps
+The interrupt callback (3.4) is polled at calls and backward jumps: when `fuel` has fallen 4,096 steps
 past the last poll, a Python call, an item a native loop takes from an
 iterator, or the statement after a loop pass asks the host. A loop pass
 only marks its frame not quiet, so the next `tick` takes its slow path
@@ -210,8 +209,7 @@ every 4,096 steps (3.2); a nonzero return stops the context. A single
 native operation, such as one multiplication, does not poll; its steps
 bound its time. A host reads its own clock there, so wall time, CPU time and a
 cancel button are the same mechanism, and the engine stays free of clocks
-and threads, as bare metal needs. This is QuickJS's
-`JS_SetInterruptHandler`.
+and threads, as bare metal needs.
 
 The worker uses it for the bindings' `timeout`: the operation stops, the
 worker reports it, and the runtime stays usable. The worker's clock stops

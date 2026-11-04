@@ -43,11 +43,6 @@ to its Core profile, as [3.1](#31-python-language-support) states with its
 evidence. It does not claim the standard library, CPython's C API, or a passing
 upstream Cython suite.
 
-This manual follows the organization of the
-[QuickJS manual](https://bellard.org/quickjs/quickjs.html): usage, specifications,
-embedding, and internals. QuickJS is the architectural reference, not the source
-of Python semantics or this engine's performance claims.
-
 ### 1.1 Main features
 
 - One core C implementation file and one public embedding header.
@@ -135,8 +130,8 @@ Generate and compile a standalone program:
 ./hello
 ```
 
-As `qjsc`, `spyc` runs the C compiler of its own build on the C file it
-generates; `spyc -e -o hello.c` writes that file instead, for any compiler:
+`spyc` generates C and compiles it with the compiler spyc itself was built
+with; `spyc -e -o hello.c` writes that file instead, for any compiler:
 
 ```sh
 ./spyc -e -o hello.c examples/hello.py
@@ -180,26 +175,24 @@ usage: spyc [options] [-o program] (input.py | -m module)
 ```
 
 `spyc` bundles a program and the modules it imports into one C translation
-unit, as esbuild bundles JavaScript: it finds each import as CPython's path
-finder would over the entry's directory and each `-I` root, embeds the
-sources, and serves them through a generated `SPYModuleLoader`. A missing
-import fails the build unless the program guards it with `try`/`except
-ImportError`. `-x` leaves a module to the host, `-D` adds modules that only
-dynamic imports name, as `qjsc -D` does, and `-M` registers a module of the
-standard layer, which the program then links (`spy-std.c`). `-O`, `-OO`,
-`--minify`, `--metafile`, `--deps`, `--analyze`, and `-v` complete the options.
-As `qjsc`, spyc outputs an executable (`a.out` without `-o`): it compiles a C
-file with a `main` that runs the entry, using the compiler and link flags of
-its own build, against the `spy.h` and libraries beside it or under the
-installation prefix; `-v` prints that command. `-e` (as `qjsc -e`) writes the C
-file instead (`out.c` without `-o`). With `-c` (as `qjsc -c`) the file holds
-each entry's source as `const char spy_name[]` (`game.py` gives `spy_game`)
-and the loader `spy_name_load`, for a host whose own `main` registers its C
-modules; [`examples/pong`](../examples/pong) is one. A failed or interrupted
-build removes the files it began to write. On Windows spyc writes C only
-(`-e` or `-c`). spyc produces no native code or bytecode for Python
-functions. [Building programs](build.md)
-is the full reference.
+unit: it finds each import as CPython's path finder would over the entry's
+directory and each `-I` root, embeds the sources, and serves them through a
+generated `SPYModuleLoader`. A missing import fails the build unless the
+program guards it with `try`/`except ImportError`. `-x` leaves a module to the
+host, `-D` adds modules that only dynamic imports name, and `-M` registers a
+module of the standard layer, which the program then links (`spy-std.c`). `-O`,
+`-OO`, `--minify`, `--metafile`, `--deps`, `--analyze`, and `-v` complete the
+options. By default spyc outputs an executable (`a.out` without `-o`): it
+compiles a C file with a `main` that runs the entry, using the compiler and
+link flags of its own build, against the `spy.h` and libraries beside it or
+under the installation prefix; `-v` prints that command. `-e` writes the C file
+instead (`out.c` without `-o`). With `-c` the file holds each entry's source as
+`const char spy_name[]` (`game.py` gives `spy_game`) and the loader
+`spy_name_load`, for a host whose own `main` registers its C modules;
+[`examples/pong`](../examples/pong) is one. A failed or interrupted build
+removes the files it began to write. On Windows spyc writes C only (`-e` or
+`-c`). spyc produces no native code or bytecode for Python functions. [Building
+programs](build.md) is the full reference.
 
 ### 2.4 Local tests
 
@@ -221,22 +214,23 @@ on each of four threads at once, which share nothing.
 
 Conformance to PLS-315 rests on two kinds of evidence, and no other:
 
-- `make test-spec` runs the specification tests in `tests/spec`, test262-style
-  scripts that each name the clauses of PLS-315 (`docs/standards/3_15.md`)
-  they exercise, import only `tests/spec/harness.py`, and state their
-  expectations directly, so the suite needs neither a library nor another
-  implementation. They run on `tests/run-spec`, a driver that, like QuickJS's
-  `run-test262`, runs the bare core with no library module; the host
-  facilities a test reaches (Annex B) come through the harness's `host`, built
-  on the engine primitives there and on CPython's library facade on the oracle. `tests/spec_coverage.py` fails unless every clause of the
+- `make test-spec` runs the specification tests in `tests/spec`, small
+  self-checking scripts that each name the clauses of PLS-315
+  (`docs/standards/3_15.md`) they exercise, import only
+  `tests/spec/harness.py`, and state their expectations directly, so the suite
+  needs neither a library nor another implementation. They run on
+  `tests/run-spec`, a driver that runs the bare core with no library module;
+  the host facilities a test reaches (Annex B) come through the harness's
+  `host`, built on the engine primitives there and on CPython's library facade
+  on the oracle. `tests/spec_coverage.py` fails unless every clause of the
   normative chapters has a test. The `ports` chapter holds CPython's language
   test modules with each library import replaced by a core equivalent, the
   `doctests` chapter CPython's doctest-based tests, and the `programs` chapter
   1,356 programs (arithmetic, comparisons, argument binding, class creation,
-  rounding, string search, template strings, asynchronous
-  generator states, and more) with the output CPython 3.15 gives them.
-  `make test-spec-oracle` also runs every test on the pinned CPython oracle,
-  which must pass it, to validate the tests.
+  rounding, string search, template strings, asynchronous generator states, and
+  more) with the output CPython 3.15 gives them. `make test-spec-oracle` also
+  runs every test on the pinned CPython oracle, which must pass it, to validate
+  the tests.
 - `make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
   (fetched by `make tla-tools`; it needs a Java runtime) and replays every
   transition of the bounded models on spy's `tests/run-spec`, through the same
@@ -700,45 +694,45 @@ any of them eager (PLS-315 B.1.4).
 
 The core engine (`spy.c`, `libspy.a`) provides the language and its builtins
 and no module but `builtins`; a program reaches every intrinsic through the
-language (PLS-315 Annex C lists the Core expressions). Every other module is the
-host's choice. A host registers modules with `spy_new_module`, as QuickJS's
-`JS_NewCModule`, and `spy_init_primitives` fills one with the engine primitives
-for modules written in Python: the module cache, frames, the recursion and
-integer-string limits, the handled exception, collection, the weak table, and
-host output. Hosts register it as `_spy`; a context where none did has no such
-module. A standard layer, `spy-std.c` (`libspy-std.a`, declared in
-`spy-std.h`), plays the role of QuickJS's `quickjs-libc`: it supplies the host
+language (PLS-315 Annex C lists the Core expressions). Every other module is
+the host's choice. A host registers modules with `spy_new_module`, and
+`spy_init_primitives` fills one with the engine primitives for modules written
+in Python: the module cache, frames, the recursion and integer-string limits,
+the handled exception, collection, the weak table, and host output. Hosts
+register it as `_spy`; a context where none did has no such module. A standard
+layer, `spy-std.c` (`libspy-std.a`, declared in `spy-std.h`), supplies the host
 modules `sys` and `gc`, written on those primitives and specified, after
-CPython 3.15, by [PLS-STD-315](standards/std.md). `spy_std_init_module` registers one
-of them and `spy_std_init` all of them. The `spy` command calls `spy_std_init`, `spyc -M`
-names the modules a generated program registers, and the conformance driver
-`tests/run-spec` registers none, only `_spy`. Their Python sources live in
-`modules/` and are embedded into `spy-std-modules.h`; an import finds them
-before the host loader, needs no loader, and parses them only on first use.
-`print` and interactive display write to `sys.stdout`, and `breakpoint` calls
-`sys.breakpointhook`, once a `sys` module is loaded; until then output goes to
-the host callback, display uses its default, and `breakpoint` returns `None`
-(PLS-315 Annex B). `gc.collect()` runs the cycle collector during execution; it has one
-generation, and runs automatically only when the host asks, so `gc`'s enable
-and threshold settings are recorded. `sys` keeps the runtime state natively:
-`modules`, `exception()`, the recursion and integer string-conversion
-limits, reference counts, and `stdout`/`stderr` streams that write to the
-host output and error callbacks; `implementation.name` is `smallpython`. `_getframe()`
-returns frame objects for running calls (functions, generators, class
-bodies, and modules); a function frame's `f_locals` is a write-through
-`FrameLocalsProxy` as in PEP 667, and line numbers are those of the executing
-statement. [PLS-STD-315](standards/std.md) specifies every name of both modules after
-CPython 3.15 and lists those not provided: `sys.monitoring`, audit hooks, and the thread
-and extension-module interfaces, among others. The lazy-import mode and
-filter, the asynchronous-generator hooks, coroutine origin tracking, the
-hook that receives unraisable exceptions, and the trace and profile
-functions are settings the engine keeps and `sys` changes through the
-`_spy._setting` primitive; trace functions see the 'call', 'line',
-'return', and 'exception' events of Python frames; `sys.excepthook` and
-`sys.unraisablehook` write CPython's traceback display without source lines. When a
-host registered `sys` but no program imported it, the first unraisable exception
-imports it, so the report appears as under CPython, whose `sys` is always
-loaded. `tests/std.py` checks the rest against CPython.
+CPython 3.15, by [PLS-STD-315](standards/std.md). `spy_std_init_module`
+registers one of them and `spy_std_init` all of them. The `spy` command calls
+`spy_std_init`, `spyc -M` names the modules a generated program registers, and
+the conformance driver `tests/run-spec` registers none, only `_spy`. Their
+Python sources live in `modules/` and are embedded into `spy-std-modules.h`; an
+import finds them before the host loader, needs no loader, and parses them only
+on first use. `print` and interactive display write to `sys.stdout`, and
+`breakpoint` calls `sys.breakpointhook`, once a `sys` module is loaded; until
+then output goes to the host callback, display uses its default, and
+`breakpoint` returns `None` (PLS-315 Annex B). `gc.collect()` runs the cycle
+collector during execution; it has one generation, and runs automatically only
+when the host asks, so `gc`'s enable and threshold settings are recorded. `sys`
+keeps the runtime state natively: `modules`, `exception()`, the recursion and
+integer string-conversion limits, reference counts, and `stdout`/`stderr`
+streams that write to the host output and error callbacks;
+`implementation.name` is `smallpython`. `_getframe()` returns frame objects for
+running calls (functions, generators, class bodies, and modules); a function
+frame's `f_locals` is a write-through `FrameLocalsProxy` as in PEP 667, and
+line numbers are those of the executing statement.
+[PLS-STD-315](standards/std.md) specifies every name of both modules after
+CPython 3.15 and lists those not provided: `sys.monitoring`, audit hooks, and
+the thread and extension-module interfaces, among others. The lazy-import mode
+and filter, the asynchronous-generator hooks, coroutine origin tracking, the
+hook that receives unraisable exceptions, and the trace and profile functions
+are settings the engine keeps and `sys` changes through the `_spy._setting`
+primitive; trace functions see the 'call', 'line', 'return', and 'exception'
+events of Python frames; `sys.excepthook` and `sys.unraisablehook` write
+CPython's traceback display without source lines. When a host registered `sys`
+but no program imported it, the first unraisable exception imports it, so the
+report appears as under CPython, whose `sys` is always loaded. `tests/std.py`
+checks the rest against CPython.
 
 No `weakref` module is built in. The engine keeps weak references for its
 hosts: the primitives `_weak_bind(target, reference, callback)` and
@@ -772,14 +766,12 @@ from `spy.h`, states each declaration's contract.
 `spy_context_new()` returns an independent context or `NULL` on allocation
 failure. `spy_context_free()` destroys it and all remaining values. Contexts
 have no process-global mutable runtime state. Use independent contexts on
-different threads; do not concurrently enter one context.
-`spy_set_opaque` and `spy_get_opaque` attach one host pointer to a context,
-like `JS_SetContextOpaque`, so callbacks such as a module init can find the
-host object that owns the context.
+different threads; do not concurrently enter one context. `spy_set_opaque` and
+`spy_get_opaque` attach one host pointer to a context, so callbacks such as a
+module init can find the host object that owns the context.
 
-The current API does not separate a shared allocator/runtime from execution
-contexts as QuickJS does. One `SPYContext` owns its heap, globals, module cache,
-errors, callbacks, and execution budget.
+The API has no runtime shared between contexts. One `SPYContext` owns its heap,
+globals, module cache, errors, callbacks, and execution budget.
 
 #### 3.4.2 Values and ownership
 
@@ -852,8 +844,7 @@ other descriptors, such as the process's standard streams, are unreachable.
 The `spy` command mounts its working directory at its own path. File access
 needs a POSIX host; elsewhere `spy_mount` and `open` raise `OSError`.
 
-`spy_new_module(ctx, name, init)` registers a module the way QuickJS's
-`JS_NewCModule` does. An import finds it before the loader. The first import
+`spy_new_module(ctx, name, init)` registers a module. An import finds it before the loader. The first import
 creates the module object with `__name__`, `__package__`, and `__builtins__`
 set and calls `init(ctx, module)`, which fills it (with `spy_set_attr`,
 `spy_native` values, or Python source through `spy_exec_module`) and returns 0,
@@ -1228,10 +1219,11 @@ checks it (3.4.8).
 
 `make unicode-data` regenerates the checked-in Unicode property table with the
 pinned oracle; `make check-unicode` verifies it. Ordinary C builds need neither
-the oracle nor the generator. The tables use QuickJS's libunicode encodings:
-properties are run lengths with a sparse block index, case mappings are runs
-of equal offsets, and decompositions are single-level and expanded
-recursively. Character names share leading words with the preceding name.
+the oracle nor the generator. In the tables (whose encoding is credited in
+[5](#5-sources-and-licenses)), properties are run lengths with a sparse block
+index, case mappings are runs of equal offsets, and decompositions are
+single-level and expanded recursively. Character names share leading words with
+the preceding name.
 
 ## 5 Sources and licenses
 

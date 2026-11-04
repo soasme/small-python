@@ -1,6 +1,5 @@
-/* A raylib host for Flappy Python. It registers a "raylib" C module, as
- * QuickJS hosts register one with JS_NewCModule, installs the module loader
- * spyc -c -N flappy generated, and runs flappy.py from the bundle. Python,
+/* A raylib host for Flappy Python. It registers a "raylib" C module,
+ * installs the module loader spyc -c -N flappy generated, and runs flappy.py from the bundle. Python,
  * the game's modules, its sprite, and (linked statically) raylib all end up
  * in this one executable. */
 #include "spy.h"

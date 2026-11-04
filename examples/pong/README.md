@@ -2,7 +2,7 @@
 
 A [raylib](https://www.raylib.com/) game whose logic is Python. `pong.py`
 holds the game; `pong.c` is the host. It registers a `raylib` C module with
-`spy_new_module`, as a QuickJS host registers one with `JS_NewCModule`, then
+`spy_new_module`, then
 runs the script. `spyc -c` compiles `pong.py` into the program as a C array,
 so `pong` runs anywhere without the Python file.
 

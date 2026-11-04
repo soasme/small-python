@@ -51,8 +51,8 @@ SPYContext *spy_context_new(void);
 /* Free a context and every value it still holds. Release external values
  * first; using one afterwards is invalid. */
 void spy_context_free(SPYContext *);
-/* A host pointer stored with the context, as QuickJS's JS_SetContextOpaque.
- * The context never dereferences or frees it. */
+/* A host pointer stored with the context, for callbacks such as a module's
+ * init to find their host. The context never dereferences or frees it. */
 void spy_set_opaque(SPYContext *, void *);
 void *spy_get_opaque(const SPYContext *);
 
@@ -170,10 +170,10 @@ SPYValue *spy_error_value(SPYContext *);
  * host controls search paths and source storage. */
 typedef SPYValue *(*SPYModuleLoader)(SPYContext *, void *, const char *);
 void spy_set_module_loader(SPYContext *, SPYModuleLoader, void *);
-/* Register a module, as QuickJS's JS_NewCModule. It is found before the
- * loader; its first import creates the module object, with __name__,
- * __package__, and __builtins__ set, and calls init to fill it. Init returns 0,
- * or -1 with an error set, which fails the import. A package's init sets
+/* Register a module. It is found before the loader; its first import
+ * creates the module object, with __name__, __package__, and __builtins__
+ * set, and calls init to fill it. Init returns 0, or -1 with an error set,
+ * which fails the import. A package's init sets
  * __path__; its submodules register under dotted names. Registering a name
  * again replaces its init. spy-std.c registers the standard ones. */
 typedef int (*SPYModuleInit)(SPYContext *, SPYValue *);

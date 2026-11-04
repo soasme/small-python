@@ -82,8 +82,8 @@ void spy_set_opaque(SPYContext *, void *);
 void *spy_get_opaque(const SPYContext *);
 ```
 
-A host pointer stored with the context, as QuickJS's JS_SetContextOpaque.
-The context never dereferences or frees it.
+A host pointer stored with the context, for callbacks such as a module's
+init to find their host. The context never dereferences or frees it.
 
 ## Evaluation
 
@@ -292,12 +292,12 @@ typedef int (*SPYModuleInit)(SPYContext *, SPYValue *);
 int spy_new_module(SPYContext *, const char *, SPYModuleInit);
 ```
 
-Register a module, as QuickJS's JS_NewCModule. It is found before the
-loader; its first import creates the module object, with __name__,
-__package__, and __builtins__ set, and calls init to fill it. Init returns
-0, or -1 with an error set, which fails the import. A package's init sets
-__path__; its submodules register under dotted names. Registering a name
-again replaces its init. spy-std.c registers the standard ones.
+Register a module. It is found before the loader; its first import creates
+the module object, with __name__, __package__, and __builtins__ set, and
+calls init to fill it. Init returns 0, or -1 with an error set, which fails
+the import. A package's init sets __path__; its submodules register under
+dotted names. Registering a name again replaces its init. spy-std.c
+registers the standard ones.
 
 ```c
 int spy_init_primitives(SPYContext *, SPYValue *);

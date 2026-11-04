@@ -3,9 +3,8 @@
 A small, embeddable Python engine written in C11.
 
 Small Python runs Python 3.15 code with nothing but a C compiler and the C
-standard library. It is built like [QuickJS](https://bellard.org/quickjs/):
-a few C files, one header to embed, and a plain Makefile. CPython is not
-needed to build or run it.
+standard library. It is a few C files, one header to embed, and a plain
+Makefile. CPython is not needed to build or run it.
 
 ```sh
 $ make
