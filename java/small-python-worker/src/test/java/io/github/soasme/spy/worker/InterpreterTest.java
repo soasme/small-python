@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.math.BigInteger;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -310,5 +311,63 @@ class InterpreterTest {
         py.mount(dir, "/data", true);
         py.eval("1");
         assertEquals("PermissionError", raises(() -> py.mount(dir, "/more", true)).getType());
+    }
+
+    /** The example native module the Makefile builds (make examples/fib.so). */
+    private static Path fib() throws IOException {
+        Path path = Path.of("../../examples/fib.so").toRealPath();
+        assertTrue(Files.isRegularFile(path), path + ": build it with make examples/fib.so");
+        return path;
+    }
+
+    @Test
+    void loadsNativeModules() throws IOException {
+        Path path = fib();
+        List<String> events = new ArrayList<>();
+        Interpreter py = start(Interpreter.builder().policy((event, args) -> {
+            if (!event.equals("dlopen")) return;
+            events.add(args.items().toString());
+            if (args.items().get(0).equals("refused")) throw new SecurityException("no native code");
+        }));
+        py.loadNative("fib", path);
+        assertEquals("PermissionError: no native code", raises(() -> py.loadNative("refused", path)).getMessage());
+        assertEquals(List.of("[fib, " + path + "]", "[refused, " + path + "]"), events);
+        assertEquals(12586269025L, py.eval("__import__('fib').fib(50)"));
+        assertEquals("ValueError: fib() argument must be in 0..92",
+                raises(() -> py.exec("import fib\nfib.fib(-1)")).getMessage());
+        assertEquals("ModuleNotFoundError", raises(() -> py.exec("import refused")).getType());
+    }
+
+    @Test
+    void nativeModuleFailures() throws IOException {
+        Path path = fib();
+        Interpreter py = start();
+        assertEquals("ImportError", raises(() -> py.loadNative("missing", Path.of(path + ".missing"))).getType());
+        Path source = Path.of("src/test/java/io/github/soasme/spy/worker/InterpreterTest.java");
+        assertEquals("ImportError", raises(() -> py.loadNative("source", source)).getType());
+        assertEquals("ImportError: dynamic module does not define module export function (spy_init_other)",
+                raises(() -> py.loadNative("other", path)).getMessage());
+        assertEquals("ValueError: embedded null character", raises(() -> py.loadNative("fib\0", path)).getMessage());
+        assertEquals("ModuleNotFoundError", raises(() -> py.exec("import missing")).getType());
+        assertEquals("PermissionError: cannot load a native module after code has run",
+                raises(() -> py.loadNative("fib", path)).getMessage());
+    }
+
+    /** A module whose init aborts takes its worker with it, and nothing else. */
+    @Test
+    void aCrashingNativeInitLosesOnlyItsWorker(@TempDir Path dir) throws Exception {
+        Path source = dir.resolve("crash.c"), library = dir.resolve("crash.so");
+        Files.writeString(source, "#include <stdlib.h>\n#include \"spy-module.h\"\n"
+                + "SPY_MODULE int spy_init_crash(SPYContext *c, SPYValue *m) { (void)c, (void)m; abort(); }\n");
+        String compiler = System.getenv().getOrDefault("CC", OS.WINDOWS.isCurrentOs() ? "gcc" : "cc");
+        Process build = new ProcessBuilder(compiler, "-shared", "-fPIC", "-DSPY_SHARED_MODULE", "-I",
+                Path.of("../..").toRealPath().toString(), source.toString(), "-o", library.toString())
+                .inheritIO().start();
+        assertEquals(0, build.waitFor());
+        Interpreter py = start();
+        py.loadNative("crash", library);
+        assertThrows(WorkerException.class, () -> py.exec("import crash"));
+        assertThrows(WorkerException.class, () -> py.eval("1"));
+        assertEquals(42L, start().eval("6 * 7"));
     }
 }

@@ -609,6 +609,21 @@ impl Runtime {
         self.run(wire::MOUNT, &[&resolved.into(), &path.into(), &read_only.into()]).map(drop)
     }
 
+    /// Opens the shared library at `path`, a native module built with
+    /// `spy-module.h`, in the worker, so that `import name` runs its init
+    /// there. The policy is asked first, with `"dlopen"` (name, path), `path`
+    /// resolved as the worker receives it. Like [`mount`](Self::mount), it is
+    /// refused once the worker has run code; the library's init and
+    /// functions then run inside the sandbox.
+    pub fn load_native(&mut self, name: &str, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let invalid = |why: &str| Error::Invalid(format!("cannot load '{}': {why}", path.display()));
+        let absolute = std::env::current_dir().map_err(|e| invalid(&e.to_string()))?.join(path);
+        let resolved = fs::canonicalize(&absolute).unwrap_or(absolute);
+        let resolved = resolved.to_str().ok_or_else(|| invalid("the path is not UTF-8"))?.to_owned();
+        self.run(wire::NATIVE, &[&name.into(), &resolved.into()]).map(drop)
+    }
+
     /// Runs the cycle collector; returns the number of values freed.
     pub fn collect(&mut self) -> Result<i64> {
         match self.run(wire::COLLECT, &[])? {

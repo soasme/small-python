@@ -404,6 +404,23 @@ func (rt *Runtime) Mount(directory, path string, readOnly bool) error {
 	return err
 }
 
+// LoadNative opens the shared library at path, a native module built with
+// spy-module.h, in the worker, so that `import name` runs its init there.
+// The policy is asked first, with "dlopen" (name, path), path resolved as
+// the worker receives it. Like Mount, it is refused once the worker has run
+// code; the library's init and functions then run inside the sandbox.
+func (rt *Runtime) LoadNative(name, path string) error {
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return invalid(fmt.Sprintf("cannot load '%s': %v", path, err))
+	}
+	if real, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = real
+	}
+	_, err = rt.run(msgNative, name, resolved)
+	return err
+}
+
 // Collect runs the cycle collector and returns the number of values freed.
 func (rt *Runtime) Collect() (int64, error) {
 	n, err := rt.run(msgCollect)

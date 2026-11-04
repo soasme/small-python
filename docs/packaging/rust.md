@@ -204,6 +204,7 @@ directory `/`, its own process group, only descriptors 0 to 2) and sends
 | `function(name, f)`, `define(name, f)` | none, then `SET` |
 | `register_module(name, members, source)` | `MODULE` |
 | `mount(directory, path, read_only)` | `MOUNT`, after resolving `directory` |
+| `load_native(name, path)` | `NATIVE`, after resolving `path` |
 | `collect()` | `COLLECT` |
 | `usage()` | `USAGE`: `(steps, memory)` |
 | `getattr`, `setattr`, `get_item`, `set_item`, `len`, `contains`, `iter`, `next`, `truth`, `hash`, `compare`, `repr`, `str`, `dir` | `OP` 1 to 19; `next` returns `None` at `StopIteration` |
@@ -270,7 +271,8 @@ Time spent in host functions, the loader, and output extends the deadline.
 
 As `python.md` §4: the process boundary is the isolation boundary, and the
 worker seals itself under the OS sandbox before it first runs code; a later
-`mount` fails with `PermissionError`. The parent validates every message and
+`mount` or `load_native` fails with `PermissionError`. A native module's
+init and functions run in the worker, inside the sandbox. The parent validates every message and
 never trusts a length, count, depth, id, or integer spelling it has not
 checked.
 

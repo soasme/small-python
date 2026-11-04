@@ -22,6 +22,7 @@ pub const COLLECT: u8 = 0x0a;
 pub const OP: u8 = 0x0b;
 pub const RELEASE: u8 = 0x0c;
 pub const USAGE: u8 = 0x0d;
+pub const NATIVE: u8 = 0x0e;
 pub const HOST: u8 = 0x21;
 pub const LOAD: u8 = 0x22;
 pub const OUTPUT: u8 = 0x23;

@@ -1,3 +1,4 @@
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -268,4 +269,94 @@ fn the_worker_is_sandboxed_once_code_runs() {
     rt.mount(&dir, Some("/data"), true).unwrap();
     rt.eval("1").unwrap();
     assert!(rt.mount(&dir, Some("/more"), true).unwrap_err().type_name() == Some("PermissionError"));
+}
+
+/// The example native module the Makefile builds (make examples/fib.so).
+fn fib() -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fib.so");
+    path.canonicalize().unwrap_or_else(|e| panic!("{}: {e}; build it with make examples/fib.so", path.display()))
+}
+
+#[test]
+fn loads_native_modules() {
+    let path = fib();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let log = events.clone();
+    let mut rt = Runtime::builder()
+        .policy(move |event, args| {
+            if event != "dlopen" {
+                return Ok(());
+            }
+            log.lock().unwrap().push(args.clone());
+            match &args[0] {
+                Value::Str(name) if name == "refused" => Err(Error::Invalid("no native code".into())),
+                _ => Ok(()),
+            }
+        })
+        .spawn()
+        .unwrap();
+    rt.load_native("fib", &path).unwrap();
+    let error = rt.load_native("refused", &path).unwrap_err();
+    assert_eq!(error.to_string(), "PermissionError: no native code");
+    let file = Value::Str(path.to_str().unwrap().into());
+    assert_eq!(*events.lock().unwrap(), [vec!["fib".into(), file.clone()], vec!["refused".into(), file]]);
+    assert_eq!(rt.eval("__import__('fib').fib(50)").unwrap(), int(12586269025));
+    let error = rt.exec("import fib\nfib.fib(-1)").unwrap_err();
+    assert_eq!(error.to_string(), "ValueError: fib() argument must be in 0..92");
+    assert_eq!(rt.exec("import refused").unwrap_err().type_name(), Some("ModuleNotFoundError"));
+}
+
+#[test]
+fn native_module_failures() {
+    let path = fib();
+    let mut rt = Runtime::new().unwrap();
+    let missing = path.with_extension("missing");
+    assert_eq!(rt.load_native("missing", &missing).unwrap_err().type_name(), Some("ImportError"));
+    let source = std::path::Path::new(file!()).file_name().unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join(source);
+    assert_eq!(rt.load_native("source", source).unwrap_err().type_name(), Some("ImportError"));
+    assert_eq!(
+        rt.load_native("other", &path).unwrap_err().to_string(),
+        "ImportError: dynamic module does not define module export function (spy_init_other)"
+    );
+    let with_nul = format!("{}\0", path.display());
+    for (name, file) in [("fib\0", path.to_str().unwrap()), ("fib", &with_nul)] {
+        assert_eq!(rt.load_native(name, file).unwrap_err().to_string(), "ValueError: embedded null character");
+    }
+    assert_eq!(rt.exec("import missing").unwrap_err().type_name(), Some("ModuleNotFoundError"));
+    assert_eq!(
+        rt.load_native("fib", &path).unwrap_err().to_string(),
+        "PermissionError: cannot load a native module after code has run"
+    );
+}
+
+/// A module whose init aborts takes its worker with it, and nothing else.
+#[test]
+fn a_crashing_native_init_loses_only_its_worker() {
+    let directory = std::env::temp_dir().join(format!("spy-crash-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let (source, library) = (directory.join("crash.c"), directory.join("crash.so"));
+    fs::write(
+        &source,
+        "#include <stdlib.h>\n#include \"spy-module.h\"\n\
+         SPY_MODULE int spy_init_crash(SPYContext *c, SPYValue *m) { (void)c, (void)m; abort(); }\n",
+    )
+    .unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let built = std::process::Command::new(compiler)
+        .args(["-shared", "-fPIC", "-DSPY_SHARED_MODULE", "-I"])
+        .arg(&root)
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .status()
+        .unwrap();
+    assert!(built.success());
+    let mut rt = Runtime::new().unwrap();
+    rt.load_native("crash", &library).unwrap();
+    assert!(rt.exec("import crash").unwrap_err().is_lost());
+    assert!(rt.eval("1").unwrap_err().is_lost());
+    fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(Runtime::new().unwrap().eval("6 * 7").unwrap(), int(42));
 }

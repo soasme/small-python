@@ -20,8 +20,8 @@ final class Wire {
     static final int MAX_DEPTH = 200;
 
     static final byte INIT = 0x01, EVAL = 0x02, EXEC = 0x03, CALL = 0x04, GET = 0x05, SET = 0x06, DELETE = 0x07,
-            MODULE = 0x08, MOUNT = 0x09, COLLECT = 0x0a, OP = 0x0b, RELEASE = 0x0c, USAGE = 0x0d, HOST = 0x21,
-            LOAD = 0x22, OUTPUT = 0x23, POLICY = 0x24, RESULT = 0x40, RAISE = 0x41;
+            MODULE = 0x08, MOUNT = 0x09, COLLECT = 0x0a, OP = 0x0b, RELEASE = 0x0c, USAGE = 0x0d, NATIVE = 0x0e,
+            HOST = 0x21, LOAD = 0x22, OUTPUT = 0x23, POLICY = 0x24, RESULT = 0x40, RAISE = 0x41;
 
     /** What the worker broke. */
     static final class Violation extends Exception {

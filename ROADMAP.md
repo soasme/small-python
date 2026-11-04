@@ -11,8 +11,8 @@ says where the engine stands today, so the first step is clear.
   reference
 - [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
-- [Sandboxed runtime](#sandboxed-runtime): runtime policy, native modules
-  in the worker packages, virtual file systems, host functions, resumable execution, inspection, snapshots,
+- [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
+  systems, host functions, resumable execution, inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -187,17 +187,6 @@ grants for:
 A denied operation raises `PermissionError` in Python and is reported to the
 host. The policy is the same in C, in the Python binding and in the
 JavaScript binding, and is tested by programs that try to escape it.
-
-### Native modules in the worker
-
-The worker protocol's `NATIVE` request loads a native module in the worker
-before it seals itself ([docs/packaging/protocol.md](docs/packaging/protocol.md)
-7.1, 9), and the Python package sends it from `load_native`. The Go, Rust
-and Java worker packages do not send it yet. Each needs the method, the
-tests the Python package has (load, policy refusal, each failure, refusal
-after code has run, a crashing init losing the runtime), and `NATIVE` in its
-parent TLA+ model. The JavaScript worker is WebAssembly and has no shared
-libraries.
 
 ### Virtual file system
 
@@ -469,8 +458,8 @@ what the extra size buys.
 - [x] Values from pools in three size classes
 - [x] Java binding; TLA+ models of every package
 - [x] `spyc` writes an executable and compiles C modules in
-- [x] Native modules: `spy`, the in-process bindings and the worker
-  protocol's `NATIVE`
+- [x] Native modules: `spy`, the in-process bindings and every worker
+  package through the protocol's `NATIVE`
 - [x] Policy callback (`spy_set_policy`, `spy_policy_check`)
 - [x] Automatic cycle collection; the `gc` module removed
 - [x] Last incompatible C API changes before 1.0 (0.6.0)

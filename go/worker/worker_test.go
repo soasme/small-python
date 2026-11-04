@@ -408,3 +408,89 @@ func TestTheWorkerIsSandboxedOnceCodeRuns(t *testing.T) {
 	eval(t, rt, "1")
 	equal(t, exception(t, rt.Mount(os.TempDir(), "/more", true)).Type, "PermissionError")
 }
+
+// fib is the example native module the Makefile builds (make examples/fib.so).
+func fib(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs("../../examples/fib.so")
+	if err == nil {
+		_, err = os.Stat(path)
+	}
+	if err != nil {
+		t.Fatalf("%v: build it with make examples/fib.so", err)
+	}
+	return path
+}
+
+func TestLoadNative(t *testing.T) {
+	path := fib(t)
+	var events []string
+	rt := start(t, worker.Options{Policy: func(event string, args worker.Tuple) error {
+		if event == "dlopen" {
+			events = append(events, fmt.Sprint(args...))
+			if args[0] == "refused" {
+				return errors.New("no native code")
+			}
+		}
+		return nil
+	}})
+	if err := rt.LoadNative("fib", path); err != nil {
+		t.Fatal(err)
+	}
+	e := exception(t, rt.LoadNative("refused", path))
+	equal(t, e.Type+": "+e.Message, "PermissionError: no native code")
+	equal(t, strings.Join(events, "|"), "fib"+path+"|refused"+path)
+	equal(t, eval(t, rt, "__import__('fib').fib(50)"), int64(12586269025))
+	e = exception(t, rt.Exec("import fib\nfib.fib(-1)"))
+	equal(t, e.Type+": "+e.Message, "ValueError: fib() argument must be in 0..92")
+	equal(t, exception(t, rt.Exec("import refused")).Type, "ModuleNotFoundError")
+}
+
+func TestLoadNativeFailures(t *testing.T) {
+	path := fib(t)
+	source, _ := filepath.Abs("worker_test.go")
+	rt := start(t, worker.Options{})
+	equal(t, exception(t, rt.LoadNative("missing", path+".missing")).Type, "ImportError")
+	equal(t, exception(t, rt.LoadNative("source", source)).Type, "ImportError")
+	e := exception(t, rt.LoadNative("other", path))
+	equal(t, e.Type+": "+e.Message, "ImportError: dynamic module does not define module export function (spy_init_other)")
+	for _, args := range [][2]string{{"fib\x00", path}, {"fib", path + "\x00"}} {
+		e = exception(t, rt.LoadNative(args[0], args[1]))
+		equal(t, e.Type+": "+e.Message, "ValueError: embedded null character")
+	}
+	equal(t, exception(t, rt.Exec("import missing")).Type, "ModuleNotFoundError")
+	e = exception(t, rt.LoadNative("fib", path))
+	equal(t, e.Type+": "+e.Message, "PermissionError: cannot load a native module after code has run")
+}
+
+// A module whose init aborts takes its worker with it, and nothing else.
+func TestACrashingNativeInitLosesOnlyItsWorker(t *testing.T) {
+	directory := t.TempDir()
+	source := filepath.Join(directory, "crash.c")
+	library := filepath.Join(directory, "crash.so")
+	err := os.WriteFile(source, []byte("#include <stdlib.h>\n#include \"spy-module.h\"\n"+
+		"SPY_MODULE int spy_init_crash(SPYContext *c, SPYValue *m) { (void)c, (void)m; abort(); }\n"), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler := os.Getenv("CC")
+	if compiler == "" {
+		compiler = "cc"
+	}
+	root, _ := filepath.Abs("../..")
+	build := exec.Command(compiler, "-shared", "-fPIC", "-DSPY_SHARED_MODULE", "-I", root, source, "-o", library)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	rt := start(t, worker.Options{})
+	if err := rt.LoadNative("crash", library); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Exec("import crash"); !lost(err) {
+		t.Fatal(err)
+	}
+	if _, err := rt.Eval("1"); !lost(err) {
+		t.Fatal(err)
+	}
+	equal(t, eval(t, start(t, worker.Options{}), "6 * 7"), int64(42))
+}

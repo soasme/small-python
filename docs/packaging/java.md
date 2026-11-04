@@ -226,6 +226,7 @@ reaches the worker as well as the JVM, which loses it.
 | `function(name, f)`, `define(name, f)` | none, then `SET` |
 | `registerModule(name, members, source)` | `MODULE` |
 | `mount(directory, path, readOnly)` | `MOUNT`, after resolving `directory` |
+| `loadNative(name, path)` | `NATIVE`, after resolving `path` |
 | `collect()`, `usage()` | `COLLECT`, `USAGE`: steps and memory |
 | `PyObject`'s `getAttr`, `setAttr`, `getItem`, `setItem`, `len`, `contains`, `iterator`, `truth`, `hash`, `compare`, `repr`, `str`, `dir`, `call`, `callKeywords` | `OP` 1 to 19, `CALL`; the iterator ends at `StopIteration` |
 | `version()`, `pid()`, `isClosed()`, `close()` | the `INIT` reply, the process id, state, closing |

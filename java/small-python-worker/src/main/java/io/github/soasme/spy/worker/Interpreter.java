@@ -11,6 +11,7 @@ import static io.github.soasme.spy.worker.Wire.INIT;
 import static io.github.soasme.spy.worker.Wire.LOAD;
 import static io.github.soasme.spy.worker.Wire.MODULE;
 import static io.github.soasme.spy.worker.Wire.MOUNT;
+import static io.github.soasme.spy.worker.Wire.NATIVE;
 import static io.github.soasme.spy.worker.Wire.OP;
 import static io.github.soasme.spy.worker.Wire.OUTPUT;
 import static io.github.soasme.spy.worker.Wire.POLICY;
@@ -353,6 +354,24 @@ public final class Interpreter implements AutoCloseable {
             throw new IllegalArgumentException("cannot mount '" + directory + "': not a directory");
         }
         run(MOUNT, resolved.toString(), path != null ? path : resolved.toString(), readOnly);
+    }
+
+    /**
+     * Opens the shared library at path, a native module built with
+     * spy-module.h, in the worker, so that {@code import name} runs its init
+     * there. The policy is asked first, with {@code "dlopen"} (name, path),
+     * path resolved as the worker receives it. Like {@link #mount}, it is
+     * refused once the worker has run code; the library's init and functions
+     * then run inside the sandbox.
+     */
+    public void loadNative(String name, Path path) {
+        Path resolved = path.toAbsolutePath();
+        try {
+            resolved = resolved.toRealPath();
+        } catch (IOException e) {
+            // A missing library is the worker's ImportError, as for any other.
+        }
+        run(NATIVE, name, resolved.toString());
     }
 
     /** Runs the cycle collector and returns the number of values freed. */

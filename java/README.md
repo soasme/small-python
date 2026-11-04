@@ -178,7 +178,9 @@ long x = (Long) point.getAttr("x");                 // 3
 
 A host function receives `(rt, args, kwargs)` and may call back into the
 interpreter, except for `eval` and `exec`. The worker seals itself under
-the OS sandbox before it runs code, so mount directories first.
+the OS sandbox before it runs code, so mount directories and load native
+modules (`loadNative`) first; a native module's init and functions run in
+the worker, inside the sandbox.
 
 ## Development
 

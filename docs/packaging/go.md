@@ -205,6 +205,7 @@ raises `PermissionError`, with the error as its cause.
 | `Function(name, f)`, `Define(name, f)` | none, then `SET` |
 | `RegisterModule(name, members, source)` | `MODULE` |
 | `Mount(directory, path, readOnly)` | `MOUNT`, after resolving `directory` |
+| `LoadNative(name, path)` | `NATIVE`, after resolving `path` |
 | `Collect()` | `COLLECT` |
 | `Usage()` | `USAGE`: steps and memory |
 | `GetAttr`, `SetAttr`, `GetItem`, `SetItem`, `Len`, `Contains`, `Iter`, `Next`, `Truth`, `Hash`, `Compare`, `Repr`, `Str`, `Dir` | `OP` 1 to 19; `Next`'s `ok` is false at `StopIteration` |

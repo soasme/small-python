@@ -42,7 +42,10 @@
 (*  - In the worker (spy-worker.c, protocol.md 7.1, 9), NATIVE does the    *)
 (*    same, but raises PermissionError once sealed; the worker seals       *)
 (*    before it first runs engine code, so before any import, and its      *)
-(*    loader is the parent's, which answers only sources.                  *)
+(*    loader is the parent's, which answers only sources. Each worker      *)
+(*    package's parent (Python, Go, Rust, Java) sends NATIVE with the      *)
+(*    path resolved and leaves every check to the worker, but Python's,    *)
+(*    which refuses a NUL itself as the worker would.                      *)
 (***************************************************************************)
 EXTENDS Naturals
 

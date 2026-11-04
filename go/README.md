@@ -295,7 +295,7 @@ v, err := rt.Eval("greet('spy')")               // "hello spy"
 Each runtime starts one `spy-worker` process and talks to it over pipes.
 The methods are those of `spy`, plus `Delete`, `Version`, `Pid`, and
 `Closed`: `Eval`, `Exec`, `Call`, `Get`, `Set`, `Define`, `Function`,
-`RegisterModule`, `Mount`, `Collect`, and `Close`.
+`RegisterModule`, `Mount`, `LoadNative`, `Collect`, and `Close`.
 
 ### Options
 
@@ -409,8 +409,10 @@ locks itself down with the operating system's sandbox:
 - **macOS**: a sandbox profile that denies everything but your mounts.
 - **Windows**: none, and no `open()`.
 
-So mount directories before running code: `Mount` after the first `Eval`,
-`Exec`, `Call`, or object operation raises `PermissionError`. Every host
+So mount directories and load native modules before running code: `Mount`
+or `LoadNative` after the first `Eval`, `Exec`, `Call`, or object operation
+raises `PermissionError`. A native module's init and functions run in the
+worker, inside the sandbox. Every host
 function you define runs with your program's full privileges; keep them
 narrow, and validate their arguments.
 
