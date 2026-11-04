@@ -21340,6 +21340,29 @@ static ALWAYS_INLINE int kind_less(SPYContext *c, int kind, SPYValue *a, SPYValu
     }
     return sort_less(c, a, b);
 }
+/* Pairs of small ints whose items span little enough order as one number:
+ * the first's distance from its least value, times the second's span, plus
+ * the second's distance from its least value. Whether they do, with the
+ * least values and the second's span. */
+static int pair_spans(SortItem *items, size_t len, int64_t low[2], uint64_t *width) {
+    int64_t high[2];
+    for (size_t i = 0; i < len; i++)
+        for (int j = 0; j < 2; j++) {
+            int64_t v = items[i].key->as.seq.items[j]->as.integer_data.small;
+            if (!i || v < low[j]) low[j] = v;
+            if (!i || v > high[j]) high[j] = v;
+        }
+    uint64_t first = (uint64_t)high[0] - (uint64_t)low[0], second = (uint64_t)high[1] - (uint64_t)low[1];
+    if (second == UINT64_MAX) return 0;
+    *width = second + 1;
+    return first <= (UINT64_MAX - second) / *width;
+}
+/* That number, moved into the signed range in order. */
+static int64_t pair_key(SPYValue *k, const int64_t low[2], uint64_t width) {
+    uint64_t u = ((uint64_t)k->as.seq.items[0]->as.integer_data.small - (uint64_t)low[0]) * width +
+                 ((uint64_t)k->as.seq.items[1]->as.integer_data.small - (uint64_t)low[1]);
+    return u >= UINT64_C(1) << 63 ? (int64_t)(u - (UINT64_C(1) << 63)) : INT64_MIN + (int64_t)u;
+}
 /* Keys of the plain kinds sort as numbers held in the items themselves. */
 typedef struct { SPYValue *value; int64_t key; } IntItem;
 typedef struct { SPYValue *value; double key; } FloatItem;
@@ -21427,9 +21450,13 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     int kind = len ? sort_kind(items, len) : SORT_INT;
     if (kind == SORT_INT) SORT_NUMBERS(IntItem, sort_ints, packed[i].key = k->as.integer_data.small);
     else if (kind == SORT_FLOAT) SORT_NUMBERS(FloatItem, sort_floats, packed[i].key = k->as.real);
-    else if (kind == SORT_INT_PAIR)
-        SORT_NUMBERS(PairItem, sort_pairs, (packed[i].key = k->as.seq.items[0]->as.integer_data.small,
-                                            packed[i].next = k->as.seq.items[1]->as.integer_data.small));
+    else if (kind == SORT_INT_PAIR) {
+        int64_t low[2];
+        uint64_t width;
+        if (pair_spans(items, len, low, &width)) SORT_NUMBERS(IntItem, sort_ints, packed[i].key = pair_key(k, low, width));
+        else SORT_NUMBERS(PairItem, sort_pairs, (packed[i].key = k->as.seq.items[0]->as.integer_data.small,
+                                                 packed[i].next = k->as.seq.items[1]->as.integer_data.small));
+    }
     else if ((scratch = allocate_array(c, len, sizeof(*scratch)))) {
         sort_items(c, kind, items, scratch, ends, len, &from);
         for (size_t i = 0; i < len; i++) out[i] = from[reverse ? len - i - 1 : i].value;
