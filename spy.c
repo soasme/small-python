@@ -12915,11 +12915,8 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         if (argc) break;
         if (!self->as.map.len) return spy_error(c, "KeyError", "popitem(): dictionary is empty");
         Entry *entry = &map_items(self)[self->as.map.len - 1];
-        SPYValue *pair = value_new(c, SPY_TUPLE);
+        SPYValue *pair = spy_tuple(c, 2, (SPYValue *[]){entry->key, entry->value});
         if (!pair) return NULL;
-        if (sequence_append(c, pair, entry->key) || sequence_append(c, pair, entry->value)) {
-            spy_release(pair); return NULL;
-        }
         Entry old = map_remove(self, map_used(self) - 1);
         spy_release(old.key); spy_release(old.value);
         return pair;
@@ -16423,10 +16420,7 @@ static SPYValue *lazy_resolve(SPYContext *c, SPYValue *lazy) {
     if (!function) return spy_error(c, "ImportError", "__import__ not found");
     /* `from a import b, c` imports only the name being resolved. */
     SPYValue *fromlist = first && root->as.lazy.attr->type == SPY_TUPLE && root->as.lazy.attr->as.seq.len ?
-        value_new(c, SPY_TUPLE) : spy_retain(root->as.lazy.attr);
-    if (fromlist && fromlist != root->as.lazy.attr && sequence_append(c, fromlist, first->as.lazy.attr)) {
-        spy_release(fromlist); fromlist = NULL;
-    }
+        spy_tuple(c, 1, &first->as.lazy.attr) : spy_retain(root->as.lazy.attr);
     SPYValue *level = spy_int(c, 0), *module = NULL, *value = NULL;
     lazy->as.lazy.resolving = 1;
     /* A bare `lazy import a.b` resolves to a alone; a.b loads on attribute access. */
@@ -25423,10 +25417,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             quotient = binary(c, T_FLOORDIV, a, b);
             if (quotient) remainder = binary(c, '%', a, b);
         } else return operand_error(c, "divmod()", left, right, NULL);
-        SPYValue *result = quotient && remainder ? value_new(c, SPY_TUPLE) : NULL;
-        if (result && (sequence_append(c, result, quotient) || sequence_append(c, result, remainder))) {
-            spy_release(result); result = NULL;
-        }
+        SPYValue *result = quotient && remainder ? spy_tuple(c, 2, (SPYValue *[]){quotient, remainder}) : NULL;
         spy_release(quotient); spy_release(remainder); return result;
     }
     case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
@@ -28258,7 +28249,7 @@ SPYValue *spy_call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *
     enter(c); return leave(c, call_keywords(c, fn, argc, argv, keywords && keywords->as.map.len ? keywords : NULL));
 }
 SPYValue *spy_tuple(SPYContext *c, size_t n, SPYValue *const *items) {
-    SPYValue *tuple = value_new(c, SPY_TUPLE);
+    SPYValue *tuple = value_alloc(c, SPY_TUPLE, n);
     for (size_t i = 0; tuple && i < n; i++)
         if (!same_context(c, items[i]) || sequence_append(c, tuple, items[i])) { spy_release(tuple); return NULL; }
     return tuple;

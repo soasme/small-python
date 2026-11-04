@@ -8,6 +8,13 @@ Unreleased:
   twice as fast on a large live heap
 - the gc module is removed from the standard layer; sys is its only module
   and builtin_module_names no longer lists gc
+- sorting is faster: int and float keys (and pairs of ints, packed into
+  one) sort by radix once a list is long enough, the merge sort merges
+  without a branch per comparison, and short runs grow by insertion;
+  bench/programs/sort.py takes 35 ms where 0.6.0 took 128 ms (M2, -O2)
+- a tuple keeps its items in its own value: up to three in a 112-byte
+  value, up to 15 in a whole one; a complete tuple of numbers leaves the
+  values a collection visits
 
 2026-11-03 0.6.0:
 

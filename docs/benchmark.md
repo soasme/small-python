@@ -130,8 +130,9 @@ containers. PocketPy and MicroPython, the other two engines built for
 embedding, start in about the same time. On `sort` spy uses about 2.3
 times CPython's memory and on `dicts` 10% more. Values are carved from
 16 KiB pools in three sizes: 96 bytes for a number, 112 for a string or
-bytes with room for 16 bytes of text, and 208 for every other kind (a
-container, class or instance), so 100,000 integers cost about 9 MiB.
+bytes with room for 16 bytes of text or a tuple of up to three items, and
+208 for every other kind (a container, class or instance, which holds a
+longer tuple's first 15 items), so 100,000 integers cost about 9 MiB.
 Other engine memory (list items, dictionary entries, long text) comes
 in blocks with a 16-byte header that records their size, so a context can
 count and limit what it holds; that header added about 5% to `dicts` and
