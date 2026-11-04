@@ -21346,7 +21346,6 @@ static NO_INLINE void name(SPYContext *c, int kind, Item *items, Item *scratch, 
             Item item = items[end]; \
             size_t lo = end; \
             while (lo > start && !(FAILED) && LESS(item, items[lo - 1])) { items[lo] = items[lo - 1]; lo--; } \
-            if (FAILED) break; \
             items[lo] = item; \
         } \
         ends[runs++] = end; \
