@@ -154,6 +154,55 @@ for signal_number in (signal.SIGINT, signal.SIGTERM):
                for _ in range(10)), "the compiler ended before every signal"
 print("Executable output passed")
 
+# C modules (docs/build.md 5.4): NAME.c is compiled into the program and
+# registered as NAME before the entry runs, winning over a NAME.py; the
+# arguments after -- reach the compiler. The dependency rule names the C file.
+ANSWER = """#include "spy-module.h"
+SPY_MODULE int spy_init_answer(SPYContext *c, SPYValue *module) {
+    SPYValue *value = spy_int(c, ANSWER);
+    int status = value ? spy_set_attr(c, module, "value", value) : -1;
+    spy_release(value);
+    return status;
+}
+"""
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    directory = Path(temp)
+    (directory / "app.py").write_text("import answer, fib\nprint(answer.value, fib.fib(10))\n", encoding="utf-8")
+    (directory / "answer.py").write_text("value = 'source'\n", encoding="utf-8")
+    (directory / "c modules").mkdir()
+    (directory / "c modules/answer.c").write_text(ANSWER, encoding="utf-8")
+    shutil.copy(ROOT / "examples/fib.c", directory / "c modules/fib.c")
+    modules = ["c modules/answer.c", "c modules/fib.c"]
+    result = subprocess.run([str(ROOT / "spyc"), "-v", "--deps", "p.d", "-o", "prog", "app.py", *modules, "--", "-DANSWER=42"],
+                            cwd=directory, check=True, capture_output=True, text=True)
+    assert " c modules/answer.c c modules/fib.c -DANSWER=42 " in result.stdout, result.stdout
+    assert (directory / "p.d").read_text(encoding="utf-8") == "prog: app.py c\\ modules/answer.c c\\ modules/fib.c\n"
+    for name in ("app.py", "answer.py"):
+        (directory / name).unlink()
+    result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
+    assert result.stdout == "42 55\n", result
+    # -e writes the same main; the host compiles the modules with it.
+    (directory / "app.py").write_text("import fib\nprint(fib.fib(20))\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "spyc"), "-e", "-o", "prog.c", "app.py", "c modules/fib.c"], cwd=directory, check=True)
+    build(directory / "prog.c", directory / "c modules/fib.c", binary=directory / "prog")
+    result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
+    assert result.stdout == "6765\n", result
+    # A C module that does not compile fails the build, leaving nothing.
+    (directory / "broken.c").write_text("this is not C\n", encoding="utf-8")
+    (directory / "prog").unlink()
+    result = subprocess.run([str(ROOT / "spyc"), "-o", "prog", "app.py", "c modules/fib.c", "broken.c"], cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 1 and "broken.c" in result.stderr and not (directory / "prog").exists(), result
+    # A module name must be an identifier; -c has no main to register it in,
+    # and only executable output runs a compiler for the arguments after --.
+    (directory / "prog").write_text("old", encoding="utf-8")
+    for args in (["app.py", "fib-2.c"], ["app.py", ".c"], ["-c", "app.py", "c modules/fib.c"], ["-e", "app.py", "--", "-lm"],
+                 ["-c", "app.py", "--"], ["-o", "c modules/fib.c", "app.py", "c modules/fib.c"]):
+        result = subprocess.run([str(ROOT / "spyc"), *args], cwd=directory, capture_output=True, text=True)
+        assert result.returncode == 2 and result.stderr.startswith("usage:"), (args, result)
+    assert (directory / "prog").read_text(encoding="utf-8") == "old"
+    assert (directory / "c modules/fib.c").read_text(encoding="utf-8") == (ROOT / "examples/fib.c").read_text(encoding="utf-8")
+print("C modules passed")
+
 # spyc -c writes only the source, named after the input, for a host's main.
 HOST = """#include "spy.h"
 #include <stdio.h>

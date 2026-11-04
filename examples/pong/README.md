@@ -1,10 +1,9 @@
 # Pong
 
 A [raylib](https://www.raylib.com/) game whose logic is Python. `pong.py`
-holds the game; `pong.c` is the host. It registers a `raylib` C module with
-`spy_new_module`, then
-runs the script. `spyc -c` compiles `pong.py` into the program as a C array,
-so `pong` runs anywhere without the Python file.
+holds the game; `raylib.c` is the `raylib` C module it imports. One `spyc`
+command compiles both into the program, so `pong` runs anywhere without the
+Python file.
 
 ## Run
 
@@ -15,10 +14,15 @@ brew install raylib pkg-config    # Debian/Ubuntu: apt install libraylib-dev pkg
 make -C examples/pong run
 ```
 
-`make` builds `libspy.a` and `spyc` first if they are missing, then
-`spyc -c -x raylib -o pong_py.c pong.py` (raylib is the C module `pong.c`
-registers, so spyc leaves it out) and links `pong.c`, `pong_py.c`, `libspy.a`
-and raylib. Edit `pong.py` and run `make run` again to rebuild.
+`make` builds `libspy.a` and `spyc` first if they are missing, then runs
+
+```sh
+spyc -o pong pong.py raylib.c -- $(pkg-config --cflags --libs raylib)
+```
+
+spyc embeds `pong.py`, compiles `raylib.c` as the module `raylib`, and
+passes the arguments after `--` (raylib's headers and library) to the
+compiler. Edit either file and run `make run` again to rebuild.
 
 ## Play
 
@@ -52,5 +56,5 @@ tuples of integers in 0..255.
 | `measure_text(text, size)` | `MeasureText` |
 
 Key constants: `KEY_W`, `KEY_S`, `KEY_UP`, `KEY_DOWN`, `KEY_SPACE`.
-To bind another function, write a wrapper in `pong.c` and add it to
+To bind another function, write a wrapper in `raylib.c` and add it to
 `functions`.

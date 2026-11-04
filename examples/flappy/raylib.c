@@ -1,12 +1,11 @@
-/* A raylib host for Flappy Python. It registers a "raylib" C module,
- * installs the module loader spyc -c -N flappy generated, and runs flappy.py from the bundle. Python,
- * the game's modules, its sprite, and (linked statically) raylib all end up
- * in this one executable. */
-#include "spy.h"
-#include "host.h"
+/* The raylib module flappy.py imports. spyc compiles it into the game with
+ * raylib's static library, so Python, the game's modules, its sprite, and
+ * raylib all end up in one executable: spyc flappy.py raylib.c. */
+#include "spy-module.h"
 
 #include <raylib.h>
 #include <stdarg.h>
+#include <string.h>
 
 /* Convert positional arguments by format: 'n' number (double), 's' string,
  * 'c' color, an (r, g, b) or (r, g, b, a) sequence of integers. */
@@ -203,7 +202,7 @@ static int set_owned(SPYContext *c, SPYValue *module, const char *name, SPYValue
     spy_release(v);
     return status ? -1 : 0;
 }
-static int raylib_init(SPYContext *c, SPYValue *module) {
+SPY_MODULE int spy_init_raylib(SPYContext *c, SPYValue *module) {
     for (size_t i = 0; i < sizeof(functions) / sizeof(*functions); i++)
         if (set_owned(c, module, functions[i].name, spy_native(c, functions[i].name, functions[i].fn, NULL, NULL))) return -1;
     for (size_t i = 0; i < sizeof(constants) / sizeof(*constants); i++)
@@ -211,18 +210,3 @@ static int raylib_init(SPYContext *c, SPYValue *module) {
     return 0;
 }
 
-/* The bundle spyc -c -N flappy writes: the entry's source and a loader
- * for every module it imports. */
-extern const char spy_flappy[];
-SPYValue *flappy_load(SPYContext *, void *, const char *);
-
-int main(void) {
-    SPYContext *c = spy_context_new();
-    if (!c) { fputs("cannot start\n", stderr); return 1; }
-    spy_set_output(c, host_output, host_flush, stdout);
-    spy_set_module_loader(c, flappy_load, NULL);
-    int status = spy_new_module(c, "raylib", raylib_init) || spy_exec(c, spy_flappy, "flappy.py") ? host_exit_status(c) : 0;
-    if (IsWindowReady()) CloseWindow();
-    spy_context_free(c);
-    return status < 0 ? 1 : status;
-}

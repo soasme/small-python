@@ -171,8 +171,8 @@ arbitrary CPython switches are not implemented.
 #### 2.3.2 `spyc` program generator
 
 ```text
-usage: spyc [options] [-o program] (input.py | -m module)
-       spyc -e [options] [-o program.c] (input.py | -m module)
+usage: spyc [options] [-o program] (input.py | -m module) [module.c]... [-- cc-arguments]
+       spyc -e [options] [-o program.c] (input.py | -m module) [module.c]...
        spyc -c [options] [-o modules.c] (input.py | -m module)...
 ```
 
@@ -182,7 +182,11 @@ directory and each `-I` root, embeds the sources, and serves them through a
 generated `SPYModuleLoader`. A missing import fails the build unless the
 program guards it with `try`/`except ImportError`. `-x` leaves a module to the
 host, `-D` adds modules that only dynamic imports name, and `-M` registers a
-module of the standard layer, which the program then links (`spy-std.c`). `-O`,
+module of the standard layer, which the program then links (`spy-std.c`). A
+C module, `NAME.c` exporting `spy_init_NAME`, is compiled into the program
+and registered as `NAME`; the arguments after `--` go to the compiler, so
+`spyc -o pong pong.py raylib.c -- -lraylib` builds
+[`examples/pong`](../examples/pong) in one step. `-O`,
 `-OO`, `--minify`, `--metafile`, `--deps`, `--analyze`, and `-v` complete the
 options. By default spyc outputs an executable (`a.out` without `-o`): it
 compiles a C file with a `main` that runs the entry, using the compiler and
@@ -190,8 +194,7 @@ link flags of its own build, against the `spy.h` and libraries beside it or
 under the installation prefix; `-v` prints that command. `-e` writes the C file
 instead (`out.c` without `-o`). With `-c` the file holds each entry's source as
 `const char spy_name[]` (`game.py` gives `spy_game`) and the loader
-`spy_name_load`, for a host whose own `main` registers its C modules;
-[`examples/pong`](../examples/pong) is one. A failed or interrupted build
+`spy_name_load`, for a host with its own `main`. A failed or interrupted build
 removes the files it began to write. On Windows spyc writes C only (`-e` or
 `-c`). spyc produces no native code or bytecode for Python functions. [Building
 programs](build.md) is the full reference.

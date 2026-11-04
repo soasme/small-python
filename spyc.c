@@ -52,7 +52,7 @@ typedef struct {
 typedef struct { const char *path, *option; size_t line; Module *owner; } Origin;
 typedef struct {
     SPYContext *c;
-    Strings roots, externals, registered, aliases, stars;
+    Strings roots, externals, registered, natives, aliases, stars;   /* natives: the C modules */
     Module **modules; size_t len, cap;
     Module **queue; size_t queue_len, queue_cap, queue_at;
     size_t errors, warnings;
@@ -160,6 +160,7 @@ static Module *find(Build *b, const char *name) {
     b->modules[b->len++] = m;
     for (size_t i = 0; i < b->externals.len; i++) if (under(b->externals.items[i], name)) m->kind = EXTERNAL;
     for (size_t i = 0; i < b->registered.len; i++) if (!strcmp(b->registered.items[i], name)) m->kind = REGISTERED;
+    for (size_t i = 0; i < b->natives.len; i++) if (!strcmp(b->natives.items[i], name)) m->kind = REGISTERED;
     if (m->kind) return m;
     for (size_t i = 0; i < b->aliases.len; i += 2)
         if (!strcmp(b->aliases.items[i], name)) {
@@ -508,6 +509,10 @@ static void put_json(Buffer *out, const char *s) {
     for (; *s; s++) put(out, *s == '"' || *s == '\\' ? "\\%c" : (unsigned char)*s < 32 ? "\\u%04x" : "%c", (unsigned char)*s);
     put(out, "\"");
 }
+/* A path in a make rule. */
+static void put_path(Buffer *out, const char *s) {
+    for (; *s; s++) put(out, *s == ' ' || *s == '#' ? "\\%c" : *s == '$' ? "$$" : "%c", *s);
+}
 static int by_key(const void *x, const void *y) {
     const Module *a = *(Module *const *)x, *b = *(Module *const *)y;
     char *ka = concat(a->name, a->kind == PACKAGE ? ".__init__" : a->kind == NAMESPACE ? ".__namespace__" : "", "");
@@ -553,17 +558,18 @@ static int write_file(const char *path, const Buffer *data) {
 }
 #ifdef _WIN32
 /* As qjsc without CONFIG_CC: the C file is all spyc can give here. */
-static int compile(const char *self, const char *output, const Buffer *c, int standard, int verbose) {
-    (void)self; (void)output; (void)c; (void)standard; (void)verbose;
+static int compile(const char *self, const char *output, const Buffer *c, const Strings *more, int standard, int verbose) {
+    (void)self; (void)output; (void)c; (void)more; (void)standard; (void)verbose;
     fputs("spyc: error: executable output is not supported on this platform; use -e or -c\n", stderr);
     return 1;
 }
 #else
 /* The executable: CONFIG_CC compiles the C file, written to a temporary
- * file, against spy.h and the libraries beside spyc in a build tree, as
- * qjsc finds quickjs.h, or else under CONFIG_PREFIX. The compiler runs in
- * its own process group, which an interruption stops as a whole. */
-static int compile(const char *self, const char *output, const Buffer *c, int standard, int verbose) {
+ * file, and MORE (the C modules and the arguments after --) against spy.h
+ * and the libraries beside spyc in a build tree, as qjsc finds quickjs.h,
+ * or else under CONFIG_PREFIX. The compiler runs in its own process group,
+ * which an interruption stops as a whole. */
+static int compile(const char *self, const char *output, const Buffer *c, const Strings *more, int standard, int verbose) {
     const char *temp = getenv("TMPDIR");
     char *source = concat(temp && *temp ? temp : "/tmp", "/spyc.XXXXXX", "");
     int fd = mkstemp(source);
@@ -585,6 +591,7 @@ static int compile(const char *self, const char *output, const Buffer *c, int st
     }
     const char *fixed[] = {"-O2", "-I", include, "-o", output, "-x", "c", source, "-x", "none"};
     for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) push(&args, concat(fixed[i], "", ""));
+    for (size_t i = 0; i < more->len; i++) push(&args, concat(more->items[i], "", ""));
     if (standard) push(&args, concat(lib, "/libspy-std.a", ""));
     push(&args, concat(lib, "/libspy.a", ""));
     push(&args, concat("-lm", "", ""));
@@ -635,8 +642,8 @@ static char *c_name(const char *entry, int module) {
 typedef struct { char *file, *package, *symbol; Module module; } EntryPoint;
 
 static int usage(void) {
-    fputs("usage: spyc [options] [-o program] (input.py | -m module)\n"
-          "       spyc -e [options] [-o program.c] (input.py | -m module)\n"
+    fputs("usage: spyc [options] [-o program] (input.py | -m module) [module.c]... [-- cc-arguments]\n"
+          "       spyc -e [options] [-o program.c] (input.py | -m module) [module.c]...\n"
           "       spyc -c [options] [-o modules.c] (input.py | -m module)...\n"
           "options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,\n"
           "         -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror, -v\n", stderr);
@@ -644,7 +651,7 @@ static int usage(void) {
 }
 int main(int argc, char **argv) {
     Build b = {0};
-    Strings files = {0}, mains = {0}, includes = {0};
+    Strings files = {0}, mains = {0}, includes = {0}, more = {0};   /* more: the C modules, then cc's arguments */
     const char *output = NULL, *metafile = NULL, *deps = NULL, *loader_name = NULL;
     int bare = 0, with_main = 0, verbose = 0, analyze = 0, werror = 0, optimize = 0, status = 0;
     EntryPoint *list = NULL;
@@ -652,8 +659,23 @@ int main(int argc, char **argv) {
     Module **table = NULL, **inputs = NULL;
     char *loader = NULL;
     Buffer out = {0}, meta = {0}, rule = {0};
+    int passed = 0;   /* the arguments after -- */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *value = i + 1 < argc ? argv[i + 1] : NULL;
+        size_t len = strlen(a);
+        if (passed || !strcmp(a, "--")) {
+            if (passed++) push(&more, concat(a, "", ""));
+            continue;
+        }
+        if (len > 2 && !strcmp(a + len - 2, ".c")) {
+            /* A C module, NAME.c, exporting spy_init_NAME. */
+            const char *base = strrchr(a, '/') ? strrchr(a, '/') + 1 : a;
+            char *name = slice(base, strlen(base) - 2);
+            if (!identifier_text(name, strlen(name))) { free(name); status = usage(); goto done; }
+            push(&b.natives, name);
+            push(&more, concat(a, "", ""));
+            continue;
+        }
         int takes = !strcmp(a, "-o") || !strcmp(a, "-m") || !strcmp(a, "-M") || !strcmp(a, "-I") || !strcmp(a, "-x") ||
                     !strcmp(a, "-D") || !strcmp(a, "-N") || !strcmp(a, "--alias") || !strcmp(a, "--metafile") || !strcmp(a, "--deps");
         if (takes && !value) { status = usage(); goto done; }
@@ -689,10 +711,12 @@ int main(int argc, char **argv) {
         else push(&files, concat(a, "", ""));
     }
     entries = files.len + mains.len;
-    if (!entries || (bare && with_main) || (!bare && entries > 1) || (bare && (b.registered.len || optimize))) { status = usage(); goto done; }
+    if (!entries || (bare && with_main) || (!bare && entries > 1) || (bare && (b.registered.len || b.natives.len || optimize)) ||
+        ((bare || with_main) && passed)) { status = usage(); goto done; }
     int executable = !bare && !with_main;
     if (!output) output = executable ? "a.out" : "out.c";
     for (size_t i = 0; i < files.len; i++) if (!strcmp(files.items[i], output)) { status = usage(); goto done; }
+    for (size_t i = 0; i < b.natives.len; i++) if (!strcmp(more.items[i], output)) { status = usage(); goto done; }
 
     /* The first root is the entry's directory, or the working directory for -m. */
     const char *first = files.len ? files.items[0] : NULL, *slash = first ? strrchr(first, '/') : NULL;
@@ -783,6 +807,7 @@ int main(int argc, char **argv) {
     else put(&out, "/* Generated by spyc. Link with %s and the C math library. */\n#include \"spy.h\"\n%s"
                    "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n",
              b.registered.len ? "libspy.a, libspy-std.a," : "libspy.a", b.registered.len ? "#include \"spy-std.h\"\n" : "");
+    for (size_t i = 0; !bare && i < b.natives.len; i++) put(&out, "int spy_init_%s(SPYContext *, SPYValue *);\n", b.natives.items[i]);
     for (size_t i = 0; i < sources; i++) {
         if (i < entries) put(&out, "%sconst char %s[] = {\n", bare ? "" : "static ", inputs[i]->array);
         else put(&out, "static const char %s[] = { /* %s */\n", inputs[i]->array, inputs[i]->path);
@@ -825,6 +850,8 @@ int main(int argc, char **argv) {
                   "    if (!c) return 1;\n");
         for (size_t i = 0; i < b.registered.len; i++)
             put(&out, "    if (spy_std_init_module(c, \"%s\")) return 1;\n", b.registered.items[i]);
+        for (size_t i = 0; i < b.natives.len; i++)
+            put(&out, "    if (spy_new_module(c, \"%s\", spy_init_%s)) return 1;\n", b.natives.items[i], b.natives.items[i]);
         if (optimize) put(&out, "    spy_set_optimize(c, %d);\n", optimize);
         put(&out, "    spy_set_output(c, output, flush_output, stdout);\n"
                   "    spy_set_module_loader(c, load, NULL);\n"
@@ -853,7 +880,7 @@ int main(int argc, char **argv) {
                   "    return status ? 1 : 0;\n}\n");
     }
 
-    if (executable ? compile(argv[0], output, &out, b.registered.len > 0, verbose) : write_file(output, &out)) { status = 1; goto done; }
+    if (executable ? compile(argv[0], output, &out, &more, b.registered.len > 0, verbose) : write_file(output, &out)) { status = 1; goto done; }
 
     if (metafile) {
         put(&meta, "{\n  \"inputs\": {");
@@ -891,7 +918,11 @@ int main(int argc, char **argv) {
         put(&rule, "%s:", output);
         for (size_t i = 0; i < sources; i++) {
             put(&rule, " ");
-            for (const char *p = inputs[i]->path; *p; p++) put(&rule, *p == ' ' || *p == '#' ? "\\%c" : *p == '$' ? "$$" : "%c", *p);
+            put_path(&rule, inputs[i]->path);
+        }
+        for (size_t i = 0; i < b.natives.len; i++) {
+            put(&rule, " ");
+            put_path(&rule, more.items[i]);
         }
         put(&rule, "\n");
         if (write_file(deps, &rule)) { status = 1; goto done; }
@@ -915,8 +946,8 @@ done:
     }
     free(b.modules); free(b.queue); free(list); free(table); free(inputs); free(loader);
     mem_free(out.data); mem_free(meta.data); mem_free(rule.data);
-    free_strings(&b.roots); free_strings(&b.externals); free_strings(&b.registered); free_strings(&b.aliases); free_strings(&b.stars);
-    free_strings(&files); free_strings(&mains); free_strings(&includes);
+    free_strings(&b.roots); free_strings(&b.externals); free_strings(&b.registered); free_strings(&b.natives); free_strings(&b.aliases); free_strings(&b.stars);
+    free_strings(&files); free_strings(&mains); free_strings(&includes); free_strings(&more);
     if (b.c) spy_context_free(b.c);
     return status;
 }

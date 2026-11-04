@@ -31,7 +31,8 @@ program only gets its sources from the C file instead of from disk.
 
 Three options shape what is bundled: imports are followed from the entry,
 `-D` adds modules that only a dynamic import reaches, and `-M` registers
-standard modules the program links instead of bundling. The other options
+standard modules the program links instead of bundling. A C module,
+`NAME.c`, is compiled into the program as module `NAME`. The other options
 ([2.1](#21-options)) control output and transforms; readers who know esbuild
 will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 
@@ -71,8 +72,8 @@ will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 ## 2 Usage
 
 ```text
-usage: spyc [options] [-o program] (entry.py | -m module)
-       spyc -e [options] [-o program.c] (entry.py | -m module)
+usage: spyc [options] [-o program] (entry.py | -m module) [module.c]... [-- cc-arguments]
+       spyc -e [options] [-o program.c] (entry.py | -m module) [module.c]...
        spyc -c [options] [-o modules.c] (entry.py | -m module)...
 ```
 
@@ -81,6 +82,7 @@ spyc -o app app.py                        # app.py and everything it imports
 spyc -e -o app.c app.py                   # the same program as C
 cc -O2 -I. app.c libspy.a -lm -o app
 
+spyc -o game game.py raylib.c -- -lraylib       # with the C module raylib
 spyc -I lib -x raylib -c -o game_py.c game.py   # for a host that registers raylib
 spyc -D plugins.* -o app app.py                 # plus every module of plugins
 spyc -O --minify --metafile app.json -o app app.py
@@ -107,6 +109,8 @@ spyc -O --minify --metafile app.json -o app app.py
 | `--analyze` | Print each bundled module's size to stderr. |
 | `-Werror` | Treat warnings as errors. |
 | `-v` | Print the compiler command ([5.3](#53-executable-output)). |
+| `NAME.c` | A C module: compile it into the program and register it as `NAME` ([5.4](#54-native-modules)). Not with `-c`. |
+| `-- ARGS` | Pass the remaining arguments to the compiler, after the C modules ([5.3](#53-executable-output)). Not with `-e` or `-c`. |
 
 spyc exits with 0 on success, 1 when the build or the C compiler fails, and
 2 for a usage error. A build that fails, or that `SIGINT` or `SIGTERM`
@@ -347,7 +351,7 @@ Without `-e` or `-c`, spyc compiles the C file of [5.1](#51-the-module-table).
 It writes the file under `TMPDIR` (or `/tmp`), runs
 
 ```text
-CONFIG_CC -O2 -I INCLUDE -o OUTPUT -x c FILE -x none [LIB/libspy-std.a] LIB/libspy.a -lm
+CONFIG_CC -O2 -I INCLUDE -o OUTPUT -x c FILE -x none [MODULE.c...] [ARGS...] [LIB/libspy-std.a] LIB/libspy.a -lm
 ```
 
 and removes the file. `CONFIG_CC` is the compiler and link flags spyc was
@@ -355,7 +359,10 @@ built with (`$(CC) $(LDFLAGS)`), so a sanitizer or coverage build links its
 own `libspy.a`. `INCLUDE` and `LIB` are the directory of the `spyc` that ran
 when `spy.h` is there (a build tree), and otherwise `PREFIX/include` and
 `PREFIX/lib` of `make install`. `libspy-std.a` is linked when `-M` names a
-standard module. `-v` prints the command. The build fails with the
+standard module. The C modules and the arguments after `--` come before
+the engine's libraries, so a library they name (`-lraylib`, a `.a` file,
+or `-framework Cocoa`) links after the code that uses it, and `-I` and `-D`
+reach the C modules. `-v` prints the command. The build fails with the
 compiler's diagnostics when it fails, and spyc exits with 1. The engine needs
 no other library (no `-ldl` or `-lpthread`), and the temporary file is named
 with `mkstemp`, so concurrent builds do not collide.
@@ -401,12 +408,23 @@ A host that does want plugins installs its own loader, which calls
 `spy_std_load_native(c, name, path)` for the names it chooses and otherwise
 calls `spy_game_load`. It links `libspy-std.a`, and on Linux `-ldl`.
 
-Executable output has no option for C modules yet. When it gains one, the
-option will compile them into the executable: `spyc app.py fib.c` would
-compile `fib.c` with the program's compiler and flags and register
-`spy_init_fib` in `main` before the entry runs, treating `fib` as resolved,
-as `-M` does. A C module named like a found source would win, as a native
-module wins in `spy`'s search.
+A program spyc writes `main` for takes the same file as an input instead:
+
+```sh
+spyc -o app app.py fib.c
+spyc -o game game.py raylib.c -- $(pkg-config --cflags --libs raylib)
+```
+
+An input ending in `.c` is a C module named after its file: `fib.c` is
+module `fib` and exports `spy_init_fib`, and its name must be an identifier.
+spyc compiles it with the program ([5.3](#53-executable-output)), and the
+generated `main` registers it with `spy_new_module` before the entry runs.
+An import of `fib` is resolved, as `-M` resolves a standard module, so a C
+module wins over a `fib.py` beside the entry, as a native module wins in
+`spy`'s search. The dependency rule ([7.2](#72-dependency-file)) names the
+C files after the sources. With `-e`, the C file declares and registers the
+module, and the host compiles `fib.c` with it; `-c` writes no `main` and
+takes no C module.
 
 ## 6 Source transforms
 
@@ -496,8 +514,8 @@ as a table on stderr, largest first.
 app.c: app.py pkg/__init__.py pkg/sub.py
 ```
 
-A Makefile that includes it rebuilds the C file when any bundled module
-changes:
+C modules follow the sources. A Makefile that includes it rebuilds the C
+file when any bundled module changes:
 
 ```make
 app.c: app.py
@@ -601,15 +619,16 @@ two roots. The tree has a regular package, a subpackage, relative imports, a
 namespace package split across both roots, a package shadowed by an earlier
 root's module, a submodule that sits in the wrong root, a guarded missing
 import, an external whose own import is missing, a module reachable only
-through `-D`, and an import cycle. For every choice of externals and `-D`
-names, and every order in which spyc may visit modules, TLC checks that:
+through `-D`, and an import cycle. For every choice of externals, C modules
+(one shadowing a source, one that only `-D` names), and `-D` names, and
+every order in which spyc may visit modules, TLC checks that:
 
 - the build finishes, and fails exactly when an unguarded import, a relative
   import, or a `-D` name does not resolve;
 - the bundle is the declarative closure of [3.2](#32-discovery), whatever the
   visiting order;
 - every bundled module's parent is bundled, and nothing under an external
-  prefix is;
+  prefix, nor a C module, is;
 - for every module name, the bundled loader either answers exactly as
   CPython's path finder does or does not answer at all. It never gives a
   different file, kind, or package. It does not answer only for names the
@@ -676,7 +695,11 @@ TEXT` marks a build that must fail with an error containing `TEXT`.
 [2.1](#21-options) at each step the model has: an unwritable `TMPDIR`, a
 compiler that cannot run, one that fails, an unwritable output, metafile, or
 dependency rule after the files before it, and `SIGINT` and `SIGTERM` during
-the compile. Each case starts with old files and checks which remain, which
+the compile. It builds C modules ([5.4](#54-native-modules)) with arguments
+after `--`, under `-v`, `--deps`, and `-e`, checks that a C module wins over
+a source of the same name, that one that does not compile leaves no
+program, and that a bad module name, a C module with `-c`, and `--` with
+`-e` or `-c` are usage errors. Each case starts with old files and checks which remain, which
 are gone, and that no temporary file is left. For the interruptions, a
 stand-in compiler found first on `PATH` leaves a child that ignores the
 signal and writes the output later, so only stopping the whole process group

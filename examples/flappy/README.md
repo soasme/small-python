@@ -1,8 +1,9 @@
 # Flappy Python
 
 Flap a python between the pipes. The game shows what [`spyc`](../../docs/build.md)
-does: it bundles a program's modules, data, and dynamically imported code into
-one C file, which links with the engine and raylib into a single executable.
+does: it bundles a program's modules, data, and dynamically imported code,
+and compiles them with a C module, the engine, and raylib into a single
+executable.
 Copy `flappy` anywhere and it runs, with no Python file, image, or raylib
 library beside it.
 
@@ -31,25 +32,30 @@ flowchart LR
     entry[flappy.py] --> spyc
     game["game/ and game/themes/"] --> spyc
     sprite --> spyc
-    spyc --> bundle[flappy_py.c]
-    spyc -.-> meta["flappy.json, flappy_py.d"]
-    host["flappy.c: registers raylib"] --> cc
-    bundle --> cc
-    libs["libspy.a, libraylib.a"] --> cc
-    cc --> exe((flappy))
+    module["raylib.c"] --> spyc
+    libs["libspy.a, libraylib.a"] --> spyc
+    spyc -.-> meta["flappy.json, flappy.d"]
+    spyc --> exe((flappy))
 ```
 
 1. `pack.py` turns the sprite into a module, `assets/sprite.py`, holding its
    bytes. It runs on the engine itself (`../../spy pack.py`), so the build
    needs no other Python. `assets` has no `__init__.py`: it is a namespace
    package, which spyc bundles as the engine finds it.
-2. `spyc -c -N flappy -x raylib -D 'game.themes.*' --minify ...` follows the
-   imports from `flappy.py` and writes `flappy_py.c`: each source as a C
-   array and `flappy_load`, the module loader `flappy.c` installs. It also
-   writes `flappy.json` (a metafile, as esbuild's), `flappy_py.d` (a make
-   rule, so editing any bundled file rebuilds), and the sizes to stderr.
-3. `cc` links `flappy.c`, `flappy_py.c`, `libspy.a`, and raylib's static
-   library. On macOS, `otool -L flappy` lists only system frameworks.
+2. One command builds the game:
+
+   ```sh
+   spyc -D 'game.themes.*' --minify --metafile flappy.json --deps flappy.d --analyze \
+       -o flappy flappy.py raylib.c -- RAYLIB-FLAGS
+   ```
+
+   spyc follows the imports from `flappy.py` and embeds each source,
+   compiles `raylib.c` as the module `raylib`, and links them with
+   `libspy.a` and what follows `--`: raylib's headers, its static library,
+   and the system libraries it needs. It also writes `flappy.json` (a
+   metafile, as esbuild's), `flappy.d` (a make rule, so editing any bundled
+   file or `raylib.c` rebuilds), and the sizes to stderr. On macOS,
+   `otool -L flappy` lists only system frameworks.
 
 ## What the game uses
 
@@ -62,7 +68,7 @@ flowchart LR
 | `game/medals.py` | A lazy import (PEP 810): `render.py` says `lazy from . import medals`, so the module first runs at the first game over. |
 | `game/sounds.py` | The flap's chirp and the crash, synthesized as 16-bit PCM when the game starts, so no audio file ships either. The world reports `flap` and `hit` events; `flappy.py` plays them. |
 | `game/render.py` | Drawing with raylib, and the sprite from `assets.sprite`. |
-| `flappy.c` | The host: registers the `raylib` C module with `spy_new_module`, installs `flappy_load`, and runs `spy_flappy`. |
+| `raylib.c` | The `raylib` C module. spyc compiles it in and registers it before `flappy.py` runs. |
 
 `python.png` is the project logo without its title, on a transparent
 background.

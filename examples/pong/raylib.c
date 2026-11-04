@@ -1,10 +1,10 @@
-/* A raylib host for Small Python: the game is pong.py, and this file only
- * registers a "raylib" C module and runs the game's source, compiled in by spyc -c. */
-#include "spy.h"
-#include "host.h"
+/* The raylib module pong.py imports. spyc compiles it into the game and
+ * registers spy_init_raylib before pong.py runs: spyc pong.py raylib.c. */
+#include "spy-module.h"
 
 #include <raylib.h>
 #include <stdarg.h>
+#include <string.h>
 
 /* Convert positional arguments by format: 'n' number (double), 's' string,
  * 'c' color, an (r, g, b) or (r, g, b, a) sequence of integers. */
@@ -136,7 +136,7 @@ static int set_owned(SPYContext *c, SPYValue *module, const char *name, SPYValue
     spy_release(v);
     return status ? -1 : 0;
 }
-static int raylib_init(SPYContext *c, SPYValue *module) {
+SPY_MODULE int spy_init_raylib(SPYContext *c, SPYValue *module) {
     for (size_t i = 0; i < sizeof(functions) / sizeof(*functions); i++)
         if (set_owned(c, module, functions[i].name, spy_native(c, functions[i].name, functions[i].fn, NULL, NULL))) return -1;
     for (size_t i = 0; i < sizeof(keys) / sizeof(*keys); i++)
@@ -144,15 +144,3 @@ static int raylib_init(SPYContext *c, SPYValue *module) {
     return 0;
 }
 
-/* The game, embedded by spyc -c from pong.py. */
-extern const char spy_pong[];
-
-int main(void) {
-    SPYContext *c = spy_context_new();
-    if (!c) { fputs("cannot start\n", stderr); return 1; }
-    spy_set_output(c, host_output, host_flush, stdout);
-    int status = spy_new_module(c, "raylib", raylib_init) || spy_exec(c, spy_pong, "pong.py") ? host_exit_status(c) : 0;
-    if (IsWindowReady()) CloseWindow();
-    spy_context_free(c);
-    return status < 0 ? 1 : status;
-}

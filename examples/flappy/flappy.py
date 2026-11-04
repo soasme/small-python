@@ -1,7 +1,8 @@
 """Flappy Python: flap the python between the pipes.
 
-flappy.c registers raylib; spyc bundles this file, the game package, its
-themes, and the sprite into the program, so it needs no file at run time."""
+spyc bundles this file, the game package, its themes, and the sprite into
+the program with the raylib module (raylib.c), so it needs no file at run
+time."""
 import raylib as rl
 from game import *
 from game import sounds

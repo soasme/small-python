@@ -13,16 +13,20 @@
 (* The bundler resolves each import where it stands (3.3): an unguarded    *)
 (* import, relative import, or -D name that does not resolve fails the     *)
 (* build; a guarded one, or a from-import name that is not a module, is    *)
-(* left out (3.4); externals are never visited. It visits the modules it   *)
-(* found in any order, adding each to the table and queueing its parent    *)
-(* and the modules its imports found (3.2).                                *)
+(* left out (3.4); externals and C modules are never visited. It visits    *)
+(* the modules it found in any order, adding each to the table and         *)
+(* queueing its parent and the modules its imports found (3.2).            *)
 (*                                                                         *)
 (* The fixed tree has two roots: a regular package with a subpackage and   *)
 (* relative imports, a module beyond the top-level package, a namespace    *)
 (* package split across the roots, a module shadowing a later root's       *)
 (* package, a submodule in the wrong root, an external whose own import is *)
 (* missing, a module only -D reaches, and a cycle. Every choice of         *)
-(* externals and -D names is checked, with every visiting order.           *)
+(* externals, C modules and -D names is checked, in every visiting order. *)
+(*                                                                         *)
+(* A C module (NAME.c, 5.4) resolves its exact name, which the program     *)
+(* registers; the choices name a module whose source the tree also has,    *)
+(* and one only -D reaches, so the C module must win over the source.      *)
 (*                                                                         *)
 (* The engine asks its loader for NAME.__init__, NAME, NAME.__namespace__ *)
 (* in that order (spy.h), and Imports.tla models the import system over    *)
@@ -65,6 +69,7 @@ Imports(f) ==
       [] OTHER -> {}
 
 ExternalChoices == {<<"ext">>, <<"cyc_a">>}
+NativeChoices == {<<"shadow">>, <<"dyn">>}
 \* -D names: a module, a submodule in the wrong root, a missing name, the
 \* namespace package's modules, and the package's (which reach pkg.beyond).
 Include(name, star) == [name |-> name, star |-> star]
@@ -110,8 +115,10 @@ Asked == Names \cup {i.target : i \in {j \in UNION {Imports(f) : f \in Files} : 
 Finder == [n \in Asked |-> FindIn(n)]
 
 -----------------------------------------------------------------------------
-\* Resolution under one choice of externals.
-IsExternal(n, ext) == \E x \in ext : Prefix(x, n)
+\* Resolution under one choice of externals and C modules: the host provides
+\* an external's whole prefix, a C module's exact name.
+Host == [ext : SUBSET ExternalChoices, native : SUBSET NativeChoices]
+IsExternal(n, host) == (\E x \in host.ext : Prefix(x, n)) \/ n \in host.native
 
 \* The package relative imports resolve against: a package itself, else its
 \* parent; the entry script and top-level modules have none (<<>>).
@@ -131,25 +138,28 @@ ScanFails(f, package, ext) ==
         (Unresolvable(i, package) \/ (~IsExternal(Resolve(i, package), ext) /\ ~Found(Finder[Resolve(i, package)])))
 Scan(f, package, ext) == {n \in Asks(f, package, ext) : Found(Finder[n])}
 
-\* -D: a name must resolve; a star needs a package and gives every module below it.
+\* -D: a name must resolve, unless the host provides it; a star needs a
+\* package and gives every module below it.
 Includes(inc) ==
     {d.name : d \in {e \in inc : ~e.star}}
     \cup {m \in Names : \E d \in inc : d.star /\ Len(m) > Len(d.name) /\ Prefix(d.name, m)
                                         /\ Finder[m].kind \in {"package", "module"}}
-IncludesFail(inc) ==
-    \E d \in inc : IF d.star THEN Finder[d.name].kind \notin {"package", "namespace"} ELSE ~Found(Finder[d.name])
+IncludesFail(inc, ext) ==
+    \E d \in inc : IF d.star THEN Finder[d.name].kind \notin {"package", "namespace"}
+                  ELSE ~Found(Finder[d.name]) /\ ~IsExternal(d.name, ext)
+Included(inc, ext) == {n \in Includes(inc) : Found(Finder[n]) /\ ~IsExternal(n, ext)}
 
 Source(n) == Finder[n].file
 
-VARIABLES externals, includes, pending, table, failed
+VARIABLES externals, includes, pending, table, failed   \* externals: a Host
 vars == <<externals, includes, pending, table, failed>>
 
 Init ==
-    /\ externals \in SUBSET ExternalChoices
+    /\ externals \in Host
     /\ includes \in IncludeChoices
-    /\ pending = Scan(Main, <<>>, externals) \cup {n \in Includes(includes) : Found(Finder[n])}
+    /\ pending = Scan(Main, <<>>, externals) \cup Included(includes, externals)
     /\ table = {}
-    /\ failed = (ScanFails(Main, <<>>, externals) \/ IncludesFail(includes))
+    /\ failed = (ScanFails(Main, <<>>, externals) \/ IncludesFail(includes, externals))
 
 \* Visit one found module: add it, queue its parent and what its imports found.
 Visit(n) ==
@@ -173,15 +183,15 @@ Edges(n, ext) ==
     (IF Len(n) > 1 THEN {Parent(n)} ELSE {}) \cup (IF Source(n) = <<>> THEN {} ELSE Scan(Source(n), Package(n), ext))
 RECURSIVE Fix(_, _)
 Fix(S, ext) == LET T == S \cup UNION {Edges(n, ext) : n \in S} IN IF T = S THEN S ELSE Fix(T, ext)
-ClosureOf(ext, inc) == Fix(Scan(Main, <<>>, ext) \cup {n \in Includes(inc) : Found(Finder[n])}, ext)
+ClosureOf(ext, inc) == Fix(Scan(Main, <<>>, ext) \cup Included(inc, ext), ext)
 \* Every name the bundled sources ask for, guarded misses included.
 AskedOf(ext, inc) ==
     Asks(Main, <<>>, ext) \cup UNION {IF Source(n) = <<>> THEN {} ELSE Asks(Source(n), Package(n), ext) : n \in ClosureOf(ext, inc)}
 FailsOf(ext, inc) ==
-    \/ ScanFails(Main, <<>>, ext) \/ IncludesFail(inc)
+    \/ ScanFails(Main, <<>>, ext) \/ IncludesFail(inc, ext)
     \/ \E n \in ClosureOf(ext, inc) : Source(n) # <<>> /\ ScanFails(Source(n), Package(n), ext)
 \* The expected outcome of every build, computed once.
-Expected == [c \in (SUBSET ExternalChoices) \X IncludeChoices |->
+Expected == [c \in Host \X IncludeChoices |->
                 [closure |-> ClosureOf(c[1], c[2]), asked |-> AskedOf(c[1], c[2]), fails |-> FailsOf(c[1], c[2])]]
 Outcome == Expected[<<externals, includes>>]
 
@@ -198,7 +208,7 @@ Probe(n) ==
 Answer(n) == [kind |-> Finder[n].kind, file |-> Finder[n].file]
 
 TypeOK ==
-    /\ externals \subseteq ExternalChoices /\ includes \in IncludeChoices
+    /\ externals \in Host /\ includes \in IncludeChoices
     /\ table \subseteq Names /\ pending \subseteq Names /\ failed \in BOOLEAN
 
 \* The build fails exactly when a required import or -D name does not resolve.
