@@ -1,12 +1,13 @@
-"""Host services: registered modules, the loader, output, and mounts."""
+"""Host services: registered and native modules, the loader, output, and mounts."""
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 
-from small_python import Error, Runtime
+from small_python import Error, Runtime, WorkerError
 
 
 class ModuleTest(unittest.TestCase):
@@ -206,6 +207,94 @@ class MountTest(unittest.TestCase):
                 rt.mount(self.path, "/x", True)
             with self.assertRaises(TypeError):
                 rt.mount(42)
+
+
+class NativeTest(unittest.TestCase):
+    """The example native module, compiled here, so every platform the wheels
+    are tested on loads one built for it."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.path = os.path.join(cls.directory.name, "fib.dll" if sys.platform == "win32" else "fib.so")
+        crash = os.path.join(cls.directory.name, "crash.c")
+        with open(crash, "w") as f:
+            f.write('#include <stdlib.h>\n#include "spy-module.h"\n'
+                    "SPY_MODULE int spy_init_crash(SPYContext *c, SPYValue *m) { (void)c, (void)m; abort(); }\n")
+        cls.crash = os.path.splitext(crash)[0] + os.path.splitext(cls.path)[1]
+        compiler = os.environ.get("CC", "gcc" if sys.platform == "win32" else "cc")
+        for source, library in [(os.path.join(root, "examples", "fib.c"), cls.path), (crash, cls.crash)]:
+            subprocess.run([compiler, "-shared", "-fPIC", "-DSPY_SHARED_MODULE", "-I", root, source, "-o", library],
+                           check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def test_load(self):
+        with Runtime() as rt:
+            rt.load_native("fib", self.path)
+            self.assertEqual(rt.eval("__import__('fib').fib(50)"), 12586269025)
+            with self.assertRaises(Error) as cm:
+                rt.exec("import fib\nfib.fib(-1)")
+            self.assertEqual(str(cm.exception), "ValueError: fib() argument must be in 0..92")
+
+    def test_policy(self):
+        events = []
+
+        def policy(event, args):
+            if event == "dlopen":
+                events.append(args)
+                if args[0] == "refused":
+                    raise PermissionError("no native code")
+
+        real = os.path.realpath(self.path)
+        with Runtime(policy=policy) as rt:
+            rt.load_native("fib", self.path)
+            with self.assertRaises(Error) as cm:
+                rt.load_native("refused", self.path)
+            self.assertEqual(str(cm.exception), "PermissionError: no native code")
+            self.assertEqual(events, [("fib", real), ("refused", real)])
+            self.assertEqual(rt.eval("__import__('fib').fib(10)"), 55)
+
+    def test_failures(self):
+        with Runtime() as rt:
+            for name, path in [("missing", self.path + ".missing"), ("source", __file__)]:
+                with self.subTest(name=name), self.assertRaises(Error) as cm:
+                    rt.load_native(name, path)
+                self.assertEqual(cm.exception.type, "ImportError")
+            with self.assertRaises(Error) as cm:
+                rt.load_native("other", self.path)
+            self.assertEqual(cm.exception.message,
+                             "dynamic module does not define module export function (spy_init_other)")
+            with self.assertRaises(Error) as cm:
+                rt.load_native("fib\0", self.path)
+            self.assertEqual(str(cm.exception), "ValueError: embedded null character")
+            with self.assertRaises(ValueError):
+                rt.load_native("fib", self.path + "\0")
+            with self.assertRaises(TypeError):
+                rt.load_native(42, self.path)
+            with self.assertRaises(Error) as cm:
+                rt.exec("import missing")
+            self.assertEqual(cm.exception.type, "ModuleNotFoundError")
+
+    def test_crashing_init_loses_only_the_runtime(self):
+        with Runtime() as rt:
+            rt.load_native("crash", self.crash)
+            with self.assertRaises(WorkerError):
+                rt.exec("import crash")
+            with self.assertRaises(WorkerError):
+                rt.eval("1")
+        with Runtime() as rt:
+            self.assertEqual(rt.eval("6 * 7"), 42)
+
+    def test_only_before_code_runs(self):
+        with Runtime() as rt:
+            rt.exec("pass")
+            with self.assertRaises(Error) as cm:
+                rt.load_native("fib", self.path)
+            self.assertEqual(str(cm.exception), "PermissionError: cannot load a native module after code has run")
 
 
 @unittest.skipUnless(sys.platform == "win32", "open() reaches mounts on POSIX hosts")

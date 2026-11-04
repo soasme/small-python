@@ -152,8 +152,7 @@ trust; for anything else use `small-python-worker`.
 policy decides first, with `"dlopen"` (name, path); once allowed, the
 library's code runs with the process's rights, outside the mounts, the
 policy, and the step and memory budgets, so allowing it trusts the library
-completely. The workers have no counterpart: a native module there would
-run inside the sandbox the worker exists to keep.
+completely.
 
 ## 4 `small-python-worker`
 

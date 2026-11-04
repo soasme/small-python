@@ -77,7 +77,7 @@ static void write_bytes(const void *p, size_t n) {
 #endif
 
 enum {
-    INIT = 0x01, EVAL, EXEC, CALL, GET, SET, DELETE, MODULE, MOUNT, COLLECT, OP, RELEASE, USAGE,
+    INIT = 0x01, EVAL, EXEC, CALL, GET, SET, DELETE, MODULE, MOUNT, COLLECT, OP, RELEASE, USAGE, NATIVE,
     HOST = 0x21, LOAD, OUTPUT, POLICY,
     RESULT = 0x40, RAISE
 };
@@ -843,6 +843,18 @@ static void serve(unsigned char *message, size_t len) {
         }
         send_status(failed);
         spy_release(directory); spy_release(path); spy_release(read_only);
+        break;
+    }
+    case NATIVE: {
+        SPYValue *name = decode_type(&k, SPY_STRING), *path = decode_type(&k, SPY_STRING);
+        finish(&k);
+        size_t n = 0, m = 0;
+        const char *module = name ? spy_as_string(c, name, &n) : NULL, *file = path ? spy_as_string(c, path, &m) : NULL;
+        int failed = !module || !file;
+        if (!failed && (strlen(module) != n || strlen(file) != m)) failed = !spy_error(c, "ValueError", "embedded null character");
+        if (!failed && sealed) failed = !spy_error(c, "PermissionError", "cannot load a native module after code has run");
+        send_status(failed || spy_std_load_native(c, module, file));
+        spy_release(name); spy_release(path);
         break;
     }
     case COLLECT:

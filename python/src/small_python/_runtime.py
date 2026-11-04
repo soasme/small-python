@@ -487,6 +487,10 @@ class Runtime:
             path = directory
         self._run(wire.MOUNT, directory, _str(path), bool(read_only))
 
+    def load_native(self, name, path):
+        """Open a native module's shared library so that ``import name`` runs its init."""
+        self._run(wire.NATIVE, _name(name), os.path.realpath(os.fsdecode(path)))
+
     def collect(self):
         """Run the engine's cycle collector; returns the number of values freed."""
         return self._run(wire.COLLECT)

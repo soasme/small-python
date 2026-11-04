@@ -1,10 +1,11 @@
 ------------------------------ MODULE SpyNative ------------------------------
 (***************************************************************************)
 (* Native modules (manual 3.4.9, spy-module.h) as the spy command imports  *)
-(* one name, and as an in-process binding's LoadNative loads the name's   *)
-(* library: what each finds, opens, leaves behind and raises. TLC checks   *)
-(* every file layout, library, init outcome and policy answer, and every   *)
-(* sequence of imports, host loads and removals from sys.modules:          *)
+(* one name, and as an in-process binding's LoadNative or the worker's     *)
+(* NATIVE request loads the name's library: what each finds, opens, leaves *)
+(* behind and raises. TLC checks every file layout, library, init outcome  *)
+(* and policy answer, in process and in the worker, and every sequence of  *)
+(* imports, host loads and removals from sys.modules:                      *)
 (*                                                                         *)
 (*  - A library is opened only with the policy's leave: "import" and      *)
 (*    "dlopen" for an import, "dlopen" for a host load. One that fails to  *)
@@ -15,6 +16,7 @@
 (*  - A package directory comes first, then NAME.so, then NAME.py; nothing *)
 (*    is "not found" while any of them exists. After a host load, every    *)
 (*    import runs the library's init, whatever the directory holds.        *)
+(*  - The worker opens no library once it has sealed itself.               *)
 (*  - sys.modules holds a native module only after its init succeeded; a   *)
 (*    failed init runs again on the next import, without opening again.    *)
 (*                                                                         *)
@@ -37,6 +39,10 @@
 (*  - LoadNative (Go), load_native (Rust) and loadNative (Java) call       *)
 (*    spy_std_load_native with NAME.so's path, outside any import: it      *)
 (*    registers the init and leaves sys.modules alone.                     *)
+(*  - In the worker (spy-worker.c, protocol.md 7.1, 9), NATIVE does the    *)
+(*    same, but raises PermissionError once sealed; the worker seals       *)
+(*    before it first runs engine code, so before any import, and its      *)
+(*    loader is the parent's, which answers only sources.                  *)
 (***************************************************************************)
 EXTENDS Naturals
 
@@ -52,15 +58,18 @@ Libraries == Sos \ {"none", "folder"}
 Inits == {"ok", "raises", "silent"}
 Errors == {"", "PermissionError", "ImportError", "ModuleNotFoundError", "ValueError", "SystemError"}
 
-VARIABLES dir, so, py, init, foreign,                 \* the environment
+VARIABLES dir, so, py, init, foreign, worker,         \* the environment
           cache, registered, handles, link, err,      \* spy's
+          sealed,
           opens, loads, breach, unlinked, hosted,     \* ghosts
-          stale
+          stale, late
 
-vars == <<dir, so, py, init, foreign, cache, registered, handles, link, err, opens, loads, breach, unlinked, hosted, stale>>
-env == <<dir, so, py, init, foreign>>
+vars == <<dir, so, py, init, foreign, worker, cache, registered, handles, link, err, sealed,
+          opens, loads, breach, unlinked, hosted, stale, late>>
+env == <<dir, so, py, init, foreign, worker>>
 
-Init == /\ dir \in Dirs /\ so \in Sos /\ py \in BOOLEAN /\ init \in Inits /\ foreign \in BOOLEAN
+Init == /\ dir \in Dirs /\ so \in Sos /\ py \in BOOLEAN /\ init \in Inits /\ foreign \in BOOLEAN /\ worker \in BOOLEAN
+        /\ sealed = FALSE /\ late = FALSE
         /\ cache = "none" /\ registered = FALSE /\ handles = 0
         /\ link = (IF foreign THEN "theirs" ELSE "none") /\ err = ""
         /\ opens = 0 /\ loads = 0 /\ breach = FALSE /\ unlinked = FALSE
@@ -84,24 +93,29 @@ LoadNative(allowed) ==
             ELSE /\ link' = "ours" /\ registered' = TRUE /\ handles' = handles + 1 /\ loads' = loads + 1
                  /\ RunInit("ours")
 
-\* import NAME, with the policy's answers about "import" and "dlopen".
+\* import NAME, with the policy's answers about "import" and "dlopen". In
+\* the worker it runs in engine code, which seals the worker first.
 Import(importing, dlopening) ==
     /\ cache = "none"
+    /\ sealed' = (sealed \/ worker)
     /\ IF ~importing THEN Fails("PermissionError") /\ UNCHANGED opens
        ELSE IF registered THEN /\ UNCHANGED <<registered, handles, link, loads, opens>> /\ RunInit(link)
        ELSE IF dir = "package" THEN Finds("package") /\ UNCHANGED opens
-       ELSE IF so \in Libraries THEN LoadNative(dlopening)
+       ELSE IF so \in Libraries /\ ~worker THEN LoadNative(dlopening)
        ELSE IF py THEN Finds("source") /\ UNCHANGED opens
        ELSE IF dir = "namespace" THEN Finds("namespace") /\ UNCHANGED opens
        ELSE Fails("ModuleNotFoundError") /\ UNCHANGED opens
     /\ breach' = (breach \/ (opens' > opens /\ ~(importing /\ dlopening)))
+    /\ late' = (late \/ (opens' > opens /\ sealed'))
     /\ stale' = FALSE /\ UNCHANGED <<env, hosted>>
 
-\* A binding's LoadNative(NAME, NAME.so), with the policy's answer about
-\* "dlopen": what does not open fails before an open, as dlopen does; what
-\* loads is registered, and sys.modules keeps what it held.
+\* A binding's LoadNative(NAME, NAME.so) or the worker's NATIVE, with the
+\* policy's answer about "dlopen": what does not open fails before an open,
+\* as dlopen does; what loads is registered, and sys.modules keeps what it
+\* held. A sealed worker refuses before asking.
 HostLoad(allowed) ==
-    /\ IF ~allowed THEN Fails("PermissionError") /\ UNCHANGED opens
+    /\ IF worker /\ sealed THEN Fails("PermissionError") /\ UNCHANGED opens
+       ELSE IF ~allowed THEN Fails("PermissionError") /\ UNCHANGED opens
        ELSE IF so \notin Libraries THEN Fails("ImportError") /\ UNCHANGED opens
        ELSE /\ opens' = opens + 1
             /\ IF so \in {"plain", "misnamed", "old"} \/ link = "theirs" THEN Fails("ImportError")
@@ -110,12 +124,13 @@ HostLoad(allowed) ==
     /\ hosted' = IF registered' /\ handles' > handles THEN hosted + 1 ELSE hosted
     /\ stale' = IF hosted' > hosted THEN cache # "none" ELSE stale
     /\ breach' = (breach \/ (opens' > opens /\ ~allowed))
-    /\ UNCHANGED env
+    /\ late' = (late \/ (opens' > opens /\ sealed))
+    /\ UNCHANGED <<env, sealed>>
 
 \* del sys.modules[NAME]
 Remove == /\ cache # "none" /\ cache' = "none" /\ err' = ""
           /\ stale' = FALSE
-          /\ UNCHANGED <<env, registered, handles, link, opens, loads, breach, unlinked, hosted>>
+          /\ UNCHANGED <<env, registered, handles, link, sealed, opens, loads, breach, unlinked, hosted, late>>
 
 Next == \/ \E importing, dlopening \in BOOLEAN : Import(importing, dlopening)
         \/ \E allowed \in BOOLEAN : HostLoad(allowed)
@@ -126,14 +141,16 @@ Spec == Init /\ [][Next]_vars
 \* A library that fails opens again on each import; three show it.
 Small == opens <= 3
 
-TypeOK == /\ dir \in Dirs /\ so \in Sos /\ py \in BOOLEAN /\ init \in Inits /\ foreign \in BOOLEAN
+TypeOK == /\ dir \in Dirs /\ so \in Sos /\ py \in BOOLEAN /\ init \in Inits /\ foreign \in BOOLEAN /\ worker \in BOOLEAN
           /\ cache \in {"none", "native", "package", "source", "namespace"}
           /\ registered \in BOOLEAN /\ handles \in Nat /\ link \in {"none", "ours", "theirs"} /\ err \in Errors
-          /\ hosted \in Nat /\ stale \in BOOLEAN
+          /\ hosted \in Nat /\ stale \in BOOLEAN /\ sealed \in BOOLEAN /\ late \in BOOLEAN
 
 \* A library is opened only with the leaves it needs; an import keeps it
 \* open once, and each host load one more time.
 PolicyGates == ~breach
+\* Nothing is opened in a sealed worker.
+SealedShut == ~late
 OpenOnce == handles <= hosted + 1
 \* What failed to load was closed: every open handle is a load.
 NothingLeftOpen == handles = loads
@@ -144,8 +161,9 @@ InitLinked == ~unlinked
 PackageFirst == dir = "package" /\ hosted = 0 => cache \in {"none", "package"}
 \* After a host load, what an import caches is the library's module.
 HostFirst == hosted > 0 /\ ~stale => cache \in {"none", "native"}
-NativeFirst == cache = "source" => so \notin Libraries
-NotFoundAbsent == err = "ModuleNotFoundError" => dir = "none" /\ ~py /\ so \notin Libraries
+\* (The worker's loader answers only sources.)
+NativeFirst == cache = "source" => so \notin Libraries \/ worker
+NotFoundAbsent == err = "ModuleNotFoundError" => dir = "none" /\ ~py /\ (so \notin Libraries \/ worker)
 \* A cached native module was initialized.
 NativeComplete == cache = "native" => registered /\ init = "ok"
 =============================================================================

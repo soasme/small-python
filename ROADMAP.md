@@ -12,7 +12,7 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): one executable from pure Python, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, native modules
-  in the worker, virtual file systems, host functions, resumable execution, inspection, snapshots,
+  in the worker packages, virtual file systems, host functions, resumable execution, inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -185,37 +185,14 @@ JavaScript binding, and is tested by programs that try to escape it.
 
 ### Native modules in the worker
 
-The in-process Go, Rust and Java bindings load native modules
-(`spy_std_load_native`, manual 3.4.9); the worker bindings do not. The
-design for them, not yet implemented:
-
-- **Protocol.** A new parent request `NATIVE` (`name` str, `path` str,
-  reply `None`) calls `spy_std_load_native` in the worker. Like `MOUNT`,
-  the parent resolves `path` to an absolute host path, and the request is
-  accepted only before the worker seals itself (protocol.md §9). After
-  that it raises `PermissionError`. The library and its dependencies are
-  mapped before the OS sandbox closes, so the sandbox needs no exception
-  for library paths, and the code then runs inside the sealed worker.
-  `import name` later runs the init in the worker, as for `MODULE`.
-- **Policy.** `"dlopen"` (name, path) reaches the parent's policy through
-  `POLICY`, like every other event, when `INIT` set `policy`. There is no
-  `INIT` option and no default library: the parent names each one.
-- **Limits.** The step limit, the engine memory limit and the worker's
-  timeout count only what the library asks of the engine. Its own
-  allocations and loops are bounded only by the grace-period kill
-  (protocol.md §10), and by the OS where the worker is limited. The
-  limits table must say so.
-- **Trust.** The parent trusts the libraries it names. The worker is
-  already assumed hostile (protocol.md §2), so a faulty library only loses
-  the runtime (§8). It is contained better than in process: it runs under
-  the worker's OS sandbox.
-- **Platforms.** The WebAssembly worker has no shared libraries and
-  answers `ImportError`, as `spy_std_load_native` does there. The static
-  Linux workers carry glibc's static `dlopen` caveat (manual 3.4.9).
-- **Evidence.** Tests in each worker package (load, policy refusal, after
-  sealing, each failure kind, a crashing init losing only the runtime), the
-  five parent TLA+ models extended with `NATIVE`'s turn and sealing order,
-  and a run on every platform of the release matrix.
+The worker protocol's `NATIVE` request loads a native module in the worker
+before it seals itself ([docs/packaging/protocol.md](docs/packaging/protocol.md)
+7.1, 9), and the Python package sends it from `load_native`. The Go, Rust
+and Java worker packages do not send it yet. Each needs the method, the
+tests the Python package has (load, policy refusal, each failure, refusal
+after code has run, a crashing init losing the runtime), and `NATIVE` in its
+parent TLA+ model. The JavaScript worker is WebAssembly and has no shared
+libraries.
 
 ### Virtual file system
 

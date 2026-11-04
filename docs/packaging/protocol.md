@@ -161,6 +161,7 @@ Fields are listed in order; each is a value (§4).
 | `0x0b` | `OP` | `op` int, `target`, operands (§7.3) | the result |
 | `0x0c` | `RELEASE` | `ids` tuple of `int` | notice: no reply |
 | `0x0d` | `USAGE` | — | `tuple` of two `int`: `spy_steps_used`, `spy_memory_used` |
+| `0x0e` | `NATIVE` | `name` str, `path` str | `None` |
 
 `CALL`'s target is a global name (`str`, looked up like `GET`) or a handle
 sent back as `h`. A parent sends `h` only for ids it holds.
@@ -177,6 +178,17 @@ NUL character.
 `MOUNT` passes an absolute host directory and an absolute engine path to
 `spy_mount`. The parent resolves both; the worker does not consult its own
 working directory.
+
+`NATIVE` passes a module name and an absolute host path to
+`spy_std_load_native` (manual 3.4.9), which asks the policy about `"dlopen"`
+with `(name, path)` (through `POLICY` when `INIT` set `policy`), opens the
+library and registers its init; `import name` then runs the init in the
+worker. The parent resolves the path. A name or path containing NUL raises
+`ValueError`. Like `MOUNT`, `NATIVE` is accepted only before the worker
+seals itself (§9) and raises `PermissionError` afterwards, so the library and
+what it links are mapped while the worker may still read them, and the
+sandbox needs no exception for them. The WebAssembly worker has no shared
+libraries and raises `ImportError`.
 
 `RELEASE` drops the listed handles.
 
@@ -333,9 +345,12 @@ the inherited stderr.
 Before it handles its first `EVAL`, `EXEC`, `CALL`, or `OP`, which are the
 requests that can run engine code, the worker *seals* itself under the
 platform's OS sandbox (`python.md` §4), allowing files only beneath the
-directories mounted so far. A `MOUNT` after sealing raises `PermissionError`
-in the engine. Only after sealing can code the parent did not write run in
-the worker.
+directories mounted so far. A `MOUNT` or `NATIVE` after sealing raises
+`PermissionError` in the engine. Only after sealing can code the parent did
+not write run in the worker. A native module is code the parent chose: its
+library's constructors run when `NATIVE` opens it, before sealing, and its
+init and functions run afterwards, inside the sandbox, where a system call
+the engine does not make fails with `EPERM`.
 
 ## 10 Limits
 
@@ -352,8 +367,9 @@ The step and memory limits are the engine's own ([metering.md](../metering.md)):
 the memory limit counts every byte the engine holds and refuses requests
 that would exceed it. Either stops the operation, so the program cannot
 catch the error, and the next operation runs normally. The worker's own
-protocol buffers are not counted. In WebAssembly the linear
-memory's maximum is an additional hard bound.
+protocol buffers are not counted, nor is memory a native module allocates
+for itself; its own loops are bounded only by the parent's deadline. In
+WebAssembly the linear memory's maximum is an additional hard bound.
 
 The timeout counts the worker's own time within one top-level operation: its
 clock stops while it waits for the parent, so time inside host functions, the

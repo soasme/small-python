@@ -17,8 +17,10 @@ Unreleased:
   values a collection visits
 - the Go, Rust and Java in-process bindings load native modules:
   Runtime.LoadNative, Runtime::load_native and Interpreter.loadNative
-  call spy_std_load_native, asked of the policy as "dlopen"; the
-  worker bindings do not
+  call spy_std_load_native, asked of the policy as "dlopen"
+- the worker protocol's NATIVE request (0x0e) loads a native module in
+  the worker before it seals itself; the Python package sends it from
+  Runtime.load_native
 
 2026-11-03 0.6.0:
 

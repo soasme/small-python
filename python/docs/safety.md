@@ -10,7 +10,7 @@ pass in. Read the limits below before relying on it for code you do not trust.
 | Resource | Default | How to grant it |
 |---|---|---|
 | Your Python objects and modules | None | `define`, `register_module`, `rt[name] = ...` |
-| Imports | Builtin and registered modules only | `register_module`, `loader=` |
+| Imports | Builtin and registered modules only | `register_module`, `loader=`, `load_native` |
 | Files | None: `open()` raises `PermissionError` | `mount(directory, read_only=...)` |
 | Printed output | Host `sys.stdout` | `output=` |
 | Standard input | None: `input()` raises `EOFError` | a host function |
@@ -88,8 +88,14 @@ cannot reach more than the engine could:
   `Error` of type `OSError`, but a worker taken over by an exploit runs with
   your privileges.
 
-Because of this, mount directories before running code: `mount` after the
-first `eval`, `exec`, or `call` raises `Error` of type `PermissionError`.
+Because of this, mount directories and load native modules before running
+code: `mount` or `load_native` after the first `eval`, `exec`, or `call`
+raises `Error` of type `PermissionError`.
+
+A native module is C code you chose, so load only libraries you trust. Its
+constructors run unsandboxed when `load_native` opens it; its functions run
+inside the sandbox, outside the step and memory limits, and a crash in it
+loses the runtime like any worker crash.
 A kernel without Landlock or seccomp gets the layers it has; on other systems,
 including Windows, run hostile code inside a container or VM as well.
 

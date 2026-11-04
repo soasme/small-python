@@ -108,6 +108,9 @@ Extending:
 - `mount(directory, path=None, *, read_only=False)`: let `open()` reach
   `directory` at engine path `path` (default: its resolved host path). The
   directory is resolved in the parent; `Error` if it does not exist.
+- `load_native(name, path)`: open the native module at `path` (resolved in
+  the parent) in the worker with `NATIVE`, so that `import name` runs its
+  init; `Error` of type `ImportError` if it does not load.
 
 Lifetime:
 
@@ -231,8 +234,8 @@ A worker that has been taken over by an exploit would run with the user's
 operating-system privileges. Containing that is the job of an OS sandbox,
 which the worker applies to itself, without privileges, immediately before it
 first runs engine code (its first `EVAL`, `EXEC`, `CALL`, or `OP`; see
-`protocol.md` §9). Mounts are fixed from then on: a later `mount` raises
-`Error` of type `PermissionError`.
+`protocol.md` §9). Mounts and native modules are fixed from then on: a later
+`mount` or `load_native` raises `Error` of type `PermissionError`.
 
 | Platform | Layer |
 |---|---|
@@ -307,4 +310,7 @@ API tests:
 8. the worker exits when the parent is killed;
 9. the worker is sandboxed once code has run (`NoNewPrivs` and `Seccomp` in
    `/proc` on Linux, `sandbox_check` on macOS), and `mount` is refused
-   afterwards.
+   afterwards;
+10. a native module compiled by the test loads, asks the policy, fails in
+    each way `spy_std_load_native` reports, is refused once code has run,
+    and loses only its runtime when its init crashes.

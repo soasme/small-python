@@ -1053,9 +1053,10 @@ The in-process Go, Rust and Java bindings call `spy_std_load_native` as
 ([packaging/go.md](packaging/go.md), [rust.md](packaging/rust.md),
 [java.md](packaging/java.md)). A library links to the engine copy that
 loads it first, so it loads into every runtime of that binding in the
-process, and another copy of the engine refuses it. The worker bindings do not load
-native modules: the worker exists to keep the engine apart from the host, and
-native code would run outside that boundary.
+process, and another copy of the engine refuses it. The worker protocol's
+`NATIVE` request loads one in the worker before it seals itself
+([packaging/protocol.md](packaging/protocol.md) 7.1); the Python package
+sends it from `load_native`.
 
 ### 3.5 Python binding
 

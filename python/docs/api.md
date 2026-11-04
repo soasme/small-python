@@ -55,6 +55,11 @@ cannot start.
   `path` (default: the directory's resolved path). Raises `Error` if the
   directory does not exist, and `Error` of type `PermissionError` once code
   has run in the runtime (the worker is then sandboxed to the mounts it has).
+- `load_native(name, path)`: Open the shared library at `path`, a native
+  module built with `spy-module.h`, in the worker, so that `import name` runs
+  its init. The policy is asked first with `"dlopen"`, `(name, path)`.
+  Raises `Error` of type `ImportError` if the library does not load, and of
+  type `PermissionError` once code has run in the runtime.
 
 ### Lifetime
 
