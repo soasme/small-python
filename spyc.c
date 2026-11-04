@@ -903,7 +903,8 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < sources; i++) fprintf(stderr, "    %s  %zu\n", inputs[i]->path, strlen(inputs[i]->source));
     }
 done:
-    if (status) discard();
+    /* A finished build keeps its files and forgets them. */
+    if (status) discard(); else written_len = 0;
     for (size_t i = 0; list && i < entries; i++) {
         free(list[i].file); free(list[i].package); free(list[i].symbol);
         free_module(&list[i].module);

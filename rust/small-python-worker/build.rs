@@ -21,6 +21,9 @@ fn main() {
     if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
         link.arg("-static");
     }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        link.arg("-ldl");
+    }
     let status = link.status().expect("cannot run the C compiler to link spy-worker");
     assert!(status.success(), "linking spy-worker failed: {status}");
 }

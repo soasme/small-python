@@ -13,6 +13,7 @@ application. Run the scripts with `spy` from the repository root after
 | [`closures.py`](closures.py) | A closure, and a list that contains itself |
 | [`generators.py`](generators.py) | `send`, `yield from` with a return value, and `finally` on close |
 | [`embed.c`](embed.c) | Embedding the engine in C: define a function, evaluate, handle errors |
+| [`fib.c`](fib.c) | A native module: `make examples/fib.so`, then `./spy examples/test_fib.py` imports it |
 
 ## Applications
 

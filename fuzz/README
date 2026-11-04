@@ -18,7 +18,8 @@ libFuzzer targets for Small Python, after QuickJS's fuzz/ directory.
                 everything it allocated.
 
 For fuzz_eval and fuzz_compile, each input gets a fresh context with the standard layer (spy_std_init), no
-output, no input, no module loader, and no mounts, a step limit so loops
+output, no input, a loader that registers any module named *_c without source
+(as a native module's loader does), no mounts, a step limit so loops
 end, and a memory limit of 256 MiB. The context is collected and freed after every input, so AddressSanitizer
 reports leaks and use-after-free per input.
 

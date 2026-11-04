@@ -24,6 +24,7 @@ FILES = {
     "csrc/spy-std.c": "spy-std.c",
     "csrc/spy-std.h": "spy-std.h",
     "csrc/spy-std-modules.h": "spy-std-modules.h",
+    "csrc/spy-module.h": "spy-module.h",
     "csrc/spy-intrinsics.h": "spy-intrinsics.h",
     "csrc/spy-unicode.h": "spy-unicode.h",
     "csrc/licenses/python.txt": "docs/licenses/python.txt",
@@ -52,7 +53,7 @@ class build_worker(build_ext):
                 include_dirs=ext.include_dirs, extra_postargs=ext.extra_compile_args)
         path = self.get_ext_fullpath(ext.name)
         self.compiler.link_executable(objects, os.path.basename(path), output_dir=os.path.dirname(path),
-                                      libraries=["m"])
+                                      libraries=["m", "dl"] if sys.platform.startswith("linux") else ["m"])
 
     def build_with_gcc(self, ext):
         objects = []

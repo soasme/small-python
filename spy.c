@@ -16164,11 +16164,15 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     int package = 0, namespace = 0;
     Buffer filename = {.ctx = c};
     if (!init) {
-        Buffer init = {.ctx = c};
-        if (!puts_buffer(&init, name) && !puts_buffer(&init, ".__init__")) source = c->loader(c, c->loader_data, init.data);
-        mem_free(init.data);
+        Buffer probe = {.ctx = c};
+        if (!puts_buffer(&probe, name) && !puts_buffer(&probe, ".__init__")) source = c->loader(c, c->loader_data, probe.data);
+        mem_free(probe.data);
         package = source != NULL;
         if (!source && !c->error_type[0]) source = c->loader(c, c->loader_data, name);
+        /* The loader may register the module instead, as for a native one. */
+        if (!source && !c->error_type[0] && (builtin = host_module(c, name)) < c->host_modules_len) init = c->host_modules[builtin].init;
+    }
+    if (!init) {
         if (!source && !c->error_type[0]) {
             Buffer probe = {.ctx = c};
             SPYValue *marker = puts_buffer(&probe, name) || puts_buffer(&probe, ".__namespace__") ? NULL : c->loader(c, c->loader_data, probe.data);

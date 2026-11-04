@@ -34,17 +34,16 @@ static char *host_read(FILE *file) {
     return source;
 }
 
-/* The core probes package.__init__ before package, then package.__namespace__
- * for a directory without __init__.py (PEP 420). Search policy stays here. */
-static inline SPYValue *host_load_module(SPYContext *c, void *data, const char *name) {
-    const char *directory = data;
-    size_t prefix = strlen(directory), len = strlen(name);
-    static const char namespace_suffix[] = ".__namespace__";
-    size_t suffix = sizeof(namespace_suffix) - 1;
-    int namespace = len > suffix && !strcmp(name + len - suffix, namespace_suffix);
-    if (namespace) len -= suffix;
-    if (!len || prefix > SIZE_MAX - len - 5) return NULL;
-    char *path = malloc(prefix + len + 5);
+static inline int host_ends_with(const char *s, size_t len, const char *suffix) {
+    size_t n = strlen(suffix);
+    return len > n && !strcmp(s + len - n, suffix);
+}
+/* The file of the first len bytes of a dotted module name under directory,
+ * with suffix appended, or NULL for a name no file can have. */
+static inline char *host_module_path(const char *directory, const char *name, size_t len, const char *suffix) {
+    size_t prefix = strlen(directory), tail = strlen(suffix);
+    if (!len || prefix > SIZE_MAX - len - tail - 2) return NULL;
+    char *path = malloc(prefix + len + tail + 2);
     if (!path) return NULL;
     memcpy(path, directory, prefix); path[prefix++] = '/';
     for (size_t i = 0; i < len; i++) {
@@ -53,14 +52,24 @@ static inline SPYValue *host_load_module(SPYContext *c, void *data, const char *
         else if (isalnum(ch) || ch == '_' || ch >= 128) path[prefix + i] = (char)ch;
         else { free(path); return NULL; }
     }
+    memcpy(path + prefix + len, suffix, tail + 1);
+    return path;
+}
+/* The core probes package.__init__ before package, then package.__namespace__
+ * for a directory without __init__.py (PEP 420). Search policy stays here. */
+static inline SPYValue *host_load_module(SPYContext *c, void *data, const char *name) {
+    size_t len = strlen(name);
+    static const char namespace_suffix[] = ".__namespace__";
+    int namespace = host_ends_with(name, len, namespace_suffix);
+    if (namespace) len -= sizeof(namespace_suffix) - 1;
+    char *path = host_module_path(data, name, len, namespace ? "" : ".py");
+    if (!path) return NULL;
     if (namespace) {
         struct stat info;
-        path[prefix + len] = 0;
         int found = !stat(path, &info) && S_ISDIR(info.st_mode);
         free(path);
         return found ? spy_none(c) : NULL;
     }
-    memcpy(path + prefix + len, ".py", 4);
     FILE *file = fopen(path, "rb");
     free(path);
     if (!file) return NULL;

@@ -6,7 +6,8 @@
 
 #include "spy.h"
 
-/* A context for one input: output discarded, no input, loader, or mounts,
+/* A context for one input: output discarded, no input or mounts, a loader
+ * that registers modules named *_c (fuzz_common.c),
  * and step and memory budgets. NULL if it cannot be created. */
 SPYContext *fuzz_context_new(void);
 /* Collect cycles and free the context, so leaks show up per input. */

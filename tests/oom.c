@@ -6,7 +6,9 @@
  * run, not only at exit.
  * Run it under make sanitize so a bad cleanup path is also reported.
  *
- * usage: tests/oom [FILE...]  (each file a program; none: the built-in set) */
+ * usage: tests/oom [--native LIBRARY] [FILE...]
+ *   (each file a program; none: the built-in set; LIBRARY: a native module
+ *   defining fib, also loaded and imported) */
 #define _XOPEN_SOURCE 700
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
@@ -51,6 +53,13 @@ static int fails(void);
  * lasting every one after it; live: blocks not yet freed. */
 static size_t count, fail, live;
 static int lasting;
+/* A native module run() loads as fib when the program imports it, as the
+ * spy command's loader does, when set. */
+static const char *native;
+static SPYValue *load_native(SPYContext *c, void *data, const char *name) {
+    if (!strcmp(name, "fib")) spy_std_load_native(c, name, data);
+    return NULL;
+}
 
 static int fails(void) { return ++count == fail || (lasting && fail && count > fail); }
 void *oom_malloc(size_t n) {
@@ -104,6 +113,7 @@ static size_t run(const char *source, const char *name, int *status) {
     if (c) {
         spy_set_output(c, discard, NULL, NULL);
         spy_set_step_limit(c, 1000000);
+        if (native) spy_set_module_loader(c, load_native, (void *)native);
         *status = spy_std_init(c) || spy_exec(c, source, name);
         spy_clear_error(c);
         spy_collect(c);
@@ -301,9 +311,14 @@ static size_t check(const char *source, const char *name, size_t from, size_t up
 }
 
 int main(int argc, char **argv) {
+    const char *library = NULL;
+    if (argc > 2 && !strcmp(argv[1], "--native")) { library = argv[2]; argv += 2; argc -= 2; }
     /* The empty program covers creating and freeing a context; the others
      * fail only what they allocate after that. */
     size_t from = check("", "<empty>", 0, 0);
+    native = library;
+    if (native) check("import fib\nprint(fib.fib(30))\n", "<native>", from, 0);
+    native = NULL;
     for (int i = 1; i < argc; i++) {
         char *source = read_file(argv[i]);
         check(source, argv[i], from, 0);

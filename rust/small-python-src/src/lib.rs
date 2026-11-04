@@ -29,6 +29,7 @@ pub fn build() -> cc::Build {
         "spy-std.c",
         "spy-std.h",
         "spy-std-modules.h",
+        "spy-module.h",
         "spy-intrinsics.h",
         "spy-unicode.h",
         "spy-worker.c",
