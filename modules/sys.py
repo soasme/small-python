@@ -16,7 +16,7 @@ frames. Monitoring and audit hooks are not provided.
 from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,
                   set_int_max_str_digits, modules, maxsize, byteorder, platform, _getframe, lazy_modules,
                   getrefcount, getallocatedblocks,
-                  _write, _flush, _frame_module, _tracked, _setting)
+                  _write, _flush, _frame_module, _tracked, _setting, argv as _argv)
 
 
 def _c_function(arity):
@@ -159,8 +159,8 @@ stdlib_module_names = frozenset((
     "types", "typing", "unicodedata", "unittest", "urllib", "uuid", "venv", "warnings", "wave",
     "weakref", "webbrowser", "winreg", "winsound", "wsgiref", "xml", "xmlrpc", "zipapp", "zipfile",
     "zipimport", "zlib", "zoneinfo"))
-argv = []
-orig_argv = []
+argv = list(_argv)
+orig_argv = list(_argv)
 path = []
 meta_path = []
 path_hooks = []
@@ -787,4 +787,4 @@ for _function in (_getframemodulename, intern, getunicodeinternedsize, getswitch
                   excepthook, unraisablehook, settrace, gettrace, setprofile, getprofile):
     _function.__qualname__ = _function.__name__
 del _function, _c_function, _one_argument, _settings, _tracing, _traceback_display, _reporting, _report_unraisable, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream
-del _write, _flush, _frame_module, _tracked, _setting
+del _write, _flush, _frame_module, _tracked, _setting, _argv

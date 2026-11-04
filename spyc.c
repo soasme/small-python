@@ -642,8 +642,8 @@ static char *c_name(const char *entry, int module) {
 typedef struct { char *file, *package, *symbol; Module module; } EntryPoint;
 
 static int usage(void) {
-    fputs("usage: spyc [options] [-o program] (input.py | -m module) [module.c]... [-- cc-arguments]\n"
-          "       spyc -e [options] [-o program.c] (input.py | -m module) [module.c]...\n"
+    fputs("usage: spyc [options] [-o program] (input.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]\n"
+          "       spyc -e [options] [-o program.c] (input.py | -m module) [module.c | libmodule.a]...\n"
           "       spyc -c [options] [-o modules.c] (input.py | -m module)...\n"
           "options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,\n"
           "         -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror, -v\n", stderr);
@@ -667,11 +667,15 @@ int main(int argc, char **argv) {
             if (passed++) push(&more, concat(a, "", ""));
             continue;
         }
-        if (len > 2 && !strcmp(a + len - 2, ".c")) {
-            /* A C module, NAME.c, exporting spy_init_NAME. */
+        if (len > 2 && (!strcmp(a + len - 2, ".c") || !strcmp(a + len - 2, ".a"))) {
+            /* A C module, NAME.c or the archive libNAME.a, exporting spy_init_NAME. */
             const char *base = strrchr(a, '/') ? strrchr(a, '/') + 1 : a;
-            char *name = slice(base, strlen(base) - 2);
-            if (!identifier_text(name, strlen(name))) { free(name); status = usage(); goto done; }
+            size_t skip = a[len - 1] == 'a' ? 3 : 0;
+            if (strncmp(base, "lib", skip)) { status = usage(); goto done; }
+            char *name = slice(base + skip, strlen(base) - 2 - skip);
+            int bad = !identifier_text(name, strlen(name));
+            for (size_t j = 0; j < b.natives.len; j++) bad |= !strcmp(b.natives.items[j], name);
+            if (bad) { free(name); status = usage(); goto done; }
             push(&b.natives, name);
             push(&more, concat(a, "", ""));
             continue;
@@ -845,9 +849,11 @@ int main(int argc, char **argv) {
                   "    int status = !value || spy_set_global(c, name, value);\n"
                   "    spy_release(value);\n"
                   "    return status;\n}\n"
-                  "int main(void) {\n"
+                  "int main(int argc, char **argv) {\n"
                   "    SPYContext *c = spy_context_new();\n"
-                  "    if (!c) return 1;\n");
+                  "    if (!c) return 1;\n"
+                  "    /* As the spy command: open reaches the working directory, if any. */\n"
+                  "    if (spy_mount(c, \".\", NULL, 0)) spy_clear_error(c);\n");
         for (size_t i = 0; i < b.registered.len; i++)
             put(&out, "    if (spy_std_init_module(c, \"%s\")) return 1;\n", b.registered.items[i]);
         for (size_t i = 0; i < b.natives.len; i++)
@@ -855,7 +861,8 @@ int main(int argc, char **argv) {
         if (optimize) put(&out, "    spy_set_optimize(c, %d);\n", optimize);
         put(&out, "    spy_set_output(c, output, flush_output, stdout);\n"
                   "    spy_set_module_loader(c, load, NULL);\n"
-                  "    int status = global(c, \"__file__\", ");
+                  "    int status = spy_set_argv(c, (size_t)argc, (const char *const *)argv) ||\n"
+                  "        global(c, \"__file__\", ");
         put_string(&out, e->file);
         put(&out, ");\n");
         if (e->package) {

@@ -257,10 +257,12 @@ test-binding: spy-worker
 	cp spy-worker $(OBJDIR)/binding/small_python/
 	PYTHONPATH=$(OBJDIR)/binding python3 -m unittest discover -s python/tests
 
-# The Rust crates (rust/, docs/packaging/rust.md) compile the engine with cc themselves.
+# The Rust crates (rust/, docs/packaging/rust.md) compile the engine with cc themselves;
+# examples/jsonify is a Rust module that spyc links into a program instead.
 test-rust: examples/fib.so
 	cd rust && cargo test --workspace --all-features
 	cd examples/todo && cargo test
+	$(MAKE) -C examples/jsonify test
 
 # A published small-python-src carries the sources and licenses in csrc/.
 RUST_CSRC = rust/small-python-src/csrc

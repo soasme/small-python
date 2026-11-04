@@ -32,7 +32,9 @@ program only gets its sources from the C file instead of from disk.
 Three options shape what is bundled: imports are followed from the entry,
 `-D` adds modules that only a dynamic import reaches, and `-M` registers
 standard modules the program links instead of bundling. A C module,
-`NAME.c`, is compiled into the program as module `NAME`. The other options
+`NAME.c`, is compiled into the program as module `NAME`, and an archive,
+`libNAME.a` (from C, Rust, or any language that exports a C function), is
+linked into it as module `NAME`. The other options
 ([2.1](#21-options)) control output and transforms; readers who know esbuild
 will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 
@@ -72,8 +74,8 @@ will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 ## 2 Usage
 
 ```text
-usage: spyc [options] [-o program] (entry.py | -m module) [module.c]... [-- cc-arguments]
-       spyc -e [options] [-o program.c] (entry.py | -m module) [module.c]...
+usage: spyc [options] [-o program] (entry.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]
+       spyc -e [options] [-o program.c] (entry.py | -m module) [module.c | libmodule.a]...
        spyc -c [options] [-o modules.c] (entry.py | -m module)...
 ```
 
@@ -83,6 +85,7 @@ spyc -e -o app.c app.py                   # the same program as C
 cc -O2 -I. app.c libspy.a -lm -o app
 
 spyc -o game game.py raylib.c -- -lraylib       # with the C module raylib
+spyc -o tool tool.py target/release/libjson.a   # with a module json from Rust
 spyc -I lib -x raylib -c -o game_py.c game.py   # for a host that registers raylib
 spyc -D plugins.* -o app app.py                 # plus every module of plugins
 spyc -O --minify --metafile app.json -o app app.py
@@ -110,6 +113,7 @@ spyc -O --minify --metafile app.json -o app app.py
 | `-Werror` | Treat warnings as errors. |
 | `-v` | Print the compiler command ([5.3](#53-executable-output)). |
 | `NAME.c` | A C module: compile it into the program and register it as `NAME` ([5.4](#54-native-modules)). Not with `-c`. |
+| `libNAME.a` | An archive module: link it into the program and register it as `NAME` ([5.4](#54-native-modules)). Not with `-c`. |
 | `-- ARGS` | Pass the remaining arguments to the compiler, after the C modules ([5.3](#53-executable-output)). Not with `-e` or `-c`. |
 
 spyc exits with 0 on success, 1 when the build or the C compiler fails, and
@@ -309,15 +313,14 @@ static const struct { const char *name, *source; size_t size; } modules[] = {
     {"pkg.sub", m2, sizeof m2 - 1},
 };
 static SPYValue *load(SPYContext *c, void *data, const char *name) { /* binary search, spy_bytes */ }
-int main(void) {
-    /* spy_context_new, the -M modules, output callbacks, as today */
+int main(int argc, char **argv) {
+    /* spy_context_new, the mount, the -M and C modules, output callbacks */
     spy_set_module_loader(c, load, NULL);
-    /* __file__ = "app.py"; spy_exec(c, m0, "app.py"); report errors */
+    /* spy_set_argv(c, argc, argv); __file__ = "app.py"; spy_exec(c, m0, "app.py"); report errors */
 }
 ```
 
-The standalone `main` is the current one, with the loader added and the
-entry's real file name in place of `<embedded>`. An entry that the program
+`main` starts the program as [5.5](#55-the-programs-start) describes. An entry that the program
 also imports by name has a table entry that points at the entry's array, so
 its source is embedded once.
 
@@ -351,7 +354,7 @@ Without `-e` or `-c`, spyc compiles the C file of [5.1](#51-the-module-table).
 It writes the file under `TMPDIR` (or `/tmp`), runs
 
 ```text
-CONFIG_CC -O2 -I INCLUDE -o OUTPUT -x c FILE -x none [MODULE.c...] [ARGS...] [LIB/libspy-std.a] LIB/libspy.a -lm
+CONFIG_CC -O2 -I INCLUDE -o OUTPUT -x c FILE -x none [MODULE.c | libMODULE.a...] [ARGS...] [LIB/libspy-std.a] LIB/libspy.a -lm
 ```
 
 and removes the file. `CONFIG_CC` is the compiler and link flags spyc was
@@ -359,8 +362,8 @@ built with (`$(CC) $(LDFLAGS)`), so a sanitizer or coverage build links its
 own `libspy.a`. `INCLUDE` and `LIB` are the directory of the `spyc` that ran
 when `spy.h` is there (a build tree), and otherwise `PREFIX/include` and
 `PREFIX/lib` of `make install`. `libspy-std.a` is linked when `-M` names a
-standard module. The C modules and the arguments after `--` come before
-the engine's libraries, so a library they name (`-lraylib`, a `.a` file,
+standard module. The C and archive modules, in their order, and the
+arguments after `--` come before the engine's libraries, so a library they name (`-lraylib`, a `.a` file,
 or `-framework Cocoa`) links after the code that uses it, and `-I` and `-D`
 reach the C modules. `-v` prints the command. The build fails with the
 compiler's diagnostics when it fails, and spyc exits with 1. The engine needs
@@ -412,19 +415,53 @@ A program spyc writes `main` for takes the same file as an input instead:
 
 ```sh
 spyc -o app app.py fib.c
+spyc -o app app.py libfib.a
 spyc -o game game.py raylib.c -- $(pkg-config --cflags --libs raylib)
 ```
 
 An input ending in `.c` is a C module named after its file: `fib.c` is
 module `fib` and exports `spy_init_fib`, and its name must be an identifier.
+An input ending in `.a` is an archive module, an already compiled C module:
+`libfib.a` is module `fib`, its file name must be `lib` followed by the
+module name and `.a`, and one of its members exports `spy_init_fib`. It may
+come from any language that exports a C function and calls `spy.h`'s: a Rust
+crate of type `staticlib` named `fib` builds `libfib.a`
+(`examples/jsonify`). It calls the engine directly, so it is built without
+`SPY_SHARED_MODULE` and must not contain a second engine. A static linker
+reads an archive once, at its place on the command line, and takes only the
+members that define what is still undefined; spyc places the archives after
+the program, which needs each init, and before the engine, which each
+module needs ([5.3](#53-executable-output)). Libraries the archive itself
+needs (for Rust's standard library on Linux, `-lgcc_s -lutil -lrt -lpthread
+-lm -ldl -lc`) go after `--`. A module name is given once, in one form:
+otherwise the linker would take the first input's init and silently leave
+the other unread, and spyc rejects it as a usage error.
 spyc compiles it with the program ([5.3](#53-executable-output)), and the
 generated `main` registers it with `spy_new_module` before the entry runs.
 An import of `fib` is resolved, as `-M` resolves a standard module, so a C
 module wins over a `fib.py` beside the entry, as a native module wins in
 `spy`'s search. The dependency rule ([7.2](#72-dependency-file)) names the
-C files after the sources. With `-e`, the C file declares and registers the
-module, and the host compiles `fib.c` with it; `-c` writes no `main` and
-takes no C module.
+C and archive files after the sources. With `-e`, the C file declares and
+registers the module, and the host compiles `fib.c` or links `libfib.a` with
+it; `-c` writes no `main` and takes no C or archive module.
+
+### 5.5 The program's start
+
+The generated `main` starts the program as the `spy` command does. It
+mounts the working directory at its own path (`spy_mount`), so `open`
+reaches the files under it and nothing else; when the mount fails (a
+working directory that was removed) the program runs with nothing mounted.
+It registers the `-M`, C and archive modules, installs the output callbacks
+and the loader, and gives the engine its command line with `spy_set_argv`.
+`sys.argv` and `sys.orig_argv` are then the program's arguments, the
+program's name first, as the shell passed them and decoded as UTF-8 with
+`surrogateescape`, as CPython decodes them on POSIX. A failure there
+(MemoryError) is reported, and the program exits with 1 without running the
+entry. `SpyProgram.tla` models this and the link ([10.1](#101-tla-model)).
+
+`main` reports an uncaught exception, a `SystemExit` included, as
+`FILE:LINE: TYPE: MESSAGE` on standard error and exits with 1; the exit
+status of `SystemExit` is not yet the program's.
 
 ## 6 Source transforms
 
@@ -655,6 +692,21 @@ unlinking the temporary file after dropping it from the list, each breaks an
 invariant. Killing only after waiting for the compiler does not, so that
 kill makes the stop prompt rather than correct.
 
+`tests/tla/SpyProgram.tla` models what a program is linked from and how it
+starts. For every list of up to two module inputs, each a C file or an
+archive, well or badly named, defining its init or not, it follows spyc's
+checks, the command line of [5.3](#53-executable-output), a static linker
+that reads each archive once and takes only the members it needs, and the
+generated `main`. TLC checks that a bad or repeated name is a usage error
+before any link; that a link succeeds exactly when every input defines its
+init, and then each module's init comes from the input of that name; and
+that the entry runs only with the command line set and every module
+registered, a failed mount not stopping it. Seeded faults show what each
+check holds: without the duplicate-name check two C files of one name fail
+the link and a C file and an archive of one name link the C file's init
+for both; with the engine before the inputs an archive's calls into it stay
+undefined.
+
 ### 10.2 Build tests
 
 `tests/build` holds small programs, one per behavior. Each program
@@ -699,7 +751,13 @@ the compile. It builds C modules ([5.4](#54-native-modules)) with arguments
 after `--`, under `-v`, `--deps`, and `-e`, checks that a C module wins over
 a source of the same name, that one that does not compile leaves no
 program, and that a bad module name, a C module with `-c`, and `--` with
-`-e` or `-c` are usage errors. Each case starts with old files and checks which remain, which
+`-e` or `-c` are usage errors. It builds archive modules with `ar`, links
+them with `-v`, `--deps` and `-e`, checks their place on the command line,
+that one without its init fails the link and leaves no program, and that a
+misnamed archive, a name given twice, and an archive with `-c` are usage
+errors. A built program prints its `sys.argv` (spaces, non-ASCII, and a
+byte that is not UTF-8), reads a file of the working directory, cannot
+open one above it, and runs from a removed working directory. Each case starts with old files and checks which remain, which
 are gone, and that no temporary file is left. For the interruptions, a
 stand-in compiler found first on `PATH` leaves a child that ignores the
 signal and writes the output later, so only stopping the whole process group

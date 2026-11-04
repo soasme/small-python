@@ -186,7 +186,12 @@ module of the standard layer, which the program then links (`spy-std.c`). A
 C module, `NAME.c` exporting `spy_init_NAME`, is compiled into the program
 and registered as `NAME`; the arguments after `--` go to the compiler, so
 `spyc -o pong pong.py raylib.c -- -lraylib` builds
-[`examples/pong`](../examples/pong) in one step. `-O`,
+[`examples/pong`](../examples/pong) in one step. An archive, `libNAME.a`
+with a member exporting `spy_init_NAME`, is linked in and registered as
+`NAME` the same way, whatever language built it:
+[`examples/jsonify`](../examples/jsonify) writes its `json` module in Rust.
+The program mounts its working directory and has its command line as
+`sys.argv`. `-O`,
 `-OO`, `--minify`, `--metafile`, `--deps`, `--analyze`, and `-v` complete the
 options. By default spyc outputs an executable (`a.out` without `-o`): it
 compiles a C file with a `main` that runs the entry, using the compiler and
@@ -708,7 +713,8 @@ language (PLS-315 Annex C lists the Core expressions). Every other module is
 the host's choice. A host registers modules with `spy_new_module`, and
 `spy_init_primitives` fills one with the engine primitives for modules written
 in Python: the module cache, frames, the recursion and integer-string limits,
-the handled exception, collection, the weak table, and host output. Hosts
+the handled exception, collection, the weak table, host output, and the
+command line. Hosts
 register it as `_spy`; a context where none did has no such module. A standard
 layer, `spy-std.c` (`libspy-std.a`, declared in `spy-std.h`), supplies the host
 module `sys`, written on those primitives and specified, after CPython 3.15,
@@ -854,6 +860,14 @@ owns every descriptor `open` creates and closes the rest when it is freed;
 other descriptors, such as the process's standard streams, are unreachable.
 The `spy` command mounts its working directory at its own path. File access
 needs a POSIX host; elsewhere `spy_mount` and `open` raise `OSError`.
+
+`spy_set_argv(ctx, argc, argv)` gives the context the program's command
+line, which the standard layer's `sys` copies into `sys.argv` and
+`sys.orig_argv` when it is first imported. The strings are copied and decoded
+as UTF-8 with `surrogateescape`, so any bytes are kept; it returns 0, or -1
+with `MemoryError`. Until a host sets it both lists are empty. Programs that
+`spyc` builds set it from `main`; the `spy` command does not yet, so its
+`sys.argv` is empty.
 
 `spy_new_module(ctx, name, init)` registers a module. An import finds it before the loader. The first import
 creates the module object with `__name__`, `__package__`, and `__builtins__`

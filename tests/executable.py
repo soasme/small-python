@@ -203,6 +203,83 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     assert (directory / "c modules/fib.c").read_text(encoding="utf-8") == (ROOT / "examples/fib.c").read_text(encoding="utf-8")
 print("C modules passed")
 
+# Archive modules (docs/build.md 5.4): libNAME.a is a compiled C module NAME,
+# as a Rust or C library builds it. It links where a C module compiles, after
+# the program and before the engine, so the program pulls its init from it and
+# it finds the engine's functions. One name is given once, whatever the form.
+def archive(directory, name, source, *flags):
+    """libNAME.a holding source compiled under the build's flags."""
+    flags = [*shlex.split(os.environ.get("CFLAGS", "-O2 -std=c11")), *flags]
+    subprocess.run([*shlex.split(os.environ.get("CC", "cc")), *flags, "-I", str(ROOT), "-c", "-o", f"{name}.o", source],
+                   cwd=directory, check=True)
+    subprocess.run(["ar", "rcs", f"lib{name}.a", f"{name}.o"], cwd=directory, check=True)
+    return directory / f"lib{name}.a"
+
+
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    directory = Path(temp)
+    (directory / "c modules").mkdir()
+    (directory / "c modules/answer.c").write_text(ANSWER, encoding="utf-8")
+    shutil.copy(ROOT / "examples/fib.c", directory / "c modules/fib.c")
+    archive(directory / "c modules", "answer", "answer.c", "-DANSWER=42")
+    archive(directory / "c modules", "fib", "fib.c")
+    (directory / "app.py").write_text("import answer, fib\nprint(answer.value, fib.fib(10))\n", encoding="utf-8")
+    (directory / "answer.py").write_text("value = 'source'\n", encoding="utf-8")
+    modules = ["c modules/libanswer.a", "c modules/fib.c"]
+    result = subprocess.run([str(ROOT / "spyc"), "-v", "--deps", "p.d", "-o", "prog", "app.py", *modules, "--", "-lm"],
+                            cwd=directory, check=True, capture_output=True, text=True)
+    assert " -x none c modules/libanswer.a c modules/fib.c -lm " + str(ROOT / "libspy.a") in result.stdout, result.stdout
+    assert (directory / "p.d").read_text(encoding="utf-8") == "prog: app.py c\\ modules/libanswer.a c\\ modules/fib.c\n"
+    (directory / "answer.py").unlink()
+    result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
+    assert result.stdout == "42 55\n", result
+    # -e declares and registers it; the host links the archive.
+    (directory / "app.py").write_text("import fib\nprint(fib.fib(20))\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "spyc"), "-e", "-o", "prog.c", "app.py", "c modules/libfib.a"], cwd=directory, check=True)
+    build(directory / "prog.c", directory / "c modules/libfib.a", binary=directory / "prog")
+    result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
+    assert result.stdout == "6765\n", result
+    # An archive without the init fails the link, leaving nothing.
+    (directory / "other.c").write_text("int spy_init_other_name(void) { return 0; }\n", encoding="utf-8")
+    archive(directory, "other", "other.c")
+    (directory / "prog").unlink()
+    result = subprocess.run([str(ROOT / "spyc"), "-o", "prog", "app.py", "c modules/libfib.a", "libother.a"],
+                            cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 1 and "spy_init_other" in result.stderr and not (directory / "prog").exists(), result
+    # An archive is named libNAME.a for an identifier NAME; a name comes once,
+    # since the linker would take an earlier init and never read the archive.
+    (directory / "prog").write_text("old", encoding="utf-8")
+    for args in (["app.py", "fib.a"], ["app.py", "c modules/fib.a"], ["app.py", "lib.a"], ["app.py", "li.a"],
+                 ["app.py", ".a"], ["app.py", "libfib-2.a"], ["app.py", "c modules/fib.c", "c modules/libfib.a"],
+                 ["app.py", "c modules/libfib.a", "c modules/libfib.a"], ["app.py", "c modules/fib.c", "c modules/fib.c"],
+                 ["-c", "app.py", "c modules/libfib.a"], ["-o", "c modules/libfib.a", "app.py", "c modules/libfib.a"]):
+        result = subprocess.run([str(ROOT / "spyc"), *args], cwd=directory, capture_output=True, text=True)
+        assert result.returncode == 2 and result.stderr.startswith("usage:"), (args, result)
+    assert (directory / "prog").read_text(encoding="utf-8") == "old"
+print("Archive modules passed")
+
+# The program's command line is sys.argv, decoded as UTF-8 with
+# surrogateescape, and open reaches the working directory, as under spy.
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    directory = Path(temp)
+    (directory / "app.py").write_text("import sys\nprint(sys.argv == sys.orig_argv, sys.argv is not sys.orig_argv, sys.argv)\n"
+                                      "with open(sys.argv[1]) as f:\n    print(f.read())\n", encoding="utf-8")
+    (directory / "data file").write_text("contents", encoding="utf-8")
+    subprocess.run([str(ROOT / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    result = subprocess.run([b"./prog", b"data file", "é".encode(), b"\xff", b""], cwd=directory, capture_output=True)
+    assert result.stdout == "True True ['./prog', 'data file', 'é', '\\udcff', '']\ncontents\n".encode(), result
+    # Outside the working directory nothing is reachable.
+    result = subprocess.run(["./prog", "../data file"], cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 1 and "Error" in result.stderr, result
+    # Without a working directory the mount fails or reaches nothing, and the
+    # program still runs.
+    (directory / "gone").mkdir()
+    (directory / "app.py").write_text("import sys\nprint(sys.argv[1:])\nopen('x')\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    result = subprocess.run("cd gone && rmdir ../gone && ../prog arg", shell=True, cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 1 and result.stdout == "['arg']\n" and "Error: " in result.stderr, result
+print("Command line and working directory passed")
+
 # spyc -c writes only the source, named after the input, for a host's main.
 HOST = """#include "spy.h"
 #include <stdio.h>

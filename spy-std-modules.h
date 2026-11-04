@@ -18,7 +18,7 @@ static const char *const module_sys[] = {
     "from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,\n",
     "                  set_int_max_str_digits, modules, maxsize, byteorder, platform, _getframe, lazy_modules,\n",
     "                  getrefcount, getallocatedblocks,\n",
-    "                  _write, _flush, _frame_module, _tracked, _setting)\n",
+    "                  _write, _flush, _frame_module, _tracked, _setting, argv as _argv)\n",
     "\n",
     "\n",
     "def _c_function(arity):\n",
@@ -156,8 +156,8 @@ static const char *const module_sys[] = {
     "    \"types\", \"typing\", \"unicodedata\", \"unittest\", \"urllib\", \"uuid\", \"venv\", \"warnings\", \"wave\",\n",
     "    \"weakref\", \"webbrowser\", \"winreg\", \"winsound\", \"wsgiref\", \"xml\", \"xmlrpc\", \"zipapp\", \"zipfile\",\n",
     "    \"zipimport\", \"zlib\", \"zoneinfo\"))\n",
-    "argv = []\n",
-    "orig_argv = []\n",
+    "argv = list(_argv)\n",
+    "orig_argv = list(_argv)\n",
     "path = []\n",
     "meta_path = []\n",
     "path_hooks = []\n",
@@ -769,7 +769,7 @@ static const char *const module_sys[] = {
     "                  excepthook, unraisablehook, settrace, gettrace, setprofile, getprofile):\n",
     "    _function.__qualname__ = _function.__name__\n",
     "del _function, _c_function, _one_argument, _settings, _tracing, _traceback_display, _reporting, _report_unraisable, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream\n",
-    "del _write, _flush, _frame_module, _tracked, _setting\n",
+    "del _write, _flush, _frame_module, _tracked, _setting, _argv\n",
 };
 static const struct { const char *name; const char *const *lines; size_t count; int package; } std_modules[] = {
     {"sys", module_sys, sizeof(module_sys) / sizeof(*module_sys), 0},

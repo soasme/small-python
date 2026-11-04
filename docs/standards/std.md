@@ -520,8 +520,10 @@ runs on its host's thread and has no lock of its own.
 environment; a host without them binds empty values and the flags of an
 isolated interpreter.
 
-*Status:* provided, with empty strings and lists; `flags` reports an
-isolated interpreter that writes no bytecode.
+*Status:* provided, with empty strings and lists, except `argv` and
+`orig_argv`, which hold the command line a host gives with `spy_set_argv`
+(programs built by `spyc` give theirs; the `spy` command does not yet);
+`flags` reports an isolated interpreter that writes no bytecode.
 
 ### 5.10 Text
 

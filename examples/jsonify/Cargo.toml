@@ -1,0 +1,25 @@
+[package]
+name = "json"
+description = "A json module for Small Python, written in Rust on serde_json"
+edition = "2021"
+publish = false
+
+# libjson.a, which spyc links into a program as the module json.
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+serde = "1"
+# Objects keep their key order, and numbers their text, as Python's json does.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "unbounded_depth"] }
+
+# A panic must not unwind into the engine's C frames.
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+# Its own workspace, apart from the crates in rust/.
+[workspace]

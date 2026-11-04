@@ -22,6 +22,7 @@ application. Run the scripts with `spy` from the repository root after
 | [`pong`](pong) | A raylib game whose logic is Python, calling a `raylib` module the host registers with `spy_new_module` |
 | [`flappy`](flappy) | `spyc` bundling a game package, dynamically imported themes and a sprite into one executable with a static raylib |
 | [`todo`](todo) | A Flask-style Python application served by a Rust host through the `small-python` crate |
+| [`jsonify`](jsonify) | A JSON pretty-printer whose `json` module is Rust on serde_json, linked by `spyc` as `libjson.a` |
 
 ## Elsewhere
 
