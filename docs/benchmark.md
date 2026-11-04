@@ -1,6 +1,6 @@
 # Benchmarks
 
-Engine: 0.6.0 (`af37fe2`). This report compares wall time
+Engine: `main` at `39c18ff`, after 0.6.0. This report compares wall time
 and peak memory of small programs on several Python implementations. It
 measures the current engine; it is not a compatibility claim.
 
@@ -55,7 +55,7 @@ idle machine.
 
 | Engine | Version | Build | Executable |
 | --- | --- | --- | --- |
-| spy | 0.6.0 (`af37fe2`) | `make`, Apple Clang 17, `-O2` | 1.5 MB |
+| spy | `39c18ff`, after 0.6.0 | `make`, Apple Clang 17, `-O2` | 1.5 MB |
 | CPython 3.15 | 3.15.2 (the pinned oracle) | `configure --without-ensurepip`, `-O3`, no PGO/LTO | 6.3 MB, plus `Lib/` |
 | CPython 3.14 | 3.14.3 | Homebrew bottle | Homebrew framework |
 | PyPy | 8.0.1, Python 3.11.17 | Homebrew bottle, JIT | 33 MB `libpypy3.11-c` |
@@ -65,12 +65,12 @@ idle machine.
 | MicroPython | 1.29.0, unix port | Homebrew bottle, `-X heapsize=512M` | 0.7 MB |
 
 The spy, CPython 3.15, CPython 3.14, PyPy and MicroPython columns are the
-median, cell by cell, of three runs of `bench/compare.py` at `af37fe2`
-(tag `v0.6.0`), with CPython 3.15.2 as the reference; memory is the largest
-of the three. Across the three runs every cell varied by at most 8% of its
-median (CPython 3.15's `fib`, 30.1–32.6 ms, and `loop`, 381–436 ms), and
-spy's by at most 4%, except `dicts`, whose first run took 70.2 ms against
-65.3 and 65.7 ms.
+median, cell by cell, of three runs of `bench/compare.py` at `39c18ff`,
+with CPython 3.15.2 as the reference; memory is the largest of the three.
+Across the three runs every cell varied by at most 4% of its median except
+four: CPython 3.14's `sort` (143.3–162.6 ms) and PyPy's `classes`
+(21.3–24.2 ms), whose first runs were slower, CPython 3.15's `bigint`
+(12.2–13.2 ms), and spy's `sort` (35.3–38.1 ms).
 PocketPy, RustPython and Monty are not built on this machine and were not
 re-measured; their columns come from the run at `ea4d579` on the same
 machine, with CPython 3.15.0 as the reference.
@@ -87,16 +87,16 @@ Median of the runs; lower is better.
 
 | Program | spy | CPython 3.15 | CPython 3.14 | PyPy | RustPython | PocketPy | Monty | MicroPython |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| startup | 2.5 ms | 10.9 ms | 18.7 ms | 16.9 ms | 27.8 ms | 2.9 ms | 4.0 ms | 3.0 ms |
-| fib | 34.8 ms | 30.2 ms | 42.5 ms | 28.1 ms | 99.1 ms | 38.7 ms | 65.2 ms | 38.5 ms |
-| loop | 151 ms | 413 ms | 372 ms | 25.3 ms | 634 ms | 218 ms | 368 ms | 229 ms |
-| nbody | 213 ms | 235 ms | 306 ms | 42.3 ms | 701 ms | 377 ms | 735 ms | 640 ms |
-| strings | 102 ms | 112 ms | 112 ms | 52.0 ms | 244 ms | 133 ms | 218 ms | 421 ms |
-| dicts | 65.7 ms | 95.2 ms | 94.9 ms | 49.0 ms | 171 ms | 72.5 ms | 328 ms | 41.47 s |
-| sort | 127 ms | 130 ms | 142 ms | 220 ms | 260 ms | 409 ms | 175 ms | 281 ms |
-| classes | 90.9 ms | 98.5 ms | 99.9 ms | 20.8 ms | 299 ms | 140 ms | 345 ms | 130 ms |
-| generators | 101 ms | 110 ms | 122 ms | 40.0 ms | 292 ms | 141 ms | error | 108 ms |
-| bigint | 6.5 ms | 12.2 ms | 20.0 ms | 19.5 ms | 29.3 ms | wrong | 4.9 ms | 14.9 ms |
+| startup | 2.6 ms | 11.0 ms | 19.2 ms | 17.3 ms | 27.8 ms | 2.9 ms | 4.0 ms | 3.1 ms |
+| fib | 31.8 ms | 30.7 ms | 43.6 ms | 27.8 ms | 99.1 ms | 38.7 ms | 65.2 ms | 38.2 ms |
+| loop | 153 ms | 386 ms | 376 ms | 25.3 ms | 634 ms | 218 ms | 368 ms | 230 ms |
+| nbody | 214 ms | 236 ms | 307 ms | 43.1 ms | 701 ms | 377 ms | 735 ms | 642 ms |
+| strings | 104 ms | 114 ms | 114 ms | 52.6 ms | 244 ms | 133 ms | 218 ms | 421 ms |
+| dicts | 69.2 ms | 91.9 ms | 94.3 ms | 49.1 ms | 171 ms | 72.5 ms | 328 ms | 41.54 s |
+| sort | 35.6 ms | 132 ms | 144 ms | 220 ms | 260 ms | 409 ms | 175 ms | 280 ms |
+| classes | 87.9 ms | 98.6 ms | 99.4 ms | 21.4 ms | 299 ms | 140 ms | 345 ms | 131 ms |
+| generators | 96.4 ms | 111 ms | 121 ms | 40.3 ms | 292 ms | 141 ms | error | 109 ms |
+| bigint | 6.5 ms | 12.3 ms | 20.6 ms | 19.7 ms | 29.3 ms | wrong | 4.9 ms | 14.9 ms |
 
 ### Peak memory
 
@@ -104,16 +104,16 @@ Largest peak resident set size of the runs, in MiB; lower is better.
 
 | Program | spy | CPython 3.15 | CPython 3.14 | PyPy | RustPython | PocketPy | Monty | MicroPython |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| startup | 2.8 | 13.0 | 14.6 | 29.1 | 31.6 | 3.5 | 9.9 | 7.6 |
+| startup | 2.9 | 13.0 | 14.6 | 29.1 | 31.6 | 3.5 | 9.9 | 7.6 |
 | fib | 3.0 | 13.0 | 14.6 | 32.3 | 31.9 | 3.5 | 10.1 | 7.6 |
 | loop | 2.9 | 13.0 | 14.6 | 31.3 | 31.7 | 3.5 | 10.1 | 7.6 |
 | nbody | 3.3 | 13.5 | 15.0 | 32.2 | 32.0 | 14.9 | 10.8 | 434.8 |
 | strings | 3.1 | 13.1 | 14.7 | 32.0 | 31.9 | 21.2 | 11.2 | 76.9 |
-| dicts | 50.0 | 45.5 | 46.9 | 70.8 | 82.9 | 19.2 | 30.1 | 36.7 |
-| sort | 84.4 | 36.6 | 38.2 | 48.4 | 90.3 | 229.2 | 42.2 | 89.5 |
-| classes | 3.1 | 13.1 | 14.6 | 32.0 | 31.9 | 30.2 | 10.8 | 25.9 |
+| dicts | 50.0 | 45.4 | 46.9 | 70.8 | 82.9 | 19.2 | 30.1 | 36.7 |
+| sort | 51.7 | 36.6 | 38.4 | 48.4 | 90.3 | 229.2 | 42.2 | 89.5 |
+| classes | 3.1 | 13.1 | 14.7 | 32.0 | 31.9 | 30.2 | 10.8 | 25.9 |
 | generators | 3.0 | 13.1 | 14.6 | 32.0 | 31.9 | 3.5 | — | 7.6 |
-| bigint | 3.2 | 13.1 | 14.6 | 31.7 | 32.0 | — | 11.1 | 8.6 |
+| bigint | 3.2 | 13.0 | 14.6 | 31.7 | 32.0 | — | 11.1 | 8.6 |
 
 ### Failures
 
@@ -125,9 +125,9 @@ Largest peak resident set size of the runs, in MiB; lower is better.
 ## Reading the results
 
 **Start-up and memory.** spy starts a process, runs `print` and exits in
-2.5 ms and stays under 4 MiB for every program that does not build large
+2.6 ms and stays under 4 MiB for every program that does not build large
 containers. PocketPy and MicroPython, the other two engines built for
-embedding, start in about the same time. On `sort` spy uses about 2.3
+embedding, start in about the same time. On `sort` spy uses about 1.4
 times CPython's memory and on `dicts` 10% more. Values are carved from
 16 KiB pools in three sizes: 96 bytes for a number, 112 for a string or
 bytes with room for 16 bytes of text or a tuple of up to three items, and
@@ -138,10 +138,14 @@ in blocks with a 16-byte header that records their size, so a context can
 count and limit what it holds; that header added about 5% to `dicts` and
 `sort` since 0.4.0.
 
-**Throughput.** spy took 0.37 times CPython 3.15.2's time on `loop`,
-0.53 on `bigint`, 0.69 on `dicts`, 0.91 on `strings`, `generators` and
-`nbody` and 0.92 on `classes`, was within 3% on `sort`, and took 15%
-longer on `fib`. spy has no
+**Throughput.** spy took 0.27 times CPython 3.15.2's time on `sort`,
+0.40 on `loop`, 0.53 on `bigint`, 0.75 on `dicts`, 0.87 on `generators`,
+0.89 on `classes` and 0.91 on `strings` and `nbody`, and took 4% longer
+on `fib`. Against 0.6.0, `sort` fell from 127 to 35.6 ms. Built at
+eight code layouts and timed alternately against `35cc21f`, the commit
+before cycles were collected automatically, `dicts` measured 2.2% slower,
+`strings` 1.4% and `loop` 1.0%; about 1.4% of `dicts` is the automatic
+collection. spy has no
 bytecode compiler and no JIT. Ordinary code is evaluated by walking the
 syntax tree (`eval` in `spy.c`); suspendable bodies run on an instruction
 list that still points into the tree. Syntax nodes cache what can be
@@ -151,18 +155,21 @@ evaluation, and how a class's instances answer an attribute read, an
 assignment or a method call. [optimization.md](optimization.md) records
 each change behind these numbers.
 
-- `loop` runs in about a third of CPython's time, `bigint` in half and
-  `dicts` in under three quarters. `loop` does a few operations per iteration on small integers,
+- `sort` runs in about a quarter of CPython's time, `loop` in two fifths,
+  `bigint` in half and `dicts` in three quarters. `sort` packs keys of
+  one kind into an array of machine numbers: ints, floats without a NaN
+  and pairs of ints whose spans fit together sort by radix, other keys by
+  a merge of natural runs that compares without branching; tuples of
+  numbers stay out of the cycle collector's list. `loop` does a few operations per iteration on small integers,
   which spy keeps inline in the value and reads without evaluating the
   operand nodes. Big integers divide with Knuth's algorithm D and multiply
   with Karatsuba above 40 32-bit digits. A dictionary removal leaves a
   hole in the entry array rather than shifting the entries after it.
-- `strings`, `generators`, `nbody` and `classes` are 8–10% faster than
-  CPython, and `sort` within 3%; `sort` merges natural runs and compares
-  keys of one kind without dispatch.
+- `strings`, `generators`, `nbody` and `classes` are 9–13% faster than
+  CPython.
 - `fib` is the furthest behind. It is almost all calls, and each call
   still binds its arguments into an environment and recurses in C:
-  about 51 ns a call against CPython's 30.
+  about 46 ns a call against CPython's 31.
 
 These are implementation gaps, not language choices. MicroPython's 41 s on
 `dicts` comes from its own implementation and was not investigated.
@@ -171,12 +178,12 @@ These are implementation gaps, not language choices. MicroPython's 41 s on
 
 `make bench` measures the embedding path without a process: it creates a
 context, executes `print('Hello, world!')` with output discarded, and frees
-the context, 20,000 times. On the build above it reports **191 µs of CPU time
-per lifecycle** (three runs: 191.26, 193.55, 189.18 µs), down from 257 µs
-at 0.3.0. The 186 µs reported for 0.5.0 was the machine, not the engine:
+the context, 20,000 times. On the build above it reports **190 µs of CPU time
+per lifecycle** (three runs: 190.88, 189.30, 189.97 µs), down from 257 µs
+at 0.3.0; 0.6.0 measured 191 µs. The 186 µs reported for 0.5.0 was the machine, not the engine:
 run alternately on the same day, 0.5.0 (`f1f274d`) took 188.86–190.60 µs
 and 0.6.0 189.12–190.13 µs, and `sort` 129.8 and 129.4 ms. The Mach-O `__TEXT` segment of `spy` is 1,392,640 bytes and the
-executable 1,509,472 bytes.
+executable 1,509,984 bytes.
 
 ## Programs built with spyc
 
