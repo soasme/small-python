@@ -130,6 +130,19 @@ public final class Interpreter implements AutoCloseable {
         check(Native.newModule(enter(), name(name)));
     }
 
+    /**
+     * Opens the shared library at path, a native module built with
+     * {@code spy-module.h}, and registers it as name, so that
+     * {@code import name} runs its init. The policy is asked first, with
+     * {@code "dlopen"} (name, path). A library that fails to load is closed
+     * and raises ImportError; one that loads stays open for the life of the
+     * process. Its code runs outside the policy and the limits, with the
+     * process's rights.
+     */
+    public synchronized void loadNative(String name, Path path) {
+        check(Native.loadNative(enter(), name(name), name(path.toString())));
+    }
+
     /** Runs source with module's namespace as its globals. */
     public synchronized void execModule(PyObject module, String source, String filename) {
         long m = ref(module);
@@ -182,8 +195,9 @@ public final class Interpreter implements AutoCloseable {
     /**
      * Asks policy before {@code open} (file, mode), a module's first
      * {@code import} (name), {@code exec}, {@code eval} or {@code compile} of a
-     * string ("exec": source), and {@code input} (prompt, if given). With
-     * null, everything is allowed.
+     * string ("exec": source), {@code input} (prompt, if given), and
+     * {@link #loadNative} ("dlopen": name, path). With null, everything is
+     * allowed.
      */
     public synchronized void setPolicy(Policy policy) {
         Native.setPolicy(enter(), policy != null);

@@ -23,6 +23,7 @@ final class Native {
     static native int setGlobal(long ctx, String name, long value);
     static native long function(long ctx, String name, HostFunction f);
     static native int newModule(long ctx, String name);
+    static native int loadNative(long ctx, String name, String path);
     static native void setOutput(long ctx, boolean on);
     static native void setLoader(long ctx, boolean on);
     static native void setPolicy(long ctx, boolean on);

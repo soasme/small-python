@@ -73,6 +73,7 @@ itself has no default and raises `OSError` from `print` without one.
 | `Get(name)`, `Set(name, value)` | `spy_get_global`, `spy_set_global` |
 | `Function(name, f)`, `Define(name, f)` | `spy_native` with a release callback, then `spy_set_global` |
 | `RegisterModule(name, init)`, `ExecModule(module, source, filename)` | `spy_new_module`, `spy_exec_module` |
+| `LoadNative(name, path)` | `spy_std_load_native` |
 | `SetOutput(w)`, `SetLoader(f)` | `spy_set_output` with an `io.Writer`, `spy_set_module_loader` |
 | `Mount(directory, path, readOnly)` | `spy_mount`; an empty `path` is `NULL` |
 | `SetStepLimit(n)`, `StepsUsed()`, `SetOptimize(level)`, `Collect()` | the same names |
@@ -155,7 +156,8 @@ Source containing NUL raises `SyntaxError`; a name containing NUL raises
 ### 3.5 Trust
 
 As `rust.md` §3.5: the engine runs in the Go process. Use `spy` for code
-you trust; for anything else use `worker`.
+you trust; for anything else use `worker`. `LoadNative` trusts the library
+completely, as `rust.md` §3.5 says.
 
 ## 4 `worker`
 

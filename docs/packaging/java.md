@@ -91,6 +91,7 @@ send output to `System.out`, as the worker does.
 | `get(name)`, `set(name, value)` | `spy_get_global`, `spy_set_global` |
 | `function(name, f)`, `define(name, f)` | `spy_native` with a release callback, then `spy_set_global` |
 | `registerModule(name, init)`, `execModule(module, source, filename)` | `spy_new_module`, `spy_exec_module` |
+| `loadNative(name, path)` | `spy_std_load_native` |
 | `setOutput(appendable)`, `setLoader(loader)` | `spy_set_output`, `spy_set_module_loader` |
 | `mount(directory, path, readOnly)` | `spy_mount`; a null `path` is `NULL` |
 | `setLimit(limit, n)`, `getLimit(limit)` | `spy_set_limit`, `spy_get_limit` |
@@ -187,7 +188,8 @@ NUL raises `ValueError`.
 
 As `rust.md` §3.5: the engine runs in the JVM's address space. Use
 `small-python` for code you trust; for anything else use
-`small-python-worker`. `System.load` is a restricted method from Java 24
+`small-python-worker`. `loadNative` trusts the library completely, as
+`rust.md` §3.5 says. `System.load` is a restricted method from Java 24
 on, so programs on the module path pass `--enable-native-access` for the
 module, and those on the class path `--enable-native-access=ALL-UNNAMED`,
 to silence the JVM's warning.

@@ -112,7 +112,13 @@ py.setLoader(name -> sources.get(name));            // null: no such module
 StringBuilder out = new StringBuilder();
 py.setOutput(out);                                  // System.out by default
 py.mount(Path.of("/srv/reports"), "/data", true);   // open() reaches only this
+py.loadNative("fib", Path.of("/opt/app/fib.so"));   // import fib runs its init
 ```
+
+`loadNative` opens a shared library built with `spy-module.h` (see
+`examples/fib.c` in the repository) after asking the policy about
+`"dlopen"`. Its code runs in the JVM with the process's rights, outside
+every limit; load only libraries you trust.
 
 A host function that throws `new PythonException("KeyError", "missing")`
 raises `KeyError` in the engine; any other exception raises `RuntimeError`

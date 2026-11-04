@@ -158,8 +158,9 @@ engine values it is given.
 
 ### Modules and imports
 
-A runtime imports only builtin modules, the modules you register, and the
-sources your loader returns. It never reads the file system to import.
+A runtime imports only builtin modules, the modules you register, the
+native modules you load, and the sources your loader returns. It never
+searches the file system to import.
 
 ```go
 rt.RegisterModule("config", func(rt *spy.Runtime, module *spy.Value) error {
@@ -179,6 +180,12 @@ rt.Exec("import config, shapes")
 `JS_NewCModule` does. The loader receives module names: for `import pkg.mod`
 it is asked for `pkg.mod.__init__` (a package), then `pkg.mod`, then
 `pkg.mod.__namespace__` (a namespace package).
+
+`rt.LoadNative("fib", "/opt/app/fib.so")` registers a native module, a
+shared library built with `spy-module.h` (see `examples/fib.c` in the
+repository), so that `import fib` runs its init. The policy is asked
+first, with `"dlopen"`. Its code runs in your process with your process's
+rights, outside every limit; load only libraries you trust.
 
 ### Output
 

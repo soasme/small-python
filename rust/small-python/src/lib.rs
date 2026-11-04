@@ -183,6 +183,18 @@ impl Runtime {
         self.check(unsafe { ffi::spy_new_module(self.ctx(), cname.as_ptr(), init_module) })
     }
 
+    /// Opens the shared library at `path`, a native module built with
+    /// `spy-module.h`, and registers it as `name`, so that `import name` runs
+    /// its init. The policy is asked first, with `"dlopen"` (name, path). A
+    /// library that fails to load is closed and raises `ImportError`; one
+    /// that loads stays open for the life of the process. Its code runs
+    /// outside the policy and the limits, with the process's rights.
+    pub fn load_native(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
+        let name = c_name(name)?;
+        let path = c_path(path.as_ref())?;
+        self.check(unsafe { ffi::spy_std_load_native(self.ctx(), name.as_ptr(), path.as_ptr()) })
+    }
+
     /// Runs `source` with `module`'s namespace as its globals.
     pub fn exec_module(&self, module: &Value<'_>, source: &str, filename: &str) -> Result<()> {
         let source = c_source(source)?;
@@ -209,8 +221,7 @@ impl Runtime {
     /// Lets `open()` reach `directory` at the absolute engine path `path`
     /// (default: the directory's own resolved path).
     pub fn mount(&self, directory: impl AsRef<Path>, path: Option<&str>, read_only: bool) -> Result<()> {
-        let directory = directory.as_ref().to_str().ok_or_else(|| Error::new("ValueError", "path is not UTF-8"))?;
-        let directory = c_name(directory)?;
+        let directory = c_path(directory.as_ref())?;
         let path = path.map(c_name).transpose()?;
         let flags = if read_only { ffi::SPY_MOUNT_READ_ONLY } else { 0 };
         let path = path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
@@ -235,8 +246,9 @@ impl Runtime {
     }
 
     /// Asks `policy` before `open` (`"open"`), a module's first import
-    /// (`"import"`), `exec`, `eval` or `compile` of a string (`"exec"`) and
-    /// `input` (`"input"`), with the event's arguments. An error refuses the
+    /// (`"import"`), `exec`, `eval` or `compile` of a string (`"exec"`),
+    /// `input` (`"input"`) and [`Runtime::load_native`] (`"dlopen"`), with
+    /// the event's arguments. An error refuses the
     /// action and is raised in its place.
     pub fn set_policy(
         &self,
@@ -421,6 +433,10 @@ pub(crate) fn cstring(text: &str) -> CString {
 
 pub(crate) fn c_name(name: &str) -> Result<CString> {
     CString::new(name).map_err(|_| Error::new("ValueError", "embedded null character"))
+}
+
+fn c_path(path: &Path) -> Result<CString> {
+    c_name(path.to_str().ok_or_else(|| Error::new("ValueError", "path is not UTF-8"))?)
 }
 
 fn c_source(source: &str) -> Result<CString> {

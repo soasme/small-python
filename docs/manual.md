@@ -1048,6 +1048,15 @@ Programs built with `spyc` do not load shared libraries: they are
 self-contained, and native code is compiled into them instead
 ([Building programs 5.4](build.md#54-native-modules)).
 
+The in-process Go, Rust and Java bindings call `spy_std_load_native` as
+`LoadNative`, `load_native` and `loadNative`
+([packaging/go.md](packaging/go.md), [rust.md](packaging/rust.md),
+[java.md](packaging/java.md)). A library links to the engine copy that
+loads it first, so it loads into every runtime of that binding in the
+process, and another copy of the engine refuses it. The worker bindings do not load
+native modules: the worker exists to keep the engine apart from the host, and
+native code would run outside that boundary.
+
 ### 3.5 Python binding
 
 The `small-python` package (in `python/`, imported as `small_python`) runs

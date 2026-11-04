@@ -72,6 +72,7 @@ layer (`spy_std_init`); `Runtime::bare()` has only the core and its
 | `get::<T>(name)`, `set(name, value)` | `spy_get_global`, `spy_set_global` |
 | `function(name, f)`, `define(name, f)` | `spy_native` with a release callback, then `spy_set_global` |
 | `register_module(name, init)`, `exec_module(module, source, filename)` | `spy_new_module`, `spy_exec_module` |
+| `load_native(name, path)` | `spy_std_load_native` |
 | `set_output(f)`, `set_loader(f)` | `spy_set_output`, `spy_set_module_loader` |
 | `mount(directory, path, read_only)` | `spy_mount` |
 | `set_step_limit(n)`, `steps_used()`, `set_optimize(level)`, `collect()` | the same names |
@@ -146,6 +147,13 @@ write, and in the loader it counts as no source. Source containing NUL raises
 The engine runs in the Rust process. A memory-safety bug in it, or in code
 that exploits one, is a bug in the program. Use `small-python` for code you
 trust; for anything else use `small-python-worker`.
+
+`load_native` opens a native module (manual 3.4.9) in the process. The
+policy decides first, with `"dlopen"` (name, path); once allowed, the
+library's code runs with the process's rights, outside the mounts, the
+policy, and the step and memory budgets, so allowing it trusts the library
+completely. The workers have no counterpart: a native module there would
+run inside the sandbox the worker exists to keep.
 
 ## 4 `small-python-worker`
 

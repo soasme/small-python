@@ -258,7 +258,7 @@ test-binding: spy-worker
 	PYTHONPATH=$(OBJDIR)/binding python3 -m unittest discover -s python/tests
 
 # The Rust crates (rust/, docs/packaging/rust.md) compile the engine with cc themselves.
-test-rust:
+test-rust: examples/fib.so
 	cd rust && cargo test --workspace --all-features
 	cd examples/todo && cargo test
 
@@ -282,7 +282,7 @@ go/licenses/%: docs/licenses/%
 	mkdir -p go/licenses
 	cp $< $@
 
-test-go: go-vendor spy-worker
+test-go: go-vendor spy-worker examples/fib.so
 	cd go && go vet ./... && go test ./...
 
 # The Java artifacts (java/, docs/packaging/java.md). Each jar carries its
@@ -310,7 +310,7 @@ java/licenses/LICENSE: LICENSE
 	cp $< $@
 java-native: java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY) java/small-python-worker/$(JAVA_NATIVE)/spy-worker$(JAVA_EXE) java/licenses/LICENSE java/licenses/python.txt java/licenses/unicode.txt
 
-test-java: java-native
+test-java: java-native examples/fib.so
 	cd java && mvn -B -q verify
 
 # libFuzzer targets, as QuickJS's fuzz/: run them as described in fuzz/README.

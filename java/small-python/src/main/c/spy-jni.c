@@ -278,6 +278,14 @@ JNIEXPORT jint NATIVE(newModule)(JNIEnv *env, jclass cls, jlong ctx, jstring nam
     return status;
 }
 
+JNIEXPORT jint NATIVE(loadNative)(JNIEnv *env, jclass cls, jlong ctx, jstring name, jstring path) {
+    (void)cls;
+    char *n = utf8(env, name, NULL), *p = n ? utf8(env, path, NULL) : NULL;
+    int status = p ? spy_std_load_native(CTX(ctx), n, p) : -1;
+    free(n), free(p);
+    return status;
+}
+
 JNIEXPORT void NATIVE(setOutput)(JNIEnv *env, jclass cls, jlong ctx, jboolean on) {
     (void)env, (void)cls;
     spy_set_output(CTX(ctx), on ? write_output : NULL, NULL, NULL);

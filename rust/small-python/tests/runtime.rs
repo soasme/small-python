@@ -233,3 +233,63 @@ fn policy() {
     rt.check_policy("storage.save", ()).unwrap();
     assert_eq!(events.lock().unwrap().join(" "), "exec/1 net.fetch/1 storage.save/0");
 }
+
+/// The example native module the Makefile builds (make examples/fib.so).
+fn fib() -> std::path::PathBuf {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fib.so");
+    path.canonicalize().unwrap_or_else(|e| panic!("{}: {e}; build it with make examples/fib.so", path.display()))
+}
+
+#[test]
+fn loads_native_modules() {
+    let path = fib();
+    let rt = Runtime::new().unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let log = events.clone();
+    rt.set_policy(move |_, event, args| {
+        if event != "dlopen" {
+            return Ok(());
+        }
+        let (name, file) = (args[0].extract::<String>()?, args[1].extract::<String>()?);
+        log.lock().unwrap().push(format!("{name} {file}"));
+        if name == "refused" {
+            Err(Error::new("PermissionError", "no native code"))
+        } else {
+            Ok(())
+        }
+    });
+    rt.load_native("fib", &path).unwrap();
+    assert_eq!(rt.eval::<i64>("__import__('fib').fib(50)").unwrap(), 12586269025);
+    let error = rt.exec("import fib\nfib.fib(-1)").unwrap_err();
+    assert_eq!(error.to_string(), "ValueError: fib() argument must be in 0..92");
+
+    let error = rt.load_native("refused", &path).unwrap_err();
+    assert_eq!(error.to_string(), "PermissionError: no native code");
+    let shown = path.display();
+    assert_eq!(events.lock().unwrap().join("|"), format!("fib {shown}|refused {shown}"));
+    assert_eq!(rt.exec("import refused").unwrap_err().type_name, "ModuleNotFoundError");
+
+    assert_eq!(rt.load_native("missing", path.with_extension("missing")).unwrap_err().type_name, "ImportError");
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/runtime.rs");
+    assert_eq!(rt.load_native("source", source).unwrap_err().type_name, "ImportError");
+    let error = rt.load_native("other", &path).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "ImportError: dynamic module does not define module export function (spy_init_other)"
+    );
+    assert_eq!(rt.load_native("fib\0", &path).unwrap_err().type_name, "ValueError");
+    assert_eq!(rt.exec("import missing").unwrap_err().type_name, "ModuleNotFoundError");
+}
+
+/// The library stays open and linked to this engine, so a second runtime
+/// loads it again, and the module of each is its own.
+#[test]
+fn loads_native_modules_in_every_runtime() {
+    let path = fib();
+    let (a, b) = (Runtime::new().unwrap(), Runtime::new().unwrap());
+    a.load_native("fib", &path).unwrap();
+    a.exec("import fib\nfib.mark = 1").unwrap();
+    b.load_native("fib", &path).unwrap();
+    assert!(!b.eval::<bool>("hasattr(__import__('fib'), 'mark')").unwrap());
+    assert_eq!(b.eval::<i64>("__import__('fib').fib(10)").unwrap(), 55);
+}

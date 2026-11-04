@@ -1,17 +1,20 @@
 ------------------------------ MODULE SpyNative ------------------------------
 (***************************************************************************)
-(* Native modules (manual 3.2, spy-module.h) as the spy command imports    *)
-(* one name: what the import finds, opens, leaves behind and raises. TLC   *)
-(* checks every file layout, library, init outcome and policy answer, and  *)
-(* every sequence of imports and removals from sys.modules:                *)
+(* Native modules (manual 3.4.9, spy-module.h) as the spy command imports  *)
+(* one name, and as an in-process binding's LoadNative loads the name's   *)
+(* library: what each finds, opens, leaves behind and raises. TLC checks   *)
+(* every file layout, library, init outcome and policy answer, and every   *)
+(* sequence of imports, host loads and removals from sys.modules:          *)
 (*                                                                         *)
-(*  - A library is opened only with the policy's leave for "import" and    *)
-(*    "dlopen". One that fails to load is closed; one that loads stays     *)
-(*    open, once per context.                                              *)
+(*  - A library is opened only with the policy's leave: "import" and      *)
+(*    "dlopen" for an import, "dlopen" for a host load. One that fails to  *)
+(*    load is closed; one that loads stays open. An import opens it at     *)
+(*    most once per context; each host load that succeeds holds one more.  *)
 (*  - The engine's table goes only to a library no other engine in the     *)
 (*    process linked, and an init runs only with it.                       *)
 (*  - A package directory comes first, then NAME.so, then NAME.py; nothing *)
-(*    is "not found" while any of them exists.                             *)
+(*    is "not found" while any of them exists. After a host load, every    *)
+(*    import runs the library's init, whatever the directory holds.        *)
 (*  - sys.modules holds a native module only after its init succeeded; a   *)
 (*    failed init runs again on the next import, without opening again.    *)
 (*                                                                         *)
@@ -31,6 +34,9 @@
 (*    open closes the library, and every failure raises ImportError.       *)
 (*  - An init that fails without raising becomes SystemError; a failed     *)
 (*    import leaves no entry in sys.modules.                               *)
+(*  - LoadNative (Go), load_native (Rust) and loadNative (Java) call       *)
+(*    spy_std_load_native with NAME.so's path, outside any import: it      *)
+(*    registers the init and leaves sys.modules alone.                     *)
 (***************************************************************************)
 EXTENDS Naturals
 
@@ -48,15 +54,17 @@ Errors == {"", "PermissionError", "ImportError", "ModuleNotFoundError", "ValueEr
 
 VARIABLES dir, so, py, init, foreign,                 \* the environment
           cache, registered, handles, link, err,      \* spy's
-          opens, loads, breach, unlinked              \* ghosts
+          opens, loads, breach, unlinked, hosted,     \* ghosts
+          stale
 
-vars == <<dir, so, py, init, foreign, cache, registered, handles, link, err, opens, loads, breach, unlinked>>
+vars == <<dir, so, py, init, foreign, cache, registered, handles, link, err, opens, loads, breach, unlinked, hosted, stale>>
 env == <<dir, so, py, init, foreign>>
 
 Init == /\ dir \in Dirs /\ so \in Sos /\ py \in BOOLEAN /\ init \in Inits /\ foreign \in BOOLEAN
         /\ cache = "none" /\ registered = FALSE /\ handles = 0
         /\ link = (IF foreign THEN "theirs" ELSE "none") /\ err = ""
         /\ opens = 0 /\ loads = 0 /\ breach = FALSE /\ unlinked = FALSE
+        /\ hosted = 0 /\ stale = FALSE
 
 \* The registered init runs in the new module, with the library linked to
 \* l: sys.modules keeps the module only when the init succeeded.
@@ -87,13 +95,30 @@ Import(importing, dlopening) ==
        ELSE IF dir = "namespace" THEN Finds("namespace") /\ UNCHANGED opens
        ELSE Fails("ModuleNotFoundError") /\ UNCHANGED opens
     /\ breach' = (breach \/ (opens' > opens /\ ~(importing /\ dlopening)))
+    /\ stale' = FALSE /\ UNCHANGED <<env, hosted>>
+
+\* A binding's LoadNative(NAME, NAME.so), with the policy's answer about
+\* "dlopen": what does not open fails before an open, as dlopen does; what
+\* loads is registered, and sys.modules keeps what it held.
+HostLoad(allowed) ==
+    /\ IF ~allowed THEN Fails("PermissionError") /\ UNCHANGED opens
+       ELSE IF so \notin Libraries THEN Fails("ImportError") /\ UNCHANGED opens
+       ELSE /\ opens' = opens + 1
+            /\ IF so \in {"plain", "misnamed", "old"} \/ link = "theirs" THEN Fails("ImportError")
+               ELSE /\ link' = "ours" /\ registered' = TRUE /\ handles' = handles + 1 /\ loads' = loads + 1
+                    /\ err' = "" /\ UNCHANGED <<cache, unlinked>>
+    /\ hosted' = IF registered' /\ handles' > handles THEN hosted + 1 ELSE hosted
+    /\ stale' = IF hosted' > hosted THEN cache # "none" ELSE stale
+    /\ breach' = (breach \/ (opens' > opens /\ ~allowed))
     /\ UNCHANGED env
 
 \* del sys.modules[NAME]
 Remove == /\ cache # "none" /\ cache' = "none" /\ err' = ""
-          /\ UNCHANGED <<env, registered, handles, link, opens, loads, breach, unlinked>>
+          /\ stale' = FALSE
+          /\ UNCHANGED <<env, registered, handles, link, opens, loads, breach, unlinked, hosted>>
 
 Next == \/ \E importing, dlopening \in BOOLEAN : Import(importing, dlopening)
+        \/ \E allowed \in BOOLEAN : HostLoad(allowed)
         \/ Remove
 
 Spec == Init /\ [][Next]_vars
@@ -104,17 +129,21 @@ Small == opens <= 3
 TypeOK == /\ dir \in Dirs /\ so \in Sos /\ py \in BOOLEAN /\ init \in Inits /\ foreign \in BOOLEAN
           /\ cache \in {"none", "native", "package", "source", "namespace"}
           /\ registered \in BOOLEAN /\ handles \in Nat /\ link \in {"none", "ours", "theirs"} /\ err \in Errors
+          /\ hosted \in Nat /\ stale \in BOOLEAN
 
-\* A library is opened only with both leaves, and stays open once.
+\* A library is opened only with the leaves it needs; an import keeps it
+\* open once, and each host load one more time.
 PolicyGates == ~breach
-OpenOnce == handles <= 1
+OpenOnce == handles <= hosted + 1
 \* What failed to load was closed: every open handle is a load.
 NothingLeftOpen == handles = loads
 \* Another engine's table is never replaced, and inits run with ours.
 TableKept == foreign => link = "theirs"
 InitLinked == ~unlinked
 \* A package before NAME.so before NAME.py; not found means none exists.
-PackageFirst == dir = "package" => cache \in {"none", "package"}
+PackageFirst == dir = "package" /\ hosted = 0 => cache \in {"none", "package"}
+\* After a host load, what an import caches is the library's module.
+HostFirst == hosted > 0 /\ ~stale => cache \in {"none", "native"}
 NativeFirst == cache = "source" => so \notin Libraries
 NotFoundAbsent == err = "ModuleNotFoundError" => dir = "none" /\ ~py /\ so \notin Libraries
 \* A cached native module was initialized.

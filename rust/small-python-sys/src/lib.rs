@@ -190,6 +190,7 @@ extern "C" {
 
     pub fn spy_std_init_module(c: *mut SPYContext, name: *const c_char) -> c_int;
     pub fn spy_std_init(c: *mut SPYContext) -> c_int;
+    pub fn spy_std_load_native(c: *mut SPYContext, name: *const c_char, path: *const c_char) -> c_int;
 }
 
 #[cfg(test)]

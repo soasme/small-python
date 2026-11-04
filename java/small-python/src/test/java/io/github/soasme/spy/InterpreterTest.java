@@ -285,6 +285,55 @@ class InterpreterTest {
         py.exec("exec('1')");
     }
 
+    /** The example native module the Makefile builds (make examples/fib.so). */
+    private static Path fib() {
+        Path path = Path.of("../../examples/fib.so").toAbsolutePath().normalize();
+        assertTrue(Files.isRegularFile(path), path + ": build it with make examples/fib.so");
+        return path;
+    }
+
+    @Test
+    void loadsNativeModules() {
+        Path path = fib();
+        List<String> events = new ArrayList<>();
+        py.setPolicy((event, args) -> {
+            if (!event.equals("dlopen")) return;
+            String name = args.get(0).as(String.class);
+            events.add(name + " " + args.get(1).as(String.class));
+            if (name.equals("refused")) throw new SecurityException("no native code");
+        });
+        py.loadNative("fib", path);
+        assertEquals(12586269025L, eval("__import__('fib').fib(50)", Long.class));
+        assertEquals("ValueError: fib() argument must be in 0..92",
+                raises(() -> py.exec("import fib\nfib.fib(-1)")).getMessage());
+
+        assertEquals("PermissionError: no native code", raises(() -> py.loadNative("refused", path)).getMessage());
+        assertEquals(List.of("fib " + path, "refused " + path), events);
+        assertEquals("ModuleNotFoundError", raises(() -> py.exec("import refused")).getType());
+
+        assertEquals("ImportError", raises(() -> py.loadNative("missing", Path.of(path + ".missing"))).getType());
+        Path source = Path.of("src/test/java/io/github/soasme/spy/InterpreterTest.java").toAbsolutePath();
+        assertEquals("ImportError", raises(() -> py.loadNative("source", source)).getType());
+        assertEquals("ImportError: dynamic module does not define module export function (spy_init_other)",
+                raises(() -> py.loadNative("other", path)).getMessage());
+        assertEquals("ValueError", raises(() -> py.loadNative("fib\0", path)).getType());
+        assertEquals("ModuleNotFoundError", raises(() -> py.exec("import missing")).getType());
+    }
+
+    /** The library stays open and linked to this engine, so a second interpreter loads it again, with its own module. */
+    @Test
+    void loadsNativeModulesInEveryInterpreter() {
+        Path path = fib();
+        py.loadNative("fib", path);
+        py.exec("import fib\nfib.mark = 1");
+        Interpreter other = Interpreter.create();
+        other.loadNative("fib", path);
+        assertFalse(other.eval("hasattr(__import__('fib'), 'mark')").as(Boolean.class));
+        assertEquals(55L, other.eval("__import__('fib').fib(10)").as(Long.class));
+        other.close();
+        assertThrows(IllegalStateException.class, () -> other.loadNative("fib", path));
+    }
+
     @Test
     @DisabledOnOs(value = OS.WINDOWS, disabledReason = "the engine has no file system support on Windows")
     void mounts(@TempDir Path dir) throws IOException {

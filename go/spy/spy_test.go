@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -312,4 +314,73 @@ func TestPolicy(t *testing.T) {
 	if err := rt.Exec("exec('1')"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// fib is the example native module the Makefile builds (make examples/fib.so).
+func fib(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs("../../examples/fib.so")
+	if err == nil {
+		_, err = os.Stat(path)
+	}
+	if err != nil {
+		t.Fatalf("%v: build it with make examples/fib.so", err)
+	}
+	return path
+}
+
+func TestLoadNative(t *testing.T) {
+	path := fib(t)
+	rt := newRuntime(t)
+	var events []string
+	rt.SetPolicy(func(event string, args []*spy.Value) error {
+		if event == "dlopen" {
+			name, _ := spy.As[string](args[0], nil)
+			file, _ := spy.As[string](args[1], nil)
+			events = append(events, name+" "+file)
+			if name == "refused" {
+				return errors.New("no native code")
+			}
+		}
+		return nil
+	})
+	if err := rt.LoadNative("fib", path); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, eval[int](t, rt, "__import__('fib').fib(50)"), 12586269025)
+	e := exception(t, rt.Exec("import fib\nfib.fib(-1)"))
+	equal(t, e.Type+": "+e.Message, "ValueError: fib() argument must be in 0..92")
+
+	e = exception(t, rt.LoadNative("refused", path))
+	equal(t, e.Type+": "+e.Message, "PermissionError: no native code")
+	equal(t, strings.Join(events, "|"), "fib "+path+"|refused "+path)
+	equal(t, exception(t, rt.Exec("import refused")).Type, "ModuleNotFoundError")
+
+	equal(t, exception(t, rt.LoadNative("missing", path+".missing")).Type, "ImportError")
+	source, _ := filepath.Abs("spy_test.go")
+	equal(t, exception(t, rt.LoadNative("source", source)).Type, "ImportError")
+	e = exception(t, rt.LoadNative("other", path))
+	equal(t, e.Type+": "+e.Message, "ImportError: dynamic module does not define module export function (spy_init_other)")
+	equal(t, exception(t, rt.LoadNative("fib\x00", path)).Type, "ValueError")
+	equal(t, exception(t, rt.Exec("import missing")).Type, "ModuleNotFoundError")
+}
+
+// The library stays open and linked to this engine, so a second runtime
+// loads it again, and the module of each is its own.
+func TestLoadNativeInEveryRuntime(t *testing.T) {
+	path := fib(t)
+	a, b := newRuntime(t), newRuntime(t)
+	if err := a.LoadNative("fib", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Exec("import fib\nfib.mark = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.LoadNative("fib", path); err != nil {
+		t.Fatal(err)
+	}
+	equal(t, eval[bool](t, b, "hasattr(__import__('fib'), 'mark')"), false)
+	equal(t, eval[int](t, b, "__import__('fib').fib(10)"), 55)
+	b.Close()
+	equal(t, b.LoadNative("fib", path), spy.ErrClosed)
 }

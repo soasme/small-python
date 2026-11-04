@@ -212,6 +212,26 @@ func (rt *Runtime) RegisterModule(name string, init func(rt *Runtime, module *Va
 	return rt.check(C.spy_go_new_module(rt.ctx, cname))
 }
 
+// LoadNative opens the shared library at path, a native module built with
+// spy-module.h, and registers it as name, so that `import name` runs its
+// init. The policy is asked first, with "dlopen" (name, path). A library
+// that fails to load is closed and raises ImportError; one that loads stays
+// open for the life of the process. Its code runs outside the policy and
+// the limits, with the process's rights.
+func (rt *Runtime) LoadNative(name, path string) error {
+	cname, err := rt.name(name)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cname))
+	cpath, err := rt.name(path)
+	if err != nil {
+		return err
+	}
+	defer C.free(unsafe.Pointer(cpath))
+	return rt.check(C.spy_std_load_native(rt.ctx, cname, cpath))
+}
+
 // ExecModule runs source with module's namespace as its globals.
 func (rt *Runtime) ExecModule(module *Value, source, filename string) error {
 	m, err := rt.ref(module)
@@ -313,10 +333,10 @@ func (rt *Runtime) Limit(limit Limit) uint {
 }
 
 // SetPolicy asks policy before open, a module's first import, exec, eval
-// or compile of a string, and input, with the event's name ("open",
-// "import", "exec", "input") and arguments. A non-nil error refuses: an
-// *Exception raises its type, any other error PermissionError. nil removes
-// the policy.
+// or compile of a string, input, and LoadNative, with the event's name
+// ("open", "import", "exec", "input", "dlopen") and arguments. A non-nil
+// error refuses: an *Exception raises its type, any other error
+// PermissionError. nil removes the policy.
 func (rt *Runtime) SetPolicy(policy func(event string, args []*Value) error) {
 	if rt.enter() != nil {
 		return
