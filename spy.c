@@ -556,7 +556,7 @@ static int due(SPYContext *c) { return c->interrupt && c->fuel <= c->poll && pol
 enum { WORK = 1 << 22 };
 static int working(SPYContext *c, size_t *left, size_t n) {
     if (n < *left) { *left -= n; return 0; }
-    *left = WORK;
+    *left = WORK - (n - *left) % WORK;
     return c->interrupt && poll(c);
 }
 /* A call, or an item a native loop takes from an iterator, while watched. */
@@ -21417,6 +21417,38 @@ DEFINE_SORT(sort_ints, IntItem, NUMBER_LESS, 0)
 DEFINE_SORT(sort_floats, FloatItem, NUMBER_LESS, 0)
 DEFINE_SORT(sort_pairs, PairItem, PAIR_LESS, 0)
 #undef DEFINE_SORT
+/* Int keys sort by their distance from the least, a byte at a time from
+ * the lowest, each pass a stable counting sort, when there are enough of
+ * them for that to beat merging; keys in order stay as they are. */
+static NO_INLINE void sort_int_keys(SPYContext *c, int kind, IntItem *items, IntItem *scratch, size_t *ends, size_t len, IntItem **result) {
+    *result = items;
+    if (!len) return;
+    int64_t low = items[0].key, high = low;
+    int ordered = 1;
+    for (size_t i = 1; i < len; i++) {
+        int64_t k = items[i].key;
+        ordered &= items[i - 1].key <= k;
+        low = k < low ? k : low; high = k > high ? k : high;
+    }
+    uint64_t span = (uint64_t)high - (uint64_t)low;
+    int passes = 0;
+    while (passes < 8 && span >> 8 * passes) passes++;
+    if (ordered) return;
+    /* Each pass costs about as much as merging 64 keys. */
+    if (len <= 64 * (size_t)passes) { sort_ints(c, kind, items, scratch, ends, len, result); return; }
+    IntItem *from = items, *to = scratch;
+    for (size_t pass = 0, left = WORK; pass < (size_t)passes; pass++) {
+        size_t count[256] = {0}, at = 0;
+        for (size_t i = 0; i < len; i++) count[((uint64_t)from[i].key - (uint64_t)low) >> 8 * pass & 255]++;
+        /* Counting reads every key, and so does moving. */
+        if (working(c, &left, len)) break;
+        for (int d = 0; d < 256; d++) { size_t n = count[d]; count[d] = at; at += n; }
+        for (size_t i = 0; i < len; i++) to[count[((uint64_t)from[i].key - (uint64_t)low) >> 8 * pass & 255]++] = from[i];
+        IntItem *swap = from; from = to; to = swap;
+        if (working(c, &left, len)) break;
+    }
+    *result = from;
+}
 #undef KEY_LESS
 #undef NUMBER_LESS
 #undef PAIR_LESS
@@ -21448,12 +21480,12 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     }
     SPYValue **out = list->as.seq.items;
     int kind = len ? sort_kind(items, len) : SORT_INT;
-    if (kind == SORT_INT) SORT_NUMBERS(IntItem, sort_ints, packed[i].key = k->as.integer_data.small);
+    if (kind == SORT_INT) SORT_NUMBERS(IntItem, sort_int_keys, packed[i].key = k->as.integer_data.small);
     else if (kind == SORT_FLOAT) SORT_NUMBERS(FloatItem, sort_floats, packed[i].key = k->as.real);
     else if (kind == SORT_INT_PAIR) {
         int64_t low[2];
         uint64_t width;
-        if (pair_spans(items, len, low, &width)) SORT_NUMBERS(IntItem, sort_ints, packed[i].key = pair_key(k, low, width));
+        if (pair_spans(items, len, low, &width)) SORT_NUMBERS(IntItem, sort_int_keys, packed[i].key = pair_key(k, low, width));
         else SORT_NUMBERS(PairItem, sort_pairs, (packed[i].key = k->as.seq.items[0]->as.integer_data.small,
                                                  packed[i].next = k->as.seq.items[1]->as.integer_data.small));
     }
