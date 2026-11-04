@@ -9,22 +9,25 @@
 (* the body ends, with the exception's type, value, and traceback or with  *)
 (* three Nones; a true result suppresses the exception, while the result   *)
 (* is ignored after a normal exit or a return; an exception from __exit__  *)
-(* replaces the body's, and is reported at the with line; and several    *)
+(* replaces the body's, and is reported at the with line, while the       *)
+(* body's own exception leaves from the line that raised it; and several   *)
 (* managers nest, so a later __enter__ that raises reaches the earlier     *)
-(* managers' __exit__.                                                     *)
+(* managers' __exit__. Both hold in a generator suspended inside the body. *)
 (*                                                                         *)
-(* A single program runs `with M(): BODY` in a function, where M's         *)
+(* A single program runs `with M(): BODY` in a function, or in a         *)
+(* generator that yields once before BODY, where M's                       *)
 (* __enter__ succeeds, raises ValueError, or is missing; its __exit__      *)
 (* returns False, returns True, raises RuntimeError, or is missing; and    *)
 (* BODY completes, raises KeyError, or returns. A nested program runs      *)
 (* `with M(), N(): pass` where N's __enter__ raises ValueError and M's     *)
 (* __exit__ returns False or True. Every method logs a word; the outcome   *)
 (* is the log followed by "done", "returned", or the exception's name,    *)
-(* with " at with" when __exit__'s exception is reported at the with line. *)
+(* with " at with" when __exit__'s exception is reported at the with line *)
+(* and " at raise" when the body's is reported at its raise statement.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"single"}, enter : {"ok", "raise", "missing"}, exit : {"false", "true", "raise", "missing"},
+Programs == [part : {"single"}, frame : {"function", "generator"}, enter : {"ok", "raise", "missing"}, exit : {"false", "true", "raise", "missing"},
              body : {"normal", "raise", "return"}]
             \cup [part : {"nested"}, exit : {"false", "true"}]
 
@@ -40,7 +43,7 @@ Single(p) ==
              start == "enter body exit:" \o (IF raised THEN "KeyError" ELSE "None") \o " "
              final == CASE p.exit = "raise" -> "RuntimeError at with"
                         [] raised /\ p.exit = "true" -> "done"
-                        [] raised -> "KeyError"
+                        [] raised -> "KeyError at raise"
                         [] p.body = "return" -> "returned"
                         [] OTHER -> "done"
          IN start \o final
@@ -63,4 +66,8 @@ ExitAfterEnter == Done /\ program.part = "single" /\ program.enter = "ok" /\ pro
 \* An exception raised by __exit__ is reported at the with statement's line.
 ExitAtWithLine == Done /\ program.part = "single" /\ program.enter = "ok" /\ program.exit = "raise" =>
     outcome \in {"enter body exit:" \o e \o " RuntimeError at with" : e \in {"None", "KeyError"}}
+
+\* A body exception that __exit__ lets pass is reported where it was raised.
+BodyErrorAtRaise == Done /\ program.part = "single" /\ program.enter = "ok" /\ program.body = "raise"
+    /\ program.exit = "false" => outcome = "enter body exit:KeyError KeyError at raise"
 =============================================================================

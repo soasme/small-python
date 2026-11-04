@@ -1,6 +1,7 @@
 # Replays With.tla: each case runs a with statement over the spec's
 # managers and compares the methods' log and the ending with the model's;
-# an exception from __exit__ records whether it is reported at the with line.
+# an exception records whether it is reported at the with line or, for the
+# body's, at its raise; a generator body runs after one suspension.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -35,6 +36,26 @@ def single(p, log):
     return "done"
 
 
+def single_gen(p, log):
+    m = manager(log, "M", p["enter"], p["exit"])
+    with m:
+        yield
+        log.append("body")
+        if p["body"] == "raise":
+            raise KeyError
+        if p["body"] == "return":
+            return "returned"
+    return "done"
+
+
+def drive(g):
+    try:
+        while True:
+            next(g)
+    except StopIteration as stop:
+        return stop.value
+
+
 def nested(p, log):
     with manager(log, "M", "ok", p["exit"], "M"), manager(log, "N", "raise", "false", "N"):
         pass
@@ -44,14 +65,22 @@ def nested(p, log):
 def outcome(p):
     log = []
     try:
-        end = single(p, log) if p["part"] == "single" else nested(p, log)
+        if p["part"] == "nested":
+            end = nested(p, log)
+        else:
+            end = single(p, log) if p["frame"] == "function" else drive(single_gen(p, log))
     except (TypeError, ValueError, KeyError, RuntimeError) as error:
         end = type(error).__name__
+        generator = p.get("frame") == "generator"
+        code = single_gen.__code__ if generator else single.__code__
         tb = error.__traceback__
-        while tb and tb.tb_frame.f_code is not single.__code__:
+        while tb and tb.tb_frame.f_code is not code:
             tb = tb.tb_next
-        if isinstance(error, RuntimeError) and tb and tb.tb_lineno == single.__code__.co_firstlineno + 2:
+        line = tb.tb_lineno - code.co_firstlineno if tb else None
+        if isinstance(error, RuntimeError) and line == 2:
             end += " at with"
+        if isinstance(error, KeyError) and line == 5 + generator:
+            end += " at raise"
     return " ".join(log + [end])
 
 

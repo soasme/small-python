@@ -13421,7 +13421,7 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
 typedef struct {
     int kind, flow;
     size_t depth, target, other;
-    Node *name;
+    Node *name, *node;
     SPYValue *value, *handled;
     ErrorState *error;
 } Block;
@@ -20274,7 +20274,7 @@ static SPYValue *machine_pop(Machine *m) { return m->stack[--m->len]; }
 static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) {
     if (grow(c, (void **)&m->blocks, &m->block_cap, m->block_len + 1, sizeof(*m->blocks))) return NULL;
     Block *b = &m->blocks[m->block_len++];
-    *b = (Block){.kind = kind, .depth = m->len, .target = ins->target, .other = ins->other};
+    *b = (Block){.kind = kind, .depth = m->len, .target = ins->target, .other = ins->other, .node = ins->node};
     return b;
 }
 static void pop_block(SPYContext *c, Machine *m, Frame *f) {
@@ -20354,6 +20354,8 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             c->handled = spy_retain(error.value ? error.value : outer);
             SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none,
                                error.value ? error.value : c->none, exception_traceback(c, error.value)};
+            size_t line = c->line, frame_line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
+            relocate(c, b->node); /* __exit__ is called at its manager's line (15.5) */
             SPYValue *result = call(c, b->value, 3, args);
             int suppress = result && error.type[0] && truthy(result);
             spy_release(result); spy_release(c->handled); c->handled = outer;
@@ -20361,7 +20363,12 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             pop_block(c, m, f);
             if (c->error_type[0]) { spy_release(r->value); *r = (Result){FLOW_ERROR, NULL}; }
             else if (suppress) { m->pc = target; r->flow = FLOW_NORMAL; }
-            else if (error.type[0]) restore_error(c, &error);
+            else if (error.type[0]) {
+                /* The exception leaves the frame from the line that raised it. */
+                restore_error(c, &error);
+                c->line = line;
+                if (c->py_depth) c->frames[c->py_depth - 1].line = frame_line;
+            }
             spy_release(error.value);
             if (r->flow == FLOW_NORMAL) return 1;
             continue;

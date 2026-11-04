@@ -105,3 +105,23 @@ def gen_body():
         x = 2
 assert_eq((exit_line(first), exit_line(second), exit_line(after_error)), (1, 2, 1))
 assert_eq(exit_line(lambda: list(gen_body()), gen_body.__code__), 2)
+# A suspended body that raises reaches __exit__ at the item's line too.
+def gen_raises():
+    with ExitRaises():
+        yield 1
+        1 / 0
+assert_eq(exit_line(lambda: list(gen_raises()), gen_raises.__code__), 1)
+# A manager that does not suppress lets the error leave from its own line.
+class Passes:
+    def __enter__(self): pass
+    def __exit__(self, *exc): return False
+def gen_passes():
+    with Passes():
+        yield 1
+        1 / 0
+try:
+    list(gen_passes())
+except ZeroDivisionError as e:
+    tb = e.__traceback__
+    while tb.tb_frame.f_code is not gen_passes.__code__: tb = tb.tb_next
+    assert_eq(tb.tb_lineno - gen_passes.__code__.co_firstlineno, 3)
