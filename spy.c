@@ -136,6 +136,7 @@ struct Node {
     SPYValue *attr_class, *attr_method; size_t attr_epoch; int attr_kind;
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
+enum { TUPLE_WITHIN = 15 };
 struct SPYValue {
     SPYContext *ctx;
     SPYValue *prev, *next, *pending;
@@ -156,7 +157,9 @@ struct SPYValue {
          * count plus one, once counted (str values are immutable); cursor:
          * a character index of a str and its byte offset. */
         struct { char *data; size_t len; union { size_t exports; int64_t hash; }; size_t chars, cursor[2]; } string;
-        struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; } seq;
+        /* within: a tuple's first items, kept in the value, as the room
+         * that the largest member leaves allows; longer tuples move out. */
+        struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; SPYValue *within[TUPLE_WITHIN]; } seq;
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
@@ -949,6 +952,7 @@ static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     /* Each size is a constant, so the compiler clears in place. */
     if (size) memset(v, 0, SMALL_VALUE);
     else memset(v, 0, sizeof(*v));
+    if (type == SPY_TUPLE) { v->as.seq.items = v->as.seq.within; v->as.seq.cap = TUPLE_WITHIN; }
     return value_link(c, v, type);
 }
 static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type, 0); }
@@ -1189,7 +1193,7 @@ static void free_value(SPYValue *v) {
         break;
     case SPY_NATIVE: if (v->as.native.release) v->as.native.release(v->as.native.data); break;
     case SPY_GENERATOR: case SPY_COROUTINE: case SPY_ASYNC_GENERATOR: free_machine(c, v->as.generator.machine); break;
-    case SPY_LIST: case SPY_TUPLE: mem_free(v->as.seq.items); break;
+    case SPY_LIST: case SPY_TUPLE: if (v->as.seq.items != v->as.seq.within) mem_free(v->as.seq.items); break;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_MODULE: case V_ENV: case SPY_CLASS: case SPY_INSTANCE: case SPY_SET: case SPY_FROZENSET:
         if (v->type == SPY_CLASS || v->watched) c->classes_changed++;
         if (v->as.map.cap + v->as.map.front == 8 && c->spare_entries_len < 16) {
@@ -1748,7 +1752,15 @@ static int same_context(SPYContext *c, SPYValue *v) {
 /* Make room for n items in the list or tuple v. */
 static int sequence_grow(SPYContext *c, SPYValue *v, size_t n) {
     if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
-    return grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, n, sizeof(SPYValue *));
+    if (n <= v->as.seq.cap) return 0;
+    if (v->as.seq.items != v->as.seq.within || v->type != SPY_TUPLE)
+        return grow_array(c, (void **)&v->as.seq.items, &v->as.seq.cap, n, sizeof(SPYValue *));
+    SPYValue **items = NULL;
+    size_t cap = v->as.seq.cap;
+    if (grow_array(c, (void **)&items, &cap, n, sizeof(SPYValue *))) return -1;
+    memcpy(items, v->as.seq.within, v->as.seq.len * sizeof(SPYValue *));
+    v->as.seq.items = items; v->as.seq.cap = cap;
+    return 0;
 }
 static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
     if (!same_context(c, v) || !same_context(c, item)) return -1;
@@ -2459,6 +2471,7 @@ static const char *const iterator_names[] = {"iterator", "list_iterator", "tuple
     "bytes_iterator", "bytearray_iterator", "dict_keyiterator", "dict_valueiterator", "dict_itemiterator", "set_iterator",
     "range_iterator", "longrange_iterator", "callable_iterator", "list_reverseiterator", "dict_reversekeyiterator",
     "dict_reversevalueiterator", "dict_reverseitemiterator", "TemplateIter", "map", "zip", "enumerate", "filter", "reversed"};
+_Static_assert(sizeof(((SPYValue *)0)->as.seq) <= sizeof(((SPYValue *)0)->as.map), "a tuple's items within fit the value");
 _Static_assert(sizeof(iterator_names) / sizeof(*iterator_names) == IT_COUNT, "iterator class table");
 /* Whether CPython iterates range r with a longrange_iterator: its C long
  * iterator needs start, stop, step and length to fit, and no overflow in
@@ -17515,11 +17528,13 @@ static int update_bases(SPYContext *c, SPYValue *bases, SPYValue *original) {
         changed = 1;
     }
     if (!c->error_type[0] && changed) {
-        /* Swap the resolved list's items into bases. */
+        /* Move the resolved list's items into bases. */
         SPYValue **items = bases->as.seq.items;
-        size_t len = bases->as.seq.len, cap = bases->as.seq.cap;
+        size_t len = bases->as.seq.len;
         bases->as.seq.items = result->as.seq.items; bases->as.seq.len = result->as.seq.len; bases->as.seq.cap = result->as.seq.cap;
-        result->as.seq.items = items; result->as.seq.len = len; result->as.seq.cap = cap;
+        result->as.seq.items = NULL; result->as.seq.len = result->as.seq.cap = 0;
+        for (size_t i = 0; i < len; i++) spy_release(items[i]);
+        if (items != bases->as.seq.within) mem_free(items);
     }
     spy_release(result);
     return c->error_type[0] ? -1 : changed;
