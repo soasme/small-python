@@ -27,6 +27,7 @@ package spy
 /*
 #cgo CFLAGS: -std=c11 -w
 #cgo LDFLAGS: -lm
+#cgo linux LDFLAGS: -ldl
 #include <stdint.h>
 #include <stdlib.h>
 #include "spy.h"

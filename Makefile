@@ -41,7 +41,7 @@ $(OBJDIR)/spy-worker.o: spy-worker.c spy.h spy-std.h
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-$(OBJDIR)/spy-worker-engine.o: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
+$(OBJDIR)/spy-worker-engine.o: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-module.h spy-unicode.h spy-intrinsics.h
 	mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DSPY_WORKER_ENGINE -c $< -o $@
 
@@ -51,7 +51,7 @@ WASI_SDK ?= /opt/wasi-sdk
 WASM_CC = $(WASI_SDK)/bin/clang --target=wasm32-wasip1 --sysroot=$(WASI_SDK)/share/wasi-sysroot
 WASM_CFLAGS = -O2 -std=c11 -Wall -Wextra -Wno-tautological-constant-out-of-range-compare -Wno-unused-function
 WASM_LDFLAGS = -Wl,--import-memory -Wl,--initial-memory=16777216 -Wl,-z,stack-size=8388608
-javascript/spy-worker.wasm: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
+javascript/spy-worker.wasm: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-module.h spy-unicode.h spy-intrinsics.h
 	mkdir -p $(OBJDIR)/wasm
 	$(WASM_CC) $(WASM_CFLAGS) -DSPY_WORKER_ENGINE -c spy-worker.c -o $(OBJDIR)/wasm/engine.o
 	$(WASM_CC) $(WASM_CFLAGS) -c spy-worker.c -o $(OBJDIR)/wasm/worker.o
@@ -266,13 +266,13 @@ test-rust:
 RUST_CSRC = rust/small-python-src/csrc
 rust-vendor:
 	mkdir -p $(RUST_CSRC)/licenses
-	cp spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-intrinsics.h spy-unicode.h spy-worker.c $(RUST_CSRC)/
+	cp spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-module.h spy-intrinsics.h spy-unicode.h spy-worker.c $(RUST_CSRC)/
 	cp LICENSE docs/licenses/python.txt docs/licenses/unicode.txt $(RUST_CSRC)/licenses/
 
 # The Go module (go/, docs/packaging/go.md): cgo compiles the engine copied
 # into go/spy, which the go/v* release tags commit.
 GO_SPY = go/spy
-GO_SOURCES = spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-intrinsics.h spy-unicode.h
+GO_SOURCES = spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-module.h spy-intrinsics.h spy-unicode.h
 go-vendor: $(addprefix $(GO_SPY)/,$(GO_SOURCES)) go/LICENSE go/licenses/python.txt go/licenses/unicode.txt
 $(GO_SPY)/%: %
 	cp $< $@
@@ -296,7 +296,7 @@ JNI_LIBRARY = $(if $(filter macos,$(JAVA_OS)),libspyjni.dylib,$(if $(filter wind
 JAVA_EXE = $(if $(filter windows,$(JAVA_OS)),.exe)
 JAVA_NATIVE = native/$(JAVA_OS)-$(JAVA_ARCH)
 JNI_LDFLAGS ?=
-java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY): java/small-python/src/main/c/spy-jni.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-unicode.h spy-intrinsics.h
+java/small-python/$(JAVA_NATIVE)/$(JNI_LIBRARY): java/small-python/src/main/c/spy-jni.c spy.c spy.h spy-std.c spy-std.h spy-std-modules.h spy-module.h spy-unicode.h spy-intrinsics.h
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fPIC -shared -I. -I"$(JAVA_HOME)/include" -I"$(JAVA_HOME)/include/$(JNI_OS)" $(filter %.c,$^) $(JNI_LDFLAGS) $(LDLIBS) -o $@
 java/small-python-worker/$(JAVA_NATIVE)/spy-worker$(JAVA_EXE): spy-worker
@@ -361,7 +361,7 @@ fuzz-replay: $(REPLAYS)
 	test -d $(FUZZ_CORPUS) || { echo "no corpus in $(FUZZ_CORPUS); run make fuzz"; exit 1; }
 	for replay in $(REPLAYS); do find $(FUZZ_CORPUS) -type f -exec $$replay {} + || exit 1; done
 
-$(REPLAY_DIR)/fuzz_eval $(REPLAY_DIR)/fuzz_compile: $(REPLAY_DIR)/%: fuzz/%.c fuzz/replay.c fuzz/fuzz_common.c fuzz/fuzz_common.h spy.c spy.h spy-std.c spy-std.h spy-unicode.h spy-intrinsics.h spy-std-modules.h
+$(REPLAY_DIR)/fuzz_eval $(REPLAY_DIR)/fuzz_compile: $(REPLAY_DIR)/%: fuzz/%.c fuzz/replay.c fuzz/fuzz_common.c fuzz/fuzz_common.h spy.c spy.h spy-std.c spy-std.h spy-unicode.h spy-intrinsics.h spy-std-modules.h spy-module.h
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< fuzz/fuzz_common.c spy.c spy-std.c $(LDLIBS) -o $@
 
@@ -373,7 +373,7 @@ $(REPLAY_DIR)/fuzz_oom: fuzz/fuzz_oom.c fuzz/replay.c tests/oom.c spy.c spy.h sp
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< $(LDLIBS) -o $@
 
-$(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o: $(OBJDIR)/fuzz/%.o: %.c spy.h spy-std.h spy-unicode.h spy-intrinsics.h spy-std-modules.h
+$(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o: $(OBJDIR)/fuzz/%.o: %.c spy.h spy-std.h spy-unicode.h spy-intrinsics.h spy-std-modules.h spy-module.h
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -c $< -o $@
 

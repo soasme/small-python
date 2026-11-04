@@ -4,6 +4,10 @@ fn main() {
     if std::env::var("CARGO_CFG_UNIX").is_ok() {
         println!("cargo:rustc-link-lib=m");
     }
+    // spy-std.c loads native modules; glibc before 2.34 keeps dlopen in libdl.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-link-lib=dl");
+    }
     let header = std::fs::read_to_string(dir.join("spy.h")).expect("spy.h");
     let version = header
         .lines()
