@@ -136,7 +136,7 @@ struct Node {
     SPYValue *attr_class, *attr_method; size_t attr_epoch; int attr_kind;
 };
 static const char *source_name(Node *n) { return n->original ? n->original : n->text; }
-enum { TUPLE_WITHIN = 15 };
+enum { TUPLE_WITHIN = 15, TUPLE_SHORT = 3 };
 struct SPYValue {
     SPYContext *ctx;
     SPYValue *prev, *next, *pending;
@@ -148,6 +148,7 @@ struct SPYValue {
      * value and own no storage, are not, as CPython's collector does not
      * track them: they cost no list upkeep, and a collection skips them. */
     unsigned char listed;
+    unsigned char size; /* The size class its allocation came from. */
     union {
         struct { int64_t small; BigInt *big; } integer_data;
         double real;
@@ -157,8 +158,9 @@ struct SPYValue {
          * count plus one, once counted (str values are immutable); cursor:
          * a character index of a str and its byte offset. */
         struct { char *data; size_t len; union { size_t exports; int64_t hash; }; size_t chars, cursor[2]; } string;
-        /* within: a tuple's first items, kept in the value, as the room
-         * that the largest member leaves allows; longer tuples move out. */
+        /* within: a tuple's items kept in the value, up to TUPLE_SHORT in a
+         * short tuple, else as many as the largest member leaves room for;
+         * a tuple that grows past them moves its items out. */
         struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; SPYValue *within[TUPLE_WITHIN]; } seq;
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
@@ -833,16 +835,19 @@ static SPYValue *buffer_text(Buffer *, int, int);
  * shorter than SHORT_TEXT, saving the text its own allocation. A value
  * never changes into a type of another size. */
 enum { SMALL_VALUE = offsetof(SPYValue, as) + sizeof(((SPYValue *)0)->as.string), SHORT_TEXT = 16 };
-/* The size of a value of type: 0 whole, 1 small, 2 small with short text. */
+/* The size of a value of type: 0 whole, 1 small, 2 small with short text,
+ * the size of a short tuple too. A tuple made for more than TUPLE_SHORT
+ * items is whole. */
 static ALWAYS_INLINE int size_class(int type) {
     static const unsigned char classes[64] = {
-        [SPY_INT] = 1, [SPY_FLOAT] = 1, [SPY_COMPLEX] = 1, [SPY_BYTEARRAY] = 1, [SPY_STRING] = 2, [SPY_BYTES] = 2
+        [SPY_INT] = 1, [SPY_FLOAT] = 1, [SPY_COMPLEX] = 1, [SPY_BYTEARRAY] = 1, [SPY_STRING] = 2, [SPY_BYTES] = 2, [SPY_TUPLE] = 2
     };
     return classes[type];
 }
 /* Rounded to 16 bytes as malloc rounds, so that hash_pointer finds the low
  * four bits of a value's address clear on every target. */
 static ALWAYS_INLINE size_t class_bytes(int size) { return ((size == 2 ? SMALL_VALUE + SHORT_TEXT : size ? SMALL_VALUE : sizeof(SPYValue)) + 15) & ~(size_t)15; }
+static ALWAYS_INLINE int tuple_class(size_t len) { return len > TUPLE_SHORT ? 0 : 2; }
 static size_t value_size(int type) { return class_bytes(size_class(type)); }
 static char *short_text(SPYValue *v) { return (char *)v + SMALL_VALUE; }
 /* Values are carved from aligned pools of POOL bytes, each of one size
@@ -942,17 +947,19 @@ static ALWAYS_INLINE SPYValue *value_link(SPYContext *c, SPYValue *v, int type) 
 }
 static SPYValue *value_alloc(SPYContext *c, int type, size_t tuple_size) {
     SPYValue *v = NULL;
-    int size = size_class(type);
+    int size = tuple_size > TUPLE_SHORT ? 0 : size_class(type);
     if (type == SPY_TUPLE && tuple_size < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache)) {
         v = c->tuple_cache[tuple_size];
         c->tuple_cache[tuple_size] = NULL;
-        if (v) cache_take(v, sizeof(*v));
+        if (v) cache_take(v, class_bytes(size));
     }
     if (!v && !(v = value_take(c, size))) return NULL;
-    /* Each size is a constant, so the compiler clears in place. */
+    /* Each size is a constant, so the compiler clears in place; a short
+     * tuple's items within are read only below its length. */
     if (size) memset(v, 0, SMALL_VALUE);
     else memset(v, 0, sizeof(*v));
-    if (type == SPY_TUPLE) { v->as.seq.items = v->as.seq.within; v->as.seq.cap = TUPLE_WITHIN; }
+    v->size = (unsigned char)size;
+    if (type == SPY_TUPLE) { v->as.seq.items = v->as.seq.within; v->as.seq.cap = size ? TUPLE_SHORT : TUPLE_WITHIN; }
     return value_link(c, v, type);
 }
 static SPYValue *value_new(SPYContext *c, int type) { return value_alloc(c, type, 0); }
@@ -962,7 +969,7 @@ static ALWAYS_INLINE SPYValue *number_new(SPYContext *c, int type) {
     SPYValue *v = value_take(c, 1);
     if (!v) return NULL;
     memset(v, 0, offsetof(SPYValue, as.integer_data) + sizeof(v->as.integer_data));
-    v->ctx = c; v->refs = 1; v->type = type;
+    v->ctx = c; v->refs = 1; v->type = type; v->size = 1;
     c->live++;
     return v;
 }
@@ -1211,12 +1218,12 @@ static void free_value(SPYValue *v) {
     }
     }
     if (v->type == SPY_TUPLE && v->as.seq.len < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache) &&
-        !c->tuple_cache[v->as.seq.len]) {
+        !c->tuple_cache[v->as.seq.len] && v->size == tuple_class(v->as.seq.len)) {
         c->tuple_cache[v->as.seq.len] = v;
-        cache_put(v, sizeof(*v));
+        cache_put(v, class_bytes(v->size));
         return;
     }
-    value_give(c, v, size_class(v->type));
+    value_give(c, v, v->size);
 }
 static void release_edge(SPYValue *v, void *data) {
     SPYValue **pending = data;
@@ -1750,7 +1757,7 @@ static int same_context(SPYContext *c, SPYValue *v) {
     return 1;
 }
 /* Make room for n items in the list or tuple v. */
-static int sequence_grow(SPYContext *c, SPYValue *v, size_t n) {
+static NO_INLINE int sequence_reserve(SPYContext *c, SPYValue *v, size_t n) {
     if (v->as.seq.cap == SIZE_MAX) v->as.seq.cap = 0; /* Detached by list.sort(). */
     if (n <= v->as.seq.cap) return 0;
     if (v->as.seq.items != v->as.seq.within || v->type != SPY_TUPLE)
@@ -1761,6 +1768,9 @@ static int sequence_grow(SPYContext *c, SPYValue *v, size_t n) {
     memcpy(items, v->as.seq.within, v->as.seq.len * sizeof(SPYValue *));
     v->as.seq.items = items; v->as.seq.cap = cap;
     return 0;
+}
+static ALWAYS_INLINE int sequence_grow(SPYContext *c, SPYValue *v, size_t n) {
+    return n <= v->as.seq.cap && v->as.seq.cap != SIZE_MAX ? 0 : sequence_reserve(c, v, n);
 }
 static int sequence_append(SPYContext *c, SPYValue *v, SPYValue *item) {
     if (!same_context(c, v) || !same_context(c, item)) return -1;
@@ -2472,6 +2482,9 @@ static const char *const iterator_names[] = {"iterator", "list_iterator", "tuple
     "range_iterator", "longrange_iterator", "callable_iterator", "list_reverseiterator", "dict_reversekeyiterator",
     "dict_reversevalueiterator", "dict_reverseitemiterator", "TemplateIter", "map", "zip", "enumerate", "filter", "reversed"};
 _Static_assert(sizeof(((SPYValue *)0)->as.seq) <= sizeof(((SPYValue *)0)->as.map), "a tuple's items within fit the value");
+_Static_assert(offsetof(SPYValue, as.seq.within) <= SMALL_VALUE &&
+               offsetof(SPYValue, as.seq.within) + TUPLE_SHORT * sizeof(SPYValue *) <= SMALL_VALUE + SHORT_TEXT,
+               "a short tuple's fields are cleared and its items fit");
 _Static_assert(sizeof(iterator_names) / sizeof(*iterator_names) == IT_COUNT, "iterator class table");
 /* Whether CPython iterates range r with a longrange_iterator: its C long
  * iterator needs start, stop, step and length to fit, and no overflow in
@@ -14718,6 +14731,11 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
             if (n->kind == N_DICT) {
                 b = eval(c, f, item->b);
                 if (!b || map_set(c, result, a, b)) goto container_fail;
+            } else if (n->kind != N_SET) {
+                /* The list or tuple takes the item's reference. */
+                if (sequence_grow(c, result, result->as.seq.len + 1)) goto container_fail;
+                result->as.seq.items[result->as.seq.len++] = a; a = NULL;
+                continue;
             } else if (display_add(c, result, a)) goto container_fail;
             spy_release(a); spy_release(b); a = b = NULL;
         }
@@ -28037,7 +28055,7 @@ void spy_context_free(SPYContext *c) {
 #endif
     mem_free(c->files); mem_free(c->error_display);
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++)
-        if (c->tuple_cache[i]) { cache_take(c->tuple_cache[i], sizeof(SPYValue)); value_give(c, c->tuple_cache[i], 0); }
+        if (c->tuple_cache[i]) { cache_take(c->tuple_cache[i], class_bytes(tuple_class(i))); value_give(c, c->tuple_cache[i], tuple_class(i)); }
     /* The unlisted values still live go with their pools. */
     while (c->every_pool) {
         Pool *pool = c->every_pool;
