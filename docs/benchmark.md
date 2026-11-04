@@ -204,6 +204,38 @@ links only the core (`libspy.a`), not the standard layer or the command's
 host. Compiling the 176 KB bundle of `examples/flappy` takes 51 ms at `-O0`
 and 53 ms at `-O2`, so `-O2` costs a bundle little.
 
+## Native modules
+
+`python3 bench/native.py [BASELINE_SPY]` (part of `make bench`) measures
+what native modules cost a user: building `examples/fib.c` into `fib.so`,
+importing it against importing the same function written in Python, and
+importing 200 source modules, which shows the probe for `NAME.so` that each
+source import now makes. Each import runs in a fresh process; the script alternates
+the programs over ten rounds of 30 runs and reports the median of the round
+medians, and every run's output must match. Given a `spy` built without
+native modules, the 200-module program also runs on it. Measured on the
+platform above (macOS 26.5.1, Apple Clang 17, `make`, `-O2`), with `main` at
+`3c1c113` as the baseline:
+
+| Measure | Result |
+| --- | ---: |
+| Build `fib.so` (`cc -O2`) | 68.2 ms |
+| Size of `fib.so` | 33,400 bytes |
+| Import `fib.so` and call it | 3.21 ms (rounds 3.18–3.95) |
+| Import `fib.py` and call it | 3.09 ms (rounds 3.00–3.45) |
+| Import 200 `.py` modules | 6.30 ms (rounds 6.20–7.12) |
+| The same on the baseline | 6.01 ms (rounds 5.98–6.44) |
+
+Opening a library costs about 0.1 ms over parsing a small source. Every
+source import now makes one more failed `stat`, for `NAME.so`, about 1.4 µs
+on this macOS; CPython's search, which finds an extension module before a
+source, needs it. Nothing else changes: the embedding lifecycle measured
+184.4–185.1 µs against the baseline's 183.6–185.4 µs, run alternately, and
+the programs of the table above, each built at eight code layouts and
+averaged, stayed within 1% of the baseline (startup −0.6%, `fib` +0.3%,
+`generators` +0.2% over 30 runs). `spy` grows by 320 bytes, to 1,510,064;
+its `__TEXT` segment is unchanged.
+
 ## Reproducing
 
 The comparison engines are not dependencies of this repository. On macOS:

@@ -381,10 +381,11 @@ $(OBJDIR)/fuzz/fuzz_common.o $(OBJDIR)/fuzz/fuzz_eval.o $(OBJDIR)/fuzz/fuzz_comp
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -c $< -o $@
 
-bench: bench/lifecycle spy spyc libspy.a
+bench: bench/lifecycle spy spyc libspy.a examples/fib.so
 	./bench/lifecycle
 	size spy
 	python3 bench/spyc.py
+	python3 bench/native.py
 
 # Every test, the packages' worker and generated programs included, under
 # SANITIZERS: AddressSanitizer with leak checking and UndefinedBehaviorSanitizer
