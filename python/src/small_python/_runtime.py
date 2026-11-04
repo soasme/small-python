@@ -489,7 +489,10 @@ class Runtime:
 
     def load_native(self, name, path):
         """Open a native module's shared library so that ``import name`` runs its init."""
-        self._run(wire.NATIVE, _name(name), os.path.realpath(os.fsdecode(path)))
+        name, path = _name(name), os.fsdecode(path)
+        if "\0" in name or "\0" in path:
+            raise ValueError("embedded null character")
+        self._run(wire.NATIVE, name, os.path.realpath(path))
 
     def collect(self):
         """Run the engine's cycle collector; returns the number of values freed."""

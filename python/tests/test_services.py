@@ -268,16 +268,23 @@ class NativeTest(unittest.TestCase):
                 rt.load_native("other", self.path)
             self.assertEqual(cm.exception.message,
                              "dynamic module does not define module export function (spy_init_other)")
-            with self.assertRaises(Error) as cm:
-                rt.load_native("fib\0", self.path)
-            self.assertEqual(str(cm.exception), "ValueError: embedded null character")
-            with self.assertRaises(ValueError):
-                rt.load_native("fib", self.path + "\0")
+            for name, path in [("fib\0", self.path), ("fib", self.path + "\0")]:
+                with self.assertRaisesRegex(ValueError, "^embedded null character$"):
+                    rt.load_native(name, path)
             with self.assertRaises(TypeError):
                 rt.load_native(42, self.path)
             with self.assertRaises(Error) as cm:
                 rt.exec("import missing")
             self.assertEqual(cm.exception.type, "ModuleNotFoundError")
+
+    def test_worker_refuses_null_characters(self):
+        # The worker's own check (protocol.md 7.1), for parents that send NUL.
+        from small_python import _wire
+        with Runtime() as rt:
+            for name, path in [("fib\0", self.path), ("fib", self.path + "\0")]:
+                with self.assertRaises(Error) as cm:
+                    rt._run(_wire.NATIVE, name, path)
+                self.assertEqual(str(cm.exception), "ValueError: embedded null character")
 
     def test_crashing_init_loses_only_the_runtime(self):
         with Runtime() as rt:
