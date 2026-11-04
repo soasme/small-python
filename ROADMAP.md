@@ -9,7 +9,7 @@ says where the engine stands today, so the first step is clear.
 - [Embeddable library](#embeddable-library): a stable ABI at 1.0, build
   options, context density, thin bindings, a portability matrix, an API
   reference
-- [Distribution](#distribution): one executable from pure Python, the
+- [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, native modules
   in the worker packages, virtual file systems, host functions, resumable execution, inspection, snapshots,
@@ -36,9 +36,9 @@ The rules are in place ([manual 3.4.8](docs/manual.md#348-stability)):
 `spy_version()` reports the library's version next to the header's
 `SPY_VERSION`, every declaration in `spy.h` states its ownership and errors,
 and `make check-api` compiles the last release's declarations against the
-current header and compares `libspy.a`'s exports with it. Remaining: settle
-the API's rough edges while 0.x still allows it (`spy_truth` reports a
-failure as 0 with an error set, not -1), then declare the ABI stable at 1.0.
+current header and compares `libspy.a`'s exports with it. 0.6.0 made the
+last incompatible changes planned before 1.0. Remaining: declare the ABI
+stable at 1.0.
 
 ### Build options
 
@@ -73,21 +73,23 @@ megabytes.
 
 ### Thin bindings
 
-Go, JavaScript, Python and Rust bindings exist. Keep each a thin layer over
+Go, Java, JavaScript, Python and Rust bindings exist. Keep each a thin layer over
 `spy.h` or the worker protocol ([docs/packaging/protocol.md](docs/packaging/protocol.md)),
 so that a binding is days of work and not a second implementation. Add new
-ones only when a real host asks for it. Swift, .NET and the JVM (through
-the foreign function API, without JNI) are the likely next ones. A binding
+ones only when a real host asks for it. Swift and .NET are the likely next
+ones. A binding
 lets a program use its host language's packages instead of a Python
 standard library ported here (see the note under
 [Standard library coverage](#standard-library-coverage)).
 
 ### Portability matrix
 
-CI tests Linux and macOS, and the Python package on Windows through
-MinGW-w64. Build and test `libspy.a` itself, in CI, on Windows with MSVC
-(in C11 mode) and with MinGW, FreeBSD, Android, iOS, WebAssembly and a
-freestanding target with no C library beyond what the host supplies.
+CI tests Linux and macOS on x86-64 and arm64, and on Windows builds the
+release archive, the Python package and the Java artifacts with MinGW-w64
+GCC. Build and test `libspy.a` on FreeBSD, Android, iOS, WASI and a
+freestanding target with no C library beyond what the host supplies. MSVC
+is out of reach while it lacks C11 complex numbers, which `complex` is
+built on.
 Supporting a platform starts with a green build here, before the
 platform's own items below.
 
@@ -99,21 +101,19 @@ manual. Remaining: publish it as a web page with each release.
 
 ## Distribution
 
-### `spyc build`: one executable from pure Python
+### `spyc`: what one executable still lacks
 
-`spyc` already bundles: it follows a program's imports, embeds every module it
-reaches in one C file, and keeps import semantics and byte-for-byte
-reproducible output ([docs/build.md](docs/build.md)). The user still runs the
-C compiler. Add `spyc build`, which writes that C file, compiles it with
-`spy.c` (and `spy-std.c` when needed) and leaves one executable, with no
-Python file shipped beside it.
+`spyc` follows a program's imports, embeds every module it reaches, compiles
+`NAME.c` modules in and leaves one executable, with import semantics kept
+and the generated C file byte-for-byte reproducible
+([docs/build.md](docs/build.md)). Remaining:
 
 - Package resources: data files a package reads with
   `importlib.resources` or relative to `__file__`, declared on the command
   line or found next to the package, embedded and served read-only through
   the virtual file system below.
-- Deterministic builds: the executable, not only the C file, is the same
-  bytes for the same inputs and compiler. Fixed flags, no timestamps or
+- Deterministic executables: the executable, not only the C file, is the
+  same bytes for the same inputs and compiler. Fixed flags, no timestamps or
   absolute paths, and a build manifest recording the inputs' hashes.
 - Standard modules the program imports are bundled from the standard layer
   as a local module is, instead of being registered by hand with `-M`.
@@ -170,9 +170,14 @@ makes it one.
 
 ### Runtime policy API
 
-Capability-native Python: code reaches nothing unless the host granted it.
-One policy object per context, set by the host and fixed once code runs,
-with fine-grained grants for:
+`spy_set_policy` installs a callback asked before each sensitive action
+(`open`, `import`, `exec`, `input`, `dlopen`), hosts ask it about their own
+actions with `spy_policy_check`, and every binding and the worker protocol
+forward it ([manual 3.4.6](docs/manual.md#346-host-services-and-limits)). A callback answers one event at
+a time; what is missing is the policy it would enforce. Capability-native
+Python: code reaches nothing unless the host granted it. One policy object
+per context, set by the host and fixed once code runs, with fine-grained
+grants for:
 
 - modules, including which standard and native modules may be imported;
 - files, by path, with read, write and create separately;
@@ -326,7 +331,7 @@ The JavaScript package already runs the engine compiled to WebAssembly, in a
 worker thread, on Node.js and in cross-origin isolated browsers. Remaining:
 a build without `SharedArrayBuffer` and threads, for pages that are not
 cross-origin isolated and for edge runtimes such as Cloudflare Workers; a
-WASI build; and `spyc build --target wasm`, which produces one module for a
+WASI build; and `spyc --target wasm`, which produces one module for a
 bundled program. The build without threads needs host calls that return to
 the host ([Resumable execution](#resumable-execution)) in place of the
 blocking worker.
@@ -417,9 +422,9 @@ upstream since the pinned commit.
 ## Performance
 
 The goal is to come as close to CPython's performance as the design allows.
-At 0.4.0 ([docs/benchmark.md](docs/benchmark.md)) spy runs `loop`, `bigint`,
-`dicts` and `classes` faster than CPython 3.15, is within 3% on `generators`,
-`nbody` and `sort`, and is 12 to 13% slower on `strings` and `fib`.
+At 0.7.0 ([docs/benchmark.md](docs/benchmark.md)) spy runs every benchmark
+program faster than CPython 3.15 except `fib`, which takes 4% longer: it is
+almost all calls, and each call binds an environment and recurses in C.
 Values already come in three sizes, and arrays for locals and calls without
 C recursion were tried and measured slower
 ([docs/optimization.md](docs/optimization.md#tried-and-left-out)). Profiles
@@ -462,3 +467,10 @@ what the extra size buys.
 - [x] `spyc` bundles a program's imports into one C file
 - [x] Go and Rust bindings
 - [x] Values from pools in three size classes
+- [x] Java binding; TLA+ models of every package
+- [x] `spyc` writes an executable and compiles C modules in
+- [x] Native modules: `spy`, the in-process bindings and the worker
+  protocol's `NATIVE`
+- [x] Policy callback (`spy_set_policy`, `spy_policy_check`)
+- [x] Automatic cycle collection; the `gc` module removed
+- [x] Last incompatible C API changes before 1.0 (0.6.0)
