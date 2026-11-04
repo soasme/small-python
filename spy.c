@@ -21363,6 +21363,15 @@ static int64_t pair_key(SPYValue *k, const int64_t low[2], uint64_t width) {
                  ((uint64_t)k->as.seq.items[1]->as.integer_data.small - (uint64_t)low[1]);
     return u >= UINT64_C(1) << 63 ? (int64_t)(u - (UINT64_C(1) << 63)) : INT64_MIN + (int64_t)u;
 }
+/* A float as an int in the same order, the two zeros as one, as < sees
+ * them; a NaN, which < orders against nothing, has none. */
+static int float_key(double d, int64_t *key) {
+    uint64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    int64_t magnitude = (int64_t)(bits & INT64_MAX);
+    *key = d == 0 ? 0 : bits >> 63 ? -1 - magnitude : magnitude;
+    return d == d;
+}
 /* Keys of the plain kinds sort as numbers held in the items themselves. */
 typedef struct { SPYValue *value; int64_t key; } IntItem;
 typedef struct { SPYValue *value; double key; } FloatItem;
@@ -21481,7 +21490,13 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     SPYValue **out = list->as.seq.items;
     int kind = len ? sort_kind(items, len) : SORT_INT;
     if (kind == SORT_INT) SORT_NUMBERS(IntItem, sort_int_keys, packed[i].key = k->as.integer_data.small);
-    else if (kind == SORT_FLOAT) SORT_NUMBERS(FloatItem, sort_floats, packed[i].key = k->as.real);
+    else if (kind == SORT_FLOAT) {
+        int64_t unused;
+        size_t numbers = 0;
+        while (numbers < len && float_key(items[numbers].key->as.real, &unused)) numbers++;
+        if (numbers == len) SORT_NUMBERS(IntItem, sort_int_keys, float_key(k->as.real, &packed[i].key));
+        else SORT_NUMBERS(FloatItem, sort_floats, packed[i].key = k->as.real);
+    }
     else if (kind == SORT_INT_PAIR) {
         int64_t low[2];
         uint64_t width;
