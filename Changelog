@@ -1,26 +1,11 @@
-Unreleased:
+2026-11-05 0.7.0:
 
-- the cycle collector runs by itself: once the values that can form
-  cycles have grown by SPY_LIMIT_COLLECTION (2000 by default) and the
-  engine's memory has doubled since the last collection, the next
-  statement collects; a limit of zero leaves collection to spy_collect
-- a collection visits only the unreachable values after marking, about
-  twice as fast on a large live heap
-- the gc module is removed from the standard layer; sys is its only module
-  and builtin_module_names no longer lists gc
-- sorting is faster: int and float keys (and pairs of ints, packed into
-  one) sort by radix once a list is long enough, the merge sort merges
-  without a branch per comparison, and short runs grow by insertion;
-  bench/programs/sort.py takes 35 ms where 0.6.0 took 128 ms (M2, -O2)
-- a tuple keeps its items in its own value: up to three in a 112-byte
-  value, up to 15 in a whole one; a complete tuple of numbers leaves the
-  values a collection visits
-- the Go, Rust and Java in-process bindings load native modules:
-  Runtime.LoadNative, Runtime::load_native and Interpreter.loadNative
-  call spy_std_load_native, asked of the policy as "dlopen"
-- the worker protocol's NATIVE request (0x0e) loads a native module in
-  the worker before it seals itself; the Python package sends it from
-  Runtime.load_native
+- the cycle collector runs automatically (SPY_LIMIT_COLLECTION; zero
+  leaves it to spy_collect) and is about twice as fast on a large heap
+- removed the gc module
+- sorting is 3.6x faster (sort benchmark 128 ms -> 35 ms)
+- tuples store their items inline
+- Go, Rust, Java and the worker protocol load native modules
 
 2026-11-03 0.6.0:
 
