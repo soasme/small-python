@@ -131,6 +131,7 @@ static const char *const programs[] = {
     "d = {str(i): i for i in x}\n"
     "s = {i % 7 for i in x}\n"
     "t = tuple(sorted(d, key=lambda k: -d[k]))\n"
+    "pairs = [(i, (i, 0.5)) for i in range(3)]\n" /* Sealed at shutdown. */
     "print(len(x), len(d), len(s), t[:3], f'{x[3]:>5}', 'a,b'.split(','))\n",
 
     "class A:\n"

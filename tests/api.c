@@ -511,6 +511,18 @@ int main(int argc, char **argv) {
     spy_collect(c);
     assert(spy_live_values(c) == baseline);
 
+    /* Tuples of numbers leave the collector's values; one holding a list
+     * stays, so a cycle through it is still found. */
+    execute(c, "pairs = [(i, i / 2) for i in range(1000)]\n");
+    spy_collect(c);
+    assert(spy_live_values(c) >= baseline + 2700);
+    execute(c, "del pairs\n");
+    spy_collect(c);
+    size_t unpaired = spy_live_values(c);
+    assert(unpaired == baseline);
+    execute(c, "holder = []\nlink = (1, holder)\nholder.append(link)\ndel holder, link\n");
+    assert(spy_collect(c) >= 2 && spy_live_values(c) == unpaired);
+
     /* Releasing a deep acyclic graph must not consume the native call stack. */
     SPYValue *deep = spy_list(c);
     for (size_t i = 0; i < 20000; i++) {

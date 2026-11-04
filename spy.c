@@ -224,7 +224,7 @@ struct SPYContext {
      * NULL: its filename is copied, no callback waits in either queue, the
      * step budget is not spent and no trace function watches. Borrowed. */
     SPYValue *quiet_unit;
-    SPYValue *values, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
+    SPYValue *values, *sealed, *globals, *builtins, *classes, *object, *modules, *exception, *handled;
     /* class_lookup results, valid while classes_changed holds the epoch they
      * were found in. A change to a class's entries or MRO, or a class's
      * release, advances it. Results are borrowed, with no value edges. */
@@ -1156,12 +1156,29 @@ static ALWAYS_INLINE void value_unlink(SPYContext *c, SPYValue *v) {
     if (v->next) v->next->prev = v->prev;
     c->live--; c->listed--;
 }
+/* A finished tuple of unlisted values (numbers and sealed tuples) can be in
+ * no cycle, and no item of a tuple changes, so collections need not visit
+ * it: it moves to the sealed values, which only shutdown walks. */
+static void seal_tuple(SPYContext *c, SPYValue *t) {
+    for (size_t i = 0; i < t->as.seq.len; i++) if (t->as.seq.items[i]->listed) return;
+    value_unlink(c, t); c->live++;
+    t->listed = 0;
+    t->prev = NULL; t->next = c->sealed;
+    if (t->next) t->next->prev = t;
+    c->sealed = t;
+}
 static void drop_kept(SPYContext *, Scope *, int);
 static void free_value(SPYValue *v) {
     SPYContext *c = v->ctx;
     if (v->weak) weak_dead(c, v, 0);
     if (v->listed) value_unlink(c, v);
-    else c->live--;
+    else {
+        c->live--;
+        if (v->type == SPY_TUPLE) {
+            if (v->prev) v->prev->next = v->next; else c->sealed = v->next;
+            if (v->next) v->next->prev = v->prev;
+        }
+    }
     switch (v->type) {
     case SPY_INT: if (v->as.integer_data.big) mem_free(v->as.integer_data.big); break;
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: if (v->as.string.data != short_text(v)) mem_free(v->as.string.data); break;
@@ -13532,10 +13549,10 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         emit(c, p, BC_NEW, n, n->kind == N_LIST ? SPY_LIST : n->kind == N_TUPLE ? SPY_TUPLE : n->kind == N_SET ? SPY_SET : SPY_DICT);
         for (Node *a = n->args; a; a = a->next) {
             if (a->kind == N_STAR || a->kind == N_MAPPING) {
-                compile_expr(c, p, a->a); emit(c, p, BC_EXTEND, a, 0);
+                compile_expr(c, p, a->a); emit(c, p, BC_EXTEND, a, n->kind == N_TUPLE && !a->next);
             } else if (n->kind == N_DICT) {
                 compile_expr(c, p, a->a); compile_expr(c, p, a->b); emit(c, p, BC_MAP, a, 0);
-            } else { compile_expr(c, p, a); emit(c, p, BC_ADD, a, 0); }
+            } else { compile_expr(c, p, a); emit(c, p, BC_ADD, a, n->kind == N_TUPLE && !a->next); }
         }
         break;
     case N_CALL:
@@ -14691,6 +14708,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
             } else if (display_add(c, result, a)) goto container_fail;
             spy_release(a); spy_release(b); a = b = NULL;
         }
+        if (n->kind == N_TUPLE) seal_tuple(c, result);
         return result;
 container_fail:
         spy_release(result); result = NULL; break;
@@ -20548,6 +20566,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             a = machine_pop(m);
             if (ins->op == BC_ADD) display_add(c, m->stack[m->len - 1], a);
             else extend_display(c, m->stack[m->len - 1], a);
+            if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         case BC_MAP:
             b = machine_pop(m); a = machine_pop(m); map_set(c, m->stack[m->len - 1], a, b); break;
@@ -27993,6 +28012,7 @@ void spy_context_free(SPYContext *c) {
             for (Node *n = v->as.unit.nodes; n; n = n->allocated) drop_kept(c, n->scope, 0);
     c->frames_cap = 0;
     while (c->values) free_value(c->values);
+    while (c->sealed) free_value(c->sealed);
     mem_free(c->weak); mem_free(c->weak_calls); mem_free(c->finalize_calls); mem_free(c->cells); mem_free(c->frames); mem_free(c->repr_stack);
     for (size_t i = 0; i < c->host_modules_len; i++) mem_free(c->host_modules[i].name);
     mem_free(c->host_modules);
