@@ -1,5 +1,5 @@
-/* A native module, as QuickJS's examples/fib.c: a shared library that spy
- * imports from beside the program (manual 3.2).
+/* A native module: a shared library that spy imports from beside the
+ * program (manual 3.2).
  *
  *     cc -shared -fPIC -DSPY_SHARED_MODULE -I. examples/fib.c -o examples/fib.so
  *     ./spy examples/test_fib.py

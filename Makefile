@@ -21,7 +21,7 @@ ifdef CONFIG_WERROR
 CFLAGS += -Werror
 endif
 # The standard layer opens native modules with dlopen, which glibc before
-# 2.34 keeps in libdl, as QuickJS's Makefile links it.
+# 2.34 keeps in libdl.
 ifeq ($(shell uname -s),Linux)
 LDLIBS += -ldl
 endif
@@ -81,7 +81,7 @@ libspy.a: $(OBJDIR)/spy.o
 libspy-std.a: $(OBJDIR)/spy-std.o
 	$(AR) rcs $@ $^
 
-# A native module (spy-module.h), as QuickJS's examples/fib.so.
+# The example native module (spy-module.h).
 examples/fib.so: examples/fib.c spy-module.h spy.h
 	$(CC) $(CFLAGS) -shared -fPIC -DSPY_SHARED_MODULE -I. $< -o $@
 

@@ -971,8 +971,8 @@ the standard layer's `sys` and `gc`, not `_spy`.
 
 #### 3.4.9 Native modules
 
-A native module is a shared library that defines one module, as QuickJS's
-`.so` modules do: a program imports it without rebuilding its host. Its
+A native module is a shared library that defines one module: a program
+imports it without rebuilding its host. Its
 source includes `spy-module.h` and marks the module's init, a
 `SPYModuleInit` named `spy_init_` and the module's last name, with
 `SPY_MODULE` ([examples/fib.c](../examples/fib.c)):
@@ -994,8 +994,8 @@ cc -shared -fPIC -DSPY_SHARED_MODULE -I. examples/fib.c -o examples/fib.so
 ```
 
 With `SPY_SHARED_MODULE` defined, every `spy.h` call goes through a table of
-function pointers that the host hands the library as it loads it, as
-SQLite's loadable extensions do. The library needs no symbol from the
+function pointers that the host hands the library as it loads it. The
+library needs no symbol from the
 engine and exports only `spy_module` and its init, so it loads into the
 statically linked `spy` of the release archives and into any host that
 links the standard layer. Without `SPY_SHARED_MODULE`, the same source is an
@@ -1303,7 +1303,10 @@ Its core/host/compiler separation, Makefile workflow, manual structure, and
 external-suite reporting informed this repository. The Unicode property
 encoding and its lookup follow QuickJS's libunicode (`build_prop_table` and
 `lre_is_in_table`) under its [MIT license](licenses/quickjs.txt); no other
-QuickJS implementation code has been copied into the engine.
+QuickJS implementation code has been copied into the engine. Native modules
+follow QuickJS's shared-library modules in where they load (its libc layer,
+here `spy-std.c`) and SQLite's loadable extensions in how they reach the
+engine (a table of function pointers handed over at load).
 
 The language standard contains derived Python 3.15.2 documentation under its
 original PSF license, with copyright notices and complete license text included
