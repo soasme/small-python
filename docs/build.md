@@ -64,6 +64,9 @@ will find them mapped to its options in [section 8](#8-esbuild-feature-map).
   [Section 8](#8-esbuild-feature-map) explains why each would change behavior.
 - Watch mode, a development server, and plugins. `make` with the dependency
   file of [7.2](#72-dependency-file) is the rebuild loop.
+- Loading native modules (`NAME.so`, manual 3.4.9) at run time. A built
+  program is self-contained; native code belongs inside it
+  ([5.4](#54-native-modules)).
 
 ## 2 Usage
 
@@ -367,6 +370,43 @@ when run directly, and does so under spyc as well.
 On Windows spyc has no process API to run the compiler with: it reports
 that executable output is not supported there, and `-e` writes the C file to
 compile instead.
+
+### 5.4 Native modules
+
+A program spyc builds does not load shared libraries. Its loader serves only
+the bundled sources, and it links neither the standard layer's loader nor
+`dlopen`. An `import fib` that only `fib.so` satisfies fails the build like
+any missing module ([3.4](#34-guarded-imports)), and with `-x fib` it raises
+`ImportError` at run time.
+
+This is a decision, not a gap. Loading at run time would bring back what
+spyc removes: files that ship beside the executable, a search path, which
+needs the executable's own location on each platform, and a library built
+for another engine version. Every built program would also link the
+standard layer and `libdl`, which only programs that load plugins need.
+
+Native code reaches a built program by being compiled into it. The source of
+a native module (`examples/fib.c`) builds both ways: with
+`-DSPY_SHARED_MODULE` as a shared library, and without it as an ordinary C
+module that calls the engine directly. A host that owns `main` (`-c`,
+[5.2](#52-library-output--c)) uses either one:
+
+```c
+spy_new_module(c, "fib", spy_init_fib);          /* fib.c, linked in */
+spy_set_module_loader(c, spy_game_load, NULL);
+spy_exec(c, spy_game, "game.py");
+```
+
+A host that does want plugins installs its own loader, which calls
+`spy_std_load_native(c, name, path)` for the names it chooses and otherwise
+calls `spy_game_load`. It links `libspy-std.a`, and on Linux `-ldl`.
+
+Executable output has no option for C modules yet. When it gains one, the
+option will compile them into the executable: `spyc app.py fib.c` would
+compile `fib.c` with the program's compiler and flags and register
+`spy_init_fib` in `main` before the entry runs, treating `fib` as resolved,
+as `-M` does. A C module named like a found source would win, as a native
+module wins in `spy`'s search.
 
 ## 6 Source transforms
 

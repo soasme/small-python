@@ -1031,6 +1031,10 @@ budgets, which count only the work and memory it asks of the engine.
 Allowing `dlopen` trusts the library completely. Where the platform has no
 shared libraries (WebAssembly), `spy_std_load_native` raises `ImportError`.
 
+Programs built with `spyc` do not load shared libraries: they are
+self-contained, and native code is compiled into them instead
+([Building programs 5.4](build.md#54-native-modules)).
+
 ### 3.5 Python binding
 
 The `small-python` package (in `python/`, imported as `small_python`) runs
