@@ -1,9 +1,8 @@
-"""The behaviour of sys and gc that docs/standards/std.md specifies, printed so that
+"""The behaviour of sys that docs/standards/std.md specifies, printed so that
 tests/std.py can compare spy with the pinned CPython 3.15 oracle. Values the
 specification leaves to the host (sizes, paths, hash algorithm, streams) are
 not printed."""
 import builtins
-import gc
 import sys
 
 
@@ -27,7 +26,6 @@ CPYTHON_PRIVATE = {"_base_executable", "_baserepl", "_clear_internal_caches", "_
                    "_is_gil_enabled", "_is_immortal", "_is_interned", "_jit", "_setprofileallthreads",
                    "_settraceallthreads", "_stdlib_dir", "_xoptions"}
 show("sys private", lambda: [n for n in dir(sys) if n[:1] == "_" and n[:2] != "__" and n not in CPYTHON_PRIVATE])
-show("gc private", lambda: [n for n in dir(gc) if n[:1] == "_" and n[:2] != "__"])
 
 # 5.1
 show("modules", lambda: (type(sys.modules).__name__, sys.modules["sys"] is sys, sys.modules["builtins"] is builtins))
@@ -139,113 +137,6 @@ for result in (TypeError("t"), ValueError("v"), -1, "x", 2**70):
     show(f"getsizeof {result!r}", lambda: sys.getsizeof(Size(result)))
     show(f"getsizeof {result!r}, 7", lambda: sys.getsizeof(Size(result), 7))
 
-# 6
-calls(gc, ["gc.isenabled()", "gc.disable()", "gc.isenabled()", "gc.enable()", "gc.isenabled()", "gc.enable(1)",
-           "gc.isenabled(1)", "gc.disable(1)", "gc.get_threshold()", "gc.get_threshold(1)", "gc.set_threshold()",
-           "gc.set_threshold(1, 2, 3, 4)", "gc.set_threshold(x=1)", "gc.set_threshold(1.5)",
-           "gc.set_threshold(2**80)", "gc.set_threshold(500)", "gc.get_threshold()",
-           "gc.set_threshold(2000, 10, 10)", "type(gc.get_count())", "len(gc.get_count())", "gc.get_count(1)",
-           "type(gc.collect())", "gc.collect(3)", "gc.collect(-1)", "gc.collect('x')", "gc.collect(1, 2)",
-           "type(gc.collect(generation=1))", "[sorted(s) for s in gc.get_stats()]", "gc.get_stats(1)",
-           "gc.get_debug()", "gc.set_debug('x')", "gc.set_debug()", "gc.set_debug(flags=1)", "gc.get_debug(1)",
-           "(gc.DEBUG_STATS, gc.DEBUG_COLLECTABLE, gc.DEBUG_UNCOLLECTABLE, gc.DEBUG_SAVEALL, gc.DEBUG_LEAK)",
-           "gc.garbage", "gc.callbacks", "gc.get_objects(3)", "gc.get_objects(2.0)", "gc.get_objects(1, 2)",
-           "type(gc.get_objects(-1))", "type(gc.get_objects(generation=0))", "gc.is_tracked()",
-           "gc.is_tracked(1, 2)", "gc.is_tracked(obj=1)", "gc.is_finalized()", "gc.is_finalized(obj=1)",
-           "gc.get_referents([1, 'a'])", "gc.get_referents(1)", "type(gc.get_referrers(gc))",
-           "gc.freeze()", "gc.unfreeze()", "type(gc.get_freeze_count())", "gc.freeze(1)",
-           "gc.get_freeze_count(1)"])
-
-
-class Node:
-    def __init__(self):
-        self.me = self
-
-
-show("tracked", lambda: [gc.is_tracked(x) for x in (None, 1, 1.0, "s", b"", (), (1,), ([],), frozenset(),
-                                                    frozenset({()}), [], {}, Node(), Node, type, len, ValueError,
-                                                    lambda: 0)])
-
-seen = []
-gc.callbacks.append(lambda phase, info: seen.append((phase, sorted(info), info["generation"],
-                                                     type(info["duration"]).__name__)))
-gc.collect()
-gc.callbacks.clear()
-show("callbacks", lambda: seen[:2])
-show("stats", lambda: [sorted(s) == ["candidates", "collected", "collections", "duration", "uncollectable"]
-                       for s in gc.get_stats()])
-
-gc.set_debug(gc.DEBUG_SAVEALL)
-node = Node()
-del node
-gc.collect()
-show("saveall", lambda: any(type(x) is Node for x in gc.garbage))
-gc.set_debug(0)
-gc.garbage.clear()
-
-revived = []
-
-
-class Phoenix:
-    def __init__(self):
-        self.me = self
-
-    def __del__(self):
-        revived.append(self)
-
-
-phoenix = Phoenix()
-show("finalized before", lambda: gc.is_finalized(phoenix))
-del phoenix
-gc.collect()
-show("finalized after", lambda: (len(revived), gc.is_finalized(revived[0]), gc.is_finalized(Node())))
-
-ended = []
-
-
-class Mortal:
-    def __init__(self):
-        self.me = self
-
-    def __del__(self):
-        ended.append(1)
-
-
-gc.collect()
-before = gc.get_count()[0]
-cells = [[] for _ in range(50)]
-show("count grows", lambda: gc.get_count()[0] >= before + 50)
-mortal = Mortal()
-gc.freeze()
-show("frozen", lambda: (gc.get_freeze_count() > 0, any(x is mortal for x in gc.get_objects())))
-del mortal
-gc.collect()
-show("frozen survives", lambda: ended)
-gc.unfreeze()
-gc.collect()
-show("unfrozen", lambda: (ended, gc.get_freeze_count()))
-
-
-class Errors:
-    def __init__(self):
-        self.text = []
-
-    def write(self, text):
-        self.text.append(text)
-        return len(text)
-
-
-sys.stderr = Errors()
-node = Node()
-del node
-gc.set_debug(gc.DEBUG_STATS | gc.DEBUG_COLLECTABLE)
-gc.collect()
-gc.set_debug(0)
-errors, sys.stderr = sys.stderr, sys.__stderr__
-lines = "".join(errors.text).splitlines()
-show("debug stats", lambda: (lines[0], lines[1].split(":")[0], lines[2].split(":")[0], lines[-1].split(",")[0]))
-show("debug collectable", lambda: any(line.startswith("gc: collectable <Node 0x") for line in lines))
-
 # 5.1.3, 5.1.4
 calls(sys, ["sys.get_lazy_imports()", "sys.get_lazy_imports(1)", "sys.set_lazy_imports('x')",
             "sys.set_lazy_imports(1)", "sys.set_lazy_imports()", "sys.set_lazy_imports('all', 1)",
@@ -298,7 +189,6 @@ try:
 except StopIteration:
     pass
 del running, step
-gc.collect()
 show("asyncgen hooks", lambda: hooked)
 sys.set_asyncgen_hooks(None, None)
 
@@ -395,13 +285,11 @@ del failing
 suspended = closing()
 next(suspended)
 del suspended
-gc.collect()
 show("unraisable", lambda: unraisable)
 
 
 def drop_failing():
     Failing()
-    gc.collect()
 
 
 sys.unraisablehook = lambda args: 1 / 0

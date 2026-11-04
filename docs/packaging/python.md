@@ -70,7 +70,7 @@ worker cannot start, the constructor raises `WorkerError`.
 
 | Argument | Meaning |
 |---|---|
-| `std` | Register the standard modules (`sys` and `gc`). |
+| `std` | Register the standard module `sys`. |
 | `step_limit` | Evaluation steps per top-level `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |
 | `memory_limit` | Bytes the engine may hold; `0` is unlimited. Exceeding it stops the operation with `MemoryError`. |
 | `output_limit` | Bytes each top-level `eval` or `exec` may print; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |

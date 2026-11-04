@@ -711,9 +711,9 @@ in Python: the module cache, frames, the recursion and integer-string limits,
 the handled exception, collection, the weak table, and host output. Hosts
 register it as `_spy`; a context where none did has no such module. A standard
 layer, `spy-std.c` (`libspy-std.a`, declared in `spy-std.h`), supplies the host
-modules `sys` and `gc`, written on those primitives and specified, after
-CPython 3.15, by [PLS-STD-315](standards/std.md). `spy_std_init_module`
-registers one of them and `spy_std_init` all of them; it also loads native
+module `sys`, written on those primitives and specified, after CPython 3.15,
+by [PLS-STD-315](standards/std.md). `spy_std_init_module` registers one
+module and `spy_std_init` all of them; it also loads native
 modules (3.4.9). The `spy` command calls
 `spy_std_init`, `spyc -M` names the modules a generated program registers, and
 the conformance driver `tests/run-spec` registers none, only `_spy`. Their
@@ -722,9 +722,9 @@ import finds them before the host loader, needs no loader, and parses them only
 on first use. `print` and interactive display write to `sys.stdout`, and
 `breakpoint` calls `sys.breakpointhook`, once a `sys` module is loaded; until
 then output goes to the host callback, display uses its default, and
-`breakpoint` returns `None` (PLS-315 Annex B). `gc.collect()` runs the cycle
-collector during execution; it has one generation, and runs automatically only
-when the host asks, so `gc`'s enable and threshold settings are recorded. `sys`
+`breakpoint` returns `None` (PLS-315 Annex B). There is no `gc` module: the
+engine collects cycles by itself (4.4), and a host controls collection
+through the C API (3.4.7). `sys`
 keeps the runtime state natively: `modules`, `exception()`, the recursion and
 integer string-conversion limits, reference counts, and `stdout`/`stderr`
 streams that write to the host output and error callbacks;
@@ -947,10 +947,20 @@ operating system's sandbox around the context for untrusted programs.
 
 #### 3.4.7 Collection
 
-`spy_collect` removes unreachable reference cycles and returns the number of
-values collected. Externally retained values are roots. The host schedules
-collection at suitable safe points. `spy_live_values` reports the current value
-count. Context teardown frees remaining cycles regardless of collection timing.
+The engine collects cycles by itself. A collection becomes due when the
+engine takes memory for new values while two things hold since the last
+collection: the values that can form cycles (everything but small integers
+and floats) have grown by `SPY_LIMIT_COLLECTION` (2,000 by default), and the
+memory the engine holds has doubled. The next statement boundary then runs
+the cycle collector (4.4). A heap that grows only in numbers is never
+scanned, and doubling keeps the total cost of collecting linear in what a
+program makes. `spy_set_limit(c, SPY_LIMIT_COLLECTION, 0)` turns automatic
+collection off, for a host that wants finalizers to run only when it asks.
+
+`spy_collect` runs the collector now and returns the number of values
+collected; values the host retains are roots. `spy_live_values` reports the
+current value count. Context teardown frees remaining cycles whether or not
+any collection ran.
 
 #### 3.4.8 Stability
 
@@ -970,7 +980,7 @@ the last such break, and 1.0 will freeze the API and ABI under these rules.
 The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
 names it puts in `_spy` serve the standard layer and may change in any
 release. Hosts and their Python code should reach those facilities through
-the standard layer's `sys` and `gc`, not `_spy`.
+the standard layer's `sys` and the C API, not `_spy`.
 
 #### 3.4.9 Native modules
 
@@ -1230,8 +1240,10 @@ statement boundary or when the top-level program finishes, before any weak
 reference callbacks. Exceptions raised by `__del__` are discarded, because there
 is no error stream. Afterwards the instance is freed unless the finalizer
 resurrected it, and `__del__` never runs twice for the same object.
-`gc.collect()` collects again after running finalizers, so cyclic garbage with
-`__del__` is freed in the same call. Context teardown never runs finalizers.
+A collection collects again after running finalizers, so cyclic garbage with
+`__del__` is freed in the same collection. An automatic collection runs at
+a statement boundary, the point where queued finalizers run, and the
+finalizers it runs do not start another one. Context teardown never runs finalizers.
 A suspended generator or coroutine closes when it is released or collected,
 running its `finally` blocks and `__exit__` methods, as CPython's does. A
 suspended asynchronous generator is passed to the host's finalizer hook when
@@ -1268,7 +1280,7 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `spy.c`, `spy.h` | Engine and public embedding API |
 | `spy-unicode.h`, `tools/build_unicode.py` | Generated Unicode properties and development-only generator |
 | `cli.c`, `host.h` | CLI and host stream support |
-| `spy-std.c`, `spy-std.h`, `modules/` | Standard layer: the host modules `sys` and `gc` |
+| `spy-std.c`, `spy-std.h`, `modules/` | Standard layer: the host module `sys` |
 | `spyc.c` | Standalone C program generator |
 | `run-cython.c` | Persistent evaluation driver for upstream doctests |
 | `tests/run-spec.c` | Conformance driver: the bare core for spec tests and TLA+ replays |
@@ -1279,7 +1291,7 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `docs/manual.md` | Engine manual |
 | `intrinsics.py`, `spy-intrinsics.h` | Embedded language-level intrinsic objects; generated header is checked in |
 | `docs/standards/3_15.md` | Single-file versioned language target |
-| `docs/standards/std.md` | Specification of the standard modules `sys` and `gc` |
+| `docs/standards/std.md` | Specification of the standard module `sys` |
 | `AGENTS.md` | Architecture, naming, evidence, and code-taste requirements |
 
 The build remains a direct C toolchain with an ordinary Makefile. There is no

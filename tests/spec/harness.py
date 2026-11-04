@@ -348,7 +348,7 @@ class EngineHost(Host):
         self.primitives._collect()
 
     def disable_automatic_collection(self):
-        pass  # the engine collects cycles only when its host asks
+        self.primitives._collection_limit(0)
 
     def weak_reference(self, obj):
         return _WeakReference(self.primitives, obj)

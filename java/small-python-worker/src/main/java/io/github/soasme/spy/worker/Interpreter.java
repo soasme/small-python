@@ -131,7 +131,7 @@ public final class Interpreter implements AutoCloseable {
 
         private Builder() {}
 
-        /** Whether to register the standard modules sys and gc; true by default. */
+        /** Whether to register the standard module sys; true by default. */
         public Builder std(boolean std) {
             this.std = std;
             return this;

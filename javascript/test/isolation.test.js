@@ -155,7 +155,7 @@ describe("loss", () => {
 
   test("handles are released", async () => {
     const rt = track(await Runtime.create());
-    const count = () => rt.eval("len(__import__('gc').get_objects())");
+    const count = () => rt.eval("__import__('sys').getallocatedblocks()");
     for (let i = 0; i < 200; i++) await rt.eval("object()");
     globalThis.gc?.();
     await new Promise((r) => setTimeout(r, 50));

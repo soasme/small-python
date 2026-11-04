@@ -224,18 +224,18 @@ static const char *const programs[] = {
     "print(next(wg()) is not None)\n"
     "class I(int): pass\n"
     "print(I(5) + 1)\n"
-    "lazy from gc import isenabled, collect\n"
-    "print(isenabled())\n",
+    "lazy from _spy import _tracked, _collect\n"
+    "print(_tracked([]))\n",
 
     /* sys is left to fuzz_oom and tests/oom FILE: importing it makes 5,000
      * allocations, too many to sweep here. */
-    "import gc\n"
+    "from _spy import _collect\n"
     "class N:\n"
     "    def __init__(self): self.me = self\n"
     "    def __del__(self): print('gone')\n"
     "n = N()\n"
     "del n\n"
-    "print(gc.collect() > 0, gc.get_referents([n := 1]), gc.isenabled())\n",
+    "print(_collect() > 0)\n",
 
     /* Cleanup after a value or block the context reuses fails. */
     "print({1: 2}.popitem(), list(range(10**30, 10**30 + 2)), t\"a{1}b\".strings)\n"
@@ -262,8 +262,8 @@ static const char *const programs[] = {
     "except ValueError as e: print(e)\n"
     "class L(list): pass\n"
     "print(L([1]))\n"
-    "lazy from gc import isenabled\n"
-    "print(isenabled())\n"
+    "lazy from _spy import _tracked\n"
+    "print(_tracked([]))\n"
     "from _spy import _setting\n"
     "_setting('coroutine_origin_tracking_depth', 2)\n"
     "async def co(): return 1\n"

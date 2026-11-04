@@ -5,15 +5,15 @@
 **Library baseline:** CPython 3.15.2 (`v3.15.2`, commit `5e58eaad`), 64-bit Linux  
 **Status:** Project library specification, draft
 
-This document specifies the library modules of Small Python's standard layer
-(`spy-std.c`): `sys` and `gc`. It follows CPython 3.15.2: a name this document
+This document specifies the library module of Small Python's standard layer
+(`spy-std.c`): `sys`. It follows CPython 3.15.2: a name this document
 defines behaves as CPython's does, with CPython's signatures, results, and
 error messages. Where CPython's behaviour depends on the process, the platform,
 or the build, this document says so and lets the host choose.
 
 The language itself is specified by [PLS-315](3_15.md), which
-depends on no library module. Its Annex B defines the host hooks that these
-modules expose, and its Annex C.5 records how `sys` names correspond to
+depends on no library module. Its Annex B defines the host hooks that this
+module exposes, and its Annex C.5 records how `sys` names correspond to
 language facilities. This document specifies the modules themselves.
 
 Each clause ends with a *Status* note on the current Small Python
@@ -30,13 +30,12 @@ the Python Software Foundation.
 3. [References](#3-references)
 4. [Conventions](#4-conventions)
 5. [The `sys` module](#5-the-sys-module)
-6. [The `gc` module](#6-the-gc-module)
 - [Annex A (informative) Implementation status](#annex-a-informative-implementation-status)
 - [Annex B (informative) Verification](#annex-b-informative-verification)
 
 ## 1 Scope
 
-This document specifies the public names of the modules `sys` and `gc` as
+This document specifies the public names of the module `sys` as
 CPython 3.15.2 defines them, and their behaviour when called from Python code.
 It does not specify:
 
@@ -45,8 +44,9 @@ It does not specify:
 - names beginning with an underscore, except `sys._getframe`,
   `sys._getframemodulename`, and `sys._xoptions`, which libraries rely on
   (5.15 lists the others);
-- other library modules. Small Python provides no other library module; a
-  host may add its own.
+- other library modules, `gc` among them. Small Python provides no other
+  library module; the engine collects cycles by itself, and a host may add
+  modules of its own.
 
 ## 2 Conformance
 
@@ -60,7 +60,7 @@ A host conforms *fully* when it binds every name of a module. Small Python is
 a partial implementation; Annex A lists its gaps.
 
 The modules carry no other public names. Helpers used to build them shall be
-private to the implementation, so that `dir(sys)` and `dir(gc)` list only the
+private to the implementation, so that `dir(sys)` lists only the
 names of this document and the CPython implementation details a host chooses
 to add (5.15).
 
@@ -69,10 +69,9 @@ to add (5.15).
 - PLS-315:2026-draft2, Python Language Specification, Python 3.15 Core
   Language (`docs/standards/3_15.md`).
 - The Python Standard Library, version 3.15: *sys — System-specific parameters
-  and functions*, and *gc — Garbage Collector interface*. Python Software
-  Foundation.
-- CPython 3.15.2 source: `Python/sysmodule.c`, `Modules/gcmodule.c`,
-  `Python/clinic/sysmodule.c.h`, `Modules/clinic/gcmodule.c.h`, at commit
+  and functions*. Python Software Foundation.
+- CPython 3.15.2 source: `Python/sysmodule.c` and
+  `Python/clinic/sysmodule.c.h`, at commit
   `5e58eaad7c58df58dfa8ea549c87996e01dd1077` (`tests/upstream.json`).
 
 ## 4 Conventions
@@ -156,7 +155,7 @@ standard library's top-level modules, including those the host lacks.
 *Host choice:* both list the host's modules; CPython's lists are those of a
 CPython build. `builtin_module_names` includes `'sys'` and `'builtins'`.
 
-*Status:* provided; `builtin_module_names` is `('_spy', 'builtins', 'gc',
+*Status:* provided; `builtin_module_names` is `('_spy', 'builtins',
 'sys')`, and `stdlib_module_names` is CPython 3.15.2's.
 
 #### 5.1.6 `path`, `meta_path`, `path_hooks`, `path_importer_cache`
@@ -630,170 +629,6 @@ document does not specify them, and a host need not bind them.
 
 *Status:* none is bound.
 
-## 6 The `gc` module
-
-The `gc` module controls the cycle collector of PLS-315 9.7, which reclaims
-groups of unreachable objects that refer to each other. Reference counting
-reclaims other objects without it.
-
-### 6.1 Collection
-
-#### 6.1.1 `collect(generation=2)`
-
-Runs a collection of the given generation and the younger ones, finalizes
-and reclaims the unreachable objects found, and returns their number, an
-`int`. *generation* is taken as an index, by position or keyword; a value
-outside 0 to 2 raises a `ValueError` exception ("invalid generation"). Before
-and after the collection, it calls each item of `gc.callbacks` (6.3.2).
-
-*Host choice:* the number of generations a host's collector distinguishes;
-a collector with one generation collects everything for any valid
-*generation*. Which unreachable objects the number counts.
-
-*Status:* provided; the collector has one generation, and the number counts
-every unreachable value freed, untracked values (6.4.3) included.
-
-### 6.2 Automatic collection
-
-The collector also runs automatically, when allocations outnumber
-deallocations by the thresholds.
-
-#### 6.2.1 `enable()`, `disable()`, `isenabled()`
-
-`enable()` and `disable()` turn automatic collection on and off;
-`isenabled()` returns whether it is on. It is on initially.
-
-*Host choice:* when collections run automatically. A host that collects only
-when it is asked to (PLS-315 9.7) records the setting.
-
-*Status:* provided; the setting is recorded, and the engine collects when the
-host asks.
-
-#### 6.2.2 `get_threshold()`, `set_threshold(threshold0[, threshold1[, threshold2]])`
-
-`get_threshold()` returns the three thresholds as a `tuple`, initially
-`(2000, 10, 10)`. `set_threshold` sets the first one, two, or three of them,
-each taken as an index that fits a C `long` (a larger one raises an
-`OverflowError` exception, "Python int too large to convert to C long").
-Setting *threshold0* to 0 disables automatic collection. Any other number of
-arguments raises a `TypeError` exception ("gc.set_threshold requires 1 to 3
-arguments").
-
-*Status:* provided, recorded only.
-
-#### 6.2.3 `get_count()`
-
-Returns the current collection counts as a `tuple` of three `int`s.
-
-*Host choice:* what the counts count, as for the number of generations
-(6.1.1).
-
-*Status:* provided; the single generation's count is the number of values
-allocated, less those freed, since the last collection, untracked values
-(6.4.3) included, and the others are 0.
-
-### 6.3 Statistics and callbacks
-
-#### 6.3.1 `get_stats()`
-
-Returns a `list` of three `dict`s, one per generation, each with the keys
-`'collections'` (the number of collections), `'collected'` (the objects
-collected), `'uncollectable'` (the objects found uncollectable),
-`'candidates'` (the objects considered), and `'duration'` (the total time
-spent, in seconds, a `float`).
-
-*Status:* provided; `'candidates'` counts the context's live values, and
-`'duration'` is 0.0 where the C library lacks `timespec_get`.
-
-#### 6.3.2 `callbacks`
-
-A `list` of callables, initially empty, that `collect` and automatic
-collections call as *callback*(*phase*, *info*): *phase* is `'start'` before
-a collection and `'stop'` after it, and *info* is a `dict` with the keys
-`'generation'`, `'collected'`, `'uncollectable'`, `'candidates'`, and
-`'duration'` (a `float`, in seconds); the last four are 0 in the `'start'`
-call.
-
-*Status:* provided.
-
-### 6.4 Object queries
-
-#### 6.4.1 `get_objects(generation=None)`
-
-Returns a `list` of the objects the collector tracks, excluding the list
-returned. With *generation*, only those in that generation. *generation* is
-`None` or an `int`: another type raises a `TypeError` exception ("argument
-should be integer or None, not '*T*'"), and a value of 3 or more raises a
-`ValueError` exception ("generation parameter must be less than the number
-of available generations (3)"). A negative value returns the objects of all
-generations.
-
-*Status:* provided; the single generation holds every tracked object.
-
-#### 6.4.2 `get_referents(*objs)`, `get_referrers(*objs)`
-
-`get_referents` returns a `list` of the objects that the arguments refer to
-directly and that the collector can find (an `int` refers to none).
-`get_referrers` returns a `list` of the tracked objects that refer directly
-to any argument.
-
-*Status:* provided.
-
-#### 6.4.3 `is_tracked(obj, /)`
-
-Returns whether the collector tracks *obj*. Atomic values (`None`, numbers,
-`str`, `bytes`) and containers that can hold only such values (including
-tuples, and frozensets, of untracked items) are untracked; lists,
-dictionaries, instances, functions, and classes that are not static types are
-tracked. Called with a number of arguments other than one, it raises a
-`TypeError` exception ("gc.is_tracked() takes exactly one argument (*n*
-given)").
-
-*Host choice:* which values are tracked, beyond what CPython's rule implies.
-
-*Status:* provided.
-
-#### 6.4.4 `is_finalized(obj, /)`
-
-Returns whether the collector has run *obj*'s finalizer (PEP 442), which
-happens at most once.
-
-*Status:* provided.
-
-### 6.5 Debugging and garbage
-
-#### 6.5.1 `get_debug()`, `set_debug(flags, /)`, `DEBUG_*`
-
-`set_debug` takes *flags* as an index and sets the debugging flags, initially
-0; `get_debug()` returns them. The flags are `DEBUG_STATS` (1, print
-statistics), `DEBUG_COLLECTABLE` (2, print collectable objects found),
-`DEBUG_UNCOLLECTABLE` (4, print uncollectable objects found),
-`DEBUG_SAVEALL` (32, append unreachable objects to `gc.garbage` instead of
-freeing them), and `DEBUG_LEAK` (38, the last three together). Printed
-information goes to `sys.stderr`.
-
-*Status:* provided. `DEBUG_STATS` reports the single generation's count
-and `DEBUG_UNCOLLECTABLE` prints nothing, since no object is uncollectable.
-
-#### 6.5.2 `garbage`
-
-A `list` of objects the collector found unreachable but could not free, and,
-under `DEBUG_SAVEALL`, of every unreachable object found.
-
-*Status:* provided; no object is uncollectable, so it holds only what
-`DEBUG_SAVEALL` saves.
-
-### 6.6 Freezing
-
-`freeze()` moves every tracked object to a permanent generation that
-collections ignore; `unfreeze()` returns them to the oldest generation;
-`get_freeze_count()` returns the number of objects in the permanent
-generation. `freeze()` and `unfreeze()` return `None`.
-
-*Status:* provided; `freeze()` marks every tracked value, a collection
-treats marked values as reachable, and `get_objects()` leaves them out, as
-CPython's does.
-
 ## Annex A (informative) Implementation status
 
 The status of Small Python's standard layer against this document, as of the
@@ -804,7 +639,6 @@ deviation.
 | Module | Bound as specified | Deviates | Not bound |
 | --- | --- | --- | --- |
 | `sys` | every name of clause 5 not listed in the other columns | `unraisablehook` (5.6.3); `settrace`, `setprofile` (5.12) | `monitoring`, `addaudithook`, `audit`, the stack trampolines, and `remote_exec` (5.12); the names of 5.13 and 5.14 |
-| `gc` | every name of clause 6 | none | none |
 
 The engine keeps the state behind 5.1.3, 5.1.4, 5.6.3, 5.8, and 5.12 as
 settings of the `_spy` primitives, which the core consults through the host
@@ -815,7 +649,7 @@ threads, which a context does not have.
 
 ## Annex B (informative) Verification
 
-Every value and message quoted in clauses 5 and 6 was checked against the
+Every value and message quoted in clause 5 was checked against the
 pinned CPython 3.15.2 build (`make oracle`, `tests/upstream/cpython-build`),
 on 64-bit Linux or macOS, by calling the name from Python and reading the
 result or the exception. Values that depend on the build (`version`, paths,

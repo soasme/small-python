@@ -19,7 +19,7 @@ cannot start.
 
 | Argument | Meaning |
 |---|---|
-| `std` | Register the standard modules (`sys` and `gc`). |
+| `std` | Register the standard module `sys`. |
 | `step_limit` | Maximum evaluation steps, counted from the start of each `eval` or `exec`; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. Must be `>= 0`. |
 | `memory_limit` | Bytes the engine may hold allocated; `0` is unlimited. Exceeding it stops the operation with `MemoryError`, which code cannot catch; the runtime keeps working. |
 | `output_limit` | Bytes each top-level `eval` or `exec` may print; `0` is unlimited. Exceeding it raises `RuntimeError` in the engine. |

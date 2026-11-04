@@ -53,7 +53,7 @@ public final class Interpreter implements AutoCloseable {
         }
     }
 
-    /** A runtime with the standard modules {@code sys} and {@code gc}. */
+    /** A runtime with the standard module {@code sys}. */
     public static Interpreter create() {
         return new Interpreter(true);
     }

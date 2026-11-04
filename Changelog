@@ -1,3 +1,14 @@
+Unreleased:
+
+- the cycle collector runs by itself: once the values that can form
+  cycles have grown by SPY_LIMIT_COLLECTION (2000 by default) and the
+  engine's memory has doubled since the last collection, the next
+  statement collects; a limit of zero leaves collection to spy_collect
+- a collection visits only the unreachable values after marking, about
+  twice as fast on a large live heap
+- the gc module is removed from the standard layer; sys is its only module
+  and builtin_module_names no longer lists gc
+
 2026-11-03 0.6.0:
 
 - incompatible C API changes, the last before 1.0:

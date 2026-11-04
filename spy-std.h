@@ -7,9 +7,9 @@
 extern "C" {
 #endif
 
-/* The standard layer: the host modules sys and gc, registered with
+/* The standard layer: the host module sys, registered with
  * spy_new_module through the public API and written on the engine
- * primitives, which they register as _spy, and the loading of native
+ * primitives, which it registers as _spy, and the loading of native
  * modules. The core (spy.c) provides the language and its builtins; hosts
  * that want these link spy-std.c, as the spy command does, and register
  * each module or all of them. Both return 0, or -1 with an error set. */

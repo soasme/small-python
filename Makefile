@@ -76,7 +76,7 @@ $(OBJDIR)/spyc.o: CPPFLAGS += -DCONFIG_CC='"$(CC) $(LDFLAGS)"' -DCONFIG_PREFIX='
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^
 
-# The standard layer (sys, gc and native modules), separate from the core
+# The standard layer (sys and native modules), separate from the core
 # like quickjs-libc.
 libspy-std.a: $(OBJDIR)/spy-std.o
 	$(AR) rcs $@ $^

@@ -58,7 +58,7 @@ doubt; move to `spy` when you trust the code and the overhead matters.
 
 ### Running code
 
-`spy.New` creates a runtime with the standard modules `sys` and `gc`;
+`spy.New` creates a runtime with the standard module `sys`;
 `spy.NewBare` creates one with only the language core and its builtins.
 `Close` frees it.
 
@@ -296,7 +296,7 @@ The zero `worker.Options` is the default.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Bare` | `false` | leave out the standard modules `sys` and `gc` |
+| `Bare` | `false` | leave out the standard module `sys` |
 | `StepLimit` | unlimited | evaluation steps per top-level `Eval` or `Exec`; past it, `RuntimeError` in Python |
 | `MemoryLimit` | unlimited | bytes the engine may hold; past it, `MemoryError` in Python |
 | `OutputLimit` | unlimited | bytes each top-level `Eval` or `Exec` may print; past it, `RuntimeError` in Python |

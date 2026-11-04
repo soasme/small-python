@@ -186,7 +186,7 @@ const (
 
 // Options configure a [Runtime]. The zero value is the default.
 type Options struct {
-	// Bare leaves out the standard modules (sys and gc).
+	// Bare leaves out the standard module sys.
 	Bare bool
 	// StepLimit bounds the evaluation steps of each top-level Eval or Exec;
 	// 0 is unlimited. Exceeding it raises RuntimeError in the engine.

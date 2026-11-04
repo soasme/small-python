@@ -346,7 +346,7 @@ int main(int argc, char **argv) {
         assert(bare && spy_exec(bare, "import sys", "bare.py") && !strcmp(spy_error_type(bare), "ModuleNotFoundError"));
         assert(spy_exec(bare, "import _spy", "bare_spy.py") && !spy_exec(bare, "import builtins\nopen", "bare_core.py"));
         assert(!spy_std_init_module(bare, "sys") && !spy_exec(bare, "import sys\nassert sys.modules['sys'] is sys", "bare_sys.py"));
-        assert(spy_exec(bare, "import gc", "bare_gc.py") && spy_std_init_module(bare, "nope"));
+        assert(spy_std_init_module(bare, "gc") && spy_std_init_module(bare, "nope"));
         spy_context_free(bare);
     }
     SPYContext *c = spy_context_new();
@@ -489,6 +489,26 @@ int main(int argc, char **argv) {
     assert(spy_collect(c) == 0);
     spy_release(cycle);
     assert(spy_collect(c) == 1);
+    assert(spy_live_values(c) == baseline);
+
+    /* Cycles made while a program runs are collected as the heap grows, with
+     * their finalizers; with no collection limit they wait for spy_collect. */
+    static const char cycles[] =
+        "class Node:\n    def __init__(self): self.me = self\n"
+        "class Mortal(Node):\n    def __del__(self): ended.append(1)\n"
+        "ended = []\nfor i in range(100000):\n    Node()\n    if i % 100 == 0: Mortal()\n";
+    assert(spy_get_limit(c, SPY_LIMIT_COLLECTION) == 2000);
+    execute(c, cycles);
+    assert(spy_live_values(c) < 3 * baseline + 6000);
+    execute(c, "assert len(ended) > 900, len(ended)\n");
+    assert(!spy_set_limit(c, SPY_LIMIT_COLLECTION, 0) && !spy_get_limit(c, SPY_LIMIT_COLLECTION));
+    spy_collect(c);
+    execute(c, cycles);
+    execute(c, "assert not ended\n");
+    assert(spy_collect(c) >= 100000);
+    assert(!spy_set_limit(c, SPY_LIMIT_COLLECTION, 2000));
+    execute(c, "del Node, Mortal, ended, i\n");
+    spy_collect(c);
     assert(spy_live_values(c) == baseline);
 
     /* Releasing a deep acyclic graph must not consume the native call stack. */
@@ -1073,10 +1093,15 @@ int main(int argc, char **argv) {
                         "    try: Ref(target, None)\n"
                         "    except TypeError as e: assert str(e) == f\"cannot create weak reference to '{type(target).__name__}' object\", e\n"
                         "    else: raise AssertionError(target)\n"
-                        "for args in ((1,), (None, 1, 2)):\n"
-                        "    try: _spy._collect(*args)\n"
-                        "    except TypeError as e: assert str(e) == '_collect expects None or a list, and a flag', e\n"
-                        "    else: raise AssertionError(args)\n", "weak_types.py"));
+                        "for primitive, args, message in ((_spy._collect, (1,), 'expected no arguments'), (_spy._tracked, (), 'expected one argument'),\n"
+                        "                                  (_spy._collection_limit, (-1,), 'the collection limit must not be negative'),\n"
+                        "                                  (_spy._collection_limit, ('x',), \"'str' object cannot be interpreted as an integer\")):\n"
+                        "    try: primitive(*args)\n"
+                        "    except (TypeError, ValueError) as e: assert str(e) == message, e\n"
+                        "    else: raise AssertionError(args)\n"
+                        "assert _spy._collection_limit(0) == 2000 and _spy._collection_limit(2000) == 0\n"
+                        "tracked = [_spy._tracked(x) for x in ((), (1,), ([],), frozenset(), frozenset({K()}), object(), K(), K, int)]\n"
+                        "assert tracked == [False, False, True, False, True, False, True, True, False], tracked\n", "weak_types.py"));
     size_t before = spy_live_values(c);
     for (int i = 0; i < 3; i++) {
         assert(!spy_exec(c, "n = Node(); n.me = n; w = Ref(n, lambda r: None); del n, w", "weak_loop.py"));
@@ -1148,16 +1173,12 @@ int main(int argc, char **argv) {
         spy_context_free(files);
     }
 
-    /* Reached by nothing else in make test: gc.get_referents, frame-locals
+    /* Reached by nothing else in make test: frame-locals
      * merging, sys's digit limit and breakpoint hook, float.__getformat__,
      * wide and half-float memoryview items, dict-view equality, latin-9, and
      * lazy import. */
     execute(c,
-        "import gc, sys\n"
-        "class T: pass\n"
-        "t = T()\n"
-        "holder = [t, 'x']\n"
-        "assert t in gc.get_referents(holder) and 'x' in gc.get_referents(holder)\n"
+        "import sys\n"
         "def merged():\n"
         "    a = 1\n"
         "    locals_ = sys._getframe().f_locals\n"
@@ -1187,8 +1208,8 @@ int main(int argc, char **argv) {
         "assert 'a\\u20ac'.encode('iso8859-15') == b'a\\xa4' and b'\\xa4'.decode('latin9') == '\\u20ac'\n"
         "assert [{1: 2}.keys()] == [{1}]\n"
         "assert type(__lazy_import__('json')).__name__ == 'lazy_import'\n"
-        "lazy import gc as lazy_gc\n"
-        "assert lazy_gc.collect() >= 0\n");
+        "lazy import sys as lazy_sys\n"
+        "assert lazy_sys.maxsize > 0\n");
 
     SPYContext *other = spy_context_new();
     assert(other);

@@ -106,7 +106,7 @@ pub struct Runtime {
 unsafe impl Send for Runtime {}
 
 impl Runtime {
-    /// A runtime with the standard modules (`sys` and `gc`).
+    /// A runtime with the standard module `sys`.
     pub fn new() -> Result<Runtime> {
         let rt = Runtime::bare()?;
         rt.check(unsafe { ffi::spy_std_init(rt.ctx()) })?;

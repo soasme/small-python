@@ -14,7 +14,7 @@
 enum { THREADS = 4, ROUNDS = 8 };
 
 static const char program[] =
-    "import gc, sys, fib\n"
+    "import sys, fib\n"
     "class Node:\n"
     "    def __init__(self, n): self.n = n; self.next = self\n"
     "    def __del__(self): freed.append(self.n)\n"
@@ -37,9 +37,7 @@ static const char program[] =
     "    c.send(None)\n"
     "except StopIteration as stop:\n"
     "    total = stop.value\n"
-    "del nodes\n"
-    "gc.collect()\n"
-    "result = (total, len(text), sys.getrecursionlimit(), len(freed), fib.fib(20))\n";
+    "del nodes\n";
 static const char *library;
 
 static int discard(SPYContext *c, void *data, const char *s, size_t n) {
@@ -53,7 +51,8 @@ static void *work(void *failed) {
         if (!c || spy_std_init(c) || spy_std_load_native(c, "fib", library)) { *(int *)failed = 1; return NULL; }
         spy_set_output(c, discard, NULL, NULL);
         SPYValue *result = NULL;
-        if (spy_exec(c, program, "<thread>") || !(result = spy_eval(c, "repr(result)", "<thread>")) ||
+        if (spy_exec(c, program, "<thread>") || !spy_collect(c) ||
+            !(result = spy_eval(c, "repr((total, len(text), sys.getrecursionlimit(), len(freed), fib.fib(20)))", "<thread>")) ||
             strcmp(spy_as_string(c, result, NULL), "(50, 38, 1000, 100, 6765)")) {
             fprintf(stderr, "thread: %s: %s\n", spy_error_type(c), spy_error_display(c));
             *(int *)failed = 1;

@@ -243,9 +243,15 @@ enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY, SPY_STOP_INTERRUPT, SPY_STOP_OUTPUT 
  * call depth, above the current one) and INT_DIGITS (the int-str
  * conversion limit; 0 for unlimited, or at least 640) are the parameters
  * sys can change too. STACK is the bytes of C stack the engine may use
- * (4 MiB by default), for hosts running it on a smaller stack. Returns 0,
- * or -1 with ValueError for an unknown limit or a value out of range. */
-enum { SPY_LIMIT_STEPS, SPY_LIMIT_MEMORY, SPY_LIMIT_OUTPUT, SPY_LIMIT_RECURSION, SPY_LIMIT_INT_DIGITS, SPY_LIMIT_STACK };
+ * (4 MiB by default), for hosts running it on a smaller stack. COLLECTION
+ * (2000 by default) is how many values that can form cycles the heap must
+ * gain, while the engine's memory doubles, after one collection before the
+ * cycle collector runs again at the next statement; zero leaves
+ * collection to spy_collect.
+ * Returns 0, or -1 with ValueError for an unknown limit or a value out of
+ * range. */
+enum { SPY_LIMIT_STEPS, SPY_LIMIT_MEMORY, SPY_LIMIT_OUTPUT, SPY_LIMIT_RECURSION, SPY_LIMIT_INT_DIGITS, SPY_LIMIT_STACK,
+       SPY_LIMIT_COLLECTION };
 int spy_set_limit(SPYContext *, int limit, size_t value);
 size_t spy_get_limit(const SPYContext *, int limit);
 int spy_stopped(const SPYContext *);

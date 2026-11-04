@@ -31,8 +31,9 @@ So the plan is:
 3. Close the engine and host gaps that `Lib/` reaches without importing a
    module: the import system, `sys`, code and frame objects (§3).
 
-Small Python keeps its own `sys` and `gc` (`modules/`). In CPython these are
-built in, not part of `Lib/`, so nothing gets copied over them.
+Small Python keeps its own `sys` (`modules/`). In CPython it is built in, not
+part of `Lib/`, so nothing gets copied over it. The engine collects cycles on
+its own; a host that wants the `gc` module supplies one (§4.2).
 
 ## 2 How the lists were made
 
@@ -157,6 +158,7 @@ column work.
 | `array`, `mmap`, `cmath` | the modules of the same name |
 | `_lsprof` | `cProfile` |
 | `_tracemalloc`, `faulthandler` | the modules of the same name; need allocator and signal hooks in the engine |
+| `gc` | `timeit`, `trace`; `collect` is `spy_collect` and `enable`/`disable` the collection limit, the rest needs collector hooks in the engine |
 
 ### 4.3 Optional accelerators
 
@@ -483,7 +485,7 @@ spyc knows which native modules the bundled sources import. The generated
 table can reference only those modules' init functions. If each native
 module in `libspy-std.a` is its own object file, the linker drops the rest
 with no further work. `spy-std.c` would then have to be split into one
-object per module once it holds more than `sys` and `gc`.
+object per module once it holds more than `sys`.
 
 ### 6.5 What stays out
 

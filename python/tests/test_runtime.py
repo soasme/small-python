@@ -29,9 +29,7 @@ class OptionsTest(unittest.TestCase):
 
     def test_std(self):
         with Runtime() as rt:
-            for name in ["sys", "gc"]:
-                with self.subTest(module=name):
-                    rt.exec(f"import {name}")
+            rt.exec("import sys")
         with Runtime(std=False) as rt:
             with self.assertRaises(Error) as cm:
                 rt.exec("import sys")

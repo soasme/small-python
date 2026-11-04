@@ -1,4 +1,4 @@
-"""The sys and gc modules against CPython 3.15 (docs/standards/std.md).
+"""The sys module against CPython 3.15 (docs/standards/std.md).
 
 tests/std_probe.py prints what the specification states about each name; it
 must print the same under the spy command and under the Python 3.15 running
@@ -26,8 +26,8 @@ def main():
     expected, actual = run([sys.executable, "-I"]), run([str(Path(sys.argv[1]).resolve())])
     if expected != actual:
         diff = difflib.unified_diff(expected.splitlines(), actual.splitlines(), "CPython", "spy", lineterm="")
-        raise SystemExit("sys and gc differ from CPython:\n" + "\n".join(diff))
-    print(f"Standard modules: {len(expected.splitlines())} probes of sys and gc match CPython")
+        raise SystemExit("sys differs from CPython:\n" + "\n".join(diff))
+    print(f"Standard modules: {len(expected.splitlines())} probes of sys match CPython")
 
 
 if __name__ == "__main__":

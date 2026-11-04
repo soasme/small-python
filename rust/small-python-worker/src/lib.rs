@@ -347,7 +347,7 @@ impl Default for Builder {
 }
 
 impl Builder {
-    /// Register the standard modules (`sys` and `gc`). Default on.
+    /// Register the standard module `sys`. Default on.
     pub fn std(mut self, std: bool) -> Builder {
         self.std = std;
         self

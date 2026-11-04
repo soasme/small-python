@@ -120,7 +120,7 @@ implementation = _Namespace(name="smallpython", cache_tag=None, version=version_
 abi_info = _Namespace(pointer_bits=64 if maxsize > 2**32 else 32, free_threaded=False, debug=False,
                       byteorder=byteorder)
 abiflags = ""
-builtin_module_names = ("_spy", "builtins", "gc", "sys")
+builtin_module_names = ("_spy", "builtins", "sys")
 stdlib_module_names = frozenset((
     "__future__", "_abc", "_aix_support", "_android_support", "_apple_support", "_ast", "_ast_unparse",
     "_asyncio", "_bisect", "_blake2", "_bz2", "_codecs", "_codecs_cn", "_codecs_hk", "_codecs_iso2022",

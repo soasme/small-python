@@ -88,7 +88,7 @@ type Runtime struct {
 	closed   bool
 }
 
-// New returns a runtime with the standard modules (sys and gc).
+// New returns a runtime with the standard module sys.
 func New() (*Runtime, error) {
 	rt, err := NewBare()
 	if err != nil {

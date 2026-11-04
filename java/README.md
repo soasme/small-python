@@ -49,7 +49,7 @@ matters.
 ```java
 import io.github.soasme.spy.Interpreter;
 
-try (Interpreter py = Interpreter.create()) {        // createBare(): no sys, gc
+try (Interpreter py = Interpreter.create()) {        // createBare(): no sys
     py.exec("def area(w, h):\n    return w * h");
     long n = py.eval("area(3, 4)").as(Long.class);    // 12
     py.set("limit", 10);

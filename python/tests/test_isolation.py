@@ -281,11 +281,11 @@ class ProtocolTest(unittest.TestCase):
                 rt.eval("object()")
             rt.eval("1")
             self.assertLess(len(rt._released), 2)
-            live = rt.eval("len(__import__('gc').get_objects())")
+            live = rt.eval("__import__('sys').getallocatedblocks()")
             for _ in range(2000):
                 rt.eval("object()")
             rt.eval("1")
-            self.assertLess(rt.eval("len(__import__('gc').get_objects())") - live, 50)
+            self.assertLess(rt.eval("__import__('sys').getallocatedblocks()") - live, 50)
 
     def test_engine_subclasses_stay_objects(self):
         with Runtime() as rt:
