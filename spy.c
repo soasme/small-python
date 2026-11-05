@@ -20609,7 +20609,8 @@ static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assi
  * its successor; any other step, and any tick with work, takes the loop. */
 #if defined(__GNUC__) /* Labels as values. */
 #define THREADED 1
-#define CASE(op) case op: op_##op:
+/* The label comes first: after case, it leaves the brace past a break uncounted by clang coverage. */
+#define CASE(op) op_##op: case op:
 #define NEXT { if (code[pc].node && quiet(c, &f)) { \
         ins = &code[pc++]; n = ins->node; relocate(c, n); \
         truth_known = known; known = 0; a = b = value = NULL; goto *dispatch[ins->op]; } } continue
