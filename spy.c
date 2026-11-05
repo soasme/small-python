@@ -1921,7 +1921,7 @@ static int same_bytes(SPYContext *c, const char *a, const char *b, size_t n) {
     return (n < 4096 || !spend(c, n / 64)) && !memcmp(a, b, n);
 }
 /* Whether two dicts, sets, lists, tuples or slices of one kind hold equal items. */
-static int items_equal(SPYValue *a, SPYValue *b, int type) {
+static ALWAYS_INLINE int items_equal(SPYValue *a, SPYValue *b, int type) {
     if (type == SPY_DICT || type == SPY_SET) {
         if (a->as.map.len != b->as.map.len) return 0;
         for (size_t i = 0; i < a->as.map.len; i++) {
@@ -13303,14 +13303,6 @@ static int set_attribute_default(SPYContext *c, SPYValue *object, const char *na
             else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s' and no __dict__ for setting new attributes", shown(type_name(object), 100), type_name(object), name);
             return -1;
         }
-        if (!descriptor && !strcmp(name, "__dict__")) {
-            if (!builtin_value(c, value, SPY_DICT)) { errorf(c, "TypeError", "__dict__ must be set to a dictionary, not a '%s'", type_name(value)); return -1; }
-            SPYValue *old = instance_dict(c, object);
-            if (!old) return -1;
-            object->as.map.namespace = spy_retain(value);
-            spy_release(old); spy_release(old);
-            return 0;
-        }
     }
     if ((object->type == SPY_GENERATOR || object->type == SPY_COROUTINE || object->type == SPY_ASYNC_GENERATOR) &&
         (!strcmp(name, "__name__") || !strcmp(name, "__qualname__"))) {
@@ -18624,11 +18616,6 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     } else {
         SPYValue *descriptor = object->type == SPY_INSTANCE ? instance_lookup(object->as.map.parent, name) : NULL;
         if (data_descriptor(descriptor)) return descriptor_set(c, descriptor, object, NULL);
-        /* BaseException's __dict__ getset refuses deletion. */
-        if (object->type == SPY_INSTANCE && !descriptor && !strcmp(name, "__dict__") &&
-            subclass(object->as.map.parent, name_local(c->classes, "BaseException"))) {
-            spy_error(c, "TypeError", "cannot delete __dict__"); return -1;
-        }
         if (object->type == SPY_INSTANCE && !instance_has_dict(object)) {
             if (descriptor || !strcmp(name, "__doc__")) errorf(c, "AttributeError", "'%s' object attribute '%s' is read-only", type_name(object), name);
             else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s' and no __dict__ for setting new attributes", shown(type_name(object), 100), type_name(object), name);

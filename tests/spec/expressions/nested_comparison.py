@@ -14,6 +14,19 @@ for make in (lambda x: [x], lambda x: (x,), lambda x: {"k": x}, lambda x: [1, x]
     assert not (nest(make, 5000) != nest(make, 5000))
     assert nest(make, 5000) != nest(make, 4999)
 
+# Sets compare their elements through lookup, which nests as deep.
+a = b = frozenset()
+for _ in range(2000):
+    a = frozenset({a}); b = frozenset({b})
+assert a == b and not (a != b)
+for _ in range(100000):
+    a = frozenset({a}); b = frozenset({b})
+try:
+    a == b
+    raise AssertionError("no RecursionError")
+except RecursionError:
+    pass
+
 # Comparing two self-containing values never ends; it raises.
 a = []; a.append(a)
 b = []; b.append(b)
