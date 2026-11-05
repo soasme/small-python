@@ -192,6 +192,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A Python call enters and leaves its frame inline](#a-python-call-enters-and-leaves-its-frame-inline) | -5.4% (fib), -4.2% (generators), -2.6% (classes); M2: fib -9.2%, generators -5.0%, classes -3.8% |
 | [Each hot machine step dispatches the next](#each-hot-machine-step-dispatches-the-next) | -3.4% (generators); M2: generators -10.9%, strings -2.5% |
 | [A call statement skips eval's other cases](#a-call-statement-skips-evals-other-cases) | -2.1% (classes), -1.6% (loop), -1.4% (fib, generators); M2: classes -2.9%, loop -2.1% |
+| [Hot paths stay out of large functions](#hot-paths-stay-out-of-large-functions) | -3.1% (fib), -2.2% (dicts), -1.8% (nbody); empty range loop -17%; M2: fib -3.3%, loop -2.3% |
 
 ### Releasing a number or string frees it at once
 
@@ -1460,6 +1461,24 @@ clang. Instructions (M2 counters): classes -2.1%, loop -1.6%, fib, generators
 and sort -1.4%, nbody +0.1%; a loop calling `f(i)` -4.4%. Wall time averaged
 over eight code layouts: classes -2.9%, loop -2.1%, generators -1.6%, sort
 -1.4%, the rest within 0.3%.
+
+### Hot paths stay out of large functions
+
+A call into a large function saves every register its rarest case uses
+before its first test. Four common paths paid for that without needing the
+function: an `if` whose test is false and that has no `else` ran
+`execute_statements` over no statements; `return` of a literal or a name
+went through `eval`; a loop took the next item of a range, list or tuple
+iterator through `iterator_next`, whose fast paths come before its many
+other kinds; and storing a local released a dying int or float through
+`release_dead`. Each now stays in its caller: the empty branch is skipped,
+the leaf is read in place while the tick has only a line to record,
+`iterator_fast` is an inline function that `iterator_next` and both loops
+share, and the local store returns the number to its spare list. Instructions
+(M2 counters): fib -3.1%, dicts -2.2%, nbody -1.8%, loop -1.2%, strings
+-1.1%; an empty `for i in range(n)` -17%. Wall time averaged over eight code
+layouts: fib -3.3%, loop -2.3%, dicts -1.7%, strings -1.3%, classes -1.2%;
+bigint +1.1% at 6 ms with the same instructions, nbody and generators +0.1%.
 
 ### A profile-guided build
 

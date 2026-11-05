@@ -8257,31 +8257,36 @@ static NO_INLINE void drop_owner(SPYValue *v) {
     spy_release(owner);
 }
 static SPYValue *native_next(SPYContext *c, SPYValue *iterator) { return pass(c) ? NULL : iterator_next(c, iterator); }
-static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
+/* The next item of a range iterator while its counter is a machine
+ * integer, or of a forward iterator over a list or tuple, in *item; 0 for
+ * any other iterator. */
+static ALWAYS_INLINE int iterator_fast(SPYContext *c, SPYValue *v, SPYValue **item) {
+    if (v->type != SPY_ITERATOR || v->as.iterator.done) return 0;
     /* A range steps a machine-integer counter without arbitrary-precision
      * arithmetic while the next counter fits. */
-    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_RANGE && !v->as.iterator.done) {
+    if (v->as.iterator.kind == I_RANGE) {
         SPYValue *counter = v->as.iterator.counter, *stop = v->as.iterator.source->as.range.stop, *step = v->as.iterator.source->as.range.step;
         int64_t at = counter->as.integer_data.small, end = stop->as.integer_data.small, by = step->as.integer_data.small;
-        if (!counter->as.integer_data.big && !stop->as.integer_data.big && !step->as.integer_data.big) {
-            if (by > 0 ? at >= end : at <= end) { v->as.iterator.done = 1; return NULL; }
-            if (by > 0 ? at <= INT64_MAX - by : at >= INT64_MIN - by) {
-                SPYValue *next = int_value(c, at + by);
-                if (!next) return NULL;
-                v->as.iterator.counter = next;
-                return counter;
-            }
-        }
+        if (counter->as.integer_data.big || stop->as.integer_data.big || step->as.integer_data.big) return 0;
+        if (by > 0 ? at >= end : at <= end) { v->as.iterator.done = 1; *item = NULL; return 1; }
+        if (by > 0 ? at > INT64_MAX - by : at < INT64_MIN - by) return 0;
+        SPYValue *next = int_value(c, at + by);
+        if (next) v->as.iterator.counter = next;
+        *item = next ? counter : NULL;
+        return 1;
     }
     /* A forward iterator over a list or tuple reads the next item directly. */
-    if (v->type == SPY_ITERATOR && v->as.iterator.kind == I_SEQUENCE && !v->as.iterator.done &&
-        (v->as.iterator.source->type == SPY_LIST || v->as.iterator.source->type == SPY_TUPLE)) {
-        SPYValue *source = v->as.iterator.source;
-        if (v->as.iterator.index < source->as.seq.len) return spy_retain(source->as.seq.items[v->as.iterator.index++]);
-        v->as.iterator.done = 1;
-        if (v->as.iterator.counter) drop_owner(v);
-        return NULL;
-    }
+    SPYValue *source = v->as.iterator.source;
+    if (v->as.iterator.kind != I_SEQUENCE || (source->type != SPY_LIST && source->type != SPY_TUPLE)) return 0;
+    if (v->as.iterator.index < source->as.seq.len) { *item = spy_retain(source->as.seq.items[v->as.iterator.index++]); return 1; }
+    v->as.iterator.done = 1;
+    if (v->as.iterator.counter) drop_owner(v);
+    *item = NULL;
+    return 1;
+}
+static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
+    SPYValue *item;
+    if (iterator_fast(c, v, &item)) return item;
     if (v->type == SPY_GENERATOR) return generator_next(c, v);
     if (v->type == SPY_COROUTINE_ITERATOR) return generator_next(c, v->as.iterator.source);
     SPYValue *base = v->type == SPY_INSTANCE ? builtin_base(c, v, "__next__", NULL) : NULL;
@@ -14899,6 +14904,14 @@ static ALWAYS_INLINE SPYValue *eval_called(SPYContext *c, Frame *f, Node *n) {
     c->depth--;
     return v;
 }
+/* eval of a statement's expression n: a call as eval_called takes it, and
+ * a literal or a name found along the fast path, while tick has only the
+ * line to record, as it is. */
+static ALWAYS_INLINE SPYValue *eval_value(SPYContext *c, Frame *f, Node *n) {
+    if (n->kind == N_CALL) return eval_called(c, f, n);
+    SPYValue *v = quiet(c, f) ? leaf_operand(f, n) : NULL;
+    return v ? spy_retain(v) : eval(c, f, n);
+}
 
 static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
     if (env->as.map.scope && env->as.map.scope->kind == S_CLASS) return 0;
@@ -16766,7 +16779,11 @@ static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue
     class_changed(env);
     SPYValue *old = entry->value;
     entry->value = spy_retain(value);
-    spy_release(old);
+    /* A number a loop counter or accumulator replaces returns to its spare list here. */
+    if (old && !--old->refs) {
+        if (((old->type == SPY_INT && !old->as.integer_data.big) || old->type == SPY_FLOAT) && !old->listed) { c->live--; value_give(c, old, 1); }
+        else release_dead(old);
+    }
     return 0;
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
@@ -20157,7 +20174,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
         if (tick(c, f, n)) break;
         switch (n->kind) {
         case N_EXPR:
-            last = n->a->kind == N_CALL ? eval_called(c, f, n->a) : eval(c, f, n->a);
+            last = eval_value(c, f, n->a);
             if (last && f->interactive) display_value(c, last);
             break;
         case N_ASSIGN: assign(c, f, n); break;
@@ -20195,7 +20212,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
         }
         case N_PASS: case N_GLOBAL: case N_NONLOCAL: break;
         case N_RETURN:
-            last = !n->a ? spy_none(c) : n->a->kind == N_CALL ? eval_called(c, f, n->a) : eval(c, f, n->a);
+            last = n->a ? eval_value(c, f, n->a) : spy_none(c);
             return (Result){last ? FLOW_RETURN : FLOW_ERROR, last};
         case N_BREAK: return (Result){FLOW_BREAK, NULL};
         case N_CONTINUE: return (Result){FLOW_CONTINUE, NULL};
@@ -20216,7 +20233,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
         }
         case N_IF: {
             int truth = condition(c, f, n->a);
-            if (truth < 0) break;
+            if (truth < 0 || !(truth ? n->b : n->c)) break;
             Result r = execute(c, f, truth ? n->b : n->c);
             if (r.flow != FLOW_NORMAL) return r;
             spy_release(r.value); break;
@@ -20236,7 +20253,9 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
                 }
                 if (tick(c, f, n)) break;
                 if (iterable) {
-                    SPYValue *item = stepping ? iterator_next(c, iterable) : iter_at(c, iterable, i);
+                    SPYValue *item;
+                    if (!stepping) item = iter_at(c, iterable, i);
+                    else if (!iterator_fast(c, iterable, &item)) item = iterator_next(c, iterable);
                     if (!item) break;
                     store_target(c, f, n->args, item);
                     spy_release(item);
@@ -20862,7 +20881,8 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 }
                 m->pc = pc; finish_delegate(c, m); pc = m->pc;
             } else {
-                a = iterator_next(c, m->blocks[m->block_len - 1].value);
+                SPYValue *iterator = m->blocks[m->block_len - 1].value;
+                if (!iterator_fast(c, iterator, &a)) a = iterator_next(c, iterator);
                 if (!a) pc = ins->target;
                 else { machine_push(c, m, a); a = NULL; }
             }
