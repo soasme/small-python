@@ -193,6 +193,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Each hot machine step dispatches the next](#each-hot-machine-step-dispatches-the-next) | -3.4% (generators); M2: generators -10.9%, strings -2.5% |
 | [A call statement skips eval's other cases](#a-call-statement-skips-evals-other-cases) | -2.1% (classes), -1.6% (loop), -1.4% (fib, generators); M2: classes -2.9%, loop -2.1% |
 | [Hot paths stay out of large functions](#hot-paths-stay-out-of-large-functions) | -3.1% (fib), -2.2% (dicts), -1.8% (nbody); empty range loop -17%; M2: fib -3.3%, loop -2.3% |
+| [An attribute is an operand at hand](#an-attribute-is-an-operand-at-hand) | -5.3% (classes); M2: classes -2.1% |
 
 ### Releasing a number or string frees it at once
 
@@ -1479,6 +1480,21 @@ share, and the local store returns the number to its spare list. Instructions
 -1.1%; an empty `for i in range(n)` -17%. Wall time averaged over eight code
 layouts: fib -3.3%, loop -2.3%, dicts -1.7%, strings -1.3%, classes -1.2%;
 bigint +1.1% at 6 ms with the same instructions, nbody and generators +0.1%.
+
+### An attribute is an operand at hand
+
+An operator whose operands are literals, names or an index of those takes
+them as they are, without `eval`. `self.x + other.x` did not qualify, so
+each attribute went through `eval` and the large `eval_inner`. An
+attribute of a name now qualifies when the name holds a plain instance
+whose class leaves the read to the instance's own entries, the answer the
+attribute node already remembers for `node_attribute`; the entry's value
+is borrowed, and `operate` holds both operands before any method runs.
+The attribute test comes after the literal and name tests, so the other
+operands pay nothing. Instructions (M2 counters): classes -5.3%, the rest
+within 0.2%. Wall time averaged over eight code layouts: classes -2.1%,
+bigint -1.4% at 6 ms, the rest within 0.4% (strings read +1.2% once and
++0.3%/-0.2% with the order swapped).
 
 ### A profile-guided build
 

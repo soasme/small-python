@@ -100,3 +100,35 @@ with assert_raises(KeyError):
     getattr(GetRaise(KeyError()), 'a')
 with assert_raises(KeyError):
     getattr(GetRaise(KeyError()), 'a', 11)
+
+
+# Attributes as operands: each is looked up as an ordinary attribute
+# reference, and an operator method may delete the attributes it was given.
+class Deleting:
+    def __init__(self, box):
+        self.box = box
+
+    def __add__(self, other):
+        del self.box.left, other.box.right
+        return [self.box] * 2
+
+
+box = A()
+for _ in range(3):
+    box.left = Deleting(box)
+    box.right = Deleting(box)
+    assert box.left + box.right == [box, box]
+    assert not hasattr(box, 'left') and not hasattr(box, 'right')
+
+point = A()
+point.x = 3
+seen = []
+for step in range(4):
+    if step == 2:
+        A.x = property(lambda self: 10)
+    seen.append((point.x + point.x, point.x < 5))
+assert seen == [(6, True), (6, True), (20, False), (20, False)]
+del A.x
+del point.x
+with assert_raises(AttributeError):
+    point.x + 1

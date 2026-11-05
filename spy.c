@@ -7823,10 +7823,11 @@ static void invalid_expression_error(Parser *p) {
 static int at_hand(Node *n) {
     return n->kind == N_NAME || n->kind == N_INT || n->kind == N_FLOAT || n->kind == N_IMAG || n->kind == N_STRING || n->kind == N_BYTES;
 }
-static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)); }
+static int item_at_hand(Node *n) { return at_hand(n) || (n->kind == N_INDEX && at_hand(n->a) && at_hand(n->b)) || (n->kind == N_ATTR && n->a->kind == N_NAME); }
 /* The right operand of n when n is an index whose operands are literals or
- * names, or arithmetic or a single comparison whose operands are those or
- * an index of those, else NULL. The compiler marks such nodes F_OPERATOR. */
+ * names, or arithmetic or a single comparison whose operands are those, an
+ * index of those, or an attribute of a name, else NULL. The compiler marks
+ * such nodes F_OPERATOR. */
 static Node *operator_right(Node *n) {
     if (n->kind == N_INDEX) return at_hand(n->a) && at_hand(n->b) ? n->b : NULL;
     Node *right = n->kind == N_COMPARE && !n->args->next ? n->args->a :
@@ -14812,10 +14813,20 @@ static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
     SPYValue *x = leaf_operand(f, n->a), *y = x ? leaf_operand(f, n->b) : NULL;
     return y ? sequence_item(x, y) : NULL;
 }
-/* An operand found along the fast path, borrowed: a literal, a name, or
- * an item of a list or tuple they index. Finding one runs no code. */
-static ALWAYS_INLINE SPYValue *operand(Frame *f, Node *n) {
-    return n->kind == N_INDEX ? item_operand(f, n) : leaf_operand(f, n);
+/* An attribute of a name found in a plain instance's own entries, as
+ * node_attribute finds it, borrowed. */
+static NO_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *v = name_fast(f->env, n->a);
+    Entry *e = v && plain_instance(v) && (node_access(c, v, n) & ATTR_READ) != ATTR_SLOW ? dict_slot(v, n->b) : NULL;
+    return e ? e->value : NULL;
+}
+/* An operand found along the fast path, borrowed: a literal, a name, an
+ * item of a list or tuple they index, or an instance's attribute. Finding
+ * one runs no code. */
+static ALWAYS_INLINE SPYValue *operand(SPYContext *c, Frame *f, Node *n) {
+    if (n->kind == N_INDEX) return item_operand(f, n);
+    SPYValue *v = leaf_operand(f, n);
+    return v || n->kind != N_ATTR ? v : attr_operand(c, f, n);
 }
 /* The truth of a condition: 1, 0, or -1 with an error set. */
 static HOT int condition(SPYContext *c, Frame *f, Node *n) {
@@ -14824,7 +14835,7 @@ static HOT int condition(SPYContext *c, Frame *f, Node *n) {
     if (n->kind == N_COMPARE && !n->args->next && ordering(n->args->op)) {
         int op = n->args->op;
         if ((n->flags & F_OPERATOR) && quiet(c, f)) {
-            SPYValue *x = operand(f, n->a), *y = x ? operand(f, n->args->a) : NULL;
+            SPYValue *x = operand(c, f, n->a), *y = x ? operand(c, f, n->args->a) : NULL;
             if (y && (truth = number_order(op, x, y)) >= 0) return truth;
         }
         SPYValue *a = eval(c, f, n->a), *b = a ? eval(c, f, n->args->a) : NULL;
@@ -14875,8 +14886,8 @@ static HOT SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
      * has only the line to record, takes them as they are. */
     SPYValue *x = NULL, *y = NULL;
     if ((n->flags & F_OPERATOR) && quiet(c, f)) {
-        x = operand(f, n->a);
-        y = x ? operand(f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL; /* operator_right(n) */
+        x = operand(c, f, n->a);
+        y = x ? operand(c, f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL; /* operator_right(n) */
         if (!y) n->flags &= ~F_OPERATOR; /* An operand the fast path misses usually always will. */
         else {
             SPYValue *v = operator_fast(c, n, x, y);
@@ -20682,8 +20693,8 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             NEXT;
         CASE(BC_OPERATE)
             /* Its operands taken at hand, as on eval's operator fast path. */
-            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
-            y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(c, &f, n->a) : NULL;
+            y = x ? operand(c, &f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
             if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
             machine_push(c, m, value);
@@ -20818,8 +20829,8 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             break;
         CASE(BC_TEST) {
             /* BC_OPERATE then BC_FALSE, a comparison of numbers making no bool. */
-            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(&f, n->a) : NULL;
-            y = x ? operand(&f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
+            x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(c, &f, n->a) : NULL;
+            y = x ? operand(c, &f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             int truth = y && n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
             if (truth < 0) {
                 value = y ? operator_fast(c, n, x, y) : NULL;
