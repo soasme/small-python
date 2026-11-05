@@ -1572,6 +1572,27 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   fixed separately: a suspended `with` body called `__exit__` at the
   body's line, and a dict subclass's views did not hold the instance.
 
+  Retried on threaded dispatch (2026-11-06), with calls, returns and frame
+  switches dispatching their next step: in one binary, walker against
+  flat, fib took 31.9 against 32.0 ms with 620 M against 505 M
+  instructions (IPC 5.97 against 4.95), classes 91.4 against 94.6 ms.
+  A linear recursion (`g(n - 1) + 1`, 50 deep, 20,000 times) took 77.0
+  against 52.2 ms, 32% less, and there the walker's IPC is the low one
+  (4.70): past the processor's return-address stack, a C return
+  mispredicts. In fib's binary recursion every return lands on either
+  the second call or the addition, so the flat return's indirect jump
+  mispredicts instead, while C returns at depth below 30 do not. Calls
+  that kept C recursion but ran bodies on the machine were slower on fib
+  (33.7 ms) and classes (92.5 ms). classes loses because its loop runs at
+  module level on the walker, so each method call enters the machine
+  afresh. Flat calls pay once callers run on the machine as well.
+
+  A call costs more than the steps around it either way. Per iteration
+  of a loop in a function, against CPython 3.15 (`-O3`) on the M2:
+  `f(i)` 694 against 301 instructions (81 against 41 cycles), `p.x` 249
+  against 60, `if i < 0` 178 against 94; `x = x + i` 250 against 408.
+  A flat call that runs every body on the machine still took about 500.
+
 - **Locals in slots.** A local is already read as a slot: a name node
   remembers its entry's index and checks only that the entry still holds
   its symbol's key. Guarding a slot by the environment's scope and its
