@@ -65,7 +65,13 @@ SOURCES = {
     "own_new": 'result = (Exception.__new__ is BaseException.__new__, KeyError.__new__ is LookupError.__new__, Exception.__new__(ValueError, 1).args)',
     "new_unsafe": "Exception.__new__(OSError, 2, 'x')",
     "new_owner": 'KeyError.__new__(int)',
-    "dict_getset": "e = ValueError()\ne.x = 1\nd = vars(BaseException)['__dict__']\nresult = (repr(d), d.__get__(e))"
+    "dict_getset": "e = ValueError()\ne.x = 1\nd = vars(BaseException)['__dict__']\nresult = (repr(d), d.__get__(e))",
+    "own_init": "e = SystemExit(5)\nSystemExit.__init__(e, 7)\nresult = ('__init__' in vars(SystemExit), '__init__' in vars(ValueError), e.code)",
+    "base_init_args_only": "e = SystemExit(5)\nBaseException.__init__(e, 7)\nresult = (e.code, e.args)",
+    "new_args_only": "e = SystemExit.__new__(SystemExit, 5)\nresult = (e.code, e.args)",
+    "init_receiver": "SystemExit.__init__(ValueError())",
+    "oserror_use_init": "class Q(OSError):\n    def __init__(self, *a): pass\nresult = (Q(2, 'x').args, Q(2, 'x').errno, OSError.__new__(OSError, 2, 'x').errno)",
+    "group_module": "result = (vars(ExceptionGroup)['__module__'], ExceptionGroup('m', [ValueError()]).__weakref__)"
 }
 
 

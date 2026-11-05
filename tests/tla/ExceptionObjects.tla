@@ -17,7 +17,11 @@
 (* called through BaseException, str() of a KeyError is the plain text;   *)
 (* str() and repr() call what the type finds, super() included; each      *)
 (* class's own __new__ names it and refuses an OSError; and __dict__ is a  *)
-(* getset of BaseException.                                                *)
+(* getset of BaseException. The classes with attributes of their own own  *)
+(* an __init__ that checks its receiver and sets them, while __new__ and   *)
+(* BaseException.__init__ set only args; an OSError subclass with its own  *)
+(* __init__ starts with no arguments; ExceptionGroup is a class of         *)
+(* builtins whose instances take weak references.                          *)
 (*                                                                         *)
 (* A program builds Exception, KeyError, or a plain subclass Sub of        *)
 (* Exception from zero to two arguments among 'a', 1, and None, and        *)
@@ -57,7 +61,8 @@ Cases == {"args_set_by_new", "args_assign_tuple", "args_assign_bad", "with_trace
           "exception_dict", "inherit_init_args", "base_new_args", "str_of_class_instance",
           "repr_trailing_comma", "equality_identity", "hashable", "systemexit_code", "stopiteration_value",
           "keyerror_str_tuple", "super_str", "base_repr_override", "own_new", "new_unsafe", "new_owner",
-          "dict_getset"}
+          "dict_getset", "own_init", "base_init_args_only", "new_args_only", "init_receiver", "oserror_use_init",
+          "group_module"}
 Programs == [op : {"str", "repr", "args", "base_str"}, cls : {"Exception", "KeyError", "Sub"}, args : Args]
             \cup [case : Cases]
 
@@ -107,6 +112,12 @@ Case(c) ==
       [] c = "new_unsafe" -> "TypeError: Exception.__new__(OSError) is not safe, use OSError.__new__()"
       [] c = "new_owner" -> "TypeError: LookupError.__new__(int): int is not a subtype of LookupError"
       [] c = "dict_getset" -> "(\"<attribute '__dict__' of 'BaseException' objects>\", {'x': 1})"
+      [] c = "own_init" -> "(True, False, 7)"
+      [] c = "base_init_args_only" -> "(5, (7,))"
+      [] c = "new_args_only" -> "(None, (5,))"
+      [] c = "init_receiver" -> "TypeError: descriptor '__init__' requires a 'SystemExit' object but received a 'ValueError'"
+      [] c = "oserror_use_init" -> "((), None, 2)"
+      [] c = "group_module" -> "('builtins', None)"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

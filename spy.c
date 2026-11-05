@@ -419,7 +419,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_TYPE, B_ISINSTANCE, B_ISSUBCLASS, B_GETATTR, B_SETATTR, B_HASATTR, B_CALLABLE, B_ID,
        B_COMPILE, B_EVAL, B_EXEC, B_SLICE, B_STATICMETHOD, B_CLASSMETHOD, B_PROPERTY, B_DIR, B_LOCALS, B_FORMAT, B_ASCII, B_MAP, B_GLOBALS, B_COMPLEX,
        B_BIN, B_OCT, B_HEX, B_POW, B_DIVMOD, B_BYTES, B_AITER, B_ANEXT, B_IMPORT, B_DELATTR, B_HASH, B_ROUND, B_SUPER,
-       B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OSERROR_NEW, B_EXCEPTION_REPR, B_EXCEPTION_STR, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_SYNTAX_INIT, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
+       B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OSERROR_NEW, B_EXCEPTION_REPR, B_EXCEPTION_STR, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
        B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_TYPE_GETATTRIBUTE, B_TYPE_SETATTR, B_TYPE_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
        B_EXCEPTION_REDUCE, B_OSERROR_REDUCE, B_IMPORT_REDUCE, B_ATTRIBUTE_REDUCE, B_ATTRIBUTE_GETSTATE, B_EXCEPTION_SETSTATE,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */ };
@@ -13894,7 +13894,7 @@ static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const
 static SPYValue *builtin_keywords(SPYContext *, size_t, SPYValue *const *, int, SPYValue *, SPYValue *);
 static SPYValue *sentinel_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *frame_module_name(SPYContext *, size_t);
-static const char *const *exception_keywords(SPYContext *, SPYValue *, const char **);
+static int oserror_use_init(SPYContext *, SPYValue *);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *eval_comprehension(SPYContext *, Frame *, Node *);
 static SPYValue *new_generator(SPYContext *, Frame *, SPYValue *);
@@ -15010,15 +15010,6 @@ static int exception_args(SPYContext *c, SPYValue *value, size_t argc, SPYValue 
     if (!status) status = set_hidden_field(c, value, "args", args);
     spy_release(args); return status;
 }
-/* The keyword-only attributes of ImportError, AttributeError and NameError,
- * and in *owner the one of those classes whose __init__ takes them. */
-static const char *const *exception_keywords(SPYContext *c, SPYValue *cls, const char **owner) {
-    static const struct { const char *owner, *const fields[4]; } kinds[] = {
-        {"ImportError", {"name", "path", "name_from", NULL}}, {"AttributeError", {"name", "obj", NULL}}, {"NameError", {"name", NULL}}};
-    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++)
-        if (subclass(cls, name_local(c->classes, kinds[i].owner))) { *owner = kinds[i].owner; return kinds[i].fields; }
-    return NULL;
-}
 /* Objects/exceptions.c errnomap: OSError(errno, ...) creates the subclass for errno. */
 static const struct { int code; const char *name; } errno_classes[] = {
 #ifdef EAGAIN
@@ -15108,9 +15099,7 @@ static int unicode_error_kind(SPYContext *c, SPYValue *cls) {
 /* UnicodeEncodeError_init and its siblings: (encoding, object, start, end,
  * reason), without the encoding for UnicodeTranslateError; a decode error's
  * object is any bytes-like value, kept as bytes. */
-static int unicode_fields(SPYContext *c, SPYValue *v, size_t argc, SPYValue *const *argv) {
-    int kind = unicode_error_kind(c, v->as.map.parent);
-    if (kind < 0) return 0;
+static int unicode_fields(SPYContext *c, SPYValue *v, int kind, size_t argc, SPYValue *const *argv) {
     size_t want = kind == 2 ? 4 : 5, at = kind == 2 ? 0 : 1;
     if (argc != want) { errorf(c, "TypeError", "function takes exactly %zu arguments (%zu given)", want, argc); return -1; }
     if (kind != 2 && !builtin_value(c, argv[0], SPY_STRING)) { errorf(c, "TypeError", "argument 1 must be str, not %s", type_name(argv[0])); return -1; }
@@ -15195,14 +15184,19 @@ static void codec_error(SPYContext *c, const char *type, const char *encoding, S
     for (size_t i = 0; i < 5; i++) spy_release(args[i]);
 }
 static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv) {
-    if (cls == name_local(c->classes, "OSError") && argc >= 2 && argc <= 5 && argv[0]->type == SPY_INT) {
+    SPYValue *oserror = name_local(c->classes, "OSError");
+    int parsed = subclass(cls, oserror) && !oserror_use_init(c, cls);
+    if (parsed && cls == oserror && argc >= 2 && argc <= 5 && argv[0]->type == SPY_INT) {
         int64_t code;
         const char *mapped = spy_as_int(c, argv[0], &code) ? (spy_clear_error(c), NULL) : oserror_subclass(code);
         if (mapped) cls = name_local(c->classes, mapped);
     }
     SPYValue *v = new_instance(c, cls);
     if (!v) return NULL;
-    int status = exception_args(c, v, argc, argv);
+    /* OSError_new: an OSError takes its fields here, unless a subclass's own
+     * __init__ will (oserror_use_init), and starts with no arguments then. */
+    int status = exception_args(c, v, !subclass(cls, oserror) || parsed ? argc : 0, argv);
+    if (!status && parsed) status = oserror_fields(c, v, argc, argv);
     if (!status) status = set_hidden_field(c, v, "__context__", c->none);
     if (!status) status = set_hidden_field(c, v, "__cause__", c->none);
     if (!status) status = set_hidden_field(c, v, "__traceback__", c->none);
@@ -15211,19 +15205,94 @@ static SPYValue *new_exception(SPYContext *c, SPYValue *cls, size_t argc, SPYVal
         const char *fields[] = {"msg", "filename", "lineno", "offset", "text", "end_lineno", "end_offset", "print_file_and_line"};
         for (size_t i = 0; i < sizeof(fields) / sizeof(*fields) && !status; i++) status = set_hidden_field(c, v, fields[i], c->none);
     }
-    if (!status && subclass(cls, name_local(c->classes, "StopIteration")))
-        status = set_hidden_field(c, v, "value", argc ? argv[0] : c->none);
-    if (!status && subclass(cls, name_local(c->classes, "SystemExit"))) {
-        /* SystemExit_init: no argument, one argument, or the args tuple. */
-        SPYValue *code = argc == 1 ? spy_retain(argv[0]) : argc ? spy_tuple(c, argc, argv) : spy_none(c);
-        status = code ? set_hidden_field(c, v, "code", code) : -1;
-        spy_release(code);
+    /* A Unicode error's bounds are 0 until __init__ sets them. */
+    if (!status && unicode_error_kind(c, cls) >= 0) {
+        SPYValue *zero = spy_int(c, 0);
+        status = !zero || set_hidden_field(c, v, "start", zero) || set_hidden_field(c, v, "end", zero);
+        spy_release(zero);
     }
-    if (!status && subclass(cls, name_local(c->classes, "ImportError"))) status = set_hidden_field(c, v, "msg", c->none);
-    if (!status && subclass(cls, name_local(c->classes, "OSError"))) status = oserror_fields(c, v, argc, argv);
-    /* UnicodeError subclasses check their arguments in __init__. */
-    if (!status && unicode_fields(c, v, argc, argv)) spy_clear_error(c);
     if (status) { spy_release(v); return NULL; }
+    return v;
+}
+/* oserror_use_init: a subclass of OSError whose own __init__, and not
+ * __new__, takes the arguments. */
+static int oserror_use_init(SPYContext *c, SPYValue *cls) {
+    SPYValue *oserror = name_local(c->classes, "OSError");
+    return class_lookup(cls, "__init__") != name_local(oserror, "__init__") && class_lookup(cls, "__new__") == name_local(oserror, "__new__");
+}
+/* The fields cls.__init__ sets from the arguments, cls being a class that
+ * defines one: BaseException's args, then each subclass's own. */
+static int exception_fields(SPYContext *c, SPYValue *self, SPYValue *cls, size_t argc, SPYValue *const *argv) {
+    const char *name = name_text(cls, "__name__")->as.string.data;
+    /* OSError_init: OSError_new did the work, unless the class uses __init__. */
+    if (!strcmp(name, "OSError"))
+        return oserror_use_init(c, value_class(c, self)) ? exception_args(c, self, argc, argv) || oserror_fields(c, self, argc, argv) : 0;
+    if (exception_args(c, self, argc, argv)) return -1;
+    SPYValue *first = argc ? argv[0] : c->none;
+    if (!strcmp(name, "StopIteration")) return set_hidden_field(c, self, "value", first);
+    if (!strcmp(name, "SystemExit")) {
+        /* SystemExit_init: no argument, one argument, or the args tuple. */
+        SPYValue *code = argc > 1 ? hidden_field(self, "args") : first;
+        return set_hidden_field(c, self, "code", code);
+    }
+    /* ImportError keeps a lone argument as msg. */
+    if (!strcmp(name, "ImportError")) return set_hidden_field(c, self, "msg", argc == 1 ? first : c->none);
+    int kind = unicode_error_kind(c, cls);
+    if (kind >= 0) return unicode_fields(c, self, kind, argc, argv);
+    if (strcmp(name, "SyntaxError") || !argc) return 0;
+    if (set_hidden_field(c, self, "msg", first)) return -1;
+    if (argc != 2) return 0;
+    /* Four to seven items; a seventh is CPython's private metadata. */
+    SPYValue *details = builtin(c, 1, &argv[1], (void *)(intptr_t)B_TUPLE);
+    if (!details) return -1;
+    const char *fields[] = {"filename", "lineno", "offset", "text", "end_lineno", "end_offset"};
+    size_t count = details->as.seq.len;
+    if (count < 4 || count > 7) errorf(c, "TypeError", "function takes at %s %d arguments (%zu given)", count < 4 ? "least" : "most", count < 4 ? 4 : 7, count);
+    else if (count == 5) spy_error(c, "TypeError", "end_offset must be provided when end_lineno is provided");
+    else for (size_t i = 0; i < 6 && !c->error_type[0]; i++) set_hidden_field(c, self, fields[i], i < count ? details->as.seq.items[i] : c->none);
+    spy_release(details);
+    return c->error_type[0] ? -1 : 0;
+}
+/* The __init__ of BaseException or of a subclass that defines its own: fn's
+ * owner. Only ImportError, AttributeError and NameError take keywords, each
+ * its own attributes, which are unset unless given. */
+static SPYValue *exception_init(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *cls = fn->as.native.owner;
+    const char *owner = name_text(cls, "__name__")->as.string.data;
+    if (!argc) return errorf(c, "TypeError", "descriptor '__init__' of '%s' object needs an argument", owner);
+    SPYValue *self = argv[0];
+    if (!subclass(value_class(c, self), cls))
+        return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'", owner, type_name(self));
+    static const struct { const char *owner, *const fields[4]; } kinds[] = {
+        {"ImportError", {"name", "path", "name_from", NULL}}, {"AttributeError", {"name", "obj", NULL}}, {"NameError", {"name", NULL}}};
+    const char *const *fields = NULL;
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) if (!strcmp(owner, kinds[i].owner)) fields = kinds[i].fields;
+    size_t named = keywords ? keywords->as.map.len : 0, n = 0;
+    while (fields && fields[n]) n++;
+    if (named && !fields && !(!strcmp(owner, "OSError") && !oserror_use_init(c, value_class(c, self))))
+        return errorf(c, "TypeError", "%s() takes no keyword arguments", type_name(self));
+    if (named && fields) {
+        if (keyword_limit(c, owner, keywords, n)) return NULL;
+        for (size_t i = 0; i < named; i++) {
+            const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
+            size_t k = 0;
+            while (fields[k] && strcmp(fields[k], key)) k++;
+            if (!fields[k]) { unexpected_keyword(c, owner, key, suggestion(key, fields, n)); return NULL; }
+        }
+    }
+    if (exception_fields(c, self, cls, argc - 1, argv + 1)) return NULL;
+    for (size_t i = 0; i < n; i++) if (hidden_field(self, fields[i])) delete_name(self->as.map.class_cell, fields[i]);
+    for (size_t i = 0; i < named; i++) {
+        Entry *entry = &map_items(keywords)[i];
+        if (set_hidden_field(c, self, builtin_value(c, entry->key, SPY_STRING)->as.string.data, entry->value)) return NULL;
+    }
+    return spy_none(c);
+}
+/* An exception of the builtin class cls made as calling cls does: its
+ * __new__, then the __init__ its class finds. */
+static SPYValue *exception_create(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv) {
+    SPYValue *v = new_exception(c, cls, argc, argv), *init = v ? class_lookup(value_class(c, v), "__init__") : NULL;
+    if (init && exception_fields(c, v, init->as.native.owner, argc, argv)) { spy_release(v); return NULL; }
     return v;
 }
 static size_t utf8_valid(const unsigned char *, size_t, const char **, size_t *);
@@ -16285,7 +16354,7 @@ static SPYValue *import_from(SPYContext *c, SPYValue *module, const char *name, 
         puts_buffer(&message, ")");
     SPYValue *text = failed ? NULL : spy_string(c, message.data, message.len), *from = text ? spy_string(c, name, strlen(name)) : NULL;
     mem_free(message.data);
-    SPYValue *error = from ? new_exception(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
+    SPYValue *error = from ? exception_create(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
     if (error && !set_hidden_field(c, error, "msg", text) && !set_hidden_field(c, error, "name", module_name ? module_name : c->none) &&
         !set_hidden_field(c, error, "name_from", from) && !set_hidden_field(c, error, "path", file ? file : c->none)) raise_value(c, error);
     spy_release(error); spy_release(text); spy_release(from);
@@ -16373,7 +16442,7 @@ static void lazy_cause(SPYContext *c, SPYValue *lazy) {
         if ((!previous || previous->type == SPY_NONE) && (!context || context->type == SPY_NONE) &&
             (!suppress || !truthy(suppress))) {
             SPYValue *text = spy_string(c, message.data, message.len);
-            cause = text ? new_exception(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
+            cause = text ? exception_create(c, name_local(c->classes, "ImportError"), 1, &text) : NULL;
             spy_release(text);
             if (cause) { set_hidden_field(c, exception, "__cause__", cause); set_hidden_field(c, exception, "__suppress_context__", c->booleans[1]); }
         }
@@ -17096,7 +17165,8 @@ static int class_has_dict(SPYContext *c, SPYValue *cls) {
     return !(cls->as.map.flags & CLASS_NO_DICT);
 }
 static int class_has_weakref(SPYContext *c, SPYValue *cls) {
-    if (subclass(cls, c->types[SPY_CLASS]) || subclass(cls, c->types[SPY_SET]) || subclass(cls, c->types[SPY_FROZENSET])) return 1;
+    if (subclass(cls, c->types[SPY_CLASS]) || subclass(cls, c->types[SPY_SET]) || subclass(cls, c->types[SPY_FROZENSET]) ||
+        subclass(cls, name_local(c->classes, "ExceptionGroup"))) return 1;
     return !builtin_class(c, cls) && (cls->as.map.flags & CLASS_WEAKREF);
 }
 static int instance_has_dict(SPYValue *v) {
@@ -17252,6 +17322,18 @@ static int reaches_through_bases(SPYValue *base, SPYValue *cls) {
     for (size_t i = 0; base->as.map.bases && i < base->as.map.bases->as.seq.len; i++)
         if (reaches_through_bases(base->as.map.bases->as.seq.items[i], cls)) return 1;
     return 0;
+}
+/* Put the generic __dict__ or __weakref__ getset in cls: one of each name
+ * serves every class, as in CPython. */
+static int generic_getset(SPYContext *c, SPYValue *cls, const char *name) {
+    if (!c->slots && !(c->slots = value_new(c, SPY_DICT))) return -1;
+    SPYValue *getset = name_local(c->slots, name);
+    if (!getset) {
+        if (!(getset = member_new(c, SPY_GETSET_DESCRIPTOR, name, c->object, DESC_GENERIC)) ||
+            name_set(c, c->slots, name, getset)) { spy_release(getset); return -1; }
+        spy_release(getset);
+    }
+    return name_set(c, cls, name, getset);
 }
 /* The __dict__ and __weakref__ slots instances of a class with these bases
  * inherit, and the nearest base whose __slots__ fix their layout. */
@@ -17409,15 +17491,7 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     for (int i = 0; !status && i < 2; i++) {
         if (!(i ? weakref && !weakrefs && weakrefs_allowed : dict && !inherited)) continue;
         if (name_local(namespace, getsets[i])) continue; /* type_add_getset: the class body's own wins. */
-        /* One generic getset of each name serves every class, as in CPython. */
-        if (!c->slots && !(c->slots = value_new(c, SPY_DICT))) { status = -1; break; }
-        SPYValue *getset = name_local(c->slots, getsets[i]);
-        if (!getset) {
-            if (!(getset = member_new(c, SPY_GETSET_DESCRIPTOR, getsets[i], c->object, DESC_GENERIC)) ||
-                name_set(c, c->slots, getsets[i], getset)) { spy_release(getset); status = -1; break; }
-            spy_release(getset);
-        }
-        status = name_set(c, cls, getsets[i], getset);
+        status = generic_getset(c, cls, getsets[i]);
     }
     for (size_t i = 0; !status && i < list->as.seq.len; i++) {
         /* Into the class's own entries: a __qualname__ slot leaves the class's name. */
@@ -17994,20 +18068,20 @@ static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with
 static SPYValue *range_overflow(SPYContext *c) {
     const char *message = strerror(ERANGE);
     SPYValue *args[] = {spy_int(c, ERANGE), spy_string(c, message, strlen(message))};
-    SPYValue *error = args[0] && args[1] ? new_exception(c, name_local(c->classes, "OverflowError"), 2, args) : NULL;
+    SPYValue *error = args[0] && args[1] ? exception_create(c, name_local(c->classes, "OverflowError"), 2, args) : NULL;
     if (error) raise_value(c, error);
     spy_release(error); spy_release(args[0]); spy_release(args[1]);
     return NULL;
 }
 static SPYValue *missing_key(SPYContext *c, SPYValue *key) {
     if (c->error_type[0]) return NULL;
-    SPYValue *error = new_exception(c, name_local(c->classes, "KeyError"), 1, &key);
+    SPYValue *error = exception_create(c, name_local(c->classes, "KeyError"), 1, &key);
     if (error) raise_value(c, error);
     spy_release(error); return NULL;
 }
 static void raise_assertion(SPYContext *c, SPYValue *message) {
     if (c->error_type[0]) return;
-    SPYValue *error = new_exception(c, name_local(c->classes, "AssertionError"), message ? 1 : 0, &message);
+    SPYValue *error = exception_create(c, name_local(c->classes, "AssertionError"), message ? 1 : 0, &message);
     if (error) raise_value(c, error);
     spy_release(error);
 }
@@ -18041,7 +18115,7 @@ static ErrorState take_error(SPYContext *c) {
         if (!cls) cls = name_local(c->classes, "RuntimeError");
         SPYValue *message = text ? spy_string(c, text, strlen(text)) : spy_string(c, state.message, strlen(state.message));
         if (message) state.value = subclass(cls, name_local(c->classes, "SyntaxError")) ?
-            call(c, cls, state.message[0] ? 1 : 0, &message) : new_exception(c, cls, state.message[0] ? 1 : 0, &message);
+            call(c, cls, state.message[0] ? 1 : 0, &message) : exception_create(c, cls, state.message[0] ? 1 : 0, &message);
         if (state.value && subclass(cls, name_local(c->classes, "ImportError")) && state.message[0]) set_hidden_field(c, state.value, "msg", message);
         if (state.value && object && attribute) attribute_details(c, state.value, object, attribute);
         else if (state.value && attribute && (subclass(cls, name_local(c->classes, "NameError")) ||
@@ -18979,7 +19053,8 @@ static SPYValue *group_method(SPYContext *c, size_t argc, SPYValue *const *argv,
     int which = (int)(intptr_t)data;
     SPYValue *base = group_class(c);
     if (which == 0) {
-        if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "BaseExceptionGroup.__new__() takes no keyword arguments");
+        if (keywords && keywords->as.map.len)
+            return errorf(c, "TypeError", "%s() takes no keyword arguments", argc && argv[0]->type == SPY_CLASS ? name_text(argv[0], "__name__")->as.string.data : "BaseExceptionGroup");
         if (argc != 3) return errorf(c, "TypeError", "BaseExceptionGroup.__new__() takes exactly 2 arguments (%zu given)", argc ? argc - 1 : 0);
         SPYValue *cls = argv[0], *message = argv[1], *given = argv[2];
         if (cls->type != SPY_CLASS || !subclass(cls, base)) return spy_error(c, "TypeError", "BaseExceptionGroup.__new__(X): X is not a subtype of BaseExceptionGroup");
@@ -20392,7 +20467,7 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
 static void error_from_cause(SPYContext *c, const char *type, const char *text) {
     ErrorState error = take_error(c);
     SPYValue *message = spy_string(c, text, strlen(text));
-    SPYValue *exception = message ? new_exception(c, name_local(c->classes, type), 1, &message) : NULL;
+    SPYValue *exception = message ? exception_create(c, name_local(c->classes, type), 1, &message) : NULL;
     if (exception) {
         set_hidden_field(c, exception, "__cause__", error.value);
         set_hidden_field(c, exception, "__context__", error.value);
@@ -20912,7 +20987,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     if (result.flow == FLOW_HALT) return NULL;
     g->as.generator.returned = result.flow == FLOW_RETURN;
     if (result.flow == FLOW_RETURN) {
-        SPYValue *exception = new_exception(c, name_local(c->classes, g->type == SPY_ASYNC_GENERATOR ? "StopAsyncIteration" : "StopIteration"),
+        SPYValue *exception = exception_create(c, name_local(c->classes, g->type == SPY_ASYNC_GENERATOR ? "StopAsyncIteration" : "StopIteration"),
             result.value && result.value->type != SPY_NONE ? 1 : 0, &result.value);
         if (exception) { raise_value(c, exception); spy_release(exception); }
     } else if (!(g->as.generator.node->kind == N_COMPREHENSION && g->as.generator.node->op != N_TUPLE) &&
@@ -20940,7 +21015,7 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
     if (method == M_CLOSE) {
         if (g->as.generator.running) return spy_error(c, "ValueError", g->type == SPY_COROUTINE ? "coroutine already executing" : "generator already executing");
         if (!g->as.generator.started || g->as.generator.done) { generator_close(g); return spy_none(c); }
-        SPYValue *exception = new_exception(c, name_local(c->classes, "GeneratorExit"), 0, NULL);
+        SPYValue *exception = exception_create(c, name_local(c->classes, "GeneratorExit"), 0, NULL);
         SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, 1, &exception) : NULL;
         spy_release(exception);
         if (result) {
@@ -20992,7 +21067,7 @@ static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_
         spy_release(iterator);
         if (!value && error_is(c, "StopAsyncIteration")) {
             spy_clear_error(c);
-            SPYValue *exception = new_exception(c, name_local(c->classes, "StopIteration"), 1, &op->as.iterator.counter);
+            SPYValue *exception = exception_create(c, name_local(c->classes, "StopIteration"), 1, &op->as.iterator.counter);
             if (exception) { raise_value(c, exception); spy_release(exception); }
         }
         return value;
@@ -21052,7 +21127,7 @@ static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_
     if (value && g->as.generator.machine && g->as.generator.machine->awaiting == AWAIT_YIELD) {
         if (closing) spy_error(c, "RuntimeError", "async generator ignored GeneratorExit");
         else {
-            SPYValue *exception = new_exception(c, name_local(c->classes, "StopIteration"), 1, &value);
+            SPYValue *exception = exception_create(c, name_local(c->classes, "StopIteration"), 1, &value);
             if (exception) { raise_value(c, exception); spy_release(exception); }
         }
         spy_release(value); value = NULL;
@@ -25738,37 +25813,6 @@ execution_fail:
         if (env->type == SPY_DICT || env->as.map.namespace) return spy_retain(namespace_map(env));
         return local_snapshot(c, env);
     }
-    case B_EXCEPTION_INIT: case B_SYNTAX_INIT: {
-        const char *owner = id == B_SYNTAX_INIT ? "SyntaxError" : "BaseException";
-        if (!argc) return errorf(c, "TypeError", "descriptor '__init__' of '%s' object needs an argument", owner);
-        if (a->type != SPY_INSTANCE || !subclass(a->as.map.parent, name_local(c->classes, owner)))
-            return errorf(c, "TypeError", "descriptor '__init__' requires a '%s' object but received a '%s'", owner, type_name(a));
-        if (exception_args(c, a, argc - 1, argv + 1)) return NULL;
-        /* Keyword attributes are unset unless given; ImportError keeps a lone argument as msg. */
-        const char *const *fields = id == B_EXCEPTION_INIT ? exception_keywords(c, a->as.map.parent, &owner) : NULL;
-        for (size_t i = 0; fields && fields[i]; i++) if (hidden_field(a, fields[i])) delete_name(a->as.map.class_cell, fields[i]);
-        if (fields && subclass(a->as.map.parent, name_local(c->classes, "ImportError")) &&
-            set_hidden_field(c, a, "msg", argc == 2 ? argv[1] : c->none)) return NULL;
-        if (id == B_EXCEPTION_INIT && subclass(a->as.map.parent, name_local(c->classes, "OSError")) &&
-            oserror_fields(c, a, argc - 1, argv + 1)) return NULL;
-        if (id == B_EXCEPTION_INIT && unicode_fields(c, a, argc - 1, argv + 1)) return NULL;
-        if (id == B_SYNTAX_INIT && argc > 1) {
-            if (set_hidden_field(c, a, "msg", argv[1])) return NULL;
-            if (argc == 3) {
-                /* Four to seven items; a seventh is CPython's private metadata. */
-                SPYValue *details = builtin(c, 1, &argv[2], (void *)(intptr_t)B_TUPLE);
-                if (!details) return NULL;
-                const char *fields[] = {"filename", "lineno", "offset", "text", "end_lineno", "end_offset"};
-                size_t count = details->as.seq.len;
-                if (count < 4 || count > 7) errorf(c, "TypeError", "function takes at %s %d arguments (%zu given)", count < 4 ? "least" : "most", count < 4 ? 4 : 7, count);
-                else if (count == 5) spy_error(c, "TypeError", "end_offset must be provided when end_lineno is provided");
-                else for (size_t i = 0; i < 6 && !c->error_type[0]; i++) set_hidden_field(c, a, fields[i], i < count ? details->as.seq.items[i] : c->none);
-                spy_release(details);
-                if (c->error_type[0]) return NULL;
-            }
-        }
-        return spy_none(c);
-    }
     case B_COMPLEX: {
         if (argc > 2) goto arity;
         if (!argc) return complex_new(c, complex_parts(0, 0));
@@ -26401,6 +26445,7 @@ static SPYValue *exception_text_method(SPYContext *c, SPYValue *fn, size_t argc,
 static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *argv, int id, SPYValue *keywords, SPYValue *owner) {
     switch (id) {
     case B_EXCEPTION_REPR: case B_EXCEPTION_STR: return exception_text_method(c, owner, argc, argv, keywords, id == B_EXCEPTION_REPR);
+    case B_EXCEPTION_INIT: return exception_init(c, owner, argc, argv, keywords);
     case B_TYPE: {
         /* Only type(object) refuses keywords; other counts but 3 are wrong first. */
         if (argc == 1) break;
@@ -26457,6 +26502,9 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             return errorf(c, "TypeError", "%s.__new__(%s) is not safe, use %s.__new__()", name_text(base, "__name__")->as.string.data,
                           name_text(cls, "__name__")->as.string.data, class_tname(builtin_base));
         if (!mro) return errorf(c, "TypeError", "cannot create '%s' instances", class_tname(cls));
+        /* OSError_new takes no keywords unless the class's __init__ parses. */
+        if (id == B_OSERROR_NEW && keywords && keywords->as.map.len && !oserror_use_init(c, cls))
+            return errorf(c, "TypeError", "%s() takes no keyword arguments", name_text(cls, "__name__")->as.string.data);
         return new_exception(c, cls, argc - 1, argv + 1);
     }
     case B_OBJECT_NEW: case B_OBJECT_INIT: {
@@ -26633,29 +26681,6 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
             if (parse_arguments(c, "int", argc, argv, keywords, names, 2, 0, 1, args)) return NULL;
             if (!args[0]) return spy_error(c, "TypeError", "int() missing string argument");
             return builtin(c, 2, args, (void *)(intptr_t)id);
-        }
-        case B_EXCEPTION_INIT: {
-            if (!argc || argv[0]->type != SPY_INSTANCE) break;
-            SPYValue *cls = argv[0]->as.map.parent;
-            const char *owner = name_text(cls, "__name__")->as.string.data;
-            const char *const *fields = subclass(cls, name_local(c->classes, "BaseException")) ? exception_keywords(c, cls, &owner) : NULL;
-            if (!fields) return errorf(c, "TypeError", "%s() takes no keyword arguments", owner);
-            size_t n = 0;
-            while (fields[n]) n++;
-            if (keyword_limit(c, owner, keywords, n)) return NULL;
-            for (size_t i = 0; i < keywords->as.map.len; i++) {
-                const char *key = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
-                size_t k = 0;
-                while (fields[k] && strcmp(fields[k], key)) k++;
-                if (!fields[k]) { unexpected_keyword(c, owner, key, suggestion(key, fields, n)); return NULL; }
-            }
-            SPYValue *value = builtin(c, argc, argv, (void *)(intptr_t)id);
-            for (size_t i = 0; value && i < keywords->as.map.len; i++) {
-                Entry *entry = &map_items(keywords)[i];
-                const char *key = builtin_value(c, entry->key, SPY_STRING)->as.string.data;
-                if (set_hidden_field(c, argv[0], key, entry->value)) { spy_release(value); value = NULL; }
-            }
-            return value;
         }
         default: break;
         }
@@ -27220,7 +27245,9 @@ static SPYValue *class_namespace(SPYContext *c, SPYValue *cls) {
     if (!view) return NULL;
     for (size_t i = 0; i < bindings->as.map.len && !c->error_type[0]; i++) {
         Entry *entry = &map_items(bindings)[i];
-        if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__module__")) continue;
+        /* ExceptionGroup is a heap type in CPython, with __module__ its own. */
+        if (entry->key->type == SPY_STRING && !strcmp(entry->key->as.string.data, "__module__") &&
+            cls != name_local(c->classes, "ExceptionGroup")) continue;
         map_set(c, view, entry->key, entry->value);
     }
     static const char *const methods[] = {"append", "clear", "copy", "count", "extend", "index", "insert", "pop", "remove",
@@ -27903,7 +27930,8 @@ SPYContext *spy_context_new(void) {
         SPYValue *cls = builtin_class_new(c, "ExceptionGroup", group, module), *bases = value_new(c, SPY_TUPLE);
         int status = !cls || !bases || sequence_append(c, bases, group) ||
             sequence_append(c, bases, name_local(c->classes, "Exception")) || class_bases(c, cls, bases) ||
-            name_set(c, c->builtins, "ExceptionGroup", cls) || name_set(c, c->classes, "ExceptionGroup", cls);
+            name_set(c, c->builtins, "ExceptionGroup", cls) || name_set(c, c->classes, "ExceptionGroup", cls) ||
+            name_set(c, cls, "__module__", module) || generic_getset(c, cls, "__weakref__");
         static const char *const methods[] = {"__new__", "__str__", "derive", "split", "subgroup", "__repr__"};
         for (size_t i = 0; i < 6 && !status; i++) {
             SPYValue *method = value_new(c, SPY_NATIVE);
@@ -28127,8 +28155,13 @@ SPYContext *spy_context_new(void) {
         {"BaseException", "__reduce__", B_EXCEPTION_REDUCE, 1}, {"BaseException", "__setstate__", B_EXCEPTION_SETSTATE, 1},
         {"OSError", "__reduce__", B_OSERROR_REDUCE, 1}, {"ImportError", "__reduce__", B_IMPORT_REDUCE, 1},
         {"AttributeError", "__reduce__", B_ATTRIBUTE_REDUCE, 1}, {"AttributeError", "__getstate__", B_ATTRIBUTE_GETSTATE, 1},
-        {"SyntaxError", "__init__", B_SYNTAX_INIT, 1},
         {"BaseException", "__new__", B_EXCEPTION_NEW, 0}, {"BaseException", "__init__", B_EXCEPTION_INIT, 1},
+        {"StopIteration", "__init__", B_EXCEPTION_INIT, 1}, {"SystemExit", "__init__", B_EXCEPTION_INIT, 1},
+        {"ImportError", "__init__", B_EXCEPTION_INIT, 1}, {"AttributeError", "__init__", B_EXCEPTION_INIT, 1},
+        {"NameError", "__init__", B_EXCEPTION_INIT, 1}, {"OSError", "__init__", B_EXCEPTION_INIT, 1},
+        {"SyntaxError", "__init__", B_EXCEPTION_INIT, 1}, {"UnicodeEncodeError", "__init__", B_EXCEPTION_INIT, 1},
+        {"UnicodeDecodeError", "__init__", B_EXCEPTION_INIT, 1}, {"UnicodeTranslateError", "__init__", B_EXCEPTION_INIT, 1},
+        {"BaseExceptionGroup", "__init__", B_EXCEPTION_INIT, 1},
         {"BaseException", "__repr__", B_EXCEPTION_REPR, 1}, {"BaseException", "__str__", B_EXCEPTION_STR, 1},
         {"ImportError", "__repr__", B_EXCEPTION_REPR, 1}, {"OSError", "__new__", B_OSERROR_NEW, 0},
         /* The subclasses that format their own fields, and those that, as
@@ -28446,7 +28479,7 @@ static SPYValue *open_builtin(SPYContext *c, size_t argc, SPYValue *const *argv,
 static SPYValue *file_error(SPYContext *c, int code, SPYValue *filename) {
     const char *text = strerror(code);
     SPYValue *args[] = {spy_int(c, code), spy_string(c, text, strlen(text)), filename};
-    SPYValue *error = args[0] && args[1] ? new_exception(c, name_local(c->classes, "OSError"), filename ? 3 : 2, args) : NULL;
+    SPYValue *error = args[0] && args[1] ? exception_create(c, name_local(c->classes, "OSError"), filename ? 3 : 2, args) : NULL;
     if (error) raise_value(c, error);
     spy_release(error); spy_release(args[0]); spy_release(args[1]);
     return NULL;

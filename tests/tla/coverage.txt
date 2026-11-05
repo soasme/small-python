@@ -372,11 +372,11 @@ Contents | - navigation
 21 Exception Objects > 21.3 Concrete exceptions > 21.3.1 SystemExit and StopIteration | ExceptionObjects, Generators
 21 Exception Objects > 21.3 Concrete exceptions > 21.3.2 AttributeError and NameError | ConcreteExceptions
 21 Exception Objects > 21.3 Concrete exceptions > 21.3.3 ImportError | ConcreteExceptions
-21 Exception Objects > 21.3 Concrete exceptions > 21.3.4 OSError | OSErrors
+21 Exception Objects > 21.3 Concrete exceptions > 21.3.4 OSError | OSErrors, ExceptionObjects
 21 Exception Objects > 21.3 Concrete exceptions > 21.3.5 SyntaxError | ConcreteExceptions
 21 Exception Objects > 21.3 Concrete exceptions > 21.3.6 Unicode errors | ConcreteExceptions
 21 Exception Objects > 21.4 Exception groups | = sections
-21 Exception Objects > 21.4 Exception groups > 21.4.1 BaseExceptionGroup ( *message*, *exceptions* ) | ExceptionGroups
+21 Exception Objects > 21.4 Exception groups > 21.4.1 BaseExceptionGroup ( *message*, *exceptions* ) | ExceptionGroups, ExceptionObjects
 21 Exception Objects > 21.4 Exception groups > 21.4.2 BaseExceptionGroup.derive ( *excs* ) | ExceptionGroups
 21 Exception Objects > 21.4 Exception groups > 21.4.3 split, subgroup, and DeriveAndCopy | ExceptionGroups, ExceptStar
 21 Exception Objects > 21.5 OS exceptions | OSErrors
