@@ -334,10 +334,24 @@ for args, stdin, status, stdout, stderr in [
     (["-OO", "-c", "def f():\n 'doc'\nprint(f.__doc__)"], "", 0, "None\n", ""),
     (["--bogus"], "", 2, "", "usage:"),
     (["-c"], "", 2, "", "usage:"),
+    (["-i", "x"], "", 2, "", "usage:"),
+    (["--version", "x"], "", 2, "", "usage:"),
+    # The program's arguments follow it into sys.argv.
+    (["-c", "import sys; print(sys.argv)", "a", "-b", "", "-c"], "", 0, "['-c', 'a', '-b', '', '-c']\n", ""),
+    (["-", "q", "--version"], "import sys; print(sys.argv)", 0, "['-', 'q', '--version']\n", ""),
+    ([], "import sys; print(sys.argv)", 0, "['']\n", ""),
 ]:
     result = subprocess.run([str(ROOT / "spy"), *args], input=stdin, capture_output=True, text=True, timeout=60)
     assert (result.returncode, result.stdout) == (status, stdout) and result.stderr.startswith(stderr), (args, result)
-print("spy exit statuses, error reports, input, and usage passed")
+with tempfile.TemporaryDirectory(prefix="spy argv ") as temp:
+    script = Path(temp) / "args.py"
+    script.write_text("import sys; print(sys.argv, sys.orig_argv == sys.argv)\n", encoding="utf-8")
+    result = subprocess.run([str(ROOT / "spy"), "-O", str(script), "-i", b"caf\xc3\xa9", b"\xff"],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout == f"[{str(script)!r}, '-i', 'café', '\\udcff'] True\n", result
+    shell = subprocess.run([str(ROOT / "spy"), "-i"], input="import sys\nsys.argv\n", capture_output=True, text=True, check=True)
+    assert ">>> ['']\n" in shell.stdout, shell
+print("spy exit statuses, error reports, input, arguments, and usage passed")
 
 # spyc --analyze lists the output and each input with its size, largest first.
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
