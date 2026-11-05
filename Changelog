@@ -1,38 +1,17 @@
-Unreleased (1.0.0):
+Unreleased (0.8.0):
 
-- incompatible C API changes, after which 1.0 freezes the API and ABI:
-  - spy_type() reports the builtin data types a host converts (None,
-    bool, int, float, complex, str, bytes, bytearray, list, tuple, dict,
-    frozendict, set, frozenset), with their 0.7 numbers, and SPY_OBJECT
-    (0.7's SPY_INSTANCE) for every other value and any subclass instance;
-    the engine's other kinds are no longer public
-  - spy_set_step_limit() and spy_set_memory_limit() are removed: use
-    spy_set_limit() with SPY_LIMIT_STEPS or SPY_LIMIT_MEMORY; so are Go's
-    Runtime.SetStepLimit and Rust's Runtime::set_step_limit
-- the JavaScript package waits through WebAssembly JSPI where the runtime
-  has it, so it needs no SharedArrayBuffer (a browser page need not be
-  cross-origin isolated); Runtime.create({ worker: false }) runs the engine
-  on the calling thread, for runtimes without Worker threads (0.8 ms to
-  create against 16 ms for a Worker); without JSPI it keeps the shared inbox
-- spyc links an archive module, libNAME.a, as module NAME, so a module
-  written in Rust (examples/jsonify, a json module on serde_json) or any
-  language exporting spy_init_NAME needs no C file; a module name given
-  twice is a usage error
-- programs spyc builds mount their working directory, have their
-  command line as sys.argv and sys.orig_argv, and exit with SystemExit's
-  code, as spy does; sys.exit(True), an int subclass and an int too large
-  for 64 bits now exit with 1, the int, and 255 under spy too
-- spy_set_argv() gives a context its command lines for sys; the spy
-  command passes the arguments after its program into sys.argv, and its
-  whole command line into sys.orig_argv, as python does
-- == on lists, tuples, dicts and sets nests as deep as the stack allows,
-  as on CPython, instead of raising RecursionError past 128 levels
-- BaseException has its own __repr__, __str__ and __dict__, and Exception
-  and the other exception classes CPython gives one their own __new__;
-  KeyError, OSError, ImportError, SyntaxError and the Unicode errors have
-  their own __str__ (ImportError also __repr__), and str() and repr() of an
-  exception call them through its type, so BaseException.__str__(KeyError(k))
-  is str(k) and super().__str__() reaches the base's text
+- incompatible C API changes, the last planned; from 0.8.0 to 1.0.0 the
+  API and ABI stay compatible:
+  - spy_type() reports only the builtin data types and SPY_OBJECT
+  - spy_set_step_limit() and spy_set_memory_limit() removed; use
+    spy_set_limit() (also Go's SetStepLimit, Rust's set_step_limit)
+- JavaScript package: no SharedArrayBuffer needed where JSPI exists;
+  worker: false runs the engine on the calling thread
+- spyc links libNAME.a archive modules
+- spyc programs mount their directory, get sys.argv and exit as spy does
+- added spy_set_argv(); spy passes its arguments into sys.argv
+- == on deeply nested containers no longer raises RecursionError
+- exception classes have CPython's own __str__, __repr__ and __new__
 
 2026-11-05 0.7.0:
 

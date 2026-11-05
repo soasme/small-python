@@ -1,6 +1,6 @@
 # Small Python
 
-Version 1.0.0
+Version 0.8.0
 
 ## Table of Contents
 
@@ -985,8 +985,9 @@ any collection ran.
 #### 3.4.8 Stability
 
 `SPY_VERSION` is the header's version and `spy_version()` the library's.
-Releases with the same major version, or before 1.0 the same minor version,
-are compatible: a later one only adds functions, callback types and
+From 0.8.0 on, releases with the same major version are compatible, 0.8
+and later 0.x releases counting with 1.x; before 0.8 only releases with the
+same minor version were. A later compatible release only adds functions, callback types and
 enumeration constants (appended, so existing values keep their numbers),
 and never changes or removes a declaration. A declaration is removed only in
 an incompatible release, after one release that marks it deprecated in
@@ -994,8 +995,9 @@ an incompatible release, after one release that marks it deprecated in
 enforces this against the last release tag by compiling that release's
 declarations against the current header. It also requires every
 declaration to be documented and `libspy.a` to export exactly the
-functions `spy.h` declares. Before 1.0 the minor version could break; 1.0
-makes the last such changes and freezes the API and ABI under these rules.
+functions `spy.h` declares. 0.8.0 makes the last incompatible changes
+planned: from it to 1.0.0 the API and ABI stay compatible under these
+rules, and 1.0.0 declares them stable.
 
 The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
 names it puts in `_spy` serve the standard layer and may change in any

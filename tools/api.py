@@ -199,10 +199,12 @@ def exported(library):
 
 
 def level(version):
-    """Releases with the same level are compatible: the major version, or
-    before 1.0 the minor version."""
+    """Releases with the same level are compatible: the major version, with
+    0.8 and later 0.x counting as 1, or before 0.8 the minor version."""
     major, minor, _ = version.split(".")
-    return (major, minor) if major == "0" else (major,)
+    if major == "0":
+        return ("1",) if int(minor) >= 8 else (major, minor)
+    return (major,)
 
 
 def incompatibilities(old, new):
@@ -262,7 +264,7 @@ def check(library):
     if table(decls, module)[:len(old_table)] != old_table:
         problems.append(f"the native-module table no longer begins with {tag}'s")
     if problems and level(version) == level(tag[1:]):
-        errors += [f"incompatible with {tag} without a new {'minor' if version.startswith('0.') else 'major'} version: {p}"
+        errors += [f"incompatible with {tag} without a new {'minor' if len(level(version)) == 2 else 'major'} version: {p}"
                    for p in problems]
     if errors:
         sys.exit("\n".join(errors))

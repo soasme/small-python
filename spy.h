@@ -19,9 +19,9 @@ extern "C" {
 /* == Versions ==
  * The header's version. spy_version returns the library's, so a host can
  * detect a library built from a different header. The header and library
- * are compatible when both have the same major version, or, before 1.0, the
- * same minor version (docs/manual.md, 3.4.8 Stability). */
-#define SPY_VERSION "1.0.0"
+ * are compatible when both are 0.8.0 or later with the same major version,
+ * or, before 0.8, the same minor version (docs/manual.md, 3.4.8 Stability). */
+#define SPY_VERSION "0.8.0"
 const char *spy_version(void);
 
 /* == Types ==

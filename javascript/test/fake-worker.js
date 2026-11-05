@@ -44,7 +44,7 @@ parentPort.once("message", async ({ inbox }) => {
     parentPort.postMessage(frame);
   };
   await receive();
-  send([0x40, 0x73, 5, 0, 0, 0, ...Buffer.from("1.0.0")]);
+  send([0x40, 0x73, 5, 0, 0, 0, ...Buffer.from("0.8.0")]);
   await receive();
   if (which === "length over limit") parentPort.postMessage(new Uint8Array([0xff, 0xff, 0xff, 0xff]));
   else if (which === "zero length") parentPort.postMessage(new Uint8Array([0, 0, 0, 0]));
