@@ -1503,6 +1503,19 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   before any frame push and pop. Flat calls wait for a machine step that
   costs well under the walker's node.
 
+  A second prototype (2026-11, branch `experiment-flat-calls`) built
+  them: a plain `def` body that holds a call compiles to machine steps,
+  and a call to such a function pushes a frame onto a per-context pool
+  and continues in the same `run_machine` loop; a return pops it. Every
+  spec test passed. Callgrind counted fib 5.0% fewer instructions,
+  classes 1.0% more and nbody the same, but M2 wall time, walker against
+  flat calls in one binary, was fib +2.3% and classes +3% after the
+  frame switch was trimmed from +12%. A machine loop without calls ties
+  the walker, so the cost is in switching frames and entering and
+  leaving the machine, not in dispatching steps. It found two bugs,
+  fixed separately: a suspended `with` body called `__exit__` at the
+  body's line, and a dict subclass's views did not hold the instance.
+
 - **Locals in slots.** A local is already read as a slot: a name node
   remembers its entry's index and checks only that the entry still holds
   its symbol's key. Guarding a slot by the environment's scope and its
