@@ -78,8 +78,9 @@ enum {
     SPY_LAZY_IMPORT = SPY_FROZENDICT + 1, SPY_FRAME, SPY_FRAME_LOCALS, SPY_MEMORYVIEW, SPY_SENTINEL, SPY_CELL,
     SPY_TRACEBACK, SPY_MEMBER_DESCRIPTOR, SPY_GETSET_DESCRIPTOR, SPY_LAST_TYPE = SPY_GETSET_DESCRIPTOR
 };
-_Static_assert(SPY_INSTANCE == SPY_OBJECT && SPY_METHOD + 1 == SPY_SET && SPY_ELLIPSIS + 1 == SPY_COMPLEX &&
-               SPY_SUPER + 1 == SPY_FROZENSET && SPY_MAPPINGPROXY + 1 == SPY_FROZENDICT, "value kinds overlap");
+_Static_assert(SPY_INSTANCE == (int)SPY_OBJECT && SPY_METHOD + 1 == (int)SPY_SET &&
+               SPY_ELLIPSIS + 1 == (int)SPY_COMPLEX && SPY_SUPER + 1 == (int)SPY_FROZENSET &&
+               SPY_MAPPINGPROXY + 1 == (int)SPY_FROZENDICT, "value kinds overlap");
 enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* An environment whose entries are cells that its variables forward to. */
 enum { ENV_FORWARD = 6 };
