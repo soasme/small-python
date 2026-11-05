@@ -1,4 +1,4 @@
-# spec: PLS-315 26, 26.4, 26.6
+# spec: PLS-315 26, 26.4, 26.6, 27.1.1, 28.5
 # description: dict views are live, ordered, and (for keys and items) set-like.
 from harness import *
 
@@ -104,3 +104,21 @@ class NeverEqual:
 first, second = NeverEqual(), NeverEqual()
 table = {first: 1, second: 2}
 assert_eq((table[first], table[second], second in table, len({first, second, second})), (1, 2, True, 2))
+
+# A dict subclass's views and builtin methods hold the instance itself (26.4,
+# 28.5); an exhausted iterator over its view releases it (27.1.1).
+class Owned(dict):
+    def copy(self): return "own copy"
+    def __del__(self): log.append("freed")
+log = []
+owned = Owned(k=1)
+assert_eq((owned.keys().mapping.copy(), owned.keys.__self__ is owned, owned.keys.__qualname__), ("own copy", True, "Owned.keys"))
+del owned
+for view in (dict.keys, dict.values, dict.items, lambda d: reversed(d.keys())):
+    log = []
+    it = iter(view(Owned(k=1)))
+    log.append("made")
+    for _ in it: pass
+    log.append("exhausted")
+    assert_eq(log, ["made", "freed", "exhausted"])
+del it

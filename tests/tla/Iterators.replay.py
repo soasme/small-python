@@ -132,7 +132,11 @@ SOURCES = {
     "map_multi": "result = list(map(pow, [2, 3], [3, 2, 9]))",
     "enumerate_start": "result = list(enumerate('ab', start=5))",
     "reversed_not_sequence": "result = reversed({1, 2})",
-    "reversed_dunder": "class R:\n    def __reversed__(self): return iter('zy')\nresult = list(reversed(R()))"
+    "reversed_dunder": "class R:\n    def __reversed__(self): return iter('zy')\nresult = list(reversed(R()))",
+    "exhausted_releases_source": "class Freed(dict):\n    def __del__(self): result.append('freed')\nresult = []\n"
+                                 "for view in (dict.keys, lambda d: reversed(d.items())):\n"
+                                 "    it = iter(view(Freed(k=1)))\n    result.append('made')\n"
+                                 "    for _ in it: pass\n    result.append('exhausted')",
 }
 
 

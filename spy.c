@@ -1801,6 +1801,18 @@ static int is_number(SPYValue *v) { return is_int(v) || v->type == SPY_FLOAT; }
 static int is_set(SPYValue *v) { return v->type == SPY_SET || v->type == SPY_FROZENSET; }
 static int is_dict(SPYValue *v) { return v->type == SPY_DICT || v->type == SPY_FROZENDICT; }
 static int is_view(SPYValue *v) { return v->type == SPY_DICT_KEYS || v->type == SPY_DICT_VALUES || v->type == SPY_DICT_ITEMS; }
+/* The builtin value a builtin method or view works on: a builtin
+ * subclass instance's storage, or the value itself. */
+static SPYValue *storage(SPYValue *v) { return v->type == SPY_INSTANCE ? v->as.map.base : v; }
+/* A view holds the mapping it was made from; it reads that mapping's storage. */
+static SPYValue *view_map(SPYValue *v) { return storage(v->as.bound.self); }
+/* A builtin method found on a subclass instance's storage binds the instance. */
+static SPYValue *bind_instance(SPYValue *method, SPYValue *instance) {
+    if (method && method->type == SPY_BOUND_METHOD && instance->type == SPY_INSTANCE && method->as.bound.self == instance->as.map.base) {
+        spy_release(method->as.bound.self); method->as.bound.self = spy_retain(instance);
+    }
+    return method;
+}
 /* Keys and items views are set-like; values views are not. */
 static int set_view(SPYValue *v) { return v->type == SPY_DICT_KEYS || v->type == SPY_DICT_ITEMS; }
 int spy_as_int(SPYContext *c, SPYValue *v, int64_t *out) {
@@ -1839,7 +1851,7 @@ static int truthy(SPYValue *v) {
     case SPY_STRING: case SPY_BYTES: case SPY_BYTEARRAY: return v->as.string.len != 0;
     case SPY_LIST: case SPY_TUPLE: return v->as.seq.len != 0;
     case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: case SPY_FROZENSET: return v->as.map.len != 0;
-    case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: return v->as.bound.self->as.map.len != 0;
+    case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: return view_map(v)->as.map.len != 0;
     case SPY_RANGE: return integer_sign(v->as.range.length) != 0;
     case SPY_MAPPINGPROXY: case SPY_FRAME_LOCALS: case SPY_MEMORYVIEW: case SPY_INSTANCE: {
         SPYContext *c = v->ctx;
@@ -8135,6 +8147,13 @@ static int iterable_type(SPYValue *v) {
     return v->type == SPY_LIST || v->type == SPY_TUPLE || is_dict(v) || v->type == SPY_SET || v->type == SPY_FROZENSET ||
            v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY || v->type == SPY_RANGE || v->type == SPY_TEMPLATE || v->type == SPY_TEMPLATE_ITERATOR || v->type == SPY_ITERATOR || v->type == SPY_COROUTINE_ITERATOR || v->type == SPY_INSTANCE || v->type == SPY_GENERATOR || is_view(v) || awaitable_iterator(v);
 }
+/* A view of the storage that view reads. Iterators walk only such views,
+ * so they read a view's mapping as its storage directly. */
+static SPYValue *storage_view(SPYContext *c, SPYValue *view) {
+    SPYValue *v = value_new(c, view->type);
+    if (v) v->as.bound.self = spy_retain(view_map(view));
+    return v;
+}
 static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
     if (source->type == SPY_LIST || source->type == SPY_TUPLE || source->type == SPY_RANGE) {
         SPYValue *v = value_new(c, SPY_ITERATOR);
@@ -8146,6 +8165,12 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         return v;
     }
     if (awaitable_iterator(source)) return spy_retain(source);
+    if (is_view(source) && source->as.bound.self->type == SPY_INSTANCE) {
+        /* The iterator walks the storage and holds the instance until exhausted. */
+        SPYValue *view = storage_view(c, source), *v = view ? get_iterator(c, view) : NULL;
+        if (v) v->as.iterator.counter = spy_retain(source->as.bound.self);
+        spy_release(view); return v;
+    }
     if (source->type == SPY_TEMPLATE_ITERATOR || source->type == SPY_ITERATOR || source->type == SPY_GENERATOR || source->type == SPY_COROUTINE_ITERATOR) return spy_retain(source);
     SPYValue *base = builtin_base(c, source, "__iter__", NULL);
     /* An iterator subclass's instance is its own iterator. */
@@ -8185,7 +8210,7 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         v->as.iterator.source = spy_retain(source);
         if (special_dispatch(source)) v->as.iterator.kind = I_GETITEM;
         if (source->type == SPY_TEMPLATE) v->as.iterator.kind = I_TEMPLATE;
-        SPYValue *map = is_view(source) ? source->as.bound.self : source;
+        SPYValue *map = is_view(source) ? view_map(source) : source;
         if (is_dict(map) || is_set(map)) { v->as.iterator.size = map->as.map.len; v->as.iterator.removed = map->as.map.removed; }
     }
     return v;
@@ -8228,7 +8253,7 @@ static SPYValue *iter_at(SPYContext *c, SPYValue *v, size_t index) {
     case SPY_DICT: case SPY_FROZENDICT: case SPY_SET: case SPY_FROZENSET:
         return index < v->as.map.len ? spy_retain(map_items(v)[index].key) : NULL;
     case SPY_DICT_KEYS: case SPY_DICT_VALUES: case SPY_DICT_ITEMS: {
-        SPYValue *map = v->as.bound.self;
+        SPYValue *map = v->as.bound.self; /* an iterator's view: storage (see storage_view) */
         if (index >= map->as.map.len) return NULL;
         Entry *e = &map_items(map)[index];
         if (v->type != SPY_DICT_ITEMS) return spy_retain(v->type == SPY_DICT_KEYS ? e->key : e->value);
@@ -9783,7 +9808,7 @@ static ALWAYS_INLINE SPYValue *number_fast(SPYContext *c, int op, SPYValue *a, S
 static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
 static SPYValue *iterator_next(SPYContext *, SPYValue *);
-static size_t sized_length(SPYValue *v) { return is_view(v) ? v->as.bound.self->as.map.len : v->as.map.len; }
+static size_t sized_length(SPYValue *v) { return is_view(v) ? view_map(v)->as.map.len : v->as.map.len; }
 /* Membership as `item in container`: 1, 0, or -1 on error. */
 static int contains(SPYContext *c, SPYValue *container, SPYValue *item) {
     SPYValue *found = comparison(c, O_IN, item, container);
@@ -9921,11 +9946,11 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             SPYValue *index = range_find(c, b, a);
             result = index != NULL; spy_release(index);
         } else if (b->type == SPY_DICT_KEYS) {
-            result = map_find(b->as.bound.self, a) >= 0;
+            result = map_find(view_map(b), a) >= 0;
         } else if (b->type == SPY_DICT_ITEMS) {
             /* Like dictitems_contains: look the key up, then compare the value. */
             if (a->type == SPY_TUPLE && a->as.seq.len == 2) {
-                SPYValue *map = b->as.bound.self, *key = spy_retain(a->as.seq.items[0]), *expected = spy_retain(a->as.seq.items[1]);
+                SPYValue *map = view_map(b), *key = spy_retain(a->as.seq.items[0]), *expected = spy_retain(a->as.seq.items[1]);
                 ptrdiff_t j = map_find(map, key);
                 SPYValue *found = j >= 0 ? spy_retain(map->as.map.items[j].value) : NULL;
                 result = found && (found == expected || equal(found, expected, 0));
@@ -11282,7 +11307,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         spy_release(held);
         if (!strcmp(name, "__class__") && v->type == SPY_INSTANCE) return spy_retain(v->as.map.parent);
         if (v->type == SPY_INSTANCE && v->as.map.base) {
-            value = attribute_value(c, v->as.map.base, name);
+            value = bind_instance(attribute_value(c, v->as.map.base, name), v);
             /* A module's own fallback ends the lookup: PEP 562 __getattr__ and its error. */
             if (value || !error_is(c, "AttributeError") || v->as.map.base->type == SPY_MODULE) return value;
             spy_clear_error(c);
@@ -12956,12 +12981,6 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         spy_release(iterator);
         return result < 0 || c->error_type[0] ? NULL : spy_bool(c, result);
     }
-    default: {
-        if (argc) break;
-        SPYValue *view = value_new(c, method == M_KEYS ? SPY_DICT_KEYS : method == M_VALUES ? SPY_DICT_VALUES : SPY_DICT_ITEMS);
-        if (view) view->as.bound.self = spy_retain(self);
-        return view;
-    }
     }
     return method_arity_error(c, self, method, name, argc);
 }
@@ -12974,8 +12993,14 @@ static int keyword_method(int method) {
  * or code.replace without arguments. */
 static SPYValue *call_method(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv,
                              SPYValue *keywords) {
-    SPYValue *result;
+    SPYValue *result, *owner = self;
+    self = storage(self);
     switch (method) {
+    case M_KEYS: case M_VALUES: case M_ITEMS:
+        if (argc) break;
+        if ((result = value_new(c, method == M_KEYS ? SPY_DICT_KEYS : method == M_VALUES ? SPY_DICT_VALUES : SPY_DICT_ITEMS)))
+            result->as.bound.self = spy_retain(owner);
+        return result;
     case M_FORMAT: return string_format(c, self, argc, argv, keywords, 1);
     case M_SORT: return sort_method(c, self, argc, argv, keywords);
     case M_CODE_REPLACE: return argc ? spy_error(c, "TypeError", "replace() takes no positional arguments") : code_replace(c, self, keywords);
@@ -25739,7 +25764,9 @@ execution_fail:
             if (a->type != SPY_LIST && a->type != SPY_TUPLE && a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY &&
                 a->type != SPY_RANGE && !is_dict(a) && !is_view(a))
                 return errorf(c, "TypeError", "'%s' object is not reversible", type_name(a));
-            source = spy_retain(a);
+            /* A subclass instance's view reverses the storage and holds the instance until exhausted. */
+            if (is_view(a) && a->as.bound.self->type == SPY_INSTANCE) { owner = a->as.bound.self; source = storage_view(c, a); }
+            else source = spy_retain(a);
         }
         if (!source) return NULL;
         SPYValue *v = value_new(c, SPY_ITERATOR);
@@ -25748,7 +25775,7 @@ execution_fail:
         v->as.iterator.kind = id == B_MAP ? I_MAP : id == B_ZIP ? I_ZIP : id == B_ENUMERATE ? I_ENUMERATE : I_REVERSED;
         v->as.iterator.counter = owner ? spy_retain(owner) : counter;
         if (id == B_REVERSED && (is_dict(a) || is_view(a))) {
-            SPYValue *map = is_dict(a) ? a : a->as.bound.self;
+            SPYValue *map = is_dict(a) ? a : view_map(a);
             v->as.iterator.index = v->as.iterator.size = map->as.map.len;
             v->as.iterator.removed = map->as.map.removed;
         } else if (id == B_REVERSED) v->as.iterator.index =
@@ -26026,7 +26053,7 @@ execution_fail:
     if (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) n = string_length(a);
     else if (a->type == SPY_LIST || a->type == SPY_TUPLE) n = a->as.seq.len;
     else if (is_dict(a) || a->type == SPY_SET || a->type == SPY_FROZENSET) n = a->as.map.len;
-    else if (is_view(a)) n = a->as.bound.self->as.map.len;
+    else if (is_view(a)) n = view_map(a)->as.map.len;
     else if (special_dispatch(a)) {
         SPYValue *length = call_special(c, a, "__len__", 0, NULL);
         if (!length) return NULL;
@@ -26968,7 +26995,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     if (!value) return errorf(c, "TypeError", "descriptor '%s' for '%s' objects doesn't apply to a '%s' object", name, owner_name, type_name(self));
     argc--; argv++;
     if (index < 0) {
-        SPYValue *method = attribute_value(c, value, name);
+        SPYValue *method = bind_instance(attribute_value(c, value, name), self);
         SPYValue *result = method ? call_keywords(c, method, argc, argv, keywords) : NULL;
         spy_release(method); return result;
     }
