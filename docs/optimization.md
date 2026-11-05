@@ -190,6 +190,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A dying number returns to its spare list directly](#a-dying-number-returns-to-its-spare-list-directly) | -5.6% (loop, nbody), -3.2% (generators), -2.4% (classes); M2: nbody -6.5%, loop -3.0%, classes -2.6% |
 | [Two strs concatenate before the operator dispatch](#two-strs-concatenate-before-the-operator-dispatch) | -2.9% (dicts); M2: dicts -1.6% |
 | [A Python call enters and leaves its frame inline](#a-python-call-enters-and-leaves-its-frame-inline) | -5.4% (fib), -4.2% (generators), -2.6% (classes); M2: fib -9.2%, generators -5.0%, classes -3.8% |
+| [Each hot machine step dispatches the next](#each-hot-machine-step-dispatches-the-next) | -3.4% (generators); M2: generators -10.9%, strings -2.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -1423,6 +1424,26 @@ rest within 0.5% except dicts, which makes no Python call and runs the
 same instructions (821.2 M), +0.5% to +0.6% in three runs from the code
 that follows the call path moving; aligning `store_slow`, the one hot
 unaligned function it runs there, did not change it.
+
+### Each hot machine step dispatches the next
+
+The instruction machine chose every step at one `switch`, at the top of
+its loop. One indirect jump stood for every pair of steps, so the
+processor predicted the next step from the shared history of all of
+them. Built with GCC or clang, every step now has a label, and the
+frequent ones (loads, operators, tests, stores, jumps, `BC_NEXT`) end by
+jumping straight to the next step's label, through a table built from
+the same list as the step enumeration, when the tick has only a line to
+record. A step that ends any other way, or a tick with work, goes back
+to the loop as before; other compilers keep the `switch`. What runs, and
+in what order, is unchanged.
+
+Wall time fell much more than instructions, which is the misprediction
+going: instructions (M2 counters) generators -3.4%, strings and sort
+-0.6%, the rest unchanged. Wall time averaged over eight code layouts:
+generators -10.9% (-8.8% and -7.8% in two earlier runs), strings -2.5%,
+sort -1.5%, fib -1.0%; loop +0.5% and classes +0.9% run the same
+instructions, which only placement moves.
 
 ### A profile-guided build
 

@@ -12,6 +12,7 @@ Unreleased (0.8.0):
 - added spy_set_argv(); spy passes its arguments into sys.argv
 - == on deeply nested containers no longer raises RecursionError
 - exception classes have CPython's own __str__, __repr__ and __new__
+- generator functions run about 10% faster (generators benchmark 99 ms -> 88 ms)
 
 2026-11-05 0.7.0:
 
