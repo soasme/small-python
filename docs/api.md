@@ -350,9 +350,9 @@ int spy_set_argv(SPYContext *, size_t argc, const char *const *argv, size_t orig
 
 The program's command lines, which the standard layer gives Python as
 sys.argv (the script's, argc strings) and sys.orig_argv (the whole one the
-program was started with), decoded as UTF-8 with surrogateescape and
-copied. Set them before sys is first imported; until then both are empty
-lists. Returns 0, or -1 with MemoryError.
+program was started with), decoded as UTF-8 with surrogateescape and copied.
+Set them before sys is first imported; until then both are empty lists.
+Returns 0, or -1 with MemoryError.
 
 ```c
 enum { SPY_MOUNT_READ_ONLY = 1 };

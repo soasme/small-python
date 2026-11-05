@@ -849,6 +849,29 @@ int main(int argc, char **argv) {
                   "    int status = !value || spy_set_global(c, name, value);\n"
                   "    spy_release(value);\n"
                   "    return status;\n}\n"
+                  "/* The process status for the pending error, as python's: SystemExit's\n"
+                  " * code (None 0, an int its low byte, 255 when it does not fit, otherwise\n"
+                  " * printed and 1); any other error is reported, and 1. */\n"
+                  "static int exit_status(SPYContext *c) {\n"
+                  "    SPYValue *error = strcmp(spy_error_type(c), \"SystemExit\") ? NULL : spy_error_value(c);\n"
+                  "    SPYValue *code = error ? spy_get_attr(c, error, \"code\") : NULL;\n"
+                  "    spy_release(error);\n"
+                  "    if (!code) {\n"
+                  "        fprintf(stderr, \"%%s:%%zu: %%s: %%s\\n\",\n"
+                  "            spy_error_filename(c), spy_error_line(c), spy_error_type(c), spy_error_display(c));\n"
+                  "        return 1;\n    }\n"
+                  "    spy_clear_error(c);\n"
+                  "    int64_t status = 1;\n"
+                  "    if (spy_type(code) == SPY_NONE) status = 0;\n"
+                  "    else if (!spy_as_int(c, code, &status)) status &= 0xff;\n"
+                  "    else if (!strcmp(spy_error_type(c), \"OverflowError\")) status = 255;\n"
+                  "    else {\n"
+                  "        SPYValue *text = (spy_clear_error(c), spy_str(c, code));\n"
+                  "        const char *s = text ? spy_as_string(c, text, NULL) : NULL;\n"
+                  "        if (s) fprintf(stderr, \"%%s\\n\", s);\n"
+                  "        spy_release(text);\n    }\n"
+                  "    spy_release(code);\n"
+                  "    return (int)status;\n}\n"
                   "int main(int argc, char **argv) {\n"
                   "    SPYContext *c = spy_context_new();\n"
                   "    if (!c) return 1;\n"
@@ -881,10 +904,9 @@ int main(int argc, char **argv) {
         put(&out, "    if (!status) status = spy_exec(c, source, ");
         put_string(&out, e->file);
         put(&out, ");\n"
-                  "    if (status) fprintf(stderr, \"%%s:%%zu: %%s: %%s\\n\",\n"
-                  "        spy_error_filename(c), spy_error_line(c), spy_error_type(c), spy_error_display(c));\n"
+                  "    if (status) status = exit_status(c);\n"
                   "    spy_context_free(c);\n"
-                  "    return status ? 1 : 0;\n}\n");
+                  "    return status;\n}\n");
     }
 
     if (executable ? compile(argv[0], output, &out, &more, b.registered.len > 0, verbose) : write_file(output, &out)) { status = 1; goto done; }

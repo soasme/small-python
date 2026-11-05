@@ -4,8 +4,10 @@ Unreleased:
   written in Rust (examples/jsonify, a json module on serde_json) or any
   language exporting spy_init_NAME needs no C file; a module name given
   twice is a usage error
-- programs spyc builds mount their working directory and have their
-  command line as sys.argv and sys.orig_argv
+- programs spyc builds mount their working directory, have their
+  command line as sys.argv and sys.orig_argv, and exit with SystemExit's
+  code, as spy does; sys.exit(True), an int subclass and an int too large
+  for 64 bits now exit with 1, the int, and 255 under spy too
 - spy_set_argv() gives a context its command lines for sys; the spy
   command passes the arguments after its program into sys.argv, and its
   whole command line into sys.orig_argv, as python does

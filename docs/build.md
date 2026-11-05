@@ -459,9 +459,12 @@ program's name first, as the shell passed them and decoded as UTF-8 with
 (MemoryError) is reported, and the program exits with 1 without running the
 entry. `SpyProgram.tla` models this and the link ([10.1](#101-tla-model)).
 
-`main` reports an uncaught exception, a `SystemExit` included, as
-`FILE:LINE: TYPE: MESSAGE` on standard error and exits with 1; the exit
-status of `SystemExit` is not yet the program's.
+An uncaught `SystemExit` ends the program as python's does: with status 0
+when its `code` is `None`, the low byte of an `int` code (a `bool` or a
+subclass of `int` too, 255 for one that does not fit 64 bits), and 1 after
+printing any other code's `str` on standard error. `main` reports any other
+uncaught exception as `FILE:LINE: TYPE: MESSAGE` on standard error and exits
+with 1.
 
 ## 6 Source transforms
 
