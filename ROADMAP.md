@@ -12,7 +12,7 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
-  systems, host functions, resumable execution, inspection, snapshots,
+  systems, host functions, inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -212,34 +212,6 @@ a table so that repeated dictionary keys are sent once, measured against
 JSON as the baseline it has to beat (djs's wire format is 1.4 to 9 times
 faster than `JSON.stringify` plus `JSON.parse` in wasm).
 
-### Resumable execution
-
-Today a host function is a C callback that runs inside the engine's call,
-and a spent step budget stops the program for good. The JavaScript package
-works around the first by blocking a worker in `Atomics.wait` while the
-host answers ([docs/packaging/javascript.md](docs/packaging/javascript.md)),
-which is why it needs `SharedArrayBuffer`.
-
-Let the engine return to the host instead, and continue later from the
-same point:
-
-- a synchronous host call returns "waiting on host call *n*" from the
-  evaluation entry point; the host answers it, possibly asynchronously, and
-  resumes the context;
-- an asynchronous host call returns an awaitable at once and records the
-  pending call in the context; results are delivered one at a time, in the
-  order the host supplies them, when the event loop is idle, so a run
-  depends on the order of results and never on when they arrived;
-- a spent step budget is a pause the host may resume, so the budget becomes
-  a time slice as well as a limit.
-
-Every frame that can be paused must then live in the heap, not on the C
-stack: this is the case for calls without C recursion in
-[Toward bytecode](#toward-bytecode). djs (a JavaScript engine for Pi's
-codemode) is built this way and is the reference design. Resumable
-execution comes before snapshots, which save a context exactly at such a
-pause.
-
 ### Embedded inspector
 
 Trace execution, allocations, policy violations and imports, as structured
@@ -251,7 +223,11 @@ below consume.
 
 Save a context and resume it later, or fork it into several that continue
 independently: agent checkpointing, speculative execution, branching
-evaluation and durable workflows.
+evaluation and durable workflows. A snapshot is taken when the context is
+idle, between top-level operations, so no frame is running: the engine
+does not pause inside a call (see
+[WebAssembly and the edge](#webassembly-and-the-edge) for host calls that
+wait without blocking a thread).
 
 A snapshot of the interpreter's memory is not a snapshot of the outside
 world. Pure Python state (values, frames, generators, coroutines) can be
@@ -319,12 +295,19 @@ both a regression suite and the benchmark for this use.
 
 The JavaScript package already runs the engine compiled to WebAssembly, in a
 worker thread, on Node.js and in cross-origin isolated browsers. Remaining:
-a build without `SharedArrayBuffer` and threads, for pages that are not
-cross-origin isolated and for edge runtimes such as Cloudflare Workers; a
-WASI build; and `spyc --target wasm`, which produces one module for a
-bundled program. The build without threads needs host calls that return to
-the host ([Resumable execution](#resumable-execution)) in place of the
-blocking worker.
+running without `SharedArrayBuffer`, and without threads, for pages that are
+not cross-origin isolated and for edge runtimes such as Cloudflare Workers;
+a WASI build; and `spyc --target wasm`, which produces one module for a
+bundled program.
+
+The engine waits for its host only in one import, `read`. With JavaScript
+Promise Integration (JSPI, WebAssembly stack switching), `read` is an async
+function: the engine's whole stack, C frames included, is suspended until a
+message arrives, and the event loop runs on. A host call from any Python
+code, inside a sort key or `__eq__` too, then waits on a promise without
+`Atomics.wait`, and on one thread without a Worker. The engine needs no
+change: it does not pause on its own, so ordinary calls keep their speed.
+Where JSPI is missing, the package keeps the `SharedArrayBuffer` inbox.
 
 ### Android and iOS
 
@@ -429,9 +412,9 @@ instruction list that hands every expression that cannot suspend back to the
 walker. Move node kinds onto machine instructions one at a time, each only
 once it measures faster than the walker, then revisit locals in slots and
 calls without C recursion, which pay only once a machine step costs well
-under a walker node. Calls without C recursion are also what
-[resumable execution](#resumable-execution) and snapshots need, so they
-are weighed against those as well as against speed. The plan and its measurements are in
+under a walker node. They are weighed on speed alone: host calls wait
+through JSPI ([WebAssembly and the edge](#webassembly-and-the-edge)) and
+snapshots are taken at idle points, so neither needs them. The plan and its measurements are in
 [docs/optimization.md](docs/optimization.md#toward-bytecode).
 
 Expected gain: two to three times on interpreter-bound programs.
