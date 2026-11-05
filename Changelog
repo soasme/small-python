@@ -6,7 +6,11 @@ Unreleased:
   twice is a usage error
 - programs spyc builds mount their working directory and have their
   command line as sys.argv and sys.orig_argv
-- spy_set_argv() gives a context its command line for sys
+- spy_set_argv() gives a context its command line for sys; the spy
+  command passes the arguments after its program into sys.argv, as python
+  does
+- == on lists, tuples, dicts and sets nests as deep as the stack allows,
+  as on CPython, instead of raising RecursionError past 128 levels
 
 2026-11-05 0.7.0:
 

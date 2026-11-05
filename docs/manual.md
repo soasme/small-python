@@ -149,7 +149,8 @@ libraries. Static linking depends on the target platform.
 #### 2.3.1 `spy` interpreter
 
 ```text
-usage: spy [--mount dir]... [-O | -OO] [-c source | -i | --version | file.py | -]
+usage: spy [--mount dir]... [-O | -OO] [-c source | file.py | -] [arg]...
+       spy [--mount dir]... [-O | -OO] (-i | --version)
 ```
 
 | Option | Effect |
@@ -161,12 +162,15 @@ usage: spy [--mount dir]... [-O | -OO] [-c source | -i | --version | file.py | -
 | `--version` | Print the engine version |
 | `file.py` | Execute a source file |
 | `-` or no arguments | Read a complete program from stdin |
+| `arg` | An argument of the program, which follows it into `sys.argv` |
 
 The interactive shell keeps global variables between submissions. A blank line
 ends a compound statement. It currently uses a small C input loop; multiline
 editing, contextual colorization, completion, and a Python-written shell remain
-unimplemented. Python command-line compatibility, script arguments, `-m`, and
-arbitrary CPython switches are not implemented.
+unimplemented. As python's, `sys.argv` is the file and its arguments,
+`['-c', arg...]` for `-c`, `['-', arg...]` for `-`, and `['']` for stdin
+alone and the shell. `-m` and the other CPython switches are not
+implemented.
 
 #### 2.3.2 `spyc` program generator
 
@@ -866,8 +870,8 @@ line, which the standard layer's `sys` copies into `sys.argv` and
 `sys.orig_argv` when it is first imported. The strings are copied and decoded
 as UTF-8 with `surrogateescape`, so any bytes are kept; it returns 0, or -1
 with `MemoryError`. Until a host sets it both lists are empty. Programs that
-`spyc` builds set it from `main`; the `spy` command does not yet, so its
-`sys.argv` is empty.
+`spyc` builds set it from `main`, and the `spy` command from its arguments
+(2.3.1).
 
 `spy_new_module(ctx, name, init)` registers a module. An import finds it before the loader. The first import
 creates the module object with `__name__`, `__package__`, and `__builtins__`
