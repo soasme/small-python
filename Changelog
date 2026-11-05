@@ -11,6 +11,12 @@ Unreleased:
   does
 - == on lists, tuples, dicts and sets nests as deep as the stack allows,
   as on CPython, instead of raising RecursionError past 128 levels
+- BaseException has its own __repr__, __str__ and __dict__, and Exception
+  and the other exception classes CPython gives one their own __new__;
+  KeyError, OSError, ImportError, SyntaxError and the Unicode errors have
+  their own __str__ (ImportError also __repr__), and str() and repr() of an
+  exception call them through its type, so BaseException.__str__(KeyError(k))
+  is str(k) and super().__str__() reaches the base's text
 
 2026-11-05 0.7.0:
 
