@@ -1491,7 +1491,9 @@ whose class leaves the read to the instance's own entries, the answer the
 attribute node already remembers for `node_attribute`; the entry's value
 is borrowed, and `operate` holds both operands before any method runs.
 The attribute test comes after the literal and name tests, so the other
-operands pay nothing. Instructions (M2 counters): classes -5.3%, the rest
+operands pay nothing; an earlier try that read `self` directly inside
+`eval` saved classes 1.0% and cost every other program up to 0.5% more
+instructions. Instructions (M2 counters): classes -5.3%, the rest
 within 0.2%. Wall time averaged over eight code layouts: classes -2.1%,
 bigint -1.4% at 6 ms, the rest within 0.4% (strings read +1.2% once and
 +0.3%/-0.2% with the order swapped).
@@ -1632,10 +1634,6 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   running the branch through a nested `execute`, cost `nbody` 1.1% and
   most other programs 0.2% to 0.5%; only `loop` gained (0.5%). The array
   and the resume test weigh on every block the loop runs.
-
-- **An attribute of a name on the operator fast path.** Reading `self.x`
-  without evaluating `self` through `eval` saved 1.0% on classes, but
-  every other program took up to 0.5% more instructions.
 
 - **Keeping every freed value for reuse.** Released values beyond 64 go
   back to `malloc`. With no limit, `dicts` took 21% longer and `sort`
