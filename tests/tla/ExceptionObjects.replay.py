@@ -16,12 +16,17 @@ def shown(op, cls, args):
     if op == "str": return repr(str(e))
     if op == "repr": return repr(repr(e))
     if op == "args": return repr(e.args)
+    if op == "base_str": return repr(BaseException.__str__(e))
 class NoSuper(Exception):
     def __init__(self, x): self.x = x
 class MyStr(Exception):
     def __str__(self): return "custom"
 class Two(Exception):
     def __init__(self, a, b): super().__init__(a, b)
+class Key(KeyError):
+    def __str__(self): return "<" + super().__str__() + ">"
+class Quiet(ValueError):
+    def __repr__(self): return "Quiet!"
 
 SOURCES = {
     "args_set_by_new": 'e = NoSuper(5)\nresult = (e.args, e.x, str(e))',
@@ -54,7 +59,13 @@ SOURCES = {
     "hashable": 'result = isinstance(hash(ValueError()), int)',
     "systemexit_code": 'result = (SystemExit().code, SystemExit(1).code, SystemExit(1, 2).code)',
     "stopiteration_value": 'result = (StopIteration().value, StopIteration(1, 2).value)',
-    "keyerror_str_tuple": 'result = (str(KeyError(1, 2)), str(KeyError(())))'
+    "keyerror_str_tuple": 'result = (str(KeyError(1, 2)), str(KeyError(())))',
+    "super_str": "result = str(Key('k'))",
+    "base_repr_override": 'result = (repr(Quiet(1)), BaseException.__repr__(Quiet(1)))',
+    "own_new": 'result = (Exception.__new__ is BaseException.__new__, KeyError.__new__ is LookupError.__new__, Exception.__new__(ValueError, 1).args)',
+    "new_unsafe": "Exception.__new__(OSError, 2, 'x')",
+    "new_owner": 'KeyError.__new__(int)',
+    "dict_getset": "e = ValueError()\ne.x = 1\nd = vars(BaseException)['__dict__']\nresult = (repr(d), d.__get__(e))"
 }
 
 
