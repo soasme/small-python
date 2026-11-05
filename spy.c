@@ -337,7 +337,7 @@ struct SPYContext {
     void *loader_data;
     SPYReadLine read_line;
     void *read_data;
-    SPYValue *argv; /* The command line for sys.argv, a list of str, or NULL. */
+    SPYValue *argv, *orig_argv; /* The command lines for sys.argv and sys.orig_argv, lists of str, or NULL. */
     SPYPolicy policy;
     void *policy_data;
     size_t output_limit, output_used; /* Bytes of output each outermost call may write, and has. */
@@ -16115,10 +16115,11 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     SPYValue *values[] = {spy_int(c, PTRDIFF_MAX), spy_string(c, *(unsigned char *)&probe ? "little" : "big", *(unsigned char *)&probe ? 6 : 3),
                           spy_string(c, platform, strlen(platform))};
     static const char *const fields[] = {"maxsize", "byteorder", "platform"};
-    SPYValue *args = c->argv ? spy_retain(c->argv) : spy_list(c);
+    SPYValue *args = c->argv ? spy_retain(c->argv) : spy_list(c), *orig = c->orig_argv ? spy_retain(c->orig_argv) : spy_list(c);
     int status = name_set(c, module, "modules", c->modules) || !lazy_registry(c) ||
-        name_set(c, module, "lazy_modules", c->lazy_modules) || !args || name_set(c, module, "argv", args);
-    spy_release(args);
+        name_set(c, module, "lazy_modules", c->lazy_modules) || !args || name_set(c, module, "argv", args) ||
+        !orig || name_set(c, module, "orig_argv", orig);
+    spy_release(args); spy_release(orig);
     for (size_t i = 0; i < sizeof(values) / sizeof(*values); i++) {
         status = status || !values[i] || name_set(c, module, fields[i], values[i]);
         spy_release(values[i]);
@@ -28296,7 +28297,8 @@ void spy_set_error_output(SPYContext *c, SPYWrite write, SPYFlush flush, void *d
 }
 void spy_set_module_loader(SPYContext *c, SPYModuleLoader loader, void *data) { c->loader = loader; c->loader_data = data; }
 void spy_set_input(SPYContext *c, SPYReadLine read_line, void *data) { c->read_line = read_line; c->read_data = data; }
-int spy_set_argv(SPYContext *c, size_t argc, const char *const *argv) {
+/* argc strings as a list of str, decoded as UTF-8 with surrogateescape. */
+static SPYValue *argv_list(SPYContext *c, size_t argc, const char *const *argv) {
     SPYValue *errors = spy_string(c, "surrogateescape", 15), *list = errors ? spy_list(c) : NULL;
     for (size_t i = 0; list && i < argc; i++) {
         SPYValue *item = bytes_decode(c, argv[i], strlen(argv[i]), NULL, errors);
@@ -28304,9 +28306,13 @@ int spy_set_argv(SPYContext *c, size_t argc, const char *const *argv) {
         spy_release(item);
     }
     spy_release(errors);
-    if (!list) return -1;
-    spy_release(c->argv);
-    c->argv = list;
+    return list;
+}
+int spy_set_argv(SPYContext *c, size_t argc, const char *const *argv, size_t orig_argc, const char *const *orig_argv) {
+    SPYValue *list = argv_list(c, argc, argv), *orig = list ? argv_list(c, orig_argc, orig_argv) : NULL;
+    if (!orig) { spy_release(list); return -1; }
+    spy_release(c->argv); spy_release(c->orig_argv);
+    c->argv = list; c->orig_argv = orig;
     return 0;
 }
 void spy_set_policy(SPYContext *c, SPYPolicy policy, void *data) { c->policy = policy; c->policy_data = data; }

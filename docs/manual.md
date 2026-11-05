@@ -169,7 +169,8 @@ ends a compound statement. It currently uses a small C input loop; multiline
 editing, contextual colorization, completion, and a Python-written shell remain
 unimplemented. As python's, `sys.argv` is the file and its arguments,
 `['-c', arg...]` for `-c`, `['-', arg...]` for `-`, and `['']` for stdin
-alone and the shell. `-m` and the other CPython switches are not
+alone and the shell, and `sys.orig_argv` is the whole command line, `spy`
+and its options included. `-m` and the other CPython switches are not
 implemented.
 
 #### 2.3.2 `spyc` program generator
@@ -865,9 +866,10 @@ other descriptors, such as the process's standard streams, are unreachable.
 The `spy` command mounts its working directory at its own path. File access
 needs a POSIX host; elsewhere `spy_mount` and `open` raise `OSError`.
 
-`spy_set_argv(ctx, argc, argv)` gives the context the program's command
-line, which the standard layer's `sys` copies into `sys.argv` and
-`sys.orig_argv` when it is first imported. The strings are copied and decoded
+`spy_set_argv(ctx, argc, argv, orig_argc, orig_argv)` gives the context the
+program's command lines, which the standard layer's `sys` copies into
+`sys.argv` (the script's) and `sys.orig_argv` (the whole one the process was
+started with) when it is first imported. The strings are copied and decoded
 as UTF-8 with `surrogateescape`, so any bytes are kept; it returns 0, or -1
 with `MemoryError`. Until a host sets it both lists are empty. Programs that
 `spyc` builds set it from `main`, and the `spy` command from its arguments

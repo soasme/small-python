@@ -316,7 +316,7 @@ static SPYValue *load(SPYContext *c, void *data, const char *name) { /* binary s
 int main(int argc, char **argv) {
     /* spy_context_new, the mount, the -M and C modules, output callbacks */
     spy_set_module_loader(c, load, NULL);
-    /* spy_set_argv(c, argc, argv); __file__ = "app.py"; spy_exec(c, m0, "app.py"); report errors */
+    /* spy_set_argv(c, argc, argv, argc, argv); __file__ = "app.py"; spy_exec(c, m0, "app.py"); report errors */
 }
 ```
 
@@ -453,7 +453,7 @@ reaches the files under it and nothing else; when the mount fails (a
 working directory that was removed) the program runs with nothing mounted.
 It registers the `-M`, C and archive modules, installs the output callbacks
 and the loader, and gives the engine its command line with `spy_set_argv`.
-`sys.argv` and `sys.orig_argv` are then the program's arguments, the
+`sys.argv` and `sys.orig_argv` are then both the program's arguments, the
 program's name first, as the shell passed them and decoded as UTF-8 with
 `surrogateescape`, as CPython decodes them on POSIX. A failure there
 (MemoryError) is reported, and the program exits with 1 without running the

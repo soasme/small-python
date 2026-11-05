@@ -861,7 +861,7 @@ int main(int argc, char **argv) {
         if (optimize) put(&out, "    spy_set_optimize(c, %d);\n", optimize);
         put(&out, "    spy_set_output(c, output, flush_output, stdout);\n"
                   "    spy_set_module_loader(c, load, NULL);\n"
-                  "    int status = spy_set_argv(c, (size_t)argc, (const char *const *)argv) ||\n"
+                  "    int status = spy_set_argv(c, (size_t)argc, (const char *const *)argv, (size_t)argc, (const char *const *)argv) ||\n"
                   "        global(c, \"__file__\", ");
         put_string(&out, e->file);
         put(&out, ");\n");

@@ -203,11 +203,12 @@ void spy_set_error_output(SPYContext *, SPYWrite, SPYFlush, void *);
  * reader, input() raises EOFError. */
 typedef SPYValue *(*SPYReadLine)(SPYContext *, void *);
 void spy_set_input(SPYContext *, SPYReadLine, void *);
-/* The program's command line, which the standard layer gives Python as
- * sys.argv and sys.orig_argv: argc strings, decoded as UTF-8 with
- * surrogateescape and copied. Set it before sys is first imported; until
- * then both are empty lists. Returns 0, or -1 with MemoryError. */
-int spy_set_argv(SPYContext *, size_t argc, const char *const *argv);
+/* The program's command lines, which the standard layer gives Python as
+ * sys.argv (the script's, argc strings) and sys.orig_argv (the whole one the
+ * program was started with), decoded as UTF-8 with surrogateescape and
+ * copied. Set them before sys is first imported; until then both are empty
+ * lists. Returns 0, or -1 with MemoryError. */
+int spy_set_argv(SPYContext *, size_t argc, const char *const *argv, size_t orig_argc, const char *const *orig_argv);
 /* open() reaches only host directories mounted with spy_mount, at an absolute
  * path (NULL: the directory's own resolved path); paths are resolved inside
  * the mount, so symbolic links cannot leave it. The first mount is the
