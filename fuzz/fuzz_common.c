@@ -34,8 +34,8 @@ SPYContext *fuzz_context_new(void) {
     if (!c) return NULL;
     spy_set_output(c, discard, NULL, NULL);
     spy_set_module_loader(c, load, NULL);
-    spy_set_step_limit(c, FUZZ_STEP_LIMIT);
-    spy_set_memory_limit(c, FUZZ_MEMORY_LIMIT);
+    spy_set_limit(c, SPY_LIMIT_STEPS, FUZZ_STEP_LIMIT);
+    spy_set_limit(c, SPY_LIMIT_MEMORY, FUZZ_MEMORY_LIMIT);
     if (spy_std_init(c)) { spy_context_free(c); return NULL; }
     return c;
 }

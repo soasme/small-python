@@ -187,7 +187,9 @@ func TestStdModulesAreOptional(t *testing.T) {
 
 func TestStepLimit(t *testing.T) {
 	rt := newRuntime(t)
-	rt.SetStepLimit(10_000)
+	if err := rt.SetLimit(spy.LimitSteps, 10_000); err != nil {
+		t.Fatal(err)
+	}
 	equal(t, exception(t, rt.Exec("while True: pass")).Type, "RuntimeError")
 	if used := rt.StepsUsed(); used <= 9_990 || used > 10_000 {
 		t.Fatalf("steps used %d", used)

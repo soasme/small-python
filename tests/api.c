@@ -433,6 +433,19 @@ int main(int argc, char **argv) {
     assert(spy_truth(c, items[2]) == -1 && !strcmp(spy_error_type(c), "ZeroDivisionError"));
     spy_clear_error(c);
     for (size_t i = 0; i < 3; i++) spy_release(items[i]);
+    /* spy_type names each builtin data type exactly; a subclass instance and
+     * every other value are SPY_OBJECT. */
+    static const struct { const char *source; SPYType type; } kinds[] = {
+        {"None", SPY_NONE}, {"True", SPY_BOOL}, {"1", SPY_INT}, {"1.5", SPY_FLOAT}, {"1j", SPY_COMPLEX},
+        {"'s'", SPY_STRING}, {"b's'", SPY_BYTES}, {"bytearray()", SPY_BYTEARRAY}, {"[]", SPY_LIST},
+        {"()", SPY_TUPLE}, {"{}", SPY_DICT}, {"frozendict()", SPY_FROZENDICT}, {"set()", SPY_SET},
+        {"frozenset()", SPY_FROZENSET}, {"Failing()", SPY_OBJECT}, {"type('I', (int,), {})(1)", SPY_OBJECT},
+        {"len", SPY_OBJECT}, {"int", SPY_OBJECT}, {"iter([])", SPY_OBJECT}, {"int.__dict__", SPY_OBJECT}};
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); i++) {
+        SPYValue *v = spy_eval(c, kinds[i].source, "api.py");
+        assert(v && spy_type(v) == kinds[i].type);
+        spy_release(v);
+    }
 
     /* Arbitrary integers stay owned Python values; the fixed-width C accessor
      * rejects overflow instead of truncating. Large limbs must be reclaimed. */
@@ -923,7 +936,7 @@ int main(int argc, char **argv) {
                "optimized = (__debug__, documented.__doc__, documented(), eval(compile('__debug__', '', 'eval')))");
     spy_set_optimize(c, 0);
     assert(integer(c, spy_eval(c, "optimized == (False, None, 1, False) and __debug__", "optimize.py")) == 1);
-    spy_set_step_limit(c, 100);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 100);
     assert(spy_exec(c, "while True:\n    pass\n", "loop.py") == -1);
     assert(!strcmp(spy_error_type(c), "RuntimeError"));
     assert(!strcmp(spy_error_filename(c), "loop.py"));
@@ -931,7 +944,7 @@ int main(int argc, char **argv) {
     assert(integer(c, spy_eval(c, "40 + 2", "recovery.py")) == 42);
     /* Calls, loop passes in generators and comprehensions, and source text
      * spend steps; a spent budget fails every handler and finally body. */
-    spy_set_step_limit(c, 1000);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 1000);
     const char *endless[] = {
         "def f(n): return f(n - 1) + f(n - 1) if n else 1\nf(40)",
         "def g():\n    while True:\n        continue\n    yield\nnext(g())",
@@ -968,7 +981,7 @@ int main(int argc, char **argv) {
     /* A large block spends a step per 64 bytes. */
     assert(spy_exec(c, "s = 'a' * 10**6", "produce.py") == -1);
     assert(spy_stopped(c) == SPY_STOP_STEPS);
-    spy_set_step_limit(c, 0);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     /* The engine counts the bytes it holds; a memory limit stops the call
      * with a MemoryError no handler sees, and the context stays usable. */
     spy_clear_error(c); spy_collect(c);
@@ -978,11 +991,11 @@ int main(int argc, char **argv) {
     execute(c, "del big");
     spy_collect(c);
     assert(spy_memory_used(c) < held + 100000);
-    spy_set_memory_limit(c, held + (8 << 20));
+    spy_set_limit(c, SPY_LIMIT_MEMORY, held + (8 << 20));
     assert(spy_exec(c, "caught = 0\ntry:\n    x = [0] * 10**7\nexcept MemoryError:\n    caught = 1", "memory.py") == -1);
     assert(!strcmp(spy_error_type(c), "MemoryError") && spy_stopped(c) == SPY_STOP_MEMORY);
     assert(integer(c, spy_eval(c, "caught", "caught.py")) == 0);
-    spy_set_memory_limit(c, 0);
+    spy_set_limit(c, SPY_LIMIT_MEMORY, 0);
     /* spy_set_limit sets every limit; output going over its limit stops the
      * call like a spent budget, and the next call writes again. */
     assert(!spy_set_limit(c, SPY_LIMIT_MEMORY, 1 << 30) && spy_get_limit(c, SPY_LIMIT_MEMORY) == 1 << 30);
@@ -1024,7 +1037,7 @@ int main(int argc, char **argv) {
     /* The interrupt is polled at least every 4096 steps; it stops the call
      * like a spent budget, and the next call runs normally. */
     int polls = 0;
-    spy_set_step_limit(c, 100000);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 100000);
     spy_set_interrupt(c, count_polls, &polls);
     assert(spy_exec(c, "caught = 0\ntry:\n    while True: pass\nexcept BaseException:\n    caught = 1", "interrupt.py") == -1);
     assert(!strcmp(spy_error_message(c), "execution interrupted") && spy_stopped(c) == SPY_STOP_INTERRUPT);
@@ -1040,7 +1053,7 @@ int main(int argc, char **argv) {
     assert(spy_stopped(c) == SPY_STOP_STEPS && polls >= -1000 + 100000 / 4096);
     /* Without a step limit, a native loop over an endless iterator polls. */
     polls = 0;
-    spy_set_step_limit(c, 0);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     const char *polled[] = {"sum(iter(int, 1))", "while True: pass", "for x in iter(int, 1): pass", "any(x for x in iter(int, 1))",
                             "[x for x in iter(int, 1)]"};
     for (size_t i = 0; i < sizeof(polled) / sizeof(*polled); i++) {
@@ -1087,7 +1100,7 @@ int main(int argc, char **argv) {
     /* Bounded malformed-source stress: exercise parse cleanup and recovery. */
     static const char alphabet[] = "abcfur0123_ @+-*/<>=!()[]{}:;,.\n'\"#\\";
     uint32_t seed = 315;
-    spy_set_step_limit(c, 500);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 500);
     for (size_t i = 0; i < 5000; i++) {
         char source[80];
         size_t len = i % (sizeof(source) - 1);
@@ -1106,7 +1119,7 @@ int main(int argc, char **argv) {
     /* Built-in modules import without a loader. The collector clears weak
      * references (the engine primitives) to cyclic garbage; callbacks run at
      * the next statement. */
-    spy_set_step_limit(c, 0);
+    spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     assert(!spy_exec(c, "import _spy\nclass Ref:\n"
                         "    def __init__(self, target, callback): _spy._weak_bind(target, self, callback)\n"
                         "    def __call__(self): return _spy._weak_get(self)\n"

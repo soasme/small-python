@@ -228,12 +228,6 @@ impl Runtime {
         self.check(unsafe { ffi::spy_mount(self.ctx(), directory.as_ptr(), path, flags) })
     }
 
-    /// Bounds the evaluation steps of each top-level `eval` or `exec`; 0 is
-    /// unlimited. Exceeding it raises `RuntimeError`.
-    pub fn set_step_limit(&self, limit: usize) {
-        unsafe { ffi::spy_set_step_limit(self.ctx(), limit) }
-    }
-
     /// Sets one limit. A spent step, memory or output limit stops the call
     /// with `RuntimeError` (`MemoryError` for memory) that no handler catches.
     pub fn set_limit(&self, limit: Limit, value: usize) -> Result<()> {

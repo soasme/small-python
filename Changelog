@@ -1,5 +1,14 @@
-Unreleased:
+Unreleased (1.0.0):
 
+- incompatible C API changes, after which 1.0 freezes the API and ABI:
+  - spy_type() reports the builtin data types a host converts (None,
+    bool, int, float, complex, str, bytes, bytearray, list, tuple, dict,
+    frozendict, set, frozenset), with their 0.7 numbers, and SPY_OBJECT
+    (0.7's SPY_INSTANCE) for every other value and any subclass instance;
+    the engine's other kinds are no longer public
+  - spy_set_step_limit() and spy_set_memory_limit() are removed: use
+    spy_set_limit() with SPY_LIMIT_STEPS or SPY_LIMIT_MEMORY; so are Go's
+    Runtime.SetStepLimit and Rust's Runtime::set_step_limit
 - spyc links an archive module, libNAME.a, as module NAME, so a module
   written in Rust (examples/jsonify, a json module on serde_json) or any
   language exporting spy_init_NAME needs no C file; a module name given

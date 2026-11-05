@@ -235,10 +235,10 @@ type name and message, not by identity.
 
 ### Limits
 
-`rt.SetStepLimit(n)` bounds the evaluation steps of each top-level `Eval` or
-`Exec`; past it the engine raises `RuntimeError` and the runtime stays
-usable. It counts work, not memory: `'x' * 10**9` takes few steps.
-`rt.SetLimit(spy.LimitMemory, bytes)` bounds memory, and `LimitOutput`,
+`rt.SetLimit(spy.LimitSteps, n)` bounds the evaluation steps of each
+top-level `Eval` or `Exec`; past it the engine raises `RuntimeError` and the
+runtime stays usable. It counts work, not memory: `'x' * 10**9` takes few
+steps. `rt.SetLimit(spy.LimitMemory, bytes)` bounds memory, and `LimitOutput`,
 `LimitRecursion`, `LimitIntDigits` and `LimitStack` the rest;
 `rt.Limit(limit)` reads one back. The in-process engine has no timeout;
 use `worker` for one. `rt.SetOptimize(1)` and `rt.SetOptimize(2)` act as

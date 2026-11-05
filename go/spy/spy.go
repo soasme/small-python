@@ -295,14 +295,6 @@ func (rt *Runtime) Mount(directory, path string, readOnly bool) error {
 	return rt.check(C.spy_mount(rt.ctx, dir, at, flags))
 }
 
-// SetStepLimit bounds the evaluation steps of each top-level Eval or Exec;
-// 0 is unlimited. Exceeding it raises RuntimeError.
-func (rt *Runtime) SetStepLimit(limit uint) {
-	if rt.enter() == nil {
-		C.spy_set_step_limit(rt.ctx, C.size_t(limit))
-	}
-}
-
 // A Limit names one of the bounds SetLimit sets.
 type Limit int
 

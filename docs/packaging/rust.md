@@ -75,7 +75,7 @@ layer (`spy_std_init`); `Runtime::bare()` has only the core and its
 | `load_native(name, path)` | `spy_std_load_native` |
 | `set_output(f)`, `set_loader(f)` | `spy_set_output`, `spy_set_module_loader` |
 | `mount(directory, path, read_only)` | `spy_mount` |
-| `set_step_limit(n)`, `steps_used()`, `set_optimize(level)`, `collect()` | the same names |
+| `steps_used()`, `set_optimize(level)`, `collect()` | the same names |
 | `set_limit(Limit, n)`, `limit(Limit)` | `spy_set_limit`, `spy_get_limit` |
 | `set_policy(f)`, `check_policy(event, args)` | `spy_set_policy` (an `Err` refuses and is raised), `spy_policy_check` |
 | `to_py(value)` | the conversions of §3.3 |

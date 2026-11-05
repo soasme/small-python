@@ -36,9 +36,10 @@ The rules are in place ([manual 3.4.8](docs/manual.md#348-stability)):
 `spy_version()` reports the library's version next to the header's
 `SPY_VERSION`, every declaration in `spy.h` states its ownership and errors,
 and `make check-api` compiles the last release's declarations against the
-current header and compares `libspy.a`'s exports with it. 0.6.0 made the
-last incompatible changes planned before 1.0. Remaining: declare the ABI
-stable at 1.0.
+current header and compares `libspy.a`'s exports with it. The tree carries
+1.0.0 with the last incompatible changes made: `spy_type` reports only the
+data types a host converts and `SPY_OBJECT`, and limits are set through
+`spy_set_limit` alone. Remaining: release 1.0.0.
 
 ### Build options
 

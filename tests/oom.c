@@ -112,7 +112,7 @@ static size_t run(const char *source, const char *name, int *status) {
     *status = -1;
     if (c) {
         spy_set_output(c, discard, NULL, NULL);
-        spy_set_step_limit(c, 1000000);
+        spy_set_limit(c, SPY_LIMIT_STEPS, 1000000);
         if (native) spy_set_module_loader(c, load_native, (void *)native);
         const char *const args[] = {"prog", "caf\xc3\xa9", "\xff"};
         *status = spy_set_argv(c, 3, args, 3, args) || spy_std_init(c) || spy_exec(c, source, name);

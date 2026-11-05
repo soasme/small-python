@@ -1,6 +1,6 @@
 # Small Python
 
-Version 0.7.0
+Version 1.0.0
 
 ## Table of Contents
 
@@ -899,8 +899,8 @@ reads standard input.
 and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
 `False`, at 2 docstrings are not kept either. `compile(optimize=-1)` uses it.
 
-`spy_set_step_limit` bounds the steps of each outermost `spy_eval`,
-`spy_eval_interactive`, `spy_exec`, `spy_exec_module`, `spy_call` or
+`spy_set_limit(c, SPY_LIMIT_STEPS, n)` bounds the steps of each outermost
+`spy_eval`, `spy_eval_interactive`, `spy_exec`, `spy_exec_module`, `spy_call` or
 `spy_call_keywords`; zero means unlimited. A step is a unit of bounded work:
 one per Python call and per 8 nodes of the body it runs, one per loop pass
 and per item a native loop takes, one per 64 bytes of source parsed or of a
@@ -912,7 +912,7 @@ caller's budget. `spy_steps_used` returns the steps the running or last
 outermost call spent; calls and native iteration spend only while a limit,
 an interrupt or a trace function is set.
 
-`spy_set_memory_limit` bounds the bytes the engine holds, values and their
+`SPY_LIMIT_MEMORY` bounds the bytes the engine holds, values and their
 storage; zero means unlimited, and `spy_memory_used` returns the count. The
 limit is a level, not a budget: it is not refilled per call.
 
@@ -994,8 +994,8 @@ an incompatible release, after one release that marks it deprecated in
 enforces this against the last release tag by compiling that release's
 declarations against the current header. It also requires every
 declaration to be documented and `libspy.a` to export exactly the
-functions `spy.h` declares. At 0.x the minor version still breaks; 0.6 is
-the last such break, and 1.0 will freeze the API and ABI under these rules.
+functions `spy.h` declares. Before 1.0 the minor version could break; 1.0
+makes the last such changes and freezes the API and ABI under these rules.
 
 The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
 names it puts in `_spy` serve the standard layer and may change in any

@@ -62,7 +62,24 @@
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
  * lexical environment alive. Every edge between values participates in GC. */
-#define SPY_LAST_TYPE SPY_GETSET_DESCRIPTOR /* The last public value tag. */
+/* The engine's other value kinds fill the numbers spy.h leaves free, and
+ * spy_type reports them as SPY_OBJECT; an instance takes SPY_OBJECT's own.
+ * Hot paths are compiled for this numbering: renumbering the kinds cost
+ * fib 3% in wall time. */
+enum {
+    SPY_FUNCTION = SPY_DICT + 1, SPY_NATIVE, SPY_MODULE, SPY_RANGE, SPY_BOUND_METHOD, SPY_ITERATOR, SPY_CLASS,
+    SPY_INSTANCE, SPY_METHOD,
+    SPY_GENERATOR = SPY_SET + 1, SPY_CODE, SPY_SLICE, SPY_STATICMETHOD, SPY_CLASSMETHOD, SPY_PROPERTY,
+    SPY_NOT_IMPLEMENTED, SPY_ELLIPSIS,
+    SPY_COROUTINE = SPY_BYTES + 1, SPY_COROUTINE_ITERATOR, SPY_ASYNC_GENERATOR, SPY_ASYNC_GENERATOR_ASEND,
+    SPY_ASYNC_GENERATOR_ATHROW, SPY_ANEXT_AWAITABLE, SPY_SUPER,
+    SPY_DICT_KEYS = SPY_BYTEARRAY + 1, SPY_DICT_VALUES, SPY_DICT_ITEMS, SPY_TEMPLATE, SPY_INTERPOLATION,
+    SPY_TEMPLATE_ITERATOR, SPY_MAPPINGPROXY,
+    SPY_LAZY_IMPORT = SPY_FROZENDICT + 1, SPY_FRAME, SPY_FRAME_LOCALS, SPY_MEMORYVIEW, SPY_SENTINEL, SPY_CELL,
+    SPY_TRACEBACK, SPY_MEMBER_DESCRIPTOR, SPY_GETSET_DESCRIPTOR, SPY_LAST_TYPE = SPY_GETSET_DESCRIPTOR
+};
+_Static_assert(SPY_INSTANCE == SPY_OBJECT && SPY_METHOD + 1 == SPY_SET && SPY_ELLIPSIS + 1 == SPY_COMPLEX &&
+               SPY_SUPER + 1 == SPY_FROZENSET && SPY_MAPPINGPROXY + 1 == SPY_FROZENDICT, "value kinds overlap");
 enum { V_UNIT = SPY_CODE, V_ENV = SPY_LAST_TYPE + 1, V_UNBOUND };
 /* An environment whose entries are cells that its variables forward to. */
 enum { ENV_FORWARD = 6 };
@@ -1340,7 +1357,13 @@ static size_t collect(SPYContext *c) {
 }
 size_t spy_collect(SPYContext *c) { return collect(c); }
 size_t spy_live_values(const SPYContext *c) { return c->live; }
-SPYType spy_type(const SPYValue *v) { return (SPYType)v->type; }
+SPYType spy_type(const SPYValue *v) {
+    static const uint64_t data = UINT64_C(1) << SPY_NONE | UINT64_C(1) << SPY_BOOL | UINT64_C(1) << SPY_INT |
+        UINT64_C(1) << SPY_FLOAT | UINT64_C(1) << SPY_STRING | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE |
+        UINT64_C(1) << SPY_DICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_COMPLEX | UINT64_C(1) << SPY_BYTES |
+        UINT64_C(1) << SPY_FROZENSET | UINT64_C(1) << SPY_BYTEARRAY | UINT64_C(1) << SPY_FROZENDICT;
+    return UINT64_C(1) << v->type & data ? (SPYType)v->type : SPY_OBJECT;
+}
 SPYValue *spy_none(SPYContext *c) { return spy_retain(c->none); }
 /* spy_int and spy_float, inline where arithmetic makes most of them. */
 static ALWAYS_INLINE SPYValue *int_value(SPYContext *c, int64_t i) {
@@ -2644,8 +2667,7 @@ static const char *class_tname(SPYValue *cls) {
     return name->as.string.data;
 }
 static const char *type_name(SPYValue *value) {
-    static const char *names[] = {"NoneType", "bool", "int", "float", "str", "list", "tuple", "dict", "function",
-        "builtin_function_or_method", "module", "range", "builtin_function_or_method", "iterator", "type", "object", "method", "set", "generator", "code", "slice", "staticmethod", "classmethod", "property", "NotImplementedType", "ellipsis", "complex", "bytes", "coroutine", "coroutine_wrapper", "async_generator", "async_generator_asend", "async_generator_athrow", "anext_awaitable", "super", "frozenset", "bytearray", "dict_keys", "dict_values", "dict_items", "string.templatelib.Template", "string.templatelib.Interpolation", "string.templatelib.TemplateIter", "mappingproxy", "frozendict", "lazy_import", "frame", "FrameLocalsProxy", "memoryview", "sentinel", "cell", "traceback", "member_descriptor", "getset_descriptor"};
+    static const char *names[SPY_LAST_TYPE + 1] = {[SPY_NONE] = "NoneType", [SPY_BOOL] = "bool", [SPY_INT] = "int", [SPY_FLOAT] = "float", [SPY_STRING] = "str", [SPY_LIST] = "list", [SPY_TUPLE] = "tuple", [SPY_DICT] = "dict", [SPY_FUNCTION] = "function", [SPY_NATIVE] = "builtin_function_or_method", [SPY_MODULE] = "module", [SPY_RANGE] = "range", [SPY_BOUND_METHOD] = "builtin_function_or_method", [SPY_ITERATOR] = "iterator", [SPY_CLASS] = "type", [SPY_INSTANCE] = "object", [SPY_METHOD] = "method", [SPY_SET] = "set", [SPY_GENERATOR] = "generator", [SPY_CODE] = "code", [SPY_SLICE] = "slice", [SPY_STATICMETHOD] = "staticmethod", [SPY_CLASSMETHOD] = "classmethod", [SPY_PROPERTY] = "property", [SPY_NOT_IMPLEMENTED] = "NotImplementedType", [SPY_ELLIPSIS] = "ellipsis", [SPY_COMPLEX] = "complex", [SPY_BYTES] = "bytes", [SPY_COROUTINE] = "coroutine", [SPY_COROUTINE_ITERATOR] = "coroutine_wrapper", [SPY_ASYNC_GENERATOR] = "async_generator", [SPY_ASYNC_GENERATOR_ASEND] = "async_generator_asend", [SPY_ASYNC_GENERATOR_ATHROW] = "async_generator_athrow", [SPY_ANEXT_AWAITABLE] = "anext_awaitable", [SPY_SUPER] = "super", [SPY_FROZENSET] = "frozenset", [SPY_BYTEARRAY] = "bytearray", [SPY_DICT_KEYS] = "dict_keys", [SPY_DICT_VALUES] = "dict_values", [SPY_DICT_ITEMS] = "dict_items", [SPY_TEMPLATE] = "string.templatelib.Template", [SPY_INTERPOLATION] = "string.templatelib.Interpolation", [SPY_TEMPLATE_ITERATOR] = "string.templatelib.TemplateIter", [SPY_MAPPINGPROXY] = "mappingproxy", [SPY_FROZENDICT] = "frozendict", [SPY_LAZY_IMPORT] = "lazy_import", [SPY_FRAME] = "frame", [SPY_FRAME_LOCALS] = "FrameLocalsProxy", [SPY_MEMORYVIEW] = "memoryview", [SPY_SENTINEL] = "sentinel", [SPY_CELL] = "cell", [SPY_TRACEBACK] = "traceback", [SPY_MEMBER_DESCRIPTOR] = "member_descriptor", [SPY_GETSET_DESCRIPTOR] = "getset_descriptor"};
     if (value->type == SPY_INSTANCE || (value->type == SPY_CLASS && value->as.map.meta)) {
         const char *name = class_tname(value->type == SPY_CLASS ? value->as.map.meta : value->as.map.parent);
         if (name) return name;
@@ -3755,7 +3777,7 @@ static NO_INLINE SPYValue *instance_conversion(SPYContext *c, SPYValue *v, int r
 }
 /* Only instances and classes (adjacent types) have their own methods. */
 static ALWAYS_INLINE SPYValue *conversion(SPYContext *c, SPYValue *v, int repr) {
-    return (unsigned)(v->type - SPY_CLASS) <= 1 ? instance_conversion(c, v, repr) : stringify(c, v, repr);
+    return v->type == SPY_INSTANCE || v->type == SPY_CLASS ? instance_conversion(c, v, repr) : stringify(c, v, repr);
 }
 
 enum {
@@ -10268,7 +10290,7 @@ static SPYValue *abstract_flag(SPYContext *c, SPYValue *const *callables, size_t
     }
     return spy_bool(c, 0);
 }
-static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, SPYType type) {
+static SPYValue *method_wrapper(SPYContext *c, SPYValue *function, int type) {
     SPYValue *v = value_new(c, type);
     if (!v) return NULL;
     v->as.wrapper.function = spy_retain(function);
@@ -27959,21 +27981,29 @@ SPYContext *spy_context_new(void) {
         if (status || name_set(c, c->builtins, "EnvironmentError", name_local(c->classes, "OSError")) ||
             name_set(c, c->builtins, "IOError", name_local(c->classes, "OSError"))) { spy_release(module); goto fail; }
     }
-    static const struct { const char *name; int native; } types[] = {
-        {"NoneType", -1}, {"bool", B_BOOL}, {"int", B_INT}, {"float", B_FLOAT}, {"str", B_STR},
-        {"list", B_LIST}, {"tuple", B_TUPLE}, {"dict", B_DICT}, {"function", -1}, {"builtin_function_or_method", -1},
-        {"module", -1}, {"range", B_RANGE}, {"builtin_function_or_method", -1}, {"iterator", -1},
-        {"type", B_TYPE}, {"object", -1}, {"method", -1}, {"set", B_SET}, {"generator", -1}, {"code", -1}, {"slice", B_SLICE},
-        {"staticmethod", B_STATICMETHOD}, {"classmethod", B_CLASSMETHOD}, {"property", B_PROPERTY},
-        {"NotImplementedType", -1}, {"ellipsis", -1}, {"complex", B_COMPLEX}, {"bytes", B_BYTES},
-        {"coroutine", -1}, {"coroutine_wrapper", -1}, {"async_generator", -1},
-        {"async_generator_asend", -1}, {"async_generator_athrow", -1}, {"anext_awaitable", -1}, {"super", B_SUPER},
-        {"frozenset", B_FROZENSET}, {"bytearray", B_BYTEARRAY}, {"dict_keys", -1}, {"dict_values", -1}, {"dict_items", -1},
-        {"Template", -1}, {"Interpolation", -1}, {"TemplateIter", -1}, {"mappingproxy", -1}, {"frozendict", B_FROZENDICT},
-        {"lazy_import", -1}, {"frame", -1}, {"FrameLocalsProxy", -1}, {"memoryview", -1}, {"sentinel", -1}, {"cell", -1},
-        {"traceback", -1}, {"member_descriptor", -1}, {"getset_descriptor", -1}
+    static const struct { const char *name; int native; } types[SPY_LAST_TYPE + 1] = {
+        [SPY_NONE] = {"NoneType", -1}, [SPY_BOOL] = {"bool", B_BOOL}, [SPY_INT] = {"int", B_INT}, [SPY_FLOAT] =
+        {"float", B_FLOAT}, [SPY_STRING] = {"str", B_STR}, [SPY_LIST] = {"list", B_LIST}, [SPY_TUPLE] = {"tuple",
+        B_TUPLE}, [SPY_DICT] = {"dict", B_DICT}, [SPY_FUNCTION] = {"function", -1}, [SPY_NATIVE] =
+        {"builtin_function_or_method", -1}, [SPY_MODULE] = {"module", -1}, [SPY_RANGE] = {"range", B_RANGE},
+        [SPY_BOUND_METHOD] = {"builtin_function_or_method", -1}, [SPY_ITERATOR] = {"iterator", -1}, [SPY_CLASS] =
+        {"type", B_TYPE}, [SPY_INSTANCE] = {"object", -1}, [SPY_METHOD] = {"method", -1}, [SPY_SET] = {"set", B_SET},
+        [SPY_GENERATOR] = {"generator", -1}, [SPY_CODE] = {"code", -1}, [SPY_SLICE] = {"slice", B_SLICE},
+        [SPY_STATICMETHOD] = {"staticmethod", B_STATICMETHOD}, [SPY_CLASSMETHOD] = {"classmethod", B_CLASSMETHOD},
+        [SPY_PROPERTY] = {"property", B_PROPERTY}, [SPY_NOT_IMPLEMENTED] = {"NotImplementedType", -1}, [SPY_ELLIPSIS] =
+        {"ellipsis", -1}, [SPY_COMPLEX] = {"complex", B_COMPLEX}, [SPY_BYTES] = {"bytes", B_BYTES}, [SPY_COROUTINE] =
+        {"coroutine", -1}, [SPY_COROUTINE_ITERATOR] = {"coroutine_wrapper", -1}, [SPY_ASYNC_GENERATOR] =
+        {"async_generator", -1}, [SPY_ASYNC_GENERATOR_ASEND] = {"async_generator_asend", -1},
+        [SPY_ASYNC_GENERATOR_ATHROW] = {"async_generator_athrow", -1}, [SPY_ANEXT_AWAITABLE] = {"anext_awaitable", -1},
+        [SPY_SUPER] = {"super", B_SUPER}, [SPY_FROZENSET] = {"frozenset", B_FROZENSET}, [SPY_BYTEARRAY] = {"bytearray",
+        B_BYTEARRAY}, [SPY_DICT_KEYS] = {"dict_keys", -1}, [SPY_DICT_VALUES] = {"dict_values", -1}, [SPY_DICT_ITEMS] =
+        {"dict_items", -1}, [SPY_TEMPLATE] = {"Template", -1}, [SPY_INTERPOLATION] = {"Interpolation", -1},
+        [SPY_TEMPLATE_ITERATOR] = {"TemplateIter", -1}, [SPY_MAPPINGPROXY] = {"mappingproxy", -1}, [SPY_FROZENDICT] =
+        {"frozendict", B_FROZENDICT}, [SPY_LAZY_IMPORT] = {"lazy_import", -1}, [SPY_FRAME] = {"frame", -1},
+        [SPY_FRAME_LOCALS] = {"FrameLocalsProxy", -1}, [SPY_MEMORYVIEW] = {"memoryview", -1}, [SPY_SENTINEL] =
+        {"sentinel", -1}, [SPY_CELL] = {"cell", -1}, [SPY_TRACEBACK] = {"traceback", -1}, [SPY_MEMBER_DESCRIPTOR] =
+        {"member_descriptor", -1}, [SPY_GETSET_DESCRIPTOR] = {"getset_descriptor", -1}
     };
-    _Static_assert(sizeof(types) / sizeof(*types) == SPY_LAST_TYPE + 1, "builtin type table must cover every public value tag");
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
         SPYValue *cls = builtin_class_new(c, types[i].name, c->object, module);
         if (!cls) { spy_release(module); goto fail; }
@@ -28321,18 +28351,16 @@ int spy_policy_check(SPYContext *c, const char *event, SPYValue *args) {
     errorf(c, "PermissionError", "%s is not allowed by the host policy", event);
     return -1;
 }
-void spy_set_step_limit(SPYContext *c, size_t limit) { c->step_limit = limit; watch(c); }
 void spy_set_interrupt(SPYContext *c, SPYInterrupt interrupt, void *data) {
     c->interrupt = interrupt; c->interrupt_data = data; c->quiet_unit = NULL;
     schedule_poll(c); watch(c);
 }
-void spy_set_memory_limit(SPYContext *c, size_t limit) { c->memory_limit = limit; watch(c); }
 size_t spy_memory_used(const SPYContext *c) { return c->memory; }
 int spy_stopped(const SPYContext *c) { return c->stopped; }
 int spy_set_limit(SPYContext *c, int limit, size_t value) {
     switch (limit) {
-    case SPY_LIMIT_STEPS: spy_set_step_limit(c, value); return 0;
-    case SPY_LIMIT_MEMORY: spy_set_memory_limit(c, value); return 0;
+    case SPY_LIMIT_STEPS: c->step_limit = value; watch(c); return 0;
+    case SPY_LIMIT_MEMORY: c->memory_limit = value; watch(c); return 0;
     case SPY_LIMIT_OUTPUT: c->output_limit = value; watch(c); return 0;
     case SPY_LIMIT_RECURSION: if (value <= c->py_depth) break; c->recursion_limit = value; return 0;
     case SPY_LIMIT_INT_DIGITS: if (value && value < 640) break; c->int_max_str_digits = value; return 0;

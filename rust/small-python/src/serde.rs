@@ -261,7 +261,7 @@ impl<'de, 'rt> de::Deserializer<'de> for &Value<'rt> {
                 let items = self.iter()?.collect::<Result<Vec<_>>>()?;
                 visitor.visit_seq(de::value::SeqDeserializer::new(items.iter()))
             }
-            ffi::SPY_DICT | ffi::SPY_FROZENDICT | ffi::SPY_MAPPINGPROXY => {
+            ffi::SPY_DICT | ffi::SPY_FROZENDICT => {
                 let mut pairs = Vec::new();
                 for key in self.iter()? {
                     let key = key?;

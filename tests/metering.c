@@ -129,7 +129,7 @@ int main(void) {
     for (size_t i = 0; i < N; i++) {
         SPYContext *c = spy_context_new();
         double start = now();
-        spy_set_step_limit(c, 1000000);
+        spy_set_limit(c, SPY_LIMIT_STEPS, 1000000);
         spy_set_interrupt(c, watchdog, &start);
         int status = spy_exec(c, programs[i], "probe.py");
         took[i] = now() - start;

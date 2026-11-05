@@ -21,25 +21,20 @@ extern "C" {
  * detect a library built from a different header. The header and library
  * are compatible when both have the same major version, or, before 1.0, the
  * same minor version (docs/manual.md, 3.4.8 Stability). */
-#define SPY_VERSION "0.7.0"
+#define SPY_VERSION "1.0.0"
 const char *spy_version(void);
 
 /* == Types ==
- * Contexts and values are opaque. spy_type reports a value's kind; new kinds
- * are only ever appended. */
+ * Contexts and values are opaque. spy_type reports a value's kind: one of
+ * the builtin data types a host converts by content, exactly that type (an
+ * instance of a subclass is SPY_OBJECT), or SPY_OBJECT for any other value.
+ * The numbers are the engine's own tags, and never change. */
 typedef struct SPYContext SPYContext;
 typedef struct SPYValue SPYValue;
 typedef enum {
-    SPY_NONE, SPY_BOOL, SPY_INT, SPY_FLOAT, SPY_STRING, SPY_LIST, SPY_TUPLE,
-    SPY_DICT, SPY_FUNCTION, SPY_NATIVE, SPY_MODULE, SPY_RANGE, SPY_BOUND_METHOD,
-    SPY_ITERATOR, SPY_CLASS, SPY_INSTANCE, SPY_METHOD, SPY_SET, SPY_GENERATOR, SPY_CODE, SPY_SLICE,
-    SPY_STATICMETHOD, SPY_CLASSMETHOD, SPY_PROPERTY, SPY_NOT_IMPLEMENTED, SPY_ELLIPSIS, SPY_COMPLEX, SPY_BYTES,
-    SPY_COROUTINE, SPY_COROUTINE_ITERATOR, SPY_ASYNC_GENERATOR,
-    SPY_ASYNC_GENERATOR_ASEND, SPY_ASYNC_GENERATOR_ATHROW, SPY_ANEXT_AWAITABLE,
-    SPY_SUPER, SPY_FROZENSET, SPY_BYTEARRAY, SPY_DICT_KEYS, SPY_DICT_VALUES, SPY_DICT_ITEMS,
-    SPY_TEMPLATE, SPY_INTERPOLATION, SPY_TEMPLATE_ITERATOR, SPY_MAPPINGPROXY, SPY_FROZENDICT, SPY_LAZY_IMPORT,
-    SPY_FRAME, SPY_FRAME_LOCALS, SPY_MEMORYVIEW, SPY_SENTINEL, SPY_CELL, SPY_TRACEBACK,
-    SPY_MEMBER_DESCRIPTOR, SPY_GETSET_DESCRIPTOR
+    SPY_NONE = 0, SPY_BOOL = 1, SPY_INT = 2, SPY_FLOAT = 3, SPY_STRING = 4, SPY_LIST = 5, SPY_TUPLE = 6,
+    SPY_DICT = 7, SPY_OBJECT = 15, SPY_SET = 17, SPY_COMPLEX = 26, SPY_BYTES = 27, SPY_FROZENSET = 35,
+    SPY_BYTEARRAY = 36, SPY_FROZENDICT = 44
 } SPYType;
 
 /* == Contexts == */
@@ -231,10 +226,7 @@ int spy_policy_check(SPYContext *, const char *event, SPYValue *args);
 
 /* == Limits and collection == */
 
-/* Steps for each outermost call (docs/metering.md); zero means unlimited. */
-void spy_set_step_limit(SPYContext *, size_t);
-/* Bytes the engine may hold, and holds now; zero means unlimited. */
-void spy_set_memory_limit(SPYContext *, size_t);
+/* Bytes the engine holds now. */
 size_t spy_memory_used(const SPYContext *);
 /* Polled at the first call, statement or native iteration after every 4096
  * steps, and inside long multiplication, division, integer formatting and
@@ -243,19 +235,19 @@ typedef int (*SPYInterrupt)(void *);
 void spy_set_interrupt(SPYContext *, SPYInterrupt, void *);
 /* Why the last outermost call stopped, or zero. */
 enum { SPY_STOP_STEPS = 1, SPY_STOP_MEMORY, SPY_STOP_INTERRUPT, SPY_STOP_OUTPUT };
-/* Every limit through one call. STEPS, MEMORY and OUTPUT (bytes written to
- * the output and error streams by each outermost call; going over stops
- * it, as a spent budget does) take zero for unlimited. RECURSION (Python
- * call depth, above the current one) and INT_DIGITS (the int-str
- * conversion limit; 0 for unlimited, or at least 640) are the parameters
- * sys can change too. STACK is the bytes of C stack the engine may use
- * (4 MiB by default), for hosts running it on a smaller stack. COLLECTION
- * (2000 by default) is how many values that can form cycles the heap must
- * gain, while the engine's memory doubles, after one collection before the
- * cycle collector runs again at the next statement; zero leaves
- * collection to spy_collect.
- * Returns 0, or -1 with ValueError for an unknown limit or a value out of
- * range. */
+/* Every limit through one call. STEPS (for each outermost call,
+ * docs/metering.md), MEMORY (bytes the engine may hold) and OUTPUT (bytes
+ * written to the output and error streams by each outermost call; going over
+ * stops it, as a spent budget does) take zero for unlimited. RECURSION
+ * (Python call depth, above the current one) and INT_DIGITS (the int-str
+ * conversion limit; 0 for unlimited, or at least 640) are the parameters sys
+ * can change too. STACK is the bytes of C stack the engine may use (4 MiB by
+ * default), for hosts running it on a smaller stack. COLLECTION (2000 by
+ * default) is how many values that can form cycles the heap must gain, while
+ * the engine's memory doubles, after one collection before the cycle
+ * collector runs again at the next statement; zero leaves collection to
+ * spy_collect. Returns 0, or -1 with ValueError for an unknown limit or a
+ * value out of range. */
 enum { SPY_LIMIT_STEPS, SPY_LIMIT_MEMORY, SPY_LIMIT_OUTPUT, SPY_LIMIT_RECURSION, SPY_LIMIT_INT_DIGITS, SPY_LIMIT_STACK,
        SPY_LIMIT_COLLECTION };
 int spy_set_limit(SPYContext *, int limit, size_t value);

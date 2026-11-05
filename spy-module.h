@@ -86,8 +86,6 @@ typedef struct SPYModuleAPI {
     int (*spy_mount)(SPYContext *, const char *directory, const char *path, int flags);
     void (*spy_set_policy)(SPYContext *, SPYPolicy, void *);
     int (*spy_policy_check)(SPYContext *, const char *event, SPYValue *args);
-    void (*spy_set_step_limit)(SPYContext *, size_t);
-    void (*spy_set_memory_limit)(SPYContext *, size_t);
     size_t (*spy_memory_used)(const SPYContext *);
     void (*spy_set_interrupt)(SPYContext *, SPYInterrupt, void *);
     int (*spy_set_limit)(SPYContext *, int limit, size_t value);
@@ -160,8 +158,6 @@ typedef struct SPYModuleAPI {
     X(spy_mount) \
     X(spy_set_policy) \
     X(spy_policy_check) \
-    X(spy_set_step_limit) \
-    X(spy_set_memory_limit) \
     X(spy_memory_used) \
     X(spy_set_interrupt) \
     X(spy_set_limit) \
@@ -246,8 +242,6 @@ extern SPY_EXPORT SPYModuleLink spy_module;
 #define spy_mount (spy_module.api->spy_mount)
 #define spy_set_policy (spy_module.api->spy_set_policy)
 #define spy_policy_check (spy_module.api->spy_policy_check)
-#define spy_set_step_limit (spy_module.api->spy_set_step_limit)
-#define spy_set_memory_limit (spy_module.api->spy_set_memory_limit)
 #define spy_memory_used (spy_module.api->spy_memory_used)
 #define spy_set_interrupt (spy_module.api->spy_set_interrupt)
 #define spy_set_limit (spy_module.api->spy_set_limit)

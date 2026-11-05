@@ -13,4 +13,4 @@ repository.workspace = true
 authors.workspace = true
 
 [build-dependencies]
-small-python-src = { version = "0.7.0", path = "../small-python-src" }
+small-python-src = { version = "1.0.0", path = "../small-python-src" }

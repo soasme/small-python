@@ -227,10 +227,10 @@ metered there, by the code that knows where the bytes go.
 ### 3.6 Interface
 
 ```c
-/* Steps for each outermost call; zero means unlimited. */
-void spy_set_step_limit(SPYContext *, size_t);
-/* Bytes the engine may hold; zero means unlimited. */
-void spy_set_memory_limit(SPYContext *, size_t);
+/* STEPS: steps for each outermost call; MEMORY: bytes the engine may
+ * hold; zero means unlimited. */
+enum { SPY_LIMIT_STEPS, SPY_LIMIT_MEMORY, ... };
+int spy_set_limit(SPYContext *, int limit, size_t value);
 size_t spy_memory_used(const SPYContext *);
 /* Polled after every 4096 steps; nonzero stops the context. */
 typedef int (*SPYInterrupt)(void *);
@@ -242,7 +242,7 @@ int spy_stopped(const SPYContext *);
 size_t spy_steps_used(const SPYContext *);
 ```
 
-`spy_set_step_limit` keeps its name; its unit changes from nodes to steps.
+The step limit keeps its meaning; its unit changes from nodes to steps.
 Budgets are set only through the C API. No primitive in `_spy` reads or
 changes them, since any program can import `_spy` where the standard
 layer is registered.

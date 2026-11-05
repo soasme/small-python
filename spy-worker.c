@@ -262,7 +262,7 @@ static void handle_release(uint64_t id) {
 }
 
 /* Engine to parent. Only exact plain types go by content (spy_type reports
- * subclass instances as SPY_INSTANCE); anything else goes as a handle.
+ * subclass instances as SPY_OBJECT); anything else goes as a handle.
  * Returns -1 with an engine error set. */
 static int encode(Buffer *b, SPYValue *v, int depth) {
     SPYContext *c = w.c;
@@ -555,7 +555,7 @@ static void raise_failure(SPYValue *failure) {
         SPYValue *base = builtin("BaseException"), *iterator = spy_iter(c, classes), *name, *cls = NULL;
         while (base && iterator && !cls && (name = spy_next(c, iterator))) {
             SPYValue *found = spy_get_item(c, w.helper[H_BUILTINS], name), *pair[2] = {found, base};
-            SPYValue *is = found && spy_type(found) == SPY_CLASS ? helper_call(H_ISSUBCLASS, 2, pair) : NULL;
+            SPYValue *is = found ? helper_call(H_ISSUBCLASS, 2, pair) : NULL;
             if (is && spy_truth(c, is)) cls = spy_retain(found);
             spy_release(is); spy_release(found); spy_release(name);
             spy_clear_error(c);
@@ -758,8 +758,8 @@ static void initialize(Cursor *k) {
         !(timeout >= 0)) violation();
     initialized = 1;
     message_limit = (size_t)limit;
-    spy_set_step_limit(c, (size_t)steps);
-    spy_set_memory_limit(c, (size_t)memory);
+    spy_set_limit(c, SPY_LIMIT_STEPS, (size_t)steps);
+    spy_set_limit(c, SPY_LIMIT_MEMORY, (size_t)memory);
     spy_set_limit(c, SPY_LIMIT_OUTPUT, (size_t)output);
     if (spy_truth(c, checked)) spy_set_policy(c, policy, NULL);
     if (timeout) spy_set_interrupt(c, expired, NULL);

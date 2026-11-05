@@ -114,7 +114,7 @@ fn std_modules_are_optional() {
 #[test]
 fn step_limit() {
     let rt = Runtime::new().unwrap();
-    rt.set_step_limit(10_000);
+    rt.set_limit(Limit::Steps, 10_000).unwrap();
     assert_eq!(rt.exec("while True: pass").unwrap_err().type_name, "RuntimeError");
     assert!((9_991..=10_000).contains(&rt.steps_used()));
     assert_eq!(rt.eval::<i64>("1 + 1").unwrap(), 2);

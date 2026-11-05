@@ -292,7 +292,7 @@ operation, its `error` carries the token.
 | Key | Value | Effect |
 |---|---|---|
 | `std` | `bool` | register the standard modules with `spy_std_init` |
-| `step_limit` | `int` ≥ 0 | `spy_set_step_limit`; 0 is unlimited |
+| `step_limit` | `int` ≥ 0 | `SPY_LIMIT_STEPS`; 0 is unlimited |
 | `memory_limit` | `int` ≥ 0 | bytes the engine may hold allocated; 0 is unlimited (§10) |
 | `output_limit` | `int` ≥ 0 | bytes one top-level operation may print; 0 is unlimited |
 | `policy` | `bool` | ask the parent with `POLICY` before each policy event |
