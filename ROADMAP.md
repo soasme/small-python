@@ -12,7 +12,7 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
-  systems, host functions, inspection, snapshots,
+  systems, host functions, green threads, inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -212,6 +212,18 @@ Values that cross the boundary go through one compact binary encoding, with
 a table so that repeated dictionary keys are sent once, measured against
 JSON as the baseline it has to beat (djs's wire format is 1.4 to 9 times
 faster than `JSON.stringify` plus `JSON.parse` in wasm).
+
+### Green threads
+
+Several Python threads in one context, taking turns on one operating-system
+thread, so that ordinary code waits for several slow host functions at once
+without `async`: the engine switches at calls and loop passes after a slice
+of steps, and a host function can answer later through a ticket the host
+settles. Today a context runs one thread and every host call blocks it.
+The design, its limits and its TLA+ model are in
+[docs/greenthread.md](docs/greenthread.md); it starts once calls no longer
+recurse in C (*Toward bytecode* in
+[docs/optimization.md](docs/optimization.md)).
 
 ### Embedded inspector
 
