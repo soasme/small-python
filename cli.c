@@ -57,10 +57,13 @@ static int repl(SPYContext *c) {
     return 0;
 }
 static int usage(void) {
-    fputs("usage: spy [--mount dir]... [-O | -OO] [-c source | -i | --version | file.py | -]\n", stderr);
+    fputs("usage: spy [--mount dir]... [-O | -OO] [-c source | file.py | -] [arg]...\n       spy [--mount dir]... [-O | -OO] (-i | --version)\n", stderr);
     return 2;
 }
 int main(int argc, char **argv) {
+    /* sys.orig_argv: the command line as given, before argv is adjusted. */
+    const char *const *orig_argv = (const char *const *)argv;
+    size_t orig_argc = (size_t)argc;
     /* open() reaches only mounted directories: the current one at its own
      * path unless --mount names others, each mounted at its own path.
      * -O and -OO set the optimization level, as python's do. */
@@ -75,17 +78,30 @@ int main(int argc, char **argv) {
             optimize = (int)strlen(argv[at++]) - 1;
         } else break;
     }
-    argv[at - 1] = argv[0]; argv += at - 1; argc -= at - 1;
+    argv += at - 1; argc -= at - 1;
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts("spy " SPY_VERSION); return 0; }
-    if (argc > 3 || (argc == 3 && strcmp(argv[1], "-c"))) return usage();
-    if (argc == 2 && !strcmp(argv[1], "-c")) return usage();
+    /* The arguments after the program are its own. sys.argv starts with the
+     * file, "-c" or "-", or is [""] for stdin and the shell, as python's. */
+    const char *mode = argc > 1 ? argv[1] : "-";
+    int code = !strcmp(mode, "-c"), shell = !strcmp(mode, "-i"), from_stdin = !strcmp(mode, "-");
+    if (code ? argc < 3 : shell ? argc > 2 : mode[0] == '-' && !from_stdin) return usage();
+    const char *source_text = code ? argv[2] : NULL;
+    /* sys.argv: [""] for the shell, the arguments from the program on, and
+     * for -c, "-c" then the arguments after the source. */
+    size_t script_argc = argc > 1 && !shell ? (size_t)argc - 1 - (size_t)code : 1;
+    const char **script_argv = malloc(script_argc * sizeof(*script_argv));
+    if (!script_argv) { fputs("cannot create runtime\n", stderr); return 1; }
+    script_argv[0] = argc > 1 && !shell ? mode : "";
+    for (size_t i = 1; i < script_argc; i++) script_argv[i] = argv[i + 1 + (size_t)code];
     SPYContext *c = spy_context_new();
-    if (!c) { fputs("cannot create runtime\n", stderr); return 1; }
+    if (!c) { free(script_argv); fputs("cannot create runtime\n", stderr); return 1; }
     spy_set_output(c, host_output, host_flush, stdout);
     spy_set_error_output(c, host_output, host_flush, stderr);
     spy_set_input(c, host_read_line, stdin);
     spy_set_optimize(c, optimize);
-    if (spy_std_init(c)) { host_report(c); spy_context_free(c); return 1; }
+    int failed = spy_set_argv(c, script_argc, script_argv, orig_argc, orig_argv) || spy_std_init(c);
+    free(script_argv);
+    if (failed) { host_report(c); spy_context_free(c); return 1; }
     /* The default mount of the working directory is best-effort: a build
      * without file support, or a deleted working directory, runs with
      * nothing mounted, so open raises OSError. */
@@ -98,25 +114,21 @@ int main(int argc, char **argv) {
             spy_context_free(c); return 1;
         }
     char *directory = NULL;
-    const char *filename = argc == 2 ? argv[1] : "<string>";
-    if (argc == 2 && argv[1][0] != '-') {
-        const char *slash = strrchr(filename, '/');
-        if (slash) {
-            size_t n = (size_t)(slash - filename);
-            directory = malloc(n + 1);
-            if (!directory) { spy_context_free(c); return 1; }
-            memcpy(directory, filename, n); directory[n] = 0;
-        }
+    const char *filename = code ? "<string>" : from_stdin ? "<stdin>" : mode;
+    const char *slash = code || from_stdin || shell ? NULL : strrchr(filename, '/');
+    if (slash) {
+        size_t n = (size_t)(slash - filename);
+        directory = malloc(n + 1);
+        if (!directory) { spy_context_free(c); return 1; }
+        memcpy(directory, filename, n); directory[n] = 0;
     }
     spy_set_module_loader(c, load_module, directory ? (*directory ? directory : "/") : ".");
     int status;
-    if (argc == 2 && !strcmp(argv[1], "-i")) status = repl(c);
-    else if (argc == 3) {
-        status = spy_exec(c, argv[2], "<string>") ? exit_status(c) : 0;
+    if (shell) status = repl(c);
+    else if (code) {
+        status = spy_exec(c, source_text, "<string>") ? exit_status(c) : 0;
         if (status < 0) status = 1;
-    } else if (argc == 2 && argv[1][0] == '-' && strcmp(argv[1], "-")) status = usage();
-    else {
-        int from_stdin = argc == 1 || !strcmp(argv[1], "-");
+    } else {
         FILE *file = from_stdin ? stdin : fopen(filename, "rb");
         if (!file) { perror(filename); status = 1; }
         else {
@@ -128,7 +140,7 @@ int main(int argc, char **argv) {
                 SPYValue *file_name = from_stdin ? NULL : spy_string(c, filename, strlen(filename));
                 if (file_name) spy_set_global(c, "__file__", file_name);
                 spy_release(file_name);
-                status = spy_exec(c, source, from_stdin ? "<stdin>" : filename) ? exit_status(c) : 0;
+                status = spy_exec(c, source, filename) ? exit_status(c) : 0;
                 if (status < 0) status = 1;
                 free(source);
             }

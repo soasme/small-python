@@ -15,6 +15,9 @@
 (*  - The entry runs only with the command line set and every module       *)
 (*    registered; a failed mount does not stop it, a failed command line   *)
 (*    does (status 1).                                                     *)
+(*  - A run's status is SystemExit's: 0 for a finished entry or a None     *)
+(*    code, the code's low byte for an int, 1 for any other code or any    *)
+(*    other uncaught exception, which alone is reported.                   *)
 (*                                                                         *)
 (* The implementation, step by step:                                       *)
 (*                                                                         *)
@@ -69,20 +72,30 @@ Valid(i) == i.name # "bad" /\ (i.form = "c" \/ i.lib)
 Accepted(list) == (\A k \in 1..Len(list) : Valid(list[k])) /\
                   \A k, m \in 1..Len(list) : k # m => list[k].name # list[m].name
 
+\* How the entry ends, as <<kind, low byte>>: it finishes, raises SystemExit
+\* with code None, an int (its low byte 0, 1, or 3, a status no other outcome
+\* has), or another object, or raises another exception.
+Endings == {<<k, 0>> : k \in {"finished", "exit_none", "exit_other", "error"}} \cup {<<"exit_int", n>> : n \in {0, 1, 3}}
+\* The process status for an ending.
+Status(e) == CASE e[1] \in {"finished", "exit_none"} -> "0"
+              [] e[1] \in {"exit_other", "error"} -> "1"
+              [] OTHER -> CASE e[2] = 0 -> "0" [] e[2] = 1 -> "1" [] OTHER -> "3"
+
 VARIABLES list, pc, line, at, origin, undefined, status, registered, argv, ran,  \* spyc's, the linker's, main's
-          linked                                                                \* a ghost
-vars == <<list, pc, line, at, origin, undefined, status, registered, argv, ran, linked>>
+          ending, reported, linked                                              \* how the entry ended; a ghost
+vars == <<list, pc, line, at, origin, undefined, status, registered, argv, ran, ending, reported, linked>>
 
 Defined == DOMAIN origin
 
 Start == /\ list \in Lists
          /\ pc = "spyc" /\ line = <<>> /\ at = 1 /\ origin = <<>> /\ undefined = {}
          /\ status = "none" /\ registered = {} /\ argv = FALSE /\ ran = FALSE /\ linked = FALSE
+         /\ ending = <<"none", 0>> /\ reported = FALSE
 
 Spyc == /\ pc = "spyc"
         /\ IF Accepted(list) THEN pc' = "link" /\ line' = LinkLine(list) /\ UNCHANGED status
            ELSE pc' = "done" /\ status' = "2" /\ UNCHANGED line
-        /\ UNCHANGED <<list, at, origin, undefined, registered, argv, ran, linked>>
+        /\ UNCHANGED <<list, at, origin, undefined, registered, argv, ran, ending, reported, linked>>
 
 \* Record where each newly defined symbol came from.
 Take(item) == /\ origin' = [s \in Defined \cup item.defines |-> IF s \in Defined THEN origin[s] ELSE item.from]
@@ -94,23 +107,24 @@ Link == /\ pc = "link" /\ at <= Len(line)
            ELSE /\ IF item.kind = "object" \/ item.defines \cap undefined # {} THEN Take(item)
                    ELSE UNCHANGED <<origin, undefined>>
                 /\ at' = at + 1 /\ UNCHANGED <<pc, status>>
-        /\ UNCHANGED <<list, line, registered, argv, ran, linked>>
+        /\ UNCHANGED <<list, line, registered, argv, ran, ending, reported, linked>>
 Linked == /\ pc = "link" /\ at > Len(line)
           /\ IF undefined = {} THEN pc' = "mount" /\ linked' = TRUE /\ UNCHANGED status
              ELSE pc' = "done" /\ status' = "1" /\ UNCHANGED linked
-          /\ UNCHANGED <<list, line, at, origin, undefined, registered, argv, ran>>
+          /\ UNCHANGED <<list, line, at, origin, undefined, registered, argv, ran, ending, reported>>
 
 \* main: the mount may fail and is ignored; registration cannot fail for a
 \* new name; spy_set_argv may fail (MemoryError), and then nothing runs.
 Mount == /\ pc = "mount" /\ pc' = "register"
-         /\ UNCHANGED <<list, line, at, origin, undefined, status, registered, argv, ran, linked>>
+         /\ UNCHANGED <<list, line, at, origin, undefined, status, registered, argv, ran, ending, reported, linked>>
 Register == /\ pc = "register" /\ registered' = {list[k].name : k \in 1..Len(list)} /\ pc' = "argv"
-            /\ UNCHANGED <<list, line, at, origin, undefined, status, argv, ran, linked>>
+            /\ UNCHANGED <<list, line, at, origin, undefined, status, argv, ran, ending, reported, linked>>
 Argv == /\ pc = "argv"
-        /\ \/ argv' = TRUE /\ pc' = "run" /\ UNCHANGED status
-           \/ pc' = "done" /\ status' = "1" /\ UNCHANGED argv
-        /\ UNCHANGED <<list, line, at, origin, undefined, registered, ran, linked>>
-Run == /\ pc = "run" /\ ran' = TRUE /\ pc' = "done" /\ status' = "0"
+        /\ \/ argv' = TRUE /\ pc' = "run" /\ UNCHANGED <<status, reported>>
+           \/ pc' = "done" /\ status' = "1" /\ reported' = TRUE /\ UNCHANGED argv
+        /\ UNCHANGED <<list, line, at, origin, undefined, registered, ran, ending, linked>>
+Run == /\ pc = "run" /\ ran' = TRUE /\ pc' = "done"
+       /\ \E e \in Endings : ending' = e /\ status' = Status(e) /\ reported' = (e[1] = "error")
        /\ UNCHANGED <<list, line, at, origin, undefined, registered, argv, linked>>
 
 Done == pc = "done" /\ UNCHANGED vars
@@ -121,7 +135,8 @@ Spec == Start /\ [][Next]_vars /\ WF_vars(Next)
 Finished == pc = "done"
 TypeOK == /\ list \in Lists /\ at \in 1..6 /\ undefined \subseteq {"main", "engine", "system"} \cup {Init(n) : n \in Names}
           /\ pc \in {"spyc", "link", "mount", "register", "argv", "run", "done"}
-          /\ status \in {"none", "0", "1", "2"} /\ argv \in BOOLEAN /\ ran \in BOOLEAN /\ linked \in BOOLEAN
+          /\ status \in {"none", "0", "1", "2", "3"} /\ argv \in BOOLEAN /\ ran \in BOOLEAN /\ linked \in BOOLEAN
+          /\ ending \in Endings \cup {<<"none", 0>>} /\ reported \in BOOLEAN
 \* A bad or repeated name is a usage error, and nothing is linked.
 Usage == Finished => ((status = "2") <=> ~Accepted(list)) /\ (status = "2" => line = <<>>)
 \* An accepted list links exactly when every input defines its init, and
@@ -132,5 +147,8 @@ Complete == Finished /\ Accepted(list) => (linked <=> \A k \in 1..Len(list) : li
 Provenance == registered # {} => \A k \in 1..Len(list) : origin[Init(list[k].name)] = k
 \* The entry runs with the command line and every module registered.
 Started == ran => argv /\ registered = {list[k].name : k \in 1..Len(list)}
+\* A run exits with SystemExit's status, and main reports only an exception
+\* that is not SystemExit.
+Exit == Finished /\ ran => status = Status(ending) /\ (reported <=> ending[1] = "error")
 Termination == <>Finished
 =============================================================================

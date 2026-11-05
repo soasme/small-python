@@ -345,13 +345,14 @@ or NULL at the end of input (EOFError) or with an error set. Without a
 reader, input() raises EOFError.
 
 ```c
-int spy_set_argv(SPYContext *, size_t argc, const char *const *argv);
+int spy_set_argv(SPYContext *, size_t argc, const char *const *argv, size_t orig_argc, const char *const *orig_argv);
 ```
 
-The program's command line, which the standard layer gives Python as
-sys.argv and sys.orig_argv: argc strings, decoded as UTF-8 with
-surrogateescape and copied. Set it before sys is first imported; until then
-both are empty lists. Returns 0, or -1 with MemoryError.
+The program's command lines, which the standard layer gives Python as
+sys.argv (the script's, argc strings) and sys.orig_argv (the whole one the
+program was started with), decoded as UTF-8 with surrogateescape and copied.
+Set them before sys is first imported; until then both are empty lists.
+Returns 0, or -1 with MemoryError.
 
 ```c
 enum { SPY_MOUNT_READ_ONLY = 1 };

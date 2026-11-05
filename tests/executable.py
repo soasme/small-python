@@ -258,6 +258,25 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     assert (directory / "prog").read_text(encoding="utf-8") == "old"
 print("Archive modules passed")
 
+# A built program exits with SystemExit's code, as spy does.
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    directory = Path(temp)
+    (directory / "app.py").write_text("import sys\nprint('ran')\nsys.exit(eval(sys.argv[1]))\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    for code, status, stderr in (("None", 0, ""), ("3", 3, ""), ("256 + 7", 7, ""), ("-1", 255, ""), ("True", 1, ""),
+                                 ("False", 0, ""), ("2 ** 70", 255, ""), ("type('I', (int,), {})(4)", 4, ""),
+                                 ("'bye'", 1, "bye\n"), ("1.5", 1, "1.5\n"), ("1 / 0", 1, "<string>:1: ZeroDivisionError: division by zero\n")):
+        result = subprocess.run(["./prog", code], cwd=directory, capture_output=True, text=True)
+        # A coverage build's program may warn about its profile.
+        errors = "".join(line for line in result.stderr.splitlines(True) if not line.startswith("LLVM Profile"))
+        assert (result.returncode, result.stdout, errors) == (status, "ran\n", stderr), (code, result)
+    # A code whose str() fails prints nothing and still fails.
+    (directory / "app.py").write_text("class C:\n    def __str__(self): raise ValueError\nraise SystemExit(C())\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "spyc"), "-o", "prog", "app.py"], cwd=directory, check=True)
+    result = subprocess.run(["./prog"], cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 1 and "Error" not in result.stderr, result
+print("Built program exit statuses passed")
+
 # The program's command line is sys.argv, decoded as UTF-8 with
 # surrogateescape, and open reaches the working directory, as under spy.
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
@@ -327,6 +346,9 @@ for args, stdin, status, stdout, stderr in [
     (["-c", "raise SystemExit(3)"], "", 3, "", ""),
     (["-c", "raise SystemExit('bye')"], "", 1, "", "bye\n"),
     (["-c", "raise SystemExit()"], "", 0, "", ""),
+    (["-c", "raise SystemExit(True)"], "", 1, "", ""),
+    (["-c", "raise SystemExit(type('I', (int,), {})(260))"], "", 4, "", ""),
+    (["-c", "raise SystemExit(2 ** 70)"], "", 255, "", ""),
     (["-c", "1/0"], "", 1, "", 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
                                "ZeroDivisionError: division by zero\n"),
     (["-c", "print(input('> '), flush=True)"], "abc\n", 0, "> abc\n", ""),
@@ -334,10 +356,30 @@ for args, stdin, status, stdout, stderr in [
     (["-OO", "-c", "def f():\n 'doc'\nprint(f.__doc__)"], "", 0, "None\n", ""),
     (["--bogus"], "", 2, "", "usage:"),
     (["-c"], "", 2, "", "usage:"),
+    (["-i", "x"], "", 2, "", "usage:"),
+    (["--version", "x"], "", 2, "", "usage:"),
+    # The program's arguments follow it into sys.argv.
+    (["-c", "import sys; print(sys.argv)", "a", "-b", "", "-c"], "", 0, "['-c', 'a', '-b', '', '-c']\n", ""),
+    (["-", "q", "--version"], "import sys; print(sys.argv)", 0, "['-', 'q', '--version']\n", ""),
+    ([], "import sys; print(sys.argv)", 0, "['']\n", ""),
+    # sys.orig_argv is the whole command line, options included.
+    (["--mount", ".", "-OO", "-c", "import sys; print(sys.orig_argv[1:])", "a"], "", 0,
+     "['--mount', '.', '-OO', '-c', 'import sys; print(sys.orig_argv[1:])', 'a']\n", ""),
+    (["-", "q"], "import sys; print(sys.orig_argv[1:])", 0, "['-', 'q']\n", ""),
 ]:
     result = subprocess.run([str(ROOT / "spy"), *args], input=stdin, capture_output=True, text=True, timeout=60)
     assert (result.returncode, result.stdout) == (status, stdout) and result.stderr.startswith(stderr), (args, result)
-print("spy exit statuses, error reports, input, and usage passed")
+with tempfile.TemporaryDirectory(prefix="spy argv ") as temp:
+    script = Path(temp) / "args.py"
+    script.write_text("import sys; print(sys.argv, sys.orig_argv[1:])\n", encoding="utf-8")
+    result = subprocess.run([str(ROOT / "spy"), "-O", str(script), "-i", b"caf\xc3\xa9", b"\xff"],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout == f"[{str(script)!r}, '-i', 'café', '\\udcff'] ['-O', {str(script)!r}, '-i', 'café', '\\udcff']\n", result
+    shell = subprocess.run([str(ROOT / "spy"), "-i"], input="import sys\nsys.orig_argv[1:]\n", capture_output=True, text=True, check=True)
+    assert ">>> ['-i']\n" in shell.stdout, shell
+    shell = subprocess.run([str(ROOT / "spy"), "-i"], input="import sys\nsys.argv\n", capture_output=True, text=True, check=True)
+    assert ">>> ['']\n" in shell.stdout, shell
+print("spy exit statuses, error reports, input, arguments, and usage passed")
 
 # spyc --analyze lists the output and each input with its size, largest first.
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:

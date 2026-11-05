@@ -62,7 +62,7 @@ for bad in [{(1, 2): 3}, {1, 2}, object(), cycle, [1, cycle]]:
 deep = []
 for _ in range(900):
     deep = [deep]
-show(lambda: json.dumps(json.loads(json.dumps(deep))) == json.dumps(deep))
+show(lambda: json.loads(json.dumps(deep)) == deep)
 
 sink = Sink()
 show(json.dump, nested, sink, indent=2)

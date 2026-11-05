@@ -13,10 +13,19 @@
 (* None, setting __cause__ sets __suppress_context__; instances have a     *)
 (* __dict__ kept by __reduce__ and __setstate__, compare by identity, and  *)
 (* hash; and SystemExit.code and StopIteration.value follow the arguments. *)
+(* __repr__ and __str__ are BaseException's, KeyError's __str__ its own:  *)
+(* called through BaseException, str() of a KeyError is the plain text;   *)
+(* str() and repr() call what the type finds, super() included; each      *)
+(* class's own __new__ names it and refuses an OSError; and __dict__ is a  *)
+(* getset of BaseException. The classes with attributes of their own own  *)
+(* an __init__ that checks its receiver and sets them, while __new__ and   *)
+(* BaseException.__init__ set only args; an OSError subclass with its own  *)
+(* __init__ starts with no arguments; ExceptionGroup is a class of         *)
+(* builtins whose instances take weak references.                          *)
 (*                                                                         *)
 (* A program builds Exception, KeyError, or a plain subclass Sub of        *)
 (* Exception from zero to two arguments among 'a', 1, and None, and        *)
-(* reports str(), repr(), or args of it; or runs one of the sources of     *)
+(* reports str(), repr(), args, or BaseException.__str__() of it; or runs one of the sources of     *)
 (* CASES in a fresh namespace. The outcome is the repr of the result, or   *)
 (* the exception and its message.                                          *)
 (***************************************************************************)
@@ -51,8 +60,10 @@ Cases == {"args_set_by_new", "args_assign_tuple", "args_assign_bad", "with_trace
           "kwargs_refused", "kwargs_subclass_init", "reduce", "reduce_dict", "setstate", "setstate_bad",
           "exception_dict", "inherit_init_args", "base_new_args", "str_of_class_instance",
           "repr_trailing_comma", "equality_identity", "hashable", "systemexit_code", "stopiteration_value",
-          "keyerror_str_tuple"}
-Programs == [op : {"str", "repr", "args"}, cls : {"Exception", "KeyError", "Sub"}, args : Args]
+          "keyerror_str_tuple", "super_str", "base_repr_override", "own_new", "new_unsafe", "new_owner",
+          "dict_getset", "own_init", "base_init_args_only", "new_args_only", "init_receiver", "oserror_use_init",
+          "group_module"}
+Programs == [op : {"str", "repr", "args", "base_str"}, cls : {"Exception", "KeyError", "Sub"}, args : Args]
             \cup [case : Cases]
 
 Pending == "pending"
@@ -61,6 +72,7 @@ Generated(p) ==
     CASE p.op = "str" -> PyRepr(Text(p.cls, p.args))
       [] p.op = "repr" -> PyRepr(p.cls \o "(" \o Join(Reprs(p.args)) \o ")")
       [] p.op = "args" -> Tuple(p.args)
+      [] p.op = "base_str" -> PyRepr(Text("Exception", p.args))
 
 Case(c) ==
     CASE c = "args_set_by_new" -> "((5,), 5, '5')"
@@ -94,6 +106,18 @@ Case(c) ==
       [] c = "systemexit_code" -> "(None, 1, (1, 2))"
       [] c = "stopiteration_value" -> "(None, 1)"
       [] c = "keyerror_str_tuple" -> "('(1, 2)', '()')"
+      [] c = "super_str" -> "\"<'k'>\""
+      [] c = "base_repr_override" -> "('Quiet!', 'Quiet(1)')"
+      [] c = "own_new" -> "(False, True, (1,))"
+      [] c = "new_unsafe" -> "TypeError: Exception.__new__(OSError) is not safe, use OSError.__new__()"
+      [] c = "new_owner" -> "TypeError: LookupError.__new__(int): int is not a subtype of LookupError"
+      [] c = "dict_getset" -> "(\"<attribute '__dict__' of 'BaseException' objects>\", {'x': 1})"
+      [] c = "own_init" -> "(True, False, 7)"
+      [] c = "base_init_args_only" -> "(5, (7,))"
+      [] c = "new_args_only" -> "(None, (5,))"
+      [] c = "init_receiver" -> "TypeError: descriptor '__init__' requires a 'SystemExit' object but received a 'ValueError'"
+      [] c = "oserror_use_init" -> "((), None, 2)"
+      [] c = "group_module" -> "('builtins', None)"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 
@@ -106,4 +130,7 @@ Done == outcome # Pending
 \* With several arguments, str() is the same for every class.
 SharedStr == Done /\ "cls" \in DOMAIN program /\ Len(program.args) > 1 =>
     \A c \in {"Exception", "KeyError", "Sub"} : Text(c, program.args) = Text(program.cls, program.args)
+\* Through BaseException, str() is the same for every class.
+BaseStr == Done /\ "op" \in DOMAIN program /\ program.op = "base_str" =>
+    outcome = PyRepr(Text("Exception", program.args))
 =============================================================================

@@ -108,22 +108,26 @@ static inline void host_report(SPYContext *c) {
             spy_error_type(c), spy_error_display(c));
 }
 /* The process status for the pending error. SystemExit(code) exits with code
- * like CPython: None is success, an int is the status, anything else is
- * printed and fails. Returns -1 for any other error, after reporting it. */
+ * like CPython: None is success, an int (a bool or subclass too) is the
+ * status, -1 when it does not fit, and anything else is printed and fails.
+ * Returns -1 for any other error, after reporting it. spyc's generated main
+ * repeats this. */
 static inline int host_exit_status(SPYContext *c) {
     if (strcmp(spy_error_type(c), "SystemExit")) { host_report(c); return -1; }
     SPYValue *error = spy_error_value(c), *code = error ? spy_get_attr(c, error, "code") : NULL;
+    if (!code) { host_report(c); spy_release(error); return 1; }
+    spy_clear_error(c);
     int64_t status = 1;
-    if (!code) host_report(c);
-    else if (spy_type(code) == SPY_NONE) status = 0;
-    else if (spy_type(code) == SPY_INT && !spy_as_int(c, code, &status)) status &= 0xff;
+    if (spy_type(code) == SPY_NONE) status = 0;
+    else if (!spy_as_int(c, code, &status)) status &= 0xff;
+    else if (!strcmp(spy_error_type(c), "OverflowError")) status = 255;
     else {
-        SPYValue *text = spy_str(c, code);
+        SPYValue *text = (spy_clear_error(c), spy_str(c, code));
         const char *s = text ? spy_as_string(c, text, NULL) : NULL;
         if (s) fprintf(stderr, "%s\n", s);
-        spy_release(text); status = 1;
+        spy_release(text);
     }
-    spy_release(code); spy_release(error);
+    spy_clear_error(c); spy_release(code); spy_release(error);
     return (int)status;
 }
 

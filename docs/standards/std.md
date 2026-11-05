@@ -522,7 +522,7 @@ isolated interpreter.
 
 *Status:* provided, with empty strings and lists, except `argv` and
 `orig_argv`, which hold the command line a host gives with `spy_set_argv`
-(programs built by `spyc` give theirs; the `spy` command does not yet);
+(the `spy` command and programs built by `spyc` give theirs);
 `flags` reports an isolated interpreter that writes no bytecode.
 
 ### 5.10 Text

@@ -18,7 +18,8 @@ static const char *const module_sys[] = {
     "from _spy import (exception, getrecursionlimit, setrecursionlimit, get_int_max_str_digits,\n",
     "                  set_int_max_str_digits, modules, maxsize, byteorder, platform, _getframe, lazy_modules,\n",
     "                  getrefcount, getallocatedblocks,\n",
-    "                  _write, _flush, _frame_module, _tracked, _setting, argv as _argv)\n",
+    "                  _write, _flush, _frame_module, _tracked, _setting, argv as _argv,\n",
+    "                  orig_argv as _orig_argv)\n",
     "\n",
     "\n",
     "def _c_function(arity):\n",
@@ -157,7 +158,7 @@ static const char *const module_sys[] = {
     "    \"weakref\", \"webbrowser\", \"winreg\", \"winsound\", \"wsgiref\", \"xml\", \"xmlrpc\", \"zipapp\", \"zipfile\",\n",
     "    \"zipimport\", \"zlib\", \"zoneinfo\"))\n",
     "argv = list(_argv)\n",
-    "orig_argv = list(_argv)\n",
+    "orig_argv = list(_orig_argv)\n",
     "path = []\n",
     "meta_path = []\n",
     "path_hooks = []\n",
@@ -769,7 +770,7 @@ static const char *const module_sys[] = {
     "                  excepthook, unraisablehook, settrace, gettrace, setprofile, getprofile):\n",
     "    _function.__qualname__ = _function.__name__\n",
     "del _function, _c_function, _one_argument, _settings, _tracing, _traceback_display, _reporting, _report_unraisable, _structseq, _Namespace, _frames, _interning, _switching, _sizes, _host_stream\n",
-    "del _write, _flush, _frame_module, _tracked, _setting, _argv\n",
+    "del _write, _flush, _frame_module, _tracked, _setting, _argv, _orig_argv\n",
 };
 static const struct { const char *name; const char *const *lines; size_t count; int package; } std_modules[] = {
     {"sys", module_sys, sizeof(module_sys) / sizeof(*module_sys), 0},

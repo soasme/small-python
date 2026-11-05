@@ -4,9 +4,21 @@ Unreleased:
   written in Rust (examples/jsonify, a json module on serde_json) or any
   language exporting spy_init_NAME needs no C file; a module name given
   twice is a usage error
-- programs spyc builds mount their working directory and have their
-  command line as sys.argv and sys.orig_argv
-- spy_set_argv() gives a context its command line for sys
+- programs spyc builds mount their working directory, have their
+  command line as sys.argv and sys.orig_argv, and exit with SystemExit's
+  code, as spy does; sys.exit(True), an int subclass and an int too large
+  for 64 bits now exit with 1, the int, and 255 under spy too
+- spy_set_argv() gives a context its command lines for sys; the spy
+  command passes the arguments after its program into sys.argv, and its
+  whole command line into sys.orig_argv, as python does
+- == on lists, tuples, dicts and sets nests as deep as the stack allows,
+  as on CPython, instead of raising RecursionError past 128 levels
+- BaseException has its own __repr__, __str__ and __dict__, and Exception
+  and the other exception classes CPython gives one their own __new__;
+  KeyError, OSError, ImportError, SyntaxError and the Unicode errors have
+  their own __str__ (ImportError also __repr__), and str() and repr() of an
+  exception call them through its type, so BaseException.__str__(KeyError(k))
+  is str(k) and super().__str__() reaches the base's text
 
 2026-11-05 0.7.0:
 

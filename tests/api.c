@@ -350,22 +350,22 @@ int main(int argc, char **argv) {
         spy_context_free(bare);
     }
     {
-        /* sys.argv and sys.orig_argv are copies of the command line the host
+        /* sys.argv and sys.orig_argv are copies of the command lines the host
          * set before sys was first imported: each context's own, decoded as
          * UTF-8 with surrogateescape, and empty when none was set. */
         SPYContext *first = spy_context_new(), *second = spy_context_new(), *unset = spy_context_new();
         assert(first && second && unset && !spy_std_init(first) && !spy_std_init(second) && !spy_std_init(unset));
         char program[] = "prog", word[] = "caf\xc3\xa9", raw[] = "\xff\x80";
         const char *const args[] = {program, word, raw, ""};
-        assert(!spy_set_argv(first, 1, args) && !spy_set_argv(first, 4, args) && !spy_set_argv(second, 0, NULL));
+        assert(!spy_set_argv(first, 1, args, 1, args) && !spy_set_argv(first, 3, args + 1, 4, args) && !spy_set_argv(second, 0, NULL, 0, NULL));
         program[0] = 'X';
         spy_collect(first);
-        execute(first, "import sys\nassert sys.argv == sys.orig_argv == ['prog', 'caf\\u00e9', '\\udcff\\udc80', '']\n"
-                       "assert sys.argv is not sys.orig_argv\nsys.argv.append(sys.argv)\n");
+        execute(first, "import sys\nassert sys.orig_argv == ['prog', 'caf\\u00e9', '\\udcff\\udc80', '']\n"
+                       "assert sys.argv == sys.orig_argv[1:]\nsys.argv.append(sys.argv)\n");
         execute(second, "import sys\nassert sys.argv == [] and sys.orig_argv == []\n");
         execute(unset, "import sys\nassert sys.argv == [] and sys.orig_argv == []\n");
         /* Set later, it changes only a sys not yet imported. */
-        assert(!spy_set_argv(second, 1, args));
+        assert(!spy_set_argv(second, 1, args, 1, args));
         execute(second, "import sys\nassert sys.argv == []\n");
         spy_context_free(first); spy_context_free(second); spy_context_free(unset);
     }

@@ -96,7 +96,7 @@ typedef struct SPYModuleAPI {
     size_t (*spy_steps_used)(const SPYContext *);
     size_t (*spy_collect)(SPYContext *);
     size_t (*spy_live_values)(const SPYContext *);
-    int (*spy_set_argv)(SPYContext *, size_t argc, const char *const *argv);
+    int (*spy_set_argv)(SPYContext *, size_t argc, const char *const *argv, size_t orig_argc, const char *const *orig_argv);
 } SPYModuleAPI;
 /* The table's functions in its order, for the host that fills it. */
 #define SPY_MODULE_FUNCTIONS(X) \
