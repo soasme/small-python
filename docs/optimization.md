@@ -1619,6 +1619,12 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   dictionary forbids, would save about 15 of fib's 900 instructions a
   call. Opening a kept environment already writes only the values.
 
+- **A remembered local bounded by the entry count.** Testing a local's
+  slot against the environment's live entries instead of its used ones
+  (which count removed entries too) saved one add per read: nbody 0.7%
+  and fib 0.3% fewer instructions, but generators took 1.3% longer on the
+  M2 in both orders with 0.4% fewer instructions.
+
 - **Call arguments taken as direct operands.** Evaluating a call's
   arguments through `eval_operand`, as a binary operator's are, cost fib
   0.7% and classes 0.4%: arguments are mostly names, literals and
