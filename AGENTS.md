@@ -31,7 +31,7 @@
   `spy.c`/`spy.h` hold no module but `builtins`; every other module is the
   embedder's choice. `spy_init_primitives` fills a host-registered module
   (`_spy`) with the engine primitives (module cache, weak table, frames,
-  collection, limits, host output); add a primitive only when a host module
+  collection, limits, host output, command line); add a primitive only when a host module
   cannot be written without it. The standard layer `spy-std.c` (like
   `quickjs-libc.c`) supplies the host module `sys` on them through
   the public API. Their Python

@@ -1,3 +1,13 @@
+Unreleased:
+
+- spyc links an archive module, libNAME.a, as module NAME, so a module
+  written in Rust (examples/jsonify, a json module on serde_json) or any
+  language exporting spy_init_NAME needs no C file; a module name given
+  twice is a usage error
+- programs spyc builds mount their working directory and have their
+  command line as sys.argv and sys.orig_argv
+- spy_set_argv() gives a context its command line for sys
+
 2026-11-05 0.7.0:
 
 - the cycle collector runs automatically (SPY_LIMIT_COLLECTION; zero

@@ -305,8 +305,9 @@ int spy_init_primitives(SPYContext *, SPYValue *);
 
 A module init that fills the module with engine primitives (the module
 cache, frames, limits, the handled exception, collection, the weak table,
-host output) for host modules written in Python. Programs reach them only
-where the host registers it: spy_new_module(c, "_spy", spy_init_primitives).
+host output, the command line) for host modules written in Python. Programs
+reach them only where the host registers it: spy_new_module(c, "_spy",
+spy_init_primitives).
 
 ```c
 int spy_exec_module(SPYContext *, SPYValue *, const char *source, const char *filename);
@@ -342,6 +343,15 @@ void spy_set_input(SPYContext *, SPYReadLine, void *);
 Return a line for input() as an owned str, with or without its line ending,
 or NULL at the end of input (EOFError) or with an error set. Without a
 reader, input() raises EOFError.
+
+```c
+int spy_set_argv(SPYContext *, size_t argc, const char *const *argv);
+```
+
+The program's command line, which the standard layer gives Python as
+sys.argv and sys.orig_argv: argc strings, decoded as UTF-8 with
+surrogateescape and copied. Set it before sys is first imported; until then
+both are empty lists. Returns 0, or -1 with MemoryError.
 
 ```c
 enum { SPY_MOUNT_READ_ONLY = 1 };

@@ -180,7 +180,7 @@ typedef int (*SPYModuleInit)(SPYContext *, SPYValue *);
 int spy_new_module(SPYContext *, const char *, SPYModuleInit);
 /* A module init that fills the module with engine primitives (the module
  * cache, frames, limits, the handled exception, collection, the weak table,
- * host output) for host modules written in Python. Programs reach them only
+ * host output, the command line) for host modules written in Python. Programs reach them only
  * where the host registers it: spy_new_module(c, "_spy", spy_init_primitives). */
 int spy_init_primitives(SPYContext *, SPYValue *);
 /* Execute source with a module's namespace as its globals. */
@@ -203,6 +203,11 @@ void spy_set_error_output(SPYContext *, SPYWrite, SPYFlush, void *);
  * reader, input() raises EOFError. */
 typedef SPYValue *(*SPYReadLine)(SPYContext *, void *);
 void spy_set_input(SPYContext *, SPYReadLine, void *);
+/* The program's command line, which the standard layer gives Python as
+ * sys.argv and sys.orig_argv: argc strings, decoded as UTF-8 with
+ * surrogateescape and copied. Set it before sys is first imported; until
+ * then both are empty lists. Returns 0, or -1 with MemoryError. */
+int spy_set_argv(SPYContext *, size_t argc, const char *const *argv);
 /* open() reaches only host directories mounted with spy_mount, at an absolute
  * path (NULL: the directory's own resolved path); paths are resolved inside
  * the mount, so symbolic links cannot leave it. The first mount is the
