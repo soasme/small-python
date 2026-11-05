@@ -1916,7 +1916,7 @@ static int numeric_order(SPYValue *a, SPYValue *b) {
     }
     return reverse ? -order : order;
 }
-static int equal(SPYValue *, SPYValue *, size_t);
+static int equal(SPYValue *, SPYValue *);
 static ptrdiff_t map_find(SPYValue *, SPYValue *);
 static Entry *map_items(SPYValue *);
 static int is_view(SPYValue *);
@@ -1932,13 +1932,41 @@ static int view_equal(SPYContext *, SPYValue *, SPYValue *);
 static int same_bytes(SPYContext *c, const char *a, const char *b, size_t n) {
     return (n < 4096 || !spend(c, n / 64)) && !memcmp(a, b, n);
 }
-static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
+/* Whether two dicts, sets, lists, tuples or slices of one kind hold equal items. */
+static int items_equal(SPYValue *a, SPYValue *b, int type) {
+    if (type == SPY_DICT || type == SPY_SET) {
+        if (a->as.map.len != b->as.map.len) return 0;
+        for (size_t i = 0; i < a->as.map.len; i++) {
+            if ((i & 15) == 15 && spend(a->ctx, 1)) return 0;
+            SPYValue *key = spy_retain(map_items(a)[i].key);
+            SPYValue *left = spy_retain(map_items(a)[i].value);
+            ptrdiff_t j = map_find_hash(b, key, map_items(a)[i].hash);
+            SPYValue *right = j >= 0 ? spy_retain(b->as.map.items[j].value) : NULL;
+            int matches = j >= 0 && (type == SPY_SET || left == right || equal(left, right));
+            spy_release(key); spy_release(left); spy_release(right);
+            if (!matches || a->ctx->error_type[0]) return 0;
+        }
+        /* As dict_equal: a callback that empties a only ends the loop early. */
+        return 1;
+    }
+    if (comparison_length(a) != comparison_length(b)) return 0;
+    for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
+        if ((i & 63) == 63 && spend(a->ctx, 1)) return 0;
+        SPYValue *left = spy_retain(comparison_item(a, i)), *right = spy_retain(comparison_item(b, i));
+        int matches = left == right || equal(left, right);
+        spy_release(left); spy_release(right);
+        if (a->ctx->error_type[0]) return 0;
+        if (!matches) return (i >= comparison_length(a) || i >= comparison_length(b)) && comparison_length(a) == comparison_length(b);
+    }
+    return comparison_length(a) == comparison_length(b);
+}
+static int equal_value(SPYValue *a, SPYValue *b) {
     if (special_dispatch(a) || special_dispatch(b)) {
         SPYValue *value = rich_compare(a->ctx, R_EQ, a, b);
         int based_a = a->type == SPY_INSTANCE && a->as.map.base, based_b = b->type == SPY_INSTANCE && b->as.map.base;
         if (!value && !a->ctx->error_type[0] && (based_a || based_b)) {
             SPYValue *x = based_a ? a->as.map.base : a, *y = based_b ? b->as.map.base : b;
-            if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE) return equal_value(x, y, depth + 1);
+            if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE) return equal_value(x, y);
         }
         if (!value) return !a->ctx->error_type[0] && a == b;
         int result = truthy(value); spy_release(value); return result;
@@ -1957,8 +1985,9 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
         return numeric_order(a, b) == 0;
     }
     if ((set_view(a) || set_view(b)) && (set_view(a) || is_set(a)) && (set_view(b) || is_set(b))) {
-        if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
-        return view_equal(a->ctx, a, b) > 0;
+        if (deeper(a->ctx, " in comparison")) return 0;
+        int result = view_equal(a->ctx, a, b) > 0;
+        a->ctx->depth--; return result;
     }
     int ta = a->type == SPY_FROZENDICT ? SPY_DICT : a->type == SPY_FROZENSET ? SPY_SET : a->type == SPY_BYTEARRAY ? SPY_BYTES : a->type;
     int tb = b->type == SPY_FROZENDICT ? SPY_DICT : b->type == SPY_FROZENSET ? SPY_SET : b->type == SPY_BYTEARRAY ? SPY_BYTES : b->type;
@@ -1977,7 +2006,7 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
                 while (skip < sizeof(ignored) / sizeof(*ignored) && strcmp(ignored[skip], name)) skip++;
                 if (skip < sizeof(ignored) / sizeof(*ignored)) continue;
                 SPYValue *other = y ? name_local(y, name) : NULL;
-                if (!other || !equal(map_items(x)[i].value, other, depth + 1)) return 0;
+                if (!other || !equal(map_items(x)[i].value, other)) return 0;
             }
         }
         return 1;
@@ -1991,49 +2020,27 @@ static int equal_value(SPYValue *a, SPYValue *b, size_t depth) {
     }
     case SPY_STRING: case SPY_BYTES:
         return a->as.string.len == b->as.string.len && same_bytes(a->ctx, a->as.string.data, b->as.string.data, a->as.string.len);
-    case SPY_DICT: case SPY_SET:
-        if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
-        if (a->as.map.len != b->as.map.len) return 0;
-        for (size_t i = 0; i < a->as.map.len; i++) {
-            if ((i & 15) == 15 && spend(a->ctx, 1)) return 0;
-            SPYValue *key = spy_retain(map_items(a)[i].key);
-            SPYValue *left = spy_retain(map_items(a)[i].value);
-            ptrdiff_t j = map_find_hash(b, key, map_items(a)[i].hash);
-            SPYValue *right = j >= 0 ? spy_retain(b->as.map.items[j].value) : NULL;
-            int matches = j >= 0 && (ta == SPY_SET || left == right || equal(left, right, depth + 1));
-            spy_release(key); spy_release(left); spy_release(right);
-            if (!matches || a->ctx->error_type[0]) return 0;
-        }
-        /* As dict_equal: a callback that empties a only ends the loop early. */
-        return 1;
-    case SPY_LIST: case SPY_TUPLE: case SPY_SLICE:
-        if (depth > 128) { spy_error(a->ctx, "RecursionError", "recursive comparison"); return 0; }
-        if (comparison_length(a) != comparison_length(b)) return 0;
-        for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
-            if ((i & 63) == 63 && spend(a->ctx, 1)) return 0;
-            SPYValue *left = spy_retain(comparison_item(a, i)), *right = spy_retain(comparison_item(b, i));
-            int matches = left == right || equal(left, right, depth + 1);
-            spy_release(left); spy_release(right);
-            if (a->ctx->error_type[0]) return 0;
-            if (!matches) return (i >= comparison_length(a) || i >= comparison_length(b)) && comparison_length(a) == comparison_length(b);
-        }
-        return comparison_length(a) == comparison_length(b);
+    case SPY_DICT: case SPY_SET: case SPY_LIST: case SPY_TUPLE: case SPY_SLICE: {
+        if (deeper(a->ctx, " in comparison")) return 0;
+        int result = items_equal(a, b, ta);
+        a->ctx->depth--; return result;
+    }
     /* Bound methods are equal when bound to the same object and equal functions. */
     case SPY_METHOD:
         return a->as.method.self == b->as.method.self &&
-            (a->as.method.function == b->as.method.function || equal(a->as.method.function, b->as.method.function, depth + 1));
+            (a->as.method.function == b->as.method.function || equal(a->as.method.function, b->as.method.function));
     case SPY_BOUND_METHOD:
         return a->as.bound.self == b->as.bound.self && a->as.bound.method == b->as.bound.method &&
-            (a->as.bound.name == b->as.bound.name || (a->as.bound.name && b->as.bound.name && equal(a->as.bound.name, b->as.bound.name, depth + 1)));
+            (a->as.bound.name == b->as.bound.name || (a->as.bound.name && b->as.bound.name && equal(a->as.bound.name, b->as.bound.name)));
     default: return 0;
     }
 }
-static int equal(SPYValue *a, SPYValue *b, size_t depth) {
+static int equal(SPYValue *a, SPYValue *b) {
     /* Two exact str values compare without a callback. */
     if (a->type == SPY_STRING && b->type == SPY_STRING)
         return a->as.string.len == b->as.string.len && same_bytes(a->ctx, a->as.string.data, b->as.string.data, a->as.string.len);
     spy_retain(a); spy_retain(b);
-    int result = equal_value(a, b, depth);
+    int result = equal_value(a, b);
     spy_release(a); spy_release(b); return result;
 }
 /* Numeric reduction and tuple/slice mixing follow CPython's pyhash.c,
@@ -2336,7 +2343,7 @@ static NO_INLINE ptrdiff_t map_find_compare(SPYValue *map, SPYValue *key, int64_
     int pending_error = map->ctx->error_type[0] != 0;
     do {
         SPYValue *candidate = spy_retain(map->as.map.items[i].key);
-        int matches = candidate == key || equal(candidate, key, 0);
+        int matches = candidate == key || equal(candidate, key);
         int unchanged = (size_t)i < map_used(map) && map->as.map.items[i].key == candidate &&
             (!cursor.indexed || cursor.changes == map->as.map.changes);
         spy_release(candidate);
@@ -7521,7 +7528,7 @@ static int scope_mapping_keys(SPYContext *c, Node *n) {
         SPYValue *key = pattern_constant(c, entry->a);
         if (!key) continue;
         for (size_t i = 0; i < seen->as.seq.len && !c->error_type[0]; i++)
-            if (equal(seen->as.seq.items[i], key, 0)) {
+            if (equal(seen->as.seq.items[i], key)) {
                 SPYValue *text = spy_repr(c, key);
                 c->line = entry->a->line;
                 if (text) errorf(c, "SyntaxError", "mapping pattern checks duplicate key (%s)", text->as.string.data);
@@ -8327,7 +8334,7 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         }
         if (v->as.iterator.done) { spy_release(result); result = NULL; break; }
         SPYValue *sentinel = spy_retain(v->as.iterator.counter);
-        int stop = sentinel == result || equal(sentinel, result, 0);
+        int stop = sentinel == result || equal(sentinel, result);
         spy_release(sentinel);
         if (c->error_type[0] || stop) {
             spy_release(result); result = NULL;
@@ -9852,7 +9859,7 @@ static SPYValue *sequence_order(SPYContext *c, int op, SPYValue *a, SPYValue *b)
     for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
         if ((i & 63) == 63 && spend(c, 1)) { c->depth--; return NULL; }
         SPYValue *x = spy_retain(comparison_item(a, i)), *y = spy_retain(comparison_item(b, i));
-        if (x == y || equal(x, y, 0)) { spy_release(x); spy_release(y); continue; }
+        if (x == y || equal(x, y)) { spy_release(x); spy_release(y); continue; }
         spy_release(x); spy_release(y);
         if (c->error_type[0]) { c->depth--; return NULL; }
         if (i >= comparison_length(a) || i >= comparison_length(b)) break;
@@ -9903,7 +9910,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         return result < 0 ? NULL : spy_bool(c, result);
     }
     if (op == T_EQ || op == T_NE) {
-        result = equal(a, b, 0);
+        result = equal(a, b);
         if (c->error_type[0]) return NULL;
         return spy_bool(c, op == T_EQ ? result : !result);
     }
@@ -9919,7 +9926,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
         if (b->type == SPY_LIST || b->type == SPY_TUPLE) {
             for (size_t i = 0; i < b->as.seq.len && !result; i++) {
                 SPYValue *item = spy_retain(b->as.seq.items[i]);
-                result = a == item || equal(item, a, 0);
+                result = a == item || equal(item, a);
                 spy_release(item);
                 if (c->error_type[0] || (!result && pass(c))) return NULL;
             }
@@ -9953,7 +9960,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
                 SPYValue *map = view_map(b), *key = spy_retain(a->as.seq.items[0]), *expected = spy_retain(a->as.seq.items[1]);
                 ptrdiff_t j = map_find(map, key);
                 SPYValue *found = j >= 0 ? spy_retain(map->as.map.items[j].value) : NULL;
-                result = found && (found == expected || equal(found, expected, 0));
+                result = found && (found == expected || equal(found, expected));
                 spy_release(key); spy_release(expected); spy_release(found);
             }
         } else if (is_dict(b)) {
@@ -9997,7 +10004,7 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
             for (;;) {
                 SPYValue *item = iterator_next(c, iterator);
                 if (!item) break;
-                result = a == item || equal(item, a, 0); spy_release(item);
+                result = a == item || equal(item, a); spy_release(item);
                 if (result || c->error_type[0]) break;
                 if (pass(c)) break;
             }
@@ -12616,7 +12623,7 @@ static SPYValue *code_replace(SPYContext *c, SPYValue *code, SPYValue *changes) 
     for (size_t i = 0; i < FIELDS && !c->error_type[0]; i++) {
         SPYValue *original = attribute(c, base, names[i]);
         int64_t old = 0;
-        int same = original && original->type == values[i]->type && equal(original, values[i], 0);
+        int same = original && original->type == values[i]->type && equal(original, values[i]);
         if (original && i == 5 && !spy_as_int(c, original, &old)) signature |= ((old ^ flags) & 0xC) != 0;
         else if (!same && (i < 3 || i == 10)) signature = 1;
         if (original && !same && !c->error_type[0]) name_set(c, replaced, names[i], values[i]);
@@ -12670,7 +12677,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             int64_t count = 0;
             for (size_t i = (size_t)start; i < self->as.seq.len && i < (uint64_t)stop; i++) {
                 SPYValue *item = spy_retain(self->as.seq.items[i]);
-                int matches = item == argv[0] || equal(item, argv[0], 0);
+                int matches = item == argv[0] || equal(item, argv[0]);
                 spy_release(item);
                 if (c->error_type[0]) return NULL;
                 if (matches) {
@@ -12701,7 +12708,7 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
             SPYValue *count = method == M_COUNT ? spy_int(c, 0) : NULL;
             SPYValue one = {.type = SPY_INT, .as.integer_data.small = 1};
             while (iterator && position && !c->error_type[0] && (item = native_next(c, iterator))) {
-                int matches = equal(item, argv[0], 0);
+                int matches = equal(item, argv[0]);
                 spy_release(item);
                 if (matches) {
                     if (!count) { index = spy_retain(position); break; }
@@ -15386,7 +15393,7 @@ static int keyword_matches(SPYContext *c, SPYValue *key, const char *name) {
     if (key->type == SPY_STRING)
         return key->as.string.len == strlen(name) && !strcmp(key->as.string.data, name);
     SPYValue *text = spy_string(c, name, strlen(name));
-    int match = text ? equal(text, key, 0) : 0;
+    int match = text ? equal(text, key) : 0;
     spy_release(text);
     return match;
 }
@@ -19942,7 +19949,7 @@ static int match_mapping(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SP
         SPYValue *key = eval(c, f, entry->a), *value = NULL;
         if (!key) goto done;
         for (size_t i = 0; i < keys->as.seq.len && !c->error_type[0]; i++)
-            if (equal(keys->as.seq.items[i], key, 0)) {
+            if (equal(keys->as.seq.items[i], key)) {
                 SPYValue *text = spy_repr(c, key);
                 if (text) errorf(c, "ValueError", "mapping pattern checks duplicate key (%s)", text->as.string.data);
                 spy_release(text);
@@ -24633,7 +24640,7 @@ static SPYValue *memory_compare(SPYContext *c, SPYValue *m, SPYValue *other, int
     spy_release(view);
     if (same && !right) { spy_release(left); return NULL; }
     for (size_t i = 0; same && i < left->as.seq.len; i++) {
-        same = equal(left->as.seq.items[i], right->as.seq.items[i], 0);
+        same = equal(left->as.seq.items[i], right->as.seq.items[i]);
         if (c->error_type[0]) { spy_release(left); spy_release(right); return NULL; }
     }
     spy_release(left); spy_release(right);
@@ -24877,7 +24884,7 @@ static SPYValue *memory_method(SPYContext *c, size_t argc, SPYValue *const *argv
         size_t found = 0;
         for (ptrdiff_t i = start; i < stop && i < (ptrdiff_t)items->as.seq.len; i++) {
             SPYValue *item = items->as.seq.items[i];
-            int match = item == args[0] || equal(item, args[0], 0);
+            int match = item == args[0] || equal(item, args[0]);
             if (c->error_type[0]) { spy_release(items); return NULL; }
             if (match && op == MV_INDEX) { spy_release(items); return spy_int(c, i); }
             found += match;
