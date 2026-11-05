@@ -194,6 +194,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A call statement skips eval's other cases](#a-call-statement-skips-evals-other-cases) | -2.1% (classes), -1.6% (loop), -1.4% (fib, generators); M2: classes -2.9%, loop -2.1% |
 | [Hot paths stay out of large functions](#hot-paths-stay-out-of-large-functions) | -3.1% (fib), -2.2% (dicts), -1.8% (nbody); empty range loop -17%; M2: fib -3.3%, loop -2.3% |
 | [An attribute is an operand at hand](#an-attribute-is-an-operand-at-hand) | -5.3% (classes); M2: classes -2.1% |
+| [eval ends in a tail call](#eval-ends-in-a-tail-call) | -0.8% (loop); M2: classes -2.0%, loop -1.5%, sort -1.5% |
 
 ### Releasing a number or string frees it at once
 
@@ -1498,6 +1499,18 @@ within 0.2%. Wall time averaged over eight code layouts: classes -2.1%,
 bigint -1.4% at 6 ms, the rest within 0.4% (strings read +1.2% once and
 +0.3%/-0.2% with the order swapped).
 
+### eval ends in a tail call
+
+`eval` had `eval_inner` inlined, so it saved nine register pairs before
+testing for a literal, and restored them after. Everything past the
+operator fast path is now `eval_rest`, which `eval` reaches as a tail
+call, and `eval` saves six. Moving the operator path out as well left
+three, but `loop` took 3.1% longer and `nbody` 0.9%: an operator is
+`eval`'s most common case, and the call to reach it cost more than the
+saved registers. Instructions (M2 counters): loop -0.8%, the rest up to
+1.2% more. Wall time averaged over eight code layouts: classes -2.0%, loop
+-1.5%, sort -1.5%, generators +0.8%, the rest within 0.4%.
+
 ### A profile-guided build
 
 `make CC=clang CONFIG_PGO=y` builds the engine twice: once instrumented,
@@ -1648,7 +1661,10 @@ nbody. Only loop, a module-level `while`, is slower with the profile
 - **A separate function for the slow part of `eval`.** `eval` has
   `eval_inner` inlined, so its fast paths (a literal, a local name) pay
   for saving the registers the slow part uses. Moving everything past the
-  fast paths into a separate function added 1% to 2.5% instead.
+  fast paths into a separate function added 1% to 2.5% instead; marking
+  `eval_inner` alone not inline cost fib 4.6% even on threaded dispatch.
+  A tail call ([eval ends in a tail call](#eval-ends-in-a-tail-call))
+  does not pay the call.
 - **A third allocation size for numbers.** Ints and floats fit 64 bytes
   with the smaller header. Choosing among three sizes made the allocator
   too large to inline into `spy_int` and `spy_float`, and forcing it

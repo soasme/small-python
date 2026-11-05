@@ -14873,6 +14873,18 @@ static ALWAYS_INLINE SPYValue *operate(SPYContext *c, Node *n, SPYValue *x, SPYV
     spy_release(x); spy_release(y);
     return result;
 }
+/* The part of eval past its fast paths, a tail call so that they save no
+ * registers: operator node n on its operands x and y when they were found,
+ * else n through eval_inner. */
+static NO_INLINE SPYValue *eval_rest(SPYContext *c, Frame *f, Node *n, SPYValue *x, SPYValue *y) {
+    if (deeper(c, "")) return NULL;
+    SPYValue *outer = c->eval_env;
+    c->eval_env = f->env;
+    SPYValue *v = y ? operate(c, n, x, y) : eval_inner(c, f, n);
+    c->eval_env = outer;
+    c->depth--;
+    return v;
+}
 static HOT SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     /* A literal made once, or a name found along the fast path, cannot
      * fail, so it skips the step bookkeeping, unless a trace function
@@ -14894,13 +14906,7 @@ static HOT SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
             if (v || c->error_type[0]) return v;
         }
     }
-    if (deeper(c, "")) return NULL;
-    SPYValue *outer = c->eval_env;
-    c->eval_env = f->env;
-    SPYValue *v = y ? operate(c, n, x, y) : eval_inner(c, f, n);
-    c->eval_env = outer;
-    c->depth--;
-    return v;
+    return eval_rest(c, f, n, x, y);
 }
 /* eval of call node n, without eval's other cases while tick has only the
  * line to record. */
