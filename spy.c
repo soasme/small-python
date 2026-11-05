@@ -26918,8 +26918,10 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
     {"__delitem__", SLOT_OTHER, SLOT_DELITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
     {"__reversed__", SLOT_BUILTIN, B_REVERSED, T(SPY_LIST) | T_DICTS | T(SPY_RANGE) | T_VIEWS},
-    {"__repr__", SLOT_OTHER, SLOT_REPR, T_COMPARED | T_OBJECT | T(SPY_NONE) | T(SPY_NOT_IMPLEMENTED) | T(SPY_ELLIPSIS) | T(SPY_BOOL) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_INTERPOLATION)},
-    {"__str__", SLOT_OTHER, SLOT_STR, T_OBJECT | T(SPY_STRING)},
+    {"__repr__", SLOT_OTHER, SLOT_REPR, T_COMPARED | T_OBJECT | T(SPY_NONE) | T(SPY_NOT_IMPLEMENTED) | T(SPY_ELLIPSIS) | T(SPY_BOOL) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_INTERPOLATION)
+        | T(SPY_FUNCTION) | T(SPY_NATIVE) | T(SPY_BOUND_METHOD) | T(SPY_METHOD) | T(SPY_CELL) | T(SPY_CODE) | T(SPY_GENERATOR)
+        | T(SPY_COROUTINE) | T(SPY_ASYNC_GENERATOR) | T(SPY_SUPER) | T(SPY_CLASS) | T(SPY_MODULE)},
+    {"__str__", SLOT_OTHER, SLOT_STR, T_OBJECT | T_TEXT},
     {"__format__", SLOT_OTHER, SLOT_FORMAT, T_OBJECT | T_NUMBERS | T(SPY_STRING)},
     {"__call__", SLOT_CALL, 0, T(SPY_FUNCTION) | T(SPY_NATIVE) | T(SPY_METHOD)},
 };
@@ -26989,6 +26991,8 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         return errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, owner_name);
     }
     SPYValue *self = argv[0], *value = type == 63 ? self : builtin_value(c, self, type);
+    /* A bound builtin method is a builtin_function_or_method too. */
+    if (!value && type == SPY_NATIVE && self->type == SPY_BOUND_METHOD) value = self;
     if (value && type == SPY_ITERATOR && value_class(c, value) != owner) value = NULL;
     if (!value && native_kind(fn) == NATIVE_WRAPPER_DESCRIPTOR)
         return errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, owner_name, type_name(self));
@@ -27086,7 +27090,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (type == 63) return object_repr(c, self);
         if (type == SPY_INT && value->type == SPY_BOOL) return spy_string(c, value == c->booleans[1] ? "1" : "0", 1);
         return spy_repr(c, value);
-    case SLOT_STR: return type == 63 ? spy_repr(c, self) : spy_retain(value);
+    case SLOT_STR: return type == 63 ? spy_repr(c, self) : type == SPY_STRING ? spy_retain(value) : spy_repr(c, value);
     case SLOT_FORMAT:
         if (argv[0]->type != SPY_STRING) return errorf(c, "TypeError", "%s.__format__() argument must be str, not %s", owner_name, type_name(argv[0]));
         if (type == 63) {
@@ -27562,9 +27566,24 @@ static SPYValue *object_method(SPYContext *c, size_t argc, SPYValue *const *argv
 }
 /* Descriptors for fields of builtin values, read through the value. */
 /* __call__ of the native descriptor classes: call the object. */
+/* The receiver of method name of native_types[index] (method_descriptor,
+ * wrapper_descriptor or method-wrapper): 0, or -1 with a TypeError. */
+static int native_receiver(SPYContext *c, void *index, const char *name, size_t argc, SPYValue *const *argv) {
+    SPYValue *cls = c->native_types[(intptr_t)index];
+    if (!argc) { errorf(c, "TypeError", "descriptor '%s' of '%s' object needs an argument", name, class_tname(cls)); return -1; }
+    if (value_class(c, argv[0]) == cls) return 0;
+    errorf(c, "TypeError", "descriptor '%s' requires a '%s' object but received a '%s'", name, class_tname(cls), type_name(argv[0]));
+    return -1;
+}
 static SPYValue *callable_call(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
-    (void)data;
+    if (native_receiver(c, data, "__call__", argc, argv)) return NULL;
     return call_keywords(c, argv[0], argc - 1, argv + 1, keywords);
+}
+static SPYValue *native_repr(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    if (native_receiver(c, data, "__repr__", argc, argv)) return NULL;
+    if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "wrapper __repr__() takes no keyword arguments");
+    if (argc > 1) return errorf(c, "TypeError", "expected 0 arguments, got %zu", argc - 1);
+    return spy_repr(c, argv[0]);
 }
 static int register_value_fields(SPYContext *c) {
     static const struct { int type, kind, flags; const char *names; } fields[] = {
@@ -27635,7 +27654,8 @@ static int register_value_fields(SPYContext *c) {
         }
     }
     for (size_t i = 0; i < 3; i++)
-        if (class_method_set(c, c->native_types[i], "__call__", callable_call, 0, METHOD_INSTANCE)) return -1;
+        if (class_method_set(c, c->native_types[i], "__call__", callable_call, (intptr_t)i, METHOD_INSTANCE) ||
+            class_method_set(c, c->native_types[i], "__repr__", native_repr, (intptr_t)i, METHOD_INSTANCE)) return -1;
     return 0;
 }
 static int class_method_set(SPYContext *, SPYValue *, const char *, NativeMethod, intptr_t, int);

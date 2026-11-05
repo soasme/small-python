@@ -63,7 +63,9 @@ SOURCES = {
     "isprintable_rule": "result = ('\\xe9'.isprintable(), '\\u2028'.isprintable(), ' '.isprintable(), '\\xa0'.isprintable())",
     "format_width_unicode": "result = format('\\u03b1', '*^5')",
     "ascii_bytes_unchanged": "result = ascii(b'\\xff')",
-    "bin_format_spec": "result = (format(10, 'b'), format(10, '#x'), format(255, '_b'))"
+    "bin_format_spec": "result = (format(10, 'b'), format(10, '#x'), format(255, '_b'))",
+    "repr_own_slot": "result = ([type(v).__repr__(v) == repr(v) for v in (len, [].append, str.join, str.__add__, (1).__add__)], "
+                     "b'a'.__str__())"
 }
 
 

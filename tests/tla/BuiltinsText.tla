@@ -8,10 +8,11 @@
 (* backslash, the chosen quote, \t, \n, and \r, other non-printable        *)
 (* characters as \x, \u, or \U escapes, and keeping printable ones;        *)
 (* ascii(), which also escapes every non-ASCII character; repr() and str() *)
-(* requiring a str from __repr__ and __str__; format() through __format__, *)
-(* object.__format__ refusing a non-empty spec; and print() writing str()  *)
-(* of each argument with sep and end (None meaning the default) to file's  *)
-(* write(), flushing on request.                                           *)
+(* requiring a str from __repr__ and __str__, which built-in types hold    *)
+(* themselves (bytes' __str__ giving its repr); format() through           *)
+(* __format__, object.__format__ refusing a non-empty spec; and print()    *)
+(* writing str() of each argument with sep and end (None meaning the       *)
+(* default) to file's write(), flushing on request.                        *)
 (*                                                                         *)
 (* A program takes a string of up to two characters among A, ', ", \,      *)
 (* newline, tab, U+007F, U+00E9, U+03B1, and U+1F600 and reports ascii()   *)
@@ -72,7 +73,8 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "format_spec_type", "print_sep_end", "print_none_sep", "print_no_args", "print_flush",
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
           "print_str_calls", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
-          "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec"}
+          "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
+          "repr_own_slot"}
 Programs == [op : {"ascii", "repr_len", "ord"}, s : Strings]
             \cup [case : Cases]
 
@@ -118,6 +120,7 @@ Case(c) ==
       [] c = "repr_str_quotes" -> "('\"it\\'s\"', '\\'say \"hi\"\\'', '\\'both \\\\\\' \"\\'')"
       [] c = "repr_nonprintable" -> "(\"'\\\\x00\\\\x1f\\\\x7f\\\\x80\\\\xa0\\\\xad'\", \"'\\\\u2028'\", \"'\\\\ud800'\")"
       [] c = "isprintable_rule" -> "(True, False, True, False)"
+      [] c = "repr_own_slot" -> "([True, True, True, True, True], \"b'a'\")"
       [] c = "format_width_unicode" -> "'**\\u03b1**'"
       [] c = "ascii_bytes_unchanged" -> "\"b'\\\\xff'\""
       [] c = "bin_format_spec" -> "('1010', '0xa', '1111_1111')"
