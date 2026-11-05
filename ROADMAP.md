@@ -104,9 +104,9 @@ manual. Remaining: publish it as a web page with each release.
 ### `spyc`: what one executable still lacks
 
 `spyc` follows a program's imports, embeds every module it reaches, compiles
-`NAME.c` modules in and leaves one executable, with import semantics kept
-and the generated C file byte-for-byte reproducible
-([docs/build.md](docs/build.md)). Remaining:
+`NAME.c` modules in, links `libNAME.a` archive modules, and leaves one
+executable, with import semantics kept and the generated C file
+byte-for-byte reproducible ([docs/build.md](docs/build.md)). Remaining:
 
 - Package resources: data files a package reads with
   `importlib.resources` or relative to `__file__`, declared on the command
