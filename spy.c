@@ -14886,6 +14886,19 @@ static HOT SPYValue *eval(SPYContext *c, Frame *f, Node *n) {
     c->depth--;
     return v;
 }
+/* eval of call node n, without eval's other cases while tick has only the
+ * line to record. */
+static ALWAYS_INLINE SPYValue *eval_called(SPYContext *c, Frame *f, Node *n) {
+    if (!quiet(c, f)) return eval(c, f, n);
+    if (deeper(c, "")) return NULL;
+    SPYValue *outer = c->eval_env;
+    c->eval_env = f->env;
+    relocate(c, n);
+    SPYValue *v = eval_call(c, f, n);
+    c->eval_env = outer;
+    c->depth--;
+    return v;
+}
 
 static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
     if (env->as.map.scope && env->as.map.scope->kind == S_CLASS) return 0;
@@ -17002,7 +17015,7 @@ static NO_INLINE int assign_items(SPYContext *c, Frame *f, Node *n) {
 static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n) {
     if (n->op == '=') {
         if (n->flags & F_PAIRED) return assign_items(c, f, n);
-        SPYValue *value = eval(c, f, n->b);
+        SPYValue *value = n->b->kind == N_CALL ? eval_called(c, f, n->b) : eval(c, f, n->b);
         if (!value) return -1;
         int status = store_target(c, f, n->a, value);
         for (Node *t = n->args; t && !status; t = t->next) status = store_target(c, f, t, value);
@@ -18105,7 +18118,7 @@ static SPYValue *missing_key(SPYContext *c, SPYValue *key) {
     if (error) raise_value(c, error);
     spy_release(error); return NULL;
 }
-static void raise_assertion(SPYContext *c, SPYValue *message) {
+static NO_INLINE void raise_assertion(SPYContext *c, SPYValue *message) {
     if (c->error_type[0]) return;
     SPYValue *error = exception_create(c, name_local(c->classes, "AssertionError"), message ? 1 : 0, &message);
     if (error) raise_value(c, error);
@@ -19325,7 +19338,7 @@ static SPYValue *sys_module(SPYContext *c) {
 }
 /* An interactive expression statement's value goes to sys.displayhook
  * once sys is loaded; until then the default hook's work is done here. */
-static int display_value(SPYContext *c, SPYValue *value) {
+static NO_INLINE int display_value(SPYContext *c, SPYValue *value) {
     SPYValue *loaded = sys_module(c);
     if (loaded) {
         SPYValue *hook = name_local(loaded, "displayhook");
@@ -20144,7 +20157,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
         if (tick(c, f, n)) break;
         switch (n->kind) {
         case N_EXPR:
-            last = eval(c, f, n->a);
+            last = n->a->kind == N_CALL ? eval_called(c, f, n->a) : eval(c, f, n->a);
             if (last && f->interactive) display_value(c, last);
             break;
         case N_ASSIGN: assign(c, f, n); break;
@@ -20182,7 +20195,7 @@ static HOT Result execute_statements(SPYContext *c, Frame *f, Node *body, int si
         }
         case N_PASS: case N_GLOBAL: case N_NONLOCAL: break;
         case N_RETURN:
-            last = n->a ? eval(c, f, n->a) : spy_none(c);
+            last = !n->a ? spy_none(c) : n->a->kind == N_CALL ? eval_called(c, f, n->a) : eval(c, f, n->a);
             return (Result){last ? FLOW_RETURN : FLOW_ERROR, last};
         case N_BREAK: return (Result){FLOW_BREAK, NULL};
         case N_CONTINUE: return (Result){FLOW_CONTINUE, NULL};
@@ -20578,7 +20591,7 @@ static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assi
 #if defined(__GNUC__) /* Labels as values. */
 #define THREADED 1
 #define CASE(op) case op: op_##op:
-#define NEXT { if (flow.flow == FLOW_NORMAL && code[pc].node && quiet(c, &f)) { \
+#define NEXT { if (code[pc].node && quiet(c, &f)) { \
         ins = &code[pc++]; n = ins->node; relocate(c, n); \
         truth_known = known; known = 0; a = b = value = NULL; goto *dispatch[ins->op]; } } continue
 #define NEXT_RELEASE { if (a) spy_release(a); if (b) spy_release(b); } NEXT

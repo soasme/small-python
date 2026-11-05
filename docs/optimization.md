@@ -191,6 +191,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Two strs concatenate before the operator dispatch](#two-strs-concatenate-before-the-operator-dispatch) | -2.9% (dicts); M2: dicts -1.6% |
 | [A Python call enters and leaves its frame inline](#a-python-call-enters-and-leaves-its-frame-inline) | -5.4% (fib), -4.2% (generators), -2.6% (classes); M2: fib -9.2%, generators -5.0%, classes -3.8% |
 | [Each hot machine step dispatches the next](#each-hot-machine-step-dispatches-the-next) | -3.4% (generators); M2: generators -10.9%, strings -2.5% |
+| [A call statement skips eval's other cases](#a-call-statement-skips-evals-other-cases) | -2.1% (classes), -1.6% (loop), -1.4% (fib, generators); M2: classes -2.9%, loop -2.1% |
 
 ### Releasing a number or string frees it at once
 
@@ -1444,6 +1445,21 @@ going: instructions (M2 counters) generators -3.4%, strings and sort
 generators -10.9% (-8.8% and -7.8% in two earlier runs), strings -2.5%,
 sort -1.5%, fib -1.0%; loop +0.5% and classes +0.9% run the same
 instructions, which only placement moves.
+
+### A call statement skips eval's other cases
+
+A call on its own as a statement, as an assignment's value or as what a
+`return` returns went through `eval`, which tests for a literal, a name and
+an operator before it reaches the call, and saves every register its other
+cases use. While the tick has only the line to record, such a call now takes
+the stack guard, the evaluating environment and the line itself and goes to
+`eval_call`. Two rare helpers inlined into the statement loop,
+`display_value` and `raise_assertion`, are out of line: the constant keys
+they built were set up on every entry to the loop, twelve instructions with
+clang. Instructions (M2 counters): classes -2.1%, loop -1.6%, fib, generators
+and sort -1.4%, nbody +0.1%; a loop calling `f(i)` -4.4%. Wall time averaged
+over eight code layouts: classes -2.9%, loop -2.1%, generators -1.6%, sort
+-1.4%, the rest within 0.3%.
 
 ### A profile-guided build
 
