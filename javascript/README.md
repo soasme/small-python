@@ -53,8 +53,15 @@ with `WorkerError` and the runtime is closed.
 
 ## Platforms
 
-Node.js 20 or later. In browsers the page must be cross-origin isolated
-(COOP and COEP headers), because the worker uses `SharedArrayBuffer`.
+Node.js 20 or later. Where WebAssembly JSPI is available (Node.js 24 and
+later, current browsers), the worker waits on promises and needs nothing
+else; elsewhere it uses `SharedArrayBuffer`, so a browser page must be
+cross-origin isolated (COOP and COEP headers).
+
+With JSPI, `Runtime.create({ worker: false })` runs the engine on the calling
+thread, for runtimes without Worker threads such as Cloudflare Workers. The
+thread is busy while Python computes; `timeout`, `stepLimit` and
+`memoryLimit` still stop the engine, from inside.
 
 The full specification is
 [docs/packaging/javascript.md](https://github.com/soasme/small-python/blob/main/docs/packaging/javascript.md).

@@ -1,6 +1,7 @@
 // Run Small Python from JavaScript. Each Runtime runs the engine, compiled to
-// WebAssembly, in a Worker thread of its own and speaks the worker protocol
-// to it (docs/packaging/protocol.md, docs/packaging/javascript.md).
+// WebAssembly, in a Worker thread of its own, or on the calling thread, and
+// speaks the worker protocol to it (docs/packaging/protocol.md,
+// docs/packaging/javascript.md).
 
 import * as wire from "./wire.js";
 import { Complex, Tuple, Violation } from "./wire.js";
@@ -14,6 +15,27 @@ const INITIAL_PAGES = 256; // spy-worker.wasm is linked with 16 MiB of initial m
 const MAX_PAGES = 65536;
 const INBOX = 64 * 1024;
 const GRACE = 1000; // milliseconds past the timeout the worker has to stop the operation itself
+
+// The engine on the Runtime's own thread, behind a Worker's interface: it
+// suspends through JSPI while it waits, and terminating it abandons it there.
+// Messages arrive as microtasks, as a Worker's would arrive later.
+class LocalWorker {
+  constructor(serve) {
+    let engine = null;
+    this._handlers = {};
+    const deliver = (to, message) => queueMicrotask(() => { if (this._handlers) to()?.(message); });
+    this.postMessage = (message) => deliver(() => engine, message);
+    serve((message) => deliver(() => this._handlers.message, message), (fn) => { engine = fn; });
+  }
+  on(event, fn) { this._handlers[event] = fn; }
+  ref() {}
+  unref() {}
+  terminate() {
+    const exit = this._handlers?.exit;
+    this._handlers = null;
+    queueMicrotask(() => exit?.(1));
+  }
+}
 
 let compiled;
 function compile() {
@@ -86,7 +108,7 @@ export class Runtime {
 
   constructor(token, options) {
     if (token !== CREATE) throw new TypeError("use Runtime.create()");
-    const { stepLimit = 0, memoryLimit = 0, outputLimit = 0, timeout, output, loader, policy, messageLimit = 64 * 2 ** 20 } = options;
+    const { stepLimit = 0, memoryLimit = 0, outputLimit = 0, timeout, output, loader, policy, messageLimit = 64 * 2 ** 20, worker = true } = options;
     for (const [name, limit] of [["stepLimit", stepLimit], ["memoryLimit", memoryLimit], ["outputLimit", outputLimit]])
       if (!Number.isSafeInteger(limit) || limit < 0) throw new RangeError(`${name} must be an integer >= 0`);
     if (!Number.isSafeInteger(messageLimit) || messageLimit < 1 || messageLimit > 0xffffffff)
@@ -102,6 +124,7 @@ export class Runtime {
     this._output = output;
     this._loader = loader;
     this._messageLimit = messageLimit;
+    this._inWorker = Boolean(worker);
     this._functions = new Map(); // function id -> { fn, keywords }
     this._functionIds = new Map(); // fn -> function id
     this._released = []; // handle ids to send with the next message
@@ -122,15 +145,22 @@ export class Runtime {
   }
 
   async _start(std) {
-    if (typeof SharedArrayBuffer !== "function")
-      throw new WorkerError("SharedArrayBuffer is unavailable; a browser page must be cross-origin isolated");
+    // With JSPI the engine waits for messages by suspending; without it, a
+    // Worker blocks on a shared inbox.
+    const jspi = Runtime._jspi;
+    if (!this._inWorker && !jspi) throw new WorkerError("running without a Worker needs WebAssembly JSPI");
+    if (!jspi && typeof SharedArrayBuffer !== "function")
+      throw new WorkerError("without WebAssembly JSPI the Worker needs SharedArrayBuffer; a browser page must be cross-origin isolated");
     const module = await compile();
-    this._inbox = new SharedArrayBuffer(8 + INBOX);
-    this._control = new Int32Array(this._inbox, 0, 2);
-    this._data = new Uint8Array(this._inbox, 8);
+    if (!jspi) {
+      this._inbox = new SharedArrayBuffer(8 + INBOX);
+      this._control = new Int32Array(this._inbox, 0, 2);
+      this._data = new Uint8Array(this._inbox, 8);
+    }
     const url = Runtime._workerURL;
     try {
-      this._worker = node ? new NodeWorker(url, { execArgv: [] }) : new Worker(url, { type: "module" });
+      this._worker = !this._inWorker ? new LocalWorker((await import("./engine.js")).serve)
+        : node ? new NodeWorker(url, { execArgv: [] }) : new Worker(url, { type: "module" });
     } catch (e) {
       throw new WorkerError(`cannot start the worker: ${e.message}`);
     }
@@ -140,7 +170,7 @@ export class Runtime {
       else this._lose(new WorkerError(`the worker trapped: ${data.trap}`));
     };
     const onError = (e) => this._lose(new WorkerError(`the worker failed: ${e?.message ?? e}`));
-    if (node) {
+    if (node || !this._inWorker) {
       this._worker.on("message", onMessage);
       this._worker.on("error", onError);
       this._worker.on("exit", (code) => this._lose(new WorkerError(`the worker exited with status ${code}`, code)));
@@ -149,7 +179,7 @@ export class Runtime {
       this._worker.addEventListener("error", onError);
     }
     const limit = this._memoryLimit ? INITIAL_PAGES + Math.ceil(this._memoryLimit * 1.25 / 65536) : MAX_PAGES;
-    this._worker.postMessage({ module, pages: INITIAL_PAGES, maximum: Math.min(limit, MAX_PAGES), inbox: this._inbox });
+    this._worker.postMessage({ module, pages: INITIAL_PAGES, maximum: Math.min(limit, MAX_PAGES), inbox: this._inbox ?? null });
     this.version = await this._run(wire.INIT, [{
       std: Boolean(std), step_limit: this._stepLimit, memory_limit: this._memoryLimit,
       output_limit: this._outputLimit, policy: this._policy !== undefined,
@@ -227,6 +257,12 @@ export class Runtime {
   }
 
   async _write(data) {
+    if (!this._inbox) {
+      const ended = this._ended();
+      if (ended) throw ended;
+      this._worker.postMessage(data);
+      return;
+    }
     for (let at = 0; at < data.length;) {
       while (Atomics.load(this._control, 0) !== 0) {
         const wait = Atomics.waitAsync(this._control, 0, 1);
@@ -577,8 +613,10 @@ export class Runtime {
   [Symbol.dispose]() { this.close(); }
 }
 
-// The Worker script; tests point it at a fake.
+// The Worker script; tests point it at a fake. Whether this runtime has
+// WebAssembly JSPI; tests turn it off to run the shared inbox.
 Runtime._workerURL = new URL("./worker.js", import.meta.url);
+Runtime._jspi = typeof WebAssembly.Suspending === "function";
 
 /** A function passed in under a chosen name, as define() does. */
 class Named {

@@ -244,6 +244,28 @@ averaged, stayed within 1% of the baseline (startup −0.6%, `fib` +0.3%,
 `generators` +0.2% over 30 runs). `spy` grows by 320 bytes, to 1,510,064;
 its `__TEXT` segment is unchanged.
 
+## The JavaScript package
+
+`node bench/javascript.mjs` measures what each transport of the JavaScript
+package ([packaging/javascript.md](packaging/javascript.md) section 2.1)
+costs a user: creating a runtime, a call from Python to a synchronous host
+function and back (5,000 calls), an `eval("1")` round trip (2,000), and
+`fib(25)` in the engine. The transports alternate over eight rounds and the
+medians are reported. Measured on the platform above with Node.js 25.6.1 and
+`spy-worker.wasm` built by wasi-sdk 34 (`-O2`), twice:
+
+| Measure | Worker, shared inbox | Worker, JSPI | Same thread, JSPI |
+| --- | ---: | ---: | ---: |
+| Create a runtime | 16.4–17.1 ms | 16.4–16.8 ms | 0.74–0.84 ms |
+| Host call round trip | 13.3–13.5 µs | 15.4–15.5 µs | 2.8–3.4 µs |
+| `eval` round trip | 14.9–15.1 µs | 16.8–17.4 µs | 4.1–4.4 µs |
+| `fib(25)` | 16.0 ms | 15.9–16.6 ms | 16.0 ms |
+
+Starting a Worker is most of a runtime's creation. Inside a Worker, JSPI
+costs about 2 µs a round trip over the inbox (a posted message against an
+`Atomics` notification); on the same thread there is no thread to cross.
+The engine computes at the same speed on every transport.
+
 ## Reproducing
 
 The comparison engines are not dependencies of this repository. On macOS:

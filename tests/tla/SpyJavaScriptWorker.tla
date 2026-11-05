@@ -2,8 +2,10 @@
 (***************************************************************************)
 (* The parent side of the worker protocol (docs/packaging/protocol.md) in *)
 (* the small-python package for JavaScript, as index.js implements it,    *)
-(* against a worker that follows the protocol. TLC checks that after     *)
-(* every step:                                                            *)
+(* against a worker that follows the protocol, over each of its three     *)
+(* transports (javascript.md 2.1): a Worker on the shared inbox, a Worker *)
+(* with JSPI, and the same thread with JSPI. TLC checks that after every *)
+(* step:                                                                  *)
 (*                                                                         *)
 (*  - The parent never sends a handle the worker has released, nor        *)
 (*    releases one twice (either makes the worker exit with status 3),   *)
@@ -22,9 +24,14 @@
 (*  - _request encodes its message and _send takes the release queue in  *)
 (*    the same synchronous run, so no PyObject can be collected or        *)
 (*    released in between; a released PyObject cannot be encoded.        *)
-(*  - _write puts the bytes in the worker's inbox as it takes them, and   *)
-(*    waits while the inbox is full; _next then waits for a reply. Both   *)
-(*    waits end once the runtime is lost or closed.                       *)
+(*  - On the inbox, _write puts the bytes in it as the worker takes them, *)
+(*    and waits while it is full; with JSPI, _write posts the message     *)
+(*    whole. _next then waits for a reply. Both waits end once the        *)
+(*    runtime is lost or closed.                                          *)
+(*  - On the same thread, nothing of the parent runs while the engine     *)
+(*    computes (it has read a request or a reply and not yet sent): no    *)
+(*    timer, no close, no collection. It runs again once the engine       *)
+(*    suspends in read; terminating it then abandons the engine there.    *)
 (*  - release() and the FinalizationRegistry's callback queue the id      *)
 (*    unless the runtime is lost or closed.                               *)
 (*  - The timer loses the worker (_lose, then _end) outside host           *)
@@ -54,14 +61,16 @@ VARIABLES wk,       \* the worker's table: "none" (not sent), "live", "released"
           alive,    \* the worker runs
           timed,    \* a timeout is set
           closed, lost,
-          bad       \* ghost: the worker saw the parent break the protocol
+          bad,      \* ghost: the worker saw the parent break the protocol
+          transport \* "inbox", "jspi" (a Worker) or "thread"
 
-vars == <<wk, held, gc, queue, outbox, to, from, pstack, waiter, wstack, alive, timed, closed, lost, bad>>
+vars == <<wk, held, gc, queue, outbox, to, from, pstack, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 
 Init == /\ wk = [h \in Handles |-> "none"] /\ held = [h \in Handles |-> FALSE]
         /\ gc = [h \in Handles |-> "none"] /\ queue = {} /\ outbox = <<>>
         /\ to = <<>> /\ from = <<>> /\ pstack = <<>> /\ waiter = FALSE /\ wstack = <<>>
         /\ alive = TRUE /\ timed \in BOOLEAN /\ closed = FALSE /\ lost = FALSE /\ bad = FALSE
+        /\ transport \in {"inbox", "jspi", "thread"}
 
 Top(s) == IF s = <<>> THEN "" ELSE s[Len(s)]
 Pop(s) == SubSeq(s, 1, Len(s) - 1)
@@ -71,68 +80,74 @@ HeldSet == {h \in Handles : held[h]}
 Over == lost \/ closed
 InCallback == \E i \in 1..Len(pstack) : pstack[i] = "H"
 
-\* The program runs: at the top level, or in a host function, its level.
-Program == Top(pstack) \in {"", "H"}
+\* On the same thread, the engine is computing: the parent cannot run.
+Busy == transport = "thread" /\ alive /\ Top(wstack) = "W"
 
-\* _send: the notice of what was queued, then the message, to _write.
-Send(m) == /\ outbox' = outbox \o (IF queue = {} THEN <<m>> ELSE <<Msg("release", queue), m>>)
+\* The program runs: at the top level, or in a host function, its level.
+Program == Top(pstack) \in {"", "H"} /\ ~Busy
+
+\* _send: the notice of what was queued, then the message, to _write, which
+\* hands them to the inbox's writer or, with JSPI, posts them at once.
+Send(m) == LET ms == IF queue = {} THEN <<m>> ELSE <<Msg("release", queue), m>> IN
+           /\ IF transport = "inbox" THEN outbox' = outbox \o ms /\ UNCHANGED to
+              ELSE to' = to \o ms /\ UNCHANGED outbox
            /\ queue' = {}
 
 Request(ids) == /\ Program /\ ~Over /\ Len(pstack) < Depth /\ ids \subseteq HeldSet
                 /\ Send(Msg("req", ids)) /\ pstack' = Append(pstack, "S")
-                /\ UNCHANGED <<wk, held, gc, to, from, waiter, wstack, alive, timed, closed, lost, bad>>
+                /\ UNCHANGED <<wk, held, gc, from, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 
 \* The worker takes the next message from the inbox's writer.
 Take == /\ alive /\ outbox # <<>> /\ to' = Append(to, Head(outbox)) /\ outbox' = Tail(outbox)
-        /\ UNCHANGED <<wk, held, gc, queue, from, pstack, waiter, wstack, alive, timed, closed, lost, bad>>
+        /\ UNCHANGED <<wk, held, gc, queue, from, pstack, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 
 \* _write returns once all is in the inbox, or throws once lost or closed.
-Written == /\ Top(pstack) \in {"S", "T"} /\ outbox = <<>> /\ ~Over
+Written == /\ ~Busy /\ Top(pstack) \in {"S", "T"} /\ outbox = <<>> /\ ~Over
            /\ pstack' = IF Top(pstack) = "S" THEN Append(Pop(pstack), "N") ELSE Pop(pstack)
-           /\ UNCHANGED <<wk, held, gc, queue, outbox, to, from, waiter, wstack, alive, timed, closed, lost, bad>>
+           /\ UNCHANGED <<wk, held, gc, queue, outbox, to, from, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 \* _next: waits, or rejects once lost or closed.
-Wait == /\ Top(pstack) = "N" /\ ~Over /\ pstack' = Append(Pop(pstack), "R") /\ waiter' = TRUE
-        /\ UNCHANGED <<wk, held, gc, queue, outbox, to, from, wstack, alive, timed, closed, lost, bad>>
+Wait == /\ ~Busy /\ Top(pstack) = "N" /\ ~Over /\ pstack' = Append(Pop(pstack), "R") /\ waiter' = TRUE
+        /\ UNCHANGED <<wk, held, gc, queue, outbox, to, from, wstack, alive, timed, closed, lost, bad, transport>>
 \* Every wait settles with the error once lost or closed.
-Unwind == /\ Top(pstack) \in {"S", "T", "N", "R"} /\ Over /\ pstack' = Pop(pstack) /\ waiter' = FALSE
-          /\ UNCHANGED <<wk, held, gc, queue, outbox, to, from, wstack, alive, timed, closed, lost, bad>>
+Unwind == /\ ~Busy /\ Top(pstack) \in {"S", "T", "N", "R"} /\ Over /\ pstack' = Pop(pstack) /\ waiter' = FALSE
+          /\ UNCHANGED <<wk, held, gc, queue, outbox, to, from, wstack, alive, timed, closed, lost, bad, transport>>
 
 \* _feed resolves the waiter: a reply, or a nested request.
 Arrive(m) == /\ held' = [h \in Handles |-> held[h] \/ h \in m.ids]
              /\ gc' = [h \in Handles |-> IF h \in m.ids THEN "live" ELSE gc[h]]
-Receive == /\ Top(pstack) = "R" /\ waiter /\ ~Over /\ from # <<>> /\ from' = Tail(from) /\ waiter' = FALSE
+Receive == /\ ~Busy /\ Top(pstack) = "R" /\ waiter /\ ~Over /\ from # <<>> /\ from' = Tail(from) /\ waiter' = FALSE
            /\ LET m == Head(from) IN
               /\ Arrive(m)
               \* After a nested request _awaitReply calls _next again.
               /\ pstack' = IF m.k = "result" THEN Pop(pstack) ELSE Append(Append(Pop(pstack), "N"), "H")
-           /\ UNCHANGED <<wk, queue, outbox, to, wstack, alive, timed, closed, lost, bad>>
+           /\ UNCHANGED <<wk, queue, outbox, to, wstack, alive, timed, closed, lost, bad, transport>>
 
 \* _end: terminates the worker; the inbox and the messages from it are gone.
 End == /\ alive' = FALSE /\ queue' = {} /\ to' = <<>> /\ from' = <<>>
 \* The timer, outside host callbacks.
-Timeout == /\ Top(pstack) \in {"S", "T", "N", "R"} /\ timed /\ ~Over /\ lost' = TRUE /\ End
-           /\ UNCHANGED <<wk, held, gc, outbox, pstack, waiter, wstack, timed, closed, bad>>
+Timeout == /\ ~Busy /\ Top(pstack) \in {"S", "T", "N", "R"} /\ timed /\ ~Over /\ lost' = TRUE /\ End
+           /\ UNCHANGED <<wk, held, gc, outbox, pstack, waiter, wstack, timed, closed, bad, transport>>
 
 \* The host function returns, maybe a handle the program holds; _serve
 \* rethrows lost, or writes the reply.
-HostReturn(ids) == /\ Top(pstack) = "H" /\ ids \subseteq HeldSet
-                   /\ IF lost THEN /\ pstack' = Pop(pstack) /\ UNCHANGED <<queue, outbox>>
+HostReturn(ids) == /\ ~Busy /\ Top(pstack) = "H" /\ ids \subseteq HeldSet
+                   /\ IF lost THEN /\ pstack' = Pop(pstack) /\ UNCHANGED <<queue, outbox, to>>
                       ELSE /\ Send(Msg("reply", ids)) /\ pstack' = Append(Pop(pstack), "T")
-                   /\ UNCHANGED <<wk, held, gc, to, from, waiter, wstack, alive, timed, closed, lost, bad>>
+                   /\ UNCHANGED <<wk, held, gc, from, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 
 \* close: refused while a host function runs, even one awaiting; otherwise
 \* it may come while a top-level operation waits.
-Close == /\ ~InCallback /\ ~closed /\ closed' = TRUE /\ waiter' = FALSE
+Close == /\ ~Busy /\ ~InCallback /\ ~closed /\ closed' = TRUE /\ waiter' = FALSE
          /\ IF lost THEN UNCHANGED <<alive, queue, to, from>> ELSE End
-         /\ UNCHANGED <<wk, held, gc, outbox, pstack, wstack, timed, lost, bad>>
+         /\ UNCHANGED <<wk, held, gc, outbox, pstack, wstack, timed, lost, bad, transport>>
 
 \* release(), or the program dropping its last reference.
-Forget(h) == /\ held[h] /\ held' = [held EXCEPT ![h] = FALSE] /\ gc' = [gc EXCEPT ![h] = "unreachable"]
-             /\ UNCHANGED <<wk, queue, outbox, to, from, pstack, waiter, wstack, alive, timed, closed, lost, bad>>
+Forget(h) == /\ ~Busy /\ held[h] /\ held' = [held EXCEPT ![h] = FALSE] /\ gc' = [gc EXCEPT ![h] = "unreachable"]
+             /\ UNCHANGED <<wk, queue, outbox, to, from, pstack, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 \* _release, from release() at once or from the registry's callback later.
-Drop(h) == /\ gc[h] = "unreachable" /\ gc' = [gc EXCEPT ![h] = "done"]
+Drop(h) == /\ ~Busy /\ gc[h] = "unreachable" /\ gc' = [gc EXCEPT ![h] = "done"]
            /\ queue' = IF Over THEN queue ELSE queue \cup {h}
-           /\ UNCHANGED <<wk, held, outbox, to, from, pstack, waiter, wstack, alive, timed, closed, lost, bad>>
+           /\ UNCHANGED <<wk, held, outbox, to, from, pstack, waiter, wstack, alive, timed, closed, lost, bad, transport>>
 
 Known(ids) == \A h \in ids : wk[h] = "live"
 WorkerRead == /\ alive /\ to # <<>> /\ to' = Tail(to)
@@ -144,13 +159,13 @@ WorkerRead == /\ alive /\ to # <<>> /\ to' = Tail(to)
                                          /\ wstack' = Append(wstack, "W") /\ UNCHANGED wk
                    [] OTHER           -> /\ bad' = (bad \/ ~Known(m.ids) \/ Top(wstack) # "N")
                                          /\ wstack' = Pop(wstack) /\ UNCHANGED wk
-              /\ UNCHANGED <<held, gc, queue, outbox, from, pstack, waiter, alive, timed, closed, lost>>
+              /\ UNCHANGED <<held, gc, queue, outbox, from, pstack, waiter, alive, timed, closed, lost, transport>>
 
 WorkerSend(k, m) == /\ alive /\ Top(wstack) = "W" /\ IF m = 0 THEN TRUE ELSE wk[m] = "none"
                     /\ wk' = IF m = 0 THEN wk ELSE [wk EXCEPT ![m] = "live"]
                     /\ from' = Append(from, Msg(k, Carried(m)))
                     /\ wstack' = IF k = "result" THEN Pop(wstack) ELSE Append(wstack, "N")
-                    /\ UNCHANGED <<held, gc, queue, outbox, to, pstack, waiter, alive, timed, closed, lost, bad>>
+                    /\ UNCHANGED <<held, gc, queue, outbox, to, pstack, waiter, alive, timed, closed, lost, bad, transport>>
 
 Done == /\ pstack = <<>> /\ Over /\ UNCHANGED vars
 

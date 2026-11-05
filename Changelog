@@ -9,6 +9,11 @@ Unreleased (1.0.0):
   - spy_set_step_limit() and spy_set_memory_limit() are removed: use
     spy_set_limit() with SPY_LIMIT_STEPS or SPY_LIMIT_MEMORY; so are Go's
     Runtime.SetStepLimit and Rust's Runtime::set_step_limit
+- the JavaScript package waits through WebAssembly JSPI where the runtime
+  has it, so it needs no SharedArrayBuffer (a browser page need not be
+  cross-origin isolated); Runtime.create({ worker: false }) runs the engine
+  on the calling thread, for runtimes without Worker threads (0.8 ms to
+  create against 16 ms for a Worker); without JSPI it keeps the shared inbox
 - spyc links an archive module, libNAME.a, as module NAME, so a module
   written in Rust (examples/jsonify, a json module on serde_json) or any
   language exporting spy_init_NAME needs no C file; a module name given

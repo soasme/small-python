@@ -15,6 +15,7 @@
     "index.d.ts",
     "wire.js",
     "worker.js",
+    "engine.js",
     "spy-worker.wasm",
     "README.md",
     "LICENSE",

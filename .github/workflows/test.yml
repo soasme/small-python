@@ -59,6 +59,12 @@ jobs:
           curl -sSfL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-$asset.tar.gz" | tar xz
           echo "WASI_SDK=$PWD/wasi-sdk-34.0-$asset" >> "$GITHUB_ENV"
       - run: make test-binding
+      # Node.js 22 has no JSPI: the Worker on the shared inbox, then every
+      # transport on the current LTS.
+      - run: make test-javascript JS_MODES="worker inbox"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
       - run: make test-javascript
       - run: make test-rust
       - uses: actions/setup-go@v5

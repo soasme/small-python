@@ -22,7 +22,9 @@ code, file access.
 The engine and `spy-worker.c` compile to one WebAssembly module,
 `spy-worker.wasm`, built for `wasm32-wasip1` with wasi-sdk. Each `Runtime`
 starts a dedicated Worker thread that instantiates the module and runs the
-worker's `main`, which loops reading requests. Two kinds of separation stack:
+worker's `main`, which loops reading requests; with `worker: false` the
+module runs on the Runtime's own thread instead (§2.1). Two kinds of
+separation stack:
 
 1. **WebAssembly.** Engine code, and anything that corrupts the engine's
    memory, can touch only the module's linear memory and call only its
@@ -31,16 +33,18 @@ worker's `main`, which loops reading requests. Two kinds of separation stack:
    (`ENOSYS`; no preopened directories). A trap (an `abort`,
    an out-of-bounds access) ends the Worker, not the program.
 2. **A Worker thread.** The engine blocks while it runs; the Worker keeps the
-   main thread responsive and can be terminated at any time, which is how
-   `timeout` works.
+   main thread responsive and can be terminated at any time, which backs
+   `timeout` when the engine does not stop by itself. Without a Worker, the
+   WebAssembly sandbox is the only separation.
 
 ```text
 main thread                                   Worker thread
 +----------------------------+  postMessage  +------------------------+
 | Runtime, PyObject proxies, | <------------ | spy-worker.wasm        |
 | host functions, loader,    |               |   SPYContext, handles  |
-| output                     | ------------> |   blocks in read()     |
-+----------------------------+  shared buffer +------------------------+
+| output                     | ------------> |   waits in read()      |
++----------------------------+  postMessage  +------------------------+
+                                 or a shared buffer
 ```
 
 ### 2.1 Streams
@@ -49,10 +53,23 @@ Worker to main: the module's `write(pointer, length)` import copies the bytes
 and posts them. Posted messages keep their order; the main thread reassembles
 frames from them.
 
-Main to worker: the Worker is blocked inside the engine, so it cannot receive
-posted messages. Instead each runtime owns a `SharedArrayBuffer` *inbox*: two
-`Int32` cells, `state` and `length`, then a data area of 64 KiB. The module's
-`read(pointer, capacity)` import:
+Main to worker, with JavaScript Promise Integration (JSPI, WebAssembly
+stack switching; `WebAssembly.Suspending`): the module's `read(pointer,
+capacity)` import is an async function, and `main` runs through
+`WebAssembly.promising`. While no bytes are waiting, `read` suspends the
+module's whole stack, C frames included, and the thread's event loop runs on;
+the main thread posts each message whole, and `read` copies up to `capacity`
+bytes of it at a time. A host call therefore waits on a promise wherever
+Python makes it, inside a sort key or `__eq__` too.
+
+On the same thread (`worker: false`), the two ends exchange the same
+messages as microtasks, and the Runtime needs no Worker. JSPI is required;
+the thread computes while Python runs, and is free while the engine waits.
+
+Main to worker, without JSPI: the Worker is blocked inside the engine, so it
+cannot receive posted messages. Instead each runtime owns a
+`SharedArrayBuffer` *inbox*: two `Int32` cells, `state` and `length`, then a
+data area of 64 KiB. The module's `read(pointer, capacity)` import:
 
 1. waits with `Atomics.wait` while `state` is 0;
 2. copies up to `capacity` bytes from the data area, keeping its position;
@@ -87,6 +104,7 @@ All methods that reach the engine return promises.
 const rt = await Runtime.create({
   std: true, stepLimit: 0, memoryLimit: 0, outputLimit: 0, timeout: undefined,
   output: undefined, loader: undefined, policy: undefined, messageLimit: 64 * 2 ** 20,
+  worker: true,
 });
 ```
 
@@ -101,9 +119,11 @@ const rt = await Runtime.create({
 | `loader` | `(name) => string \| null \| Promise<string \| null>` mapping module names to source. |
 | `policy` | `(event, args) => void \| Promise<void>` asked before the engine opens a file (`"open"`: file and mode), imports a module for the first time (`"import"`: name), executes source text with `exec`, `eval` or `compile` (`"exec"`: source), or reads `input` (`"input"`: the prompt, if given). Throwing refuses the event; an error whose name is no Python exception raises `PermissionError`. |
 | `messageLimit` | Largest message in bytes, either direction. |
+| `worker` | Run the engine in a Worker of its own (`true`), or on the calling thread (`false`, which needs JSPI). On the calling thread, `timeout`, `stepLimit` and `memoryLimit` stop the engine from inside; nothing can stop it while it computes past them. |
 
 `Runtime.create` rejects with `WorkerError` when the Worker cannot start,
-including when `SharedArrayBuffer` is unavailable (§5).
+when `worker` is `false` and JSPI is unavailable, and when, without JSPI,
+`SharedArrayBuffer` is unavailable (§5).
 
 Methods:
 
@@ -234,7 +254,9 @@ or output runs, operations of that runtime run immediately as nested requests
 ## 4 Security
 
 1. The WebAssembly module is the isolation boundary; the Worker gives it
-   termination. Neither depends on the engine being correct.
+   termination. Neither depends on the engine being correct. Without a
+   Worker the module is still the boundary, but a bug that keeps the engine
+   from checking its limits holds the thread.
 2. The main thread validates every message as in `protocol.md` §2, bounds
    reads by `messageLimit`, and terminates the Worker on a violation.
 3. The WASI shim gives the module no files, no network, no environment, and no
@@ -245,11 +267,15 @@ or output runs, operations of that runtime run immediately as nested requests
 
 | Platform | Worker | Requirement |
 |---|---|---|
-| Node.js 20 and later | `worker_threads` | none |
-| Browsers | module `Worker` | `crossOriginIsolated` (COOP and COEP headers), for `SharedArrayBuffer` |
+| Node.js 24 and later | `worker_threads` | none; JSPI, so `worker: false` works too |
+| Node.js 20 and 22 | `worker_threads` | none; the shared inbox, and no `worker: false` |
+| Browsers with JSPI | module `Worker` | none |
+| Browsers without JSPI | module `Worker` | `crossOriginIsolated` (COOP and COEP headers), for `SharedArrayBuffer` |
 
-Other runtimes with `Worker`, `SharedArrayBuffer`, `Atomics.waitAsync`, and
-`WebAssembly` should work but are not tested.
+Runtimes with JSPI and no Worker threads, such as Cloudflare Workers, can
+run with `worker: false`. Other runtimes with `Worker` and either JSPI or
+`SharedArrayBuffer` with `Atomics.waitAsync` should work. Only Node.js is
+tested.
 
 The Worker is started with an empty `execArgv`, so flags of the embedding
 process (`--inspect`, `--input-type`) do not reach it.
@@ -261,8 +287,9 @@ small-python/
   package.json        "type": "module", "exports": "./index.js"
   index.js            Runtime, PyObject, conversions, errors
   wire.js             value codec and framing (protocol.md §3–§4)
-  worker.js           the Worker: WASI shim, streams, instantiation; it
-                      moves bytes and decodes none
+  engine.js           the engine side: WASI shim, streams, instantiation;
+                      it moves bytes and decodes none
+  worker.js           the Worker: serves engine.js over its port
   spy-worker.wasm     the engine and worker
   index.d.ts          types
 ```
@@ -277,4 +304,9 @@ As `python.md` §7, adapted: a Worker that exits or is terminated rejects with
 `timeout` with an infinite loop and its exclusion of host time;
 `memoryLimit`; nested and parallel async callbacks; handle release; queued
 concurrent operations; messages larger than the inbox, in both
-directions; and closing while a write waits for a stalled worker. The suite runs on every supported Node.js major version.
+directions; closing while a write waits for a stalled worker; host calls
+that wait inside callbacks from C while timers run; and the refusals of
+§3.1 without JSPI or `SharedArrayBuffer`. The whole suite runs once for each
+transport: a Worker with JSPI, a Worker on the shared inbox, and the same
+thread (`make test-javascript`, `JS_MODES`). CI runs it on Node.js 22 (the
+first two) and on the current LTS (all three).

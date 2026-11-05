@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 
 import { PythonError, Runtime, Timeout, WorkerError } from "../index.js";
+import "./mode.js";
 
 const CASES = ["unknown kind", "unknown tag", "truncated value", "trailing bytes", "count over message",
   "invalid utf-8", "non-canonical int", "deep nesting", "unknown function", "parent-only tag", "malformed error",
@@ -13,7 +14,7 @@ async function withFake(name, timeout, body) {
   Runtime._workerURL = new URL("./fake-worker.js", import.meta.url);
   process.env.FAKE_WORKER_CASE = name;
   try {
-    return await body(await Runtime.create({ timeout }));
+    return await body(await Runtime.create({ timeout, worker: true }));
   } finally {
     Runtime._workerURL = real;
     delete process.env.FAKE_WORKER_CASE;
@@ -134,6 +135,30 @@ describe("limits", () => {
     const { steps, memory } = await rt.usage();
     assert.ok(steps > 9990 && steps <= 10000 && memory > 0);
     assert.equal(await rt.eval("1 + 1"), 2);
+  });
+});
+
+describe("transports", () => {
+  test("a runtime without a Worker needs JSPI", async () => {
+    const jspi = Runtime._jspi;
+    Runtime._jspi = false;
+    try {
+      await assert.rejects(Runtime.create({ worker: false }), (e) => e instanceof WorkerError && /JSPI/.test(e.message));
+    } finally {
+      Runtime._jspi = jspi;
+    }
+  });
+
+  test("a Worker without JSPI needs SharedArrayBuffer", async () => {
+    const { _jspi: jspi } = Runtime, shared = globalThis.SharedArrayBuffer;
+    Runtime._jspi = false;
+    globalThis.SharedArrayBuffer = undefined;
+    try {
+      await assert.rejects(Runtime.create({ worker: true }), (e) => e instanceof WorkerError && /SharedArrayBuffer/.test(e.message));
+    } finally {
+      Runtime._jspi = jspi;
+      globalThis.SharedArrayBuffer = shared;
+    }
   });
 });
 

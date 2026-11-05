@@ -19,26 +19,37 @@ const which = process.env.FAKE_WORKER_CASE;
 if (!(which in CASES) && !["length over limit", "zero length", "exit", "silent"].includes(which))
   throw new Error(`unknown case ${which}`);
 
-parentPort.once("message", ({ inbox }) => {
-  const control = new Int32Array(inbox, 0, 2), data = new Uint8Array(inbox, 8);
-  const receive = () => {
-    while (Atomics.load(control, 0) === 0) Atomics.wait(control, 0, 0);
-    Atomics.store(control, 0, 0);
-    Atomics.notify(control, 0);
-  };
+// Requests come through the inbox, or as messages when the parent has JSPI.
+let posted = 0, wake = null;
+parentPort.once("message", async ({ inbox }) => {
+  let receive;
+  if (inbox) {
+    const control = new Int32Array(inbox, 0, 2);
+    receive = async () => {
+      while (Atomics.load(control, 0) === 0) Atomics.wait(control, 0, 0);
+      Atomics.store(control, 0, 0);
+      Atomics.notify(control, 0);
+    };
+  } else {
+    parentPort.on("message", () => { posted++; wake?.(); });
+    receive = async () => {
+      while (!posted) await new Promise((resolve) => { wake = resolve; });
+      posted--;
+    };
+  }
   const send = (payload) => {
     const frame = new Uint8Array(4 + payload.length);
     new DataView(frame.buffer).setUint32(0, payload.length, true);
     frame.set(payload, 4);
     parentPort.postMessage(frame);
   };
-  receive();
+  await receive();
   send([0x40, 0x73, 5, 0, 0, 0, ...Buffer.from("1.0.0")]);
-  receive();
+  await receive();
   if (which === "length over limit") parentPort.postMessage(new Uint8Array([0xff, 0xff, 0xff, 0xff]));
   else if (which === "zero length") parentPort.postMessage(new Uint8Array([0, 0, 0, 0]));
   else if (which === "exit") process.exit(5);
   else if (which !== "silent") send(CASES[which]);
   // Stay alive, as a hostile worker would; the runtime must end it.
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  setInterval(() => {}, 1 << 30);
 });

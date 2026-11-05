@@ -27,6 +27,12 @@ export interface RuntimeOptions {
   policy?: (event: "open" | "import" | "exec" | "input", args: any[]) => void | Promise<void>;
   /** Largest message between the runtime and its worker, in bytes. */
   messageLimit?: number;
+  /**
+   * Run the engine in a Worker of its own (default true). False runs it on
+   * the calling thread, which needs WebAssembly JSPI: the thread is busy while
+   * Python computes, and only the engine's own limits stop it.
+   */
+  worker?: boolean;
 }
 
 export class Runtime {

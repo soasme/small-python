@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, describe, test } from "node:test";
 
 import { Complex, keywords, PyObject, PythonError, Runtime, WorkerError } from "../index.js";
+import "./mode.js";
 
 // Runtimes made by a test are closed after it.
 const open = [];
@@ -56,6 +57,23 @@ describe("values", () => {
 });
 
 describe("host functions", () => {
+  // An async host function called where C calls Python (a sort key, __eq__)
+  // waits like any other, and the event loop runs meanwhile.
+  test("waiting inside callbacks from C", async () => {
+    const rt = track(await Runtime.create());
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 1);
+    try {
+      await rt.define("later", (x) => new Promise((resolve) => setTimeout(() => resolve(x), 10)));
+      assert.deepEqual(await rt.eval("sorted([3, 1, 2], key=lambda x: later(-x))"), [3, 2, 1]);
+      await rt.exec("class E:\n    def __eq__(self, other):\n        return later(True)");
+      assert.equal(await rt.eval("E() in [1]"), true);
+      assert.ok(ticks > 0);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
   test("define, keywords, async, nesting", async () => {
     const rt = track(await Runtime.create());
     await rt.define("add", (a, b = 10) => a + b);

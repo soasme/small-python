@@ -293,21 +293,22 @@ both a regression suite and the benchmark for this use.
 
 ### WebAssembly and the edge
 
-The JavaScript package already runs the engine compiled to WebAssembly, in a
-worker thread, on Node.js and in cross-origin isolated browsers. Remaining:
-running without `SharedArrayBuffer`, and without threads, for pages that are
-not cross-origin isolated and for edge runtimes such as Cloudflare Workers;
-a WASI build; and `spyc --target wasm`, which produces one module for a
-bundled program.
+The JavaScript package runs the engine compiled to WebAssembly in a Worker
+thread, or with `worker: false` on the calling thread, on Node.js and in
+browsers. The engine waits for its host only in one import, `read`; with
+JavaScript Promise Integration (JSPI, WebAssembly stack switching), `read`
+is an async function, so the engine's whole stack, C frames included, is
+suspended until a message arrives while the event loop runs on. A host call
+from any Python code, inside a sort key or `__eq__` too, then waits on a
+promise without `SharedArrayBuffer`, and without threads for edge runtimes
+such as Cloudflare Workers. The engine did not change: it does not pause on
+its own, so ordinary calls keep their speed. Where JSPI is missing, the
+package keeps the `SharedArrayBuffer` inbox
+([docs/packaging/javascript.md](docs/packaging/javascript.md) section 2.1).
 
-The engine waits for its host only in one import, `read`. With JavaScript
-Promise Integration (JSPI, WebAssembly stack switching), `read` is an async
-function: the engine's whole stack, C frames included, is suspended until a
-message arrives, and the event loop runs on. A host call from any Python
-code, inside a sort key or `__eq__` too, then waits on a promise without
-`Atomics.wait`, and on one thread without a Worker. The engine needs no
-change: it does not pause on its own, so ordinary calls keep their speed.
-Where JSPI is missing, the package keeps the `SharedArrayBuffer` inbox.
+Remaining: a test on Cloudflare Workers and in browsers (only Node.js runs
+in CI); a WASI build; and `spyc --target wasm`, which produces one module
+for a bundled program.
 
 ### Android and iOS
 
@@ -442,6 +443,7 @@ what the extra size buys.
 - [x] Values from pools in three size classes
 - [x] Java binding; TLA+ models of every package
 - [x] `spyc` writes an executable and compiles C modules in
+- [x] JavaScript package without `SharedArrayBuffer` or a Worker, through JSPI
 - [x] Native modules: `spy`, the in-process bindings and every worker
   package through the protocol's `NATIVE`
 - [x] Policy callback (`spy_set_policy`, `spy_policy_check`)

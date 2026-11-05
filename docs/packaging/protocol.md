@@ -19,7 +19,7 @@ run each runtime in a *worker*, a separate address space that owns exactly one
 | Rust (`small-python-worker`) | as Python | as Python | OS process |
 | Go (`worker`) | as Python | as Python | OS process |
 | Java (`small-python-worker`) | as Python | as Python | OS process |
-| JavaScript | `spy-worker.wasm` in a Worker thread, one per runtime | `postMessage` out, a `SharedArrayBuffer` in | WebAssembly sandbox and a Worker thread |
+| JavaScript | `spy-worker.wasm` in a Worker thread, or on the calling thread, one per runtime | `postMessage` out; in, `postMessage` with JSPI or a `SharedArrayBuffer` | WebAssembly sandbox, and a Worker thread unless `worker: false` |
 
 Both workers are built from the same C file, `spy-worker.c`, with only the
 stream functions differing. Everything below holds for both.

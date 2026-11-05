@@ -62,8 +62,11 @@ javascript/spy-worker.wasm: spy-worker.c spy.c spy.h spy-std.c spy-std.h spy-std
 
 wasm: javascript/spy-worker.wasm
 
+# Each transport runs the whole suite (javascript/test/mode.js); "thread"
+# needs WebAssembly JSPI, so older Node versions take JS_MODES="worker inbox".
+JS_MODES ?= worker inbox thread
 test-javascript: javascript/spy-worker.wasm
-	cd javascript && node --test test/*.test.js
+	cd javascript && for mode in $(JS_MODES); do echo "transport: $$mode"; SMALL_PYTHON_TEST_MODE=$$mode node --test test/*.test.js || exit 1; done
 
 # spyc parses with the engine itself, as qjsc compiles with quickjs.c. It
 # builds executables with this build's compiler and link flags, so a
