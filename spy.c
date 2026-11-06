@@ -240,7 +240,7 @@ struct SPYValue {
  * to the class (20.2.8), not by binding it in the class body. */
 enum { CLASS_NO_DICT = 8, CLASS_SLOTS = 16, CLASS_WEAKREF = 32, CLASS_ABSTRACT = 64, CLASS_OWN_DICT = 128, CLASS_OWN_WEAKREF = 256 };
 typedef struct { SPYValue *cls, *value; size_t epoch; char name[24]; } ClassLookup;
-typedef struct { SPYValue *cls, *init; size_t epoch; } PlainClass;
+typedef struct { SPYValue *cls, *init, *del; size_t epoch; } PlainClass;
 struct SPYContext {
     /* The fields every step reads come first, where arm64 loads reach them
      * with one instruction; the large tables are at the end. */
@@ -1263,7 +1263,13 @@ static int finalize_later(SPYValue *v) {
         if (!(v->as.generator.started || hooked) || v->as.generator.running || v->as.generator.done) return 0;
     } else if (v->type == SPY_MEMORYVIEW) {
         if (!v->as.memory.view || v->as.memory.released) return 0;
-    } else if (!class_lookup(v->as.map.parent, "__del__")) return 0;
+    } else {
+        /* The class of a plain instance answers from plain_init's entry. */
+        SPYContext *c = v->ctx;
+        SPYValue *cls = v->as.map.parent;
+        PlainClass *hit = &c->plain[(uintptr_t)cls / sizeof(SPYValue) % 16];
+        if (!(hit->cls == cls && hit->epoch == c->classes_changed && hit->init ? hit->del : class_lookup(cls, "__del__"))) return 0;
+    }
     SPYContext *c = v->ctx;
     if (weak_push(c, &c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
     attend(c);
@@ -15942,7 +15948,7 @@ static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
             !subclass(cls, name_local(c->classes, "BaseException")) && init && init->type == SPY_FUNCTION &&
             slot_new(c, cls) == name_local(c->object, "__new__") && native_slot_new(c, cls) == name_local(c->object, "__new__");
         if (c->error_type[0]) return NULL;
-        *hit = (PlainClass){cls, plain ? init : NULL, c->classes_changed};
+        *hit = (PlainClass){cls, plain ? init : NULL, class_lookup(cls, "__del__"), c->classes_changed};
     }
     return hit->init;
 }

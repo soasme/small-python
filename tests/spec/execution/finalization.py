@@ -46,3 +46,19 @@ log.clear()
 Raises()
 host.collect()
 assert_eq(log, ["raised"])
+
+# __del__ is looked up on the class when an instance dies, so one assigned
+# or deleted after instances were made applies to them.
+class Late:
+    def __init__(self, name):
+        self.name = name
+log.clear()
+kept = [Late("assigned"), Late("deleted")]
+Late("before")
+Late.__del__ = lambda self: log.append(self.name)
+kept.pop(0)
+assert_eq(log, ["assigned"])
+del Late.__del__
+kept.clear()
+host.collect()
+assert_eq(log, ["assigned"])
