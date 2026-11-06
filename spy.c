@@ -21424,6 +21424,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_CALLK)
             callee_env = NULL;
             value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, 1, &callee_env);
+            /* A class call enters its __init__ (class_call). */
+            if (callee_env && value->type == SPY_CLASS) {
+                spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
+                goto enter_special;
+            }
             if (callee_env) goto enter_call;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
@@ -21807,11 +21812,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         continue;
     }
     enter_call:
-        /* A class call enters its __init__ (class_call). */
-        if (value->type == SPY_CLASS) {
-            spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
-            goto enter_special;
-        }
         m->pc = pc;
         {
             Call *call = call_enter(c, value, callee_env, m);
