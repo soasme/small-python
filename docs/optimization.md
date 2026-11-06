@@ -198,6 +198,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [eval ends in a tail call](#eval-ends-in-a-tail-call) | -0.8% (loop); M2: classes -2.0%, loop -1.5%, sort -1.5% |
 | [A dying instance asks plain_init for __del__](#a-dying-instance-asks-plain_init-for-__del__) | -1.7% (classes); M2: classes -1.6% |
 | [A call on the machine takes its arguments](#a-call-on-the-machine-takes-its-arguments) | -3.7% (fib), -0.8% (classes); M2: fib -1.7% |
+| [Keywords and defaults bind by slot](#keywords-and-defaults-bind-by-slot) | -1.6% (fib), -1.1% (classes); keyword call -46%; M2: classes -0.8% |
 | [Calls run on the machine](#calls-run-on-the-machine) | -12.9% (fib), +1.7% (generators), +1.2% (classes); M2: fib -2.2%, classes +2.0% |
 
 ### Releasing a number or string frees it at once
@@ -1567,6 +1568,21 @@ Instructions (M2 counters): fib -3.7%, classes -0.8%, the rest
 unchanged; cycles averaged over eight code layouts: fib -1.7%, the rest
 within noise (about 1%, strings and dicts changing sign with the order
 of the runs).
+
+### Keywords and defaults bind by slot
+
+A call that passed a keyword, or left a default to fill, built a fresh
+environment, declared every local and ran the general `bind_arguments`.
+When a plain function's parameters lead its slots, `open_parameters`
+now binds each keyword into the matching slot of a kept environment
+(comparing hashes, then spelling) and fills the remaining slots from
+`__defaults__` and `__kwdefaults__`. Anything it does not settle, such as
+an unknown or repeated name or a missing argument, resets those slots and
+falls back to `bind_arguments`, which reports the error. A call
+`f(i, b=2)` to `def f(a, b=1)` costs 2290 instructions instead of
+4220 (CPython: 466). Instructions (M2 counters): fib -1.6%, classes
+-1.1%, the rest unchanged; cycles averaged over eight code layouts:
+classes -0.8%, the rest within noise.
 
 ### A profile-guided build
 

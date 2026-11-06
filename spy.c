@@ -110,7 +110,7 @@ typedef struct { const char *name; unsigned flags; size_t line; Node *declared; 
  * statics chain its methods' self.attr stores through static_next; its
  * cells (CLASS_CELL, CLASSDICT_CELL) and static_attributes are found at
  * its first build. */
-struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, nodes; int kind, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
+struct Scope { Node *owner, *statics; Scope *parent; Symbol *symbols; size_t len, cap, *order, order_len, positional, parameters, positionals, nodes; int kind, tries, cells, kept_len; const char *within; SPYValue *kept, *static_attributes; };
 enum { CELLS_FOUND = 1, CLASS_CELL = 2, CLASSDICT_CELL = 4 };
 enum { KEPT = 4 };
 typedef struct { SPYValue *key, *value; int64_t hash; } Entry;
@@ -15025,15 +15025,21 @@ static int declare_name(SPYContext *c, SPYValue *env, const char *name) {
 }
 /* The symbols a plain function environment of scope binds in its own
  * entries, in co_varnames order: positional and keyword-only parameters,
- * *args, **kwargs, then the other locals as the scope found them; and the
- * number of parameters when all are positional, else SIZE_MAX. */
+ * *args, **kwargs, then the other locals as the scope found them; the
+ * number of parameters when all are positional, else SIZE_MAX; and without
+ * *args and **kwargs, the number of parameters, else SIZE_MAX, and of
+ * positional ones. */
 static NO_INLINE int order_scope(SPYContext *c, Scope *scope) {
     size_t *order = allocate(c, (scope->len + 1) * sizeof(*order)), len = 0;
     if (!order) return -1;
     Node *params = scope->kind == S_FUNCTION ? scope->owner->args : NULL;
-    scope->positional = 0;
-    for (Node *arg = params; arg; arg = arg->next)
-        scope->positional = arg->op == P_POSITIONAL || arg->op == P_POSONLY ? scope->positional + 1 : SIZE_MAX;
+    scope->positional = scope->parameters = scope->positionals = 0;
+    for (Node *arg = params; arg; arg = arg->next) {
+        int positional = arg->op == P_POSITIONAL || arg->op == P_POSONLY;
+        scope->positional = positional ? scope->positional + 1 : SIZE_MAX;
+        scope->positionals += positional;
+        scope->parameters = arg->op == P_VARARGS || arg->op == P_KWARGS ? SIZE_MAX : scope->parameters + (scope->parameters != SIZE_MAX);
+    }
     for (int pass = 0; pass < 3; pass++)
         for (Node *arg = params; arg; arg = arg->next) {
             Symbol *symbol = (arg->op == P_VARARGS ? 1 : arg->op == P_KWARGS ? 2 : 0) == pass ? remember_symbol(arg, scope, scope_find(scope, node_name(arg))) : NULL;
@@ -15698,24 +15704,83 @@ static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, 
 static void not_callable(SPYContext *, SPYValue *);
 static void release_owned(SPYValue *, void *);
 static Result run_machine(SPYContext *, SPYValue *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
+/* Whether string keys a and b are equal, b holding hash. */
+static int same_key(SPYValue *a, SPYValue *b) {
+    return a == b || (a->type == SPY_STRING && b->type == SPY_STRING && a->as.string.len == b->as.string.len &&
+                      !memcmp(a->as.string.data, b->as.string.data, a->as.string.len));
+}
+/* Bind keywords and defaults into the parameters of env, a plain function
+ * environment whose first argc are bound: 0 when every parameter is bound,
+ * 1 when the call needs bind_arguments, which reports what is wrong, with
+ * the parameters past argc unbound again. */
+static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords) {
+    Scope *scope = env->as.map.scope;
+    Entry *items = env->as.map.items;
+    size_t count = scope->parameters, posonly = 0, i, j;
+    for (Node *arg = fn->as.function.def->args; arg && arg->op == P_POSONLY; arg = arg->next) posonly++;
+    for (i = 0; keywords && i < keywords->as.map.len; i++) {
+        Entry *keyword = &map_items(keywords)[i];
+        for (j = argc > posonly ? argc : posonly; j < count; j++)
+            if (items[j].hash == keyword->hash && same_key(items[j].key, keyword->key)) break;
+        if (j == count || items[j].value != c->unbound) break;
+        spy_release(items[j].value); items[j].value = spy_retain(keyword->value);
+    }
+    SPYValue *defaults = NULL, *kwdefaults = NULL;
+    j = 0;
+    for (Node *arg = fn->as.function.def->args; arg && (!keywords || i == keywords->as.map.len); arg = arg->next, j++) {
+        if (items[j].value != c->unbound) continue;
+        SPYValue *value = NULL;
+        if (arg->op != P_KWONLY) {
+            if (!defaults) defaults = name_local(fn->as.function.metadata, "__defaults__");
+            size_t len = defaults->type == SPY_TUPLE ? defaults->as.seq.len : 0;
+            if (j + len >= scope->positionals) value = defaults->as.seq.items[j + len - scope->positionals];
+        } else {
+            if (!kwdefaults) kwdefaults = name_local(fn->as.function.metadata, "__kwdefaults__");
+            value = kwdefaults->type == SPY_DICT ? name_local(kwdefaults, arg->text) : NULL;
+        }
+        if (!value) break;
+        spy_release(items[j].value); items[j].value = spy_retain(value);
+    }
+    if (j == count && (!keywords || i == keywords->as.map.len)) return 0;
+    for (j = argc; j < count; j++) { spy_release(items[j].value); items[j].value = spy_retain(c->unbound); }
+    return 1;
+}
 /* A new environment of fn's scope with its arguments bound, or NULL;
  * with take, it has argv's references, bound or released. */
-static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
+static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
     Scope *scope = fn->as.function.def->scope;
-    /* The common call passes exactly the parameters, by position. */
-    int positional = !fn->as.function.signature && (!keywords || !keywords->as.map.len);
-    SPYValue *env = positional && scope->positional == argc ? kept_env(c, scope) : NULL;
+    int plain = !fn->as.function.signature;
+    /* Keywords and defaults bind to the parameters' entries when there are
+     * no *args and **kwargs and the positional arguments fit; only then may
+     * a kept environment, whose values open_locals sets, serve. A
+     * replace()d code's parameters bind under its names and then take the
+     * body's: the body's locals are declared after them. */
+    int direct = plain && !scope_order(c, scope) && scope->parameters != SIZE_MAX && argc <= scope->positionals;
+    SPYValue *env = direct ? kept_env(c, scope) : NULL;
     if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
     env->as.map.parent = spy_retain(fn->as.function.env);
     env->as.map.scope = scope;
     env->as.map.unit = spy_retain(fn->as.function.unit);
-    /* A replace()d code's parameters bind under its names and then take
-     * the body's: the body's locals are declared after them. */
-    int open = positional && fresh_locals(env) && !scope_order(c, scope) && scope->positional == argc;
-    int failed = fn->as.function.signature ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
+    int open = direct && fresh_locals(env);
+    int failed = !plain ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
         open ? open_locals(c, env, argc, argv, take) : declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
+    if (open && !failed && open_parameters(c, fn, env, argc, keywords)) failed = bind_arguments(c, fn, env, argc, argv, keywords);
     if (take && !open) release_all(argc, argv);
     if (failed) { release_locals(env); return NULL; }
+    return env;
+}
+/* function_env, inline for the common call of a function whose scope is
+ * ordered: exactly the parameters, by position. */
+static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
+    Scope *scope = fn->as.function.def->scope;
+    if (fn->as.function.signature || (keywords && keywords->as.map.len) || !scope->order || scope->positional != argc || scope->kind != S_FUNCTION)
+        return keyword_env(c, fn, argc, argv, keywords, take);
+    SPYValue *env = kept_env(c, scope);
+    if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
+    env->as.map.parent = spy_retain(fn->as.function.env);
+    env->as.map.scope = scope;
+    env->as.map.unit = spy_retain(fn->as.function.unit);
+    if (open_locals(c, env, argc, argv, take)) { release_locals(env); return NULL; }
     return env;
 }
 /* Room for the next running call, -1 when there is no memory for it. */
