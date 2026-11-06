@@ -185,7 +185,7 @@ struct SPYValue {
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
-        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; size_t statements; int expression, setup_annotations, future_flags; } unit;
+        struct { Node *nodes, *body, *definition, *annotate; char *filename; Scope *scope; SPYValue *owner, *replaced; Program *flat; size_t statements; int expression, setup_annotations, future_flags; } unit;
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
@@ -1234,6 +1234,7 @@ static void free_value(SPYValue *v) {
         Node *n = v->as.unit.nodes;
         while (n) { Node *next = n->allocated; drop_kept(c, n->scope, 1); free_scope(n->scope); free_program(n->code); free_program(n->flat); mem_free(n->text); mem_free(n->original); mem_free(n->local); mem_free(n); n = next; }
         free_scope(v->as.unit.scope);
+        free_program(v->as.unit.flat);
         if (c->filename_from == v) c->filename_from = c->quiet_unit = NULL;
         mem_free(v->as.unit.filename);
         break;
@@ -13430,7 +13431,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_AWITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_BLOCK)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -13459,6 +13460,7 @@ struct Machine {
     int awaiting, drop; /* drop: a yield statement's resumption pushes no sent value. */
     int outermost; /* run_machine returns when it does: a generator's, or a call's entered from C. */
     Frame frame; /* Borrowed from its generator or call. */
+    Node *owner; /* A module body's: the node its steps of no node tick on. */
 };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
@@ -13516,7 +13518,8 @@ static int list_expands(Node *n, int calls) {
 static int expands(Node *n, int calls) {
     if (!n) return 0;
     if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && n->kind == N_CALL) ||
-        (calls == BODY && (n->kind == N_IF || n->kind == N_RETURN))) return 1;
+        (calls == BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
+                           n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH))) return 1;
     if (n->kind == N_COMPREHENSION)
         return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
@@ -13549,6 +13552,16 @@ static void compile_test(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
     if (n && !expands(n, p->calls) && (n->kind != N_COMPARE || operator_right(n))) emit(c, p, operator_right(n) ? BC_OPERATE : BC_EVAL, n, 1);
     else compile_expr(c, p, n);
+}
+/* A call's or class header's arguments, each added by BC_ARG: the
+ * positional and starred ones first, then the keywords. */
+static void compile_arguments(SPYContext *c, Program *p, Node *args) {
+    for (int pass = 0; pass < 2; pass++) for (Node *a = args; a; a = a->next) {
+        int keyword = a->kind == N_KEYWORD || a->kind == N_MAPPING;
+        if (keyword != pass) continue;
+        compile_expr(c, p, keyword || a->kind == N_STAR ? a->a : a);
+        emit(c, p, BC_ARG, a, a->kind);
+    }
 }
 static void compile_expr(SPYContext *c, Program *p, Node *n) {
     if (c->error_type[0]) return;
@@ -13625,18 +13638,14 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
         if (plain_call(n) || keyword_plain_call(n)) {
+            /* A plain method call's object is on the stack in its callee's place. */
             int argc = 0;
-            compile_expr(c, p, n->a);
+            compile_expr(c, p, n->a->kind == N_ATTR && plain_call(n) ? n->a->a : n->a);
             for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
             emit(c, p, plain_call(n) ? BC_CALLN : BC_CALLK, n, argc); break;
         }
         compile_expr(c, p, n->a); emit(c, p, BC_ARGS, n, 0);
-        for (int pass = 0; pass < 2; pass++) for (Node *a = n->args; a; a = a->next) {
-            int keyword = a->kind == N_KEYWORD || a->kind == N_MAPPING;
-            if (keyword != pass) continue;
-            compile_expr(c, p, keyword || a->kind == N_STAR ? a->a : a);
-            emit(c, p, BC_ARG, a, a->kind);
-        }
+        compile_arguments(c, p, n->args);
         emit(c, p, BC_CALL, n, 0); break;
     case N_NAMED:
         compile_expr(c, p, n->b); emit(c, p, BC_NAMED, n->a, 0); break;
@@ -13812,7 +13821,15 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
         emit(c, p, BC_STORE, n->a, 1); break;
     case N_ANNASSIGN:
-        compile_expr(c, p, n->c); compile_store(c, p, n->a, n); break;
+        /* Without a value, an attribute or subscript target's primary is
+         * evaluated, and nothing stored. */
+        if (n->c) { compile_expr(c, p, n->c); compile_store(c, p, n->a, n); }
+        else if (n->a->kind != N_NAME) {
+            compile_expr(c, p, n->a->a); emit(c, p, BC_POP, n, 0);
+            if (n->a->kind == N_INDEX) { compile_expr(c, p, n->a->b); emit(c, p, BC_POP, n, 0); }
+        }
+        if (n->flags & (F_FUTURE | F_CONDITIONAL)) emit(c, p, BC_ANNOTATE, n, 0);
+        break;
     case N_MATCH: {
         /* The subject stays on the stack until a case is chosen. */
         size_t exits = SIZE_MAX;
@@ -13905,7 +13922,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             compile_body(c, p, h->b); emit(c, p, BC_POP_BLOCK, NULL, 0);
             emit(c, p, BC_JUMP, NULL, 1); patch(p, branch, p->len);
         }
-        if (n->args) emit(c, p, BC_RERAISE, n, 0);
+        if (n->args) emit(c, p, BC_RERAISE, NULL, 0);
         for (size_t i = first; i < p->len; i++)
             if (p->items[i].op == BC_JUMP && p->items[i].arg && !p->items[i].target) p->items[i].target = p->len;
         patch(p, end, p->len);
@@ -13925,10 +13942,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         for (Node *a = n->args; a && !n->params; a = a->next) stacked |= expands(a, p->calls);
         if (stacked) {
             emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
-            for (Node *a = n->args; a; a = a->next) {
-                compile_expr(c, p, a->kind == N_KEYWORD || a->kind == N_MAPPING || a->kind == N_STAR ? a->a : a);
-                emit(c, p, BC_ARG, a, a->kind);
-            }
+            compile_arguments(c, p, n->args);
         }
         emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
         for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
@@ -13948,11 +13962,22 @@ static int check_async_return(SPYContext *c, Node *n) {
     }
     return 0;
 }
-/* A generator's body, or a function body that holds a call, on the machine. */
+/* Whether statements body hold a loop, a comprehension's too, outside
+ * the definitions among them. */
+static int loops(Node *body) {
+    for (Node *n = body; n; n = n->next) {
+        if (n->kind == N_WHILE || n->kind == N_FOR || n->kind == N_COMPREHENSION) return 1;
+        if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS) continue;
+        if (loops(n->a) || loops(n->b) || loops(n->c) || loops(n->args)) return 1;
+    }
+    return 0;
+}
+/* A generator's body, or a function body that holds a call or a loop, on
+ * the machine: a body of neither always ends, so it may run on the walker. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = (n->kind == N_DEF && n->op) || list_expands(n->b, 0);
     /* An annotation or lazy value function's body is one walker statement. */
-    if (!generator && (n->b->kind == N_ANNOTATIONS || !list_expands(n->b, CALLS))) return 0;
+    if (!generator && (n->b->kind == N_ANNOTATIONS || !(list_expands(n->b, CALLS) || loops(n->b)))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
@@ -14460,7 +14485,10 @@ static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYVal
         cell->as.cell.name = spy_string(c, name, strlen(name));
         if (!cell->as.cell.name) { spy_release(cell); return NULL; }
         cell->as.cell.env = spy_retain(env);
-        if (weak_push(c, &c->cells, &c->cells_len, &c->cells_cap, cell)) { spy_release(cell); return NULL; }
+        if (weak_push(c, &c->cells, &c->cells_len, &c->cells_cap, cell)) {
+            spy_release(cell);
+            return spy_error(c, "MemoryError", "allocation failed");
+        }
     } else cell->as.cell.value = value ? spy_retain(value) : NULL;
     return cell;
 }
@@ -14622,10 +14650,16 @@ static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
  * goes to call_method without the bound method the attribute would make. */
 static SPYValue *call_native_method(SPYContext *, SPYValue *, int, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *call_function(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *method_of(SPYContext *, Node *, SPYValue *, SPYValue **, int *);
 static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self, int *method) {
     SPYValue *object = eval(c, f, n->a);
     *self = NULL; *method = -1;
-    if (!object) return NULL;
+    return object ? method_of(c, n, object, self, method) : NULL;
+}
+/* The callee of method call n.b() on object, which it takes: a function
+ * with *self the object to pass first, the object itself with *method its
+ * native method, or else the attribute. */
+static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **self, int *method) {
     relocate(c, n);
     if (plain_instance(object) && (node_access(c, object, n) & ATTR_READ) == ATTR_METHOD && !env_find(object, node_name(n->b))) {
         *self = object;
@@ -19686,6 +19720,7 @@ static SPYValue *conditional_set(SPYContext *c, Frame *f) {
             return spy_retain(name_local(e->as.map.class_cell, "__conditional_annotations__"));
     return name_get(c, f->env, "__conditional_annotations__");
 }
+static void record_annotation(SPYContext *, Frame *, Node *);
 static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
     if (n->c) {
         SPYValue *value = eval(c, f, n->c);
@@ -19696,7 +19731,13 @@ static NO_INLINE void annotated_assign(SPYContext *c, Frame *f, Node *n) {
         SPYValue *index = object && n->a->kind == N_INDEX ? eval(c, f, n->a->b) : NULL;
         spy_release(object); spy_release(index);
     }
-    if (!c->error_type[0] && (n->flags & F_FUTURE)) {
+    if (!c->error_type[0]) record_annotation(c, f, n);
+}
+/* After annotated assignment n's store, the annotation it records: its
+ * text under `from __future__ import annotations`, or, in a conditional
+ * block, that it ran. */
+static NO_INLINE void record_annotation(SPYContext *c, Frame *f, Node *n) {
+    if (n->flags & F_FUTURE) {
         SPYValue *annotations = name_get(c, f->env, "__annotations__");
         SPYValue *key = annotations ? spy_string(c, n->a->text, strlen(n->a->text)) : NULL;
         SPYValue *value = key ? spy_string(c, n->b->text, (size_t)n->b->op) : NULL;
@@ -19767,6 +19808,38 @@ static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char
     spy_release(fn);
     return status;
 }
+/* A module's body: on the machine, compiled at its first run, so that its
+ * loops are steps and its calls run there; an expression or interactive
+ * unit, whose statements' values the walker reports, on the walker. */
+static Result module_body(SPYContext *c, Frame *f) {
+    SPYValue *unit = f->unit;
+    Node *body = unit->as.unit.body;
+    if (f->interactive || unit->as.unit.expression || !body) return execute(c, f, body);
+    if (!unit->as.unit.flat) {
+        Program *p = allocate(c, sizeof(*p));
+        if (!p) return (Result){FLOW_ERROR, NULL};
+        p->calls = BODY;
+        /* The body's value is its last statement's, when that is an expression. */
+        Node *last = body;
+        while (last->next) last = last->next;
+        for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
+        if (last->kind == N_EXPR) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
+        else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
+        if (c->error_type[0]) { free_program(p); return (Result){FLOW_ERROR, NULL}; }
+        unit->as.unit.flat = p;
+    }
+    Machine *m = machine_new(c, unit->as.unit.flat, f->env, unit);
+    if (!m) return (Result){FLOW_ERROR, NULL};
+    m->owner = body;
+    SPYValue *outer = c->eval_env;
+    c->eval_env = f->env;
+    Result r = run_machine(c, NULL, m, NULL, NULL, 0, NULL);
+    c->eval_env = outer;
+    machine_edges(m, release_owned, NULL);
+    free_machine(c, m);
+    if (r.flow == FLOW_RETURN) r.flow = FLOW_NORMAL;
+    return r;
+}
 static Result execute_module(SPYContext *c, Frame *f) {
     /* A module's docstring is its first statement's store to __doc__. */
     if (!f->interactive && !f->unit->as.unit.expression) {
@@ -19777,7 +19850,7 @@ static Result execute_module(SPYContext *c, Frame *f) {
     }
     if (enter_frame(c, f->env, f->unit)) return (Result){FLOW_ERROR, NULL};
     Result r = setup_annotations(c, f, f->unit->as.unit.setup_annotations) || start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
-        (Result){FLOW_ERROR, NULL} : execute(c, f, f->unit->as.unit.body);
+        (Result){FLOW_ERROR, NULL} : module_body(c, f);
     leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     if (r.flow != FLOW_ERROR && c->error_type[0]) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
     return r;
@@ -20918,7 +20991,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYVal
 }
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
+static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
+    if (n->a->kind == N_ATTR) return stack_method_call(c, m, n, argc, calls, env);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
     relocate(c, n);
     if (calls && machine_function(c, callee)) {
@@ -20929,6 +21004,28 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     result = call_plain(c, callee, -1, n, argc, argv);
+    for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+    return result;
+}
+/* BC_CALLN of method call node n: its object, then its arguments, on the
+ * stack; the method found as plain_callee finds it. */
+static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
+    SPYValue **argv = &m->stack[m->len - argc - 1], *object = argv[0], *self = NULL, *result = NULL;
+    int method = -1;
+    SPYValue *callee = method_of(c, n->a, spy_retain(object), &self, &method);
+    relocate(c, n);
+    if (self) spy_release(object); /* The stack holds it; a native method's callee is the reference passed. */
+    /* A method takes the object first; another callee, the arguments after it. */
+    size_t skip = !self;
+    if (callee && method < 0 && calls && machine_function(c, callee)) {
+        m->len -= argc + 1;
+        if (skip) spy_release(object);
+        if ((*env = function_env(c, callee, argc + !skip, argv + skip, NULL, 1))) return callee;
+        spy_release(callee);
+        return NULL;
+    }
+    if (callee) result = call_plain(c, callee, method, n, argc + !skip, argv + skip);
+    spy_release(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return result;
 }
@@ -21042,7 +21139,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
         else if (!quiet(c, &f)) {
             /* An instruction of no node ticks on the definition, keeping the
              * frame's line; while only a line would be recorded, it need not. */
-            n = generator ? generator->as.generator.node : c->calls[c->calls_len - 1]->fn->as.function.def;
+            n = generator ? generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
             if (tick(c, &f, n)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
@@ -21088,6 +21185,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
             continue;
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
+        CASE(BC_ANNOTATE) record_annotation(c, &f, n); break;
         CASE(BC_POP) spy_release(machine_pop(m)); NEXT;
         CASE(BC_SLICE)
             b = machine_pop(m); a = machine_pop(m); value = machine_pop(m);
