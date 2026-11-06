@@ -20,6 +20,10 @@ Unreleased (0.8.0):
 - sort keys, next(), send(), str(), repr(), __new__, properties, __getattr__
   and operator methods no longer use the C stack in most function code
 - class bodies that call or loop no longer use the C stack
+- code compiled while pausing is set pauses inside operator, subscript,
+  format(), f-string and every function's special methods
+- calling a class body's function directly returns its __class__ cell when
+  the body loops or calls
 - == on deeply nested containers no longer raises RecursionError
 - a method call looks up its method before evaluating arguments that call
   code; an attribute read in an operator honors a property added later

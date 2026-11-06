@@ -287,7 +287,8 @@ These run as machines on the heap, in one native activation of
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`;
-- the `__str__` and `__repr__` that `str` and `repr` call;
+- the `__str__`, `__repr__` and `__format__` that `str`, `repr` and
+  `format` call;
 - property getters and `__getattr__`, `__enter__`, `__bool__`, binary
   operator, comparison, `__getitem__`, `__setitem__` and `__contains__`
   methods of instances, where a step of their own reaches them;
@@ -295,12 +296,24 @@ These run as machines on the heap, in one native activation of
 - class bodies that hold a call or a loop, when the class has no type
   parameters or annotations and the builtin `__build_class__` makes it.
 
+Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
+function or comprehension is first compiled) runs every function and
+class body on the machine and gives every operator, subscript and
+f-string field a step of its own, so their special methods are among the
+calls above. Code compiled without pausing keeps faster steps that
+evaluate an assignment of one operator, or arithmetic on names and
+literals, whole.
+
 A call that native code makes runs in an activation of its own: another
-special method, a host function, the metaclass call that makes a class,
-and a call from what the walker evaluates whole. The walker runs a function whose body holds no
-call or loop, which ends within a bounded number of steps, and, inside a
-function on the machine, arithmetic of more than one operator on names
-and literals, so an operator method such an expression reaches nests. The engine counts
+special method (an augmented subscript assignment's, an unpacking's
+`__iter__`, a property of a class with `__getattr__`), a host function,
+the metaclass call that makes a class, an import, `exec` and `eval`, and
+a call from what the walker evaluates whole. Without pausing compiled
+in, the walker runs a function whose body holds no call or loop, which
+ends within a bounded number of steps, and, inside a function on the
+machine, an assignment of one operator on operands at hand and
+arithmetic on names and literals, so an operator method such an
+expression reaches nests. The engine counts
 the activations and pauses only in the outermost one, so a pause due
 inside native code waits until that code returns. Interactive and
 expression units run on the walker and do not pause.
@@ -312,7 +325,9 @@ under the stop rule (3.1), running no handler or `finally` body.
 `tests/api.c` pauses a program of calls, a generator, a class call and a
 comprehension more than twenty times and checks its value; checks that
 another call runs while it is paused, that a sort pauses in its key
-calls and a class body inside its loop, that a pause due inside a host function's call back waits for it,
+calls, a class body inside its loop, and code compiled while pausing
+inside operator, subscript and f-string special methods, that a pause
+due inside a host function's call back waits for it,
 within one further budget, and that an interrupt pauses
 too; and frees a context with a call paused. `tests/tla/SpyPause.tla`
 models the contract.

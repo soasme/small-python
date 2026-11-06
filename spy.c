@@ -122,7 +122,7 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */,
        F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
-       F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments. */ };
+       F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -330,6 +330,7 @@ struct SPYContext {
     SPYValue *none, *booleans[2], *not_implemented, *ellipsis;
     SPYValue *small_ints[262]; /* -5 through 256, shared as in CPython. */
     SPYValue *unbound; /* What a forwarded empty cell reads as. */
+    SPYValue *field_calls[2]; /* The builtin repr and format, as an f-string field calls them while calls can pause. */
     SPYValue *eval_env; /* Borrowed from the currently evaluating frame. */
     SPYValue *inherited_exception; /* Borrowed from a suspended caller. */
     /* Steps left in this outermost call: SIZE_MAX without a limit, zero
@@ -429,6 +430,9 @@ static SPYValue *traceback_construct(SPYContext *, size_t, SPYValue *const *, SP
 static SPYValue *function_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *function_from_code(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *call_module_code(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+static int body_arguments(SPYContext *, SPYValue *, size_t, SPYValue *);
+static SPYValue *class_env(SPYContext *, SPYValue *, SPYValue *);
+static int class_body_begin(SPYContext *, SPYValue *, Node *, SPYValue *, SPYValue *);
 static Node *replaced_signature(SPYValue *);
 static SPYValue *forward_env(SPYContext *, Node *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -12151,6 +12155,7 @@ static SPYValue *convert_field(SPYContext *c, SPYValue *value, int conversion) {
     return conversion == 'a' ? ascii_repr(c, value) :
         conversion ? stringify(c, value, conversion == 'r') : spy_retain(value);
 }
+enum { CONVERT_CALL = 256 }; /* BC_CONVERT's arg for a field's call (convert_step). */
 /* format(value, spec): Format (7.5.8), whose result may be a str subclass. */
 static ALWAYS_INLINE SPYValue *format_call(SPYContext *c, SPYValue *value, SPYValue *spec) {
     SPYValue *format = spec && spec->type != SPY_NONE ? spy_retain(spec) : spy_string(c, "", 0);
@@ -12178,6 +12183,7 @@ static SPYValue *join_strings(SPYContext *c, SPYValue *items) {
     Buffer out = {.ctx = c};
     for (size_t i = 0; i < items->as.seq.len && !c->error_type[0]; i++) {
         SPYValue *text = items->as.seq.items[i];
+        if (text->type != SPY_STRING) text = builtin_value(c, text, SPY_STRING);
         append(&out, text->as.string.data, text->as.string.len);
     }
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
@@ -13640,7 +13646,7 @@ static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValu
  * literals (arithmetic) or an operator on operands at hand
  * (operator_right), whose special methods its steps call on the
  * machine. */
-enum { CALLS = 1, BODY = 2 };
+enum { CALLS = 1, BODY = 2, PAUSING = 3 };
 static int expands(Node *n, int calls);
 static int loops(Node *);
 static int list_expands(Node *n, int calls) {
@@ -13661,11 +13667,11 @@ static int expands(Node *n, int calls) {
     if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
     if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && n->kind == N_CALL) ||
-        (calls == BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
+        (calls >= BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
                            n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
-                           n->kind == N_SLICE))) return 1;
+                           n->kind == N_SLICE)) || (calls == PAUSING && n->kind == N_FORMAT)) return 1;
     if (n->kind == N_COMPREHENSION)
         return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
@@ -13733,7 +13739,19 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     case N_INTERPOLATION:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INTERPOLATION, n, 0); break;
     case N_FORMAT:
-        compile_expr(c, p, n->a); emit(c, p, BC_CONVERT, n, n->op);
+        compile_expr(c, p, n->a);
+        if (p->calls == PAUSING) {
+            /* While calls can pause, a field's str(), repr() and format()
+             * are calls on the machine, their callee before the value
+             * (F_CALLEE_FIRST); the f-string joins a str subclass's text. */
+            n->flags |= F_CALLEE_FIRST;
+            if (n->op == 's' || n->op == 'r') { emit(c, p, BC_CONVERT, n, n->op | CONVERT_CALL); emit(c, p, BC_CALLN, n, 1); }
+            else if (n->op) emit(c, p, BC_CONVERT, n, n->op);
+            emit(c, p, BC_CONVERT, n, 'f' | CONVERT_CALL);
+            if (n->b) compile_expr(c, p, n->b);
+            emit(c, p, BC_CALLN, n, 1 + !!n->b); break;
+        }
+        emit(c, p, BC_CONVERT, n, n->op);
         compile_expr(c, p, n->b); emit(c, p, BC_FORMAT, n, 0); break;
     case N_YIELD: case N_AWAIT:
         /* A yield of a name or literal loads it in its own step (arg 1). */
@@ -13819,13 +13837,16 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
 }
 static void compile_body(SPYContext *, Program *, Node *);
 static void compile_target(SPYContext *, Program *, Node *);
+/* A target expands as in a body, even while calls can pause: BC_STORE
+ * calls a Python __setitem__ on the machine (store_call). */
+static int target_expands(Program *p, Node *n) { return expands(n, p->calls == PAUSING ? BODY : p->calls); }
 /* Store the value on top of the stack in target n, then pop it. */
 static void compile_store(SPYContext *c, Program *p, Node *n, Node *at) {
-    if (!expands(n, p->calls)) emit(c, p, BC_STORE, n, 1);
+    if (!target_expands(p, n)) emit(c, p, BC_STORE, n, 1);
     else { compile_target(c, p, n); emit(c, p, BC_POP, at, 0); }
 }
 static void compile_target(SPYContext *c, Program *p, Node *n) {
-    if (!expands(n, p->calls)) { emit(c, p, BC_STORE, n, 0); return; }
+    if (!target_expands(p, n)) { emit(c, p, BC_STORE, n, 0); return; }
     if (n->kind == N_ATTR || n->kind == N_INDEX) {
         compile_expr(c, p, n->a);
         if (n->kind == N_INDEX) compile_expr(c, p, n->b);
@@ -13885,7 +13906,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
 static int compile_comprehension(SPYContext *c, Node *n) {
     n->code = allocate(c, sizeof(*n->code));
     if (!n->code) return -1;
-    n->code->calls = BODY;
+    n->code->calls = c->pausing ? PAUSING : BODY;
     compile_comprehension_clause(c, n->code, n, n->a);
     if (n->op == N_TUPLE) emit(c, n->code, BC_NONE, n, 0);
     emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
@@ -14153,18 +14174,20 @@ static int loops(Node *body) {
 /* A generator's body, or a function or class body that holds a call or a loop, on
  * the machine: a body of neither always ends, so it may run on the walker. */
 static int compile_generator(SPYContext *c, Node *n) {
-    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0));
-    /* An annotation or lazy value function's body is one walker statement. */
-    if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS || !(list_expands(n->b, CALLS) || loops(n->b)))) return 0;
+    int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
+    /* An annotation or lazy value function's body is one walker statement;
+     * while calls can pause, every other body runs on the machine. */
+    if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS || (mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = BODY;
+    p->calls = mode;
     if (generator) n->code = p;
     else n->flat = p;
     compile_body(c, p, n->b);
-    /* The implicit return has no node: it runs on the last line executed. */
-    emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN);
+    /* The implicit return has no node: it runs on the last line executed;
+     * a class body's returns its __class__ cell (class_part). */
+    emit(c, p, n->kind == N_CLASS ? BC_CLASS : BC_NONE, NULL, 6); emit(c, p, BC_FLOW, NULL, FLOW_RETURN);
     return c->error_type[0] ? -1 : 0;
 }
 static SPYValue *eval(SPYContext *, Frame *, Node *);
@@ -15990,10 +16013,16 @@ static int bind_keywords(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc
 static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv,
                                        const Entry *kw, size_t kwc, SPYValue *keywords, int take) {
     Scope *scope = fn->as.function.def->scope;
-    if (fn->as.function.def->kind == N_CLASS && fn->as.function.attributes && fn->as.function.attributes->type == V_ENV) {
-        /* A class body called by its statement runs in the env class_part made. */
+    if (fn->as.function.def->kind == N_CLASS) {
+        /* A class body called by its statement runs in the env class_part
+         * made; called otherwise, with the globals as its namespace (28.1). */
         SPYValue *env = fn->as.function.attributes;
-        fn->as.function.attributes = NULL;
+        if (env && env->type == V_ENV) fn->as.function.attributes = NULL;
+        else if (body_arguments(c, fn, argc, kwc ? kw[0].key : NULL) ||
+                 !(env = class_env(c, fn->as.function.env, namespace_map(module_env(c, fn->as.function.env)))) ||
+                 class_body_begin(c, fn->as.function.unit, fn->as.function.def, env, NULL)) {
+            spy_release(env); env = NULL;
+        }
         if (take) release_all(argc, argv);
         return env;
     }
@@ -20099,7 +20128,7 @@ static Result module_body(SPYContext *c, Frame *f) {
     if (!unit->as.unit.flat) {
         Program *p = allocate(c, sizeof(*p));
         if (!p) return (Result){FLOW_ERROR, NULL};
-        p->calls = BODY;
+        p->calls = c->pausing ? PAUSING : BODY;
         /* The body's value is its last statement's, when that is an expression. */
         Node *last = body;
         while (last->next) last = last->next;
@@ -21477,17 +21506,33 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     c->entering_kind = CALL_CHECKED;
     return allocator->as.wrapper.function;
 }
-/* The Python __str__ or __repr__ that callee, str or repr, calls on its
- * one argument, an instance, *name its name; else NULL. */
-static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **name) {
-    int repr = callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_REPR;
-    if (argc != 1 || argv[0]->type != SPY_INSTANCE || argv[0]->as.map.base || (!repr && callee != c->types[SPY_STRING])) return NULL;
-    SPYValue *cls = argv[0]->as.map.parent, *function = repr ? NULL : class_lookup(cls, "__str__");
+/* The Python __str__, __repr__ or __format__ that callee, str, repr or
+ * format, calls on its first argument, an instance, found[0] its name and
+ * found[1] the spec format passes it, or NULL; else NULL. */
+static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
+    SPYValue **name = &found[0], **spec = &found[1];
+    if (argc > 2 || argv[0]->as.map.base) return NULL;
+    int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1, repr = id == B_REPR;
+    if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && callee != c->types[SPY_STRING])) return NULL;
+    SPYValue *cls = argv[0]->as.map.parent, *function;
+    if (id == B_FORMAT) {
+        /* object's __format__ of an empty spec is str(). */
+        SPYValue *text = argc == 2 ? argv[1] : NULL;
+        function = class_lookup(cls, "__format__");
+        if (function && machine_function(c, function)) {
+            if (!(*spec = text ? spy_retain(text) : spy_string(c, "", 0)) || !(*name = spy_string(c, "__format__", 10))) { spy_release(*spec); *spec = NULL; return NULL; }
+            c->entering_kind = CALL_CHECKED;
+            return function;
+        }
+        if (function != name_local(c->object, "__format__") || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
+    }
+    function = repr ? NULL : class_lookup(cls, "__str__");
     /* object's __str__ is the instance's __repr__. */
     if (!repr && function && !machine_function(c, function) && function == name_local(c->object, "__str__"))
         function = NULL, repr = 1;
     if (!function) function = class_lookup(cls, "__repr__");
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, repr ? "__repr__" : "__str__", repr ? 8 : 7))) return NULL;
+    *spec = NULL;
     c->entering_kind = CALL_CHECKED;
     return function;
 }
@@ -21527,15 +21572,17 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
-    SPYValue *name, *convert = method < 0 ? conversion_method(c, callee, argc, argv, &name) : NULL;
+    SPYValue *found[2], *convert = method < 0 && argc && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
     if (convert) {
-        /* str() or repr() of an instance enters its Python __str__ or
-         * __repr__ (CALL_CHECKED), the name and instance on the stack. */
+        /* str(), repr() or format() of an instance enters its Python
+         * __str__, __repr__ or __format__ (CALL_CHECKED), the name and
+         * instance on the stack. */
         spy_release(callee);
-        if (machine_push(c, m, name)) { release_all(argc, argv); return NULL; }
-        if (machine_push(c, m, argv[0])) return NULL;
-        SPYValue *self = spy_retain(argv[0]);
-        if (!(*env = function_env(c, convert, 1, &self, NULL, 1))) return NULL;
+        if (argc == 2) spy_release(argv[1]);
+        if (machine_push(c, m, found[0])) { spy_release(argv[0]); spy_release(found[1]); return NULL; }
+        if (machine_push(c, m, argv[0])) { spy_release(found[1]); return NULL; }
+        found[0] = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
@@ -21587,6 +21634,14 @@ static NO_INLINE void method_load(SPYContext *c, Machine *m, Node *n, SPYValue *
     }
     spy_release(object);
     if (callee) machine_push(c, m, callee);
+}
+/* BC_CONVERT: field conversion arg of value; or, with CONVERT_CALL, value
+ * after the callee of its conversion or format ('f'), str, repr or format,
+ * for the call after it. */
+static NO_INLINE SPYValue *convert_step(SPYContext *c, Machine *m, SPYValue *value, int arg) {
+    if (arg < CONVERT_CALL) return convert_field(c, value, arg);
+    SPYValue *callee = arg == ('s' | CONVERT_CALL) ? c->types[SPY_STRING] : c->field_calls[arg == ('f' | CONVERT_CALL)];
+    return machine_push(c, m, spy_retain(callee)) ? NULL : spy_retain(value);
 }
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
@@ -21645,13 +21700,15 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (machine_push(c, m, args) || !*env) { *env = NULL; spy_release(callee); return NULL; }
         return spy_retain(callee);
     }
-    SPYValue *name, *convert = conversion_method(c, callee, argc, argv, &name);
+    SPYValue *found[2], *convert = argc && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
     if (convert) {
-        /* The method's name takes the callee's place (CALL_CHECKED). */
+        /* The method's name takes the callee's place (CALL_CHECKED); a
+         * spec leaves the stack. */
         spy_release(callee);
-        argv[-1] = name;
-        SPYValue *self = spy_retain(argv[0]);
-        if (!(*env = function_env(c, convert, 1, &self, NULL, 1))) return NULL;
+        argv[-1] = found[0];
+        if (argc == 2) spy_release(machine_pop(m));
+        found[0] = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
@@ -22011,22 +22068,29 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
  * with its header's bases and keywords on the stack (arg 3) or evaluated
  * here (arg 4), its state and its body, a function whose env the state's
  * is (keyword_env), go on the stack for the BC_CALLN after it; arg 5 takes
- * that state and the body's value, and makes the class. When the builtin
+ * that state and the body's value, its __class__ cell or None, and makes
+ * the class. Arg 6 ends a body, making that value. When the builtin
  * __build_class__ does not make it, or its body is not compiled, it is
  * made at once: the state is a tuple of it alone, and the call tuple().
  * The value to push, or NULL with an error. */
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
     Node *n = ins->node;
     SPYValue *bases, *arguments, *name, *body = NULL;
+    if (ins->arg == 6) {
+        /* The body's end, in its env, whose scope's owner is the class statement. */
+        SPYValue *classcell = NULL;
+        if (class_body_end(c, f->env->as.map.scope->owner, f->env, &classcell)) { spy_release(classcell); return NULL; }
+        return classcell ? classcell : spy_none(c);
+    }
     if (ins->arg == 1) return generic_class(c, f, n);
     if (ins->arg == 5) {
-        SPYValue *result = machine_pop(m), *v = machine_pop(m), **items = v->as.seq.items, *classcell = NULL;
-        spy_release(result);
-        if (v->as.seq.len == 1) { body = spy_retain(items[0]); spy_release(v); return body; }
-        ClassState state = {spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), spy_retain(items[3]),
-                            items[4] == c->none ? NULL : spy_retain(items[4]), spy_retain(items[5])};
-        if (class_body_end(c, n, state.env, &classcell)) class_state_free(&state);
-        else body = class_create(c, items[6], &state, classcell);
+        SPYValue *classcell = machine_pop(m), *v = machine_pop(m), **items = v->as.seq.items;
+        if (v->as.seq.len == 1) body = spy_retain(items[0]);
+        else {
+            ClassState state = {spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), spy_retain(items[3]),
+                                items[4] == c->none ? NULL : spy_retain(items[4]), spy_retain(items[5])};
+            body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell);
+        }
         spy_release(classcell); spy_release(v);
         return body;
     }
@@ -22446,7 +22510,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m); machine_push(c, m, augmented(c, ins->arg, a, b)); break;
         CASE(BC_CONVERT)
-            a = machine_pop(m); machine_push(c, m, convert_field(c, a, ins->arg)); break;
+            a = machine_pop(m); machine_push(c, m, convert_step(c, m, a, ins->arg)); break;
         CASE(BC_TEMPLATE)
             a = machine_pop(m); machine_push(c, m, template_from_parts(c, a->as.seq.len, a->as.seq.items)); break;
         CASE(BC_INTERPOLATION)
@@ -28251,6 +28315,14 @@ static SPYValue *module_code_function(SPYContext *c, SPYValue *code, SPYValue *g
 }
 /* A function of module, eval, or class body code, which takes no arguments,
  * or of a generator expression's code, which takes its iterable (28.1). */
+/* A module or class body's code takes no arguments: -1 with the error
+ * for argc of them or the keyword key. */
+static int body_arguments(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *key) {
+    const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
+    if (argc) errorf(c, "TypeError", "%s() takes 0 positional arguments but %zu %s given", name, argc, argc == 1 ? "was" : "were");
+    else if (key) errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
+    return argc || key ? -1 : 0;
+}
 static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     const char *name = name_text(fn->as.function.metadata, "__qualname__")->as.string.data;
     Node *def = fn->as.function.def;
@@ -28272,11 +28344,7 @@ static SPYValue *call_module_code(SPYContext *c, SPYValue *fn, size_t argc, SPYV
         }
         return generator;
     }
-    if (argc) return errorf(c, "TypeError", "%s() takes 0 positional arguments but %zu %s given", name, argc, argc == 1 ? "was" : "were");
-    if (keywords && keywords->as.map.len) {
-        SPYValue *key = map_items(keywords)[0].key;
-        return errorf(c, "TypeError", "%s() got an unexpected keyword argument '%s'", name, key->type == SPY_STRING ? key->as.string.data : "");
-    }
+    if (body_arguments(c, fn, argc, keywords && keywords->as.map.len ? map_items(keywords)[0].key : NULL)) return NULL;
     SPYValue *global = module_env(c, fn->as.function.env), *unit = fn->as.function.unit, *env;
     if (def) {
         /* A class body's code runs with the globals as its namespace and
@@ -29893,6 +29961,7 @@ SPYContext *spy_context_new(void) {
         SPYValue *v = value_new(c, SPY_NATIVE);
         if (!v) goto fail;
         v->as.native.call = builtin; v->as.native.data = (void *)(intptr_t)i;
+        if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);
         spy_release(v);
         if (status) goto fail;

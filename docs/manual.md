@@ -952,10 +952,13 @@ error set, and `spy_paused` returns `SPY_STOP_STEPS` or
 `SPY_STOP_INTERRUPT`. `spy_resume(ctx)` runs it on from the step where it
 paused, with fresh budgets, and returns its value, or NULL with an error or
 paused again. A call pauses only at a step where its frames are all on the
-engine's machine: a pause that becomes due inside native code, such as a
-`sorted` key function or a host function, waits until that code returns,
-and a further budget spent before then stops the call. Other calls may run
-while one is paused; freeing the context stops a paused call.
+engine's machine: a pause that becomes due inside native code, such as an
+import, `exec` or a host function, waits until that code returns, and a
+further budget spent before then stops the call. Code compiled while the
+limit is set gives every operator, subscript and f-string field a step of
+its own, so their special methods pause too; set it before running the
+code. Other calls may run while one is paused; freeing the context stops a
+paused call.
 
 `spy_set_policy` installs a callback asked before each sensitive action, as
 CPython's audit hooks (PEP 578) are, with an event name and a tuple of its

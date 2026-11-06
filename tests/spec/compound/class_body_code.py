@@ -125,6 +125,14 @@ assert_eq(str(assert_raises(TypeError, f, 1)), "C() takes 0 positional arguments
 assert_eq(str(assert_raises(TypeError, f, 1, 2)), "C() takes 0 positional arguments but 2 were given")
 assert_eq(str(assert_raises(TypeError, lambda: f(a=1))), "C() got an unexpected keyword argument 'a'")
 
+# A body that loops and calls, called the same way.
+looping, = bodies("class L:\n    for i in range(2): pass\n    n = len('ab')\n    def m(self): return __class__\n")
+g = {"__name__": "gl"}
+result = FunctionType(looping, g)()
+assert_eq((type(result), g["i"], g["n"], g["__qualname__"], g["__classcell__"] is result), (CellType, 1, 2, "L", True))
+assert_eq(str(assert_raises(TypeError, FunctionType(looping, g), 1)), "L() takes 0 positional arguments but 1 was given")
+assert_eq(str(assert_raises(TypeError, lambda: FunctionType(looping, g)(a=1))), "L() got an unexpected keyword argument 'a'")
+
 # Body code assigned to a function's __code__; the body without __class__ returns None.
 target = FunctionType((lambda: None).__code__, {"__name__": "t"})
 target.__code__ = plain

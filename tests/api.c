@@ -1030,6 +1030,18 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "class Looping:\n    n = 0\n    while n < 3000: n += 1\n    m = slow(n)\nLooping.m", "class.py"),
                                  SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
+    /* Code compiled while calls can pause pauses inside the special
+     * methods of operators, subscripts and f-string fields. */
+    execute(c, "def spin():\n    for i in range(1500): pass\n"
+               "class Special:\n    def __add__(self, o): spin(); return 1\n    def __lt__(self, o): spin(); return True\n"
+               "    def __getitem__(self, k): spin(); return 2\n    def __setitem__(self, k, v): spin()\n"
+               "    def __contains__(self, k): spin(); return True\n    def __format__(self, spec): spin(); return spec\n"
+               "    def __repr__(self): spin(); return 'r'\n"
+               "class Shown:\n    def __str__(self): spin(); return 'str'\n"
+               "def special():\n    p, q = Special(), Shown()\n    t = p + 1\n    u = p < 1\n    w = p[0] + (0 in p)\n    p[0] = 1\n"
+               "    return t + u + w + len(f'{p:ab}{p!r}{q}{q!s:>4}')\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "special()", "special.py"), SPY_STOP_STEPS, &pauses)) == 5 + 3 + 3 + 4 && pauses > 9);
     /* An interrupt pauses too; spy_exec returns -1 when it pauses. */
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     spy_set_interrupt(c, always, NULL);
