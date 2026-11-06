@@ -452,7 +452,8 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_EXCEPTION_INIT, B_EXCEPTION_NEW, B_OSERROR_NEW, B_EXCEPTION_REPR, B_EXCEPTION_STR, B_OBJECT_NEW, B_OBJECT_INIT, B_OBJECT_HASH, B_INIT_SUBCLASS, B_ADD_NOTE, B_TYPE_MRO, B_TYPE_SUBCLASSES,
        B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_TYPE_GETATTRIBUTE, B_TYPE_SETATTR, B_TYPE_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
        B_EXCEPTION_REDUCE, B_OSERROR_REDUCE, B_IMPORT_REDUCE, B_ATTRIBUTE_REDUCE, B_ATTRIBUTE_GETSTATE, B_EXCEPTION_SETSTATE,
-       B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */ };
+       B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */,
+       B_JOIN /* str.join consuming a generator (consume) */ };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
     return dict ? dict : builtin_value(c, value, SPY_FROZENDICT);
@@ -13470,8 +13471,15 @@ typedef struct {
 } ErrorState;
 enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_ASYNC_WITH, BLOCK_CONSUME };
 /* A builtin taking an iterable's items one at a time (consumer_add): sum,
- * any, all, list or tuple; and a sum's float total while it compensates. */
-typedef struct { int id, compensating; SPYValue *result; double total, compensation; } Consumer;
+ * any, all, list or tuple; and a sum's float total while it compensates.
+ * A set adds each item; a callee, owned, takes the items collected in a
+ * list at their end (a native method of it with name when method is not
+ * -1): frozenset, sorted or str.join. */
+typedef struct {
+    int id, compensating, method;
+    SPYValue *result, *callee, *name;
+    double total, compensation;
+} Consumer;
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
 static SPYValue *consumer_end(SPYContext *, Consumer *);
 /* A BLOCK_CONSUME's value is the generator its consumer takes the items of. */
@@ -13523,6 +13531,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->handled) visit(b->handled, data);
         if (b->error && b->error->value) visit(b->error->value, data);
         if (b->consumer && b->consumer->result) visit(b->consumer->result, data);
+        if (b->consumer && b->consumer->callee) visit(b->consumer->callee, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
@@ -20867,7 +20876,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     }
     spy_release(b.value); spy_release(b.handled);
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
-    if (b.consumer) { spy_release(b.consumer->result); mem_free(b.consumer); }
+    if (b.consumer) { spy_release(b.consumer->result); spy_release(b.consumer->callee); mem_free(b.consumer); }
 }
 static ErrorState *save_error(SPYContext *c) {
     ErrorState state = take_error(c);
@@ -21090,30 +21099,39 @@ static ALWAYS_INLINE int resumable(SPYValue *v) {
     return v->type == SPY_GENERATOR && !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
         v->as.generator.machine->awaiting < AWAIT_DELEGATE;
 }
-/* The builtin of consumer that callee is when called with argc arguments
- * argv, the first a generator the machine can resume (consumer_of): sum,
- * any, all, list or tuple; else -1. */
-static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
-    int id = callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
+/* The builtin of consumer that callee, or its native method method, is
+ * when called with argc arguments argv, the first a generator the machine
+ * can resume (consumer_of): sum, any, all, list, tuple, set, frozenset,
+ * sorted or str.join (B_JOIN); else -1. */
+static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN : -1 :
+             callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
+             callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
-    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL) return -1;
+    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET &&
+        id != B_FROZENSET && id != B_SORTED && id != B_JOIN) return -1;
     if (argc > (id == B_SUM ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
                       builtin_value(c, argv[1], SPY_BYTEARRAY))) return -1;
     return id;
 }
-static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
-    return argc && resumable(argv[0]) ? consumer_id(c, callee, argc, argv) : -1;
+static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    return argc && resumable(argv[0]) ? consumer_id(c, callee, method, argc, argv) : -1;
 }
-/* Consumer id takes generator's items on machine m (BLOCK_CONSUME), sum's
- * from start; both owned. */
-static void consume(SPYContext *c, Machine *m, int id, SPYValue *generator, SPYValue *start) {
+/* Consumer id, of callee, its native method method of name, takes
+ * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
+ * owned. */
+static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
+    if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
+    int collects = id == B_FROZENSET || id == B_SORTED || id == B_JOIN;
     Consumer *consumer = allocate(c, sizeof(*consumer));
-    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_LIST || id == B_TUPLE ? value_new(c, id == B_LIST ? SPY_LIST : SPY_TUPLE) : NULL;
+    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_LIST || id == B_TUPLE || id == B_SET || collects ?
+                       value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : SPY_LIST) : NULL;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); return; }
-    *consumer = (Consumer){.id = id, .result = result};
+    *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name};
     block->value = generator; block->consumer = consumer;
 }
 /* Whether the consumer atop m, given its generator's next item (NULL at
@@ -21166,8 +21184,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
-    int id = method < 0 ? consumer_of(c, callee, argc, argv) : -1;
-    if (id >= 0) consume(c, m, id, spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL);
+    int id = consumer_of(c, callee, method, argc, argv);
+    if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL);
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) :
              c->error_type[0] ? NULL : call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
@@ -21187,7 +21205,7 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         spy_release(callee);
         return NULL;
     }
-    if (method < 0 && (callee->type == SPY_METHOD || callee->type == SPY_CLASS || (argc && argv[0]->type == SPY_GENERATOR)))
+    if ((method < 0 && (callee->type == SPY_METHOD || callee->type == SPY_CLASS)) || (argc && argv[0]->type == SPY_GENERATOR))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
@@ -21230,11 +21248,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     if (c->error_type[0]) return NULL;
-    int id = consumer_of(c, callee, argc, argv);
+    int id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : call_plain(c, callee, -1, n, argc, argv);
+    if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-    if (id >= 0) consume(c, m, id, generator, start);
+    if (id >= 0) { consume(c, m, id, callee, -1, NULL, generator, start); spy_release(callee); }
     return result;
 }
 /* BC_CALLN of method call node n: its object, then its arguments, on the
@@ -21260,9 +21279,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
-    if (callee) result = call_plain(c, callee, method, n, argc + !skip, argv + skip);
-    spy_release(callee);
+    int id = callee ? consumer_of(c, callee, method, argc + !skip, argv + skip) : -1;
+    SPYValue *generator = id >= 0 ? spy_retain(argv[skip]) : NULL, *start = id >= 0 && argc + !skip > 1 ? spy_retain(argv[skip + 1]) : NULL;
+    if (callee && id < 0) result = call_plain(c, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+    if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start);
+    spy_release(callee);
     return result;
 }
 /* BC_CALLK: call node n of argc arguments, positional and then keyword
@@ -26344,7 +26366,12 @@ static void consumer_settle(SPYContext *c, Consumer *s) {
  * -1 on an error. A float total accumulates with Neumaier's compensation,
  * as CPython's sum. */
 static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
-    if (s->id == B_LIST || s->id == B_TUPLE) {
+    if (s->id == B_SET) {
+        int status = set_add(c, s->result, item);
+        spy_release(item);
+        return status;
+    }
+    if (s->id == B_LIST || s->id == B_TUPLE || s->callee) {
         int status = sequence_append(c, s->result, item);
         spy_release(item);
         return status;
@@ -26378,6 +26405,11 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
     if (!c->error_type[0]) consumer_settle(c, s);
     SPYValue *result = s->result;
     s->result = NULL;
+    if (s->callee && !c->error_type[0]) {
+        SPYValue *items = result;
+        result = s->method >= 0 ? call_native_method(c, s->callee, s->method, s->name, 1, &items) : call_keywords(c, s->callee, 1, &items, NULL);
+        spy_release(items);
+    }
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result || (s->id != B_ALL && s->id != B_ANY) ? result : spy_bool(c, s->id == B_ALL);
 }

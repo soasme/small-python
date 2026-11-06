@@ -1,4 +1,4 @@
-# spec: PLS-315 19.3.35, 19.3.3, 13.16
+# spec: PLS-315 19.3.35, 19.3.3, 19.3.34, 13.16
 # description: sum, any, all, list and tuple take a generator's items in
 # order until it ends, any and all stop at the first item that decides,
 # and what the generator raises reaches their caller.
@@ -99,3 +99,36 @@ class Money:
     __radd__ = __add__
 
 assert sum(Money(i) for i in range(4)).n == 6
+
+# set, frozenset, sorted and str.join take all the items first.
+assert set(count(4)) == {0, 1, 2, 3}
+assert frozenset(x % 2 for x in range(5)) == frozenset({0, 1})
+assert sorted(x % 3 for x in range(6)) == [0, 0, 1, 1, 2, 2]
+assert '-'.join(str(i) for i in count(3)) == '0-1-2'
+assert ''.join(c for c in '') == ''
+
+def joined():
+    return ', '.join(str(x) for x in count(3)), sorted(count(2)), set(x for x in 'aa')
+
+assert joined() == ('0, 1, 2', [0, 1], {'a'})
+
+taken = []
+def mixed():
+    for x in ['a', 1, 'b']:
+        taken.append(x)
+        yield x
+
+try:
+    ''.join(mixed())
+except TypeError as e:
+    assert str(e) == 'sequence item 1: expected str instance, int found', str(e)
+else:
+    raise AssertionError('no TypeError')
+assert taken == ['a', 1, 'b'], taken
+
+try:
+    set([] for _ in range(1))
+except TypeError as e:
+    assert str(e) == "cannot use 'list' as a set element (unhashable type: 'list')", str(e)
+else:
+    raise AssertionError('no TypeError')
