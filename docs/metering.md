@@ -277,11 +277,12 @@ A call can pause only where nothing but its machines holds its state.
 Function calls, calls of bound methods, plain classes and instances with
 a Python `__call__`, a loop's Python `__next__`, the function of a `map`
 taken by a loop, generators and maps consumed by `sum`, `any`, `all`,
-`list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, the key
+`list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, generators
+resumed by `next` or by their `__next__` and `send` methods, the key
 functions of `sorted`, `list.sort`, `min` and `max`, Python decorators,
 property getters, `__enter__` methods, and the binary operator,
-comparison, `__getitem__`, `__contains__` and `__bool__` methods of
-instances, and list, set and dictionary
+comparison, `__getitem__`, `__setitem__`, `__contains__`, `__bool__` and
+`__iter__` methods of instances, and list, set and dictionary
 comprehensions run as machines on the heap, in one native
 activation of `run_machine`; a call that native code makes (another
 special method, a host function, a class body, a call from a statement

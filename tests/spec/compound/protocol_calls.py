@@ -1,4 +1,4 @@
-# spec: PLS-315 16.1.2, 16.4, 20.5.1, 15.5
+# spec: PLS-315 16.1.2, 16.4, 20.5.1, 15.5, 15.3, 14.2
 # description: Decorators apply from the last to the first, each called with
 # what the one below gave; a property's getter is called with the instance
 # and takes precedence over its __dict__; with calls __enter__, binds its
@@ -119,3 +119,55 @@ assert managed() == [('enter', 1), ('enter', 2), (1, 2), ('exit', 2, None), ('ex
                      ('enter', 'swallow'), ('exit', 'swallow', 'ValueError'), ('enter', 3), ('exit', 3, 'KeyError'),
                      'caught', ('enter',), ('enter', 0), ('exit', 0, None), ('enter', 1), ('exit', 1, None),
                      ('enter', 'return'), ('exit', 'return', None), 'return'], events
+
+# A for loop calls its iterable's __iter__, which must give an iterator; a
+# store to a subscript calls __setitem__ with the key and the value.
+calls = []
+class Counted:
+    def __init__(self, n): self.n = n
+    def __iter__(self):
+        for i in range(1): pass
+        calls.append('iter')
+        return iter(range(self.n))
+
+class Yielding:
+    def __iter__(self):
+        yield 'a'
+        yield 'b'
+
+class NotIterator:
+    def __iter__(self): return 5
+
+class Table:
+    def __init__(self): self.d = {}
+    def __setitem__(self, key, value):
+        for i in range(1): pass
+        calls.append((key, value))
+        self.d[key] = value
+
+def loops_and_stores():
+    out = [x for x in Counted(2)]
+    for x in Yielding():
+        out.append(x)
+    try:
+        for x in NotIterator():
+            pass
+    except TypeError as e:
+        out.append(str(e))
+    t = Table()
+    k = 'k'
+    t[k] = 1
+    t['j'] = t.d['k'] + 1
+    u = v = Table()
+    u[1] = v[2] = 'both'
+    out.append(sorted(t.d.items()))
+    out.append(sorted(u.d.items()))
+    return out
+
+assert loops_and_stores() == [0, 1, 'a', 'b', 'NotIterator.__iter__() must return an iterator, not int',
+                              [('j', 2), ('k', 1)], [(1, 'both'), (2, 'both')]], loops_and_stores()
+assert calls[:5] == ['iter', ('k', 1), ('j', 2), (1, 'both'), (2, 'both')], calls
+
+table = Table()
+table['module'] = 'level'
+assert table.d == {'module': 'level'}
