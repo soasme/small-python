@@ -181,6 +181,10 @@ TLA_JAR = $(OBJDIR)/tla/tla2tools.jar
 TLA_URL = https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 TLA_SHA256 = 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 JAVA ?= java
+# tpp (github.com/soasme/tlaplusplus) reads TLC's models and options and
+# finds the same states, faster; it is used when installed, TLC otherwise.
+TPP ?= $(shell command -v tpp 2>/dev/null)
+TLA_CHECKER = $(if $(TPP),--tpp $(TPP),--java $(JAVA) --jar $(abspath $(TLA_JAR)))
 
 tla-tools: $(TLA_JAR)
 $(TLA_JAR):
@@ -189,12 +193,12 @@ $(TLA_JAR):
 	echo "$(TLA_SHA256)  $@.tmp" | shasum -a 256 -c -
 	mv $@.tmp $@
 
-test-tla: tests/run-spec $(TLA_JAR) tla-coverage
-	python3 tests/tla_check.py tests/run-spec --java $(JAVA) --jar $(abspath $(TLA_JAR))
+test-tla: tests/run-spec $(if $(TPP),,$(TLA_JAR)) tla-coverage
+	python3 tests/tla_check.py tests/run-spec $(TLA_CHECKER)
 
 # The replays validated against the pinned CPython oracle as well.
-test-tla-oracle: tests/run-spec $(TLA_JAR) tla-coverage
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py tests/run-spec --java $(JAVA) --jar $(abspath $(TLA_JAR)) --oracle $(CPYTHON)
+test-tla-oracle: tests/run-spec $(if $(TPP),,$(TLA_JAR)) tla-coverage
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/tla_check.py tests/run-spec $(TLA_CHECKER) --oracle $(CPYTHON)
 
 # Every section of docs/standards/3_15.md is mapped to the models covering it
 # (tests/tla/coverage.txt) or to a stated exclusion; a TODO entry fails.

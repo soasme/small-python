@@ -1,6 +1,6 @@
 """Model-check the TLA+ specifications in tests/tla and replay them on Python.
 
-usage: tla_check.py ENGINE [--oracle PYTHON] [--java JAVA] [--jar TLA2TOOLS] [--only NAME]
+usage: tla_check.py ENGINE [--oracle PYTHON] [--java JAVA] [--jar TLA2TOOLS | --tpp TPP] [--only NAME]
 
 Each NAME.tla has a NAME.cfg naming its invariants and properties; TLC checks
 them over the model's whole state space. A model with a NAME.replay.py also
@@ -241,9 +241,8 @@ def cases(nodes, edges, initial, nearby=2000):
     return walks
 
 
-def model_check(name, java, jar, directory, dump):
-    command = [java, "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC", "-nowarning", "-workers", "auto",
-               "-metadir", str(Path(directory) / "states"), "-config", str(TLA / f"{name}.cfg")]
+def model_check(name, checker, directory, dump):
+    command = checker + ["-nowarning", "-workers", "auto", "-metadir", str(Path(directory) / "states"), "-config", str(TLA / f"{name}.cfg")]
     if dump:
         command += ["-dump", "dot,actionlabels", str(Path(directory) / name)]
     command.append(str(TLA / f"{name}.tla"))
@@ -302,11 +301,16 @@ def main():
     parser.add_argument("--oracle", type=Path)
     parser.add_argument("--java", default=os.environ.get("JAVA", shutil.which("java") or "java"))
     parser.add_argument("--jar", type=Path, default=JAR)
+    parser.add_argument("--tpp", help="check with tpp, which reads TLC's models and options, instead of TLC")
     parser.add_argument("--only", default="")
     args = parser.parse_args()
     args.engine = args.engine.resolve()
     args.oracle = args.oracle and args.oracle.resolve()
-    if not args.jar.exists():
+    if args.tpp:
+        checker = [args.tpp]
+    elif args.jar.exists():
+        checker = [args.java, "-XX:+UseParallelGC", "-cp", str(args.jar), "tlc2.TLC"]
+    else:
         raise SystemExit(f"{args.jar} not found; run `make tla-tools`")
     failures = 0
     for spec in sorted(TLA.glob("*.tla")):
@@ -315,7 +319,7 @@ def main():
             continue
         has_replay = (TLA / f"{name}.replay.py").exists()
         with tempfile.TemporaryDirectory(prefix="tla-") as directory:
-            passed, output, states = model_check(name, args.java, args.jar, directory, has_replay)
+            passed, output, states = model_check(name, checker, directory, has_replay)
             if not passed:
                 failures += 1
                 print(f"{name}: model check FAILED\n{output[-4000:]}")

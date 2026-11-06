@@ -247,7 +247,8 @@ Conformance to PLS-315 rests on two kinds of evidence, and no other:
   runs every test on the pinned CPython oracle, which must pass it, to validate
   the tests.
 - `make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
-  (fetched by `make tla-tools`; it needs a Java runtime) and replays every
+  (fetched by `make tla-tools`; it needs a Java runtime), or with `tpp` when it
+  is installed (`TPP=` forces TLC), and replays every
   transition of the bounded models on spy's `tests/run-spec`, through the same
   harness `host` (`make test-tla-oracle` replays them on the oracle too). They cover generator and coroutine methods, try/with
   control flow and exception context, name resolution, integer arithmetic,
