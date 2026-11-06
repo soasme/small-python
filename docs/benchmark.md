@@ -254,6 +254,46 @@ averaged, stayed within 1% of the baseline (startup −0.6%, `fib` +0.3%,
 `generators` +0.2% over 30 runs). `spy` grows by 320 bytes, to 1,510,064;
 its `__TEXT` segment is unchanged.
 
+## Threads
+
+`python3 bench/threads.py SPY [PYTHON]` measures what `_thread`
+([threads.md](threads.md)) costs a user. Each measure is a program that does
+N operations against the same program doing none (for the import, against an
+empty program), both run as fresh processes and alternated over eight rounds
+of 15 runs. A cost is the difference of the medians of the round medians,
+divided by N, and every run's output must match. Measured on the platform
+above (macOS 26.5.1, Apple Clang 17, `make`, `-O2`), against the pinned
+CPython:
+
+| Measure | spy | CPython |
+| --- | ---: | ---: |
+| Import `_thread` | 0.51 ms | 0.02 ms |
+| Start and join a thread | 27.4 µs | 18.0 µs |
+| Acquire and release a free lock | 0.47 µs | 0.06 µs |
+| Hand the turn to another thread | 3.66 µs | 2.86 µs |
+
+The import is spy running the module's Python layer, and costs what any
+270-line source module costs. CPython builds `_thread` into its executable.
+A lock and an `RLock` are Python classes over a native primitive (threads.md
+section 1), so a lock costs two Python method calls.
+
+Linking `_thread` into `spy` costs start-up even when no program imports
+it. `spy` grows 18,496 bytes, to 1,545,280, and its `__TEXT` segment by
+16,384 bytes. Alternating `startup.py` against `main` at `c37c7c6` over 12
+rounds of 60 runs:
+
+- **macOS:** 2.590 ms against 2.531 ms, +2.3%; `main` against itself reads
+  +0.0%. The core's changes alone, without `_thread` linked, read −0.2%. A
+  stub that only refers to `_thread`'s 19 thread and clock imports reads
+  +2.5%, so the cost is dyld binding those imports at load. Lazy binding does
+  not remove it.
+- **Linux arm64 (a container on this machine, gcc `-O2`):** 0.553 ms against
+  0.549 ms, +0.7%, with overlapping rounds.
+- **Callgrind:** start-up runs 2,832,823 instructions against 2,816,762,
+  +0.57%. Every program of the table above runs within +0.07% of `main`.
+
+`stdlib/_thread.so` is 51,976 bytes and `stdlib/lib_thread.a` 28,064 bytes.
+
 ## The JavaScript package
 
 `node bench/javascript.mjs` measures what each transport of the JavaScript
