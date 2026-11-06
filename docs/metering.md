@@ -298,15 +298,15 @@ These run as machines on the heap, in one native activation of
 
 Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
 function or comprehension is first compiled) runs every function and
-class body on the machine and gives every operator, subscript and
-f-string field a step of its own, so their special methods are among the
+class body on the machine and gives every operator, subscript,
+augmented assignment and f-string field a step of its own, so their special methods are among the
 calls above. Code compiled without pausing keeps faster steps that
 evaluate an assignment of one operator, or arithmetic on names and
 literals, whole.
 
 A call that native code makes runs in an activation of its own: another
-special method (an augmented subscript assignment's, an unpacking's
-`__iter__`, a property of a class with `__getattr__`), a host function,
+special method (outside code compiled while pausing, an augmented
+subscript assignment's; an unpacking's `__iter__`, a property of a class with `__getattr__`), a host function,
 the metaclass call that makes a class, an import, `exec` and `eval`, and
 a call from what the walker evaluates whole. Without pausing compiled
 in, the walker runs a function whose body holds no call or loop, which
@@ -326,7 +326,8 @@ under the stop rule (3.1), running no handler or `finally` body.
 comprehension more than twenty times and checks its value; checks that
 another call runs while it is paused, that a sort pauses in its key
 calls, a class body inside its loop, and code compiled while pausing
-inside operator, subscript and f-string special methods, that a pause
+inside operator, subscript, augmented assignment and f-string special
+methods, that a pause
 due inside a host function's call back waits for it,
 within one further budget, and that an interrupt pauses
 too; and frees a context with a call paused. `tests/tla/SpyPause.tla`

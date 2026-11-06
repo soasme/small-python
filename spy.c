@@ -13673,7 +13673,7 @@ static int expands(Node *n, int calls) {
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
                            n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
-                           n->kind == N_SLICE)) || (calls == PAUSING && n->kind == N_FORMAT)) return 1;
+                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || (n->kind == N_ASSIGN && n->op >= T_ADDEQ && n->op <= T_XOREQ)))) return 1;
     if (n->kind == N_COMPREHENSION)
         return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
@@ -13987,7 +13987,9 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             else {
                 compile_expr(c, p, target->a);
                 if (target->kind == N_INDEX) compile_expr(c, p, target->b);
-                emit(c, p, BC_LOAD_TARGET, target, 0);
+                /* While calls can pause, the target's read is a step of its own. */
+                emit(c, p, BC_LOAD_TARGET, target, p->calls == PAUSING);
+                if (p->calls == PAUSING) emit(c, p, target->kind == N_INDEX ? BC_INDEX : BC_ATTR, target, 0);
             }
             compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
             if (target->kind == N_NAME) emit(c, p, BC_STORE, target, 1);
@@ -21668,6 +21670,14 @@ static NO_INLINE SPYValue *convert_step(SPYContext *c, Machine *m, SPYValue *val
     SPYValue *callee = arg == ('s' | CONVERT_CALL) ? c->types[SPY_STRING] : c->field_calls[arg == ('f' | CONVERT_CALL)];
     return machine_push(c, m, spy_retain(callee)) ? NULL : spy_retain(value);
 }
+/* BC_LOAD_TARGET with arg 1, of target n: its object's, and a
+ * subscript's key's, copies on m's stack, the last one to push, for the
+ * BC_INDEX or BC_ATTR after it. */
+static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Node *n) {
+    if (n->kind != N_INDEX) return spy_retain(m->stack[m->len - 1]);
+    if (machine_push(c, m, spy_retain(m->stack[m->len - 2]))) return NULL;
+    return spy_retain(m->stack[m->len - 2]);
+}
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
@@ -21893,12 +21903,13 @@ static NO_INLINE SPYValue *with_enter(SPYContext *c, Machine *m, Instruction *in
     else if (!function) spy_release(exit);
     return NULL;
 }
-enum { OPERATE_INDEX, OPERATE_BINARY, OPERATE_COMPARE };
+enum { OPERATE_INDEX, OPERATE_BINARY, OPERATE_COMPARE, OPERATE_INPLACE };
 /* What operator step ins does: a subscript, or a binary operator or
  * comparison *op. */
 static int step_operation(Instruction *ins, int *op) {
     Node *n = ins->node;
     if (ins->op == BC_BINARY) { *op = ins->arg; return OPERATE_BINARY; }
+    if (ins->op == BC_INPLACE) { *op = ins->arg; return OPERATE_INPLACE; }
     if (ins->op == BC_COMPARE) { *op = n->op; return OPERATE_COMPARE; }
     if (ins->op == BC_INDEX || n->kind == N_INDEX) return OPERATE_INDEX;
     if (n->kind == N_COMPARE) { *op = n->args->op; return OPERATE_COMPARE; }
@@ -21927,9 +21938,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     }
     if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
     SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
-    const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : NULL;
+    const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
-    else if (kind == OPERATE_BINARY)
+    /* An augmented assignment takes the in-place method, else the plain one's rule. */
+    else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
+    else if (kind != OPERATE_COMPARE)
         function = other != cls && subclass(other, cls) && class_lookup(other, o->reflected) != class_lookup(cls, o->reflected) ?
                    NULL : class_lookup(cls, o->direct);
     else function = rich < 0 || (other != cls && subclass(other, cls)) ? NULL : class_lookup(cls, rich_names[rich]);
@@ -21944,7 +21957,8 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     int op = 0, kind = step_operation(ins, &op);
     relocate(c, ins->node);
     spy_retain(x); spy_retain(y);
-    SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY ? binary(c, op, x, y) : comparison(c, op, x, y);
+    SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY ? binary(c, op, x, y) :
+                       kind == OPERATE_INPLACE ? augmented(c, op, x, y) : comparison(c, op, x, y);
     spy_release(x); spy_release(y);
     return result;
 }
@@ -21981,13 +21995,18 @@ static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction
         result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
     } else if (kind != OPERATE_INDEX && result == c->not_implemented) {
         spy_release(result);
-        if (kind == OPERATE_BINARY) {
-            result = value_class(c, x) != value_class(c, y) ? try_operator(c, y, operator_of(op)->reflected, x, NULL, 0) : NULL;
-            if (!result && !c->error_type[0]) result = binary_declined(c, op, x, y);
+        const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
+        if (kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
+            /* A declined in-place method leaves the plain operator. */
+            result = binary(c, o->token, x, y);
+        } else if (o) {
+            result = value_class(c, x) != value_class(c, y) ? try_operator(c, y, o->reflected, x, NULL, 0) : NULL;
+            if (!result && !c->error_type[0]) result = binary_declined(c, o->token, x, y);
         } else {
             result = rich_method(c, rich_reflected[rich_kind(op)], y, x);
             if (!result && !c->error_type[0]) result = comparison_declined(c, op, x, y);
         }
+        if (kind == OPERATE_INPLACE && !result) augmented_error(c, o->token, x, y);
     }
     pc = operator_finish(c, m, ins, y, result, pc);
     spy_release(x); spy_release(y);
@@ -22017,15 +22036,21 @@ static SPYValue *setitem_function(SPYContext *c, SPYValue *object) {
                          NULL : class_lookup(object->as.map.parent, "__setitem__");
     return function && machine_function(c, function) ? function : NULL;
 }
-/* BC_STORE, or BC_EXEC's assignment (assign_step), to subscript n of a
+/* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
- * (store_into), the value atop m's stack: that __setitem__, owned, with
- * its env, to call with the key and the value. */
-static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
-    SPYValue *value = m->stack[m->len - 1], *object = leaf_operand(f, n->a), *key = leaf_operand(f, n->b);
-    SPYValue *function = setitem_function(c, object);
+ * (store_into), the value atop m's stack; or BC_SAVE_TARGET's, taking the
+ * instance, key and value from it: that __setitem__, owned, with its env,
+ * to call with the key and the value. */
+static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
+    Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
+    SPYValue *args[3];
+    if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
+    else {
+        args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
+        args[2] = spy_retain(m->stack[m->len - 1]);
+    }
+    SPYValue *function = setitem_function(c, args[0]);
     relocate(c, n);
-    SPYValue *args[] = {spy_retain(object), spy_retain(key), spy_retain(value)};
     return (*env = function_env(c, function, 3, args, NULL, 1)) ? spy_retain(function) : NULL;
 }
 /* The Python __bool__ of instance v's class that a test calls on v,
@@ -22522,10 +22547,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             else node_set_attribute(c, a, n, m->stack[m->len - 1]);
             break;
         CASE(BC_LOAD_TARGET)
-            value = n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
+            value = ins->arg ? target_copies(c, m, n) : n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
                 attribute(c, m->stack[m->len - 1], n->b->text);
             machine_push(c, m, value); break;
         CASE(BC_SAVE_TARGET)
+            if (n->kind == N_INDEX && setitem_function(c, m->stack[m->len - 3])) goto store_step;
             value = machine_pop(m);
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
@@ -22533,7 +22559,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             else node_set_attribute(c, a, n, value);
             spy_release(value); break;
         CASE(BC_INPLACE)
-            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, augmented(c, ins->arg, a, b)); break;
+            b = machine_pop(m); a = machine_pop(m);
+            if (a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            machine_push(c, m, augmented(c, ins->arg, a, b)); break;
         CASE(BC_CONVERT)
             a = machine_pop(m); machine_push(c, m, convert_step(c, m, a, ins->arg)); break;
         CASE(BC_TEMPLATE)
@@ -22930,7 +22958,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
     operator_step:
-        /* BC_BINARY, BC_INDEX or BC_COMPARE on x and y, an instance among
+        /* BC_BINARY, BC_INDEX, BC_COMPARE or BC_INPLACE on x and y, an instance among
          * them: a Python special method is a call (operator_call). */
         callee_env = NULL;
         if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
@@ -22944,10 +22972,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (b) spy_release(b);
         continue;
     store_step:
-        /* A store to a subscript, BC_STORE's or BC_EXEC's assignment's, is
-         * a call of a Python __setitem__ (store_call). */
+        /* A store to a subscript, BC_STORE's, BC_EXEC's assignment's or
+         * BC_SAVE_TARGET's, is a call of a Python __setitem__ (store_call). */
         callee_env = NULL;
-        if ((value = store_call(c, m, &f, ins->op == BC_EXEC ? n->a : n, &callee_env))) { special = CALL_STORE; goto enter_special; }
+        if ((value = store_call(c, m, &f, ins, &callee_env))) { special = CALL_STORE; goto enter_special; }
         continue;
     bool_step:
         /* BC_FALSE on instance a: a Python __bool__ is a call (CALL_CHECKED). */

@@ -211,3 +211,50 @@ class Counted(int):
 c = Counted(1)
 c += 1
 assert_eq(c, "added")
+
+# Inside a function, methods that loop take the same fallbacks: __iadd__,
+# then on NotImplemented __add__ and the reflected __radd__; a subscript
+# or attribute target evaluates its object and key once, reads through
+# __getitem__ or __getattr__ and stores through __setitem__.
+log = []
+def spin():
+    for _ in range(2): pass
+class Into:
+    def __iadd__(self, o): spin(); log.append("iadd"); return "i"
+class Declining:
+    def __iadd__(self, o): spin(); log.append("iadd"); return NotImplemented
+    def __add__(self, o): spin(); log.append("add"); return "a"
+class Unadding:
+    def __add__(self, o): spin(); log.append("add"); return NotImplemented
+class Radding:
+    def __radd__(self, o): spin(); log.append("radd"); return "r"
+class Plain: pass
+class Box:
+    def __init__(self): self.items = {"k": 1}
+    def __getitem__(self, k): spin(); log.append("get " + k); return self.items[k]
+    def __setitem__(self, k, v): spin(); log.append("set " + k); self.items[k] = v
+    def __getattr__(self, name): spin(); log.append("attr " + name); return 10
+def key(k):
+    log.append("key")
+    return k
+def box(b):
+    log.append("box")
+    return b
+def fallbacks():
+    out = []
+    for x, y in ((Into(), 1), (Declining(), 1), (Unadding(), Radding()), (Unadding(), 1), (Plain(), 2), (Declining(), None)):
+        try:
+            x += y
+            out.append(x)
+        except TypeError as e:
+            out.append(str(e))
+    b = Box()
+    box(b)[key("k")] += 5
+    box(b).total += 1
+    out.append((b.items, b.total))
+    return out
+assert_eq(fallbacks(), ["i", "a", "r",
+    "unsupported operand type(s) for +=: 'Unadding' and 'int'",
+    "unsupported operand type(s) for +=: 'Plain' and 'int'", "a", ({"k": 6}, 11)])
+assert_eq(log, ["iadd", "iadd", "add", "add", "radd", "add", "iadd", "add",
+    "box", "key", "get k", "set k", "box", "attr total"])
