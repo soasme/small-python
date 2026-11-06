@@ -83,3 +83,27 @@ def methods():
     return bound('!'), kind(2), d.kind(1), Derived.plain(1), d.plain(2), (lambda: super(Derived, d).name('?'))()
 
 assert methods() == ('derived/base!', 'DerivedDerived', 'Derived', 2, 3, 'base?'), methods()
+
+# Keyword arguments to a class, a bound method and a metaclass's __call__.
+class Keyed:
+    def __init__(self, x=0, *, y=1):
+        for i in range(1): pass
+        self.v = (x, y)
+    def m(self, a, b=2):
+        for i in range(1): pass
+        return (a, b)
+
+def keyed():
+    k = Keyed(1, y=5)
+    bound = k.m
+    return k.v, Keyed(x=3).v, bound(1, b=4), k.m(a=7), Made(z=1)
+
+assert keyed() == ((1, 5), (3, 1), (1, 4), (7, 2), ('made', (), {'z': 1})), keyed()
+
+def unexpected():
+    try:
+        Keyed(1, zz=2)
+    except TypeError as e:
+        return str(e)
+
+assert unexpected() == "Keyed.__init__() got an unexpected keyword argument 'zz'", unexpected()

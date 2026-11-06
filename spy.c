@@ -21302,6 +21302,28 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         kw[kwc] = (Entry){a->global_key, argv[positional + kwc], name.hash};
         kwc++;
     }
+    /* A bound method's self, or a plain class's new instance, takes the
+     * callee's place before the arguments, entering the function or the
+     * __init__ with it; the instance stays there as the call's value. */
+    SPYValue *init = callee->type == SPY_CLASS ? plain_init(c, callee) : NULL, *function = NULL, *self = NULL;
+    if (callee->type == SPY_METHOD && calls && machine_function(c, callee->as.method.function)) {
+        function = callee->as.method.function; self = spy_retain(callee->as.method.self);
+    } else if (init && calls && machine_function(c, init) && (self = new_instance(c, callee))) function = init;
+    if (function) {
+        argv[-1] = self;
+        SPYValue *callee_env = keyword_env(c, function, positional + 1, argv - 1, kw, kwc, NULL, 0);
+        if (callee_env) {
+            m->len -= argc + (function != init);
+            release_all(argc + (function != init), argv - (function != init));
+            *env = callee_env;
+            if (function == init) { c->entering_init = init; return callee; }
+            spy_release(callee);
+            return spy_retain(function);
+        }
+        spy_release(callee);
+        goto done;
+    }
+    if (c->error_type[0]) goto done;
     Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? callee->as.function.def : NULL;
     if (def && def->kind != N_CLASS && def->kind != N_COMPREHENSION) {
         SPYValue *callee_env = keyword_env(c, callee, positional, argv, kw, kwc, NULL, 0);
