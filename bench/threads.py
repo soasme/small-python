@@ -1,5 +1,5 @@
 """Measure what _thread costs a user: importing it, starting and joining a
-thread, an uncontended lock, and handing the turn between two threads.
+thread, and an uncontended lock.
 
 Usage: python3 bench/threads.py SPY [PYTHON] [ROUNDS]
 
@@ -22,19 +22,6 @@ PROGRAMS = {
     "import _thread": (1, "import _thread\n"),
     "start and join a thread": (2000, "import _thread\nfor _ in range(N):\n    _thread.start_joinable_thread(int).join()\n"),
     "acquire and release a free lock": (200000, "import _thread\nl = _thread.allocate_lock()\nfor _ in range(N):\n    l.acquire()\n    l.release()\n"),
-    "hand the turn to another thread": (4000, """import _thread
-ping, pong = _thread.allocate_lock(), _thread.allocate_lock()
-ping.acquire(); pong.acquire()
-def other():
-    for _ in range(N // 2):
-        ping.acquire()
-        pong.release()
-h = _thread.start_joinable_thread(other)
-for _ in range(N // 2):
-    ping.release()
-    pong.acquire()
-h.join()
-"""),
 }
 BASE = "import _thread\n"
 

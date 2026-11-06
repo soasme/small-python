@@ -3,7 +3,8 @@
 tests/std_probe.py prints what the specification states about each name of
 sys, and tests/thread_probe.py what _thread does; each must print the same
 under the spy command and under the Python 3.15 running this script, which
-should be the pinned oracle.
+should be the pinned oracle. tests/thread_virtual.py checks under spy alone
+what its virtual threads do where CPython's preempted ones differ.
 """
 
 import difflib
@@ -32,7 +33,8 @@ def main():
             diff = difflib.unified_diff(expected.splitlines(), actual.splitlines(), "CPython", "spy", lineterm="")
             raise SystemExit(f"{name} differs from CPython:\n" + "\n".join(diff))
         counts.append(f"{len(expected.splitlines())} of {name}")
-    print(f"Standard modules: probes match CPython ({', '.join(counts)})")
+    virtual = run([str(Path(sys.argv[1]).resolve())], HERE / "thread_virtual.py")
+    print(f"Standard modules: probes match CPython ({', '.join(counts)}); {virtual.strip()}")
 
 
 if __name__ == "__main__":

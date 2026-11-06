@@ -12,8 +12,8 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
-  systems, host functions, host calls that let threads run, inspection,
-  snapshots,
+  systems, host functions, threads that switch anywhere they block,
+  inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -214,19 +214,19 @@ a table so that repeated dictionary keys are sent once, measured against
 JSON as the baseline it has to beat (djs's wire format is 1.4 to 9 times
 faster than `JSON.stringify` plus `JSON.parse` in wasm).
 
-### Host functions that give up the turn
+### Threads that switch anywhere they block
 
-Python threads (`_thread`, [docs/threads.md](docs/threads.md)) take turns at
-one context, and a host function that waits keeps the turn, so every thread
-of the context waits with it. Give host functions a way to release the turn
-while they wait and take it back before they touch the context again, as
-CPython's I/O releases its lock, so that threads wait for several slow host
+`_thread` ([docs/threads.md](docs/threads.md)) runs virtual threads on the
+host's system thread. A thread that blocks runs other threads on top of
+itself, so it resumes only when the threads above it end, and a wait that
+needs a thread below it raises `RuntimeError`. Two threads that hand a lock
+back and forth fail so. Once calls no longer recurse in C (*Toward bytecode*
+in [docs/optimization.md](docs/optimization.md)), a thread with only Python
+frames since its start can set them aside and resume later, so threads
+switch wherever they block.
+Calls from C into Python (a sort key, `__eq__`) still raise there. Then let
+host functions answer later, so that threads wait for several slow host
 functions (a model's tools, network requests) at once.
-
-Threads without system threads (WebAssembly without threads, edge runtimes,
-bare metal) need a thread to stop with its frames on the heap, which waits
-for calls without C recursion (*Toward bytecode* in
-[docs/optimization.md](docs/optimization.md)).
 
 ### Embedded inspector
 
@@ -460,7 +460,7 @@ what the extra size buys.
 - [x] Java binding; TLA+ models of every package
 - [x] `spyc` writes an executable and compiles C modules in
 - [x] JavaScript package without `SharedArrayBuffer` or a Worker, through JSPI
-- [x] `_thread` in `stdlib/`, static or shared: Python threads taking turns
+- [x] `_thread` in `stdlib/`, static or shared: virtual threads
 - [x] Native modules: `spy`, the in-process bindings and every worker
   package through the protocol's `NATIVE`
 - [x] Policy callback (`spy_set_policy`, `spy_policy_check`)

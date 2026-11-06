@@ -1,173 +1,155 @@
 # Threads
 
-Python threads come from `_thread`, the first module of the C standard
-library in `stdlib/`. Each Python thread runs on a system thread of its own,
-and the threads of one context take turns at it: one runs Python code at a
-time, as in CPython with its global interpreter lock. The core supplies the
-two things the module cannot be written without, a thread state and a switch
-callback (section 5); everything else is in `stdlib/_thread.c`.
+Python threads come from `_thread`, the first module of the standard library
+in `stdlib/`. They are **virtual threads**:
+
+- They all run on the host's system thread, the one that calls the engine.
+- A thread switches only where it would block: waiting for a lock that is
+  held, or joining a thread that has not ended. Nothing preempts a thread.
+
+The module is Python (`stdlib/_thread.py`) with a C wrapper (`stdlib/_thread.c`).
+The core has no thread support of its own, and the module needs none.
 
 ## 1 The module
 
 `_thread` has CPython 3.15's interface for what `threading` needs:
-`start_new_thread` (and `start_new`), `start_joinable_thread` with its
-`_ThreadHandle`, `allocate_lock` (and `allocate`), `lock` (`LockType`),
-`RLock`, `get_ident`, `get_native_id`, `_count`, `stack_size`, `exit` (and
-`exit_thread`), `error`, `TIMEOUT_MAX`, `daemon_threads_allowed`,
-`_get_main_thread_ident`, `_is_main_interpreter`, `_make_thread_handle` and
-`_shutdown`. Its messages are CPython's, and `tests/thread_probe.py` checks
-them against the pinned CPython.
+
+- `start_new_thread` (and `start_new`), plus `start_joinable_thread` with its
+  `_ThreadHandle`;
+- `allocate_lock` (and `allocate`), `lock` (`LockType`) and `RLock`;
+- `get_ident`, `get_native_id`, `_count`, `stack_size`, `exit` (and
+  `exit_thread`);
+- `error`, `TIMEOUT_MAX`, `daemon_threads_allowed`, `_get_main_thread_ident`,
+  `_is_main_interpreter`, `_make_thread_handle` and `_shutdown`.
+
+Its messages are CPython's, and `tests/thread_probe.py` checks them against
+the pinned CPython.
 
 Not provided yet: `interrupt_main`, `_local`, `set_name` and `_get_name`,
-`_excepthook` and `_ExceptHookArgs`, `_NAME_MAXLEN`. `threading` is not
-shipped; CPython's `threading.py` falls back to Python code for `_local` and
-the excepthook. A lock and an `RLock` are Python classes over a native
-primitive, so `dir()` of one also lists `_op` or its fields, and the least
-`stack_size` is 32768 bytes on every platform.
+`_excepthook` and `_ExceptHookArgs`, and `_NAME_MAXLEN`. `threading` is not
+shipped. CPython's `threading.py` falls back to Python code for `_local` and
+for the excepthook.
 
-An exception that leaves a thread's function goes to `sys.unraisablehook`
-with "Exception ignored in thread started by" and the function; `SystemExit`
-ends the thread silently.
+Locks and `RLock`s are Python classes, so `dir()` of one also lists their
+private fields. `get_native_id()` returns the thread's ident, since every
+thread shares one system thread. `stack_size()` is stored and checked, but
+no stack is allocated.
 
-## 2 Taking turns
+When an exception leaves a thread's function, it goes to
+`sys.unraisablehook` with "Exception ignored in thread started by" and the
+function. `SystemExit` ends the thread silently.
 
-The thread holding the context holds the **turn**. Turns are handed on in
-the order threads asked for them: a thread draws a ticket and waits until
-the module serves it, all under one mutex, so everything the last thread did
-to the context happens before the next one runs (C11's and POSIX's
-happens-before through a mutex).
+## 2 Switching
 
-- **Taking a turn** swaps the thread's state into the context
-  (`spy_thread_swap`). **Giving it** swaps the state out and serves the next
-  ticket.
-- **A lock** that is free is taken at once. One that is held makes the
-  thread give its turn, wait for the lock without it, take the lock, and
-  then take a turn again behind the threads already waiting.
-- **The switch.** While a started thread lives, the module sets the switch
-  callback (`spy_set_switch`). The engine calls it after every 4096 steps or
-  so; it gives the turn and takes it again when another thread waits and
-  this one has held it for 5 ms, CPython's default switch interval.
-- **A started thread** takes its first turn, calls its function, and at the
-  end frees its state and serves the next ticket. The last one to end clears
-  the switch.
-- **The host's thread**, the one that imported the module, holds the turn
-  whenever the host is outside the engine. Other threads run only during the
-  host's calls: in the `spy` command, while the program runs.
-- **Freeing the context** closes the module: every thread still waiting,
-  for a lock or a turn, leaves its system thread without touching the
-  context, whose memory goes with the context, and the module's own memory
-  goes once no system thread of it remains.
+- **Starting** a thread queues it. It runs only once the running thread
+  blocks. Queued threads start in the order they were started.
+- **Blocking.** A thread that would block runs the first queued thread on
+  top of itself, within its own call. When that thread ends, the blocked
+  thread checks again, and repeats while threads remain queued. It goes on
+  once the lock is free (taking it) or the joined thread has ended.
+- **Nothing left to run.** A thread that would still block with no thread
+  queued cannot be helped by any other thread:
+  - a thread below it resumes only when this one ends;
+  - an ended or never-started thread cannot release anything.
 
-Blocking host services keep the turn: `print`, `input`, the module loader
-and a host function that waits block every thread of the context. A
-deadlock between Python threads waits for ever, as under CPython.
+  So a timed wait (`acquire(True, t)`, `join(t)`) returns at once as timed
+  out. A wait for ever raises `RuntimeError: cannot block: no other thread
+  can run until this one ends`.
+- **Resuming.** A thread under others resumes when the threads above it
+  have ended. Threads that wait for each other therefore resume last first.
+- **The host's call** returns when the main thread's code does. Threads
+  still queued then never start. `_shutdown` (which `threading` calls at
+  exit) joins the threads that are not daemons.
 
-## 3 What Python code sees
+This is a long way from CPython's preempted threads:
 
-A switch happens only in the tick before the engine evaluates the next
-expression or statement, where a finalizer may run anyway. A builtin
-operation is never interleaved with another thread: `list.append`, a
-dictionary store, `sorted` without a key, `x[i] = v`. Python code called
-from a builtin (a sort key, `__eq__`) can be switched away from, as in
-CPython.
+- **No time slices.** A thread that never blocks keeps running, so a busy
+  loop waiting for a flag that another thread sets never ends. Use a lock.
+- **Nested resumption.** Two threads that hand a lock back and forth fail.
+  The second one to block is above the first and cannot wait for it, so
+  its wait raises. A producer that waits for a consumer it started fails
+  the same way. Fan-out work joined by its starter, locks around critical
+  sections, and waits that later threads satisfy all work as under CPython.
+  `tests/thread_virtual.py` checks each case.
+- **Cost of depth.** A thread running on top of others adds its frames to
+  theirs. Its recursion depth counts theirs, and `sys._getframe()` walks on
+  into the thread below, as from a callback. A thread that runs while the
+  thread below it is in an `except` block sees that block's
+  `sys.exception()` until it handles one of its own.
+- **Determinism.** The order of a program's threads depends only on the
+  program, never on timing.
 
-The threads share the context's limits. The outermost call's step budget,
-memory limit and output limit count every thread's work, and a stop or an
-interrupt ends the outermost call while the other threads keep their state.
-A thread state starts inside a call, so a started thread's calls never
-refill the budget. Trace and profile functions are the context's, not each
-thread's.
+## 3 Linking
 
-Each thread has its own recursion depth, C stack measure, pending
-exception, handled exception (`sys.exception()`) and running frames. A
-started thread's system stack is the engine's stack limit
-(`SPY_LIMIT_STACK`) and a megabyte to spare, or `stack_size()` when that is
-larger.
+`stdlib/_thread.c` is one source in the native-module form (manual 3.4.9),
+and needs only the C library.
 
-## 4 Linking
-
-`stdlib/_thread.c` is one source in the native-module form (manual 3.4.9):
-
-- **Static.** `make` builds `stdlib/lib_thread.a`. A host links it with
-  `-pthread` and registers it with `spy_new_module(c, "_thread",
-  spy_init__thread)`, declared in `stdlib/spy-stdlib.h`. The `spy` command
-  links it so. `spyc` takes `stdlib/_thread.c` or `stdlib/lib_thread.a` as
-  a C or archive module, with `-- -pthread` where the C library needs it.
-- **Dynamic.** `make` builds `stdlib/_thread.so`, which a host loads with
-  `spy_std_load_native(c, "_thread", path)`; a host that searches beside a
+- **Static.** `make` builds `stdlib/lib_thread.a`. A host links it and
+  registers it with `spy_new_module(c, "_thread", spy_init__thread)`, which
+  `stdlib/spy-stdlib.h` declares. The `spy` command links it this way.
+  `spyc` takes `stdlib/_thread.c` or `stdlib/lib_thread.a` as a C or archive
+  module.
+- **Dynamic.** `make` builds `stdlib/_thread.so`. A host loads it with
+  `spy_std_load_native(c, "_thread", path)`. A host that searches beside a
   program's sources, as the `spy` command does, finds `_thread.so` there.
 
-Windows builds use the system's threads instead of POSIX ones. WebAssembly
-builds have no `_thread`.
+The Python source is embedded in `stdlib/_thread-source.h`, which
+`tools/build_intrinsics.py` generates from `stdlib/_thread.py`. Ordinary
+builds use the checked-in header. The C wrapper uses only `malloc`,
+`strlen` and `memcpy`; the WebAssembly worker does not link the module.
 
-## 5 The core's part
+## 4 Evidence
 
-```c
-SPYThread *spy_thread_new(SPYContext *);
-void spy_thread_swap(SPYContext *, SPYThread *);
-void spy_thread_free(SPYContext *, SPYThread *);
-void spy_set_switch(SPYContext *, SPYSwitch, void *);
-```
+- **`tests/std.py`** runs two checks:
+  - `tests/thread_probe.py` under `spy` and under the pinned CPython 3.15,
+    requiring the same output. It covers the module's names and messages,
+    lock and `RLock` semantics, threads that start, end, raise and are
+    joined, a contended counter, a lock passed to a waiting thread, a timed
+    wait, and `_shutdown`.
+  - `tests/thread_virtual.py` under `spy` alone, for what section 2 says
+    differs from CPython: start order, no preemption, idents, nested waits
+    resuming last first, the `RuntimeError` of a wait nothing can end, and
+    a thread that cannot wait for the one below it.
+- **`tests/threads`** loads `stdlib/_thread.so` into four contexts on four
+  system threads at once. Each context runs virtual threads and is freed
+  with one still queued.
+- **`tests/tla/SpyThreads.tla`** models the scheduler. TLC checks four
+  properties, and deadlock checking with `Termination` checks that the
+  host's call always returns:
+  - only the thread on top runs, and `_current` names it;
+  - a queued thread has not started;
+  - a wait ends only when its condition holds or nothing is left to run;
+  - the lock goes to the thread whose wait took it.
+- **[benchmark.md](benchmark.md)** records what a thread and a lock cost.
 
-A thread state holds the fields of `SPYContext` that belong to one thread:
-the pending error with its message, filename, line and traceback, the
-running frames and recursion depth, the handled and inherited exceptions,
-the current environment, the C stack measure, `repr`'s recursion guard,
-whether a trace function runs, and how deep in host calls the thread is.
-`spy_thread_swap` exchanges them with the context's; reference counts,
-allocator caches and lookup caches stay the context's, because one thread at
-a time uses them. A state still held goes with the context.
+## 5 Left out
 
-The switch callback is polled with the interrupt. The poll only marks the
-switch due; the next tick calls it, so a poll inside a builtin operation does
-not interleave another thread. While no switch is set, the engine does no
-more work than before: the callback is tested only on the slow path that
-the interrupt and limits already take.
+- **Switching with frames below.** Every Python call in spy recurses in C,
+  so a blocked thread cannot set its frames aside for another thread to
+  run and resume later. It can only run others on top of itself.
+  - That needs calls without C recursion (*Toward bytecode* in
+    [optimization.md](optimization.md)). Then a thread whose frames since
+    its start are all Python can be suspended like a generator, and threads
+    switch wherever they block.
+  - Calls from C into Python (a sort key, `__eq__`) would still raise when
+    they block. C11 cannot switch C stacks portably.
+- **Host functions that answer later.** A host function that waits, such as
+  a network request or a model's tool, blocks every thread. Letting it hand
+  back a pending result, which a waiting thread blocks on, would let
+  threads wait for several host functions at once.
+- **Parallelism.** All threads share one system thread. Separate contexts
+  already run in parallel.
 
-## 6 Evidence
+## 6 Sources
 
-- `tests/std.py` runs `tests/thread_probe.py` under `spy` and under the
-  pinned CPython 3.15 and requires the same output: the module's names and
-  messages, lock and `RLock` semantics, threads that start, end, raise and
-  are joined, a contended counter, a thread that never waits, a timed wait
-  and `_shutdown`.
-- `tests/api` checks that a swap sets aside one thread's pending error and
-  frames and brings them back, that a builtin operation finishes before the
-  switch runs, and that a state left to the context is freed with it.
-- `tests/threads` loads `stdlib/_thread.so` into four contexts at once, runs
-  Python threads in each and frees each context while one of its threads
-  still waits; under ThreadSanitizer it reports any context state a turn
-  leaves unordered.
-- `tests/tla/SpyThreads.tla` models the module's contract with its host:
-  one thread at a time uses the context, holding the turn with its own state
-  in it; the host holds the turn outside the engine; the switch is set
-  exactly while a started thread lives; nothing touches the module once it
-  is freed; and threads that release what they take run on until the
-  context is freed.
-- [benchmark.md](benchmark.md) records what a thread, a lock and a switch
-  cost.
+The design follows the virtual threads Mark Shannon proposed for CPython
+("Add Virtual Threads to Python", discuss.python.org, 2025):
 
-## 7 Left out
+- threads with no new syntax;
+- switches only at well-defined points, with no preemption;
+- an exception, instead of a hang, where a switch would need to set C
+  frames aside.
 
-- **Threads without system threads.** WebAssembly without threads, edge
-  runtimes and bare metal could still run Python threads if a thread could
-  stop at any instruction with its frames on the heap. Python calls recurse
-  in C today, so that waits for calls without C recursion (*Toward bytecode*
-  in [optimization.md](optimization.md)); a thread inside C code that called
-  Python (a sort key, `__eq__`) would still be pinned to the C stack. C11
-  cannot switch C stacks portably.
-- **Parallel threads in one context.** Running Python code on several cores
-  at once needs atomic reference counts, a lock per container and a
-  collector that stops every thread. Separate contexts already run in
-  parallel.
-- **Releasing the turn around host calls.** A host function that waits
-  could give the turn while it waits, as CPython's I/O releases its lock.
-  That needs an interface for host functions to do so safely; until then
-  they block the context.
-
-## 8 Sources
-
-The turn follows CPython's global interpreter lock and its switch interval
-(`sys.setswitchinterval`); the module's interface and messages are
-CPython's `Modules/_threadmodule.c`. Tickets served in order are Lamport's
-bakery algorithm.
+It also follows PEP 219 (Stackless Python), which keeps Python frames off
+the C stack so that threads can switch. The module's interface and messages
+are CPython's `Modules/_threadmodule.c`.

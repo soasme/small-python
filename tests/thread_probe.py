@@ -2,8 +2,8 @@
 
 Prints what does not depend on timing, addresses or the platform: the
 module's names, every error and its message, lock and RLock semantics,
-threads that start, finish, raise and are joined, mutual exclusion under
-contention, and a switch from a thread that never waits.
+threads that start, finish, raise and are joined, and mutual exclusion under
+contention. What CPython's preemption changes is in tests/thread_virtual.py.
 """
 import _thread
 import sys
@@ -123,18 +123,17 @@ for worker in workers:
     worker.join()
 show("counted", counter[0])
 
-# A thread that never waits still lets the others run.
-flags = {"started": False, "stop": False}
-def spin():
-    flags["started"] = True
-    while not flags["stop"]:
-        pass
-spinner = _thread.start_joinable_thread(spin)
-while not flags["started"]:
-    pass
-flags["stop"] = True
-spinner.join()
-show("switched", flags)
+# A lock held while a thread starts passes to it once released.
+handed = _thread.allocate_lock()
+handed.acquire()
+got = []
+def take():
+    with handed:
+        got.append(_thread.get_ident() != _thread._get_main_thread_ident())
+taker = _thread.start_joinable_thread(take)
+handed.release()
+taker.join()
+show("handed", got, handed.locked())
 
 # Waiting with a timeout, and being woken by another thread.
 held = _thread.allocate_lock()

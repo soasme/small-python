@@ -3,10 +3,8 @@
  * ThreadSanitizer (make CC=clang SANITIZERS=thread sanitize) any
  * process-global state the engine writes is reported as a race.
  *
- * Each context also loads the native _thread and runs Python threads of its
- * own, which take turns at it: ThreadSanitizer reports any context state
- * a turn leaves unordered. The last of them still waits for a lock when its
- * context is freed, which ends it.
+ * Each context also loads the native _thread and runs virtual threads of its
+ * own; the last of them has not started when its context is freed.
  *
  * usage: tests/threads LIBRARY THREAD   (native modules fib and _thread) */
 #include "../spy.h"
@@ -53,16 +51,9 @@ static const char threaded[] =
     "            count[0] += 1\n"
     "    if n > 100:\n"
     "        _thread.start_joinable_thread(lambda: add(100)).join()\n"
-    "flags = [False]\n"
-    "def spin():\n"
-    "    while not flags[0]:\n"
-    "        pass\n"
-    "spinner = _thread.start_joinable_thread(spin)\n"
     "workers = [_thread.start_joinable_thread(lambda: add(500)) for _ in range(3)]\n"
     "for w in workers:\n"
     "    w.join()\n"
-    "flags[0] = True\n"
-    "spinner.join()\n"
     "never = _thread.allocate_lock()\n"
     "never.acquire()\n"
     "_thread.start_new_thread(never.acquire, ())\n";

@@ -35,7 +35,7 @@ STDLIB_LIBS = $(STDLIB:%=stdlib/lib%.a) $(STDLIB:%=stdlib/%.so)
 all: spy spyc spy-worker libspy.a libspy-std.a $(STDLIB_LIBS)
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o $(STDLIB_OBJS)
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -pthread -o $@
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # The packages' worker (docs/packaging/protocol.md): spy-worker.c compiled
 # once as the engine, once as the worker.
@@ -91,10 +91,11 @@ libspy-std.a: $(OBJDIR)/spy-std.o
 
 stdlib/lib%.a: $(OBJDIR)/stdlib/%.o
 	$(AR) rcs $@ $^
-stdlib/%.so: stdlib/%.c spy-module.h spy.h
-	$(CC) $(CFLAGS) -shared -fPIC -DSPY_SHARED_MODULE -I. $< -o $@ -pthread
+stdlib/%.so: stdlib/%.c stdlib/%-source.h spy-module.h spy.h
+	$(CC) $(CFLAGS) -shared -fPIC -DSPY_SHARED_MODULE -I. $< -o $@
 $(STDLIB_OBJS) $(OBJDIR)/cli.o: CPPFLAGS += -I.
 $(STDLIB_OBJS) $(OBJDIR)/cli.o: spy-module.h stdlib/spy-stdlib.h
+$(STDLIB_OBJS): $(OBJDIR)/stdlib/%.o: stdlib/%-source.h
 
 # The example native module (spy-module.h).
 examples/fib.so: examples/fib.c spy-module.h spy.h

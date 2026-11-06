@@ -11,7 +11,7 @@ extern "C" {
  * libNAME.a and registers it with spy_new_module(c, "NAME", spy_init_NAME),
  * as the spy command does with each, or loads NAME.so at run time with
  * spy_std_load_native (spy-std.h). */
-int spy_init__thread(SPYContext *, SPYValue *); /* Needs the system's threads (-pthread). */
+int spy_init__thread(SPYContext *, SPYValue *); /* Virtual threads (docs/threads.md). */
 
 #ifdef __cplusplus
 }
