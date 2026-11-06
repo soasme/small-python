@@ -13415,12 +13415,12 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_AWITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_RETURN) X(BC_BLOCK)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
 typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
-/* calls: a function body, whose calls run on the machine (expands). */
+/* calls: BODY for a function body whose calls run on the machine (expands). */
 struct Program { Instruction *items; size_t len, cap; int calls; };
 typedef struct {
     char type[64], message[256], filename[256];
@@ -13442,10 +13442,12 @@ struct Machine {
     Block *blocks;
     size_t await_target;
     int awaiting, drop; /* drop: a yield statement's resumption pushes no sent value. */
+    int outermost; /* run_machine returns when it does: a generator's, or a call's entered from C. */
+    Frame frame; /* Borrowed from its generator or call. */
 };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
-struct Call { Machine m; Frame f; SPYValue *fn; };
+struct Call { Machine m; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
     return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->delegate) : spy_none(c);
@@ -13475,19 +13477,22 @@ static void free_machine(SPYContext *c, Machine *m) {
         cache_put(m->blocks, m->block_cap * sizeof(*m->blocks));
     } else { mem_free(m->blocks); mem_free(m->stack); mem_free(m); }
 }
-static Machine *machine_new(SPYContext *c, Program *code) {
+static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValue *unit) {
     Machine *m = c->spare_machine ? c->spare_machine : allocate(c, sizeof(Machine));
     c->spare_machine = NULL;
     if (m) {
         cache_take(m->stack, m->cap * sizeof(*m->stack));
         cache_take(m->blocks, m->block_cap * sizeof(*m->blocks));
-        m->code = code;
+        m->code = code; m->outermost = 1; m->frame = (Frame){env, unit, 0};
     }
     return m;
 }
 /* Whether n is compiled to machine steps rather than evaluated whole: it
- * can suspend, or, in a function body on the machine (calls), it holds a
- * call, which runs there without recursing in C. */
+ * can suspend; or, with calls, it holds a call, which runs on the machine
+ * without recursing in C, except a for loop's iterable; or, with calls at BODY, in a function body on
+ * the machine, it is an if or a return, whose steps cost less there than
+ * the walker's statement. */
+enum { CALLS = 1, BODY = 2 };
 static int expands(Node *n, int calls);
 static int list_expands(Node *n, int calls) {
     for (; n; n = n->next) if (expands(n, calls)) return 1;
@@ -13495,10 +13500,15 @@ static int list_expands(Node *n, int calls) {
 }
 static int expands(Node *n, int calls) {
     if (!n) return 0;
-    if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && n->kind == N_CALL)) return 1;
+    if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && n->kind == N_CALL) ||
+        (calls == BODY && (n->kind == N_IF || n->kind == N_RETURN))) return 1;
     if (n->kind == N_COMPREHENSION)
         return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
+    /* A loop whose iterable alone holds a call makes that call once: it
+     * stays a walker statement, where the call nests in C. */
+    if (calls && n->kind == N_FOR && !expands(n->args, calls) && !list_expands(n->b, calls) && !list_expands(n->c, calls))
+        return expands(n->a, 0);
     if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS)
         return list_expands(n->args, calls) || list_expands(n->decorators, calls);
     return list_expands(n->a, calls) || list_expands(n->b, calls) || list_expands(n->c, calls) || list_expands(n->args, calls);
@@ -13731,147 +13741,134 @@ static void compile_delete(SPYContext *c, Program *p, Node *n) {
     if (n->kind == N_INDEX) compile_expr(c, p, n->b);
     emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
 }
+static void compile_statement(SPYContext *, Program *, Node *);
 static void compile_body(SPYContext *c, Program *p, Node *body) {
-    for (Node *n = body; n && !c->error_type[0]; n = n->next) {
-        size_t branch, end, start, loop;
-        if (!expands(n, p->calls)) { emit(c, p, BC_EXEC, n, 0); continue; }
-        switch (n->kind) {
-        case N_EXPR:
-            /* A yield statement drops the sent value rather than popping it (arg 2). */
-            if (n->a->kind == N_YIELD && !n->a->op) {
-                int leaf = n->a->a && (n->a->a->kind == N_NAME || n->a->a->constant);
-                if (!leaf) compile_expr(c, p, n->a->a);
-                emit(c, p, BC_YIELD, n->a, leaf | 2); break;
-            }
-            compile_expr(c, p, n->a); emit(c, p, BC_POP, n, 0); break;
-        case N_ASSIGN:
-            if (n->op != '=') {
-                Node *target = n->a;
-                if (target->kind == N_NAME) compile_expr(c, p, target);
-                else {
-                    compile_expr(c, p, target->a);
-                    if (target->kind == N_INDEX) compile_expr(c, p, target->b);
-                    emit(c, p, BC_LOAD_TARGET, target, 0);
-                }
-                compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
-                if (target->kind == N_NAME) emit(c, p, BC_STORE, target, 1);
-                else emit(c, p, BC_SAVE_TARGET, target, 0);
-                break;
-            }
-            compile_expr(c, p, n->b);
+    /* The statements after the last that expands are one walker step,
+     * BC_BLOCK, when there are more than one. */
+    Node *rest = body;
+    for (Node *n = body; n; n = n->next) if (expands(n, p->calls)) rest = n->next;
+    for (Node *n = body; n != rest && !c->error_type[0]; n = n->next) compile_statement(c, p, n);
+    if (rest && rest->next) emit(c, p, BC_BLOCK, rest, 0);
+    else if (rest) compile_statement(c, p, rest);
+}
+static void compile_statement(SPYContext *c, Program *p, Node *n) {
+    size_t branch, end, start, loop;
+    if (!expands(n, p->calls)) { emit(c, p, BC_EXEC, n, 0); return; }
+    switch (n->kind) {
+    case N_EXPR:
+        /* A yield statement drops the sent value rather than popping it (arg 2). */
+        if (n->a->kind == N_YIELD && !n->a->op) {
+            int leaf = n->a->a && (n->a->a->kind == N_NAME || n->a->a->constant);
+            if (!leaf) compile_expr(c, p, n->a->a);
+            emit(c, p, BC_YIELD, n->a, leaf | 2); break;
+        }
+        compile_expr(c, p, n->a); emit(c, p, BC_POP, n, 0); break;
+    case N_ASSIGN:
+        if (n->op != '=') {
             Node *target = n->a;
-            for (Node *next = n->args; next; target = next, next = next->next) compile_target(c, p, target);
-            compile_store(c, p, target, n); break;
-        case N_DEF:
-            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
-            if (n->params) {
-                /* A generic function's defaults are evaluated before its type parameters. */
-                int count = 0;
-                for (Node *a = n->args; a; a = a->next) if (a->a) { compile_expr(c, p, a->a); count++; }
-                emit(c, p, BC_GENERIC_FUNCTION, n, count);
-            } else {
-                emit(c, p, BC_FUNCTION, n, 0);
-                for (Node *a = n->args; a; a = a->next) if (a->a) {
-                    compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
-                }
+            if (target->kind == N_NAME) compile_expr(c, p, target);
+            else {
+                compile_expr(c, p, target->a);
+                if (target->kind == N_INDEX) compile_expr(c, p, target->b);
+                emit(c, p, BC_LOAD_TARGET, target, 0);
             }
-            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
-            emit(c, p, BC_STORE, n->a, 1); break;
-        case N_ANNASSIGN:
-            compile_expr(c, p, n->c); compile_store(c, p, n->a, n); break;
-        case N_MATCH: {
-            /* The subject stays on the stack until a case is chosen. */
-            size_t exits = SIZE_MAX;
-            compile_expr(c, p, n->a);
-            for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
-                size_t fail = emit(c, p, BC_PATTERN, item, 0), guard = SIZE_MAX;
-                if (item->b) { compile_test(c, p, item->b); guard = emit(c, p, BC_FALSE, item->b, 0); }
-                emit(c, p, BC_POP, item, 0);
-                compile_body(c, p, item->c);
-                end = emit(c, p, BC_JUMP, item, 0);
-                if (end != SIZE_MAX) { p->items[end].other = exits; exits = end; }
-                patch(p, fail, p->len); patch(p, guard, p->len);
-            }
-            emit(c, p, BC_POP, n, 0);
-            while (exits != SIZE_MAX && !c->error_type[0]) {
-                size_t next = p->items[exits].other;
-                patch(p, exits, p->len); exits = next;
-            }
+            compile_expr(c, p, n->b); emit(c, p, BC_INPLACE, n, n->op);
+            if (target->kind == N_NAME) emit(c, p, BC_STORE, target, 1);
+            else emit(c, p, BC_SAVE_TARGET, target, 0);
             break;
         }
-        case N_RETURN:
-            compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
-        case N_RAISE:
-            compile_expr(c, p, n->a); compile_expr(c, p, n->b);
-            emit(c, p, BC_RAISE, n, n->b != NULL); break;
-        case N_ASSERT:
-            compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0);
-            end = emit(c, p, BC_JUMP, n, 0); patch(p, branch, p->len);
-            if (n->b) compile_expr(c, p, n->b);
-            emit(c, p, BC_ASSERT, n, n->b != NULL); patch(p, end, p->len); break;
-        case N_IF:
-            compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0);
-            compile_body(c, p, n->b); end = emit(c, p, BC_JUMP, n, 0);
-            patch(p, branch, p->len); compile_body(c, p, n->c); patch(p, end, p->len); break;
-        case N_FOR: case N_WHILE:
-            if (n->kind == N_FOR) compile_expr(c, p, n->a);
-            loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
-            start = p->len;
-            if (loop != SIZE_MAX) p->items[loop].other = start;
-            if (n->kind == N_FOR) {
-                branch = emit(c, p, BC_NEXT, n, n->op);
-                compile_store(c, p, n->args, n);
+        compile_expr(c, p, n->b);
+        Node *target = n->a;
+        for (Node *next = n->args; next; target = next, next = next->next) compile_target(c, p, target);
+        compile_store(c, p, target, n); break;
+    case N_DEF:
+        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
+        if (n->params) {
+            /* A generic function's defaults are evaluated before its type parameters. */
+            int count = 0;
+            for (Node *a = n->args; a; a = a->next) if (a->a) { compile_expr(c, p, a->a); count++; }
+            emit(c, p, BC_GENERIC_FUNCTION, n, count);
+        } else {
+            emit(c, p, BC_FUNCTION, n, 0);
+            for (Node *a = n->args; a; a = a->next) if (a->a) {
+                compile_expr(c, p, a->a); emit(c, p, BC_DEFAULT, a, 0);
             }
-            else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
-            compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
-            patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
-            compile_body(c, p, n->c); patch(p, loop, p->len); break;
-        case N_TRY: {
-            size_t final = n->c ? emit(c, p, BC_FINALLY, n, 0) : SIZE_MAX;
-            if (n->flags & F_STAR) {
-                /* The handler block keeps [unhandled rest, raised list]; each
-                 * matched clause runs inside an inner block that collects its error. */
-                size_t handler = emit(c, p, BC_EXCEPT, n, 0);
-                compile_body(c, p, n->a);
-                emit(c, p, BC_POP_BLOCK, n, 0);
-                compile_body(c, p, n->b);
-                end = emit(c, p, BC_JUMP, n, 0);
-                patch(p, handler, p->len);
-                emit(c, p, BC_STAR_BEGIN, n, 0);
-                for (Node *h = n->args; h; h = h->next) {
-                    compile_expr(c, p, h->a);
-                    size_t match = emit(c, p, BC_STAR_MATCH, h, 0);
-                    compile_body(c, p, h->b);
-                    size_t done = emit(c, p, BC_STAR_DONE, h, 0);
-                    if (match != SIZE_MAX) p->items[match].other = p->len;
-                    emit(c, p, BC_STAR_CAUGHT, h, 0);
-                    patch(p, match, p->len); patch(p, done, p->len);
-                }
-                emit(c, p, BC_STAR_RERAISE, n, 0);
-                patch(p, end, p->len);
-                if (n->c) {
-                    emit(c, p, BC_LEAVE, n, 0); patch(p, final, p->len);
-                    compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, n, 0);
-                }
-                break;
-            }
-            /* Leaving a block reports no line of its own. */
-            size_t handler = n->args ? emit(c, p, BC_EXCEPT, n, 0) : SIZE_MAX;
+        }
+        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
+        emit(c, p, BC_STORE, n->a, 1); break;
+    case N_ANNASSIGN:
+        compile_expr(c, p, n->c); compile_store(c, p, n->a, n); break;
+    case N_MATCH: {
+        /* The subject stays on the stack until a case is chosen. */
+        size_t exits = SIZE_MAX;
+        compile_expr(c, p, n->a);
+        for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
+            size_t fail = emit(c, p, BC_PATTERN, item, 0), guard = SIZE_MAX;
+            if (item->b) { compile_test(c, p, item->b); guard = emit(c, p, BC_FALSE, item->b, 0); }
+            emit(c, p, BC_POP, item, 0);
+            compile_body(c, p, item->c);
+            end = emit(c, p, BC_JUMP, item, 0);
+            if (end != SIZE_MAX) { p->items[end].other = exits; exits = end; }
+            patch(p, fail, p->len); patch(p, guard, p->len);
+        }
+        emit(c, p, BC_POP, n, 0);
+        while (exits != SIZE_MAX && !c->error_type[0]) {
+            size_t next = p->items[exits].other;
+            patch(p, exits, p->len); exits = next;
+        }
+        break;
+    }
+    case N_RETURN:
+        /* A return of a name or literal loads it in its own step. */
+        if (n->a && (n->a->kind == N_NAME || n->a->constant)) { emit(c, p, BC_RETURN, n, 0); break; }
+        compile_expr(c, p, n->a); emit(c, p, BC_FLOW, n, FLOW_RETURN); break;
+    case N_RAISE:
+        compile_expr(c, p, n->a); compile_expr(c, p, n->b);
+        emit(c, p, BC_RAISE, n, n->b != NULL); break;
+    case N_ASSERT:
+        compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0);
+        end = emit(c, p, BC_JUMP, n, 0); patch(p, branch, p->len);
+        if (n->b) compile_expr(c, p, n->b);
+        emit(c, p, BC_ASSERT, n, n->b != NULL); patch(p, end, p->len); break;
+    case N_IF:
+        compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0);
+        compile_body(c, p, n->b); end = emit(c, p, BC_JUMP, n, 0);
+        patch(p, branch, p->len); compile_body(c, p, n->c); patch(p, end, p->len); break;
+    case N_FOR: case N_WHILE:
+        if (n->kind == N_FOR) compile_expr(c, p, n->a);
+        loop = emit(c, p, BC_LOOP, n, n->kind == N_FOR ? 1 + n->op : 0);
+        start = p->len;
+        if (loop != SIZE_MAX) p->items[loop].other = start;
+        if (n->kind == N_FOR) {
+            branch = emit(c, p, BC_NEXT, n, n->op);
+            compile_store(c, p, n->args, n);
+        }
+        else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
+        compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
+        patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
+        compile_body(c, p, n->c); patch(p, loop, p->len); break;
+    case N_TRY: {
+        size_t final = n->c ? emit(c, p, BC_FINALLY, n, 0) : SIZE_MAX;
+        if (n->flags & F_STAR) {
+            /* The handler block keeps [unhandled rest, raised list]; each
+             * matched clause runs inside an inner block that collects its error. */
+            size_t handler = emit(c, p, BC_EXCEPT, n, 0);
             compile_body(c, p, n->a);
-            if (n->args) emit(c, p, BC_POP_BLOCK, NULL, 0);
+            emit(c, p, BC_POP_BLOCK, n, 0);
             compile_body(c, p, n->b);
-            end = emit(c, p, BC_JUMP, NULL, 0);
+            end = emit(c, p, BC_JUMP, n, 0);
             patch(p, handler, p->len);
-            size_t first = p->len;
+            emit(c, p, BC_STAR_BEGIN, n, 0);
             for (Node *h = n->args; h; h = h->next) {
-                if (h->a) compile_expr(c, p, h->a);
-                branch = emit(c, p, BC_MATCH, h, h->a != NULL);
-                compile_body(c, p, h->b); emit(c, p, BC_POP_BLOCK, NULL, 0);
-                emit(c, p, BC_JUMP, NULL, 1); patch(p, branch, p->len);
+                compile_expr(c, p, h->a);
+                size_t match = emit(c, p, BC_STAR_MATCH, h, 0);
+                compile_body(c, p, h->b);
+                size_t done = emit(c, p, BC_STAR_DONE, h, 0);
+                if (match != SIZE_MAX) p->items[match].other = p->len;
+                emit(c, p, BC_STAR_CAUGHT, h, 0);
+                patch(p, match, p->len); patch(p, done, p->len);
             }
-            if (n->args) emit(c, p, BC_RERAISE, n, 0);
-            for (size_t i = first; i < p->len; i++)
-                if (p->items[i].op == BC_JUMP && p->items[i].arg && !p->items[i].target) p->items[i].target = p->len;
+            emit(c, p, BC_STAR_RERAISE, n, 0);
             patch(p, end, p->len);
             if (n->c) {
                 emit(c, p, BC_LEAVE, n, 0); patch(p, final, p->len);
@@ -13879,26 +13876,49 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
             }
             break;
         }
-        case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
-        case N_DELETE: compile_delete(c, p, n->a); break;
-        default: { /* N_CLASS, the last statement that can contain a yield */
-            /* Decorators, then the bases and keywords as __build_class__'s
-             * arguments; a generic class's bases cannot suspend. */
-            int stacked = 0;
-            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
-            for (Node *a = n->args; a && !n->params; a = a->next) stacked |= expands(a, p->calls);
-            if (stacked) {
-                emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
-                for (Node *a = n->args; a; a = a->next) {
-                    compile_expr(c, p, a->kind == N_KEYWORD || a->kind == N_MAPPING || a->kind == N_STAR ? a->a : a);
-                    emit(c, p, BC_ARG, a, a->kind);
-                }
+        /* Leaving a block reports no line of its own. */
+        size_t handler = n->args ? emit(c, p, BC_EXCEPT, n, 0) : SIZE_MAX;
+        compile_body(c, p, n->a);
+        if (n->args) emit(c, p, BC_POP_BLOCK, NULL, 0);
+        compile_body(c, p, n->b);
+        end = emit(c, p, BC_JUMP, NULL, 0);
+        patch(p, handler, p->len);
+        size_t first = p->len;
+        for (Node *h = n->args; h; h = h->next) {
+            if (h->a) compile_expr(c, p, h->a);
+            branch = emit(c, p, BC_MATCH, h, h->a != NULL);
+            compile_body(c, p, h->b); emit(c, p, BC_POP_BLOCK, NULL, 0);
+            emit(c, p, BC_JUMP, NULL, 1); patch(p, branch, p->len);
+        }
+        if (n->args) emit(c, p, BC_RERAISE, n, 0);
+        for (size_t i = first; i < p->len; i++)
+            if (p->items[i].op == BC_JUMP && p->items[i].arg && !p->items[i].target) p->items[i].target = p->len;
+        patch(p, end, p->len);
+        if (n->c) {
+            emit(c, p, BC_LEAVE, n, 0); patch(p, final, p->len);
+            compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, n, 0);
+        }
+        break;
+    }
+    case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
+    case N_DELETE: compile_delete(c, p, n->a); break;
+    default: { /* N_CLASS, the last statement that can contain a yield */
+        /* Decorators, then the bases and keywords as __build_class__'s
+         * arguments; a generic class's bases cannot suspend. */
+        int stacked = 0;
+        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) compile_expr(c, p, decorator);
+        for (Node *a = n->args; a && !n->params; a = a->next) stacked |= expands(a, p->calls);
+        if (stacked) {
+            emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
+            for (Node *a = n->args; a; a = a->next) {
+                compile_expr(c, p, a->kind == N_KEYWORD || a->kind == N_MAPPING || a->kind == N_STAR ? a->a : a);
+                emit(c, p, BC_ARG, a, a->kind);
             }
-            emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
-            for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
-            emit(c, p, BC_STORE, n->a, 1); break;
         }
-        }
+        emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
+        for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
+        emit(c, p, BC_STORE, n->a, 1); break;
+    }
     }
 }
 static int check_async_return(SPYContext *c, Node *n) {
@@ -13916,11 +13936,11 @@ static int check_async_return(SPYContext *c, Node *n) {
 /* A generator's body, or a function body that holds a call, on the machine. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = (n->kind == N_DEF && n->op) || list_expands(n->b, 0);
-    if (!generator && !list_expands(n->b, 1)) return 0;
+    if (!generator && !list_expands(n->b, CALLS)) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = !generator;
+    p->calls = generator ? 0 : BODY;
     if (generator) n->code = p;
     else n->flat = p;
     compile_body(c, p, n->b);
@@ -14627,12 +14647,15 @@ static ALWAYS_INLINE SPYValue *callee_of(SPYContext *c, Frame *f, Node *n) {
     }
     return eval(c, f, n->a);
 }
+static SPYValue *operand(SPYContext *, Frame *, Node *);
+static SPYValue *operator_fast(SPYContext *, Node *, SPYValue *, SPYValue *);
 /* The callee of plain call node n, owned, with its arguments in argv,
  * owned too, after the instance a method call passes first; or NULL,
  * argv released. A literal or name among them, while tick has only the
- * line to record, is taken as it is. With *method set, the callee is the
- * object whose native method n names. */
-static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SPYValue **argv, size_t *argc, int *method) {
+ * line to record, is taken as it is, and with operators, so is an
+ * operator on such operands that operator_fast computes. With *method
+ * set, the callee is the object whose native method n names. */
+static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SPYValue **argv, size_t *argc, int *method, int operators) {
     SPYValue *a;
     size_t done = 0;
     *method = -1;
@@ -14642,8 +14665,15 @@ static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SP
     } else a = callee_of(c, f, n);
     if (!a) return NULL;
     for (Node *arg = n->args; arg; arg = arg->next) {
-        SPYValue *value = (arg->constant || arg->kind == N_NAME) && quiet(c, f) ? leaf_operand(f, arg) : NULL;
-        if (!(argv[done] = value ? spy_retain(value) : eval(c, f, arg))) {
+        SPYValue *value = NULL;
+        if (quiet(c, f)) {
+            if (arg->constant || arg->kind == N_NAME) { if ((value = leaf_operand(f, arg))) spy_retain(value); }
+            else if (operators && (arg->flags & F_OPERATOR)) {
+                SPYValue *x = operand(c, f, arg->a), *y = x ? operand(c, f, arg->kind == N_COMPARE ? arg->args->a : arg->b) : NULL;
+                if (y) value = operator_fast(c, arg, x, y);
+            }
+        }
+        if (!(argv[done] = value ? value : c->error_type[0] ? NULL : eval(c, f, arg))) {
             while (done) spy_release(argv[--done]);
             spy_release(a);
             return NULL;
@@ -14676,7 +14706,7 @@ static HOT NO_INLINE SPYValue *eval_call(SPYContext *c, Frame *f, Node *n) {
         SPYValue *argv[9];
         size_t argc;
         int method;
-        if (!(a = plain_callee(c, f, n, argv, &argc, &method))) return NULL;
+        if (!(a = plain_callee(c, f, n, argv, &argc, &method, 0))) return NULL;
         result = call_plain(c, a, method, n, argc, argv);
         while (argc) spy_release(argv[--argc]);
         spy_release(a);
@@ -15653,7 +15683,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
 static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static void not_callable(SPYContext *, SPYValue *);
 static void release_owned(SPYValue *, void *);
-static Result run_machine(SPYContext *, SPYValue *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
+static Result run_machine(SPYContext *, SPYValue *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 /* A new environment of fn's scope with its arguments bound, or NULL. */
 static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     Scope *scope = fn->as.function.def->scope;
@@ -15691,13 +15721,14 @@ static void calls_free(SPYContext *c, size_t first) {
 }
 /* Enter the frame of fn, whose body is on the machine, in env; it takes
  * both references, releasing them when it fails. */
-static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env) {
+static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env, int outermost) {
     if (!enter_frame(c, env, fn)) {
         if ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c)) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = fn->as.function.def->flat; call->m.pc = 0;
-            call->f = (Frame){env, fn->as.function.unit, 0};
+            call->m.code = fn->as.function.def->flat; call->m.pc = 0; call->m.outermost = outermost;
+            call->m.frame = (Frame){env, fn->as.function.unit, 0};
             call->fn = fn;
+            call->caller_env = c->eval_env; c->eval_env = env;
             return call;
         }
         leave_frame(c, NULL);
@@ -15709,7 +15740,8 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
  * raises. A trace function leave_frame calls may reuse its storage. */
 static ALWAYS_INLINE void call_leave(SPYContext *c, SPYValue *value) {
     Call *call = c->calls[--c->calls_len];
-    SPYValue *env = call->f.env, *fn = call->fn;
+    SPYValue *env = call->m.frame.env, *fn = call->fn;
+    c->eval_env = call->caller_env;
     while (call->m.len) spy_release(call->m.stack[--call->m.len]);
     leave_frame(c, value);
     release_locals(env);
@@ -15731,8 +15763,9 @@ static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPY
     SPYValue *env = function_env(c, fn, argc, argv, keywords), *result = NULL;
     if (!env) return NULL;
     if (def->flat) {
-        if (!call_enter(c, spy_retain(fn), env)) return NULL;
-        Result r = run_machine(c, NULL, NULL, NULL, 0, NULL);
+        if (!call_enter(c, spy_retain(fn), env, 1)) return NULL;
+        Call *call = c->calls[c->calls_len - 1];
+        Result r = run_machine(c, NULL, &call->m, NULL, NULL, 0, NULL);
         call_leave(c, r.flow == FLOW_RETURN ? r.value : NULL);
         /* A deep recursion's storage goes once it has returned. */
         if (!c->calls_len && c->calls_cap > 64) calls_free(c, 64);
@@ -16961,7 +16994,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     return store_items(c, f, n, value);
 }
 static int machine_push(SPYContext *, Machine *, SPYValue *);
-static Result run_machine(SPYContext *, SPYValue *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
+static Result run_machine(SPYContext *, SPYValue *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
     SPYValue *iterator = n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source);
     if (!iterator) return NULL;
@@ -16983,7 +17016,7 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
         result->as.generator.unit = spy_retain(f->unit);
         result->as.generator.node = n;
         result->as.generator.code = definition_code(c, f->unit, n);
-        Machine *m = result->as.generator.machine = machine_new(c, n->code);
+        Machine *m = result->as.generator.machine = machine_new(c, n->code, env, f->unit);
         if (m) {
             if (n->op != N_TUPLE)
                 machine_push(c, m, value_new(c, n->op == N_DICT ? SPY_DICT : n->op == N_SET ? SPY_SET : SPY_LIST));
@@ -16993,7 +17026,7 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
     spy_release(iterator); spy_release(env);
     if (c->error_type[0]) { spy_release(result); return NULL; }
     if (eager) {
-        Result value = run_machine(c, result, NULL, NULL, 0, NULL);
+        Result value = run_machine(c, result, result->as.generator.machine, NULL, NULL, 0, NULL);
         env = result->as.generator.env; result->as.generator.env = NULL;
         spy_release(result); release_locals(env);
         if (value.flow == FLOW_RETURN) return value.value;
@@ -20485,7 +20518,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     Node *n = function->as.function.def;
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
-    if (!(v->as.generator.machine = machine_new(c, n->code))) { spy_release(v); return NULL; }
+    if (!(v->as.generator.machine = machine_new(c, n->code, f->env, f->unit))) { spy_release(v); return NULL; }
     v->as.generator.node = n;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
     v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
@@ -20740,6 +20773,41 @@ static void finish_delegate(SPYContext *c, Machine *m) {
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE;
 }
+/* The call steps: a call's result, or NULL with an error; or, when the
+ * callee's body is on the machine, the callee with *env its environment,
+ * to enter there. */
+/* BC_CALLF: plain call node n, whose operands need no steps of their own. */
+static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYValue **env) {
+    SPYValue *argv[9], *callee, *result;
+    size_t argc;
+    int method;
+    if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1))) return NULL;
+    if (method < 0 && machine_function(c, callee)) result = (*env = function_env(c, callee, argc, argv, NULL)) ? spy_retain(callee) : NULL;
+    else result = call_plain(c, callee, method, n, argc, argv);
+    while (argc) spy_release(argv[--argc]);
+    spy_release(callee);
+    return result;
+}
+/* BC_CALLN: plain call node n of argc arguments, taken from the stack after
+ * its callee; a generator's machine (calls 0) enters no call. */
+static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
+    SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
+    relocate(c, n);
+    if (calls && machine_function(c, callee)) result = (*env = function_env(c, callee, argc, argv, NULL)) ? spy_retain(callee) : NULL;
+    else result = call_plain(c, callee, -1, n, argc, argv);
+    for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+    return result;
+}
+/* BC_CALL: the callee, argument list and keyword dict on the stack; a
+ * generator's machine (calls 0) enters no call. */
+static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
+    SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result;
+    if (calls && machine_function(c, callee) && string_keys(c, keywords))
+        result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords)) ? spy_retain(callee) : NULL;
+    else result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
+    spy_release(keywords); spy_release(args); spy_release(callee);
+    return result;
+}
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assign(c, f, n); }
 /* The hot machine steps end in their own dispatch, so that each predicts
@@ -20760,25 +20828,11 @@ static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assi
 #endif
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
-static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent, SPYValue *thrown,
+/* Run machine m: generator's, or else the innermost call's, then the
+ * calls it makes, until the outermost of them returns. */
+static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SPYValue *sent, SPYValue *thrown,
                           size_t argc, SPYValue *const *argv) {
-    /* It runs generator, or else the innermost call, and the calls they
-     * make above it until it returns. */
-    size_t entry = c->calls_len;
-    SPYValue *outer_env = c->eval_env;
-    Machine *m;
-    Frame f;
-    Node *owner;
-#define RESUME_INNERMOST() do { \
-        if (generator && c->calls_len == entry) { \
-            m = generator->as.generator.machine; f = (Frame){generator->as.generator.env, generator->as.generator.unit, 0}; \
-            owner = generator->as.generator.node; c->eval_env = outer_env; \
-        } else { \
-            Call *call = c->calls[c->calls_len - 1]; \
-            m = &call->m; f = call->f; owner = call->fn->as.function.def; c->eval_env = f.env; \
-        } \
-    } while (0)
-    RESUME_INNERMOST();
+    Frame f = m->frame;
     Result flow = {FLOW_NORMAL, NULL};
     if (m->awaiting >= AWAIT_DELEGATE) {
         int halt = 0;
@@ -20803,15 +20857,11 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         if (flow.flow != FLOW_NORMAL) {
             m->pc = pc;
             if ((!m->block_len && flow.flow == FLOW_RETURN) || !machine_unwind(c, m, &f, &flow)) {
-                if (c->calls_len == entry) { c->eval_env = outer_env; return flow; }
+                if (m->outermost) return flow;
                 /* A call returns or raises into its caller. */
-                SPYValue *returned = flow.flow == FLOW_RETURN ? flow.value : NULL;
-                call_leave(c, returned);
-                RESUME_INNERMOST();
-                code = m->code->items; pc = m->pc;
-                flow = (Result){returned ? FLOW_NORMAL : FLOW_ERROR, NULL};
-                if (returned) machine_push(c, m, returned);
-                continue;
+                flow = flow.flow == FLOW_RETURN ? (Result){FLOW_NORMAL, flow.value} : (Result){FLOW_ERROR, NULL};
+                call_leave(c, flow.value);
+                goto switch_call;
             }
             pc = m->pc;
             if (c->error_type[0]) continue;
@@ -20819,15 +20869,16 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         Instruction *ins = &code[pc++];
         Node *n = ins->node;
         if (n) { if (tick(c, &f, n)) continue; }
-        else if (n = owner, !quiet(c, &f)) {
+        else if (!quiet(c, &f)) {
             /* An instruction of no node ticks on the definition, keeping the
              * frame's line; while only a line would be recorded, it need not. */
+            n = generator ? generator->as.generator.node : c->calls[c->calls_len - 1]->fn->as.function.def;
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
             if (tick(c, &f, n)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
         }
         SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
-        SPYValue *callee, *callee_env; /* A call entered on the machine, both owned. */
+        SPYValue *callee_env; /* With value, a call to enter on the machine, both owned. */
         /* A step that owns no operand continues past their release. */
 #if THREADED
 #define STEP_LABEL(op) [op] = &&op_##op,
@@ -20862,6 +20913,10 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
             continue;
         }
+        CASE(BC_BLOCK)
+            flow = execute_statements(c, &f, n, 0);
+            if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
+            continue;
         CASE(BC_NONE) machine_push(c, m, spy_none(c)); NEXT;
         CASE(BC_POP) spy_release(machine_pop(m)); NEXT;
         CASE(BC_SLICE)
@@ -20911,48 +20966,18 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
             else sequence_append(c, args, a);
             break;
         }
-        CASE(BC_CALLF) {
-            /* A plain call whose operands need no steps of their own. */
-            SPYValue *argv[9];
-            size_t argc;
-            int method;
-            if (!(callee = plain_callee(c, &f, n, argv, &argc, &method))) continue;
-            if (method < 0 && machine_function(c, callee)) {
-                callee_env = function_env(c, callee, argc, argv, NULL);
-                while (argc) spy_release(argv[--argc]);
-                goto enter_call;
-            }
-            machine_push(c, m, call_plain(c, callee, method, n, argc, argv));
-            while (argc) spy_release(argv[--argc]);
-            spy_release(callee);
-            NEXT;
-        }
-        CASE(BC_CALLN) {
-            /* A plain call, its callee and arguments on the stack. */
-            size_t argc = (size_t)ins->arg;
-            SPYValue **argv = &m->stack[m->len - argc];
-            callee = argv[-1];
-            relocate(c, n);
-            if (machine_function(c, callee)) {
-                callee_env = function_env(c, callee, argc, argv, NULL);
-                while (argc--) spy_release(machine_pop(m));
-                m->len--;
-                goto enter_call;
-            }
-            value = call_plain(c, callee, -1, n, argc, argv);
-            while (argc--) spy_release(machine_pop(m));
-            spy_release(machine_pop(m));
+        CASE(BC_CALLF)
+            callee_env = NULL; value = operand_call(c, &f, n, &callee_env);
+            if (callee_env) goto enter_call;
             machine_push(c, m, value); NEXT;
-        }
+        CASE(BC_CALLN)
+            callee_env = NULL; value = stack_call(c, m, n, (size_t)ins->arg, !generator, &callee_env);
+            if (callee_env) goto enter_call;
+            machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
-            b = machine_pop(m); a = machine_pop(m); callee = machine_pop(m);
-            if (machine_function(c, callee) && string_keys(c, b)) {
-                callee_env = function_env(c, callee, a->as.seq.len, a->as.seq.items, b);
-                spy_release(a); spy_release(b);
-                goto enter_call;
-            }
-            machine_push(c, m, call_keywords(c, callee, a->as.seq.len, a->as.seq.items, b));
-            spy_release(callee); break;
+            callee_env = NULL; value = keyword_call(c, m, !generator, &callee_env);
+            if (callee_env) goto enter_call;
+            machine_push(c, m, value); break;
         CASE(BC_STORE)
             store_target(c, &f, n, m->stack[m->len - 1]);
             if (ins->arg) a = machine_pop(m);
@@ -21061,15 +21086,22 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
                 m->pc = pc; finish_delegate(c, m); pc = m->pc;
             }
             break;
-        CASE(BC_FLOW)
-            if (ins->arg == FLOW_RETURN && !m->block_len && c->calls_len > entry) {
-                /* A call returns into its caller. */
-                value = machine_pop(m);
+        CASE(BC_RETURN)
+            value = leaf_operand(&f, n->a);
+            if (!(value = value ? spy_retain(value) : eval(c, &f, n->a))) break;
+            if (!m->block_len && !m->outermost) {
+                /* A call returns into its caller, dispatching its next step
+                 * from here rather than switch_call, which predicts better. */
                 call_leave(c, value);
-                RESUME_INNERMOST();
-                code = m->code->items; pc = m->pc;
+                m = &c->calls[c->calls_len - 1]->m; f = m->frame; code = m->code->items; pc = m->pc;
                 machine_push(c, m, value);
                 NEXT;
+            }
+            flow = (Result){FLOW_RETURN, value}; break;
+        CASE(BC_FLOW)
+            if (ins->arg == FLOW_RETURN && !m->block_len && !m->outermost) {
+                call_leave(c, flow.value = machine_pop(m));
+                goto switch_call;
             }
             flow = (Result){ins->arg, ins->arg == FLOW_RETURN ? machine_pop(m) : NULL}; break;
         CASE(BC_LOOP) {
@@ -21237,17 +21269,15 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, SPYValue *sent
         if (b) spy_release(b);
         continue;
     enter_call:
-        /* callee, called on the machine in callee_env, or NULL when its
-         * arguments did not bind. */
-        if (!callee_env) { spy_release(callee); continue; }
         m->pc = pc;
-        if (!call_enter(c, callee, callee_env)) continue;
-        RESUME_INNERMOST();
-        code = m->code->items; pc = 0;
+        if (!call_enter(c, value, callee_env, 0)) continue;
+    switch_call:
+        /* The innermost call runs on, given flow.value when a call returned it. */
+        m = &c->calls[c->calls_len - 1]->m; f = m->frame; code = m->code->items; pc = m->pc;
+        if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
     }
 }
-#undef RESUME_INNERMOST
 #pragma GCC diagnostic pop
 #undef CASE
 #undef NEXT
@@ -21283,7 +21313,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     SPYValue *inherited = c->inherited_exception;
     c->inherited_exception = active_exception(c);
     c->handled = spy_retain(m->handled);
-    Result result = run_machine(c, g, sent, thrown, argc, argv);
+    Result result = run_machine(c, g, m, sent, thrown, argc, argv);
     spy_release(m->handled); m->handled = c->handled; c->handled = outer;
     c->inherited_exception = inherited;
     g->as.generator.line = c->frames[c->py_depth - 1].line;
