@@ -11517,10 +11517,11 @@ static int plain_mro(SPYContext *c, SPYValue *cls) {
     }
     return 1;
 }
-enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD, ATTR_READ = 3, ATTR_WRITE = 4 };
+enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD, ATTR_PROPERTY, ATTR_READ = 3, ATTR_WRITE = 4 };
 /* How cls's plain instances answer a read of name: from their own entries
  * (ATTR_OWN), else by binding the Python function *method (ATTR_METHOD),
- * or only by the full lookup (ATTR_SLOW); with ATTR_WRITE, an assignment
+ * by the getter of the property *method when no __getattr__ follows an
+ * error (ATTR_PROPERTY), or only by the full lookup (ATTR_SLOW); with ATTR_WRITE, an assignment
  * binds name in their own entries. The answer holds while classes_changed
  * does: every class in the MRO is watched, and none is a builtin class
  * whose slots could precede the class entries. */
@@ -11530,7 +11531,8 @@ static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYVa
     int read = ATTR_SLOW;
     if (!(hook = class_lookup(cls, "__getattribute__")) || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         if (!(*method = class_lookup(cls, name))) read = class_lookup(cls, "__getattr__") ? ATTR_SLOW : ATTR_OWN;
-        else read = (*method)->type == SPY_FUNCTION ? ATTR_METHOD : ATTR_SLOW;
+        else read = (*method)->type == SPY_FUNCTION ? ATTR_METHOD :
+                    (*method)->type == SPY_PROPERTY && !class_lookup(cls, "__getattr__") ? ATTR_PROPERTY : ATTR_SLOW;
     }
     int write = !class_lookup(cls, name) && !(cls->as.map.flags & CLASS_NO_DICT) &&
         (!(hook = class_lookup(cls, "__setattr__")) || default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR));
@@ -11547,14 +11549,18 @@ static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     if (cls != n->attr_class || n->attr_epoch != c->classes_changed) return node_access_refresh(c, cls, n);
     return n->attr_kind;
 }
-/* The attribute node n read from v, with n remembering how v's class answers. */
-static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n) {
+static int machine_function(SPYContext *, SPYValue *);
+/* The attribute node n read from v, with n remembering how v's class
+ * answers; or, when calls is set, NULL with no error for a property whose
+ * getter, n->attr_method's, the machine calls. */
+static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int calls) {
     int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
-    if (kind != ATTR_SLOW) {
+    if (kind == ATTR_OWN || kind == ATTR_METHOD) {
         Entry *e = dict_slot(v, n->b);
         if (e) return spy_retain(e->value);
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
+    if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
     return attribute(c, v, n->b->text);
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
@@ -13519,8 +13525,9 @@ struct Machine {
 };
 /* What a call on the machine returns into: its caller's machine; C; or
  * the step that made a special call, a class call's __init__, a loop's
- * __next__, a sort's key function or a consumer's next item. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM };
+ * __next__, a sort's key function, a consumer's next item or a with
+ * statement's __enter__. */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -13569,7 +13576,8 @@ static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValu
     return m;
 }
 /* Whether n is compiled to machine steps rather than evaluated whole: it
- * can suspend; or, with calls, it holds a call, which runs on the machine
+ * can suspend; or, with calls, it holds a call (a decorated definition
+ * applies one), which runs on the machine
  * without recursing in C, except a for loop's iterable; or, with calls at BODY, in a function body on
  * the machine, it is an if or a return, whose steps cost less there than
  * the walker's statement. */
@@ -13591,8 +13599,9 @@ static int expands(Node *n, int calls) {
      * stays a walker statement, where the call nests in C. */
     if (calls && n->kind == N_FOR && !expands(n->args, calls) && !list_expands(n->b, calls) && !list_expands(n->c, calls))
         return expands(n->a, 0);
+    /* Applying a decorator is a call. */
     if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS)
-        return list_expands(n->args, calls) || list_expands(n->decorators, calls);
+        return (calls && n->decorators) || list_expands(n->args, calls) || list_expands(n->decorators, calls);
     return list_expands(n->a, calls) || list_expands(n->b, calls) || list_expands(n->c, calls) || list_expands(n->args, calls);
 }
 static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
@@ -14757,7 +14766,7 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
         *method = -1 - n->attr_kind;
         return object;
     }
-    SPYValue *callee = node_attribute(c, object, n);
+    SPYValue *callee = node_attribute(c, object, n, 0);
     int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
         !dunder && callee->as.method.function == class_lookup(type, n->b->text)) {
@@ -14862,7 +14871,7 @@ static ALWAYS_INLINE SPYValue *eval_operand(SPYContext *c, Frame *f, Node *n) {
     if (!v) return eval(c, f, n);
     relocate(c, n);
     spy_retain(v);
-    SPYValue *result = node_attribute(c, v, n);
+    SPYValue *result = node_attribute(c, v, n, 0);
     spy_release(v);
     return result;
 }
@@ -15006,7 +15015,7 @@ container_fail:
         /* An attribute of a name, while tick has only the line to record,
          * takes the name's value as it is, held across the lookup. */
         a = n->a->kind == N_NAME && quiet(c, f) ? spy_retain(name_fast(f->env, n->a)) : NULL;
-        if (a || (a = eval(c, f, n->a))) { relocate(c, n); result = node_attribute(c, a, n); }
+        if (a || (a = eval(c, f, n->a))) { relocate(c, n); result = node_attribute(c, a, n, 0); }
         break;
     default: return eval_call(c, f, n); /* N_CALL, the last expression */
     }
@@ -21491,6 +21500,14 @@ done:
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return result;
 }
+/* BC_DECORATE of a Python decorator: it and the decorated value, taken
+ * from the stack, as the decorator to enter, with its env; or NULL. */
+static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
+    SPYValue *decorated = machine_pop(m), *decorator = machine_pop(m);
+    if ((*env = function_env(c, decorator, 1, &decorated, NULL, 1))) return decorator;
+    spy_release(decorator);
+    return NULL;
+}
 /* BC_CALL: the callee, argument list and keyword dict on the stack; a
  * generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
@@ -21500,6 +21517,35 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
     else result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
     spy_release(keywords); spy_release(args); spy_release(callee);
     return result;
+}
+/* The block of a with statement's step ins on m, whose manager's
+ * __exit__, exit, it takes, and __enter__'s value, which it takes too. */
+static void with_entered(SPYContext *c, Machine *m, Instruction *ins, SPYValue *exit, SPYValue *value) {
+    Block *block = push_block(c, m, BLOCK_WITH, ins);
+    if (block) { block->value = exit; machine_push(c, m, value); }
+    else { spy_release(exit); spy_release(value); }
+}
+/* BC_WITH: the manager on m's stack, taken. Its __exit__ and __enter__;
+ * a Python __enter__, owned, with its env, is a call to enter on the
+ * machine (CALL_ENTER), the __exit__ on the stack under it; else NULL,
+ * with the statement's block pushed, or an error. */
+static NO_INLINE SPYValue *with_enter(SPYContext *c, Machine *m, Instruction *ins, SPYValue **env) {
+    SPYValue *manager = machine_pop(m), *exit = special_method(c, manager, "__exit__");
+    SPYValue *enter = exit ? special_method(c, manager, "__enter__") : NULL, *function = NULL, *value = NULL;
+    if (!enter && !c->error_type[0]) manager_error(c, manager, 0, exit != NULL);
+    spy_release(manager);
+    if (enter && enter->type == SPY_METHOD && (function = bound_function(c, enter)) && !machine_push(c, m, exit)) {
+        SPYValue *self = spy_retain(enter->as.method.self);
+        spy_retain(function); spy_release(enter);
+        if ((*env = function_env(c, function, 1, &self, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
+    if (!function) value = enter ? call(c, enter, 0, NULL) : NULL;
+    spy_release(enter);
+    if (value) with_entered(c, m, ins, exit, value);
+    else if (!function) spy_release(exit);
+    return NULL;
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assign(c, f, n); }
@@ -21614,6 +21660,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                          * whose value is already on the caller's stack. */
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
+                    } else if (kind == CALL_ENTER) {
+                        if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);
                     } else if (kind == CALL_ITEM) {
                         if (!result && error_is(c, "StopIteration")) spy_clear_error(c);
                         flow.value = result;
@@ -21712,7 +21760,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m); machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
-            a = machine_pop(m); machine_push(c, m, node_attribute(c, a, n)); break;
+            a = machine_pop(m);
+            if (!(value = node_attribute(c, a, n, 1)) && !c->error_type[0]) goto enter_getter;
+            machine_push(c, m, value); break;
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
             int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
@@ -21811,6 +21861,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_JOIN)
             a = machine_pop(m); machine_push(c, m, join_strings(c, a)); break;
         CASE(BC_DECORATE)
+            /* A Python decorator is a call taking the decorated value. b's
+             * address taken here keeps run_steps' dispatch threaded. */
+            if (machine_function(c, m->stack[m->len - 2])) {
+                if ((value = decorate(c, m, &callee_env))) goto enter_call;
+                break;
+            }
             b = machine_pop(m); a = machine_pop(m);
             machine_push(c, m, call(c, a, 1, &b)); break;
         CASE(BC_FUNCTION) machine_push(c, m, function_new(c, &f, n)); break;
@@ -22087,22 +22143,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (block->error && !suppress && !c->error_type[0]) restore_error(c, block->error);
             pop_block(c, m, &f); break;
         }
-        CASE(BC_WITH) {
-            a = machine_pop(m);
-            b = special_method(c, a, "__exit__");
-            SPYValue *enter = b ? special_method(c, a, "__enter__") : NULL;
-            if (!enter && !c->error_type[0]) manager_error(c, a, 0, b != NULL);
-            value = enter ? call(c, enter, 0, NULL) : NULL;
-            spy_release(enter);
-            if (value) {
-                Block *block = push_block(c, m, BLOCK_WITH, ins);
-                if (block) {
-                    block->value = spy_retain(b);
-                    machine_push(c, m, spy_retain(value));
-                }
-            }
-            spy_release(value); break;
-        }
+        CASE(BC_WITH)
+            if (!(value = with_enter(c, m, ins, &callee_env))) break;
+            special = CALL_ENTER;
+            goto enter_special;
         CASE(BC_INCREMENT) increment_step(c, &f, n); break;
         }
         if (a) spy_release(a);
@@ -22191,6 +22235,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         f = m->frame; code = m->code->items; pc = m->pc;
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
+    enter_getter:
+        /* A property's Python getter is a call taking the instance (BC_ATTR). */
+        {
+            SPYValue *self = a;
+            value = spy_retain(n->attr_method->as.property.get);
+            if (!(callee_env = function_env(c, value, 1, &self, NULL, 1))) { spy_release(value); continue; }
+        }
+        goto enter_call;
     enter_init:
         /* A class call enters its __init__ (class_init). */
         spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
