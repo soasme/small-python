@@ -15071,13 +15071,20 @@ static NO_INLINE int new_locals(SPYContext *c, SPYValue *env, size_t argc, SPYVa
     env->as.map.items = items; env->as.map.cap = cap; env->as.map.len = len;
     return 0;
 }
-/* A kept environment has its keys, so it takes only the values. */
-static ALWAYS_INLINE int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *const *argv) {
+/* Release the references of argv. */
+static void release_all(size_t argc, SPYValue *const *argv) { while (argc) spy_release(argv[--argc]); }
+/* A kept environment has its keys, so it takes only the values; with
+ * take, argv's references are its own. */
+static ALWAYS_INLINE int open_locals(SPYContext *c, SPYValue *env, size_t argc, SPYValue *const *argv, int take) {
     Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
-    if (!items || !scope->order) return new_locals(c, env, argc, argv);
+    if (!items || !scope->order) {
+        int failed = new_locals(c, env, argc, argv);
+        if (take) release_all(argc, argv);
+        return failed;
+    }
     env->as.map.keyed = 1;
-    for (size_t i = 0; i < scope->order_len; i++) items[i].value = spy_retain(i < argc ? argv[i] : c->unbound);
+    for (size_t i = 0; i < scope->order_len; i++) items[i].value = i >= argc ? spy_retain(c->unbound) : take ? argv[i] : spy_retain(argv[i]);
     return 0;
 }
 /* Free the environments scope keeps; their keys are released unless the
@@ -15128,7 +15135,7 @@ static ALWAYS_INLINE void release_locals(SPYValue *env) {
     spy_release(parent); spy_release(unit);
 }
 static int declare_locals(SPYContext *c, SPYValue *env) {
-    if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env, 0, NULL);
+    if (fresh_locals(env) && !env->as.map.len) return open_locals(c, env, 0, NULL, 0);
     Scope *scope = env->as.map.scope;
     for (size_t i = 0; i < scope->len; i++)
         if ((scope->symbols[i].flags & S_LOCAL) && declare_name(c, env, scope->symbols[i].name)) return -1;
@@ -15691,21 +15698,23 @@ static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, 
 static void not_callable(SPYContext *, SPYValue *);
 static void release_owned(SPYValue *, void *);
 static Result run_machine(SPYContext *, SPYValue *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
-/* A new environment of fn's scope with its arguments bound, or NULL. */
-static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+/* A new environment of fn's scope with its arguments bound, or NULL;
+ * with take, it has argv's references, bound or released. */
+static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
     Scope *scope = fn->as.function.def->scope;
     /* The common call passes exactly the parameters, by position. */
     int positional = !fn->as.function.signature && (!keywords || !keywords->as.map.len);
     SPYValue *env = positional && scope->positional == argc ? kept_env(c, scope) : NULL;
-    if (!env && !(env = value_new(c, V_ENV))) return NULL;
+    if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
     env->as.map.parent = spy_retain(fn->as.function.env);
     env->as.map.scope = scope;
     env->as.map.unit = spy_retain(fn->as.function.unit);
     /* A replace()d code's parameters bind under its names and then take
      * the body's: the body's locals are declared after them. */
+    int open = positional && fresh_locals(env) && !scope_order(c, scope) && scope->positional == argc;
     int failed = fn->as.function.signature ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
-        positional && fresh_locals(env) && !scope_order(c, scope) && scope->positional == argc ?
-        open_locals(c, env, argc, argv) : declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
+        open ? open_locals(c, env, argc, argv, take) : declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
+    if (take && !open) release_all(argc, argv);
     if (failed) { release_locals(env); return NULL; }
     return env;
 }
@@ -15781,7 +15790,7 @@ static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *e
 /* A Python function's body, run in a new environment of its scope. */
 static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     Node *def = fn->as.function.def;
-    SPYValue *env = function_env(c, fn, argc, argv, keywords), *result = NULL;
+    SPYValue *env = function_env(c, fn, argc, argv, keywords, 0), *result = NULL;
     if (!env) return NULL;
     if (def->flat) return call_machine(c, fn, env);
     Frame frame = {env, fn->as.function.unit, 0};
@@ -17023,7 +17032,7 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
         env->as.map.parent = spy_retain(outer);
         env->as.map.scope = n->scope;
         env->as.map.unit = spy_retain(f->unit);
-        if (env->as.map.items) open_locals(c, env, 0, NULL);
+        if (env->as.map.items) open_locals(c, env, 0, NULL, 0);
         else declare_locals(c, env);
         result->as.generator.env = spy_retain(env);
         result->as.generator.unit = spy_retain(f->unit);
@@ -20795,9 +20804,14 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYVal
     size_t argc;
     int method;
     if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1))) return NULL;
-    if (method < 0 && machine_function(c, callee)) result = (*env = function_env(c, callee, argc, argv, NULL)) ? spy_retain(callee) : NULL;
-    else result = call_plain(c, callee, method, n, argc, argv);
-    while (argc) spy_release(argv[--argc]);
+    /* A call on the machine takes the arguments and the callee. */
+    if (method < 0 && machine_function(c, callee)) {
+        if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
+        spy_release(callee);
+        return NULL;
+    }
+    result = call_plain(c, callee, method, n, argc, argv);
+    release_all(argc, argv);
     spy_release(callee);
     return result;
 }
@@ -20806,8 +20820,14 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYVal
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
     relocate(c, n);
-    if (calls && machine_function(c, callee)) result = (*env = function_env(c, callee, argc, argv, NULL)) ? spy_retain(callee) : NULL;
-    else result = call_plain(c, callee, -1, n, argc, argv);
+    if (calls && machine_function(c, callee)) {
+        /* A call on the machine takes the arguments and the callee from the stack. */
+        m->len -= argc + 1;
+        if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
+        spy_release(callee);
+        return NULL;
+    }
+    result = call_plain(c, callee, -1, n, argc, argv);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return result;
 }
@@ -20816,7 +20836,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result;
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
-        result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords)) ? spy_retain(callee) : NULL;
+        result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
     else result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
     spy_release(keywords); spy_release(args); spy_release(callee);
     return result;
