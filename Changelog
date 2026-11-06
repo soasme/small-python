@@ -19,6 +19,7 @@ Unreleased (0.8.0):
   C stack
 - sort keys, next(), send(), str(), repr(), __new__, properties, __getattr__
   and operator methods no longer use the C stack in most function code
+- class bodies that call or loop no longer use the C stack
 - == on deeply nested containers no longer raises RecursionError
 - a method call looks up its method before evaluating arguments that call
   code; an attribute read in an operator honors a property added later

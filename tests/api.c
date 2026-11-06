@@ -1026,6 +1026,10 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "call_back(lambda: sorted(range(15), key=slow))[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
     assert(!spy_eval(c, "call_back(lambda: sorted(range(30), key=slow))", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
     spy_clear_error(c);
+    /* A class body that loops pauses inside it. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "class Looping:\n    n = 0\n    while n < 3000: n += 1\n    m = slow(n)\nLooping.m", "class.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
     /* An interrupt pauses too; spy_exec returns -1 when it pauses. */
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     spy_set_interrupt(c, always, NULL);

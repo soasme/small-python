@@ -291,11 +291,13 @@ These run as machines on the heap, in one native activation of
 - property getters and `__getattr__`, `__enter__`, `__bool__`, binary
   operator, comparison, `__getitem__`, `__setitem__` and `__contains__`
   methods of instances, where a step of their own reaches them;
-- list, set and dictionary comprehensions.
+- list, set and dictionary comprehensions;
+- class bodies that hold a call or a loop, when the class has no type
+  parameters or annotations and the builtin `__build_class__` makes it.
 
 A call that native code makes runs in an activation of its own: another
-special method, a host function, a class body, and a call from what the
-walker evaluates whole. The walker runs a function whose body holds no
+special method, a host function, the metaclass call that makes a class,
+and a call from what the walker evaluates whole. The walker runs a function whose body holds no
 call or loop, which ends within a bounded number of steps, and, inside a
 function on the machine, arithmetic of more than one operator on names
 and literals, so an operator method such an expression reaches nests. The engine counts
@@ -310,7 +312,7 @@ under the stop rule (3.1), running no handler or `finally` body.
 `tests/api.c` pauses a program of calls, a generator, a class call and a
 comprehension more than twenty times and checks its value; checks that
 another call runs while it is paused, that a sort pauses in its key
-calls, that a pause due inside a host function's call back waits for it,
+calls and a class body inside its loop, that a pause due inside a host function's call back waits for it,
 within one further budget, and that an interrupt pauses
 too; and frees a context with a call paused. `tests/tla/SpyPause.tla`
 models the contract.
