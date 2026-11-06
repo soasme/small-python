@@ -1016,12 +1016,15 @@ int main(int argc, char **argv) {
     assert(spy_exec(c, "while True: pass", "between.py") == -1 && spy_stopped(c) == SPY_STOP_STEPS && spy_paused(c));
     spy_clear_error(c);
     assert(integer(c, run_paused(c, v, SPY_STOP_STEPS, &pauses)) == 4498500 && pauses > 1);
-    /* A pause due inside a native call waits for it to return, within one
-     * further budget; a call needing more stops. */
+    /* A sort's key calls pause; a pause due inside a host function's call
+     * back waits for it to return, within one further budget, and a call
+     * needing more stops. */
     execute(c, "def slow(x):\n    for i in range(100): pass\n    return x");
     pauses = 0;
-    assert(integer(c, run_paused(c, spy_eval(c, "sorted(range(15), key=slow)[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
-    assert(!spy_eval(c, "sorted(range(30), key=slow)", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
+    assert(integer(c, run_paused(c, spy_eval(c, "sorted(range(30), key=slow)[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 29 && pauses > 1);
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "call_back(lambda: sorted(range(15), key=slow))[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
+    assert(!spy_eval(c, "call_back(lambda: sorted(range(30), key=slow))", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
     spy_clear_error(c);
     /* An interrupt pauses too; spy_exec returns -1 when it pauses. */
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);

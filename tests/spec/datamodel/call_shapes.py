@@ -1,4 +1,4 @@
-# spec: PLS-315 20.2.5, 10.2.1, 13.3.4
+# spec: PLS-315 20.2.5, 10.2.1, 13.3.4, 7.4.1
 # description: Calling a class runs its metaclass's __call__, then
 # __init__ with the new instance; a bound method passes its self first.
 # Each holds whatever form the call takes inside a function.
@@ -107,3 +107,28 @@ def unexpected():
         return str(e)
 
 assert unexpected() == "Keyed.__init__() got an unexpected keyword argument 'zz'", unexpected()
+
+# An instance's class __call__, and never one the instance holds.
+class Callable:
+    def __init__(self, k): self.k = k
+    def __call__(self, x=1, *, y=2):
+        for i in range(1): pass
+        return (self.k, x, y)
+
+class CallableChild(Callable):
+    pass
+
+def instances():
+    a = Callable('a')
+    args = [5]
+    out = [a(), a(3), a(*args), a(y=9), a(4, y=8), CallableChild('b')(7), (lambda: a(1))()]
+    try:
+        a(1, 2)
+    except TypeError as e:
+        out.append(str(e))
+    a.__call__ = lambda: 'held'
+    out.append(a(0))
+    return out
+
+assert instances() == [('a', 1, 2), ('a', 3, 2), ('a', 5, 2), ('a', 1, 9), ('a', 4, 8), ('b', 7, 2), ('a', 1, 2),
+                       'Callable.__call__() takes from 1 to 2 positional arguments but 3 were given', ('a', 0, 2)], instances()

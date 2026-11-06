@@ -8324,6 +8324,38 @@ static ALWAYS_INLINE int iterator_fast(SPYContext *c, SPYValue *v, SPYValue **it
     *item = NULL;
     return 1;
 }
+/* The next items of zip or map iterator v's iterables, as a tuple; NULL
+ * at their end or on an error. */
+static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
+    SPYValue *source = v->as.iterator.source, *result;
+    if (!source->as.seq.len || !(result = value_new(c, SPY_TUPLE))) return NULL;
+    size_t first = v->as.iterator.kind == I_MAP;
+    const char *name = first ? "map" : "zip";
+    for (size_t i = first; i < source->as.seq.len; i++) {
+        SPYValue *item = iterator_next(c, source->as.seq.items[i]);
+        if (!item || sequence_append(c, result, item)) {
+            spy_release(item); spy_release(result); result = NULL;
+            /* zip(strict=True) and map(strict=True), as zip_next checks: a
+             * short argument after the first, or a longer one once the
+             * first is exhausted. Arguments count from the first iterable. */
+            if (!item && !c->error_type[0] && v->as.iterator.size) {
+                size_t k = i - first;
+                if (k) { errorf(c, "ValueError", "%s() argument %zu is shorter than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k); break; }
+                for (size_t j = first + 1; j < source->as.seq.len && !c->error_type[0]; j++) {
+                    SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
+                    if (extra) {
+                        spy_release(extra);
+                        k = j - first;
+                        errorf(c, "ValueError", "%s() argument %zu is longer than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k);
+                    }
+                }
+            }
+            break;
+        }
+        spy_release(item);
+    }
+    return result;
+}
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     SPYValue *item;
     if (iterator_fast(c, v, &item)) return item;
@@ -8423,34 +8455,7 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         break;
     }
     case I_ZIP: case I_MAP:
-        if (!source->as.seq.len) break;
-        result = value_new(c, SPY_TUPLE);
-        if (!result) break;
-        size_t first = v->as.iterator.kind == I_MAP;
-        const char *name = first ? "map" : "zip";
-        for (size_t i = first; i < source->as.seq.len; i++) {
-            SPYValue *item = iterator_next(c, source->as.seq.items[i]);
-            if (!item || sequence_append(c, result, item)) {
-                spy_release(item); spy_release(result); result = NULL;
-                /* zip(strict=True) and map(strict=True), as zip_next checks: a
-                 * short argument after the first, or a longer one once the
-                 * first is exhausted. Arguments count from the first iterable. */
-                if (!item && !c->error_type[0] && v->as.iterator.size) {
-                    size_t k = i - first;
-                    if (k) { errorf(c, "ValueError", "%s() argument %zu is shorter than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k); break; }
-                    for (size_t j = first + 1; j < source->as.seq.len && !c->error_type[0]; j++) {
-                        SPYValue *extra = iterator_next(c, source->as.seq.items[j]);
-                        if (extra) {
-                            spy_release(extra);
-                            k = j - first;
-                            errorf(c, "ValueError", "%s() argument %zu is longer than argument%s%zu", name, k + 1, k == 1 ? " " : "s 1-", k);
-                        }
-                    }
-                }
-                break;
-            }
-            spy_release(item);
-        }
+        result = zip_items(c, v);
         if (result && v->as.iterator.kind == I_MAP) {
             SPYValue *mapped = call(c, source->as.seq.items[0], result->as.seq.len, result->as.seq.items);
             spy_release(result); result = mapped;
@@ -10371,7 +10376,7 @@ static int class_assign_bases(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *slots_base(SPYValue *);
 static int builtin_class(SPYContext *, SPYValue *);
 static int static_type(SPYContext *, SPYValue *);
-static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
+static int sort_list(SPYContext *, SPYValue *, SPYValue *, int, SPYValue *const *);
 static void delete_name(SPYValue *, const char *);
 static int set_class(SPYContext *, SPYValue *, SPYValue *);
 static int class_has_dict(SPYContext *, SPYValue *);
@@ -13474,10 +13479,15 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * any, all, list or tuple; and a sum's float total while it compensates.
  * A set adds each item; a callee, owned, takes the items collected in a
  * list at their end (a native method of it with name when method is not
- * -1): frozenset, sorted or str.join. */
+ * -1): frozenset, sorted or str.join. A sort by a key function, its
+ * callee, collects in result the keys of its block's list, to sort in
+ * order descending or not; list.sort's list, the target, waits empty. A
+ * min or max by key keeps its best item and, in result, that item's key,
+ * and the item whose key its callee is computing. */
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX };
 typedef struct {
-    int id, compensating, method;
-    SPYValue *result, *callee, *name;
+    int id, compensating, method, keyed, descending;
+    SPYValue *result, *callee, *name, *target, *best, *item;
     double total, compensation;
 } Consumer;
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
@@ -13508,9 +13518,9 @@ struct Machine {
     Machine *resumer;
 };
 /* What a call on the machine returns into: its caller's machine; C; or
- * the step that made a special call, a class call's __init__ or a loop's
- * __next__. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT };
+ * the step that made a special call, a class call's __init__, a loop's
+ * __next__, a sort's key function or a consumer's next item. */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -13532,6 +13542,9 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->error && b->error->value) visit(b->error->value, data);
         if (b->consumer && b->consumer->result) visit(b->consumer->result, data);
         if (b->consumer && b->consumer->callee) visit(b->consumer->callee, data);
+        if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
+        if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
+        if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
@@ -15260,14 +15273,14 @@ static int declare_locals(SPYContext *c, SPYValue *env) {
         if ((scope->symbols[i].flags & S_LOCAL) && declare_name(c, env, scope->symbols[i].name)) return -1;
     return 0;
 }
-static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
+static int sort_list(SPYContext *, SPYValue *, SPYValue *, int, SPYValue *const *);
 /* object_new refuses a class marked CLASS_ABSTRACT (Py_TPFLAGS_IS_ABSTRACT),
  * naming the sorted methods of its own __abstractmethods__. */
 static int abstract_instance_error(SPYContext *c, SPYValue *cls) {
     SPYValue *methods = cls->as.map.flags & CLASS_ABSTRACT ? name_local(cls, "__abstractmethods__") : NULL;
     if (!methods) return 0;
     SPYValue *sorted = builtin(c, 1, &methods, (void *)(intptr_t)B_LIST);
-    if (!sorted || sort_list(c, sorted, NULL, 0)) { spy_release(sorted); return -1; }
+    if (!sorted || sort_list(c, sorted, NULL, 0, NULL)) { spy_release(sorted); return -1; }
     Buffer joined = {.ctx = c};
     for (size_t i = 0; i < sorted->as.seq.len; i++)
         if ((i && puts_buffer(&joined, ", ")) || format_value(&joined, sorted->as.seq.items[i], 1)) break;
@@ -17967,7 +17980,7 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
             errorf(c, "ValueError", "'%s' in __slots__ conflicts with class variable", name); status = -1;
         }
     }
-    if (!status) status = sort_list(c, list, NULL, 0);
+    if (!status) status = sort_list(c, list, NULL, 0, NULL);
     /* Variable-size instances take __weakref__ only when __slots__ lists it. */
     int weakrefs_allowed = (layout != SPY_INT && layout != SPY_BYTES && layout != SPY_TUPLE) || (slots && weakref);
     static const char *const getsets[] = {"__dict__", "__weakref__"};
@@ -18086,7 +18099,7 @@ static int update_bases(SPYContext *c, SPYValue *bases, SPYValue *original) {
     spy_release(result);
     return c->error_type[0] ? -1 : changed;
 }
-static int sort_list(SPYContext *, SPYValue *, SPYValue *, int);
+static int sort_list(SPYContext *, SPYValue *, SPYValue *, int, SPYValue *const *);
 static SPYValue *static_attributes(SPYContext *c, Scope *scope) {
     if (scope->static_attributes) return spy_retain(scope->static_attributes);
     SPYValue *names = value_new(c, SPY_DICT), *result = spy_list(c);
@@ -18096,7 +18109,7 @@ static SPYValue *static_attributes(SPYContext *c, Scope *scope) {
     for (size_t i = 0; i < names->as.map.len && !c->error_type[0]; i++)
         sequence_append(c, result, map_items(names)[i].key);
     spy_release(names);
-    if (c->error_type[0] || sort_list(c, result, NULL, 0)) { spy_release(result); return NULL; }
+    if (c->error_type[0] || sort_list(c, result, NULL, 0, NULL)) { spy_release(result); return NULL; }
     result->type = SPY_TUPLE;
     scope->static_attributes = spy_retain(result);
     return result;
@@ -20865,6 +20878,7 @@ static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) 
     *b = (Block){.kind = kind, .depth = m->len, .target = ins->target, .other = ins->other, .node = ins->node};
     return b;
 }
+static void sort_restore(SPYContext *, SPYValue *, SPYValue *);
 static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     Block b = m->blocks[--m->block_len];
     while (m->len > b.depth) spy_release(machine_pop(m));
@@ -20874,9 +20888,18 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
             clear_binding(c, f->env, b.name->text);
         }
     }
+    if (b.consumer && b.consumer->target) {
+        /* An unfinished list.sort leaves its list as it was. */
+        sort_restore(c, b.consumer->target, b.value);
+        spy_release(b.consumer->target); b.value = NULL;
+    }
     spy_release(b.value); spy_release(b.handled);
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
-    if (b.consumer) { spy_release(b.consumer->result); spy_release(b.consumer->callee); mem_free(b.consumer); }
+    if (b.consumer) {
+        spy_release(b.consumer->result); spy_release(b.consumer->callee);
+        spy_release(b.consumer->best); spy_release(b.consumer->item);
+        mem_free(b.consumer);
+    }
 }
 static ErrorState *save_error(SPYContext *c) {
     ErrorState state = take_error(c);
@@ -21118,7 +21141,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     return id;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
-    return argc && resumable(argv[0]) ? consumer_id(c, callee, method, argc, argv) : -1;
+    return argc && (resumable(argv[0]) || (argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP)) ?
+           consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
@@ -21147,20 +21171,131 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     }
     return !status;
 }
-/* Whether callee is a method of a function on the machine; then the
- * function, owned, replaces it, and its self goes before the argc
- * arguments argv, which have room for it. */
+/* A call node's sort, min or max by a key function on the machine, keyword
+ * call stack_keyword_call's with positional arguments argv and keywords
+ * kw: sorted(iterable, key=...) or list.sort(key=...), with reverse= or not,
+ * and min or max of an iterable or of the arguments, by key=. Its keys are
+ * calls returning into the step (CALL_KEY), on block value: the list it
+ * sorts, or an iterator of the items (key_call). 1 when it began, 0 when
+ * the call is not one, -1 on an error. */
+static int sort_detach_into(SPYContext *, SPYValue *, SPYValue **);
+static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, size_t positional, SPYValue *const *argv,
+                                  const Entry *kw, size_t kwc) {
+    int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
+    int method = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_SORT;
+    int keyed = method || id == B_SORTED ? KEY_SORT : id == B_MIN ? KEY_MIN : id == B_MAX ? KEY_MAX : 0;
+    if (!keyed || (method ? positional != 0 : id == B_SORTED ? positional != 1 : !positional) ||
+        (positional == 1 && resumable(argv[0]))) return 0;
+    SPYValue *key = NULL, *reverse = NULL;
+    for (size_t i = 0; i < kwc; i++) {
+        const char *name = kw[i].key->as.string.data;
+        SPYValue **slot = !strcmp(name, "key") ? &key : keyed == KEY_SORT && !strcmp(name, "reverse") ? &reverse : NULL;
+        if (!slot || *slot) return 0;
+        *slot = kw[i].value;
+    }
+    if (!key || !machine_function(c, key)) return 0;
+    /* sorted() takes its items before list.sort reads reverse, which reads
+     * it before it empties the list. */
+    SPYValue *items = NULL, *keys = NULL;
+    Consumer *consumer = allocate(c, sizeof(*consumer));
+    int ready = 0, descending = 0;
+    if (!consumer) ;
+    else if (keyed != KEY_SORT) {
+        SPYValue *all = positional == 1 ? spy_retain(argv[0]) : spy_tuple(c, positional, argv);
+        ready = all && (items = get_iterator(c, all));
+        spy_release(all);
+    } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !extend_display(c, items, argv[0])))) {
+        descending = reverse ? truthy(reverse) : 0;
+        ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee->as.bound.self, &items));
+    }
+    Block *block = ready ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (block) {
+        *consumer = (Consumer){.keyed = keyed, .descending = descending, .result = keys, .callee = spy_retain(key),
+                               .target = method ? spy_retain(callee->as.bound.self) : NULL};
+        block->value = items; block->consumer = consumer;
+        return 1;
+    }
+    if (ready && method) sort_restore(c, callee->as.bound.self, items);
+    else spy_release(items);
+    mem_free(consumer); spy_release(keys);
+    return -1;
+}
+/* The key function the consumer atop m calls next, owned, with its env;
+ * or NULL when its items are all taken, then its value on the stack, or
+ * an error. */
+static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValue **env) {
+    Block *top = &m->blocks[m->block_len - 1];
+    Consumer *s = top->consumer;
+    SPYValue *items = top->value, *item, *result;
+    if (s->keyed == KEY_SORT) {
+        size_t done = s->result->as.seq.len;
+        if (done < items->as.seq.len) {
+            item = spy_retain(items->as.seq.items[done]);
+            return (*env = function_env(c, s->callee, 1, &item, NULL, 1)) ? spy_retain(s->callee) : NULL;
+        }
+        if (sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
+        result = s->target ? spy_none(c) : spy_retain(items);
+    } else {
+        if ((item = iterator_next(c, items))) {
+            s->item = spy_retain(item);
+            return (*env = function_env(c, s->callee, 1, &item, NULL, 1)) ? spy_retain(s->callee) : NULL;
+        }
+        if (c->error_type[0]) return NULL;
+        result = s->best ? spy_retain(s->best) :
+                 errorf(c, "ValueError", "%s() iterable argument is empty", s->keyed == KEY_MAX ? "max" : "min");
+    }
+    pop_block(c, m, f);
+    if (c->error_type[0]) spy_release(result);
+    else machine_push(c, m, result);
+    return NULL;
+}
+/* The consumer atop m takes key, its item's key: a sort keeps it, and min
+ * or max keeps the item while it is the best; 0, or -1 on an error. */
+static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
+    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    if (s->keyed == KEY_SORT) {
+        int status = sequence_append(c, s->result, key);
+        spy_release(key);
+        return status;
+    }
+    SPYValue *item = s->item;
+    s->item = NULL;
+    int better = !s->best;
+    if (s->best) {
+        SPYValue *test = comparison(c, s->keyed == KEY_MAX ? '>' : '<', key, s->result);
+        better = test && truthy(test);
+        spy_release(test);
+    }
+    if (better && !c->error_type[0]) {
+        spy_release(s->best); spy_release(s->result);
+        s->best = item; s->result = key;
+    } else { spy_release(item); spy_release(key); }
+    return c->error_type[0] ? -1 : 0;
+}
+/* The function on the machine that calling v calls with v's self first:
+ * a bound method's, or a Python __call__ of an instance's class; borrowed,
+ * or NULL. */
+static SPYValue *bound_function(SPYContext *c, SPYValue *v) {
+    SPYValue *function = v->type == SPY_METHOD ? v->as.method.function :
+                         v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__call__") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Whether callee calls a function on the machine with its self
+ * (bound_function); then the function, owned, replaces it, and the self
+ * goes before the argc arguments argv, which have room for it. */
 static int unbind(SPYContext *c, SPYValue **callee, size_t *argc, SPYValue **argv) {
-    SPYValue *method = *callee;
-    if (method->type != SPY_METHOD || !machine_function(c, method->as.method.function)) return 0;
+    SPYValue *method = *callee, *function = bound_function(c, method);
+    if (!function) return 0;
     memmove(argv + 1, argv, *argc * sizeof(*argv));
-    argv[0] = spy_retain(method->as.method.self); ++*argc;
-    *callee = spy_retain(method->as.method.function);
-    spy_release(method);
+    ++*argc;
+    *callee = spy_retain(function);
+    if (method->type == SPY_METHOD) { argv[0] = spy_retain(method->as.method.self); spy_release(method); }
+    else argv[0] = method;
     return 1;
 }
-/* operand_call of a bound method, a class, or a callee given a generator
- * first, with room in argv for one more argument. */
+/* operand_call of a bound method, a class, an instance, or a callee given
+ * a generator or an iterator first, with room in argv for one more
+ * argument. */
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -21205,7 +21340,8 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         spy_release(callee);
         return NULL;
     }
-    if ((method < 0 && (callee->type == SPY_METHOD || callee->type == SPY_CLASS)) || (argc && argv[0]->type == SPY_GENERATOR))
+    if ((method < 0 && (callee->type == SPY_METHOD || callee->type == SPY_CLASS || callee->type == SPY_INSTANCE)) ||
+        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
@@ -21226,11 +21362,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return NULL;
     }
-    SPYValue *self, *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
-    if (function && machine_function(c, function)) {
-        /* A bound method's self takes its place. */
-        argv[-1] = spy_retain(callee->as.method.self);
-        spy_retain(function); spy_release(callee);
+    SPYValue *self, *function = bound_function(c, callee);
+    if (function) {
+        /* A bound method's self takes its place; an instance stays as self. */
+        spy_retain(function);
+        if (callee->type == SPY_METHOD) { argv[-1] = spy_retain(callee->as.method.self); spy_release(callee); }
         m->len -= argc + 1;
         if ((*env = function_env(c, function, argc + 1, argv - 1, NULL, 1))) return function;
         spy_release(function);
@@ -21305,10 +21441,9 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     /* A bound method's self, or a plain class's new instance, takes the
      * callee's place before the arguments, entering the function or the
      * __init__ with it; the instance stays there as the call's value. */
-    SPYValue *init = callee->type == SPY_CLASS ? plain_init(c, callee) : NULL, *function = NULL, *self = NULL;
-    if (callee->type == SPY_METHOD && calls && machine_function(c, callee->as.method.function)) {
-        function = callee->as.method.function; self = spy_retain(callee->as.method.self);
-    } else if (init && calls && machine_function(c, init) && (self = new_instance(c, callee))) function = init;
+    SPYValue *init = callee->type == SPY_CLASS ? plain_init(c, callee) : NULL, *function = calls ? bound_function(c, callee) : NULL, *self = NULL;
+    if (function) self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
+    else if (init && calls && machine_function(c, init) && (self = new_instance(c, callee))) function = init;
     if (function) {
         argv[-1] = self;
         SPYValue *callee_env = keyword_env(c, function, positional + 1, argv - 1, kw, kwc, NULL, 0);
@@ -21324,6 +21459,17 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         goto done;
     }
     if (c->error_type[0]) goto done;
+    if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD)) {
+        int began = key_consumer(c, m, callee, positional, argv, kw, kwc);
+        if (began < 0) goto done;
+        if (began) {
+            /* The sort's block goes above the call's operands. */
+            Block block = m->blocks[--m->block_len];
+            for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+            block.depth = m->len; m->blocks[m->block_len++] = block;
+            return NULL;
+        }
+    }
     Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? callee->as.function.def : NULL;
     if (def && def->kind != N_CLASS && def->kind != N_COMPREHENSION) {
         SPYValue *callee_env = keyword_env(c, callee, positional, argv, kw, kwc, NULL, 0);
@@ -21402,12 +21548,30 @@ static ALWAYS_INLINE void loop_item(SPYContext *c, Machine *m, Frame *f, Instruc
     if (next->other) { store_target(c, f, next->node->args, item); spy_release(item); }
     else machine_push(c, m, item);
 }
-/* The __next__ of iterator v that a loop step enters on the machine: a
- * Python function of v's class, borrowed; else NULL. */
-static SPYValue *machine_next(SPYContext *c, SPYValue *v) {
-    if (v->type != SPY_INSTANCE || builtin_base(c, v, "__next__", NULL)) return NULL;
-    SPYValue *next = class_lookup(v->as.map.parent, "__next__");
-    return next && machine_function(c, next) ? next : NULL;
+/* The call a step enters on the machine for iterator v's next item, owned,
+ * with its env: a Python __next__ of v's class, or a map's function given
+ * its iterables' next items. 1 then; 0 when v has none; -1 when the map's
+ * iterables ended or raised. */
+static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *function, *args;
+    if (v->type == SPY_ITERATOR) {
+        if (v->as.iterator.kind != I_MAP || !v->as.iterator.source->as.seq.len ||
+            !machine_function(c, function = v->as.iterator.source->as.seq.items[0])) return 0;
+        if (!(args = zip_items(c, v))) return -1;
+        *env = function_env(c, function, args->as.seq.len, args->as.seq.items, NULL, 0);
+        spy_release(args);
+    } else {
+        if (v->type != SPY_INSTANCE || builtin_base(c, v, "__next__", NULL)) return 0;
+        if (!(function = class_lookup(v->as.map.parent, "__next__")) || !machine_function(c, function)) return 0;
+        args = spy_retain(v);
+        *env = function_env(c, function, 1, &args, NULL, 1);
+    }
+    if (!*env) return -1;
+    *fn = spy_retain(function);
+    return 1;
+}
+static ALWAYS_INLINE int next_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    return v->type == SPY_ITERATOR || v->type == SPY_INSTANCE ? next_call_of(c, v, fn, env) : 0;
 }
 /* Run machine m: generator's, or else the innermost call's, then the
  * calls it makes, until the outermost of them returns. */
@@ -21450,6 +21614,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                          * whose value is already on the caller's stack. */
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
+                    } else if (kind == CALL_ITEM) {
+                        if (!result && error_is(c, "StopIteration")) spy_clear_error(c);
+                        flow.value = result;
+                        goto item_returned;
+                    } else if (kind == CALL_KEY) {
+                        if (result && !key_took(c, m, result)) goto consume_generator;
                     } else if (result) loop_item(c, m, &f, &code[pc - 1], result);
                     else if (error_is(c, "StopIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
                     continue;
@@ -21767,14 +21937,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (!iterator_fast(c, iterator, &a)) {
                     if (resumable(iterator)) { value = iterator; goto resume_generator; }
                     relocate(c, n);
-                    /* A Python __next__ is a call that returns into this step (next_left). */
-                    if ((value = machine_next(c, iterator))) {
-                        SPYValue *self = spy_retain(iterator);
-                        if (!(callee_env = function_env(c, value, 1, &self, NULL, 1))) break;
-                        spy_retain(value); special = CALL_NEXT;
-                        goto enter_special;
-                    }
-                    a = iterator_next(c, iterator);
+                    /* A Python __next__, or a map's function, is a call that
+                     * returns into this step. */
+                    SPYValue *next;
+                    int calling = next_call(c, iterator, &next, &callee_env);
+                    if (calling > 0) { value = next; special = CALL_NEXT; goto enter_special; }
+                    a = calling ? NULL : iterator_next(c, iterator);
                 }
                 if (!a) pc = ins->target;
                 else if (ins->other) {
@@ -21944,7 +22112,21 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
         value = m->blocks[m->block_len - 1].value;
-        if (!resumable(value)) { m->pc = pc; a = iterator_next(c, value); goto consume_item; }
+        if (!resumable(value)) {
+            m->pc = pc;
+            callee_env = NULL;
+            if (m->blocks[m->block_len - 1].consumer->keyed) {
+                if (!(value = key_call(c, m, &f, &callee_env))) continue;
+                special = CALL_KEY;
+                goto enter_special;
+            }
+            /* A map's function is a call returning its item (CALL_ITEM). */
+            SPYValue *next;
+            int calling = next_call(c, value, &next, &callee_env);
+            if (calling > 0) { value = next; special = CALL_ITEM; goto enter_special; }
+            a = calling ? NULL : iterator_next(c, value);
+            goto consume_item;
+        }
     resume_generator:
         /* A loop step resumes generator value's machine here, which yields
          * or ends into this machine (generator_left). */
@@ -21990,6 +22172,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         flow = (Result){FLOW_NORMAL, NULL};
         continue;
     }
+    item_returned:
+        /* A consumer's item, or its end, that a call returned (CALL_ITEM). */
+        a = flow.value; flow.value = NULL;
     consume_item:
         if (consumer_took(c, m, &f, a)) goto consume_generator;
         a = NULL;
@@ -22630,7 +22815,8 @@ static NO_INLINE void sort_int_keys(SPYContext *c, int kind, IntItem *items, Int
     for (size_t i = 0; i < len; i++) out[i] = sorted[reverse ? len - i - 1 : i].value; \
     mem_free(packed); \
 } while (0)
-static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) {
+/* Sort list by key, or by keys computed already when given. */
+static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse, SPYValue *const *given) {
     size_t len = list->as.seq.len;
     if (len > SIZE_MAX / sizeof(SortItem)) { spy_error(c, "MemoryError", "list too large to sort"); return -1; }
     SortItem *items = allocate_array(c, len, sizeof(*items)), *from = items, *scratch = NULL;
@@ -22639,7 +22825,7 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse) 
     size_t keys = 0;
     for (; keys < len; keys++) {
         items[keys].value = list->as.seq.items[keys];
-        items[keys].key = key && key->type != SPY_NONE ? call(c, key, 1, &items[keys].value) : spy_retain(items[keys].value);
+        items[keys].key = given ? spy_retain(given[keys]) : key && key->type != SPY_NONE ? call(c, key, 1, &items[keys].value) : spy_retain(items[keys].value);
         if (!items[keys].key) break;
     }
     if (keys != len) goto done;
@@ -22672,26 +22858,33 @@ done:
     mem_free(items); mem_free(scratch); mem_free(ends); return c->error_type[0] ? -1 : 0;
 }
 #undef SORT_NUMBERS
-static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
-    (void)argv;
+/* list.sort's arguments: its key function, borrowed, or NULL, and whether
+ * it sorts in descending order. */
+static int sort_arguments(SPYContext *c, size_t argc, SPYValue *keywords, SPYValue **key, int *descending) {
     static const char *const names[] = {"key", "reverse"};
-    if (argc > 2) return errorf(c, "TypeError", "sort() takes at most 2 arguments (%zu given)", argc);
-    if (argc) return spy_error(c, "TypeError", "sort() takes no positional arguments");
-    if (keyword_limit(c, "sort", keywords, 2)) return NULL;
-    SPYValue *key = keywords ? name_local(keywords, names[0]) : NULL;
+    if (argc > 2) { errorf(c, "TypeError", "sort() takes at most 2 arguments (%zu given)", argc); return -1; }
+    if (argc) { spy_error(c, "TypeError", "sort() takes no positional arguments"); return -1; }
+    if (keyword_limit(c, "sort", keywords, 2)) return -1;
+    *key = keywords ? name_local(keywords, names[0]) : NULL;
     SPYValue *reverse = keywords ? name_local(keywords, names[1]) : NULL;
     for (size_t i = 0; keywords && i < keywords->as.map.len; i++) {
         const char *name = builtin_value(c, map_items(keywords)[i].key, SPY_STRING)->as.string.data;
-        if (strcmp(name, names[0]) && strcmp(name, names[1])) { unknown_keywords(c, "sort", keywords, names, 2); return NULL; }
+        if (strcmp(name, names[0]) && strcmp(name, names[1])) { unknown_keywords(c, "sort", keywords, names, 2); return -1; }
     }
-    int descending = reverse ? truthy(reverse) : 0;
-    if (c->error_type[0]) return NULL;
-    SPYValue *working = spy_list(c);
-    if (!working) return NULL;
-    /* Callbacks see an empty list. The working list keeps its values traced. */
-    working->as.seq = list->as.seq;
+    *descending = reverse ? truthy(reverse) : 0;
+    return c->error_type[0] ? -1 : 0;
+}
+/* The working list that takes list's items while it sorts: callbacks see
+ * list empty, and the working list keeps its values traced. */
+static int sort_detach_into(SPYContext *c, SPYValue *list, SPYValue **working) {
+    if (!(*working = spy_list(c))) return -1;
+    (*working)->as.seq = list->as.seq;
     list->as.seq.items = NULL; list->as.seq.len = 0; list->as.seq.cap = SIZE_MAX;
-    sort_list(c, working, key, descending);
+    return 0;
+}
+/* list takes back working's items, which it takes; a list changed while
+ * it sorted raises. */
+static void sort_restore(SPYContext *c, SPYValue *list, SPYValue *working) {
     int modified = list->as.seq.cap != SIZE_MAX;
     SPYValue **items = list->as.seq.items;
     size_t len = list->as.seq.len, cap = list->as.seq.cap;
@@ -22699,6 +22892,14 @@ static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValu
     working->as.seq.items = items; working->as.seq.len = len; working->as.seq.cap = cap;
     spy_release(working);
     if (modified && !c->error_type[0]) spy_error(c, "ValueError", "list modified during sort");
+}
+static SPYValue *sort_method(SPYContext *c, SPYValue *list, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    (void)argv;
+    SPYValue *key, *working;
+    int descending;
+    if (sort_arguments(c, argc, keywords, &key, &descending) || sort_detach_into(c, list, &working)) return NULL;
+    sort_list(c, working, key, descending, NULL);
+    sort_restore(c, list, working);
     return c->error_type[0] ? NULL : spy_none(c);
 }
 /* Whether a local name of scope is one of its cells and not a parameter. */
@@ -23118,7 +23319,7 @@ static SPYValue *directory_of(SPYContext *c, SPYValue *object, int plain) {
             sequence_append(c, result, map_items(names)[i].key);
     }
     spy_release(names);
-    if (c->error_type[0] || (!plain && sort_list(c, result, NULL, 0))) { spy_release(result); return NULL; }
+    if (c->error_type[0] || (!plain && sort_list(c, result, NULL, 0, NULL))) { spy_release(result); return NULL; }
     return result;
 }
 static SPYValue *directory(SPYContext *c, SPYValue *object) { return directory_of(c, object, 0); }

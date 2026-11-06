@@ -274,13 +274,15 @@ a pause is due stops the call as without pausing, so an outermost call or
 a resume does at most two budgets of work.
 
 A call can pause only where nothing but its machines holds its state.
-Function calls, calls of bound methods and plain classes, a loop's Python `__next__`, generators
-resumed by a loop or consumed by `sum`, `any`, `all`, `list`, `tuple`,
-`set`, `frozenset`, `sorted` or `str.join`,
-and list, set and dictionary comprehensions run as machines on the heap, in one
-native activation of `run_machine`; a call that native code makes (a
-special method, a `sorted` key, a host function, a class body, a call from
-a statement the walker still runs) runs in an activation of its own. The
+Function calls, calls of bound methods, plain classes and instances with
+a Python `__call__`, a loop's Python `__next__`, the function of a `map`
+taken by a loop, generators and maps consumed by `sum`, `any`, `all`,
+`list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, the key
+functions of `sorted`, `list.sort`, `min` and `max`, and list, set and
+dictionary comprehensions run as machines on the heap, in one native
+activation of `run_machine`; a call that native code makes (another
+special method, a host function, a class body, a call from a statement
+the walker still runs) runs in an activation of its own. The
 engine counts the activations and pauses only in the outermost one, so a
 pause due inside native code waits until that code returns. Interactive
 and expression units run on the walker and do not pause.
@@ -291,8 +293,9 @@ under the stop rule (3.1), running no handler or `finally` body.
 
 `tests/api.c` pauses a program of calls, a generator, a class call and a
 comprehension more than twenty times and checks its value; checks that
-another call runs while it is paused, that a pause due inside `sorted`
-waits for it, within one further budget, and that an interrupt pauses
+another call runs while it is paused, that a sort pauses in its key
+calls, that a pause due inside a host function's call back waits for it,
+within one further budget, and that an interrupt pauses
 too; and frees a context with a call paused. `tests/tla/SpyPause.tla`
 models the contract.
 
