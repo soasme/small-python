@@ -13461,6 +13461,11 @@ struct Machine {
     int outermost; /* run_machine returns when it does: a generator's, or a call's entered from C. */
     Frame frame; /* Borrowed from its generator or call. */
     Node *owner; /* A module body's: the node its steps of no node tick on. */
+    /* A generator's: the generator, borrowed; while a loop step resumed it
+     * in its own run_machine, that step's machine, and what the generator's
+     * frame set aside from the context. */
+    SPYValue *generator, *outer_handled, *outer_inherited;
+    Machine *resumer;
 };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
@@ -15746,7 +15751,7 @@ static int bind_arguments(SPYContext *c, SPYValue *fn, SPYValue *env, size_t arg
 static SPYValue *type_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static void not_callable(SPYContext *, SPYValue *);
 static void release_owned(SPYValue *, void *);
-static Result run_machine(SPYContext *, SPYValue *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
+static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 /* Whether string keys a and b are equal, b holding hash. */
 static int same_key(SPYValue *a, SPYValue *b) {
     return a == b || (a->type == SPY_STRING && b->type == SPY_STRING && a->as.string.len == b->as.string.len &&
@@ -15912,7 +15917,7 @@ static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
 static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *env) {
     Call *call = call_enter(c, spy_retain(fn), env, NULL);
     if (!call) return NULL;
-    Result r = run_machine(c, NULL, &call->m, NULL, NULL, 0, NULL);
+    Result r = run_machine(c, &call->m, NULL, NULL, 0, NULL);
     call_leave(c, call, r.flow == FLOW_RETURN ? r.value : NULL);
     /* A deep recursion's storage goes once it has returned. */
     if (!c->calls_len && c->calls_cap > 64) calls_free(c, 64);
@@ -17151,7 +17156,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
     return store_items(c, f, n, value);
 }
 static int machine_push(SPYContext *, Machine *, SPYValue *);
-static Result run_machine(SPYContext *, SPYValue *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
+static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
     SPYValue *iterator = n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source);
     if (!iterator) return NULL;
@@ -17175,6 +17180,7 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
         result->as.generator.code = definition_code(c, f->unit, n);
         Machine *m = result->as.generator.machine = machine_new(c, n->code, env, f->unit);
         if (m) {
+            m->generator = result;
             if (n->op != N_TUPLE)
                 machine_push(c, m, value_new(c, n->op == N_DICT ? SPY_DICT : n->op == N_SET ? SPY_SET : SPY_LIST));
             if (!c->error_type[0]) machine_push(c, m, spy_retain(iterator));
@@ -17183,7 +17189,7 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
     spy_release(iterator); spy_release(env);
     if (c->error_type[0]) { spy_release(result); return NULL; }
     if (eager) {
-        Result value = run_machine(c, result, result->as.generator.machine, NULL, NULL, 0, NULL);
+        Result value = run_machine(c, result->as.generator.machine, NULL, NULL, 0, NULL);
         env = result->as.generator.env; result->as.generator.env = NULL;
         spy_release(result); release_locals(env);
         if (value.flow == FLOW_RETURN) return value.value;
@@ -19833,7 +19839,7 @@ static Result module_body(SPYContext *c, Frame *f) {
     m->owner = body;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
-    Result r = run_machine(c, NULL, m, NULL, NULL, 0, NULL);
+    Result r = run_machine(c, m, NULL, NULL, 0, NULL);
     c->eval_env = outer;
     machine_edges(m, release_owned, NULL);
     free_machine(c, m);
@@ -20715,6 +20721,7 @@ static SPYValue *new_generator(SPYContext *c, Frame *f, SPYValue *function) {
     SPYValue *v = value_new(c, n->op == 2 ? SPY_ASYNC_GENERATOR : n->op ? SPY_COROUTINE : SPY_GENERATOR);
     if (!v) return NULL;
     if (!(v->as.generator.machine = machine_new(c, n->code, f->env, f->unit))) { spy_release(v); return NULL; }
+    v->as.generator.machine->generator = v;
     v->as.generator.node = n;
     v->as.generator.name = spy_retain(name_local(function->as.function.metadata, "__name__"));
     v->as.generator.qualname = spy_retain(name_local(function->as.function.metadata, "__qualname__"));
@@ -21093,11 +21100,24 @@ static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assi
 #define NEXT continue
 #define NEXT_RELEASE break
 #endif
+/* A yield returns from run_machine, or, in a generator a loop step
+ * resumed, goes on in that step's machine. */
+#define YIELD(v) { flow = (Result){FLOW_YIELD, (v)}; if (!m->resumer) return flow; goto generator_left; }
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
+static int generator_resume(SPYContext *, SPYValue *);
+static Result generator_pause(SPYContext *, SPYValue *, Result);
+static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
+static void generator_close(SPYValue *);
+/* Whether a loop step may resume v's machine in its own run_machine: a
+ * generator that is not running or delegating. */
+static ALWAYS_INLINE int resumable(SPYValue *v) {
+    return v->type == SPY_GENERATOR && !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
+        v->as.generator.machine->awaiting < AWAIT_DELEGATE;
+}
 /* Run machine m: generator's, or else the innermost call's, then the
  * calls it makes, until the outermost of them returns. */
-static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SPYValue *sent, SPYValue *thrown,
+static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
                           size_t argc, SPYValue *const *argv) {
     Frame f = m->frame;
     Result flow = {FLOW_NORMAL, NULL};
@@ -21124,7 +21144,10 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
         if (flow.flow != FLOW_NORMAL) {
             m->pc = pc;
             if ((!m->block_len && flow.flow == FLOW_RETURN) || !machine_unwind(c, m, &f, &flow)) {
-                if (m->outermost) return flow;
+                if (m->outermost) {
+                    if (!m->resumer) return flow;
+                    goto generator_left;
+                }
                 /* A call returns or raises into its caller. */
                 flow = flow.flow == FLOW_RETURN ? (Result){FLOW_NORMAL, flow.value} : (Result){FLOW_ERROR, NULL};
                 m = call_leave(c, (Call *)m, flow.value);
@@ -21139,7 +21162,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
         else if (!quiet(c, &f)) {
             /* An instruction of no node ticks on the definition, keeping the
              * frame's line; while only a line would be recorded, it need not. */
-            n = generator ? generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
+            n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
             if (tick(c, &f, n)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
@@ -21241,11 +21264,11 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
         CASE(BC_CALLN)
         CASE(BC_CALLK)
             callee_env = NULL;
-            value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, !generator, &callee_env);
+            value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, !m->generator, &callee_env);
             if (callee_env) goto enter_call;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
-            callee_env = NULL; value = keyword_call(c, m, !generator, &callee_env);
+            callee_env = NULL; value = keyword_call(c, m, !m->generator, &callee_env);
             if (callee_env) goto enter_call;
             machine_push(c, m, value); break;
         CASE(BC_STORE)
@@ -21342,17 +21365,17 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
                 if (!(value = value ? spy_retain(value) : eval(c, &f, n->a))) break;
             } else value = machine_pop(m);
             m->awaiting = AWAIT_YIELD; m->drop = ins->arg >> 1;
-            m->pc = pc; return (Result){FLOW_YIELD, value};
+            m->pc = pc; YIELD(value);
         CASE(BC_DELEGATE)
             a = machine_pop(m);
             m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
                                                   ins->arg == DELEGATE_AEXIT ? "__aexit__" : NULL) :
-                a->type != SPY_COROUTINE ? get_iterator(c, a) : iterable_coroutine(generator) ? await_iterator(c, a, NULL) :
+                a->type != SPY_COROUTINE ? get_iterator(c, a) : iterable_coroutine(m->generator) ? await_iterator(c, a, NULL) :
                 spy_error(c, "TypeError", "cannot 'yield from' a coroutine object in a non-coroutine generator");
             if (m->delegate) {
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
                 value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
-                if (value) { spy_release(a); m->pc = pc; return (Result){FLOW_YIELD, value}; }
+                if (value) { spy_release(a); m->pc = pc; YIELD(value); }
                 m->pc = pc; finish_delegate(c, m); pc = m->pc;
             }
             break;
@@ -21389,12 +21412,15 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
                 if (a) m->delegate = await_iterator(c, a, "__anext__");
                 if (m->delegate) {
                     value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
-                    if (value) { spy_release(a); m->pc = pc; return (Result){FLOW_YIELD, value}; }
+                    if (value) { spy_release(a); m->pc = pc; YIELD(value); }
                 }
                 m->pc = pc; finish_delegate(c, m); pc = m->pc;
             } else {
                 SPYValue *iterator = m->blocks[m->block_len - 1].value;
-                if (!iterator_fast(c, iterator, &a)) a = iterator_next(c, iterator);
+                if (!iterator_fast(c, iterator, &a)) {
+                    if (resumable(iterator)) { value = iterator; goto resume_generator; }
+                    a = iterator_next(c, iterator);
+                }
                 if (!a) pc = ins->target;
                 else { machine_push(c, m, a); a = NULL; }
             }
@@ -21537,6 +21563,35 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
         if (a) spy_release(a);
         if (b) spy_release(b);
         continue;
+    resume_generator:
+        /* A loop step resumes generator value's machine here, which yields
+         * or ends into this machine (generator_left). */
+        m->pc = pc;
+        if (generator_resume(c, value)) continue;
+        value->as.generator.machine->resumer = m;
+        m = value->as.generator.machine;
+        if (m->awaiting && !m->drop) machine_push(c, m, spy_none(c));
+        m->awaiting = AWAIT_NONE;
+        goto switch_call;
+    generator_left: {
+        /* A resumed generator's yield is its resumer's next item; its end
+         * ends the resumer's loop, or raises there. */
+        Machine *resumer = m->resumer;
+        SPYValue *g = m->generator;
+        m->resumer = NULL;
+        flow = generator_pause(c, g, flow);
+        if (flow.flow == FLOW_RETURN) {
+            g->as.generator.returned = 1;
+            spy_release(flow.value); flow.value = NULL;
+            generator_close(g);
+        } else if (flow.flow != FLOW_YIELD) generator_end(c, g, flow);
+        m = resumer;
+        f = m->frame; code = m->code->items; pc = m->pc;
+        if (flow.flow != FLOW_YIELD && !c->error_type[0]) pc = code[pc - 1].target;
+        flow.flow = FLOW_NORMAL;
+        if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
+        continue;
+    }
     enter_call:
         m->pc = pc;
         {
@@ -21555,7 +21610,11 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
 #undef CASE
 #undef NEXT
 #undef NEXT_RELEASE
+#undef YIELD
 #undef THREADED
+static int generator_resume(SPYContext *, SPYValue *);
+static Result generator_pause(SPYContext *, SPYValue *, Result);
+static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
 static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent, SPYValue *thrown,
                                     size_t argc, SPYValue *const *argv) {
     if (g->as.generator.running) return spy_error(c, "ValueError", g->type == SPY_COROUTINE ? "coroutine already executing" : "generator already executing");
@@ -21576,26 +21635,42 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
         raise_value(c, thrown); leave_frame(c, NULL); c->line = line;
         generator_close(g); return NULL;
     }
+    if (generator_resume(c, g)) return NULL;
+    Result result = generator_pause(c, g, run_machine(c, g->as.generator.machine, sent, thrown, argc, argv));
+    if (result.flow == FLOW_YIELD) return result.value;
+    return generator_end(c, g, result);
+}
+/* Enter generator g's frame to run its machine, setting aside the
+ * context's handled exception for the generator's own. */
+static int generator_resume(SPYContext *c, SPYValue *g) {
     g->as.generator.started = 1;
-    if (deeper(c, "")) return NULL;
-    if (enter_frame(c, g->as.generator.env, g)) { c->depth--; return NULL; }
+    if (deeper(c, "")) return -1;
+    if (enter_frame(c, g->as.generator.env, g)) { c->depth--; return -1; }
     if (g->as.generator.line) c->frames[c->py_depth - 1].line = g->as.generator.line;
     g->as.generator.running = 1;
     Machine *m = g->as.generator.machine;
-    SPYValue *outer = c->handled;
-    SPYValue *inherited = c->inherited_exception;
+    m->outer_handled = c->handled; m->outer_inherited = c->inherited_exception;
     c->inherited_exception = active_exception(c);
     c->handled = spy_retain(m->handled);
-    Result result = run_machine(c, g, m, sent, thrown, argc, argv);
-    spy_release(m->handled); m->handled = c->handled; c->handled = outer;
-    c->inherited_exception = inherited;
+    return 0;
+}
+/* Leave g's frame after its machine ran to result, which it returns, an
+ * error when leaving the frame raised. */
+static Result generator_pause(SPYContext *c, SPYValue *g, Result result) {
+    Machine *m = g->as.generator.machine;
+    spy_release(m->handled); m->handled = c->handled; c->handled = m->outer_handled;
+    c->inherited_exception = m->outer_inherited;
     g->as.generator.line = c->frames[c->py_depth - 1].line;
     g->as.generator.running = 0; c->depth--;
     leave_frame(c, result.flow == FLOW_YIELD || result.flow == FLOW_RETURN ? result.value ? result.value : c->none : NULL);
     if (c->error_type[0] && result.flow != FLOW_ERROR && result.flow != FLOW_HALT) {
         spy_release(result.value); result = (Result){FLOW_ERROR, NULL};
     }
-    if (result.flow == FLOW_YIELD) return result.value;
+    return result;
+}
+/* NULL, after generator g's machine ended with result: a return raises
+ * StopIteration, and a StopIteration it raised becomes a RuntimeError. */
+static SPYValue *generator_end(SPYContext *c, SPYValue *g, Result result) {
     if (result.flow == FLOW_HALT) return NULL;
     g->as.generator.returned = result.flow == FLOW_RETURN;
     if (result.flow == FLOW_RETURN) {
