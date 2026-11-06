@@ -264,7 +264,8 @@ struct SPYContext {
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
     Call **calls; size_t calls_len, calls_cap; /* Functions running on the machine, innermost last; their storage is kept. */
-    SPYValue *entering_init; /* Borrowed: the __init__ a class call step enters next. */
+    SPYValue *entering_init; /* Borrowed: the __init__ a class call step enters next, */
+    int entering_kind;       /* as a call of this kind: CALL_INIT, or CALL_CHECKED for str() and repr(). */
     /* Pausing (docs/metering.md 3.8): whether a spent budget or an interrupt
      * pauses; why a pause is due or was taken; the native activations of
      * run_machine now running; the machine of the module body a pausable
@@ -3800,16 +3801,20 @@ static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
     return buffer_text(&b, SPY_STRING, format_value(&b, v, repr));
 }
 SPYValue *spy_repr(SPYContext *c, SPYValue *v) { return stringify(c, v, 1); }
-/* str(v) and repr(v) (ToStr, ToRepr): what __str__ or __repr__ returned, a
- * str subclass included, when that is the whole text; else as stringify. */
-static NO_INLINE SPYValue *instance_conversion(SPYContext *c, SPYValue *v, int repr) {
-    SPYValue *whole = NULL, *string;
-    Buffer b = { .ctx = c, .whole = &whole };
-    int failed = format_value(&b, v, repr);
-    if (!failed && whole && (string = builtin_value(c, whole, SPY_STRING))->as.string.len == b.len &&
-        !memcmp(string->as.string.data, b.data, b.len)) { mem_free(b.data); return whole; }
+/* Buffer b's text, or what __str__ or __repr__ returned into it, a str
+ * subclass included, when that is the whole text. */
+static SPYValue *whole_text(Buffer *b, int failed) {
+    SPYValue *whole = *b->whole, *string;
+    if (!failed && whole && (string = builtin_value(b->ctx, whole, SPY_STRING))->as.string.len == b->len &&
+        !memcmp(string->as.string.data, b->data, b->len)) { mem_free(b->data); return whole; }
     spy_release(whole);
-    return buffer_text(&b, SPY_STRING, failed);
+    return buffer_text(b, SPY_STRING, failed);
+}
+/* str(v) and repr(v) (ToStr, ToRepr): whole_text; else as stringify. */
+static NO_INLINE SPYValue *instance_conversion(SPYContext *c, SPYValue *v, int repr) {
+    SPYValue *whole = NULL;
+    Buffer b = { .ctx = c, .whole = &whole };
+    return whole_text(&b, format_value(&b, v, repr));
 }
 /* Only instances and classes (adjacent types) have their own methods. */
 static ALWAYS_INLINE SPYValue *conversion(SPYContext *c, SPYValue *v, int repr) {
@@ -13558,7 +13563,7 @@ struct Machine {
  * __next__, a sort's key function, a consumer's next item, a with
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__ or a store's __setitem__. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_BOOL, CALL_ITER, CALL_STORE };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -21166,12 +21171,13 @@ static void finish_delegate(SPYContext *c, Machine *m) {
 /* The call steps: a call's result, or NULL with an error; or, when the
  * callee's body is on the machine, the callee with *env its environment,
  * to enter there. */
-/* Whether a loop step may resume v's machine in its own run_machine: a
- * generator that is not running or delegating. */
-static ALWAYS_INLINE int resumable(SPYValue *v) {
-    return v->type == SPY_GENERATOR && !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
+/* Whether a step may resume v's machine in its own run_machine: one not
+ * running, ended or delegating; a loop step resumes only a generator's. */
+static ALWAYS_INLINE int suspended(SPYValue *v) {
+    return !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
         v->as.generator.machine->awaiting < AWAIT_DELEGATE;
 }
+static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATOR && suspended(v); }
 /* The builtin of consumer that callee, or its native method method, is
  * when called with argc arguments argv, the first a generator the machine
  * can resume (consumer_of): sum, any, all, list, tuple, set, frozenset,
@@ -21179,9 +21185,10 @@ static ALWAYS_INLINE int resumable(SPYValue *v) {
  * or send (B_NEXT); else -1. */
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
-    /* A generator's __next__ and send. */
-    if (method >= 0 && callee->type == SPY_GENERATOR)
-        return resumable(callee) && argc == (method == M_SEND) && (method == M_NEXT || method == M_SEND) &&
+    /* A generator's __next__ and send, and a coroutine's send. */
+    if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
+        return suspended(callee) && argc == (method == M_SEND) &&
+               (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
     if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN : -1 :
@@ -21198,7 +21205,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || (argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP))) ||
-           callee->type == SPY_GENERATOR || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
+           callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
@@ -21356,6 +21363,20 @@ static int unbind(SPYContext *c, SPYValue **callee, size_t *argc, SPYValue **arg
 /* operand_call of a bound method, a class, an instance, or a callee given
  * a generator or an iterator first, with room in argv for one more
  * argument. */
+/* The Python __str__ or __repr__ that callee, str or repr, calls on its
+ * one argument, an instance, *name its name; else NULL. */
+static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **name) {
+    int repr = callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_REPR;
+    if (argc != 1 || argv[0]->type != SPY_INSTANCE || argv[0]->as.map.base || (!repr && callee != c->types[SPY_STRING])) return NULL;
+    SPYValue *cls = argv[0]->as.map.parent, *function = repr ? NULL : class_lookup(cls, "__str__");
+    /* object's __str__ is the instance's __repr__. */
+    if (!repr && function && !machine_function(c, function) && function == name_local(c->object, "__str__"))
+        function = NULL, repr = 1;
+    if (!function) function = class_lookup(cls, "__repr__");
+    if (!function || !machine_function(c, function) || !(*name = spy_string(c, repr ? "__repr__" : "__str__", repr ? 8 : 7))) return NULL;
+    c->entering_kind = CALL_CHECKED;
+    return function;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -21373,11 +21394,23 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         else {
             memmove(argv + 1, argv, argc * sizeof(*argv));
             argv[0] = self;
-            c->entering_init = init;
+            c->entering_init = init; c->entering_kind = CALL_INIT;
             if ((*env = function_env(c, init, argc + 1, argv, NULL, 1))) return callee;
         }
         spy_release(callee);
         return NULL;
+    }
+    SPYValue *name, *convert = method < 0 ? conversion_method(c, callee, argc, argv, &name) : NULL;
+    if (convert) {
+        /* str() or repr() of an instance enters its Python __str__ or
+         * __repr__ (CALL_CHECKED), the name and instance on the stack. */
+        spy_release(callee);
+        if (machine_push(c, m, name)) { release_all(argc, argv); return NULL; }
+        if (machine_push(c, m, argv[0])) return NULL;
+        SPYValue *self = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 1, &self, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
     }
     int id = consumer_of(c, callee, method, argc, argv);
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL, argc > 1 ? spy_retain(argv[1]) : NULL);
@@ -21401,8 +21434,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         return NULL;
     }
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
-                      UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) : callee->type == SPY_GENERATOR) ||
-        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)))
+                      UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
+                      callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE) ||
+        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE)))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
@@ -21439,12 +21473,22 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (!(self = new_instance(c, callee))) return NULL;
         argv[-1] = spy_retain(self);
         m->len -= argc;
-        c->entering_init = init;
+        c->entering_init = init; c->entering_kind = CALL_INIT;
         if ((*env = function_env(c, init, argc + 1, argv - 1, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
     }
     if (c->error_type[0]) return NULL;
+    SPYValue *name, *convert = conversion_method(c, callee, argc, argv, &name);
+    if (convert) {
+        /* The method's name takes the callee's place (CALL_CHECKED). */
+        spy_release(callee);
+        argv[-1] = name;
+        SPYValue *self = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 1, &self, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
+    }
     int id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : call_plain(c, callee, -1, n, argc, argv);
@@ -21514,7 +21558,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
             m->len -= argc + (function != init);
             release_all(argc + (function != init), argv - (function != init));
             *env = callee_env;
-            if (function == init) { c->entering_init = init; return callee; }
+            if (function == init) { c->entering_init = init; c->entering_kind = CALL_INIT; return callee; }
             spy_release(callee);
             return spy_retain(function);
         }
@@ -21746,10 +21790,20 @@ static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPY
     spy_release(machine_pop(m));
     return NULL;
 }
-/* A test's __bool__ returned result into step ins, the tested value on m's
- * stack: the pc to run next. */
-static NO_INLINE size_t bool_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+/* A test's __bool__, or a str() or repr() call's __str__ or __repr__,
+ * returned result into step ins (CALL_CHECKED): the pc to run next. The
+ * tested value is on m's stack; a conversion's method name and instance
+ * are, which the str it makes replaces. */
+static NO_INLINE size_t checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     SPYValue *v = machine_pop(m);
+    if (ins->op != BC_FALSE) {
+        SPYValue *name = machine_pop(m), *whole = NULL;
+        Buffer b = { .ctx = c, .whole = &whole };
+        SPYValue *string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
+        spy_release(result); spy_release(v); spy_release(name);
+        if (string) machine_push(c, m, string);
+        return pc;
+    }
     int truth = truth_result(c, v, 1, result);
     spy_release(v);
     return truth ? pc : ins->target;
@@ -21896,8 +21950,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || code[pc - 1].arg)) spy_release(machine_pop(m));
-                    } else if (kind == CALL_BOOL) {
-                        if (result) pc = bool_returned(c, m, &code[pc - 1], result, pc);
+                    } else if (kind == CALL_CHECKED) {
+                        if (result) pc = checked_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_OPERATOR) {
                         if (result) pc = operator_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_ENTER) {
@@ -22417,7 +22471,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
         value = m->blocks[m->block_len - 1].value;
-        if (!resumable(value)) {
+        if (!resumable(value) && (value->type != SPY_COROUTINE || !suspended(value))) {
             m->pc = pc;
             callee_env = NULL;
             if (m->blocks[m->block_len - 1].consumer->keyed) {
@@ -22517,9 +22571,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if ((value = store_call(c, m, &f, ins->op == BC_EXEC ? n->a : n, &callee_env))) { special = CALL_STORE; goto enter_special; }
         continue;
     bool_step:
-        /* BC_FALSE on instance a: a Python __bool__ is a call (CALL_BOOL). */
+        /* BC_FALSE on instance a: a Python __bool__ is a call (CALL_CHECKED). */
         callee_env = NULL;
-        if ((value = bool_call(c, m, a, &callee_env))) { spy_release(a); special = CALL_BOOL; goto enter_special; }
+        if ((value = bool_call(c, m, a, &callee_env))) { spy_release(a); special = CALL_CHECKED; goto enter_special; }
         if (!c->error_type[0] && !truthy(a)) pc = ins->target;
         spy_release(a);
         continue;
@@ -22533,7 +22587,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         goto enter_call;
     enter_init:
         /* A class call enters its __init__ (class_init). */
-        spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
+        spy_release(value); value = spy_retain(c->entering_init); special = c->entering_kind;
     enter_special:
         m->pc = pc;
         {

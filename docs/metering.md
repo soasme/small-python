@@ -278,7 +278,9 @@ Function calls, calls of bound methods, plain classes and instances with
 a Python `__call__`, a loop's Python `__next__`, the function of a `map`
 taken by a loop, generators and maps consumed by `sum`, `any`, `all`,
 `list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, generators
-resumed by `next` or by their `__next__` and `send` methods, the key
+resumed by `next` or by their `__next__` and `send` methods, coroutines
+resumed by `send`, the `__str__` and `__repr__` that `str` and `repr`
+call, the key
 functions of `sorted`, `list.sort`, `min` and `max`, Python decorators,
 property getters, `__enter__` methods, and the binary operator,
 comparison, `__getitem__`, `__setitem__`, `__contains__`, `__bool__` and

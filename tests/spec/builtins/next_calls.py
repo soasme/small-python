@@ -1,8 +1,9 @@
-# spec: PLS-315 19.3.27, 27.2.1, 27.2
+# spec: PLS-315 19.3.27, 27.2.1, 27.2, 27.3
 # description: next() and a generator's __next__ and send resume it to
 # its next yield, whose value it returns; send's value is what that yield
 # evaluates to. A generator that returns raises StopIteration with its
 # value, unless next() has a default; what it raises reaches the caller.
+# A coroutine's send runs it the same way.
 from harness import *
 
 def echo():
@@ -95,3 +96,51 @@ except ValueError as e:
     assert str(e) == 'generator already executing'
 else:
     raise AssertionError('no ValueError')
+
+# Coroutines.
+async def f(x):
+    n = 0
+    for i in range(3): n += i
+    return n + x
+def coroutines():
+    out = []
+    c = f(1)
+    try: c.send(None)
+    except StopIteration as e: out.append(e.value)
+    try: c.send(None)
+    except RuntimeError as e: out.append(str(e))
+    c = f(2)
+    try: c.send(3)
+    except TypeError as e: out.append(str(e))
+    c.close()
+    async def stop():
+        raise StopIteration(5)
+    try: stop().send(None)
+    except RuntimeError as e: out.append(str(e))
+    async def bad():
+        raise KeyError(1)
+    try: bad().send(None)
+    except KeyError as e: out.append(e.args)
+    class Y:
+        def __await__(self):
+            v = yield 'y'
+            return v
+    async def waits():
+        return await Y()
+    w = waits()
+    out.append(w.send(None))
+    try: w.send(9)
+    except StopIteration as e: out.append(e.value)
+    s = f(4).send
+    try: s(None)
+    except StopIteration as e: out.append(e.value)
+    return out
+assert coroutines() == [4, 'cannot reuse already awaited coroutine', "can't send non-None value to a just-started coroutine",
+                 'coroutine raised StopIteration', (1,), 'y', 9, 7], coroutines()
+c = f(5)
+try:
+    c.send(None)
+except StopIteration as e:
+    assert e.value == 8
+else:
+    raise AssertionError('no StopIteration')
