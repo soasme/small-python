@@ -1602,6 +1602,25 @@ the same instruction count). `BC_CALLK` shares `BC_CALLN`'s case in the
 machine loop; a case of its own added 16 instructions to every
 positional call, through the loop's register allocation.
 
+### Loops and counters on the machine
+
+With module bodies, loops and generator bodies on the machine
+([Calls run on the machine](#calls-run-on-the-machine)), three steps
+took over from the walker's statement loop. A `for` loop whose target is
+a name on the loop's line stores each item in its `BC_NEXT`, without a
+`BC_STORE` step. A statement `name += x` or `name -= x`, with `x` a name
+or a constant, is `BC_INCREMENT`: two small integers in the name's
+remembered slot sum in place, and anything else goes through the
+assignment. The overflow test of an `int` sum or difference wraps in
+unsigned arithmetic and compares signs, with no branch on the operands'
+signs, which mispredicted when one statement added and the next
+subtracted. Averaged over eight code layouts against main: loop -8.5%,
+generators -9.7%, dicts -3.8%, classes -1.4%, strings 0.0%, nbody +2.2%,
+fib +0.9%. `BC_INCREMENT` ends in the loop's `break` rather than its own
+dispatch: one more dispatching case made Apple clang merge the indirect
+jumps of every step into two (17 before), which cost strings 4%; count
+`br x` in `run_steps` after adding a case.
+
 ### A profile-guided build
 
 `make CC=clang CONFIG_PGO=y` builds the engine twice: once instrumented,

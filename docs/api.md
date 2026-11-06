@@ -405,7 +405,7 @@ Why the last outermost call stopped, or zero.
 
 ```c
 enum { SPY_LIMIT_STEPS, SPY_LIMIT_MEMORY, SPY_LIMIT_OUTPUT, SPY_LIMIT_RECURSION, SPY_LIMIT_INT_DIGITS, SPY_LIMIT_STACK,
-       SPY_LIMIT_COLLECTION };
+       SPY_LIMIT_COLLECTION, SPY_LIMIT_PAUSE };
 int spy_set_limit(SPYContext *, int limit, size_t value);
 size_t spy_get_limit(const SPYContext *, int limit);
 int spy_stopped(const SPYContext *);
@@ -430,6 +430,26 @@ size_t spy_steps_used(const SPYContext *);
 
 Steps the running or last outermost call spent. Calls and native iteration
 spend only while a limit, an interrupt or a trace is set.
+
+```c
+int spy_paused(const SPYContext *);
+```
+
+With PAUSE set to 1, a spent step budget or an interrupt pauses an outermost
+spy_eval or spy_exec instead of stopping it, at its next step where only
+Python frames run between it and the host (docs/metering.md 3.8): the call
+returns NULL (spy_exec -1) without an error, and spy_paused tells why
+(SPY_STOP_STEPS or SPY_STOP_INTERRUPT). A further budget spent before that
+step stops the call. Other calls may run while one is paused; they stop
+rather than pause.
+
+```c
+SPYValue *spy_resume(SPYContext *);
+```
+
+Run the paused call on with fresh budgets: its value, as spy_eval returns
+it, or NULL with an error or paused again. Freeing the context stops a
+paused call.
 
 ```c
 size_t spy_collect(SPYContext *);

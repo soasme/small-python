@@ -945,6 +945,18 @@ outermost call, which runs normally. `spy_stopped` returns
 `SPY_STOP_INTERRUPT` after such a call and zero after any other, which
 tells a stop from the same error raised by the program.
 
+With `SPY_LIMIT_PAUSE` set to 1, a spent step budget or an interrupt
+pauses an outermost `spy_eval` or `spy_exec` instead of stopping it
+(docs/metering.md 3.8). The call returns NULL (`spy_exec` -1) with no
+error set, and `spy_paused` returns `SPY_STOP_STEPS` or
+`SPY_STOP_INTERRUPT`. `spy_resume(ctx)` runs it on from the step where it
+paused, with fresh budgets, and returns its value, or NULL with an error or
+paused again. A call pauses only at a step where its frames are all on the
+engine's machine: a pause that becomes due inside native code, such as a
+`sorted` key function or a host function, waits until that code returns,
+and a further budget spent before then stops the call. Other calls may run
+while one is paused; freeing the context stops a paused call.
+
 `spy_set_policy` installs a callback asked before each sensitive action, as
 CPython's audit hooks (PEP 578) are, with an event name and a tuple of its
 arguments: `open` (file, mode) before a file is opened, `import` (name)

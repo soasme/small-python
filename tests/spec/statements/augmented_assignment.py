@@ -176,3 +176,38 @@ x -= Witness()
 assert x is SubDict
 x = SubDict(a=1)
 assert_raises(TypeError, lambda: x.__ior__(Witness()), message="'Witness' object is not iterable")
+
+# A counter's step: small integers sum in place, and a sum past 64 bits, a
+# float, a str or an unbound name take the general path, in a module's
+# globals and in a function's locals alike.
+big = 2 ** 63 - 2
+for _ in range(3):
+    big += 1
+assert_eq(big, 2 ** 63 + 1)
+small = -2 ** 63 + 1
+small -= 1
+small -= 1
+assert_eq(small, -2 ** 63 - 1)
+def steps():
+    n, f, s = 0, 0.5, "a"
+    for i in range(4):
+        n += i
+        n -= 1
+        f += 1
+        s += "b"
+    return n, f, s
+assert_eq(steps(), (2, 4.5, "abbbb"))
+def unbound():
+    counter += 1
+    counter = 0
+try:
+    unbound()
+    assert_true(False, "no error")
+except UnboundLocalError as error:
+    assert_eq(str(error), "cannot access local variable 'counter' where it is not associated with a value")
+class Counted(int):
+    def __add__(self, other):
+        return "added"
+c = Counted(1)
+c += 1
+assert_eq(c, "added")

@@ -259,6 +259,41 @@ the process would, not an operation of the language; conformance item 5
 allocation the system refuses. The manual documents budgets with the rest
 of the C API.
 
+### 3.8 Pausing
+
+A sandbox host that runs many programs in turn wants a spent budget to
+suspend a program rather than end it. With `SPY_LIMIT_PAUSE` set to 1,
+the first budget an outermost `spy_eval` or `spy_exec` spends, or the
+first interrupt, makes a pause *due* instead of stopping the context, and
+the budget is refilled. The call pauses at its next machine step before
+running it, returning NULL (`spy_exec` -1) with no error set;
+`spy_paused` tells why (`SPY_STOP_STEPS` or `SPY_STOP_INTERRUPT`).
+`spy_resume` runs the call on from that step with fresh budgets and
+returns what `spy_eval` would have, or pauses again. A budget spent while
+a pause is due stops the call as without pausing, so an outermost call or
+a resume does at most two budgets of work.
+
+A call can pause only where nothing but its machines holds its state.
+Function calls, plain class calls, a loop's Python `__next__`, generators
+resumed by a loop and list, set and dictionary comprehensions run as machines on the heap, in one
+native activation of `run_machine`; a call that native code makes (a
+special method, a `sorted` key, a host function, a class body, a call from
+a statement the walker still runs) runs in an activation of its own. The
+engine counts the activations and pauses only in the outermost one, so a
+pause due inside native code waits until that code returns. Interactive
+and expression units run on the walker and do not pause.
+
+While a call is paused, other outermost calls run as usual and stop
+rather than pause. Freeing the context stops a paused call: it unwinds
+under the stop rule (3.1), running no handler or `finally` body.
+
+`tests/api.c` pauses a program of calls, a generator, a class call and a
+comprehension more than twenty times and checks its value; checks that
+another call runs while it is paused, that a pause due inside `sorted`
+waits for it, within one further budget, and that an interrupt pauses
+too; and frees a context with a call paused. `tests/tla/SpyPause.tla`
+models the contract.
+
 ## 4 Bindings
 
 The worker protocol gains no message; an error reply gains the stop
@@ -317,6 +352,8 @@ Each step is one commit that keeps every suite green.
 5. Done: the worker's timeout uses the interrupt, error replies carry the
    stop reason, and the four packages keep a timed-out runtime open; the
    manual names what metering covers and what it does not.
+6. Done: pausing (3.8), `spy_paused` and `spy_resume`, for calls whose
+   frames are on the machine.
 
 ## 7 Borrowed
 

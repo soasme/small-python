@@ -264,6 +264,15 @@ struct SPYContext {
     Entry *spare_entries[16]; size_t spare_entries_len; /* Released eight-entry map storage. */
     Machine *spare_machine; /* One released machine with its stacks kept, emptied; no value edges. */
     Call **calls; size_t calls_len, calls_cap; /* Functions running on the machine, innermost last; their storage is kept. */
+    SPYValue *entering_init; /* Borrowed: the __init__ a class call step enters next. */
+    /* Pausing (docs/metering.md 3.8): whether a spent budget or an interrupt
+     * pauses; why a pause is due or was taken; the native activations of
+     * run_machine now running; the machine of the module body a pausable
+     * call runs; and once paused, the machine to resume, the eval_env there
+     * and outside the module, and the unit, owned. */
+    int pausing, pause_due, machines, pause_entry;
+    Machine *pause_root, *paused_at;
+    SPYValue *paused_env, *paused_outer, *paused_unit;
     SPYValue *intrinsics; /* The intrinsics module, loaded on first use. */
     SPYValue *lazy_modules; /* sys.lazy_modules: submodules named by lazy imports, as a set. */
     /* Settings a host module changes through _spy._setting; owned, NULL for None. */
@@ -541,7 +550,17 @@ static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const
 static NO_INLINE SPYValue *call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) { return call_keywords(c, fn, argc, argv, NULL); }
 /* Stop the context: until the next outermost call every spend and tick
  * fails with the stop's error, so no handler or finally body runs on. */
+static void schedule_poll(SPYContext *);
 static NO_INLINE int halt(SPYContext *c, int reason) {
+    /* While a pausable call runs, its first spent budget or interrupt makes
+     * a pause due at its next step where it can pause, with one more budget
+     * to reach it in. */
+    if (c->pause_root && !c->pause_due && !c->stopped && (reason == SPY_STOP_STEPS || reason == SPY_STOP_INTERRUPT)) {
+        c->pause_due = reason; c->quiet_unit = NULL;
+        c->fuel = c->step_limit ? c->step_limit : SIZE_MAX;
+        schedule_poll(c);
+        return 0;
+    }
     if (!c->stopped) { c->stopped = reason; c->stopped_fuel = c->fuel; }
     c->fuel = 0; c->quiet_unit = NULL;
     if (c->stopped == SPY_STOP_MEMORY) spy_error(c, "MemoryError", "memory limit exceeded");
@@ -9179,13 +9198,18 @@ static int set_index(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) 
     spy_release(old);
     return 0;
 }
+/* The sum or difference wraps in unsigned arithmetic; it overflowed when
+ * its sign differs from both operands' (from a's and not b's for a
+ * difference), a test without a branch on the operands' signs. */
 static ALWAYS_INLINE int int_add(int64_t a, int64_t b, int64_t *r) {
-    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return -1;
-    *r = a + b; return 0;
+    int64_t sum = (int64_t)((uint64_t)a + (uint64_t)b);
+    if (((a ^ sum) & (b ^ sum)) < 0) return -1;
+    *r = sum; return 0;
 }
 static ALWAYS_INLINE int int_sub(int64_t a, int64_t b, int64_t *r) {
-    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return -1;
-    *r = a - b; return 0;
+    int64_t difference = (int64_t)((uint64_t)a - (uint64_t)b);
+    if (((a ^ b) & (a ^ difference)) < 0) return -1;
+    *r = difference; return 0;
 }
 static ALWAYS_INLINE int int_mul(int64_t a, int64_t b, int64_t *r) {
     if (a > 0 ? (b > 0 ? a > INT64_MAX / b : b < INT64_MIN / a) :
@@ -13414,7 +13438,8 @@ static ALWAYS_INLINE SPYValue *leaf_operand(Frame *f, Node *n) {
     return n->constant ? n->constant : n->kind == N_NAME ? name_fast(f->env, n) : NULL;
 }
 /* FLOW_HALT: an error raised before a suspended generator resumed, which stays suspended. */
-enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR, FLOW_YIELD, FLOW_HALT };
+/* FLOW_PAUSE: a pausable call paused at a step (docs/metering.md 3.8). */
+enum { FLOW_NORMAL, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR, FLOW_YIELD, FLOW_HALT, FLOW_PAUSE };
 enum { AWAIT_NONE, AWAIT_YIELD, AWAIT_DELEGATE, AWAIT_NEXT, AWAIT_COMPREHENSION };
 enum { DELEGATE_ITERATOR, DELEGATE_AWAITABLE, DELEGATE_COMPREHENSION, DELEGATE_AENTER, DELEGATE_AEXIT };
 typedef struct { int flow; SPYValue *value; } Result;
@@ -13431,7 +13456,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_AWITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -13458,15 +13483,19 @@ struct Machine {
     Block *blocks;
     size_t await_target;
     int awaiting, drop; /* drop: a yield statement's resumption pushes no sent value. */
-    int outermost; /* run_machine returns when it does: a generator's, or a call's entered from C. */
+    int outermost; /* CALL_OUTERMOST: run_machine returns when it does, a generator's or a call's entered from C. */
     Frame frame; /* Borrowed from its generator or call. */
     Node *owner; /* A module body's: the node its steps of no node tick on. */
     /* A generator's: the generator, borrowed; while a loop step resumed it
      * in its own run_machine, that step's machine, and what the generator's
      * frame set aside from the context. */
-    SPYValue *generator, *outer_handled, *outer_inherited;
+    SPYValue *generator, *outer_handled, *outer_inherited, *outer_env;
     Machine *resumer;
 };
+/* What a call on the machine returns into: its caller's machine; C; or
+ * the step that made a special call, a class call's __init__ or a loop's
+ * __next__. */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -13686,6 +13715,14 @@ static void compile_target(SPYContext *c, Program *p, Node *n) {
         }
     }
 }
+/* The step taking loop n's next item into target: a name on the loop's
+ * line is stored by the step itself (other 1). */
+static size_t compile_next(SPYContext *c, Program *p, Node *n, Node *target) {
+    size_t next = emit(c, p, BC_NEXT, n, n->op);
+    if (!n->op && target->kind == N_NAME && target->line == n->line && next != SIZE_MAX) p->items[next].other = 1;
+    else compile_store(c, p, target, n);
+    return next;
+}
 static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Node *clause) {
     if (c->error_type[0]) return;
     if (!clause) {
@@ -13718,8 +13755,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
     /* The first iterator is acquired eagerly in the enclosing frame. */
     if (clause != n->a) compile_expr(c, p, clause->a);
     size_t loop = emit(c, p, BC_LOOP, clause, clause == n->a ? 3 : clause->op ? 2 : 1);
-    size_t start = p->len, end = emit(c, p, BC_NEXT, clause, clause->op);
-    compile_store(c, p, clause->args, clause);
+    size_t start = p->len, end = compile_next(c, p, clause, clause->args);
     compile_comprehension_clause(c, p, n, clause->b);
     patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
     patch(p, end, p->len); emit(c, p, BC_POP_BLOCK, clause, 0); patch(p, loop, p->len);
@@ -13727,6 +13763,7 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
 static int compile_comprehension(SPYContext *c, Node *n) {
     n->code = allocate(c, sizeof(*n->code));
     if (!n->code) return -1;
+    n->code->calls = BODY;
     compile_comprehension_clause(c, n->code, n, n->a);
     if (n->op == N_TUPLE) emit(c, n->code, BC_NONE, n, 0);
     emit(c, n->code, BC_FLOW, n, FLOW_RETURN);
@@ -13780,9 +13817,15 @@ static void compile_body(SPYContext *c, Program *p, Node *body) {
     if (rest && rest->next) emit(c, p, BC_BLOCK, rest, 0);
     else if (rest) compile_statement(c, p, rest);
 }
+/* Whether statement n adds a name or constant to a name, or subtracts it:
+ * a counter's or an accumulator's step. */
+static int increment(Node *n) {
+    return n->kind == N_ASSIGN && (n->op == T_ADDEQ || n->op == T_SUBEQ) && n->a->kind == N_NAME &&
+        (n->b->constant || n->b->kind == N_NAME);
+}
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
-    if (!expands(n, p->calls)) { emit(c, p, BC_EXEC, n, 0); return; }
+    if (!expands(n, p->calls)) { emit(c, p, increment(n) ? BC_INCREMENT : BC_EXEC, n, 0); return; }
     switch (n->kind) {
     case N_EXPR:
         /* A yield statement drops the sent value rather than popping it (arg 2). */
@@ -13877,8 +13920,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         start = p->len;
         if (loop != SIZE_MAX) p->items[loop].other = start;
         if (n->kind == N_FOR) {
-            branch = emit(c, p, BC_NEXT, n, n->op);
-            compile_store(c, p, n->args, n);
+            branch = compile_next(c, p, n, n->args);
         }
         else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
         compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
@@ -13986,7 +14028,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = generator ? 0 : BODY;
+    p->calls = BODY;
     if (generator) n->code = p;
     else n->flat = p;
     compile_body(c, p, n->b);
@@ -14246,7 +14288,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
     }
     if (c->stopped) return halt(c, c->stopped);
     if (due(c)) return -1;
-    if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len) c->quiet_unit = f->unit;
+    if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len && !c->pause_due) c->quiet_unit = f->unit;
     return 0;
 }
 /* Whether tick has nothing to do but record the line. */
@@ -17102,19 +17144,23 @@ static NO_INLINE int store_items(SPYContext *c, Frame *f, Node *n, SPYValue *val
 }
 /* A name stored in its remembered slot cannot fail, so it skips the step
  * bookkeeping unless a trace function watches, as eval's names do. */
-static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
-    SPYValue *env = f->env;
-    Entry *entry = n->kind != N_NAME || c->settings[SET_TRACE] ? NULL :
-        env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
-    if (!entry) return store_slow(c, f, n, value);
+/* Store value, taking it, in the entry of env remembered for a name. */
+static ALWAYS_INLINE void entry_store(SPYContext *c, SPYValue *env, Entry *entry, SPYValue *value) {
     class_changed(env);
     SPYValue *old = entry->value;
-    entry->value = spy_retain(value);
+    entry->value = value;
     /* A number a loop counter or accumulator replaces returns to its spare list here. */
     if (old && !--old->refs) {
         if (((old->type == SPY_INT && !old->as.integer_data.big) || old->type == SPY_FLOAT) && !old->listed) { c->live--; value_give(c, old, 1); }
         else release_dead(old);
     }
+}
+static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    SPYValue *env = f->env;
+    Entry *entry = n->kind != N_NAME || c->settings[SET_TRACE] ? NULL :
+        env->type == SPY_DICT ? remembered_global(env, n) : remembered_local(env, n);
+    if (!entry) return store_slow(c, f, n, value);
+    entry_store(c, env, entry, spy_retain(value));
     return 0;
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
@@ -17157,10 +17203,26 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
 }
 static int machine_push(SPYContext *, Machine *, SPYValue *);
 static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
-static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
+/* Whether comprehension n runs to its value when it is evaluated: a list,
+ * set or dictionary comprehension that does not await. */
+static ALWAYS_INLINE int eager_comprehension(Node *n) {
+    return n->kind == N_COMPREHENSION && n->op != N_TUPLE && !n->asynchronous;
+}
+/* The value of eager comprehension g, which its machine ended with result. */
+static SPYValue *comprehension_end(SPYContext *c, SPYValue *g, Result result) {
+    SPYValue *env = g->as.generator.env;
+    g->as.generator.env = NULL;
+    spy_release(g); release_locals(env);
+    if (result.flow == FLOW_RETURN) return result.value;
+    spy_release(result.value);
+    return c->error_type[0] ? NULL : spy_error(c, "RuntimeError", "synchronous comprehension suspended");
+}
+/* Comprehension n over source, its first iterable, as a generator whose
+ * machine has not started. */
+static SPYValue *comprehension_new(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
     SPYValue *iterator = n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source);
     if (!iterator) return NULL;
-    int eager = n->op != N_TUPLE && !n->asynchronous;
+    int eager = eager_comprehension(n);
     SPYValue *env = eager ? kept_env(c, n->scope) : NULL;
     if (!env) env = value_new(c, V_ENV);
     SPYValue *result = env ? value_new(c, n->asynchronous ?
@@ -17188,15 +17250,18 @@ static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *
     }
     spy_release(iterator); spy_release(env);
     if (c->error_type[0]) { spy_release(result); return NULL; }
-    if (eager) {
-        Result value = run_machine(c, result->as.generator.machine, NULL, NULL, 0, NULL);
-        env = result->as.generator.env; result->as.generator.env = NULL;
-        spy_release(result); release_locals(env);
-        if (value.flow == FLOW_RETURN) return value.value;
-        spy_release(value.value);
-        return c->error_type[0] ? NULL : spy_error(c, "RuntimeError", "synchronous comprehension suspended");
-    }
     return result;
+}
+/* The value of comprehension n over source: an eager one's result, else a
+ * generator. */
+static SPYValue *comprehension_from(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
+    SPYValue *result = comprehension_new(c, f, n, source);
+    if (!result || !eager_comprehension(n)) return result;
+    SPYValue *outer = c->eval_env;
+    c->eval_env = result->as.generator.env;
+    Result value = run_machine(c, result->as.generator.machine, NULL, NULL, 0, NULL);
+    c->eval_env = outer;
+    return comprehension_end(c, result, value);
 }
 static SPYValue *eval_comprehension(SPYContext *c, Frame *f, Node *n) {
     /* Only the outer iterable is evaluated in the enclosing scope. */
@@ -19817,7 +19882,24 @@ static int start_annotations(SPYContext *c, Frame *f, Node *annotate, const char
 /* A module's body: on the machine, compiled at its first run, so that its
  * loops are steps and its calls run there; an expression or interactive
  * unit, whose statements' values the walker reports, on the walker. */
+/* Module machine m ran to r, outer the eval_env before it: a pause keeps
+ * it for spy_resume. */
+static Result module_end(SPYContext *c, Machine *m, SPYValue *outer, Result r) {
+    if (r.flow == FLOW_PAUSE) {
+        c->paused_env = c->eval_env; c->paused_outer = outer;
+    } else {
+        if (c->pause_root == m) { c->pause_root = NULL; c->pause_due = 0; }
+        machine_edges(m, release_owned, NULL);
+        free_machine(c, m);
+        if (r.flow == FLOW_RETURN) r.flow = FLOW_NORMAL;
+    }
+    c->eval_env = outer;
+    return r;
+}
 static Result module_body(SPYContext *c, Frame *f) {
+    /* The body a pausable call runs first, while no other is paused. */
+    int pausable = c->pause_entry && c->pausing && !c->pause_root;
+    c->pause_entry = 0;
     SPYValue *unit = f->unit;
     Node *body = unit->as.unit.body;
     if (f->interactive || unit->as.unit.expression || !body) return execute(c, f, body);
@@ -19839,13 +19921,10 @@ static Result module_body(SPYContext *c, Frame *f) {
     m->owner = body;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
-    Result r = run_machine(c, m, NULL, NULL, 0, NULL);
-    c->eval_env = outer;
-    machine_edges(m, release_owned, NULL);
-    free_machine(c, m);
-    if (r.flow == FLOW_RETURN) r.flow = FLOW_NORMAL;
-    return r;
+    if (pausable) c->pause_root = m;
+    return module_end(c, m, outer, run_machine(c, m, NULL, NULL, 0, NULL));
 }
+static Result module_left(SPYContext *, Result);
 static Result execute_module(SPYContext *c, Frame *f) {
     /* A module's docstring is its first statement's store to __doc__. */
     if (!f->interactive && !f->unit->as.unit.expression) {
@@ -19857,6 +19936,10 @@ static Result execute_module(SPYContext *c, Frame *f) {
     if (enter_frame(c, f->env, f->unit)) return (Result){FLOW_ERROR, NULL};
     Result r = setup_annotations(c, f, f->unit->as.unit.setup_annotations) || start_annotations(c, f, f->unit->as.unit.annotate, "__annotate__") ?
         (Result){FLOW_ERROR, NULL} : module_body(c, f);
+    return r.flow == FLOW_PAUSE ? r : module_left(c, r);
+}
+/* Leave the frame of a module whose body ended with r. */
+static Result module_left(SPYContext *c, Result r) {
     leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     if (r.flow != FLOW_ERROR && c->error_type[0]) { spy_release(r.value); r = (Result){FLOW_ERROR, NULL}; }
     return r;
@@ -20999,6 +21082,21 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYVal
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
+/* A call of plain class cls, in argv[-1]'s place before its argc
+ * arguments, whose __init__ is on the machine: its new instance takes the
+ * class's place as the call's value, and the call enters the __init__
+ * with it, taking the arguments and returning the class to enter there;
+ * else NULL. */
+static SPYValue *class_call(SPYContext *c, Machine *m, SPYValue *cls, size_t argc, SPYValue **argv, SPYValue **env) {
+    SPYValue *init = plain_init(c, cls), *self;
+    if (!init || !machine_function(c, init) || !(self = new_instance(c, cls))) return NULL;
+    argv[-1] = spy_retain(self);
+    m->len -= argc;
+    c->entering_init = init;
+    if ((*env = function_env(c, init, argc + 1, argv - 1, NULL, 1))) return cls;
+    spy_release(cls);
+    return NULL;
+}
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     if (n->a->kind == N_ATTR) return stack_method_call(c, m, n, argc, calls, env);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
@@ -21010,6 +21108,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return NULL;
     }
+    if (callee->type == SPY_CLASS && (result = class_call(c, m, callee, argc, argv, env))) return result;
+    if (c->error_type[0]) return NULL;
     result = call_plain(c, callee, -1, n, argc, argv);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return result;
@@ -21084,6 +21184,20 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assign(c, f, n); }
+/* BC_INCREMENT: small integers in a remembered slot, while no trace
+ * function watches, sum in place of the assignment. */
+static NO_INLINE void increment_step(SPYContext *c, Frame *f, Node *n) {
+    SPYValue *env = f->env, *x, *y, *value;
+    Entry *entry = c->settings[SET_TRACE] ? NULL : env->type == SPY_DICT ? remembered_global(env, n->a) : remembered_local(env, n->a);
+    x = entry ? entry->value : NULL;
+    y = x && x->type == SPY_INT && !x->as.integer_data.big ? leaf_operand(f, n->b) : NULL;
+    int64_t sum;
+    if (y && y->type == SPY_INT && !y->as.integer_data.big &&
+        !(n->op == T_ADDEQ ? int_add : int_sub)(x->as.integer_data.small, y->as.integer_data.small, &sum) &&
+        (value = int_value(c, sum)))
+        entry_store(c, env, entry, value);
+    else if (!c->error_type[0]) assign(c, f, n);
+}
 /* The hot machine steps end in their own dispatch, so that each predicts
  * its successor; any other step, and any tick with work, takes the loop. */
 #if defined(__GNUC__) /* Labels as values. */
@@ -21109,6 +21223,19 @@ static int generator_resume(SPYContext *, SPYValue *);
 static Result generator_pause(SPYContext *, SPYValue *, Result);
 static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
 static void generator_close(SPYValue *);
+/* Loop item item, which the loop step next took: stored to a name the
+ * step stores (compile_next), or pushed. */
+static ALWAYS_INLINE void loop_item(SPYContext *c, Machine *m, Frame *f, Instruction *next, SPYValue *item) {
+    if (next->other) { store_target(c, f, next->node->args, item); spy_release(item); }
+    else machine_push(c, m, item);
+}
+/* The __next__ of iterator v that a loop step enters on the machine: a
+ * Python function of v's class, borrowed; else NULL. */
+static SPYValue *machine_next(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_INSTANCE || builtin_base(c, v, "__next__", NULL)) return NULL;
+    SPYValue *next = class_lookup(v->as.map.parent, "__next__");
+    return next && machine_function(c, next) ? next : NULL;
+}
 /* Whether a loop step may resume v's machine in its own run_machine: a
  * generator that is not running or delegating. */
 static ALWAYS_INLINE int resumable(SPYValue *v) {
@@ -21117,7 +21244,7 @@ static ALWAYS_INLINE int resumable(SPYValue *v) {
 }
 /* Run machine m: generator's, or else the innermost call's, then the
  * calls it makes, until the outermost of them returns. */
-static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
+static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
                           size_t argc, SPYValue *const *argv) {
     Frame f = m->frame;
     Result flow = {FLOW_NORMAL, NULL};
@@ -21144,6 +21271,22 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         if (flow.flow != FLOW_NORMAL) {
             m->pc = pc;
             if ((!m->block_len && flow.flow == FLOW_RETURN) || !machine_unwind(c, m, &f, &flow)) {
+                if (m->outermost >= CALL_INIT) {
+                    /* A special call returns into the step that made it. */
+                    int kind = m->outermost;
+                    SPYValue *result = flow.flow == FLOW_RETURN ? flow.value : NULL;
+                    flow = (Result){FLOW_NORMAL, NULL};
+                    m = call_leave(c, (Call *)m, result);
+                    f = m->frame; code = m->code->items; pc = m->pc;
+                    if (kind == CALL_INIT) {
+                        /* An __init__ returns None into its class call,
+                         * whose value is already on the caller's stack. */
+                        if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+                        spy_release(result);
+                    } else if (result) loop_item(c, m, &f, &code[pc - 1], result);
+                    else if (error_is(c, "StopIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
+                    continue;
+                }
                 if (m->outermost) {
                     if (!m->resumer) return flow;
                     goto generator_left;
@@ -21158,8 +21301,17 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         }
         Instruction *ins = &code[pc++];
         Node *n = ins->node;
-        if (n) { if (tick(c, &f, n)) continue; }
-        else if (!quiet(c, &f)) {
+        if (n) {
+            if (!quiet(c, &f)) {
+                if (tick_full(c, &f, n)) continue;
+                /* A due pause waits for a step of the pausable call's own
+                 * activation, which holds no state but its machines'. */
+                if (c->pause_due && c->machines == 1 && !c->paused_at && !truth_known) {
+                    m->pc = pc - 1; c->paused_at = m;
+                    return (Result){FLOW_PAUSE, NULL};
+                }
+            } else relocate(c, n);
+        } else if (!quiet(c, &f)) {
             /* An instruction of no node ticks on the definition, keeping the
              * frame's line; while only a line would be recorded, it need not. */
             n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
@@ -21169,6 +21321,7 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         }
         SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
         SPYValue *callee_env; /* With value, a call to enter on the machine, both owned. */
+        int special; /* At enter_special, the kind of that call. */
         /* A step that owns no operand continues past their release. */
 #if THREADED
 #define STEP_LABEL(op) [op] = &&op_##op,
@@ -21264,11 +21417,11 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         CASE(BC_CALLN)
         CASE(BC_CALLK)
             callee_env = NULL;
-            value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, !m->generator, &callee_env);
+            value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, 1, &callee_env);
             if (callee_env) goto enter_call;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
-            callee_env = NULL; value = keyword_call(c, m, !m->generator, &callee_env);
+            callee_env = NULL; value = keyword_call(c, m, 1, &callee_env);
             if (callee_env) goto enter_call;
             machine_push(c, m, value); break;
         CASE(BC_STORE)
@@ -21323,8 +21476,23 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         CASE(BC_DEFAULT)
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;
         CASE(BC_COMPREHENSION)
-            a = machine_pop(m); machine_push(c, m, comprehension_from(c, &f, n, a)); break;
-        CASE(BC_NAMED) name_set(c, f.env, n->text, m->stack[m->len - 1]); break;
+            a = machine_pop(m);
+            if (!eager_comprehension(n)) { machine_push(c, m, comprehension_from(c, &f, n, a)); break; }
+            /* An eager comprehension runs on in this run_machine, returning
+             * into this machine (generator_left). */
+            if (!(value = comprehension_new(c, &f, n, a))) break;
+            spy_release(a);
+            m->pc = pc;
+            value->as.generator.machine->resumer = m;
+            m = value->as.generator.machine;
+            m->outer_env = c->eval_env; c->eval_env = value->as.generator.env;
+            goto switch_call;
+        CASE(BC_NAMED) {
+            /* A comprehension binds its target in the enclosing scope. */
+            SPYValue *env = f.env;
+            while (env->type == V_ENV && env->as.map.flags == 2) env = env->as.map.parent;
+            name_set(c, env, n->text, m->stack[m->len - 1]); break;
+        }
         CASE(BC_JUMP)
             /* A backward jump shows a trace function its line again. */
             if (watched(c) && ins->target < pc) {
@@ -21419,9 +21587,17 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
                 SPYValue *iterator = m->blocks[m->block_len - 1].value;
                 if (!iterator_fast(c, iterator, &a)) {
                     if (resumable(iterator)) { value = iterator; goto resume_generator; }
+                    /* A Python __next__ is a call that returns into this step (next_left). */
+                    if ((value = machine_next(c, iterator))) {
+                        SPYValue *self = spy_retain(iterator);
+                        if (!(callee_env = function_env(c, value, 1, &self, NULL, 1))) break;
+                        spy_retain(value); special = CALL_NEXT;
+                        goto enter_special;
+                    }
                     a = iterator_next(c, iterator);
                 }
                 if (!a) pc = ins->target;
+                else if (ins->other) store_target(c, &f, n->args, a);
                 else { machine_push(c, m, a); a = NULL; }
             }
             NEXT_RELEASE;
@@ -21559,6 +21735,7 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
             }
             spy_release(value); break;
         }
+        CASE(BC_INCREMENT) increment_step(c, &f, n); break;
         }
         if (a) spy_release(a);
         if (b) spy_release(b);
@@ -21579,6 +21756,15 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         Machine *resumer = m->resumer;
         SPYValue *g = m->generator;
         m->resumer = NULL;
+        if (eager_comprehension(g->as.generator.node)) {
+            c->eval_env = m->outer_env;
+            value = comprehension_end(c, g, flow);
+            m = resumer;
+            f = m->frame; code = m->code->items; pc = m->pc;
+            flow = (Result){FLOW_NORMAL, NULL};
+            if (value) machine_push(c, m, value);
+            continue;
+        }
         flow = generator_pause(c, g, flow);
         if (flow.flow == FLOW_RETURN) {
             g->as.generator.returned = 1;
@@ -21587,12 +21773,18 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         } else if (flow.flow != FLOW_YIELD) generator_end(c, g, flow);
         m = resumer;
         f = m->frame; code = m->code->items; pc = m->pc;
+        /* The loop's BC_NEXT, which resumed it. */
         if (flow.flow != FLOW_YIELD && !c->error_type[0]) pc = code[pc - 1].target;
-        flow.flow = FLOW_NORMAL;
-        if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
+        if (flow.value) loop_item(c, m, &f, &code[pc - 1], flow.value);
+        flow = (Result){FLOW_NORMAL, NULL};
         continue;
     }
     enter_call:
+        /* A class call enters its __init__ (class_call). */
+        if (value->type == SPY_CLASS) {
+            spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
+            goto enter_special;
+        }
         m->pc = pc;
         {
             Call *call = call_enter(c, value, callee_env, m);
@@ -21604,6 +21796,15 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
         f = m->frame; code = m->code->items; pc = m->pc;
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
+    enter_special:
+        m->pc = pc;
+        {
+            Call *call = call_enter(c, value, callee_env, m);
+            if (!call) continue;
+            call->m.outermost = special;
+            m = &call->m;
+        }
+        goto switch_call;
     }
 }
 #pragma GCC diagnostic pop
@@ -21612,9 +21813,15 @@ static HOT Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValu
 #undef NEXT_RELEASE
 #undef YIELD
 #undef THREADED
-static int generator_resume(SPYContext *, SPYValue *);
-static Result generator_pause(SPYContext *, SPYValue *, Result);
-static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
+/* run_steps, counting the native activations that run machines: only the
+ * outermost one, a pausable call's, may pause. */
+static ALWAYS_INLINE Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
+                                        size_t argc, SPYValue *const *argv) {
+    c->machines++;
+    Result r = run_steps(c, m, sent, thrown, argc, argv);
+    c->machines--;
+    return r;
+}
 static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent, SPYValue *thrown,
                                     size_t argc, SPYValue *const *argv) {
     if (g->as.generator.running) return spy_error(c, "ValueError", g->type == SPY_COROUTINE ? "coroutine already executing" : "generator already executing");
@@ -21642,7 +21849,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
 }
 /* Enter generator g's frame to run its machine, setting aside the
  * context's handled exception for the generator's own. */
-static int generator_resume(SPYContext *c, SPYValue *g) {
+static ALWAYS_INLINE int generator_resume(SPYContext *c, SPYValue *g) {
     g->as.generator.started = 1;
     if (deeper(c, "")) return -1;
     if (enter_frame(c, g->as.generator.env, g)) { c->depth--; return -1; }
@@ -21650,16 +21857,17 @@ static int generator_resume(SPYContext *c, SPYValue *g) {
     g->as.generator.running = 1;
     Machine *m = g->as.generator.machine;
     m->outer_handled = c->handled; m->outer_inherited = c->inherited_exception;
+    m->outer_env = c->eval_env; c->eval_env = g->as.generator.env;
     c->inherited_exception = active_exception(c);
     c->handled = spy_retain(m->handled);
     return 0;
 }
 /* Leave g's frame after its machine ran to result, which it returns, an
  * error when leaving the frame raised. */
-static Result generator_pause(SPYContext *c, SPYValue *g, Result result) {
+static ALWAYS_INLINE Result generator_pause(SPYContext *c, SPYValue *g, Result result) {
     Machine *m = g->as.generator.machine;
     spy_release(m->handled); m->handled = c->handled; c->handled = m->outer_handled;
-    c->inherited_exception = m->outer_inherited;
+    c->inherited_exception = m->outer_inherited; c->eval_env = m->outer_env;
     g->as.generator.line = c->frames[c->py_depth - 1].line;
     g->as.generator.running = 0; c->depth--;
     leave_frame(c, result.flow == FLOW_YIELD || result.flow == FLOW_RETURN ? result.value ? result.value : c->none : NULL);
@@ -21862,6 +22070,8 @@ static SPYValue *super_new(SPYContext *c, SPYValue *type, SPYValue *self) {
 }
 static SPYValue *implicit_super(SPYContext *c) {
     SPYValue *env = c->eval_env;
+    /* A list, set or dictionary comprehension runs in its function's frame. */
+    while (env && env->type == V_ENV && env->as.map.flags == 2 && env->as.map.scope->owner->op != N_TUPLE) env = env->as.map.parent;
     Scope *scope = env && env->type == V_ENV ? env->as.map.scope : NULL;
     Node *first = scope && scope->kind == S_FUNCTION ? scope->owner->args : NULL;
     if (!first || (first->op != P_POSITIONAL && first->op != P_POSONLY))
@@ -28936,8 +29146,16 @@ SPYContext *spy_context_new(void) {
 fail:
     spy_context_free(c); return NULL;
 }
+static SPYValue *resume(SPYContext *);
 void spy_context_free(SPYContext *c) {
     if (!c) return;
+    if (c->paused_at) {
+        /* Stopped, the paused call unwinds without running a step. */
+        enter(c);
+        halt(c, SPY_STOP_INTERRUPT);
+        spy_release(resume(c));
+        leave(c, NULL);
+    }
     /* Context destruction invalidates every value. Free storage directly so
      * shutdown cannot recurse through an arbitrarily deep object graph. */
     c->weak_len = 0;
@@ -29032,6 +29250,7 @@ int spy_set_limit(SPYContext *c, int limit, size_t value) {
     case SPY_LIMIT_INT_DIGITS: if (value && value < 640) break; c->int_max_str_digits = value; return 0;
     case SPY_LIMIT_STACK: if (!value) break; c->stack_size = value; return 0;
     case SPY_LIMIT_COLLECTION: c->collection_limit = value; schedule_collection(c); return 0;
+    case SPY_LIMIT_PAUSE: if (value > 1) break; c->pausing = (int)value; return 0;
     default: spy_error(c, "ValueError", "unknown limit"); return -1;
     }
     spy_error(c, "ValueError", "limit value out of range");
@@ -29046,6 +29265,7 @@ size_t spy_get_limit(const SPYContext *c, int limit) {
     case SPY_LIMIT_INT_DIGITS: return c->int_max_str_digits;
     case SPY_LIMIT_STACK: return c->stack_size;
     case SPY_LIMIT_COLLECTION: return c->collection_limit;
+    case SPY_LIMIT_PAUSE: return (size_t)c->pausing;
     default: return 0;
     }
 }
@@ -29053,12 +29273,20 @@ size_t spy_steps_used(const SPYContext *c) {
     return (c->step_limit ? c->step_limit : SIZE_MAX) - (c->stopped ? c->stopped_fuel : c->fuel);
 }
 void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : level > 2 ? 2 : level; }
+static SPYValue *source_end(SPYContext *, SPYValue *, Result);
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c);
     SPYValue *unit = parse(c, source, strlen(source), filename ? filename : "<string>");
     if (!unit) return NULL;
     Frame frame = {c->globals, unit, interactive};
+    c->pause_entry = !interactive && c->entries == 1;
     Result result = execute_module(c, &frame);
+    c->pause_entry = 0;
+    if (result.flow == FLOW_PAUSE) { c->paused_unit = unit; return NULL; }
+    return source_end(c, unit, result);
+}
+/* The value of evaluating unit, which ended with result. */
+static SPYValue *source_end(SPYContext *c, SPYValue *unit, Result result) {
     spy_release(unit);
     /* Deaths in the last statement have no later statement boundary. */
     if (result.flow != FLOW_ERROR && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
@@ -29074,6 +29302,25 @@ static void enter(SPYContext *c) {
     c->stopped = 0; c->output_used = 0;
 }
 static SPYValue *leave(SPYContext *c, SPYValue *result) { c->entries--; return result; }
+int spy_paused(const SPYContext *c) { return c->paused_at ? c->pause_due : 0; }
+/* Run the paused call on from its step: to its end, or to its next pause. */
+static SPYValue *resume(SPYContext *c) {
+    Machine *at = c->paused_at;
+    c->paused_at = NULL;
+    c->eval_env = c->paused_env;
+    Result r = run_machine(c, at, NULL, NULL, 0, NULL);
+    if (r.flow == FLOW_PAUSE) { c->paused_env = c->eval_env; c->eval_env = c->paused_outer; return NULL; }
+    SPYValue *unit = c->paused_unit;
+    c->paused_unit = NULL;
+    return source_end(c, unit, module_left(c, module_end(c, c->pause_root, c->paused_outer, r)));
+}
+SPYValue *spy_resume(SPYContext *c) {
+    if (!c->paused_at) { spy_error(c, "RuntimeError", "no call is paused"); return NULL; }
+    enter(c);
+    spy_clear_error(c);
+    c->pause_due = 0;
+    return leave(c, resume(c));
+}
 SPYValue *spy_eval(SPYContext *c, const char *source, const char *filename) {
     enter(c); return leave(c, eval_source(c, source, filename, 0));
 }

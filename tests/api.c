@@ -42,6 +42,17 @@ static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *
 }
 /* An interrupt that stops the context on its tenth poll. */
 static int count_polls(void *data) { return ++*(int *)data == 10; }
+/* An interrupt that stops the context at every poll. */
+static int always(void *data) { (void)data; return 1; }
+/* Resume a paused call until it ends, counting the pauses. */
+static SPYValue *run_paused(SPYContext *c, SPYValue *v, int reason, int *pauses) {
+    while (!v && spy_paused(c)) {
+        assert(spy_paused(c) == reason && !spy_error_type(c)[0]);
+        ++*pauses;
+        v = spy_resume(c);
+    }
+    return v;
+}
 /* A host function that calls its argument back into the engine. */
 static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)data;
@@ -981,6 +992,54 @@ int main(int argc, char **argv) {
     /* A large block spends a step per 64 bytes. */
     assert(spy_exec(c, "s = 'a' * 10**6", "produce.py") == -1);
     assert(spy_stopped(c) == SPY_STOP_STEPS);
+    /* With PAUSE set, a spent budget pauses the call at its next step where
+     * only Python frames run, keeping the frames of calls, generators,
+     * class calls and comprehensions; each spy_resume runs it on with a
+     * fresh budget, to the value an unlimited call gets. */
+    spy_clear_error(c);
+    assert(spy_set_limit(c, SPY_LIMIT_PAUSE, 2) == -1 && !strcmp(spy_error_type(c), "ValueError"));
+    spy_clear_error(c);
+    assert(!spy_set_limit(c, SPY_LIMIT_PAUSE, 1) && spy_get_limit(c, SPY_LIMIT_PAUSE) == 1);
+    assert(!spy_resume(c) && !strcmp(spy_error_message(c), "no call is paused"));
+    const char *paused = "def gen(n):\n    for i in range(n): yield i\n"
+                         "class P:\n    def __init__(self, v): self.v = v\n"
+                         "def work(n):\n    total = 0\n    for i in gen(n):\n        total += P(i).v + sum([j for j in range(3)])\n    return total\n"
+                         "result = 0\nfor k in range(50):\n    result += work(100)\nresult";
+    int pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, paused, "paused.py"), SPY_STOP_STEPS, &pauses)) == 262500 && pauses > 20);
+    assert(!spy_paused(c) && !spy_stopped(c));
+    /* Other calls run while one is paused; they stop rather than pause. */
+    pauses = 0;
+    SPYValue *v = spy_eval(c, "total = 0\nfor i in range(3000): total += i\ntotal", "first.py");
+    assert(!v && spy_paused(c));
+    assert(integer(c, spy_eval(c, "40 + 2", "between.py")) == 42);
+    assert(spy_exec(c, "while True: pass", "between.py") == -1 && spy_stopped(c) == SPY_STOP_STEPS && spy_paused(c));
+    spy_clear_error(c);
+    assert(integer(c, run_paused(c, v, SPY_STOP_STEPS, &pauses)) == 4498500 && pauses > 1);
+    /* A pause due inside a native call waits for it to return, within one
+     * further budget; a call needing more stops. */
+    execute(c, "def slow(x):\n    for i in range(100): pass\n    return x");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "sorted(range(15), key=slow)[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
+    assert(!spy_eval(c, "sorted(range(30), key=slow)", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
+    spy_clear_error(c);
+    /* An interrupt pauses too; spy_exec returns -1 when it pauses. */
+    spy_set_limit(c, SPY_LIMIT_STEPS, 0);
+    spy_set_interrupt(c, always, NULL);
+    assert(spy_exec(c, "n = 0\nwhile n < 10000: n += 1", "interrupted.py") == -1 && spy_paused(c) == SPY_STOP_INTERRUPT);
+    spy_set_interrupt(c, NULL, NULL);
+    pauses = 0;
+    v = run_paused(c, NULL, SPY_STOP_INTERRUPT, &pauses);
+    assert(v && pauses == 1);
+    spy_release(v);
+    assert(integer(c, spy_eval(c, "n", "interrupted.py")) == 10000);
+    /* Freeing a context stops its paused call. */
+    SPYContext *dropped = spy_context_new();
+    spy_set_limit(dropped, SPY_LIMIT_STEPS, 100);
+    spy_set_limit(dropped, SPY_LIMIT_PAUSE, 1);
+    assert(!spy_eval(dropped, "def f():\n    try:\n        while True: pass\n    finally:\n        print('never')\nf()", "dropped.py") && spy_paused(dropped));
+    spy_context_free(dropped);
+    spy_set_limit(c, SPY_LIMIT_PAUSE, 0);
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     /* The engine counts the bytes it holds; a memory limit stops the call
      * with a MemoryError no handler sees, and the context stays usable. */

@@ -99,3 +99,47 @@ def delegating():
     yield from count(2)
     yield from count(1)
 assert_eq([x for x in delegating()], [0, 1, 0])
+
+# 7.7.2, 15.3: a loop steps an iterator through its type's __next__; a
+# StopIteration, or a subclass, ends the loop, and any other error reaches it.
+class Count:
+    def __init__(self, n):
+        self.i, self.n = 0, n
+    def __iter__(self):
+        return self
+    def __next__(self):
+        if self.i >= self.n:
+            raise StopIteration
+        self.i += 1
+        return self.i
+class Ended(StopIteration):
+    pass
+class EndsEarly(Count):
+    def __next__(self):
+        if self.i:
+            raise Ended
+        return Count.__next__(self)
+class Fails(Count):
+    def __next__(self):
+        raise ValueError("next failed")
+total = 0
+for x in Count(4):
+    total += x
+assert_eq(total, 10)
+assert_eq([x * x for x in Count(3)], [1, 4, 9])
+assert_eq([pair for pair in zip(Count(2), Count(3))], [(1, 1), (2, 2)])
+assert_eq([x for x in EndsEarly(5)], [1])
+try:
+    for x in Fails(1):
+        pass
+    assert_true(False, "the loop ran on")
+except ValueError as error:
+    assert_eq(str(error), "next failed")
+def through():
+    for x in Count(2):
+        yield x
+assert_eq(list(through()), [1, 2])
+# The method the type holds is called, not one set on the instance.
+counter = Count(2)
+counter.__next__ = lambda: 99
+assert_eq([x for x in counter], [1, 2])
