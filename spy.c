@@ -13871,8 +13871,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_STAR_RERAISE, n, 0);
             patch(p, end, p->len);
             if (n->c) {
-                emit(c, p, BC_LEAVE, n, 0); patch(p, final, p->len);
-                compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, n, 0);
+                emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
+                compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, NULL, 0);
             }
             break;
         }
@@ -13895,8 +13895,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             if (p->items[i].op == BC_JUMP && p->items[i].arg && !p->items[i].target) p->items[i].target = p->len;
         patch(p, end, p->len);
         if (n->c) {
-            emit(c, p, BC_LEAVE, n, 0); patch(p, final, p->len);
-            compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, n, 0);
+            emit(c, p, BC_LEAVE, NULL, 0); patch(p, final, p->len);
+            compile_body(c, p, n->c); emit(c, p, BC_END_FINALLY, NULL, 0);
         }
         break;
     }
@@ -13936,7 +13936,8 @@ static int check_async_return(SPYContext *c, Node *n) {
 /* A generator's body, or a function body that holds a call, on the machine. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = (n->kind == N_DEF && n->op) || list_expands(n->b, 0);
-    if (!generator && !list_expands(n->b, CALLS)) return 0;
+    /* An annotation or lazy value function's body is one walker statement. */
+    if (!generator && (n->b->kind == N_ANNOTATIONS || !list_expands(n->b, CALLS))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;

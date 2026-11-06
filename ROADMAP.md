@@ -399,9 +399,9 @@ upstream since the pinned commit.
 The goal is to come as close to CPython's performance as the design allows.
 At 0.7.0 ([docs/benchmark.md](docs/benchmark.md)) spy runs every benchmark
 program faster than CPython 3.15 except `fib`, which takes 4% longer: it is
-almost all calls, and each call binds an environment and recurses in C.
-Values already come in three sizes, and arrays for locals and calls without
-C recursion were tried and measured slower
+almost all calls, and each call binds an environment. Calls between
+Python functions no longer recurse in C. Values already come in three
+sizes, and arrays for locals were tried and measured slower
 ([docs/optimization.md](docs/optimization.md#tried-and-left-out)). Profiles
 are flat, so the remaining work is structural. Each step must keep `make
 test`, the spec suite, the TLA+ models and the sanitizer runs green, and its
@@ -412,9 +412,10 @@ commit reports before and after timings.
 Ordinary code is evaluated by walking the syntax tree; generators run on an
 instruction list that hands every expression that cannot suspend back to the
 walker. Move node kinds onto machine instructions one at a time, each only
-once it measures faster than the walker, then revisit locals in slots and
-calls without C recursion, which pay only once a machine step costs well
-under a walker node. They are weighed on speed alone: host calls wait
+once it measures faster than the walker, then revisit locals in slots,
+which pay only once a machine step costs well under a walker node. A body
+that holds a call already runs on the machine, so that its calls do not
+recurse in C. They are weighed on speed alone: host calls wait
 through JSPI ([WebAssembly and the edge](#webassembly-and-the-edge)) and
 snapshots are taken at idle points, so neither needs them. The plan and its measurements are in
 [docs/optimization.md](docs/optimization.md#toward-bytecode).

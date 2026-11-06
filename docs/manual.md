@@ -1208,7 +1208,11 @@ internal instruction array so their execution can suspend. Expressions without
 yields reuse the evaluator; expressions containing yields preserve intermediate
 operands on an owned heap stack. A separate cleanup stack records loops,
 exception handlers, `finally` blocks, and context managers. Every instruction
-borrows its AST node from the retained source unit. There is no peephole
+borrows its AST node from the retained source unit. A function body that
+holds a call and cannot suspend compiles to the same instructions; a call to
+such a function from such a body pushes a frame on the context's call stack
+and the same instruction loop continues, so these calls do not nest on the C
+stack. There is no peephole
 optimizer or stable serialized-program format.
 
 ### 4.2 Executable generation

@@ -80,10 +80,11 @@ that, gradually, with three changes that only pay off together:
    `locals()`, frame views and closures that need it.
 3. **Calls without C recursion.** A Python call pushes a frame and the
    same loop continues; calls that C makes into Python (`__init__`,
-   `sorted` keys, comparison callbacks) keep the C stack guard.
+   `sorted` keys, comparison callbacks) keep the C stack guard. This
+   landed as [Calls run on the machine](#calls-run-on-the-machine).
 
-Measured at 0.4.0 (see *Tried and left out*), steps 2 and 3 do not pay
-yet: locals are already read by index, and a function body on the
+Measured at 0.4.0 (see *Tried and left out*), steps 2 and 3 did not pay
+then: locals are already read by index, and a function body on the
 machine costs more than the walker even before its calls. Step 1, a
 cheaper machine step, comes first.
 
@@ -195,6 +196,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Hot paths stay out of large functions](#hot-paths-stay-out-of-large-functions) | -3.1% (fib), -2.2% (dicts), -1.8% (nbody); empty range loop -17%; M2: fib -3.3%, loop -2.3% |
 | [An attribute is an operand at hand](#an-attribute-is-an-operand-at-hand) | -5.3% (classes); M2: classes -2.1% |
 | [eval ends in a tail call](#eval-ends-in-a-tail-call) | -0.8% (loop); M2: classes -2.0%, loop -1.5%, sort -1.5% |
+| [Calls run on the machine](#calls-run-on-the-machine) | -12.9% (fib), +1.7% (generators), +1.2% (classes); M2: fib -2.2%, classes +2.0% |
 
 ### Releasing a number or string frees it at once
 
@@ -1511,6 +1513,37 @@ saved registers. Instructions (M2 counters): loop -0.8%, the rest up to
 1.2% more. Wall time averaged over eight code layouts: classes -2.0%, loop
 -1.5%, sort -1.5%, generators +0.8%, the rest within 0.4%.
 
+### Calls run on the machine
+
+A function body that holds a call and cannot suspend compiles to
+machine steps (`Node.flat`), and a call to such a function from such a
+body pushes a `Call` on the context's stack and goes on in the same
+`run_machine`, so a recursion of Python functions no longer recurses in
+C: it is bounded by the recursion limit alone. A call that C makes
+(the walker, a special method, a host or trace callback) enters a new
+`run_machine`, out of line in `call_machine`. Three things made it pay:
+
+- Inside a body on the machine, `if` and `return` are steps too, and a
+  return of a name or literal (`BC_RETURN`) switches to its caller and
+  dispatches the caller's next step from there.
+- A call's arguments that are operators of literals and names are
+  computed in place (`BC_CALLF`), and the call steps are out of line,
+  so that generators, which share the loop, keep their registers; with
+  the calls inline, generators took 8-10% longer.
+- A call keeps its caller's machine, so a switch waits on one load
+  rather than reloading `c->calls`, its top, the call's code and its
+  pc. That chain of loads was what fib's lower IPC paid: cycles fell
+  9% with no change in instructions.
+
+The statements after a body's last call are one walker step
+(`BC_BLOCK`), and a `for` whose only call is its iterable stays a
+walker statement, so nbody and loop are unchanged. Instructions (M2
+counters): fib -12.9%, generators +1.7%, classes +1.2%, the rest within
+0.5%. Cycles averaged over eight code layouts: fib -2.2%, classes
++2.0%, generators -0.1%, nbody +0.3%. On Linux clang (callgrind) classes runs about 1%
+fewer instructions than before; the M2 build's +2% is open. A 50,000
+deep recursion runs in a 64 KiB C stack (`tests/api`).
+
 ### A profile-guided build
 
 `make CC=clang CONFIG_PGO=y` builds the engine twice: once instrumented,
@@ -1617,6 +1650,8 @@ nbody. Only loop, a module-level `while`, is slower with the profile
   (33.7 ms) and classes (92.5 ms). classes loses because its loop runs at
   module level on the walker, so each method call enters the machine
   afresh. Flat calls pay once callers run on the machine as well.
+
+  Landed in 2026-11 as [Calls run on the machine](#calls-run-on-the-machine).
 
   A call costs more than the steps around it either way. Per iteration
   of a loop in a function, against CPython 3.15 (`-O3`) on the M2:
