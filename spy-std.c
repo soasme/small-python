@@ -128,10 +128,12 @@ static int compatible(const char *built) {
     return b[0] == r[0] && (b[0] || b[1] == r[1]) && (b[1] < r[1] || (b[1] == r[1] && b[2] <= r[2]));
 }
 /* Hand the library this engine's table, once: a library another engine in
- * the process linked keeps that engine's table and cannot load here. */
+ * the process linked keeps that engine's table and cannot load here. A
+ * linked library is only read, as its calls on other threads read it. */
 static int link_table(SPYModuleLink *link) {
     const SPYModuleAPI *expected = NULL;
 #if defined(__GNUC__)
+    if ((expected = __atomic_load_n(&link->api, __ATOMIC_ACQUIRE))) return expected == &module_api;
     return __atomic_compare_exchange_n(&link->api, &expected, &module_api, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || expected == &module_api;
 #else
     if (!link->api) link->api = &module_api;
