@@ -13447,7 +13447,7 @@ struct Machine {
 };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
-struct Call { Machine m; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
+struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
     return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->delegate) : spy_none(c);
@@ -15719,15 +15719,16 @@ static void calls_free(SPYContext *c, size_t first) {
         mem_free(c->calls[i]->m.blocks); mem_free(c->calls[i]->m.stack); mem_free(c->calls[i]); c->calls[i] = NULL;
     }
 }
-/* Enter the frame of fn, whose body is on the machine, in env; it takes
- * both references, releasing them when it fails. */
-static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env, int outermost) {
+/* Enter the frame of fn, whose body is on the machine, in env, called from
+ * the machine caller or, when NULL, from C; it takes both references,
+ * releasing them when it fails. */
+static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env, Machine *caller) {
     if (!enter_frame(c, env, fn)) {
         if ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c)) {
             Call *call = c->calls[c->calls_len++];
-            call->m.code = fn->as.function.def->flat; call->m.pc = 0; call->m.outermost = outermost;
+            call->m.code = fn->as.function.def->flat; call->m.pc = 0; call->m.outermost = !caller;
             call->m.frame = (Frame){env, fn->as.function.unit, 0};
-            call->fn = fn;
+            call->caller = caller; call->fn = fn;
             call->caller_env = c->eval_env; c->eval_env = env;
             return call;
         }
@@ -15736,16 +15737,19 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
     release_locals(env); spy_release(fn);
     return NULL;
 }
-/* Leave the innermost running call, which returns value, or NULL when it
- * raises. A trace function leave_frame calls may reuse its storage. */
-static ALWAYS_INLINE void call_leave(SPYContext *c, SPYValue *value) {
-    Call *call = c->calls[--c->calls_len];
+/* Leave call, the innermost running, which returns value, or NULL when it
+ * raises; its caller's machine. A trace function leave_frame calls may
+ * reuse its storage. */
+static ALWAYS_INLINE Machine *call_leave(SPYContext *c, Call *call, SPYValue *value) {
+    Machine *caller = call->caller;
     SPYValue *env = call->m.frame.env, *fn = call->fn;
+    c->calls_len--;
     c->eval_env = call->caller_env;
     while (call->m.len) spy_release(call->m.stack[--call->m.len]);
     leave_frame(c, value);
     release_locals(env);
     spy_release(fn);
+    return caller;
 }
 /* Whether call_keywords accepts the keys of keywords. */
 static int string_keys(SPYContext *c, SPYValue *keywords) {
@@ -15763,10 +15767,10 @@ static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPY
     SPYValue *env = function_env(c, fn, argc, argv, keywords), *result = NULL;
     if (!env) return NULL;
     if (def->flat) {
-        if (!call_enter(c, spy_retain(fn), env, 1)) return NULL;
-        Call *call = c->calls[c->calls_len - 1];
+        Call *call = call_enter(c, spy_retain(fn), env, NULL);
+        if (!call) return NULL;
         Result r = run_machine(c, NULL, &call->m, NULL, NULL, 0, NULL);
-        call_leave(c, r.flow == FLOW_RETURN ? r.value : NULL);
+        call_leave(c, call, r.flow == FLOW_RETURN ? r.value : NULL);
         /* A deep recursion's storage goes once it has returned. */
         if (!c->calls_len && c->calls_cap > 64) calls_free(c, 64);
         return r.flow == FLOW_RETURN ? r.value : NULL;
@@ -20860,7 +20864,7 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
                 if (m->outermost) return flow;
                 /* A call returns or raises into its caller. */
                 flow = flow.flow == FLOW_RETURN ? (Result){FLOW_NORMAL, flow.value} : (Result){FLOW_ERROR, NULL};
-                call_leave(c, flow.value);
+                m = call_leave(c, (Call *)m, flow.value);
                 goto switch_call;
             }
             pc = m->pc;
@@ -21092,15 +21096,14 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
             if (!m->block_len && !m->outermost) {
                 /* A call returns into its caller, dispatching its next step
                  * from here rather than switch_call, which predicts better. */
-                call_leave(c, value);
-                m = &c->calls[c->calls_len - 1]->m; f = m->frame; code = m->code->items; pc = m->pc;
+                m = call_leave(c, (Call *)m, value); f = m->frame; code = m->code->items; pc = m->pc;
                 machine_push(c, m, value);
                 NEXT;
             }
             flow = (Result){FLOW_RETURN, value}; break;
         CASE(BC_FLOW)
             if (ins->arg == FLOW_RETURN && !m->block_len && !m->outermost) {
-                call_leave(c, flow.value = machine_pop(m));
+                m = call_leave(c, (Call *)m, flow.value = machine_pop(m));
                 goto switch_call;
             }
             flow = (Result){ins->arg, ins->arg == FLOW_RETURN ? machine_pop(m) : NULL}; break;
@@ -21270,10 +21273,14 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
         continue;
     enter_call:
         m->pc = pc;
-        if (!call_enter(c, value, callee_env, 0)) continue;
+        {
+            Call *call = call_enter(c, value, callee_env, m);
+            if (!call) continue;
+            m = &call->m;
+        }
     switch_call:
-        /* The innermost call runs on, given flow.value when a call returned it. */
-        m = &c->calls[c->calls_len - 1]->m; f = m->frame; code = m->code->items; pc = m->pc;
+        /* Machine m runs on, given flow.value when a call returned it. */
+        f = m->frame; code = m->code->items; pc = m->pc;
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
     }
