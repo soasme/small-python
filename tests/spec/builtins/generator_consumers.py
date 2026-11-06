@@ -1,6 +1,7 @@
-# spec: PLS-315 19.3.35, 19.3.3, 19.3.34, 13.16
-# description: sum, any, all, list and tuple take a generator's items in
-# order until it ends, any and all stop at the first item that decides,
+# spec: PLS-315 19.3.35, 19.3.3, 19.3.34, 19.3.26, 13.16
+# description: sum, any, all, min, max, list and tuple take a generator's
+# items in order until it ends, any and all stop at the first item that
+# decides, min and max compare each item with the best before the next,
 # and what the generator raises reaches their caller.
 from harness import *
 
@@ -132,3 +133,34 @@ except TypeError as e:
     assert str(e) == "cannot use 'list' as a set element (unhashable type: 'list')", str(e)
 else:
     raise AssertionError('no TypeError')
+
+# min and max compare each item with the best so far as it arrives, the
+# new item on the left, and keep the first of equal items.
+order = []
+class Ranked:
+    def __init__(self, n, name): self.n, self.name = n, name
+    def __lt__(self, other): order.append(("<", self.name, other.name)); return self.n < other.n
+    def __gt__(self, other): order.append((">", self.name, other.name)); return self.n > other.n
+def ranked():
+    for n, name in ((1, "a"), (3, "b"), (3, "c"), (0, "d")):
+        order.append(name)
+        yield Ranked(n, name)
+assert max(ranked()).name == "b"
+assert order == ["a", "b", (">", "b", "a"), "c", (">", "c", "b"), "d", (">", "d", "b")], order
+order.clear()
+assert min(ranked()).name == "d"
+assert order == ["a", "b", ("<", "b", "a"), "c", ("<", "c", "a"), "d", ("<", "d", "a")], order
+assert (max(count(4)), min(x - 1 for x in count(3))) == (3, -1)
+for f, name in ((max, "max"), (min, "min")):
+    try:
+        f(count(0))
+    except ValueError as e:
+        assert str(e) == name + "() iterable argument is empty", str(e)
+    else:
+        raise AssertionError("no ValueError")
+try:
+    max(x for x in [1, "a"])
+except TypeError as e:
+    assert str(e) == "'>' not supported between instances of 'str' and 'int'", str(e)
+else:
+    raise AssertionError("no TypeError")

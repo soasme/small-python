@@ -13542,7 +13542,7 @@ typedef struct {
 } ErrorState;
 enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_ASYNC_WITH, BLOCK_CONSUME };
 /* A builtin taking an iterable's items one at a time (consumer_add): sum,
- * any, all, list or tuple; and a sum's float total while it compensates.
+ * any, all, list or tuple; min or max keeping its best item in best; and a sum's float total while it compensates.
  * A set adds each item; a callee, owned, takes the items collected in a
  * list at their end (a native method of it with name when method is not
  * -1): frozenset, sorted or str.join. A sort by a key function, its
@@ -13557,7 +13557,11 @@ typedef struct {
     int id, compensating, method, keyed, descending;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent;
     double total, compensation;
+    size_t count, star;
 } Consumer;
+/* An assignment's unpacking, collecting in result the items for a target
+ * list of count targets with a star at index star (unpack_step). */
+enum { UNPACK_ITEMS = -2 };
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
 static SPYValue *consumer_end(SPYContext *, Consumer *);
 /* A BLOCK_CONSUME's value is the generator its consumer takes the items of. */
@@ -13839,9 +13843,13 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
 }
 static void compile_body(SPYContext *, Program *, Node *);
 static void compile_target(SPYContext *, Program *, Node *);
-/* A target expands as in a body, even while calls can pause: BC_STORE
- * calls a Python __setitem__ on the machine (store_call). */
-static int target_expands(Program *p, Node *n) { return expands(n, p->calls == PAUSING ? BODY : p->calls); }
+/* A target expands as in a body; while calls can pause, so do every
+ * subscript, whose Python __setitem__ BC_SET_TARGET calls on the machine
+ * (store_call), and every target list, which BC_UNPACK unpacks there. */
+static int target_expands(Program *p, Node *n) {
+    if (p->calls != PAUSING) return expands(n, p->calls);
+    return n->kind == N_INDEX || n->kind == N_TUPLE || n->kind == N_LIST || expands(n, BODY);
+}
 /* Store the value on top of the stack in target n, then pop it. */
 static void compile_store(SPYContext *c, Program *p, Node *n, Node *at) {
     if (!target_expands(p, n)) emit(c, p, BC_STORE, n, 1);
@@ -17257,6 +17265,7 @@ static NO_INLINE SPYValue *call_import(SPYContext *c, Frame *f, const char *name
 /* The count items of value, as an assignment target list with a star at
  * index star (SIZE_MAX for none) receives them: the starred items gathered
  * into a list. */
+static SPYValue *unpack_settle(SPYContext *, SPYValue *, SPYValue *, size_t, size_t);
 static SPYValue *unpack_values(SPYContext *c, Frame *f, Node *n, SPYValue *value, size_t count, size_t star) {
     if (!iterable_type(value)) {
         const char *name = value->type == SPY_INT ? "int" : value->type == SPY_FLOAT ? "float" :
@@ -17274,18 +17283,27 @@ static SPYValue *unpack_values(SPYContext *c, Frame *f, Node *n, SPYValue *value
         spy_release(item);
         if (status) break;
     }
+    spy_release(iterator);
+    if (c->error_type[0]) { spy_release(items); return NULL; }
+    return unpack_settle(c, value, items, count, star);
+}
+/* What a target list of count items, with a star at index star (SIZE_MAX
+ * for none), receives from items, those it took of value (one past count
+ * at most, without a star), taking them: the starred ones gathered into a
+ * list; or NULL with the ValueError of too few or too many. */
+static SPYValue *unpack_settle(SPYContext *c, SPYValue *value, SPYValue *items, size_t count, size_t star) {
     size_t got = items->as.seq.len, required = count - (star != SIZE_MAX);
-    if (!c->error_type[0] && got < required) {
+    if (got < required) {
         errorf(c, "ValueError", "not enough values to unpack (expected %s%zu, got %zu)",
                star == SIZE_MAX ? "" : "at least ", required, got);
-    } else if (!c->error_type[0] && star == SIZE_MAX && got > count) {
-        if (value->type == SPY_LIST || value->type == SPY_TUPLE)
+    } else if (star == SIZE_MAX && got > count) {
+        if (!value) errorf(c, "ValueError", "too many values to unpack (expected %zu)", count);
+        else if (value->type == SPY_LIST || value->type == SPY_TUPLE)
             errorf(c, "ValueError", "too many values to unpack (expected %zu, got %zu)", count, value->as.seq.len);
         else if (value->type == SPY_DICT)
             errorf(c, "ValueError", "too many values to unpack (expected %zu, got %zu)", count, value->as.map.len);
         else errorf(c, "ValueError", "too many values to unpack (expected %zu)", count);
     }
-    spy_release(iterator);
     if (c->error_type[0]) { spy_release(items); return NULL; }
     if (star == SIZE_MAX) return items;
     SPYValue *rest = spy_list(c), *result = spy_list(c);
@@ -17299,12 +17317,19 @@ static SPYValue *unpack_values(SPYContext *c, Frame *f, Node *n, SPYValue *value
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result;
 }
-static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
-    size_t count = 0, star = SIZE_MAX;
+/* Target list n's count of targets, and the index of its star in star
+ * (SIZE_MAX for none). */
+static size_t target_count(Node *n, size_t *star) {
+    size_t count = 0;
+    *star = SIZE_MAX;
     for (Node *item = n->args; item; item = item->next) {
-        if (item->kind == N_STAR) star = count;
+        if (item->kind == N_STAR) *star = count;
         count++;
     }
+    return count;
+}
+static SPYValue *unpack_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) {
+    size_t star, count = target_count(n, &star);
     return unpack_values(c, f, n, value, count, star);
 }
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls);
@@ -21333,8 +21358,8 @@ static ALWAYS_INLINE int suspended(SPYValue *v) {
 static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATOR && suspended(v); }
 /* The builtin of consumer that callee, or its native method method, is
  * when called with argc arguments argv, the first a generator the machine
- * can resume (consumer_of): sum, any, all, list, tuple, set, frozenset,
- * sorted or str.join (B_JOIN); next() of it, or a generator's __next__
+ * can resume (consumer_of): sum, any, all, min, max, list, tuple, set,
+ * frozenset, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
@@ -21348,8 +21373,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
-    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET &&
-        id != B_FROZENSET && id != B_SORTED && id != B_JOIN && (id != B_NEXT || !resumable(argv[0]))) return -1;
+    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
+        id != B_MAX && id != B_FROZENSET && id != B_SORTED && id != B_JOIN && (id != B_NEXT || !resumable(argv[0]))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -21378,6 +21403,21 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
                            .sent = sent};
     block->value = generator; block->consumer = consumer;
 }
+/* BC_UNPACK of target list n, the value atop m's stack: its items, owned,
+ * or, for a generator the machine can resume, NULL, its items to be taken
+ * on the machine (BLOCK_CONSUME) as an unpacking (UNPACK_ITEMS). */
+static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    SPYValue *value = m->stack[m->len - 1];
+    if (!resumable(value)) return unpack_target(c, f, n, value);
+    Consumer *s = allocate(c, sizeof(*s));
+    SPYValue *items = s ? spy_list(c) : NULL;
+    Block *block = items ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (!block) { mem_free(s); spy_release(items); return NULL; }
+    *s = (Consumer){.id = UNPACK_ITEMS, .result = items};
+    s->count = target_count(n, &s->star);
+    block->value = spy_retain(value); block->consumer = s;
+    return NULL;
+}
 /* Whether the consumer atop m, given its generator's next item (NULL at
  * its end or on an error), takes another; when it does not, its result is
  * on the stack, or the error pending. */
@@ -21385,9 +21425,15 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     Block *top = &m->blocks[m->block_len - 1];
     int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
     if (status > 0) {
+        int id = top->consumer->id;
         SPYValue *result = consumer_end(c, top->consumer);
         pop_block(c, m, f);
-        machine_push(c, m, result);
+        /* An unpacking's items go on the stack last first, as BC_UNPACK's. */
+        if (id != UNPACK_ITEMS || !result) machine_push(c, m, result);
+        else {
+            for (size_t i = result->as.seq.len; i; i--) if (machine_push(c, m, spy_retain(result->as.seq.items[i - 1]))) break;
+            spy_release(result);
+        }
     }
     return !status;
 }
@@ -21535,14 +21581,14 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     c->entering_kind = CALL_CHECKED;
     return allocator->as.wrapper.function;
 }
-/* The Python __str__, __repr__ or __format__ that callee, str, repr or
- * format, calls on its first argument, an instance, found[0] its name and
+/* The Python __str__, __repr__, __format__ or __len__ that callee, str,
+ * repr, format or len, calls on its first argument, an instance, found[0] its name and
  * found[1] the spec format passes it, or NULL; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
     if (argc > 2 || argv[0]->as.map.base) return NULL;
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1, repr = id == B_REPR;
-    if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && callee != c->types[SPY_STRING])) return NULL;
+    if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && id != B_LEN && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
@@ -21556,9 +21602,10 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         if (function || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
     }
     /* With no __str__ above object's, str() calls the instance's __repr__. */
-    function = repr ? NULL : class_lookup(cls, "__str__");
-    if (!function) function = class_lookup(cls, "__repr__");
-    if (!function || !machine_function(c, function) || !(*name = spy_string(c, repr ? "__repr__" : "__str__", repr ? 8 : 7))) return NULL;
+    const char *method = id == B_LEN ? "__len__" : repr ? "__repr__" : "__str__";
+    function = class_lookup(cls, method);
+    if (!function && id != B_LEN) function = class_lookup(cls, "__repr__");
+    if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
     *spec = NULL;
     c->entering_kind = CALL_CHECKED;
     return function;
@@ -22039,12 +22086,14 @@ static SPYValue *setitem_function(SPYContext *c, SPYValue *object) {
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
  * (store_into), the value atop m's stack; or BC_SAVE_TARGET's, taking the
- * instance, key and value from it: that __setitem__, owned, with its env,
+ * instance, key and value from it, or BC_SET_TARGET's, taking the instance
+ * and key above the value: that __setitem__, owned, with its env,
  * to call with the key and the value. */
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
     SPYValue *args[3];
     if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
+    else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     else {
         args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
         args[2] = spy_retain(m->stack[m->len - 1]);
@@ -22198,9 +22247,12 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         return &call->m;
     }
     if (ins->op != BC_FALSE) {
-        SPYValue *name = machine_pop(m), *whole = NULL;
+        SPYValue *name = machine_pop(m), *whole = NULL, *string;
         Buffer b = { .ctx = c, .whole = &whole };
-        SPYValue *string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
+        int64_t length;
+        /* len() checks its length (length_result); the others' text is a str. */
+        if (!strcmp(name->as.string.data, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
+        else string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
         spy_release(result); spy_release(v); spy_release(name);
         if (string) machine_push(c, m, string);
         return m;
@@ -22529,9 +22581,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg) a = machine_pop(m);
             NEXT_RELEASE;
         CASE(BC_UNPACK)
-            a = unpack_target(c, &f, n, m->stack[m->len - 1]);
+            a = unpack_step(c, m, &f, n);
             if (a) for (size_t i = a->as.seq.len; i; i--)
                 if (machine_push(c, m, spy_retain(a->as.seq.items[i - 1]))) break;
+            if (!a && !c->error_type[0]) goto consume_generator;
             break;
         CASE(BC_ASSERT)
             a = ins->arg ? machine_pop(m) : NULL;
@@ -22541,6 +22594,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             b = machine_pop(m); a = machine_pop(m);
             raise_with_cause(c, a, ins->arg ? b : NULL); break;
         CASE(BC_SET_TARGET)
+            if (n->kind == N_INDEX && setitem_function(c, m->stack[m->len - 2])) goto store_step;
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);
@@ -22972,8 +23026,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (b) spy_release(b);
         continue;
     store_step:
-        /* A store to a subscript, BC_STORE's, BC_EXEC's assignment's or
-         * BC_SAVE_TARGET's, is a call of a Python __setitem__ (store_call). */
+        /* A store to a subscript, BC_STORE's, BC_EXEC's assignment's,
+         * BC_SET_TARGET's or BC_SAVE_TARGET's, is a call of a Python
+         * __setitem__ (store_call). */
         callee_env = NULL;
         if ((value = store_call(c, m, &f, ins, &callee_env))) { special = CALL_STORE; goto enter_special; }
         continue;
@@ -27393,10 +27448,10 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         return status;
     }
-    if (s->id == B_LIST || s->id == B_TUPLE || s->callee) {
+    if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS) {
         int status = sequence_append(c, s->result, item);
         spy_release(item);
-        return status;
+        return status ? status : s->id == UNPACK_ITEMS && s->star == SIZE_MAX && s->result->as.seq.len > s->count;
     }
     if (s->id == B_SUM && s->result && s->result->type == SPY_FLOAT &&
         (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
@@ -27408,6 +27463,15 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         } else s->total += (double)item->as.integer_data.small;
         spy_release(item);
         return 0;
+    }
+    if (s->id == B_MIN || s->id == B_MAX) {
+        /* The best item so far, replaced by one that compares beyond it. */
+        SPYValue *test = s->best ? comparison(c, s->id == B_MAX ? '>' : '<', item, s->best) : NULL;
+        int better = !s->best || (test && truthy(test));
+        spy_release(test);
+        if (better && !c->error_type[0]) { spy_release(s->best); s->best = item; }
+        else spy_release(item);
+        return c->error_type[0] ? -1 : 0;
     }
     consumer_settle(c, s);
     if (s->id == B_ALL || s->id == B_ANY) {
@@ -27434,6 +27498,16 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         if (exception) { raise_value(c, exception); spy_release(exception); }
         spy_release(returned);
         return NULL;
+    }
+    if (s->id == UNPACK_ITEMS && !c->error_type[0]) {
+        SPYValue *items = s->result;
+        s->result = NULL;
+        return unpack_settle(c, NULL, items, s->count, s->star);
+    }
+    if ((s->id == B_MIN || s->id == B_MAX) && !c->error_type[0]) {
+        SPYValue *best = s->best;
+        s->best = NULL;
+        return best ? best : errorf(c, "ValueError", "%s() iterable argument is empty", s->id == B_MAX ? "max" : "min");
     }
     if (!c->error_type[0]) consumer_settle(c, s);
     SPYValue *result = s->result;

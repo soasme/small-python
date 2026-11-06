@@ -21,7 +21,9 @@ Unreleased (0.8.0):
   and operator methods no longer use the C stack in most function code
 - class bodies that call or loop no longer use the C stack
 - code compiled while pausing is set pauses inside operator, subscript,
-  augmented assignment, format(), f-string and every function's special methods
+  augmented assignment, target list, format(), len(), f-string and every
+  function's special methods
+- min() and max() of a generator no longer use the C stack
 - calling a class body's function directly returns its __class__ cell when
   the body loops or calls
 - sorted() of a non-iterable raises "'X' object is not iterable"

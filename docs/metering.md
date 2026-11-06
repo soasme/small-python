@@ -282,13 +282,15 @@ These run as machines on the heap, in one native activation of
   decorators;
 - a loop's Python `__iter__` and `__next__`, and the function of a `map`
   it takes items from;
-- generators and maps consumed by `sum`, `any`, `all`, `list`, `tuple`,
-  `set`, `frozenset`, `sorted` or `str.join`; generators resumed by
+- generators and maps consumed by `sum`, `any`, `all`, `min`, `max`,
+  `list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, and, in
+  code compiled while pausing, generators a target list unpacks;
+  generators resumed by
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`;
-- the `__str__`, `__repr__` and `__format__` that `str`, `repr` and
-  `format` call;
+- the `__str__`, `__repr__`, `__format__` and `__len__` that `str`,
+  `repr`, `format` and `len` call;
 - property getters and `__getattr__`, `__enter__`, `__bool__`, binary
   operator, comparison, `__getitem__`, `__setitem__` and `__contains__`
   methods of instances, where a step of their own reaches them;
@@ -299,14 +301,17 @@ These run as machines on the heap, in one native activation of
 Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
 function or comprehension is first compiled) runs every function and
 class body on the machine and gives every operator, subscript,
-augmented assignment and f-string field a step of its own, so their special methods are among the
-calls above. Code compiled without pausing keeps faster steps that
+augmented assignment, target list and f-string field a step of its own,
+so their special methods are among the calls above. Code compiled without pausing keeps faster steps that
 evaluate an assignment of one operator, or arithmetic on names and
 literals, whole.
 
 A call that native code makes runs in an activation of its own: another
 special method (outside code compiled while pausing, an augmented
-subscript assignment's; an unpacking's `__iter__`, a property of a class with `__getattr__`), a host function,
+subscript assignment's or a target list's `__setitem__`; an unpacking's
+`__iter__`, a property of a class with `__getattr__`), the items a
+builtin iterator such as `enumerate`, `zip` or `filter` takes from a
+generator, a host function,
 the metaclass call that makes a class, an import, `exec` and `eval`, and
 a call from what the walker evaluates whole. Without pausing compiled
 in, the walker runs a function whose body holds no call or loop, which
