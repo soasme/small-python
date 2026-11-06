@@ -199,6 +199,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A dying instance asks plain_init for __del__](#a-dying-instance-asks-plain_init-for-__del__) | -1.7% (classes); M2: classes -1.6% |
 | [A call on the machine takes its arguments](#a-call-on-the-machine-takes-its-arguments) | -3.7% (fib), -0.8% (classes); M2: fib -1.7% |
 | [Keywords and defaults bind by slot](#keywords-and-defaults-bind-by-slot) | -1.6% (fib), -1.1% (classes); keyword call -46%; M2: classes -0.8% |
+| [A keyword call keeps its arguments on the stack](#a-keyword-call-keeps-its-arguments-on-the-stack) | keyword call -59%; the programs unchanged |
 | [Calls run on the machine](#calls-run-on-the-machine) | -12.9% (fib), +1.7% (generators), +1.2% (classes); M2: fib -2.2%, classes +2.0% |
 
 ### Releasing a number or string frees it at once
@@ -1583,6 +1584,23 @@ falls back to `bind_arguments`, which reports the error. A call
 4220 (CPython: 466). Instructions (M2 counters): fib -1.6%, classes
 -1.1%, the rest unchanged; cycles averaged over eight code layouts:
 classes -0.8%, the rest within noise.
+
+### A keyword call keeps its arguments on the stack
+
+A call with a keyword argument built a list of its positional arguments,
+a str for each keyword's name and a dict of the keywords, and bound from
+the dict. A call of at most eight positional and keyword arguments, none
+unpacked, is now `BC_CALLK`: its values stay on the machine's stack, each
+name's str is made once and kept on its keyword node, and a Python
+callee binds them through `open_parameters` from an array of entries. A
+dict is made only for another callee, or when binding falls back to
+`bind_arguments`. `f(i, b=2)` to `def f(a, b=1)` costs 938 instructions
+instead of 2290 (CPython: 466). The programs make no keyword calls: their
+instructions are unchanged, and their cycles averaged over eight code
+layouts are within noise (classes +0.5% in both orders of the runs, with
+the same instruction count). `BC_CALLK` shares `BC_CALLN`'s case in the
+machine loop; a case of its own added 16 instructions to every
+positional call, through the loop's register allocation.
 
 ### A profile-guided build
 

@@ -70,3 +70,18 @@ assert_eq(str(e), "one() missing 1 required positional argument: 'a'")
 for call in (lambda: two_operands(1), lambda: two_calls(1)):
     e = assert_raises(TypeError, call)
     assert_eq(str(e), "one() takes 1 positional argument but 2 were given")
+
+# Keyword calls from a body that calls reach every kind of callee.
+def flat(a, b=1, *, c=2): return len([a, b, c]) and (a, b, c)
+def plain(a, b=1, *, c=2): return (a, b, c)
+def keyword_calls(x):
+    made = dict(x=x, y=2)
+    return made, flat(x, c=3), plain(x, b=x, c=x), flat(a=x)
+assert_eq(keyword_calls(5), ({"x": 5, "y": 2}, (5, 1, 3), (5, 5, 5), (5, 1, 2)))
+def wrong_keyword(x): return flat(x, d=len([x]))
+e = assert_raises(TypeError, lambda: wrong_keyword(1))
+assert_eq(str(e), "flat() got an unexpected keyword argument 'd'")
+def keyword_generator(x):
+    yield flat(x, c=len([x]))
+    yield plain(a=x)
+assert_eq(list(keyword_generator(4)), [(4, 1, 1), (4, 1, 2)])

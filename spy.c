@@ -7858,6 +7858,15 @@ static int plain_call(Node *n) {
         if (argc == 8 || arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) return 0;
     return 1;
 }
+/* A call of at most 8 positional and keyword arguments, with a keyword. */
+static int keyword_plain_call(Node *n) {
+    size_t argc = 0, keywords = 0;
+    for (Node *arg = n->args; arg; arg = arg->next, argc++) {
+        if (argc == 8 || arg->kind == N_MAPPING || arg->kind == N_STAR) return 0;
+        keywords += arg->kind == N_KEYWORD;
+    }
+    return keywords > 0;
+}
 static SPYValue *parse_normalized(SPYContext *c, const char *source, const char *filename, int *incomplete) {
     SPYValue *unit = value_new(c, V_UNIT);
     if (!unit) return NULL;
@@ -13421,7 +13430,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_AWITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_RETURN) X(BC_BLOCK)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_BLOCK)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
@@ -13615,11 +13624,11 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         if (plain_call(n) && (n->a->kind == N_NAME || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls)) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
-        if (plain_call(n)) {
+        if (plain_call(n) || keyword_plain_call(n)) {
             int argc = 0;
             compile_expr(c, p, n->a);
-            for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a);
-            emit(c, p, BC_CALLN, n, argc); break;
+            for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
+            emit(c, p, plain_call(n) ? BC_CALLN : BC_CALLK, n, argc); break;
         }
         compile_expr(c, p, n->a); emit(c, p, BC_ARGS, n, 0);
         for (int pass = 0; pass < 2; pass++) for (Node *a = n->args; a; a = a->next) {
@@ -15713,13 +15722,13 @@ static int same_key(SPYValue *a, SPYValue *b) {
  * environment whose first argc are bound: 0 when every parameter is bound,
  * 1 when the call needs bind_arguments, which reports what is wrong, with
  * the parameters past argc unbound again. */
-static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *keywords) {
+static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, const Entry *kw, size_t kwc) {
     Scope *scope = env->as.map.scope;
     Entry *items = env->as.map.items;
     size_t count = scope->parameters, posonly = 0, i, j;
     for (Node *arg = fn->as.function.def->args; arg && arg->op == P_POSONLY; arg = arg->next) posonly++;
-    for (i = 0; keywords && i < keywords->as.map.len; i++) {
-        Entry *keyword = &map_items(keywords)[i];
+    for (i = 0; i < kwc; i++) {
+        const Entry *keyword = &kw[i];
         for (j = argc > posonly ? argc : posonly; j < count; j++)
             if (items[j].hash == keyword->hash && same_key(items[j].key, keyword->key)) break;
         if (j == count || items[j].value != c->unbound) break;
@@ -15727,7 +15736,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     }
     SPYValue *defaults = NULL, *kwdefaults = NULL;
     j = 0;
-    for (Node *arg = fn->as.function.def->args; arg && (!keywords || i == keywords->as.map.len); arg = arg->next, j++) {
+    for (Node *arg = fn->as.function.def->args; arg && i == kwc; arg = arg->next, j++) {
         if (items[j].value != c->unbound) continue;
         SPYValue *value = NULL;
         if (arg->op != P_KWONLY) {
@@ -15741,13 +15750,32 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
         if (!value) break;
         spy_release(items[j].value); items[j].value = spy_retain(value);
     }
-    if (j == count && (!keywords || i == keywords->as.map.len)) return 0;
+    if (j == count && i == kwc) return 0;
     for (j = argc; j < count; j++) { spy_release(items[j].value); items[j].value = spy_retain(c->unbound); }
     return 1;
 }
-/* A new environment of fn's scope with its arguments bound, or NULL;
- * with take, it has argv's references, bound or released. */
-static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
+/* A dictionary of the keyword entries kw. */
+static SPYValue *entries_dict(SPYContext *c, const Entry *kw, size_t kwc) {
+    SPYValue *dict = value_new(c, SPY_DICT);
+    for (size_t i = 0; dict && i < kwc; i++)
+        if (map_append(c, dict, kw[i].key, kw[i].value, kw[i].hash)) { spy_release(dict); dict = NULL; }
+    return dict;
+}
+/* bind_arguments with the keyword entries kw, from keywords when they are
+ * its entries. */
+static int bind_keywords(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, SPYValue *const *argv,
+                         const Entry *kw, size_t kwc, SPYValue *keywords) {
+    if (keywords || !kwc) return bind_arguments(c, fn, env, argc, argv, keywords);
+    SPYValue *dict = entries_dict(c, kw, kwc);
+    int failed = !dict || bind_arguments(c, fn, env, argc, argv, dict);
+    spy_release(dict);
+    return failed;
+}
+/* A new environment of fn's scope with its arguments bound, or NULL: the
+ * keywords are the entries kw, keywords' own unless it is NULL. With take,
+ * it has argv's references, bound or released. */
+static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv,
+                                       const Entry *kw, size_t kwc, SPYValue *keywords, int take) {
     Scope *scope = fn->as.function.def->scope;
     int plain = !fn->as.function.signature;
     /* Keywords and defaults bind to the parameters' entries when there are
@@ -15761,11 +15789,15 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
     env->as.map.parent = spy_retain(fn->as.function.env);
     env->as.map.scope = scope;
     env->as.map.unit = spy_retain(fn->as.function.unit);
-    int open = direct && fresh_locals(env);
-    int failed = !plain ? bind_arguments(c, fn, env, argc, argv, keywords) || declare_locals(c, env) :
-        open ? open_locals(c, env, argc, argv, take) : declare_locals(c, env) || bind_arguments(c, fn, env, argc, argv, keywords);
-    if (open && !failed && open_parameters(c, fn, env, argc, keywords)) failed = bind_arguments(c, fn, env, argc, argv, keywords);
-    if (take && !open) release_all(argc, argv);
+    int failed;
+    if (direct && fresh_locals(env)) {
+        failed = open_locals(c, env, argc, argv, take);
+        if (!failed && open_parameters(c, fn, env, argc, kw, kwc)) failed = bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
+    } else {
+        failed = !plain ? bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords) || declare_locals(c, env) :
+            declare_locals(c, env) || bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
+        if (take) release_all(argc, argv);
+    }
     if (failed) { release_locals(env); return NULL; }
     return env;
 }
@@ -15774,7 +15806,7 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
 static ALWAYS_INLINE SPYValue *function_env(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords, int take) {
     Scope *scope = fn->as.function.def->scope;
     if (fn->as.function.signature || (keywords && keywords->as.map.len) || !scope->order || scope->positional != argc || scope->kind != S_FUNCTION)
-        return keyword_env(c, fn, argc, argv, keywords, take);
+        return keyword_env(c, fn, argc, argv, keywords ? map_items(keywords) : NULL, keywords ? keywords->as.map.len : 0, keywords, take);
     SPYValue *env = kept_env(c, scope);
     if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
     env->as.map.parent = spy_retain(fn->as.function.env);
@@ -15852,11 +15884,11 @@ static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *e
     if (!c->calls_len && c->calls_cap > 64) calls_free(c, 64);
     return r.flow == FLOW_RETURN ? r.value : NULL;
 }
-/* A Python function's body, run in a new environment of its scope. */
-static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+/* A Python function's body, run in env, a new environment of its scope;
+ * it takes env. */
+static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValue *env) {
     Node *def = fn->as.function.def;
-    SPYValue *env = function_env(c, fn, argc, argv, keywords, 0), *result = NULL;
-    if (!env) return NULL;
+    SPYValue *result = NULL;
     if (def->flat) return call_machine(c, fn, env);
     Frame frame = {env, fn->as.function.unit, 0};
     if (def->code) result = new_generator(c, &frame, fn);
@@ -15868,6 +15900,10 @@ static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPY
     }
     release_locals(env);
     return result;
+}
+static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *env = function_env(c, fn, argc, argv, keywords, 0);
+    return env ? run_function(c, fn, env) : NULL;
 }
 /* function called with self before the arguments, as a method object
  * calls it. */
@@ -20896,6 +20932,42 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return result;
 }
+/* BC_CALLK: call node n of argc arguments, positional and then keyword
+ * ones, taken from the stack after its callee; a generator's machine
+ * (calls 0) enters no call. A keyword's name is kept on its node. */
+static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
+    SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result = NULL;
+    Entry kw[8];
+    size_t kwc = 0, positional = 0;
+    relocate(c, n);
+    for (Node *a = n->args; a; a = a->next) {
+        if (a->kind != N_KEYWORD) { positional++; continue; }
+        Name name = node_name(a);
+        if (!a->global_key && !(a->global_key = spy_string(c, name.text, name.len))) goto done;
+        kw[kwc] = (Entry){a->global_key, argv[positional + kwc], name.hash};
+        kwc++;
+    }
+    Node *def = callee->type == SPY_FUNCTION && callee->ctx == c ? callee->as.function.def : NULL;
+    if (def && def->kind != N_CLASS && def->kind != N_COMPREHENSION) {
+        SPYValue *callee_env = keyword_env(c, callee, positional, argv, kw, kwc, NULL, 0);
+        if (callee_env && calls && def->flat) {
+            /* The call takes the callee from the stack. */
+            m->len -= argc + 1;
+            release_all(argc, argv);
+            *env = callee_env;
+            return callee;
+        }
+        if (callee_env) result = run_function(c, callee, callee_env);
+        if (c->error_type[0]) { spy_release(result); result = NULL; }
+    } else {
+        SPYValue *keywords = entries_dict(c, kw, kwc);
+        if (keywords) result = call_keywords(c, callee, positional, argv, keywords);
+        spy_release(keywords);
+    }
+done:
+    for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+    return result;
+}
 /* BC_CALL: the callee, argument list and keyword dict on the stack; a
  * generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
@@ -21069,7 +21141,9 @@ static HOT Result run_machine(SPYContext *c, SPYValue *generator, Machine *m, SP
             if (callee_env) goto enter_call;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALLN)
-            callee_env = NULL; value = stack_call(c, m, n, (size_t)ins->arg, !generator, &callee_env);
+        CASE(BC_CALLK)
+            callee_env = NULL;
+            value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, !generator, &callee_env);
             if (callee_env) goto enter_call;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
