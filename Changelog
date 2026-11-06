@@ -24,6 +24,8 @@ Unreleased (0.8.0):
   format(), f-string and every function's special methods
 - calling a class body's function directly returns its __class__ cell when
   the body loops or calls
+- sorted() of a non-iterable raises "'X' object is not iterable"
+- trace functions see a class body's first line as CPython reports it
 - == on deeply nested containers no longer raises RecursionError
 - a method call looks up its method before evaluating arguments that call
   code; an attribute read in an operator honors a property added later
