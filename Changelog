@@ -5,6 +5,10 @@ Unreleased (0.8.0):
   - spy_type() reports only the builtin data types and SPY_OBJECT
   - spy_set_step_limit() and spy_set_memory_limit() removed; use
     spy_set_limit() (also Go's SetStepLimit, Rust's set_step_limit)
+- added _thread (stdlib/_thread.c): Python threads taking turns at one
+  context, linked into spy or a host, or loaded as _thread.so
+- added spy_thread_new(), spy_thread_swap(), spy_thread_free() and
+  spy_set_switch() for hosts that run Python threads
 - JavaScript package: no SharedArrayBuffer needed where JSPI exists;
   worker: false runs the engine on the calling thread
 - spyc links libNAME.a archive modules

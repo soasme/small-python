@@ -27,10 +27,15 @@ LDLIBS += -ldl
 endif
 
 .PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
-all: spy spyc spy-worker libspy.a libspy-std.a
+# The standard library's C modules (stdlib/): each links into a host from
+# stdlib/libNAME.a, or loads at run time as stdlib/NAME.so; spy links them all.
+STDLIB = _thread
+STDLIB_OBJS = $(STDLIB:%=$(OBJDIR)/stdlib/%.o)
+STDLIB_LIBS = $(STDLIB:%=stdlib/lib%.a) $(STDLIB:%=stdlib/%.so)
+all: spy spyc spy-worker libspy.a libspy-std.a $(STDLIB_LIBS)
 
-spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o $(STDLIB_OBJS)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -pthread -o $@
 
 # The packages' worker (docs/packaging/protocol.md): spy-worker.c compiled
 # once as the engine, once as the worker.
@@ -83,6 +88,13 @@ libspy.a: $(OBJDIR)/spy.o
 # like quickjs-libc.
 libspy-std.a: $(OBJDIR)/spy-std.o
 	$(AR) rcs $@ $^
+
+stdlib/lib%.a: $(OBJDIR)/stdlib/%.o
+	$(AR) rcs $@ $^
+stdlib/%.so: stdlib/%.c spy-module.h spy.h
+	$(CC) $(CFLAGS) -shared -fPIC -DSPY_SHARED_MODULE -I. $< -o $@ -pthread
+$(STDLIB_OBJS) $(OBJDIR)/cli.o: CPPFLAGS += -I.
+$(STDLIB_OBJS) $(OBJDIR)/cli.o: spy-module.h stdlib/spy-stdlib.h
 
 # The example native module (spy-module.h).
 examples/fib.so: examples/fib.c spy-module.h spy.h
@@ -206,6 +218,9 @@ install: all
 	install -m755 spy spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h spy-std.h spy-module.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
+	install -d "$(DESTDIR)$(PREFIX)/lib/spy-stdlib"
+	install -m644 stdlib/spy-stdlib.h "$(DESTDIR)$(PREFIX)/include"
+	install -m644 $(STDLIB_LIBS) "$(DESTDIR)$(PREFIX)/lib/spy-stdlib"
 	install -m644 docs/manual.md docs/api.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
 	install -m644 docs/standards/3_15.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards"
 	install -m644 docs/testing/cython.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
@@ -244,7 +259,7 @@ test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cy
 	./tests/api examples/fib.so
 	./tests/metering
 	./tests/oom --native examples/fib.so
-	./tests/threads examples/fib.so
+	./tests/threads examples/fib.so stdlib/_thread.so
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
 	$(PYTHON) tests/files.py ./spy
@@ -434,5 +449,5 @@ coverage:
 	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc.c spy-std.c cli.c spy-worker.c
 
 clean:
-	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
-	rm -rf $(OBJDIR) examples/fib.so.dSYM java/licenses java/*/native java/*/target
+	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(STDLIB_LIBS) $(FUZZERS)
+	rm -rf $(OBJDIR) examples/fib.so.dSYM stdlib/*.so.dSYM java/licenses java/*/native java/*/target

@@ -1,6 +1,7 @@
 #include "spy.h"
 #include "spy-std.h"
 #include "host.h"
+#include "stdlib/spy-stdlib.h"
 
 #include <string.h>
 
@@ -99,7 +100,8 @@ int main(int argc, char **argv) {
     spy_set_error_output(c, host_output, host_flush, stderr);
     spy_set_input(c, host_read_line, stdin);
     spy_set_optimize(c, optimize);
-    int failed = spy_set_argv(c, script_argc, script_argv, orig_argc, orig_argv) || spy_std_init(c);
+    int failed = spy_set_argv(c, script_argc, script_argv, orig_argc, orig_argv) || spy_std_init(c) ||
+                 spy_new_module(c, "_thread", spy_init__thread);
     free(script_argv);
     if (failed) { host_report(c); spy_context_free(c); return 1; }
     /* The default mount of the working directory is best-effort: a build

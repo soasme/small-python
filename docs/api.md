@@ -16,6 +16,7 @@ the pieces fit together.
 - [Host services](#host-services)
 - [Policy](#policy)
 - [Limits and collection](#limits-and-collection)
+- [Threads](#threads)
 
 ## Conventions
 
@@ -438,3 +439,50 @@ size_t spy_live_values(const SPYContext *);
 
 Run the cycle collector and return how many unreachable values it freed;
 count the values alive now.
+
+## Threads
+
+```c
+typedef struct SPYThread SPYThread;
+```
+
+A context runs one thread of Python code at a time. A host or module that
+runs several, each on its own system thread, gives each a thread state and
+lets one system thread at a time use the context, handing it on through a
+lock or other synchronization. A thread state holds what belongs to one
+thread: its pending error, running frames, handled exception, C stack
+measure, and whether it is inside a host call.
+
+```c
+SPYThread *spy_thread_new(SPYContext *);
+```
+
+A thread state with no frame and no error, or NULL with MemoryError. It
+counts as inside a call, so its calls share the running outermost call's
+step budget. States still held go with the context in spy_context_free.
+
+```c
+void spy_thread_swap(SPYContext *, SPYThread *);
+```
+
+Exchange the context's thread state with the one held in the argument: the
+thread taking the context swaps its state in, and swaps it out again before
+another thread takes it.
+
+```c
+void spy_thread_free(SPYContext *, SPYThread *);
+```
+
+Free a state with no running frame, and release what it holds. Not from a
+release callback during spy_context_free.
+
+```c
+typedef void (*SPYSwitch)(SPYContext *, void *);
+void spy_set_switch(SPYContext *, SPYSwitch, void *);
+```
+
+Called after every 4096 steps or so, before the engine evaluates the next
+expression or statement, where it may hand the context to another thread
+before it returns. A finalizer may run there anyway, so a builtin operation
+is never interleaved: one that polls finishes first. NULL removes it. Steps
+are counted while it is set.

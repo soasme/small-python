@@ -42,6 +42,8 @@ static SPYValue *twice(SPYContext *c, size_t argc, SPYValue *const *argv, void *
 }
 /* An interrupt that stops the context on its tenth poll. */
 static int count_polls(void *data) { return ++*(int *)data == 10; }
+/* A switch that records the steps spent when it ran last. */
+static void count_switch(SPYContext *c, void *data) { ((size_t *)data)[0]++; ((size_t *)data)[1] = spy_steps_used(c); }
 /* A host function that calls its argument back into the engine. */
 static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     (void)data;
@@ -1073,6 +1075,36 @@ int main(int argc, char **argv) {
     spy_set_interrupt(c, NULL, NULL);
     assert(spy_exec(c, "def recurse():\n    return recurse()\nrecurse()", "recursion.py") == -1);
     assert(!strcmp(spy_error_type(c), "RecursionError"));
+
+    /* A thread state holds one thread's pending error and frames: another
+     * runs with none, and swapping back brings the first one's back. */
+    SPYThread *thread = spy_thread_new(c), *kept = spy_thread_new(c);
+    assert(thread && kept);
+    assert(spy_exec(c, "def inner():\n    raise KeyError('mine')\ninner()", "thread.py") == -1);
+    spy_thread_swap(c, thread);
+    assert(!spy_error_type(c)[0] && integer(c, spy_eval(c, "len([1, 2])", "other.py")) == 2);
+    assert(spy_exec(c, "raise ValueError('theirs')", "other.py") == -1);
+    spy_thread_swap(c, thread);
+    assert(!strcmp(spy_error_type(c), "KeyError") && !strcmp(spy_error_message(c), "'mine'"));
+    assert(!strcmp(spy_error_filename(c), "thread.py") && spy_error_line(c) == 2);
+    spy_clear_error(c);
+    spy_thread_free(c, thread);
+    spy_set_limit(c, SPY_LIMIT_MEMORY, spy_memory_used(c));
+    assert(!spy_thread_new(c) && !strcmp(spy_error_type(c), "MemoryError"));
+    spy_clear_error(c);
+    spy_set_limit(c, SPY_LIMIT_MEMORY, 0);
+    /* The switch runs at the tick after a poll: a builtin operation that
+     * polls finishes first, and a loop of Python code switches as it goes. */
+    size_t switches[2] = {0, 0};
+    spy_set_switch(c, count_switch, switches);
+    execute(c, "total = sum(iter(range(10**5).__iter__().__next__, -1))");
+    assert(switches[0] == 1 && switches[1] >= 100000);
+    execute(c, "for i in range(10**6): pass");
+    assert(switches[0] > 100);
+    spy_set_switch(c, NULL, NULL);
+    switches[0] = 0;
+    execute(c, "for i in range(10**5): pass");
+    assert(switches[0] == 0);
 
     /* Parsing must finish before any statement runs. */
     execute(c, "x = 1");

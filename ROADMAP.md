@@ -12,7 +12,8 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
-  systems, host functions, green threads, inspection, snapshots,
+  systems, host functions, host calls that let threads run, inspection,
+  snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -122,8 +123,8 @@ byte-for-byte reproducible ([docs/build.md](docs/build.md)). Remaining:
 
 ### Standard library coverage
 
-The standard layer (`spy-std.c`) has `sys`; the rest of
-the standard library is out of scope today. Cover it in steps, so that both
+The standard layer (`spy-std.c`) has `sys`, and `stdlib/` the C modules,
+each linked into a host or loaded as a shared library: `_thread` so far. Cover it in steps, so that both
 `spy` (at run time) and `spyc` (at build time) load the same modules:
 
 1. Pure-Python modules, ported from CPython 3.15 with as few edits as
@@ -213,16 +214,18 @@ a table so that repeated dictionary keys are sent once, measured against
 JSON as the baseline it has to beat (djs's wire format is 1.4 to 9 times
 faster than `JSON.stringify` plus `JSON.parse` in wasm).
 
-### Green threads
+### Host functions that give up the turn
 
-Several Python threads in one context, taking turns on one operating-system
-thread, so that ordinary code waits for several slow host functions at once
-without `async`: the engine switches at calls and loop passes after a slice
-of steps, and a host function can answer later through a ticket the host
-settles. Today a context runs one thread and every host call blocks it.
-The design, its limits and its TLA+ model are in
-[docs/greenthread.md](docs/greenthread.md); it starts once calls no longer
-recurse in C (*Toward bytecode* in
+Python threads (`_thread`, [docs/threads.md](docs/threads.md)) take turns at
+one context, and a host function that waits keeps the turn, so every thread
+of the context waits with it. Give host functions a way to release the turn
+while they wait and take it back before they touch the context again, as
+CPython's I/O releases its lock, so that threads wait for several slow host
+functions (a model's tools, network requests) at once.
+
+Threads without system threads (WebAssembly without threads, edge runtimes,
+bare metal) need a thread to stop with its frames on the heap, which waits
+for calls without C recursion (*Toward bytecode* in
 [docs/optimization.md](docs/optimization.md)).
 
 ### Embedded inspector
@@ -457,6 +460,7 @@ what the extra size buys.
 - [x] Java binding; TLA+ models of every package
 - [x] `spyc` writes an executable and compiles C modules in
 - [x] JavaScript package without `SharedArrayBuffer` or a Worker, through JSPI
+- [x] `_thread` in `stdlib/`, static or shared: Python threads taking turns
 - [x] Native modules: `spy`, the in-process bindings and every worker
   package through the protocol's `NATIVE`
 - [x] Policy callback (`spy_set_policy`, `spy_policy_check`)

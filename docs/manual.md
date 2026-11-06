@@ -768,6 +768,14 @@ boundary; callback exceptions are discarded because there is no error stream.
 Closures retain their whole defining environment, so a closure can keep alive
 a local that CPython would have released.
 
+The C modules of the standard library live in `stdlib/`, one source each in
+the native-module form (3.4.9): a host links `stdlib/libNAME.a` and
+registers it, or loads `stdlib/NAME.so` at run time. `stdlib/spy-stdlib.h`
+declares their inits. The `spy` command links them all. The first is
+`_thread` (3.4.10, [threads.md](threads.md)), CPython 3.15's interface for
+what `threading` needs, with Python threads taking turns at one context;
+`tests/std.py` checks it against CPython.
+
 Other standard-library modules are not built in. The `builtins` module exposes
 language builtins. Core `print` requires an output callback; other source
 imports require a loader. An embedding application opts into those
@@ -788,7 +796,8 @@ from `spy.h`, states each declaration's contract.
 `spy_context_new()` returns an independent context or `NULL` on allocation
 failure. `spy_context_free()` destroys it and all remaining values. Contexts
 have no process-global mutable runtime state. Use independent contexts on
-different threads; do not concurrently enter one context. `spy_set_opaque` and
+different threads; do not concurrently enter one context. Several threads
+take turns at one context through thread states (3.4.10). `spy_set_opaque` and
 `spy_get_opaque` attach one host pointer to a context, so callbacks such as a
 module init can find the host object that owns the context.
 
@@ -1080,6 +1089,28 @@ process, and another copy of the engine refuses it. The worker protocol's
 ([packaging/protocol.md](packaging/protocol.md) 7.1); the worker packages
 send it from `load_native` (Python, Rust), `LoadNative` (Go) and
 `loadNative` (Java).
+
+#### 3.4.10 Threads
+
+A context runs one thread of Python code at a time. A host or module that
+runs several, each on its own system thread, gives each a thread state from
+`spy_thread_new` and lets one system thread at a time use the context,
+handing it on through a mutex or other synchronization. `spy_thread_swap`
+exchanges the context's thread state with the one a `SPYThread` holds: the
+pending error with its traceback, the running frames and recursion depth,
+the handled exception, the C stack measure, and how deep in host calls the
+thread is. A new state counts as inside a call, so its calls share the
+running outermost call's step budget. `spy_thread_free` frees a state with
+no running frame; states still held go with the context.
+
+`spy_set_switch` installs a callback the engine calls after every 4096 steps
+or so, before it evaluates the next expression or statement. There the
+callback may hand the context to another thread before it returns. The
+poll that makes the switch due may come inside a builtin operation, which
+finishes first, so no builtin operation is interleaved with another thread.
+While a switch is set, calls and loop passes count steps, as with a limit.
+`stdlib/_thread.c` is written on these four functions alone
+([threads.md](threads.md)).
 
 ### 3.5 Python binding
 

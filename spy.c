@@ -376,7 +376,39 @@ struct SPYContext {
     size_t poll; /* The interrupt is due when fuel falls to this. */
     size_t stopped_fuel; /* The steps left when the context stopped. */
     SPYInterrupt interrupt; void *interrupt_data;
+    /* Called at the tick after a poll, to let another thread of Python
+     * code run; switch_due marks that the tick should. */
+    SPYSwitch switcher; void *switch_data;
+    int switch_due;
+    SPYThread *threads; /* The thread states not swapped in, linked by next. */
 };
+/* What belongs to one thread of Python code: the fields of SPYContext of
+ * the same names, which spy_thread_swap exchanges. */
+#define THREAD_FIELDS(X) X(error_type) X(error_message) X(filename) X(error_text) X(error_name) X(error_display) \
+    X(exception) X(traceback) X(traceback_frame) X(error_object) X(line) X(handled) X(eval_env) X(inherited_exception) \
+    X(py_depth) X(frames) X(frames_cap) X(frame_line) X(depth) X(stack_top) X(repr_stack) X(repr_len) X(repr_cap) \
+    X(tracing) X(entries)
+struct SPYThread {
+    SPYThread *next, **link;
+    char error_type[64], error_message[256], filename[256];
+    char *error_text, *error_name, *error_display;
+    SPYValue *exception, *traceback;
+    size_t traceback_frame;
+    SPYValue *error_object;
+    size_t line;
+    SPYValue *handled, *eval_env, *inherited_exception;
+    size_t py_depth;
+    struct ActiveFrame *frames;
+    size_t frames_cap, *frame_line, depth;
+    uintptr_t stack_top;
+    SPYValue **repr_stack;
+    size_t repr_len, repr_cap;
+    int tracing;
+    size_t entries;
+};
+#define SAME_FIELD(f) _Static_assert(sizeof(((SPYContext *)0)->f) == sizeof(((SPYThread *)0)->f), #f);
+THREAD_FIELDS(SAME_FIELD)
+#undef SAME_FIELD
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
  * coroutine records as cr_origin, the hook that receives unraisable
@@ -547,11 +579,12 @@ static NO_INLINE int halt(SPYContext *c, int reason) {
     return -1;
 }
 static void watch(SPYContext *c) {
-    c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit || c->output_limit || c->interrupt;
+    c->watch = c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->step_limit || c->memory_limit || c->output_limit || c->interrupt ||
+        c->switcher;
 }
-/* Where the countdown next stops for the interrupt: 4096 steps on, or at
- * zero without one, where spend stops. */
-static void schedule_poll(SPYContext *c) { c->poll = c->interrupt && c->fuel > 4096 ? c->fuel - 4096 : 0; }
+/* Where the countdown next stops for the interrupt or a switch: 4096 steps
+ * on, or at zero without either, where spend stops. */
+static void schedule_poll(SPYContext *c) { c->poll = (c->interrupt || c->switcher) && c->fuel > 4096 ? c->fuel - 4096 : 0; }
 static int watched(const SPYContext *c) { return c->watch; }
 /* Spend n steps of the budget. Calls, loop passes, source text and native
  * work proportional to its operands spend. */
@@ -566,9 +599,12 @@ static ALWAYS_INLINE int spend(SPYContext *c, size_t n) {
  * the statement after a loop pass. */
 static NO_INLINE int poll(SPYContext *c) {
     schedule_poll(c);
-    return c->interrupt(c->interrupt_data) ? halt(c, SPY_STOP_INTERRUPT) : 0;
+    /* A switch waits for the next tick, where a finalizer may run anyway;
+     * a poll inside a builtin operation must not interleave it. */
+    if (c->switcher) { c->switch_due = 1; c->quiet_unit = NULL; }
+    return c->interrupt && c->interrupt(c->interrupt_data) ? halt(c, SPY_STOP_INTERRUPT) : 0;
 }
-static int due(SPYContext *c) { return c->interrupt && c->fuel <= c->poll && poll(c); }
+static int due(SPYContext *c) { return (c->interrupt || c->switcher) && c->fuel <= c->poll && poll(c); }
 /* An algorithm worse than linear, charged before it runs, polls the
  * interrupt after every WORK operations of its inner loop: left counts
  * them down, n at a time. */
@@ -14130,6 +14166,7 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
  * file or a trace function needs attention. */
 static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
     if (c->error_type[0]) return -1;
+    if (c->switch_due) { c->switch_due = 0; c->switcher(c, c->switch_data); }
     if (c->collect_due) collect(c);
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
@@ -28375,6 +28412,11 @@ void spy_context_free(SPYContext *c) {
     for (size_t i = 0; i < c->files_len; i++) close(c->files[i]);
 #endif
     mem_free(c->files); mem_free(c->error_display);
+    while (c->threads) {
+        SPYThread *t = c->threads;
+        c->threads = t->next;
+        mem_free(t->frames); mem_free(t->repr_stack); mem_free(t->error_text); mem_free(t->error_name); mem_free(t->error_display); mem_free(t);
+    }
     for (size_t i = 0; i < sizeof(c->tuple_cache) / sizeof(*c->tuple_cache); i++)
         if (c->tuple_cache[i]) { cache_take(c->tuple_cache[i], class_bytes(tuple_class(i))); value_give(c, c->tuple_cache[i], tuple_class(i)); }
     /* The unlisted values still live go with their pools. */
@@ -28438,6 +28480,37 @@ void spy_set_interrupt(SPYContext *c, SPYInterrupt interrupt, void *data) {
     schedule_poll(c); watch(c);
 }
 size_t spy_memory_used(const SPYContext *c) { return c->memory; }
+void spy_set_switch(SPYContext *c, SPYSwitch switcher, void *data) {
+    c->switcher = switcher; c->switch_data = data; c->switch_due = 0; c->quiet_unit = NULL;
+    schedule_poll(c); watch(c);
+}
+/* A thread state starts inside a call, so its calls share the outermost
+ * call's step budget, and with no frame, error or C stack measured. */
+SPYThread *spy_thread_new(SPYContext *c) {
+    SPYThread *t = allocate(c, sizeof(*t));
+    if (!t) return NULL;
+    t->frame_line = &c->line; t->entries = 1;
+    if ((t->next = c->threads)) c->threads->link = &t->next;
+    c->threads = t; t->link = &c->threads;
+    return t;
+}
+static void swap_bytes(void *a, void *b, size_t n) {
+    unsigned char *x = a, *y = b;
+    for (size_t i = 0; i < n; i++) { unsigned char v = x[i]; x[i] = y[i]; y[i] = v; }
+}
+void spy_thread_swap(SPYContext *c, SPYThread *t) {
+#define SWAP(f) swap_bytes(&c->f, &t->f, sizeof(t->f));
+    THREAD_FIELDS(SWAP)
+#undef SWAP
+    /* The tick copies the new thread's filename again. */
+    c->filename_from = c->quiet_unit = NULL;
+}
+void spy_thread_free(SPYContext *c, SPYThread *t) {
+    (void)c;
+    if ((*t->link = t->next)) t->next->link = t->link;
+    spy_release(t->exception); spy_release(t->traceback); spy_release(t->error_object); spy_release(t->handled);
+    mem_free(t->frames); mem_free(t->repr_stack); mem_free(t->error_text); mem_free(t->error_name); mem_free(t->error_display); mem_free(t);
+}
 int spy_stopped(const SPYContext *c) { return c->stopped; }
 int spy_set_limit(SPYContext *c, int limit, size_t value) {
     switch (limit) {

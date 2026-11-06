@@ -1,9 +1,14 @@
 /* Contexts are independent: threads that each own one run at once, sharing
- * nothing but a native module, which they all load at once. Under
+ * nothing but native modules, which they all load at once. Under
  * ThreadSanitizer (make CC=clang SANITIZERS=thread sanitize) any
  * process-global state the engine writes is reported as a race.
  *
- * usage: tests/threads LIBRARY   (a native module defining fib) */
+ * Each context also loads the native _thread and runs Python threads of its
+ * own, which take turns at it: ThreadSanitizer reports any context state
+ * a turn leaves unordered. The last of them still waits for a lock when its
+ * context is freed, which ends it.
+ *
+ * usage: tests/threads LIBRARY THREAD   (native modules fib and _thread) */
 #include "../spy.h"
 #include "../spy-std.h"
 
@@ -38,7 +43,30 @@ static const char program[] =
     "except StopIteration as stop:\n"
     "    total = stop.value\n"
     "del nodes\n";
-static const char *library;
+static const char threaded[] =
+    "import _thread\n"
+    "guard = _thread.allocate_lock()\n"
+    "count = [0]\n"
+    "def add(n):\n"
+    "    for _ in range(n):\n"
+    "        with guard:\n"
+    "            count[0] += 1\n"
+    "    if n > 100:\n"
+    "        _thread.start_joinable_thread(lambda: add(100)).join()\n"
+    "flags = [False]\n"
+    "def spin():\n"
+    "    while not flags[0]:\n"
+    "        pass\n"
+    "spinner = _thread.start_joinable_thread(spin)\n"
+    "workers = [_thread.start_joinable_thread(lambda: add(500)) for _ in range(3)]\n"
+    "for w in workers:\n"
+    "    w.join()\n"
+    "flags[0] = True\n"
+    "spinner.join()\n"
+    "never = _thread.allocate_lock()\n"
+    "never.acquire()\n"
+    "_thread.start_new_thread(never.acquire, ())\n";
+static const char *library, *thread_library;
 
 static int discard(SPYContext *c, void *data, const char *s, size_t n) {
     (void)c; (void)data; (void)s; (void)n;
@@ -57,6 +85,13 @@ static void *work(void *failed) {
             fprintf(stderr, "thread: %s: %s\n", spy_error_type(c), spy_error_display(c));
             *(int *)failed = 1;
         }
+        spy_release(result); result = NULL;
+        if (spy_std_load_native(c, "_thread", thread_library) || spy_exec(c, threaded, "<threads>") ||
+            !(result = spy_eval(c, "repr((count[0], _thread._count()))", "<threads>")) ||
+            strcmp(spy_as_string(c, result, NULL), "(1800, 1)")) {
+            fprintf(stderr, "_thread: %s: %s\n", spy_error_type(c), spy_error_display(c));
+            *(int *)failed = 1;
+        }
         spy_release(result);
         spy_context_free(c);
     }
@@ -64,8 +99,8 @@ static void *work(void *failed) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) { fputs("usage: tests/threads LIBRARY\n", stderr); return 2; }
-    library = argv[1];
+    if (argc != 3) { fputs("usage: tests/threads LIBRARY THREAD\n", stderr); return 2; }
+    library = argv[1]; thread_library = argv[2];
     pthread_t threads[THREADS];
     int failed[THREADS] = {0};
     for (int i = 0; i < THREADS; i++)
@@ -75,6 +110,6 @@ int main(int argc, char **argv) {
         pthread_join(threads[i], NULL);
         status |= failed[i];
     }
-    if (!status) printf("Threads: %d contexts at once, %d rounds each, passed\n", THREADS, ROUNDS);
+    if (!status) printf("Threads: %d contexts at once, %d rounds each, with Python threads in each, passed\n", THREADS, ROUNDS);
     return status;
 }
