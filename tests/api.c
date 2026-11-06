@@ -1025,7 +1025,11 @@ int main(int argc, char **argv) {
     assert(!spy_set_limit(c, SPY_LIMIT_INT_DIGITS, 4300));
     size_t stack = spy_get_limit(c, SPY_LIMIT_STACK);
     assert(stack == 4 << 20 && !spy_set_limit(c, SPY_LIMIT_STACK, 64 << 10) && !spy_set_limit(c, SPY_LIMIT_RECURSION, 100000));
-    assert(spy_exec(c, "down(0)", "stack.py") == -1 && !strcmp(spy_error_type(c), "RecursionError"));
+    /* A Python function calling Python functions uses no C stack per call;
+     * a recursion through an operator's method, which C calls, does. */
+    execute(c, "def depth(n): return depth(n - 1) + 1 if n else 0\nassert depth(50000) == 50000");
+    assert(spy_exec(c, "class Down:\n def __add__(self, n): return self + n\nDown() + 1", "stack.py") == -1 &&
+           !strcmp(spy_error_type(c), "RecursionError") && !strncmp(spy_error_message(c), "Stack overflow", 14));
     assert(!spy_set_limit(c, SPY_LIMIT_STACK, stack) && !spy_set_limit(c, SPY_LIMIT_RECURSION, 1000));
     spy_clear_error(c);
     static const int bad[][2] = {{SPY_LIMIT_RECURSION, 0}, {SPY_LIMIT_INT_DIGITS, 100}, {SPY_LIMIT_STACK, 0}, {99, 1}};

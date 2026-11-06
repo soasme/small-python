@@ -117,7 +117,7 @@ Contents | - navigation
 9 Executable Code and Execution Contexts > 9.3 Name resolution > 9.3.5 StoreName ( *n*, *v* ) and DeleteName ( *n* ) | Scopes, SimpleStatements
 9 Executable Code and Execution Contexts > 9.4 Suspension and resumption | Generators, Awaitables
 9 Executable Code and Execution Contexts > 9.5 The handled exception | Exceptions, Raise
-9 Executable Code and Execution Contexts > 9.6 Recursion limit | Exceptions, BuiltinsText
+9 Executable Code and Execution Contexts > 9.6 Recursion limit | Exceptions, BuiltinsText, SpyCalls
 9 Executable Code and Execution Contexts > 9.7 Object lifetime and finalization | GC, SpyGC
 9 Executable Code and Execution Contexts > 9.8 Program execution | CompileModes
 10 Object Behaviours | = sections

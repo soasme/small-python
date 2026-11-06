@@ -10,6 +10,8 @@ Unreleased (0.8.0):
 - spyc links libNAME.a archive modules
 - spyc programs mount their directory, get sys.argv and exit as spy does
 - added spy_set_argv(); spy passes its arguments into sys.argv
+- Python-to-Python calls no longer use the C stack; deep recursion is bounded
+  by the recursion limit alone
 - == on deeply nested containers no longer raises RecursionError
 - exception classes have CPython's own __str__, __repr__ and __new__
 - generator functions run about 10% faster (generators benchmark 99 ms -> 88 ms)

@@ -1208,7 +1208,11 @@ internal instruction array so their execution can suspend. Expressions without
 yields reuse the evaluator; expressions containing yields preserve intermediate
 operands on an owned heap stack. A separate cleanup stack records loops,
 exception handlers, `finally` blocks, and context managers. Every instruction
-borrows its AST node from the retained source unit. There is no peephole
+borrows its AST node from the retained source unit. A function body that
+holds a call and cannot suspend compiles to the same instructions; a call to
+such a function from such a body pushes a frame on the context's call stack
+and the same instruction loop continues, so these calls do not nest on the C
+stack. There is no peephole
 optimizer or stable serialized-program format.
 
 ### 4.2 Executable generation
@@ -1245,8 +1249,11 @@ supports modular inverses. Decimal conversion currently uses the default
 Recursion follows CPython's two limits. Python frames (function calls,
 generator resumption, and module execution) count against the per-context
 recursion limit, 1,000 by default, and exceeding it raises "maximum recursion
-depth exceeded". Recursive C paths in the evaluator, parser, repr, comparison,
-and hashing check the remaining machine stack against a 4 MiB budget and raise
+depth exceeded". A call from one Python function to another whose body holds
+a call runs on the instruction machine without growing the C stack, so such
+recursion is bounded by the recursion limit alone. Calls that C makes (special
+methods, host callbacks, trace functions) and other recursive C paths in the
+evaluator, parser, repr, comparison, and hashing check the remaining machine stack against a 4 MiB budget and raise
 CPython's "Stack overflow" RecursionError instead of crashing.
 
 ### 4.4 Garbage collection
