@@ -274,7 +274,7 @@ a pause is due stops the call as without pausing, so an outermost call or
 a resume does at most two budgets of work.
 
 A call can pause only where nothing but its machines holds its state.
-Function calls, plain class calls, a loop's Python `__next__`, generators
+Function calls, calls of bound methods and plain classes, a loop's Python `__next__`, generators
 resumed by a loop or consumed by `sum`, `any`, `all`, `list` or `tuple`,
 and list, set and dictionary comprehensions run as machines on the heap, in one
 native activation of `run_machine`; a call that native code makes (a

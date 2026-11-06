@@ -16140,16 +16140,28 @@ static SPYValue *method_construct(SPYContext *c, size_t argc, SPYValue *const *a
     if (argv[1]->type == SPY_NONE) return spy_error(c, "TypeError", "instance must not be None");
     return plain_method(c, argv[1], argv[0]);
 }
+/* A call of class cls whose plain __init__ (plain_init) is init:
+ * object.__new__, then init called directly. */
+static SPYValue *plain_construct(SPYContext *c, SPYValue *cls, SPYValue *init, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *result = new_instance(c, cls);
+    SPYValue *value = result ? call_with_self(c, init, result, argc, argv, keywords) : NULL;
+    if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+    spy_release(value);
+    return result;
+}
 /* type.__call__: allocate with __new__, then initialize with __init__. */
 /* The Python __init__ function of cls when calling cls is just object.__new__
- * and that __init__: a plain MRO, neither abstract nor an exception, and
- * object.__new__ as both its allocator and its slot, so that object.__new__
- * accepts the arguments. Borrowed. */
+ * and that __init__: a plain MRO, neither abstract nor an exception, a
+ * metaclass whose __call__ is type's, and object.__new__ as both its
+ * allocator and its slot, so that object.__new__ accepts the arguments.
+ * Borrowed. */
 static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
     PlainClass *hit = &c->plain[(uintptr_t)cls / sizeof(SPYValue) % 16];
     if (hit->cls != cls || hit->epoch != c->classes_changed) {
         SPYValue *init = class_lookup(cls, "__init__");
+        SPYValue *meta = cls->as.map.meta;
         int plain = plain_mro(c, cls) && !(cls->as.map.flags & CLASS_ABSTRACT) &&
+            (!meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
             !subclass(cls, name_local(c->classes, "BaseException")) && init && init->type == SPY_FUNCTION &&
             slot_new(c, cls) == name_local(c->object, "__new__") && native_slot_new(c, cls) == name_local(c->object, "__new__");
         if (c->error_type[0]) return NULL;
@@ -16182,13 +16194,8 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         return builtin_keywords(c, argc, argv, fn->as.map.native - 1, keywords, fn);
     /* A class whose MRO a custom mro() is still computing makes no instances. */
     if (!fn->as.map.mro) return errorf(c, "TypeError", "cannot create '%s' instances", name_text(fn, "__name__")->as.string.data);
-    if ((plain = plain_init(c, fn))) {
-        /* object.__new__ then a Python __init__, called directly. */
-        if (!(result = new_instance(c, fn))) return NULL;
-        SPYValue *value = call_with_self(c, plain, result, argc, argv, keywords);
-        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
-        spy_release(value);
-    } else {
+    if ((plain = plain_init(c, fn))) result = plain_construct(c, fn, plain, argc, argv, keywords);
+    else {
         SPYValue *allocator = slot_new(c, fn);
         SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
         SPYValue *bound = method ? bind_method(c, fn, method) : NULL;
@@ -21122,10 +21129,55 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     }
     return !status;
 }
+/* Whether callee is a method of a function on the machine; then the
+ * function, owned, replaces it, and its self goes before the argc
+ * arguments argv, which have room for it. */
+static int unbind(SPYContext *c, SPYValue **callee, size_t *argc, SPYValue **argv) {
+    SPYValue *method = *callee;
+    if (method->type != SPY_METHOD || !machine_function(c, method->as.method.function)) return 0;
+    memmove(argv + 1, argv, *argc * sizeof(*argv));
+    argv[0] = spy_retain(method->as.method.self); ++*argc;
+    *callee = spy_retain(method->as.method.function);
+    spy_release(method);
+    return 1;
+}
+/* operand_call of a bound method, a class, or a callee given a generator
+ * first, with room in argv for one more argument. */
+static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
+                                             size_t argc, SPYValue **argv, SPYValue **env) {
+    SPYValue *result, *self;
+    if (method < 0 && unbind(c, &callee, &argc, argv)) {
+        if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
+        spy_release(callee);
+        return NULL;
+    }
+    SPYValue *init = method < 0 && callee->type == SPY_CLASS ? plain_init(c, callee) : NULL;
+    if (init && machine_function(c, init)) {
+        /* A class call enters its __init__ (CALL_INIT) with the new instance,
+         * which is the call's value on the stack. */
+        if (!(self = new_instance(c, callee))) release_all(argc, argv);
+        else if (machine_push(c, m, spy_retain(self))) { spy_release(self); release_all(argc, argv); }
+        else {
+            memmove(argv + 1, argv, argc * sizeof(*argv));
+            argv[0] = self;
+            c->entering_init = init;
+            if ((*env = function_env(c, init, argc + 1, argv, NULL, 1))) return callee;
+        }
+        spy_release(callee);
+        return NULL;
+    }
+    int id = method < 0 ? consumer_of(c, callee, argc, argv) : -1;
+    if (id >= 0) consume(c, m, id, spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL);
+    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) :
+             c->error_type[0] ? NULL : call_plain(c, callee, method, n, argc, argv);
+    release_all(argc, argv);
+    spy_release(callee);
+    return result;
+}
 /* BC_CALLF: plain call node n, whose operands need no steps of their own;
  * or NULL with no error when a consumer of a generator began on m. */
 static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
-    SPYValue *argv[9], *callee, *result;
+    SPYValue *argv[9], *callee;
     size_t argc;
     int method;
     if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1))) return NULL;
@@ -21135,9 +21187,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         spy_release(callee);
         return NULL;
     }
-    int id = method < 0 ? consumer_of(c, callee, argc, argv) : -1;
-    if (id >= 0) consume(c, m, id, spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL);
-    result = id >= 0 ? NULL : call_plain(c, callee, method, n, argc, argv);
+    if (method < 0 && (callee->type == SPY_METHOD || callee->type == SPY_CLASS || (argc && argv[0]->type == SPY_GENERATOR)))
+        return operand_call_rest(c, m, n, callee, method, argc, argv, env);
+    SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -21145,21 +21197,6 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
-/* A call of plain class cls, in argv[-1]'s place before its argc
- * arguments, whose __init__ is on the machine: its new instance takes the
- * class's place as the call's value, and the call enters the __init__
- * with it, taking the arguments and returning the class to enter there;
- * else NULL. */
-static SPYValue *class_call(SPYContext *c, Machine *m, SPYValue *cls, size_t argc, SPYValue **argv, SPYValue **env) {
-    SPYValue *init = plain_init(c, cls), *self;
-    if (!init || !machine_function(c, init) || !(self = new_instance(c, cls))) return NULL;
-    argv[-1] = spy_retain(self);
-    m->len -= argc;
-    c->entering_init = init;
-    if ((*env = function_env(c, init, argc + 1, argv - 1, NULL, 1))) return cls;
-    spy_release(cls);
-    return NULL;
-}
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     if (n->a->kind == N_ATTR) return stack_method_call(c, m, n, argc, calls, env);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
@@ -21171,11 +21208,31 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return NULL;
     }
-    if (callee->type == SPY_CLASS && (result = class_call(c, m, callee, argc, argv, env))) return result;
+    SPYValue *self, *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
+    if (function && machine_function(c, function)) {
+        /* A bound method's self takes its place. */
+        argv[-1] = spy_retain(callee->as.method.self);
+        spy_retain(function); spy_release(callee);
+        m->len -= argc + 1;
+        if ((*env = function_env(c, function, argc + 1, argv - 1, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
+    SPYValue *init = callee->type == SPY_CLASS ? plain_init(c, callee) : NULL;
+    if (init && machine_function(c, init)) {
+        /* The new instance takes the class's place, as the call's value. */
+        if (!(self = new_instance(c, callee))) return NULL;
+        argv[-1] = spy_retain(self);
+        m->len -= argc;
+        c->entering_init = init;
+        if ((*env = function_env(c, init, argc + 1, argv - 1, NULL, 1))) return callee;
+        spy_release(callee);
+        return NULL;
+    }
     if (c->error_type[0]) return NULL;
     int id = consumer_of(c, callee, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
-    result = id >= 0 ? NULL : call_plain(c, callee, -1, n, argc, argv);
+    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : call_plain(c, callee, -1, n, argc, argv);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume(c, m, id, generator, start);
     return result;
@@ -21190,6 +21247,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     if (self) spy_release(object); /* The stack holds it; a native method's callee is the reference passed. */
     /* A method takes the object first; another callee, the arguments after it. */
     size_t skip = !self;
+    if (callee && method < 0 && skip && callee->type == SPY_METHOD && machine_function(c, callee->as.method.function)) {
+        /* A bound method's self takes the object's place. */
+        SPYValue *function = spy_retain(callee->as.method.function);
+        spy_release(object); argv[0] = spy_retain(callee->as.method.self);
+        spy_release(callee); callee = function; skip = 0;
+    }
     if (callee && method < 0 && calls && machine_function(c, callee)) {
         m->len -= argc + 1;
         if (skip) spy_release(object);
@@ -21472,6 +21535,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_CALLF)
             callee_env = NULL; value = operand_call(c, m, &f, n, &callee_env);
+            if (callee_env && value->type == SPY_CLASS) goto enter_init;
             if (callee_env) goto enter_call;
             if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); NEXT;
@@ -21479,11 +21543,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_CALLK)
             callee_env = NULL;
             value = (ins->op == BC_CALLN ? stack_call : stack_keyword_call)(c, m, n, (size_t)ins->arg, 1, &callee_env);
-            /* A class call enters its __init__ (class_call). */
-            if (callee_env && value->type == SPY_CLASS) {
-                spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
-                goto enter_special;
-            }
+            if (callee_env && value->type == SPY_CLASS) goto enter_init;
             if (callee_env) goto enter_call;
             if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); NEXT;
@@ -21629,6 +21689,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg == FLOW_RETURN && !m->block_len && !m->outermost) {
                 m = call_leave(c, (Call *)m, flow.value = machine_pop(m));
                 goto switch_call;
+            }
+            if (ins->arg == FLOW_RETURN && !m->block_len && m->outermost == CALL_INIT) {
+                /* An __init__ returns None into its class call, whose value is
+                 * already on the caller's stack. */
+                value = machine_pop(m);
+                m = call_leave(c, (Call *)m, value); f = m->frame; code = m->code->items; pc = m->pc;
+                if (value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+                spy_release(value); break;
             }
             flow = (Result){ins->arg, ins->arg == FLOW_RETURN ? machine_pop(m) : NULL}; break;
         CASE(BC_LOOP) {
@@ -21894,6 +21962,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         f = m->frame; code = m->code->items; pc = m->pc;
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
+    enter_init:
+        /* A class call enters its __init__ (class_init). */
+        spy_release(value); value = spy_retain(c->entering_init); special = CALL_INIT;
     enter_special:
         m->pc = pc;
         {
