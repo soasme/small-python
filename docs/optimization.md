@@ -196,6 +196,8 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Hot paths stay out of large functions](#hot-paths-stay-out-of-large-functions) | -3.1% (fib), -2.2% (dicts), -1.8% (nbody); empty range loop -17%; M2: fib -3.3%, loop -2.3% |
 | [An attribute is an operand at hand](#an-attribute-is-an-operand-at-hand) | -5.3% (classes); M2: classes -2.1% |
 | [eval ends in a tail call](#eval-ends-in-a-tail-call) | -0.8% (loop); M2: classes -2.0%, loop -1.5%, sort -1.5% |
+| [A dying instance asks plain_init for __del__](#a-dying-instance-asks-plain_init-for-__del__) | -1.7% (classes); M2: classes -1.6% |
+| [A call on the machine takes its arguments](#a-call-on-the-machine-takes-its-arguments) | -3.7% (fib), -0.8% (classes); M2: fib -1.7% |
 | [Calls run on the machine](#calls-run-on-the-machine) | -12.9% (fib), +1.7% (generators), +1.2% (classes); M2: fib -2.2%, classes +2.0% |
 
 ### Releasing a number or string frees it at once
@@ -1543,6 +1545,28 @@ counters): fib -12.9%, generators +1.7%, classes +1.2%, the rest within
 +2.0%, generators -0.1%, nbody +0.3%. On Linux clang (callgrind) classes runs about 1%
 fewer instructions than before; the M2 build's +2% is open. A 50,000
 deep recursion runs in a 64 KiB C stack (`tests/api`).
+
+### A dying instance asks plain_init for __del__
+
+Freeing an instance looks for its class's `__del__`. `class_lookup`
+answers from a cache, but its hit compares the name with `strcmp`, a
+library call per instance. `plain_init`'s entry for the class, valid
+until any class changes, keeps the answer as well, so an instance of a
+class called recently finds it without the comparison. Instructions (M2
+counters): classes -1.7%, the rest unchanged; cycles averaged over eight
+code layouts: classes -1.6%.
+
+### A call on the machine takes its arguments
+
+A call step computed its arguments as owned values, `open_locals`
+retained each into the new environment, and the step then released its
+own; it retained the callee for the call and released its reference
+too. The step now hands both over: `function_env` with `take` owns the
+arguments whichever way it binds them, also when binding fails.
+Instructions (M2 counters): fib -3.7%, classes -0.8%, the rest
+unchanged; cycles averaged over eight code layouts: fib -1.7%, the rest
+within noise (about 1%, strings and dicts changing sign with the order
+of the runs).
 
 ### A profile-guided build
 
