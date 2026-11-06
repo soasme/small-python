@@ -121,7 +121,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_PLAIN_CALL = 4096 /* A call of at most eight positional arguments, none starred. */,
        F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */,
        F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
-       F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */ };
+       F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
+       F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -13632,21 +13633,38 @@ static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValu
 }
 /* Whether n is compiled to machine steps rather than evaluated whole: it
  * can suspend; or, with calls, it holds a call (a decorated definition
- * applies one), which runs on the machine
- * without recursing in C, except a for loop's iterable; or, with calls at BODY, in a function body on
- * the machine, it is an if or a return, whose steps cost less there than
- * the walker's statement. */
+ * applies one), which runs on the machine without recursing in C, except
+ * a for loop's iterable; or, with calls at BODY, in a body on the machine,
+ * it is an if or a return, whose steps cost less there than the walker's
+ * statement, or an expression other than arithmetic on names and
+ * literals (arithmetic) or an operator on operands at hand
+ * (operator_right), whose special methods its steps call on the
+ * machine. */
 enum { CALLS = 1, BODY = 2 };
 static int expands(Node *n, int calls);
 static int list_expands(Node *n, int calls) {
     for (; n; n = n->next) if (expands(n, calls)) return 1;
     return 0;
 }
+/* Whether n is a name or literal, or unary, binary or comparison
+ * arithmetic of those: one walker step costs less than its machine steps. */
+static int arithmetic(Node *n) {
+    if (at_hand(n) || n->constant || n->kind == N_NONE || n->kind == N_BOOL) return 1;
+    if (n->kind == N_BINARY && n->op != O_AND && n->op != O_OR) return arithmetic(n->a) && arithmetic(n->b);
+    if (n->kind == N_UNARY) return arithmetic(n->a);
+    if (n->kind == N_COMPARE) { for (Node *c = n->args; c; c = c->next) if (!arithmetic(c->a)) return 0; return arithmetic(n->a); }
+    return 0;
+}
 static int expands(Node *n, int calls) {
     if (!n) return 0;
+    if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
+        (operator_right(n) || arithmetic(n))) return 0;
     if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && n->kind == N_CALL) ||
         (calls == BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
-                           n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH))) return 1;
+                           n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
+                           n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
+                           n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
+                           n->kind == N_SLICE))) return 1;
     if (n->kind == N_COMPREHENSION)
         return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
@@ -13766,9 +13784,16 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
         if (plain_call(n) || keyword_plain_call(n)) {
-            /* A plain method call's object is on the stack in its callee's place. */
-            int argc = 0;
-            compile_expr(c, p, n->a->kind == N_ATTR && plain_call(n) ? n->a->a : n->a);
+            /* A plain method call's object is on the stack in its callee's
+             * place, unless the method must be found before arguments that
+             * run code (F_CALLEE_FIRST). */
+            int argc = 0, method = n->a->kind == N_ATTR && plain_call(n);
+            compile_expr(c, p, method ? n->a->a : n->a);
+            if (method && list_expands(n->args, p->calls)) {
+                size_t pc = emit(c, p, BC_ATTR, n->a, 0);
+                n->flags |= F_CALLEE_FIRST;
+                if (pc != SIZE_MAX) p->items[pc].other = 1;
+            }
             for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
             emit(c, p, plain_call(n) ? BC_CALLN : BC_CALLK, n, argc); break;
         }
@@ -15093,7 +15118,8 @@ static NO_INLINE SPYValue *item_operand(Frame *f, Node *n) {
  * node_attribute finds it, borrowed. */
 static NO_INLINE SPYValue *attr_operand(SPYContext *c, Frame *f, Node *n) {
     SPYValue *v = name_fast(f->env, n->a);
-    Entry *e = v && plain_instance(v) && (node_access(c, v, n) & ATTR_READ) != ATTR_SLOW ? dict_slot(v, n->b) : NULL;
+    int kind = v && plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
+    Entry *e = kind == ATTR_OWN || kind == ATTR_METHOD ? dict_slot(v, n->b) : NULL;
     return e ? e->value : NULL;
 }
 /* An operand found along the fast path, borrowed: a literal, a name, an
@@ -21291,7 +21317,8 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         spy_release(all);
     } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !extend_display(c, items, argv[0])))) {
         descending = reverse ? truthy(reverse) : 0;
-        ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee->as.bound.self, &items));
+        ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee->as.bound.self, &items)) &&
+                !sequence_reserve(c, keys, items->as.seq.len);
     }
     Block *block = ready ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (block) {
@@ -21339,9 +21366,8 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Consumer *s = m->blocks[m->block_len - 1].consumer;
     if (s->keyed == KEY_SORT) {
-        int status = sequence_append(c, s->result, key);
-        spy_release(key);
-        return status;
+        s->result->as.seq.items[s->result->as.seq.len++] = key;
+        return 0;
     }
     SPYValue *item = s->item;
     s->item = NULL;
@@ -21494,12 +21520,37 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     spy_release(callee);
     return result;
 }
+/* The attribute step of a method call (F_CALLEE_FIRST) on a builtin
+ * receiver, which takes object: a builtin type's attributes are its own
+ * and fixed, so a method found now is found again at the call, which then
+ * takes object with c->unbound above it; any other attribute is the
+ * callee. */
+static NO_INLINE void method_load(SPYContext *c, Machine *m, Node *n, SPYValue *object) {
+    SPYValue *self = NULL;
+    int method = -1;
+    SPYValue *callee = method_of(c, n, spy_retain(object), &self, &method);
+    if (callee && (self || method >= 0)) {
+        spy_release(callee); spy_release(self);
+        if (!machine_push(c, m, object)) machine_push(c, m, spy_retain(c->unbound));
+        return;
+    }
+    spy_release(object);
+    if (callee) machine_push(c, m, callee);
+}
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
-    if (n->a->kind == N_ATTR) return stack_method_call(c, m, n, argc, calls, env);
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
+    if (n->a->kind == N_ATTR && (!(n->flags & F_CALLEE_FIRST) || callee == c->unbound)) {
+        if (callee == c->unbound) {
+            /* method_load found the method: the object below takes its call. */
+            memmove(argv - 1, argv, argc * sizeof(*argv));
+            m->len--;
+            spy_release(callee);
+        }
+        return stack_method_call(c, m, n, argc, calls, env);
+    }
     relocate(c, n);
     if (calls && machine_function(c, callee)) {
         /* A call on the machine takes the arguments and the callee from the stack. */
@@ -22195,6 +22246,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
+            if (ins->other && builtin_receiver(a)) { method_load(c, m, n, a); a = NULL; break; }
             if (!(value = node_attribute(c, a, n, 1)) && !c->error_type[0]) goto enter_getter;
             machine_push(c, m, value); break;
         CASE(BC_COMPARE) {

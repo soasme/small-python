@@ -17,7 +17,11 @@ Unreleased (0.8.0):
 - calls of classes with a Python __init__, for loops over generators and
   Python iterators, and list, set and dict comprehensions no longer use the
   C stack
+- sort keys, next(), send(), str(), repr(), __new__, properties, __getattr__
+  and operator methods no longer use the C stack in most function code
 - == on deeply nested containers no longer raises RecursionError
+- a method call looks up its method before evaluating arguments that call
+  code; an attribute read in an operator honors a property added later
 - exception classes have CPython's own __str__, __repr__ and __new__
 - generator functions run about 10% faster (generators benchmark 99 ms -> 88 ms)
 

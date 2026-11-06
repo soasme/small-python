@@ -294,9 +294,11 @@ These run as machines on the heap, in one native activation of
 - list, set and dictionary comprehensions.
 
 A call that native code makes runs in an activation of its own: another
-special method, a host function, a class body, and a call from a
-statement or expression the walker evaluates whole, such as an attribute
-read or a test inside an expression without calls. The engine counts
+special method, a host function, a class body, and a call from what the
+walker evaluates whole. The walker runs a function whose body holds no
+call or loop, which ends within a bounded number of steps, and, inside a
+function on the machine, arithmetic of more than one operator on names
+and literals, so an operator method such an expression reaches nests. The engine counts
 the activations and pauses only in the outermost one, so a pause due
 inside native code waits until that code returns. Interactive and
 expression units run on the walker and do not pause.
