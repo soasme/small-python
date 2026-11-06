@@ -128,6 +128,15 @@ static size_t run(const char *source, const char *name, int *status) {
 }
 
 static const char *const programs[] = {
+    "class G:\n"
+    "    def __getattr__(self, k):\n"
+    "        for i in range(1): pass\n"
+    "        return k\n"
+    "def f():\n"
+    "    for i in range(1): pass\n"
+    "    return G().missing\n"
+    "print(f())\n",
+
     "x = [i * i for i in range(20)]\n"
     "d = {str(i): i for i in x}\n"
     "s = {i % 7 for i in x}\n"

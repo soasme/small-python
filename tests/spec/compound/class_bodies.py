@@ -85,3 +85,19 @@ class Scoped:
 
 assert Scoped.firsts == [0, 1]
 assert Scoped.message == "name 'base' is not defined", Scoped.message
+
+# A body with annotations loops over a Python iterator the same way.
+class Countdown:
+    def __init__(self, n): self.n = n
+    def __iter__(self): return self
+    def __next__(self):
+        if not self.n: raise StopIteration
+        self.n -= 1
+        return self.n
+
+class Annotated:
+    total: int = 0
+    for item in Countdown(3):
+        total += item
+
+assert (Annotated.total, Annotated.item, Annotated.__annotations__) == (3, 0, {"total": int})

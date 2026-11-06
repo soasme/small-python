@@ -328,6 +328,14 @@ def traced_generator():
         yield j
 
 
+def traced_class():
+    class Annotated:
+        x: int = 0
+        for i in range(2):
+            pass
+    return Annotated.i
+
+
 def traced_raise():
     try:
         raise ValueError("v")
@@ -339,6 +347,7 @@ def traced_raise():
 sys.settrace(tracer)
 traced_loop(1)
 list(traced_generator())
+traced_class()
 try:
     traced_raise()
 except KeyError:

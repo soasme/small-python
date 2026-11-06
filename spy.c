@@ -554,6 +554,7 @@ static int trace_call(SPYContext *);
 static void leave_frame(SPYContext *, SPYValue *);
 enum { TRACE_CALL, TRACE_LINE, TRACE_RETURN, TRACE_EXCEPTION };
 static int trace_event(SPYContext *, int, SPYValue *);
+static int trace_class_line(SPYContext *, Node *);
 static SPYValue *call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static NO_INLINE SPYValue *call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) { return call_keywords(c, fn, argc, argv, NULL); }
 /* Stop the context: until the next outermost call every spend and tick
@@ -9753,9 +9754,11 @@ static SPYValue *binary_special(SPYContext *, const Operator *, SPYValue *, SPYV
 static SPYValue *view_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *set_intersect_iterable(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
+/* The entry of binary operator op, which the table holds. */
 static const Operator *operator_of(int op) {
-    for (size_t i = 0; i < sizeof(operators) / sizeof(*operators); i++) if (operators[i].token == op) return &operators[i];
-    return NULL;
+    const Operator *o = operators;
+    while (o->token != op) o++;
+    return o;
 }
 static SPYValue *binary_declined(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *binary_builtin(SPYContext *, int, SPYValue *, SPYValue *);
@@ -9771,8 +9774,7 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int formats = op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
         !(b->type == SPY_INSTANCE && subclass(b->as.map.parent, c->types[a->type]));
     if ((special_dispatch(a) || special_dispatch(b)) && !formats) {
-        const Operator *o = operator_of(op);
-        SPYValue *result = o ? binary_special(c, o, a, b, NULL) : NULL;
+        SPYValue *result = binary_special(c, operator_of(op), a, b, NULL);
         return result || c->error_type[0] ? result : binary_declined(c, op, a, b);
     }
     return binary_builtin(c, op, a, b);
@@ -14175,8 +14177,10 @@ static int loops(Node *body) {
  * the machine: a body of neither always ends, so it may run on the walker. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
-    /* An annotation or lazy value function's body is one walker statement;
+    /* An annotation or lazy value function's body is one walker statement,
+     * as is a class body with type parameters or annotations (class_body);
      * while calls can pause, every other body runs on the machine. */
+    if (n->kind == N_CLASS && (n->params || n->annotate || (n->flags & F_SETUP_ANNOTATIONS))) return 0;
     if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS || (mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
@@ -14370,6 +14374,14 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
 }
 static int extend_display(SPYContext *c, SPYValue *result, SPYValue *source) {
     return extend_container(c, result, source, NULL);
+}
+/* sorted()'s list gains iterable's items, raising as iter() does. */
+static int sorted_items(SPYContext *c, SPYValue *list, SPYValue *iterable) {
+    if (iterable->type == SPY_LIST || iterable->type == SPY_TUPLE) return extend_display(c, list, iterable);
+    SPYValue *iterator = get_iterator(c, iterable);
+    int status = iterator ? extend_display(c, list, iterator) : -1;
+    spy_release(iterator);
+    return status;
 }
 static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     /* Like PyDict_Merge, dict subclasses keeping dict iteration copy directly. */
@@ -18340,6 +18352,7 @@ static int class_body(SPYContext *c, SPYValue *unit, Node *n, SPYValue *env, SPY
     Frame frame = {env, unit, 0};
     if (enter_frame(c, env, unit)) return -1;
     Result r = setup_annotations(c, &frame, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, &frame, n->annotate, "__annotate_func__") ? (Result){FLOW_ERROR, NULL} : execute(c, &frame, n->b);
+    if (r.flow == FLOW_NORMAL && n->annotate && (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_class_line(c, n)) r.flow = FLOW_ERROR;
     leave_frame(c, r.flow == FLOW_ERROR ? NULL : c->none);
     spy_release(r.value);
     if (r.flow != FLOW_NORMAL || c->error_type[0]) return -1;
@@ -18880,10 +18893,24 @@ static int trace_event(SPYContext *c, int event, SPYValue *arg) {
     else spy_release(saved.value);
     return failed ? -1 : 0;
 }
-/* The 'call' event of a frame just entered, at its definition line. */
+/* A class body's 'line' event at its first line, the decorators' when it
+ * has any: as it begins, and as it ends when it has annotations. */
+static int trace_class_line(SPYContext *c, Node *n) {
+    struct ActiveFrame *top = &c->frames[c->py_depth - 1];
+    top->line = top->traced = n->decorators ? n->decorators->line : n->line;
+    return c->settings[SET_TRACE] ? trace_event(c, TRACE_LINE, NULL) : 0;
+}
+/* The 'call' event of a frame just entered, at its definition line; a
+ * class body's 'line' event follows. */
 static NO_INLINE int trace_call(SPYContext *c) {
     struct ActiveFrame *top = &c->frames[c->py_depth - 1];
     SPYValue *owner = top->owner;
+    Scope *scope = top->env->type == V_ENV ? top->env->as.map.scope : NULL;
+    Node *cls = scope && scope->kind == S_CLASS ? scope->owner : NULL;
+    if (cls) {
+        top->line = cls->decorators ? cls->decorators->line : cls->line;
+        return trace_event(c, TRACE_CALL, NULL) || trace_class_line(c, cls);
+    }
     if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->line;
     else if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) {
         /* A resumed generator continues the line where it was suspended. */
@@ -21395,7 +21422,7 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         SPYValue *all = positional == 1 ? spy_retain(argv[0]) : spy_tuple(c, positional, argv);
         ready = all && (items = get_iterator(c, all));
         spy_release(all);
-    } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !extend_display(c, items, argv[0])))) {
+    } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !sorted_items(c, items, argv[0])))) {
         descending = reverse ? truthy(reverse) : 0;
         ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee->as.bound.self, &items)) &&
                 !sequence_reserve(c, keys, items->as.seq.len);
@@ -21516,7 +21543,6 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
-        /* object's __format__ of an empty spec is str(). */
         SPYValue *text = argc == 2 ? argv[1] : NULL;
         function = class_lookup(cls, "__format__");
         if (function && machine_function(c, function)) {
@@ -21524,12 +21550,11 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
             c->entering_kind = CALL_CHECKED;
             return function;
         }
-        if (function != name_local(c->object, "__format__") || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
+        /* With none above object's, an empty spec formats as str(). */
+        if (function || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
     }
+    /* With no __str__ above object's, str() calls the instance's __repr__. */
     function = repr ? NULL : class_lookup(cls, "__str__");
-    /* object's __str__ is the instance's __repr__. */
-    if (!repr && function && !machine_function(c, function) && function == name_local(c->object, "__str__"))
-        function = NULL, repr = 1;
     if (!function) function = class_lookup(cls, "__repr__");
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, repr ? "__repr__" : "__str__", repr ? 8 : 7))) return NULL;
     *spec = NULL;
@@ -21905,7 +21930,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : NULL;
     if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
     else if (kind == OPERATE_BINARY)
-        function = !o || (other != cls && subclass(other, cls) && class_lookup(other, o->reflected) != class_lookup(cls, o->reflected)) ?
+        function = other != cls && subclass(other, cls) && class_lookup(other, o->reflected) != class_lookup(cls, o->reflected) ?
                    NULL : class_lookup(cls, o->direct);
     else function = rich < 0 || (other != cls && subclass(other, cls)) ? NULL : class_lookup(cls, rich_names[rich]);
     if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y))) return NULL;
@@ -22946,8 +22971,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!call) continue;
             call->m.outermost = special;
             m = &call->m;
+            goto switch_call;
         }
-        goto switch_call;
     }
 }
 #pragma GCC diagnostic pop
@@ -28639,7 +28664,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (argc != 1) return errorf(c, "TypeError", "sorted expected 1 argument, got %zu", argc);
         SPYValue *list = value_new(c, SPY_LIST);
         if (!list) return NULL;
-        if (extend_display(c, list, argv[0])) { spy_release(list); return NULL; }
+        if (sorted_items(c, list, argv[0])) { spy_release(list); return NULL; }
         SPYValue *result = sort_method(c, list, 0, NULL, keywords);
         if (!result) { spy_release(list); return NULL; }
         spy_release(result);

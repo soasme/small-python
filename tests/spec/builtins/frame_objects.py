@@ -88,6 +88,12 @@ def caller_frame():
 class Body:
     frame = caller_frame()
 assert_true(repr(Body.frame).endswith(", code Body>"))
+class AnnotatedBody:
+    annotated: int = 0
+    frame = caller_frame()
+    code = current().f_back.f_code
+assert_true(repr(AnnotatedBody.frame).endswith(", code AnnotatedBody>"))
+assert_eq(AnnotatedBody.code.co_name, "AnnotatedBody")
 
 def caught_frame():
     try: raise ValueError

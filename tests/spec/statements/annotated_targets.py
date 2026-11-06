@@ -51,3 +51,19 @@ for source, kind in (("[(yield x) for x in ()]", "list comprehension"),
                      ("((yield from x) for x in ())", "generator expression")):
     e = assert_raises(SyntaxError, compile, "def g(): " + source, "<s>", "exec")
     assert_eq(e.msg, "'yield' inside " + kind)
+
+# Without a value, a subscript or attribute target's primary is evaluated,
+# in a function that calls nothing as elsewhere.
+holder = {}
+def subscript_annotation():
+    holder[0]: int
+    holder.missing: int
+try:
+    subscript_annotation()
+except AttributeError as e:
+    assert str(e) == "'dict' object has no attribute 'missing'", str(e)
+assert holder == {}
+# A conditional annotation whose value calls runs as one without.
+if holder is not None:
+    conditional: int = len(holder)
+assert conditional == 0

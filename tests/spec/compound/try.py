@@ -479,3 +479,15 @@ except KeyError as cleared:
 assert "cleared" not in globals()
 assert globals()[1] == "int key"
 del globals()[1]
+
+# A function that calls nothing runs else.
+def plain_else():
+    global branch
+    try:
+        branch = 0
+    except ValueError:
+        branch = 1
+    else:
+        branch = 2
+plain_else()
+assert branch == 2

@@ -129,3 +129,16 @@ def failing_key():
         return seen
 
 assert failing_key() == [2, 0]
+
+# An iterable that is not one raises before any key call.
+def unsortable():
+    messages = []
+    for call in (lambda: sorted(1), lambda: sorted(1, key=key), lambda: min(1, key=key), lambda: max(1, 2, key=key, default=0)):
+        try:
+            call()
+        except TypeError as e:
+            messages.append(str(e))
+    return messages
+
+assert unsortable() == ["'int' object is not iterable", "'int' object is not iterable", "'int' object is not iterable",
+                        "Cannot specify a default for max() with multiple positional arguments"], unsortable()

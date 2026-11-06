@@ -154,3 +154,28 @@ def f():
         assert_eq(lines(error, run.code), outer)
         if inner is not None:
             assert_eq([lines(e, run.code) for e in error.exceptions], inner)
+
+# A function that calls nothing runs except*, else and finally the same way.
+group = ExceptionGroup("g", [ValueError(1)])
+def star_raising():
+    global star_final
+    try:
+        raise group
+    except* ValueError:
+        raise KeyError
+    finally:
+        star_final = 1
+def star_else():
+    global star_branch
+    try:
+        star_branch = 0
+    except* ValueError:
+        star_branch = 1
+    else:
+        star_branch = 2
+try:
+    star_raising()
+except KeyError as e:
+    assert type(e.__context__) is ExceptionGroup
+star_else()
+assert (star_final, star_branch) == (1, 2)
