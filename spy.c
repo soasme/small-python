@@ -266,6 +266,7 @@ struct SPYContext {
     Call **calls; size_t calls_len, calls_cap; /* Functions running on the machine, innermost last; their storage is kept. */
     SPYValue *entering_init; /* Borrowed: the __init__ a class call step enters next, */
     int entering_kind;       /* as a call of this kind: CALL_INIT, or CALL_CHECKED for str() and repr(). */
+    SPYValue *fallback;      /* Owned: the __getattr__ an attribute step calls next (attribute_step). */
     /* Pausing (docs/metering.md 3.8): whether a spent budget or an interrupt
      * pauses; why a pause is due or was taken; the native activations of
      * run_machine now running; the machine of the module body a pausable
@@ -11583,9 +11584,26 @@ static ALWAYS_INLINE int node_access(SPYContext *c, SPYValue *v, Node *n) {
     return n->attr_kind;
 }
 static int machine_function(SPYContext *, SPYValue *);
+/* attribute, for an attribute step: NULL with no error when v's class's
+ * __getattr__, on the machine, answers an AttributeError, c->fallback. */
+static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, Node *n) {
+    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : NULL, *definition;
+    SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
+    if (!fallback || !machine_function(c, fallback) ||
+        ((definition = class_lookup(owner, "__getattribute__")) && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)))
+        return attribute(c, v, n->b->text);
+    /* As attribute_lookup: __getattr__ is found before the lookup runs. */
+    spy_retain(fallback);
+    SPYValue *result = attribute_value(c, v, n->b->text);
+    if (result || !error_is(c, "AttributeError")) { spy_release(fallback); return result; }
+    spy_clear_error(c);
+    c->fallback = fallback;
+    return NULL;
+}
 /* The attribute node n read from v, with n remembering how v's class
  * answers; or, when calls is set, NULL with no error for a property whose
- * getter, n->attr_method's, the machine calls. */
+ * getter, n->attr_method's, or a __getattr__ (attribute_step) the machine
+ * calls. */
 static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int calls) {
     int kind = plain_instance(v) ? node_access(c, v, n) & ATTR_READ : ATTR_SLOW;
     if (kind == ATTR_OWN || kind == ATTR_METHOD) {
@@ -11594,7 +11612,7 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
     if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
-    return attribute(c, v, n->b->text);
+    return calls ? attribute_step(c, v, n) : attribute(c, v, n->b->text);
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
@@ -21363,6 +21381,25 @@ static int unbind(SPYContext *c, SPYValue **callee, size_t *argc, SPYValue **arg
 /* operand_call of a bound method, a class, an instance, or a callee given
  * a generator or an iterator first, with room in argv for one more
  * argument. */
+/* A tuple of the n values items holds. */
+static SPYValue *tuple_of(SPYContext *c, size_t n, SPYValue *const *items) {
+    SPYValue *tuple = value_alloc(c, SPY_TUPLE, n);
+    for (size_t i = 0; tuple && i < n; i++)
+        if (sequence_append(c, tuple, items[i])) { spy_release(tuple); return NULL; }
+    return tuple;
+}
+/* The Python __new__ that calling class callee, which plain_init does
+ * not serve, calls first as type_call does, setting c->entering_kind;
+ * else NULL. Borrowed. */
+static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
+    SPYValue *meta = callee->as.map.meta, *allocator;
+    if (callee->as.map.flags == 2 || callee->as.map.native || !callee->as.map.mro ||
+        (meta && class_lookup(meta, "__call__") != name_local(c->types[SPY_CLASS], "__call__")) ||
+        !(allocator = slot_new(c, callee)) || allocator->type != SPY_STATICMETHOD ||
+        !machine_function(c, allocator->as.wrapper.function)) return NULL;
+    c->entering_kind = CALL_CHECKED;
+    return allocator->as.wrapper.function;
+}
 /* The Python __str__ or __repr__ that callee, str or repr, calls on its
  * one argument, an instance, *name its name; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **name) {
@@ -21397,6 +21434,19 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
             c->entering_init = init; c->entering_kind = CALL_INIT;
             if ((*env = function_env(c, init, argc + 1, argv, NULL, 1))) return callee;
         }
+        spy_release(callee);
+        return NULL;
+    }
+    SPYValue *allocate = !init && method < 0 && callee->type == SPY_CLASS && argc < 8 ? new_method(c, callee) : NULL;
+    if (allocate) {
+        /* A class call enters its Python __new__ (CALL_CHECKED) with the
+         * class first, the class and the arguments on the stack. */
+        SPYValue *args = tuple_of(c, argc, argv);
+        if (machine_push(c, m, spy_retain(callee)) || machine_push(c, m, args)) { release_all(argc, argv); spy_release(callee); return NULL; }
+        memmove(argv + 1, argv, argc * sizeof(*argv));
+        argv[0] = spy_retain(callee);
+        c->entering_init = allocate;
+        if ((*env = function_env(c, allocate, argc + 1, argv, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
     }
@@ -21436,7 +21486,8 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE) ||
-        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE)))
+        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
+        (argc == 1 && callee->type == SPY_NATIVE && argv[0]->type == SPY_INSTANCE))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
@@ -21479,6 +21530,19 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     if (c->error_type[0]) return NULL;
+    SPYValue *allocate = !init && callee->type == SPY_CLASS ? new_method(c, callee) : NULL;
+    if (allocate) {
+        /* The class stays in its place, the arguments' tuple after it. */
+        SPYValue *args = tuple_of(c, argc, argv);
+        if (!args) return NULL;
+        spy_retain(callee);
+        m->len -= argc;
+        c->entering_init = allocate;
+        *env = function_env(c, allocate, argc + 1, argv - 1, NULL, 1);
+        argv[-1] = callee;
+        if (machine_push(c, m, args) || !*env) { *env = NULL; spy_release(callee); return NULL; }
+        return spy_retain(callee);
+    }
     SPYValue *name, *convert = conversion_method(c, callee, argc, argv, &name);
     if (convert) {
         /* The method's name takes the callee's place (CALL_CHECKED). */
@@ -21790,23 +21854,88 @@ static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPY
     spy_release(machine_pop(m));
     return NULL;
 }
-/* A test's __bool__, or a str() or repr() call's __str__ or __repr__,
- * returned result into step ins (CALL_CHECKED): the pc to run next. The
- * tested value is on m's stack; a conversion's method name and instance
- * are, which the str it makes replaces. */
-static NO_INLINE size_t checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
-    SPYValue *v = machine_pop(m);
+/* A class call's __new__ returned result, given class cls and arguments
+ * args, all owned: as type_call, an instance of cls, of the type it has,
+ * is initialized; result is the call's value, on m's stack. A Python
+ * __init__ is the function returned, with *env its environment. */
+static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *args, SPYValue *result, SPYValue **env) {
+    SPYValue *init = (result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls)) ||
+                     (result->type == SPY_CLASS && subclass(value_class(c, result), cls)) ? special_method(c, result, "__init__") : NULL;
+    SPYValue *function = NULL;
+    size_t argc = args->as.seq.len;
+    spy_release(cls);
+    if (machine_push(c, m, result) || !init) { spy_release(args); spy_release(init); return NULL; }
+    if (init->type == SPY_METHOD && machine_function(c, init->as.method.function) && argc < 8) {
+        SPYValue *argv[9];
+        argv[0] = spy_retain(init->as.method.self);
+        for (size_t i = 0; i < argc; i++) argv[i + 1] = spy_retain(args->as.seq.items[i]);
+        if ((*env = function_env(c, init->as.method.function, argc + 1, argv, NULL, 1)))
+            function = spy_retain(init->as.method.function);
+    } else {
+        SPYValue *value = call(c, init, argc, args->as.seq.items);
+        if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
+        spy_release(value);
+    }
+    spy_release(init); spy_release(args);
+    return function;
+}
+/* Attribute step n's call on v, which it owns: its property's getter, or
+ * the __getattr__ c->fallback (CALL_CHECKED), the name and v on m's stack;
+ * the function to enter, its kind c->entering_kind, else NULL. */
+static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYValue *v, SPYValue **env) {
+    SPYValue *function = c->fallback, *argv[2] = {v, NULL};
+    c->fallback = NULL;
+    c->entering_kind = function ? CALL_CHECKED : CALL_MACHINE;
+    if (!function) function = spy_retain(n->attr_method->as.property.get);
+    else if (!(argv[1] = spy_string(c, n->b->text, strlen(n->b->text))) || machine_push(c, m, spy_retain(argv[1])) ||
+             machine_push(c, m, spy_retain(v))) {
+        spy_release(argv[1]); spy_release(v); spy_release(function);
+        return NULL;
+    }
+    if ((*env = function_env(c, function, 1 + !!argv[1], argv, NULL, 1))) return function;
+    spy_release(function);
+    return NULL;
+}
+/* A test's __bool__, a str() or repr() call's __str__ or __repr__, an
+ * attribute step's __getattr__ or a class call's __new__ returned result,
+ * or NULL on an error, into step ins of m (CALL_CHECKED), whose next
+ * instruction is pc: the machine to run on, m with its pc set, or that of
+ * the __init__ the class call enters (CALL_INIT). The tested value is on m's
+ * stack; a conversion's or __getattr__'s name and instance are, or a
+ * __new__'s class and arguments (a tuple), which what the step makes
+ * replaces. */
+static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    m->pc = pc;
+    if (!result) {
+        /* As attribute: an AttributeError names the attribute and object. */
+        if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], m->stack[m->len - 2]->as.string.data);
+        return m;
+    }
+    SPYValue *v = machine_pop(m), *function, *env;
+    if (ins->op == BC_ATTR) {
+        spy_release(machine_pop(m)); spy_release(v);
+        machine_push(c, m, result);
+        return m;
+    }
+    if (v->type == SPY_TUPLE) {
+        if (!(function = constructed(c, m, machine_pop(m), v, result, &env))) return m;
+        Call *call = call_enter(c, function, env, m);
+        if (!call) return m;
+        call->m.outermost = CALL_INIT;
+        return &call->m;
+    }
     if (ins->op != BC_FALSE) {
         SPYValue *name = machine_pop(m), *whole = NULL;
         Buffer b = { .ctx = c, .whole = &whole };
         SPYValue *string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
         spy_release(result); spy_release(v); spy_release(name);
         if (string) machine_push(c, m, string);
-        return pc;
+        return m;
     }
     int truth = truth_result(c, v, 1, result);
     spy_release(v);
-    return truth ? pc : ins->target;
+    if (!truth) m->pc = ins->target;
+    return m;
 }
 /* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;
  * or, for an instance's Python special method, the call to enter
@@ -21951,7 +22080,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || code[pc - 1].arg)) spy_release(machine_pop(m));
                     } else if (kind == CALL_CHECKED) {
-                        if (result) pc = checked_returned(c, m, &code[pc - 1], result, pc);
+                        m = checked_returned(c, m, &code[pc - 1], result, pc);
+                        f = m->frame; code = m->code->items; pc = m->pc;
                     } else if (kind == CALL_OPERATOR) {
                         if (result) pc = operator_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_ENTER) {
@@ -22578,13 +22708,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         spy_release(a);
         continue;
     enter_getter:
-        /* A property's Python getter is a call taking the instance (BC_ATTR). */
-        {
-            SPYValue *self = a;
-            value = spy_retain(n->attr_method->as.property.get);
-            if (!(callee_env = function_env(c, value, 1, &self, NULL, 1))) { spy_release(value); continue; }
-        }
-        goto enter_call;
+        /* A property's Python getter or a __getattr__ is a call (BC_ATTR). */
+        if (!(value = getter_call(c, m, n, a, &callee_env))) continue;
+        special = c->entering_kind;
+        goto enter_special;
     enter_init:
         /* A class call enters its __init__ (class_init). */
         spy_release(value); value = spy_retain(c->entering_init); special = c->entering_kind;

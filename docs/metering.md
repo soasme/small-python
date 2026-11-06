@@ -274,24 +274,32 @@ a pause is due stops the call as without pausing, so an outermost call or
 a resume does at most two budgets of work.
 
 A call can pause only where nothing but its machines holds its state.
-Function calls, calls of bound methods, plain classes and instances with
-a Python `__call__`, a loop's Python `__next__`, the function of a `map`
-taken by a loop, generators and maps consumed by `sum`, `any`, `all`,
-`list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, generators
-resumed by `next` or by their `__next__` and `send` methods, coroutines
-resumed by `send`, the `__str__` and `__repr__` that `str` and `repr`
-call, the key
-functions of `sorted`, `list.sort`, `min` and `max`, Python decorators,
-property getters, `__enter__` methods, and the binary operator,
-comparison, `__getitem__`, `__setitem__`, `__contains__`, `__bool__` and
-`__iter__` methods of instances, and list, set and dictionary
-comprehensions run as machines on the heap, in one native
-activation of `run_machine`; a call that native code makes (another
-special method, a host function, a class body, a call from a statement
-the walker still runs) runs in an activation of its own. The
-engine counts the activations and pauses only in the outermost one, so a
-pause due inside native code waits until that code returns. Interactive
-and expression units run on the walker and do not pause.
+These run as machines on the heap, in one native activation of
+`run_machine`:
+
+- calls of functions, bound methods and plain classes; classes with a
+  Python `__new__`; instances with a Python `__call__`; Python
+  decorators;
+- a loop's Python `__iter__` and `__next__`, and the function of a `map`
+  it takes items from;
+- generators and maps consumed by `sum`, `any`, `all`, `list`, `tuple`,
+  `set`, `frozenset`, `sorted` or `str.join`; generators resumed by
+  `next` or by their `__next__` and `send` methods, and coroutines
+  resumed by `send`;
+- the key functions of `sorted`, `list.sort`, `min` and `max`;
+- the `__str__` and `__repr__` that `str` and `repr` call;
+- property getters and `__getattr__`, `__enter__`, `__bool__`, binary
+  operator, comparison, `__getitem__`, `__setitem__` and `__contains__`
+  methods of instances, where a step of their own reaches them;
+- list, set and dictionary comprehensions.
+
+A call that native code makes runs in an activation of its own: another
+special method, a host function, a class body, and a call from a
+statement or expression the walker evaluates whole, such as an attribute
+read or a test inside an expression without calls. The engine counts
+the activations and pauses only in the outermost one, so a pause due
+inside native code waits until that code returns. Interactive and
+expression units run on the walker and do not pause.
 
 While a call is paused, other outermost calls run as usual and stop
 rather than pause. Freeing the context stops a paused call: it unwinds
