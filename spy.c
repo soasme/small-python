@@ -15761,20 +15761,22 @@ static int string_keys(SPYContext *c, SPYValue *keywords) {
 static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
     return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->flat;
 }
+/* Run fn, whose body is on the machine, in env, called from C; it takes env. */
+static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *env) {
+    Call *call = call_enter(c, spy_retain(fn), env, NULL);
+    if (!call) return NULL;
+    Result r = run_machine(c, NULL, &call->m, NULL, NULL, 0, NULL);
+    call_leave(c, call, r.flow == FLOW_RETURN ? r.value : NULL);
+    /* A deep recursion's storage goes once it has returned. */
+    if (!c->calls_len && c->calls_cap > 64) calls_free(c, 64);
+    return r.flow == FLOW_RETURN ? r.value : NULL;
+}
 /* A Python function's body, run in a new environment of its scope. */
 static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     Node *def = fn->as.function.def;
     SPYValue *env = function_env(c, fn, argc, argv, keywords), *result = NULL;
     if (!env) return NULL;
-    if (def->flat) {
-        Call *call = call_enter(c, spy_retain(fn), env, NULL);
-        if (!call) return NULL;
-        Result r = run_machine(c, NULL, &call->m, NULL, NULL, 0, NULL);
-        call_leave(c, call, r.flow == FLOW_RETURN ? r.value : NULL);
-        /* A deep recursion's storage goes once it has returned. */
-        if (!c->calls_len && c->calls_cap > 64) calls_free(c, 64);
-        return r.flow == FLOW_RETURN ? r.value : NULL;
-    }
+    if (def->flat) return call_machine(c, fn, env);
     Frame frame = {env, fn->as.function.unit, 0};
     if (def->code) result = new_generator(c, &frame, fn);
     else if (!enter_frame(c, env, fn)) {
