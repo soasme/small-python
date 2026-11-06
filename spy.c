@@ -13924,9 +13924,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         }
         else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
         compile_body(c, p, n->b);
-        /* A body of one block that a loop's step stores into runs in it. */
-        if (n->kind == N_FOR && branch != SIZE_MAX && p->len == branch + 2 && p->items[branch].other && p->items[branch + 1].op == BC_BLOCK)
-            p->items[branch].other = 2;
+        /* A body of one walker step that a loop's step stores into runs
+         * in it: 2 a block, 3 a statement. */
+        if (n->kind == N_FOR && branch != SIZE_MAX && p->len == branch + 2 && p->items[branch].other &&
+            (p->items[branch + 1].op == BC_BLOCK || p->items[branch + 1].op == BC_EXEC))
+            p->items[branch].other = p->items[branch + 1].op == BC_BLOCK ? 2 : 3;
         patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
         patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
         compile_body(c, p, n->c); patch(p, loop, p->len); break;
@@ -21591,6 +21593,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 SPYValue *iterator = m->blocks[m->block_len - 1].value;
                 if (!iterator_fast(c, iterator, &a)) {
                     if (resumable(iterator)) { value = iterator; goto resume_generator; }
+                    relocate(c, n);
                     /* A Python __next__ is a call that returns into this step (next_left). */
                     if ((value = machine_next(c, iterator))) {
                         SPYValue *self = spy_retain(iterator);
@@ -21603,13 +21606,23 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (!a) pc = ins->target;
                 else if (ins->other) {
                     store_target(c, &f, n->args, a);
-                    /* The body and the jump back, unless a pass is counted or watched. */
-                    if (ins->other == 2 && !watched(c) && quiet(c, &f)) {
-                        spy_release(a); a = NULL;
-                        relocate(c, n = code[pc].node);
-                        flow = execute_statements(c, &f, n, 0);
-                        if (flow.flow != FLOW_NORMAL || c->error_type[0]) { pc++; continue; }
-                        spy_release(flow.value); flow.value = NULL; pc--;
+                    /* The body and the jump back, while no pass is counted or
+                     * watched and the iterator steps itself without raising. */
+                    if (ins->other >= 2 && !watched(c)) {
+                        Node *body = code[pc].node;
+                        int left = 0;
+                        while (quiet(c, &f)) {
+                            spy_release(a); a = NULL;
+                            relocate(c, body);
+                            if (ins->other == 3 && body->kind == N_ASSIGN) assign_step(c, &f, body);
+                            else flow = execute_statements(c, &f, body, ins->other == 3);
+                            if (flow.flow != FLOW_NORMAL || c->error_type[0]) { left = 1; break; }
+                            spy_release(flow.value); flow.value = NULL;
+                            if (watched(c) || !quiet(c, &f) || !iterator_fast(c, iterator, &a)) { pc--; break; }
+                            if (!a) { pc = ins->target; break; }
+                            store_target(c, &f, n->args, a);
+                        }
+                        if (left) { pc++; continue; }
                     }
                 }
                 else { machine_push(c, m, a); a = NULL; }
