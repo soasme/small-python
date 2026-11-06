@@ -1893,6 +1893,16 @@ const unsigned char *spy_as_bytes(SPYContext *c, SPYValue *v, size_t *n) {
     if (n) *n = v->as.string.len;
     return (const unsigned char *)v->as.string.data;
 }
+/* The truth of v that its __bool__ (boolean) or __len__ returned in
+ * result, which it takes; 0 with an error when result cannot be one. */
+static int truth_result(SPYContext *c, SPYValue *v, int boolean, SPYValue *result) {
+    int64_t length = 0;
+    if (boolean && result->type != SPY_BOOL) { char fq[256]; errorf(c, "TypeError", "%s.__bool__() must return a bool, not %s", type_fqname(v, fq, sizeof(fq)), type_name(result)); }
+    else if (!boolean) length_result(c, result, &length);
+    else length = result == c->booleans[1];
+    spy_release(result);
+    return !c->error_type[0] && length != 0;
+}
 /* Python truth; a failing __bool__ or __len__ yields 0 with the error set. */
 static int truthy(SPYValue *v) {
     switch (v->type == SPY_CLASS && v->as.map.meta ? SPY_INSTANCE : v->type) {
@@ -1923,12 +1933,7 @@ static int truthy(SPYValue *v) {
         }
         SPYValue *result = call(c, method, 0, NULL);
         spy_release(method);
-        if (!result) return 0;
-        int64_t length = 0;
-        if (boolean && result->type != SPY_BOOL) { char fq[256]; errorf(c, "TypeError", "%s.__bool__() must return a bool, not %s", type_fqname(v, fq, sizeof(fq)), type_name(result)); }
-        else if (!boolean) length_result(c, result, &length);
-        else length = result == c->booleans[1];
-        spy_release(result); return !c->error_type[0] && length != 0;
+        return result ? truth_result(c, v, boolean, result) : 0;
     }
     default: return 1;
     }
@@ -13544,8 +13549,9 @@ struct Machine {
 /* What a call on the machine returns into: its caller's machine; C; or
  * the step that made a special call, a class call's __init__, a loop's
  * __next__, a sort's key function, a consumer's next item, a with
- * statement's __enter__ or an operator's special method. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR };
+ * statement's __enter__, an operator's special method or a test's
+ * __bool__. */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_BOOL };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -21580,12 +21586,25 @@ static int step_operation(Instruction *ins, int *op) {
 /* The Python special method of instance x's class that operator step ins
  * calls on x and y, owned, with its env, to enter on m (CALL_OPERATOR),
  * x and y on the stack under it: __getitem__, a binary operator's direct
- * method when no reflected one of y's class comes first, or a rich
- * comparison when y's class is no subclass of x's; else NULL. */
+ * method when no reflected one of y's class comes first, a rich
+ * comparison when y's class is no subclass of x's, or, for in, instance
+ * y's __contains__; else NULL. */
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
+    int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
+    SPYValue *function = NULL;
+    if (contains) {
+        /* in takes the container's __contains__, given the item. */
+        if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
+            (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
+            !machine_push(c, m, spy_retain(x)) && !machine_push(c, m, spy_retain(y))) {
+            SPYValue *args[] = {spy_retain(y), spy_retain(x)};
+            if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+            spy_release(machine_pop(m)); spy_release(machine_pop(m));
+        }
+        return NULL;
+    }
     if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
-    int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op);
-    SPYValue *cls = x->as.map.parent, *other = value_class(c, y), *function;
+    SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : NULL;
     if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
     else if (kind == OPERATE_BINARY)
@@ -21634,7 +21653,11 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
 static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     SPYValue *y = machine_pop(m), *x = machine_pop(m);
     int op = 0, kind = step_operation(ins, &op);
-    if (kind != OPERATE_INDEX && result == c->not_implemented) {
+    if (op == O_IN || op == O_NOTIN) {
+        int truth = truthy(result);
+        spy_release(result);
+        result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
+    } else if (kind != OPERATE_INDEX && result == c->not_implemented) {
         spy_release(result);
         if (kind == OPERATE_BINARY) {
             result = value_class(c, x) != value_class(c, y) ? try_operator(c, y, operator_of(op)->reflected, x, NULL, 0) : NULL;
@@ -21647,6 +21670,24 @@ static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction
     pc = operator_finish(c, m, ins, y, result, pc);
     spy_release(x); spy_release(y);
     return pc;
+}
+/* The Python __bool__ of instance v's class that a test calls on v,
+ * owned, with its env, v on m's stack under it; else NULL. */
+static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **env) {
+    SPYValue *function = v->as.map.base || builtin_base(c, v, "__bool__", "__len__") ? NULL : class_lookup(v->as.map.parent, "__bool__");
+    if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(v))) return NULL;
+    SPYValue *self = spy_retain(v);
+    if ((*env = function_env(c, function, 1, &self, NULL, 1))) return spy_retain(function);
+    spy_release(machine_pop(m));
+    return NULL;
+}
+/* A test's __bool__ returned result into step ins, the tested value on m's
+ * stack: the pc to run next. */
+static NO_INLINE size_t bool_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    SPYValue *v = machine_pop(m);
+    int truth = truth_result(c, v, 1, result);
+    spy_release(v);
+    return truth ? pc : ins->target;
 }
 /* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;
  * or, for an instance's Python special method, the call to enter
@@ -21768,6 +21809,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                          * whose value is already on the caller's stack. */
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
+                    } else if (kind == CALL_BOOL) {
+                        if (result) pc = bool_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_OPERATOR) {
                         if (result) pc = operator_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_ENTER) {
@@ -21883,7 +21926,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
             int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
-            if (order < 0 && a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            if (order < 0 && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE)) { x = a; y = b; goto operator_step; }
             value = order >= 0 ? spy_bool(c, order) : comparison(c, n->op, a, b);
             if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(b); }
             else {
@@ -22038,6 +22081,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_FALSE)
             a = machine_pop(m);
+            if (a->type == SPY_INSTANCE && !truth_known) goto bool_step;
             if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a))) pc = ins->target;
             NEXT_RELEASE;
         CASE(BC_SHORT) {
@@ -22358,8 +22402,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
     operator_step:
-        /* BC_BINARY, BC_INDEX or BC_COMPARE on instance x and y: a Python
-         * special method is a call (operator_call). */
+        /* BC_BINARY, BC_INDEX or BC_COMPARE on x and y, an instance among
+         * them: a Python special method is a call (operator_call). */
         callee_env = NULL;
         if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
             if (a) spy_release(a);
@@ -22370,6 +22414,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : operation(c, ins, x, y), pc);
         if (a) spy_release(a);
         if (b) spy_release(b);
+        continue;
+    bool_step:
+        /* BC_FALSE on instance a: a Python __bool__ is a call (CALL_BOOL). */
+        callee_env = NULL;
+        if ((value = bool_call(c, m, a, &callee_env))) { spy_release(a); special = CALL_BOOL; goto enter_special; }
+        if (!c->error_type[0] && !truthy(a)) pc = ins->target;
+        spy_release(a);
         continue;
     enter_getter:
         /* A property's Python getter is a call taking the instance (BC_ATTR). */

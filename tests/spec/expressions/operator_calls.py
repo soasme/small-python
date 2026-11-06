@@ -1,4 +1,4 @@
-# spec: PLS-315 7.6.2, 13.3.2, 13.7, 13.10
+# spec: PLS-315 7.6.2, 13.3.2, 13.7, 13.10, 7.5.1
 # description: A binary operator calls the left operand's method, then the
 # right one's reflected method when that declines, unless the right
 # operand's class is a subclass overriding it, which goes first; a
@@ -114,3 +114,40 @@ assert comparisons() == [True, True, True, False, False, 'sub', True, False, Tru
                          'truthy', 'Truth', 'lt raised'], comparisons()
 assert order[:12] == [('eq', 1), ('eq', 1), ('lt', 1), ('lt', 2), ('eq', 1), 'sub eq', ('lt', 1), ('lt', 2),
                       ('lt', 1), ('lt', 3), ('lt', 1), ('lt', 1)], order
+
+# in calls the container's __contains__ with the item and takes its truth;
+# a test calls __bool__, which must return a bool.
+seen = []
+class Box:
+    def __init__(self, items): self.items = items
+    def __contains__(self, item):
+        for i in range(1): pass
+        seen.append(item)
+        return len(self.items) if item in self.items else 0
+
+class Flag:
+    def __init__(self, t): self.t = t
+    def __bool__(self):
+        for i in range(1): pass
+        seen.append(self.t)
+        return self.t
+
+class NotBool:
+    def __bool__(self): return 1
+
+def tests():
+    box = Box([1, 2])
+    out = [1 in box, 3 in box, 3 not in box, 2 not in box]
+    if 1 in box: out.append('in')
+    if Flag(True): out.append('true')
+    if not Flag(False): out.append('false')
+    while Flag(False): pass
+    out.append('y' if Flag(True) else 'n')
+    try:
+        if NotBool(): pass
+    except TypeError as e:
+        out.append(str(e))
+    return out
+
+assert tests() == [True, False, True, False, 'in', 'true', 'false', 'y', 'NotBool.__bool__() must return a bool, not int'], tests()
+assert seen[:5] == [1, 3, 3, 2, 1] and seen[5:9] == [True, False, False, True], seen
