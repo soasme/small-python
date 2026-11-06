@@ -13468,13 +13468,20 @@ typedef struct {
     size_t line;
     SPYValue *value;
 } ErrorState;
-enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_ASYNC_WITH };
+enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_ASYNC_WITH, BLOCK_CONSUME };
+/* A builtin taking an iterable's items one at a time (consumer_add): sum,
+ * any, all, list or tuple; and a sum's float total while it compensates. */
+typedef struct { int id, compensating; SPYValue *result; double total, compensation; } Consumer;
+static int consumer_add(SPYContext *, Consumer *, SPYValue *);
+static SPYValue *consumer_end(SPYContext *, Consumer *);
+/* A BLOCK_CONSUME's value is the generator its consumer takes the items of. */
 typedef struct {
     int kind, flow;
     size_t depth, target, other;
     Node *name, *node;
     SPYValue *value, *handled;
     ErrorState *error;
+    Consumer *consumer;
 } Block;
 struct Machine {
     Program *code;
@@ -13515,12 +13522,13 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->value) visit(b->value, data);
         if (b->handled) visit(b->handled, data);
         if (b->error && b->error->value) visit(b->error->value, data);
+        if (b->consumer && b->consumer->result) visit(b->consumer->result, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
 static void free_machine(SPYContext *c, Machine *m) {
     if (!m) return;
-    for (size_t i = 0; i < m->block_len; i++) mem_free(m->blocks[i].error);
+    for (size_t i = 0; i < m->block_len; i++) { mem_free(m->blocks[i].error); mem_free(m->blocks[i].consumer); }
     if (!c->spare_machine) {
         *m = (Machine){.stack = m->stack, .cap = m->cap, .blocks = m->blocks, .block_cap = m->block_cap};
         c->spare_machine = m;
@@ -20852,6 +20860,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     }
     spy_release(b.value); spy_release(b.handled);
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
+    if (b.consumer) { spy_release(b.consumer->result); mem_free(b.consumer); }
 }
 static ErrorState *save_error(SPYContext *c) {
     ErrorState state = take_error(c);
@@ -21068,8 +21077,54 @@ static void finish_delegate(SPYContext *c, Machine *m) {
 /* The call steps: a call's result, or NULL with an error; or, when the
  * callee's body is on the machine, the callee with *env its environment,
  * to enter there. */
-/* BC_CALLF: plain call node n, whose operands need no steps of their own. */
-static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYValue **env) {
+/* Whether a loop step may resume v's machine in its own run_machine: a
+ * generator that is not running or delegating. */
+static ALWAYS_INLINE int resumable(SPYValue *v) {
+    return v->type == SPY_GENERATOR && !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
+        v->as.generator.machine->awaiting < AWAIT_DELEGATE;
+}
+/* The builtin of consumer that callee is when called with argc arguments
+ * argv, the first a generator the machine can resume (consumer_of): sum,
+ * any, all, list or tuple; else -1. */
+static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    int id = callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
+             callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
+    if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL) return -1;
+    if (argc > (id == B_SUM ? 2u : 1u)) return -1;
+    /* sum() refuses a str, bytes or bytearray start before it iterates. */
+    if (argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
+                      builtin_value(c, argv[1], SPY_BYTEARRAY))) return -1;
+    return id;
+}
+static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    return argc && resumable(argv[0]) ? consumer_id(c, callee, argc, argv) : -1;
+}
+/* Consumer id takes generator's items on machine m (BLOCK_CONSUME), sum's
+ * from start; both owned. */
+static void consume(SPYContext *c, Machine *m, int id, SPYValue *generator, SPYValue *start) {
+    Consumer *consumer = allocate(c, sizeof(*consumer));
+    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_LIST || id == B_TUPLE ? value_new(c, id == B_LIST ? SPY_LIST : SPY_TUPLE) : NULL;
+    Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); return; }
+    *consumer = (Consumer){.id = id, .result = result};
+    block->value = generator; block->consumer = consumer;
+}
+/* Whether the consumer atop m, given its generator's next item (NULL at
+ * its end or on an error), takes another; when it does not, its result is
+ * on the stack, or the error pending. */
+static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
+    Block *top = &m->blocks[m->block_len - 1];
+    int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
+    if (status > 0) {
+        SPYValue *result = consumer_end(c, top->consumer);
+        pop_block(c, m, f);
+        machine_push(c, m, result);
+    }
+    return !status;
+}
+/* BC_CALLF: plain call node n, whose operands need no steps of their own;
+ * or NULL with no error when a consumer of a generator began on m. */
+static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
     SPYValue *argv[9], *callee, *result;
     size_t argc;
     int method;
@@ -21080,7 +21135,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Frame *f, Node *n, SPYVal
         spy_release(callee);
         return NULL;
     }
-    result = call_plain(c, callee, method, n, argc, argv);
+    int id = method < 0 ? consumer_of(c, callee, argc, argv) : -1;
+    if (id >= 0) consume(c, m, id, spy_retain(argv[0]), argc > 1 ? spy_retain(argv[1]) : NULL);
+    result = id >= 0 ? NULL : call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -21116,8 +21173,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     if (callee->type == SPY_CLASS && (result = class_call(c, m, callee, argc, argv, env))) return result;
     if (c->error_type[0]) return NULL;
-    result = call_plain(c, callee, -1, n, argc, argv);
+    int id = consumer_of(c, callee, argc, argv);
+    SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
+    result = id >= 0 ? NULL : call_plain(c, callee, -1, n, argc, argv);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+    if (id >= 0) consume(c, m, id, generator, start);
     return result;
 }
 /* BC_CALLN of method call node n: its object, then its arguments, on the
@@ -21241,12 +21301,6 @@ static SPYValue *machine_next(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_INSTANCE || builtin_base(c, v, "__next__", NULL)) return NULL;
     SPYValue *next = class_lookup(v->as.map.parent, "__next__");
     return next && machine_function(c, next) ? next : NULL;
-}
-/* Whether a loop step may resume v's machine in its own run_machine: a
- * generator that is not running or delegating. */
-static ALWAYS_INLINE int resumable(SPYValue *v) {
-    return v->type == SPY_GENERATOR && !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
-        v->as.generator.machine->awaiting < AWAIT_DELEGATE;
 }
 /* Run machine m: generator's, or else the innermost call's, then the
  * calls it makes, until the outermost of them returns. */
@@ -21417,8 +21471,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             break;
         }
         CASE(BC_CALLF)
-            callee_env = NULL; value = operand_call(c, &f, n, &callee_env);
+            callee_env = NULL; value = operand_call(c, m, &f, n, &callee_env);
             if (callee_env) goto enter_call;
+            if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALLN)
         CASE(BC_CALLK)
@@ -21430,6 +21485,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 goto enter_special;
             }
             if (callee_env) goto enter_call;
+            if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
             callee_env = NULL; value = keyword_call(c, m, 1, &callee_env);
@@ -21772,6 +21828,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (a) spy_release(a);
         if (b) spy_release(b);
         continue;
+    consume_generator:
+        /* A call consuming a generator (consume) resumes it for each item;
+         * one delegating in C gives its item there, as to a loop step. */
+        value = m->blocks[m->block_len - 1].value;
+        if (!resumable(value)) { m->pc = pc; a = iterator_next(c, value); goto consume_item; }
     resume_generator:
         /* A loop step resumes generator value's machine here, which yields
          * or ends into this machine (generator_left). */
@@ -21805,12 +21866,22 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         } else if (flow.flow != FLOW_YIELD) generator_end(c, g, flow);
         m = resumer;
         f = m->frame; code = m->code->items; pc = m->pc;
+        Block *top = m->block_len ? &m->blocks[m->block_len - 1] : NULL;
+        if (top && top->kind == BLOCK_CONSUME) {
+            a = flow.flow == FLOW_YIELD ? flow.value : NULL;
+            flow = (Result){FLOW_NORMAL, NULL};
+            goto consume_item;
+        }
         /* The loop's BC_NEXT, which resumed it. */
         if (flow.flow != FLOW_YIELD && !c->error_type[0]) pc = code[pc - 1].target;
         if (flow.value) loop_item(c, m, &f, &code[pc - 1], flow.value);
         flow = (Result){FLOW_NORMAL, NULL};
         continue;
     }
+    consume_item:
+        if (consumer_took(c, m, &f, a)) goto consume_generator;
+        a = NULL;
+        continue;
     enter_call:
         m->pc = pc;
         {
@@ -26190,6 +26261,55 @@ static const char *attribute_slot_name(SPYContext *c, const char *owner, const c
     if (!name) { errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(argv[1])); return NULL; }
     return name->as.string.data;
 }
+/* A sum's compensated float total, as its result. */
+static void consumer_settle(SPYContext *c, Consumer *s) {
+    if (!s->compensating) return;
+    s->compensating = 0;
+    if (s->compensation && isfinite(s->compensation)) s->total += s->compensation;
+    spy_release(s->result);
+    s->result = spy_float(c, s->total);
+}
+/* Consumer s takes item: 0 to go on, 1 when its result is known (any, all),
+ * -1 on an error. A float total accumulates with Neumaier's compensation,
+ * as CPython's sum. */
+static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
+    if (s->id == B_LIST || s->id == B_TUPLE) {
+        int status = sequence_append(c, s->result, item);
+        spy_release(item);
+        return status;
+    }
+    if (s->id == B_SUM && s->result && s->result->type == SPY_FLOAT &&
+        (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
+        if (!s->compensating) { s->total = s->result->as.real; s->compensation = 0; s->compensating = 1; }
+        if (item->type == SPY_FLOAT) {
+            double x = item->as.real, t = s->total + x;
+            s->compensation += fabs(s->total) >= fabs(x) ? (s->total - t) + x : (x - t) + s->total;
+            s->total = t;
+        } else s->total += (double)item->as.integer_data.small;
+        spy_release(item);
+        return 0;
+    }
+    consumer_settle(c, s);
+    if (s->id == B_ALL || s->id == B_ANY) {
+        int truth = truthy(item);
+        spy_release(item);
+        if (c->error_type[0]) return -1;
+        if (truth != (s->id == B_ALL)) { s->result = spy_bool(c, truth); return 1; }
+        return 0;
+    }
+    SPYValue *next = s->result ? binary(c, '+', s->result, item) : NULL;
+    spy_release(s->result); spy_release(item);
+    return (s->result = next) ? 0 : -1;
+}
+/* Consumer s's result, once its items ran out or decided it; or NULL with
+ * the error that stopped it. */
+static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
+    if (!c->error_type[0]) consumer_settle(c, s);
+    SPYValue *result = s->result;
+    s->result = NULL;
+    if (c->error_type[0]) { spy_release(result); return NULL; }
+    return result || (s->id != B_ALL && s->id != B_ANY) ? result : spy_bool(c, s->id == B_ALL);
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -26796,16 +26916,14 @@ execution_fail:
             return v;
         }
         SPYValue *iterator = argc && (id == B_TUPLE || !length_hint_check(c, a)) ? get_iterator(c, a) : NULL;
+        Consumer consumer = {.id = id, .result = v};
         if (iterator) for (;;) {
             if (pass(c)) break;
             SPYValue *item = iterator_next(c, iterator);
-            if (!item) break;
-            int status = sequence_append(c, v, item); spy_release(item);
-            if (status) break;
+            if (!item || consumer_add(c, &consumer, item)) break;
         }
         spy_release(iterator);
-        if (c->error_type[0]) { spy_release(v); return NULL; }
-        return v;
+        return consumer_end(c, &consumer);
     }
     case B_SUM: case B_ALL: case B_ANY: {
         if (!argc || (argc > 1 && (id != B_SUM || argc != 2))) goto arity;
@@ -26815,46 +26933,14 @@ execution_fail:
             if (builtin_value(c, start, SPY_BYTES)) return spy_error(c, "TypeError", "sum() can't sum bytes [use b''.join(seq) instead]");
             if (builtin_value(c, start, SPY_BYTEARRAY)) return spy_error(c, "TypeError", "sum() can't sum bytearray [use b''.join(seq) instead]");
         }
-        SPYValue *result = id == B_SUM ? (argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)) : NULL;
+        Consumer consumer = {.id = id, .result = id == B_SUM ? (argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)) : NULL};
         SPYValue *iterator = get_iterator(c, a);
-        /* A float total accumulates with Neumaier's compensation, as CPython's sum. */
-        int compensating = 0;
-        double total = 0, compensation = 0;
-        for (;;) {
-            if (c->error_type[0]) break;
-            if (pass(c)) break;
+        while (!c->error_type[0] && !pass(c)) {
             SPYValue *item = iterator_next(c, iterator);
-            if (id == B_SUM && result && result->type == SPY_FLOAT && item && !c->error_type[0] &&
-                (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
-                if (!compensating) { total = result->as.real; compensation = 0; compensating = 1; }
-                if (item->type == SPY_FLOAT) {
-                    double x = item->as.real, t = total + x;
-                    compensation += fabs(total) >= fabs(x) ? (total - t) + x : (x - t) + total;
-                    total = t;
-                } else total += (double)item->as.integer_data.small;
-                spy_release(item);
-                continue;
-            }
-            if (compensating) {
-                compensating = 0;
-                if (compensation && isfinite(compensation)) total += compensation;
-                spy_release(result);
-                if (!(result = spy_float(c, total))) { spy_release(item); break; }
-            }
-            if (!item) break;
-            if (id == B_ALL || id == B_ANY) {
-                int truth = truthy(item); spy_release(item);
-                if ((id == B_ALL && !truth) || (id == B_ANY && truth)) { spy_release(iterator); return spy_bool(c, truth); }
-            } else {
-                SPYValue *next = result ? binary(c, '+', result, item) : NULL;
-                spy_release(result); spy_release(item); result = next;
-                if (!result) break;
-            }
+            if (!item || consumer_add(c, &consumer, item)) break;
         }
         spy_release(iterator);
-        if (c->error_type[0]) { spy_release(result); return NULL; }
-        if (id == B_ALL || id == B_ANY) return spy_bool(c, id == B_ALL);
-        return result;
+        return consumer_end(c, &consumer);
     }
     case B_BOOL: {
         if (argc > 1) goto arity;

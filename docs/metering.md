@@ -275,7 +275,8 @@ a resume does at most two budgets of work.
 
 A call can pause only where nothing but its machines holds its state.
 Function calls, plain class calls, a loop's Python `__next__`, generators
-resumed by a loop and list, set and dictionary comprehensions run as machines on the heap, in one
+resumed by a loop or consumed by `sum`, `any`, `all`, `list` or `tuple`,
+and list, set and dictionary comprehensions run as machines on the heap, in one
 native activation of `run_machine`; a call that native code makes (a
 special method, a `sorted` key, a host function, a class body, a call from
 a statement the walker still runs) runs in an activation of its own. The
