@@ -13923,7 +13923,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             branch = compile_next(c, p, n, n->args);
         }
         else { compile_test(c, p, n->a); branch = emit(c, p, BC_FALSE, n, 0); }
-        compile_body(c, p, n->b); patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
+        compile_body(c, p, n->b);
+        /* A body of one block that a loop's step stores into runs in it. */
+        if (n->kind == N_FOR && branch != SIZE_MAX && p->len == branch + 2 && p->items[branch].other && p->items[branch + 1].op == BC_BLOCK)
+            p->items[branch].other = 2;
+        patch(p, emit(c, p, BC_JUMP, NULL, 0), start);
         patch(p, branch, p->len); emit(c, p, BC_POP_BLOCK, n, 0);
         compile_body(c, p, n->c); patch(p, loop, p->len); break;
     case N_TRY: {
@@ -21597,7 +21601,17 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     a = iterator_next(c, iterator);
                 }
                 if (!a) pc = ins->target;
-                else if (ins->other) store_target(c, &f, n->args, a);
+                else if (ins->other) {
+                    store_target(c, &f, n->args, a);
+                    /* The body and the jump back, unless a pass is counted or watched. */
+                    if (ins->other == 2 && !watched(c) && quiet(c, &f)) {
+                        spy_release(a); a = NULL;
+                        relocate(c, n = code[pc].node);
+                        flow = execute_statements(c, &f, n, 0);
+                        if (flow.flow != FLOW_NORMAL || c->error_type[0]) { pc++; continue; }
+                        spy_release(flow.value); flow.value = NULL; pc--;
+                    }
+                }
                 else { machine_push(c, m, a); a = NULL; }
             }
             NEXT_RELEASE;
