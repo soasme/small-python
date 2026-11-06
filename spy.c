@@ -9732,6 +9732,12 @@ static SPYValue *binary_special(SPYContext *, const Operator *, SPYValue *, SPYV
 static SPYValue *view_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *set_intersect_iterable(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
+static const Operator *operator_of(int op) {
+    for (size_t i = 0; i < sizeof(operators) / sizeof(*operators); i++) if (operators[i].token == op) return &operators[i];
+    return NULL;
+}
+static SPYValue *binary_declined(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *binary_builtin(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
     if (a->type == SPY_FLOAT && b->type == SPY_FLOAT && (op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real)))
@@ -9744,18 +9750,23 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int formats = op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) &&
         !(b->type == SPY_INSTANCE && subclass(b->as.map.parent, c->types[a->type]));
     if ((special_dispatch(a) || special_dispatch(b)) && !formats) {
-        for (size_t i = 0; i < sizeof(operators) / sizeof(*operators); i++) {
-            if (operators[i].token != op) continue;
-            SPYValue *result = binary_special(c, &operators[i], a, b, NULL);
-            if (result || c->error_type[0]) return result;
-            break;
-        }
-        if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
-        if (op == '|' && dictionary_value(c, a) && dictionary_value(c, b)) return dict_union(c, a, b);
-        if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
-            return binary(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
-                          b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
+        const Operator *o = operator_of(op);
+        SPYValue *result = o ? binary_special(c, o, a, b, NULL) : NULL;
+        return result || c->error_type[0] ? result : binary_declined(c, op, a, b);
     }
+    return binary_builtin(c, op, a, b);
+}
+/* Binary op on a and b once their special methods declined it. */
+static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
+    if (op == '|' && dictionary_value(c, a) && dictionary_value(c, b)) return dict_union(c, a, b);
+    if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
+        return binary(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
+                      b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
+    return binary_builtin(c, op, a, b);
+}
+/* Binary op on a and b, values of builtin types for it. */
+static SPYValue *binary_builtin(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (op == '+' && a->type == SPY_TEMPLATE) return template_concat(c, a, b);
     if (op == '+' && a->type == SPY_STRING && b->type == SPY_TEMPLATE)
         return spy_error(c, "TypeError", "can only concatenate str (not \"string.templatelib.Template\") to str");
@@ -9913,6 +9924,19 @@ static ALWAYS_INLINE int number_order(int op, SPYValue *a, SPYValue *b) {
     return a->type == SPY_FLOAT ? COMPARE(op, a->as.real, b->as.real) : -1;
 }
 static size_t find_bytes(SPYContext *, const char *, size_t, const char *, size_t, int);
+/* The rich comparison R_LT to R_GE of comparison operator op, or -1. */
+static int rich_kind(int op) {
+    return op == T_EQ ? R_EQ : op == T_NE ? R_NE : op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : op == T_GE ? R_GE : -1;
+}
+/* Rich comparison op of a and b once their special methods declined it. */
+static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
+        return comparison(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
+                          b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
+    if (op == T_EQ || op == T_NE) return spy_bool(c, op == T_EQ ? a == b : a != b);
+    return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
+                  op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
+}
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
@@ -9923,15 +9947,8 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     if ((special_dispatch(a) || special_dispatch(b)) &&
         (op == T_EQ || op == T_NE || op == '<' || op == T_LE || op == '>' || op == T_GE)) {
-        int kind = op == T_EQ ? R_EQ : op == T_NE ? R_NE : op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : R_GE;
-        SPYValue *value = rich_compare(c, kind, a, b);
-        if (value || c->error_type[0]) return value;
-        if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
-            return comparison(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
-                              b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
-        if (kind == R_EQ || kind == R_NE) return spy_bool(c, kind == R_EQ ? a == b : a != b);
-        return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
-                      op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
+        SPYValue *value = rich_compare(c, rich_kind(op), a, b);
+        return value || c->error_type[0] ? value : comparison_declined(c, op, a, b);
     }
     if ((op == T_EQ || op == T_NE || op == '<' || op == T_LE || op == '>' || op == T_GE) &&
         (set_view(a) || set_view(b)) && (set_view(a) || is_set(a)) && (set_view(b) || is_set(b))) {
@@ -10592,13 +10609,14 @@ static SPYValue *special_method_maybe(SPYContext *c, SPYValue *v, const char *na
     if (!method && error_is(c, "AttributeError")) spy_clear_error(c);
     return method;
 }
+static const char *const rich_names[] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};
+static const int rich_reflected[] = {R_GT, R_GE, R_EQ, R_NE, R_LT, R_LE};
 static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *other) {
-    static const char *names[] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};
-    SPYValue *method = special_method_maybe(c, self, names[op]);
+    SPYValue *method = special_method_maybe(c, self, rich_names[op]);
     if (!method) {
         if (c->error_type[0]) return NULL;
         /* Builtin bases define every comparison themselves. */
-        if (builtin_base(c, self, names[op], NULL)) return NULL;
+        if (builtin_base(c, self, rich_names[op], NULL)) return NULL;
         if (op == R_EQ) return self == other ? spy_bool(c, 1) : NULL;
         if (op != R_NE) return NULL;
         SPYValue *equal = rich_method(c, R_EQ, self, other);
@@ -10612,7 +10630,7 @@ static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *ot
     return result;
 }
 static SPYValue *rich_compare(SPYContext *c, int op, SPYValue *left, SPYValue *right) {
-    static const int reflected[] = {R_GT, R_GE, R_EQ, R_NE, R_LT, R_LE};
+    const int *reflected = rich_reflected;
     spy_retain(left); spy_retain(right);
     SPYValue *a = value_class(c, left), *b = value_class(c, right);
     int first = a != b && subclass(b, a);
@@ -13525,9 +13543,9 @@ struct Machine {
 };
 /* What a call on the machine returns into: its caller's machine; C; or
  * the step that made a special call, a class call's __init__, a loop's
- * __next__, a sort's key function, a consumer's next item or a with
- * statement's __enter__. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER };
+ * __next__, a sort's key function, a consumer's next item, a with
+ * statement's __enter__ or an operator's special method. */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -21547,6 +21565,96 @@ static NO_INLINE SPYValue *with_enter(SPYContext *c, Machine *m, Instruction *in
     else if (!function) spy_release(exit);
     return NULL;
 }
+enum { OPERATE_INDEX, OPERATE_BINARY, OPERATE_COMPARE };
+/* What operator step ins does: a subscript, or a binary operator or
+ * comparison *op. */
+static int step_operation(Instruction *ins, int *op) {
+    Node *n = ins->node;
+    if (ins->op == BC_BINARY) { *op = ins->arg; return OPERATE_BINARY; }
+    if (ins->op == BC_COMPARE) { *op = n->op; return OPERATE_COMPARE; }
+    if (ins->op == BC_INDEX || n->kind == N_INDEX) return OPERATE_INDEX;
+    if (n->kind == N_COMPARE) { *op = n->args->op; return OPERATE_COMPARE; }
+    *op = n->op;
+    return OPERATE_BINARY;
+}
+/* The Python special method of instance x's class that operator step ins
+ * calls on x and y, owned, with its env, to enter on m (CALL_OPERATOR),
+ * x and y on the stack under it: __getitem__, a binary operator's direct
+ * method when no reflected one of y's class comes first, or a rich
+ * comparison when y's class is no subclass of x's; else NULL. */
+static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
+    if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
+    int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op);
+    SPYValue *cls = x->as.map.parent, *other = value_class(c, y), *function;
+    const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : NULL;
+    if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
+    else if (kind == OPERATE_BINARY)
+        function = !o || (other != cls && subclass(other, cls) && class_lookup(other, o->reflected) != class_lookup(cls, o->reflected)) ?
+                   NULL : class_lookup(cls, o->direct);
+    else function = rich < 0 || (other != cls && subclass(other, cls)) ? NULL : class_lookup(cls, rich_names[rich]);
+    if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y))) return NULL;
+    SPYValue *args[] = {spy_retain(x), spy_retain(y)};
+    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    spy_release(machine_pop(m)); spy_release(machine_pop(m));
+    return NULL;
+}
+/* Operator step ins on x and y, in C. */
+static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
+    int op = 0, kind = step_operation(ins, &op);
+    relocate(c, ins->node);
+    spy_retain(x); spy_retain(y);
+    SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY ? binary(c, op, x, y) : comparison(c, op, x, y);
+    spy_release(x); spy_release(y);
+    return result;
+}
+/* Operator step ins ends with value, which it takes, its right operand y:
+ * a test jumps on its truth, a comparison in a chain goes on with y or
+ * jumps out; others push it. The pc to run next. */
+static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *y, SPYValue *value, size_t pc) {
+    if (ins->op == BC_TEST) {
+        if (!value) return pc;
+        int truth = value->type == SPY_BOOL ? (int)value->as.integer_data.small : truthy(value);
+        spy_release(value);
+        return truth ? pc : ins->target;
+    }
+    if (ins->op == BC_COMPARE) {
+        if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(y); }
+        else {
+            if (value && c->error_type[0]) { spy_release(value); value = NULL; }
+            pc = ins->target;
+        }
+    }
+    machine_push(c, m, value);
+    return pc;
+}
+/* A special method operator_call entered returned result into operator
+ * step ins, its operands on m's stack; NotImplemented from a binary
+ * operator or comparison goes on with the rest of the operation. The pc
+ * to run next. */
+static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    SPYValue *y = machine_pop(m), *x = machine_pop(m);
+    int op = 0, kind = step_operation(ins, &op);
+    if (kind != OPERATE_INDEX && result == c->not_implemented) {
+        spy_release(result);
+        if (kind == OPERATE_BINARY) {
+            result = value_class(c, x) != value_class(c, y) ? try_operator(c, y, operator_of(op)->reflected, x, NULL, 0) : NULL;
+            if (!result && !c->error_type[0]) result = binary_declined(c, op, x, y);
+        } else {
+            result = rich_method(c, rich_reflected[rich_kind(op)], y, x);
+            if (!result && !c->error_type[0]) result = comparison_declined(c, op, x, y);
+        }
+    }
+    pc = operator_finish(c, m, ins, y, result, pc);
+    spy_release(x); spy_release(y);
+    return pc;
+}
+/* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;
+ * or, for an instance's Python special method, the call to enter
+ * (operator_call). */
+static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
+    SPYValue *function = operator_call(c, m, ins, x, y, env);
+    return function || c->error_type[0] ? function : operate(c, ins->node, x, y);
+}
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Frame *f, Node *n) { return assign(c, f, n); }
 /* BC_INCREMENT: small integers in a remembered slot, while no trace
@@ -21660,6 +21768,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                          * whose value is already on the caller's stack. */
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
+                    } else if (kind == CALL_OPERATOR) {
+                        if (result) pc = operator_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_ENTER) {
                         if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);
                     } else if (kind == CALL_ITEM) {
@@ -21727,7 +21837,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(c, &f, n->a) : NULL;
             y = x ? operand(c, &f, n->kind == N_COMPARE ? n->args->a : n->b) : NULL;
             value = y ? operator_fast(c, n, x, y) : NULL;
-            if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
+            if (!value && !c->error_type[0]) {
+                callee_env = NULL;
+                value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
+                if (callee_env) { special = CALL_OPERATOR; goto enter_special; }
+            }
             machine_push(c, m, value);
             NEXT;
         CASE(BC_LOAD)
@@ -21756,9 +21870,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_BINARY)
             b = machine_pop(m); a = machine_pop(m);
             value = number_fast(c, ins->arg, a, b, 0);
+            if (!value && !c->error_type[0] && a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
             machine_push(c, m, value || c->error_type[0] ? value : binary(c, ins->arg, a, b)); NEXT_RELEASE;
         CASE(BC_INDEX)
-            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, get_index(c, a, b)); break;
+            b = machine_pop(m); a = machine_pop(m);
+            if (a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
             if (!(value = node_attribute(c, a, n, 1)) && !c->error_type[0]) goto enter_getter;
@@ -21766,6 +21883,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
             int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
+            if (order < 0 && a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
             value = order >= 0 ? spy_bool(c, order) : comparison(c, n->op, a, b);
             if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(b); }
             else {
@@ -21907,7 +22025,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             int truth = y && n->kind == N_COMPARE && ordering(n->args->op) ? number_order(n->args->op, x, y) : -1;
             if (truth < 0) {
                 value = y ? operator_fast(c, n, x, y) : NULL;
-                if (!value && !c->error_type[0]) value = y ? operate(c, n, x, y) : eval(c, &f, n);
+                if (!value && !c->error_type[0]) {
+                    callee_env = NULL;
+                    value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
+                    if (callee_env) { special = CALL_OPERATOR; goto enter_special; }
+                }
                 if (!(a = value)) break;
                 truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a);
             }
@@ -22235,6 +22357,20 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         f = m->frame; code = m->code->items; pc = m->pc;
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
+    operator_step:
+        /* BC_BINARY, BC_INDEX or BC_COMPARE on instance x and y: a Python
+         * special method is a call (operator_call). */
+        callee_env = NULL;
+        if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
+            if (a) spy_release(a);
+            if (b) spy_release(b);
+            special = CALL_OPERATOR;
+            goto enter_special;
+        }
+        pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : operation(c, ins, x, y), pc);
+        if (a) spy_release(a);
+        if (b) spy_release(b);
+        continue;
     enter_getter:
         /* A property's Python getter is a call taking the instance (BC_ATTR). */
         {

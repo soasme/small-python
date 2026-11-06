@@ -279,7 +279,8 @@ a Python `__call__`, a loop's Python `__next__`, the function of a `map`
 taken by a loop, generators and maps consumed by `sum`, `any`, `all`,
 `list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, the key
 functions of `sorted`, `list.sort`, `min` and `max`, Python decorators,
-property getters and `__enter__` methods, and list, set and dictionary
+property getters, `__enter__` methods, binary operator, comparison and
+`__getitem__` of instances, and list, set and dictionary
 comprehensions run as machines on the heap, in one native
 activation of `run_machine`; a call that native code makes (another
 special method, a host function, a class body, a call from a statement
