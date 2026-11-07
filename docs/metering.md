@@ -297,7 +297,9 @@ These run as machines on the heap, in one native activation of
   Python `__lt__` comparisons of `sorted` and `list.sort`;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__` and `__hash__` that `str`, `repr`, `format`, `len`, `int`,
-  `float` and `hash` call;
+  `float` and `hash` call, and, in code compiled while pausing, the
+  `__str__` of the instances that a call of `print` with positional
+  arguments alone writes, each after the objects before it;
 - property getters and `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and
   binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, where a step of their own

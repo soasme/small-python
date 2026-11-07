@@ -1038,6 +1038,20 @@ int main(int argc, char **argv) {
                "def consume():\n    return len(list(Steps())) + sum(Items()) + sorted(Items())[-1] + sorted(x for x in Items())[0]");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "consume()", "consume.py"), SPY_STOP_STEPS, &pauses)) == 20 + 190 + 19 && pauses > 3);
+    /* print() pauses in an instance's __str__, writing in order. */
+    execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
+               "def show():\n    for i in range(10): print(Shown(), i, Shown())\n    return 1");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "show()", "show.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* print writes to the sys.stdout it began with, which __str__ rebinds. */
+    SPYContext *muted = spy_context_new();
+    Output shown = {0};
+    assert(muted && !spy_std_init(muted) && !spy_set_limit(muted, SPY_LIMIT_PAUSE, 1));
+    spy_set_output(muted, output, NULL, &shown);
+    execute(muted, "import sys\nclass Mute:\n    def __str__(self):\n        sys.stdout = None\n        return 'm'\n"
+                   "def mute():\n    print(Mute(), Mute())\n    print(Mute())\nmute()");
+    assert(!strcmp(shown.text, "m m\n"));
+    spy_context_free(muted);
     /* A class body that loops pauses inside it. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "class Looping:\n    n = 0\n    while n < 3000: n += 1\n    m = slow(n)\nLooping.m", "class.py"),
