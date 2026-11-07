@@ -130,6 +130,13 @@ static size_t run(const char *source, const char *name, int *status) {
 }
 
 static const char *const programs[] = {
+    "class D:\n"
+    "    def __get__(self, obj, owner): return owner.__name__\n"
+    "class A:\n"
+    "    d = D()\n"
+    "def f(): return A().d\n"
+    "print(f())\n",
+
     "class G:\n"
     "    def __getattr__(self, k):\n"
     "        for i in range(1): pass\n"
