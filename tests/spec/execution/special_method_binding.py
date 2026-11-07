@@ -13,6 +13,8 @@ def one():
 
 class Narrow:
     def __add__(self): ran.append("add")
+    def __rmul__(self): ran.append("rmul")
+    def __rsub__(self): ran.append("rsub")
     def __lt__(self): ran.append("lt")
     def __getitem__(self): ran.append("getitem")
     def __contains__(self): ran.append("contains")
@@ -30,6 +32,11 @@ class Narrow:
         return "narrow"
     @property
     def wide(self, extra): ran.append("wide")
+
+class Declining:
+    def __sub__(self, o):
+        for _ in range(1): pass
+        return NotImplemented
 
 class Init:
     def __init__(self): ran.append("init")
@@ -57,6 +64,8 @@ def checks():
     results = [
         message(lambda: n + one()),
         message(lambda: n < one()),
+        message(lambda: one() * n),
+        message(lambda: Declining() - n),
         message(lambda: n[one()]),
         message(lambda: one() in n),
         message(lambda: [one() for x in loop(n)]),
@@ -89,6 +98,8 @@ def checks():
 expected = [
     "Narrow.__add__() takes 1 positional argument but 2 were given",
     "Narrow.__lt__() takes 1 positional argument but 2 were given",
+    "Narrow.__rmul__() takes 1 positional argument but 2 were given",
+    "Narrow.__rsub__() takes 1 positional argument but 2 were given",
     "Narrow.__getitem__() takes 1 positional argument but 2 were given",
     "Narrow.__contains__() takes 1 positional argument but 2 were given",
     "Narrow.__iter__() must return an iterator, not int",

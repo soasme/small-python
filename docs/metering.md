@@ -300,7 +300,10 @@ These run as machines on the heap, in one native activation of
   and `__contains__` methods of instances, where a step of their own
   reaches them, and the `__eq__` that an instance's `in` a list or tuple,
   or an iterator over one, calls on its items when it ends its
-  comparison chain;
+  comparison chain, and the reflected operator or comparison method of an
+  instance on the right, called once the left operand, an `int`, `bool`,
+  `float` or instance, declines, or first when the right operand's class
+  is a subclass of the left's;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
   parameters or annotations and the builtin `__build_class__` makes it.

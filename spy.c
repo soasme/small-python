@@ -9776,6 +9776,11 @@ static const Operator *operator_of(int op) {
 }
 static SPYValue *binary_declined(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *binary_builtin(SPYContext *, int, SPYValue *, SPYValue *);
+/* binary, except that an instance operand, whose method the machine
+ * calls, gives NULL without an error. */
+static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE ? NULL : binary(c, op, a, b);
+}
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
     if (a->type == SPY_FLOAT && b->type == SPY_FLOAT && (op == '+' || op == '-' || op == '*' || (op == '/' && b->as.real)))
@@ -22071,12 +22076,21 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
     for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
     return NULL;
 }
-/* The Python special method of instance x's class that operator step ins
- * calls on x and y, owned, with its env, to enter on m (CALL_OPERATOR),
- * x and y on the stack under it: __getitem__, a binary operator's direct
- * method when no reflected one of y's class comes first, a rich
- * comparison when y's class is no subclass of x's, or, for in, instance
- * y's __contains__; else NULL. */
+static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
+/* Which of an operator's special method calls one is: x's own first, y's
+ * reflected one first, or the last. */
+enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST };
+/* An operator's call pushes its operands x and y and its phase. */
+static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
+    return machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, phase));
+}
+/* The Python special method that operator step ins calls first on x and
+ * y, owned, with its env, to enter on m (CALL_OPERATOR), x, y and the
+ * phase on the stack under it (operator_push): instance x's __getitem__,
+ * unary method, or direct method or rich comparison, unless y's class is
+ * a subclass of x's whose reflected method comes first; the reflected
+ * method of instance y for a number x; or, for in, instance y's
+ * __contains__; else NULL. */
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -22085,30 +22099,43 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* in takes the container's __contains__, given the item. */
         if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
             (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
-            !machine_push(c, m, spy_retain(x)) && !machine_push(c, m, spy_retain(y))) {
+            !operator_push(c, m, x, y, OPERATOR_LAST)) {
             SPYValue *args[] = {spy_retain(y), spy_retain(x)};
             if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
-            spy_release(machine_pop(m)); spy_release(machine_pop(m));
+            for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
         }
         return NULL;
     }
-    if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
-    SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
-    /* A unary operator calls its method on x alone (y is x); not tests truth. */
-    if (kind == OPERATE_UNARY)
-        function = op == O_NOT ? NULL : class_lookup(cls, op == '+' ? "__pos__" : op == '-' ? "__neg__" : "__invert__");
-    else if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
-    /* An augmented assignment takes the in-place method, else the plain one's rule. */
-    else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
-    else if (kind != OPERATE_COMPARE)
-        function = other != cls && subclass(other, cls) && class_lookup(other, o->reflected) != class_lookup(cls, o->reflected) ?
-                   NULL : class_lookup(cls, o->direct);
-    else function = rich < 0 ? NULL : rich_function(c, x, y, rich);
-    if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y))) return NULL;
-    SPYValue *args[] = {spy_retain(x), spy_retain(y)};
+    const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
+    SPYValue *self = x, *other = y;
+    int phase = OPERATOR_FIRST;
+    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT) {
+        /* A number declines an operator or comparison with a plain
+         * instance, whose reflected method is the last call. */
+        if (!reflected || !(function = item_function(c, y, reflected))) return NULL;
+        self = y; other = x; phase = OPERATOR_LAST;
+    } else {
+        if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
+        SPYValue *cls = x->as.map.parent, *right = value_class(c, y);
+        /* y's reflected method comes first when y's class is a subclass
+         * of x's that overrides it; a comparison's whenever it is one. */
+        int first = reflected && right != cls && subclass(right, cls) && (!o || class_lookup(right, reflected) != class_lookup(cls, reflected));
+        /* A unary operator calls its method on x alone (y is x); not tests truth. */
+        if (kind == OPERATE_UNARY)
+            function = op == O_NOT ? NULL : class_lookup(cls, op == '+' ? "__pos__" : op == '-' ? "__neg__" : "__invert__");
+        else if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
+        /* An augmented assignment takes the in-place method, else the plain one's rule. */
+        else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
+        else if (first) {
+            if (!(function = item_function(c, y, reflected))) return NULL;
+            self = y; other = x; phase = OPERATOR_REFLECTED;
+        } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_function(c, x, y, rich);
+    }
+    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, phase)) return NULL;
+    SPYValue *args[] = {spy_retain(self), spy_retain(other)};
     if ((*env = function_env(c, function, 2 - (kind == OPERATE_UNARY), args, NULL, 1))) return spy_retain(function);
-    spy_release(machine_pop(m)); spy_release(machine_pop(m));
+    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
 /* Operator step ins on x and y, in C. */
@@ -22143,10 +22170,12 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
     return pc;
 }
 /* A special method operator_call entered returned result into operator
- * step ins, its operands on m's stack; NotImplemented from a binary
- * operator or comparison goes on with the rest of the operation. The pc
- * to run next. */
-static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+ * step ins, its operands and phase on m's stack; NotImplemented from a
+ * binary operator or comparison goes on with the other operand's method,
+ * entered as the last call, or the rest of the operation. The machine to
+ * run on, at its pc. */
+static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    m->pc = pc;
     if (m->stack[m->len - 1] == c->unbound) {
         /* An item's comparison for in (contains_call): found, or the step
          * again, to go on from the iterator after the item. */
@@ -22157,34 +22186,56 @@ static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction
         if (found || c->error_type[0]) {
             SPYValue *iterator = machine_pop(m);
             spy_release(machine_pop(m));
-            pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : spy_bool(c, (ins->node->op == O_IN) == found), pc);
+            m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : spy_bool(c, (ins->node->op == O_IN) == found), pc);
             spy_release(iterator);
-            return pc;
+            return m;
         }
-        return pc - 1;
+        m->pc = pc - 1;
+        return m;
     }
-    SPYValue *y = machine_pop(m), *x = machine_pop(m);
-    int op = 0, kind = step_operation(ins, &op);
+    SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
+    int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small;
+    spy_release(marker);
     if (op == O_IN || op == O_NOTIN) {
         int truth = truthy(result);
         spy_release(result);
         result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
-    } else if (kind == OPERATE_COMPARE) result = compared(c, op, x, y, result);
-    else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
+    } else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
         spy_release(result);
-        const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : operator_of(op);
-        if (kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
+        const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
+        int rich = rich_kind(op);
+        if (phase == OPERATOR_FIRST && kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
             /* A declined in-place method leaves the plain operator. */
             result = binary(c, o->token, x, y);
         } else {
-            result = value_class(c, x) != value_class(c, y) ? try_operator(c, y, o->reflected, x, NULL, 0) : NULL;
-            if (!result && !c->error_type[0]) result = binary_declined(c, o->token, x, y);
+            /* After x's method, y's reflected one, unless y's class is x's
+             * for an operator; after y's first, x's own. */
+            SPYValue *self = phase == OPERATOR_FIRST ? y : x, *other = self == x ? y : x;
+            const char *name = phase == OPERATOR_LAST || (o && phase == OPERATOR_FIRST && value_class(c, x) == value_class(c, y)) ? NULL :
+                               o ? (self == y ? o->reflected : o->direct) : rich_names[self == y ? rich_reflected[rich] : rich];
+            SPYValue *function = name ? item_function(c, self, name) : NULL;
+            if (function && !operator_push(c, m, x, y, OPERATOR_LAST)) {
+                SPYValue *args[] = {spy_retain(self), spy_retain(other)};
+                SPYValue *env = function_env(c, function, 2, args, NULL, 1);
+                Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
+                if (call) {
+                    spy_release(x); spy_release(y);
+                    call->m.outermost = CALL_OPERATOR;
+                    return &call->m;
+                }
+                for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+                result = NULL;
+            } else if (!c->error_type[0]) {
+                result = !name ? NULL : o ? try_operator(c, self, name, other, NULL, 0) :
+                         rich_method(c, self == y ? rich_reflected[rich] : rich, self, other);
+                if (!result && !c->error_type[0]) result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
+            } else result = NULL;
         }
         if (kind == OPERATE_INPLACE && !result) augmented_error(c, o->token, x, y);
     }
-    pc = operator_finish(c, m, ins, y, result, pc);
+    m->pc = operator_finish(c, m, ins, y, result, pc);
     spy_release(x); spy_release(y);
-    return pc;
+    return m;
 }
 /* The Python __iter__ of the instance atop m's stack that a loop calls on
  * it, owned, with its env, the instance left there; else NULL. */
@@ -22576,7 +22627,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
                     } else if (kind == CALL_OPERATOR) {
-                        if (result) pc = operator_returned(c, m, &code[pc - 1], result, pc);
+                        if (result) {
+                            m = operator_returned(c, m, &code[pc - 1], result, pc);
+                            f = m->frame; code = m->code->items; pc = m->pc;
+                        }
                     } else if (kind == CALL_ENTER) {
                         if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);
                     } else if (kind == CALL_ITEM) {
@@ -22682,8 +22736,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_BINARY)
             b = machine_pop(m); a = machine_pop(m);
             value = number_fast(c, ins->arg, a, b, 0);
-            if (!value && !c->error_type[0] && a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
-            machine_push(c, m, value || c->error_type[0] ? value : binary(c, ins->arg, a, b)); NEXT_RELEASE;
+            if (!value && !c->error_type[0] && !(value = binary_operand(c, ins->arg, a, b)) && !c->error_type[0]) { x = a; y = b; goto operator_step; }
+            machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
             if (a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
@@ -22784,7 +22838,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
             machine_push(c, m, augmented(c, ins->arg, a, b)); break;
         CASE(BC_CONVERT)
             a = machine_pop(m); machine_push(c, m, convert_step(c, m, a, ins->arg)); break;
