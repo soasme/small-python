@@ -490,17 +490,27 @@ static SPYValue *active_exception(SPYContext *c) {
     return c->handled ? c->handled : c->inherited_exception;
 }
 
+/* snprintf(to, size, "%s", from) without the formatting. */
+static void put_text(char *to, size_t size, const char *from) {
+    size_t n = strlen(from);
+    if (n >= size) n = size - 1;
+    memcpy(to, from, n); to[n] = 0;
+}
 static void *mem_malloc(SPYContext *, size_t);
 static NO_INLINE void mem_free(void *);
+/* A new pending error of the named type, its message still to be set. */
+static void error_begin(SPYContext *c, const char *type) {
+    spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
+    put_text(c->error_type, sizeof(c->error_type), type);
+    if (c->error_text) { mem_free(c->error_text); c->error_text = NULL; }
+}
 static SPYValue *errorf(SPYContext *c, const char *type, const char *fmt, ...) {
     if (!c->error_type[0]) {
         va_list ap;
-        spy_release(c->traceback); c->traceback = NULL; c->traceback_frame = 0;
-        snprintf(c->error_type, sizeof(c->error_type), "%s", type);
+        error_begin(c, type);
         va_start(ap, fmt);
         int len = vsnprintf(c->error_message, sizeof(c->error_message), fmt, ap);
         va_end(ap);
-        if (c->error_text) { mem_free(c->error_text); c->error_text = NULL; }
         if (len >= (int)sizeof(c->error_message) && (c->error_text = mem_malloc(c, (size_t)len + 1))) {
             va_start(ap, fmt);
             vsnprintf(c->error_text, (size_t)len + 1, fmt, ap);
@@ -722,7 +732,7 @@ static NO_INLINE void leave_traced_frame(SPYContext *c, SPYValue *value) {
         struct ActiveFrame *caller = &c->frames[c->py_depth - 1];
         SPYValue *unit = frame_unit(caller);
         c->line = caller->line;
-        if (unit && unit->as.unit.filename) { snprintf(c->filename, sizeof(c->filename), "%s", unit->as.unit.filename); c->filename_from = c->quiet_unit = NULL; }
+        if (unit && unit->as.unit.filename) { put_text(c->filename, sizeof(c->filename), unit->as.unit.filename); c->filename_from = c->quiet_unit = NULL; }
     }
     SPYValue *frame = top->object;
     if (!frame) return;
@@ -742,7 +752,12 @@ static ALWAYS_INLINE void leave_frame(SPYContext *c, SPYValue *value) {
     c->frame_line = c->py_depth ? &c->frames[c->py_depth - 1].line : &c->line;
 }
 SPYValue *spy_error(SPYContext *c, const char *type, const char *message) {
-    return errorf(c, type, "%s", message);
+    if (c->error_type[0]) return NULL;
+    error_begin(c, type);
+    size_t len = strlen(message);
+    put_text(c->error_message, sizeof(c->error_message), message);
+    if (len >= sizeof(c->error_message) && (c->error_text = mem_malloc(c, len + 1))) memcpy(c->error_text, message, len + 1);
+    return NULL;
 }
 const char *spy_error_type(const SPYContext *c) { return c->error_type; }
 const char *spy_error_message(const SPYContext *c) { return c->error_message; }
@@ -2454,7 +2469,7 @@ static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) 
         (!c->exception || c->exception->as.map.parent == name_local(c->classes, "TypeError"))) {
         char message[sizeof(c->error_message)];
         error_settle(c);
-        snprintf(message, sizeof(message), "%s", c->error_message);
+        put_text(message, sizeof(message), c->error_message);
         spy_clear_error(c);
         errorf(c, "TypeError", "cannot use '%s' as %s (%s)", type_name(key), role, message);
     }
@@ -3970,7 +3985,7 @@ static size_t lexeme_line(Parser *p, const char *at) {
 static void field_parser_error(Parser *p, const Field *f, const char *end, int complete) {
     if (strcmp(p->ctx->error_type, "SyntaxError")) return;
     char message[256];
-    snprintf(message, sizeof(message), "%s", p->ctx->error_message);
+    put_text(message, sizeof(message), p->ctx->error_message);
     size_t line = p->ctx->line;
     const char *start = p->error_start, *stop = p->error_end;
     int trim = p->error_trim_line, zero = p->error_end_zero;
@@ -4505,7 +4520,7 @@ static Node *syntax_span(Parser *p, size_t first, size_t end, const char *messag
 }
 static void defer(Parser *p, const char *message) {
     if (p->deferred) return;
-    snprintf(p->deferred_text, sizeof(p->deferred_text), "%s", message);
+    put_text(p->deferred_text, sizeof(p->deferred_text), message);
     p->deferred = p->deferred_text; p->deferred_line = peek(p)->line;
     p->deferred_start = peek(p)->start; p->deferred_end = peek(p)->start + peek(p)->len;
 }
@@ -8066,7 +8081,7 @@ static SPYValue *parse_normalized(SPYContext *c, const char *source, const char 
 lexer_error:
     mem_free(p.tokens);
     if (c->error_type[0]) {
-        snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL;
+        put_text(c->filename, sizeof(c->filename), filename); c->filename_from = c->quiet_unit = NULL;
         int syntax_error = !strcmp(c->error_type, "SyntaxError") || !strcmp(c->error_type, "IndentationError") ||
             !strcmp(c->error_type, "TabError");
         /* The compiler's errors read the line from the file, which a string has not. */
@@ -8772,7 +8787,7 @@ static int iterator_state_index(SPYContext *c, SPYValue *state, int64_t *index) 
  * iterators' __reduce__; an AttributeError if it is missing. */
 static SPYValue *builtin_entry(SPYContext *c, const char *name) {
     SPYValue *value = c->builtins->type == SPY_DICT ? dict_name(c, c->builtins, name_of(name)) : name_local(c->builtins, name);
-    if (!value && !c->error_type[0]) errorf(c, "AttributeError", "%s", name);
+    if (!value && !c->error_type[0]) spy_error(c, "AttributeError", name);
     return spy_retain(value);
 }
 /* A copy of a built-in iterator's position, for __reduce__ to drain. */
@@ -14548,7 +14563,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
         }
     }
     if (c->filename_from != f->unit) {
-        snprintf(c->filename, sizeof(c->filename), "%s", f->unit->as.unit.filename);
+        put_text(c->filename, sizeof(c->filename), f->unit->as.unit.filename);
         /* While a trace function watches, no filename is recorded as copied,
          * so that every tick takes this path. */
         c->filename_from = c->settings[SET_TRACE] ? NULL : f->unit;
@@ -15618,6 +15633,7 @@ static int oserror_fields(SPYContext *c, SPYValue *v, size_t argc, SPYValue *con
  * 2; -1 for other classes. */
 static int unicode_error_kind(SPYContext *c, SPYValue *cls) {
     static const char *const names[] = {"UnicodeEncodeError", "UnicodeDecodeError", "UnicodeTranslateError"};
+    if (!subclass(cls, name_local(c->classes, "UnicodeError"))) return -1;
     for (int i = 0; i < 3; i++) if (subclass(cls, name_local(c->classes, names[i]))) return i;
     return -1;
 }
@@ -15892,7 +15908,7 @@ static void attach_syntax_error(SPYContext *c, const char *filename, const char 
         chain_exception(c, error);
         c->exception = error;
         memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-        snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL;
+        put_text(c->filename, sizeof(c->filename), filename); c->filename_from = c->quiet_unit = NULL;
         c->line = line;
     }
 }
@@ -18869,8 +18885,8 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
     char type[sizeof(c->error_type)];
     if (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins"))
         snprintf(type, sizeof(type), "%s.%s", module->as.string.data, name->as.string.data);
-    else snprintf(type, sizeof(type), "%s", name->as.string.data);
-    errorf(c, type, "%s", "");
+    else put_text(type, sizeof(type), name->as.string.data);
+    spy_error(c, type, "");
     spy_release(c->exception); c->exception = exception;
     SPYValue *traceback = hidden_field(exception, "__traceback__");
     if (traceback && traceback->type == SPY_TRACEBACK) c->traceback = spy_retain(traceback);
@@ -26057,7 +26073,7 @@ static SPYValue *decode_source(SPYContext *c, const char *source, size_t len, co
         }
         if (!text && (error_is(c, "LookupError") || error_is(c, "UnicodeDecodeError"))) source_decode_error(c, filename);
     }
-    if (!text) { snprintf(c->filename, sizeof(c->filename), "%s", filename); c->filename_from = c->quiet_unit = NULL; }
+    if (!text) { put_text(c->filename, sizeof(c->filename), filename); c->filename_from = c->quiet_unit = NULL; }
     spy_release(encoding);
     return text;
 }
@@ -27085,7 +27101,7 @@ static SPYValue *memory_new(SPYContext *c, SPYValue *obj, SPYValue *source, cons
     m->as.memory.layout = allocate(c, (ndim ? 2 * (size_t)ndim : 1) * sizeof(ptrdiff_t));
     if (!m->as.memory.layout) { m->as.memory.released = 1; spy_release(m); spy_error(c, "MemoryError", "out of memory"); return NULL; }
     m->as.memory.obj = spy_retain(obj); m->as.memory.source = spy_retain(source);
-    snprintf(m->as.memory.format, sizeof(m->as.memory.format), "%s", format);
+    put_text(m->as.memory.format, sizeof(m->as.memory.format), format);
     m->as.memory.itemsize = itemsize; m->as.memory.ndim = ndim; m->as.memory.readonly = readonly;
     if (source->type == SPY_BYTEARRAY) source->as.string.exports++;
     return m;
@@ -28323,7 +28339,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             SPYValue *path = filesystem_path(c, argv[1]);
             if (!path) return NULL;
             int embedded_null = strlen(path->as.string.data) != path->as.string.len;
-            snprintf(filename_buffer, sizeof(filename_buffer), "%s", path->as.string.data);
+            put_text(filename_buffer, sizeof(filename_buffer), path->as.string.data);
             spy_release(path);
             if (embedded_null) return spy_error(c, "ValueError", "embedded null character");
             filename = filename_buffer;

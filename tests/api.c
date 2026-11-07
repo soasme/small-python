@@ -940,6 +940,11 @@ int main(int argc, char **argv) {
     assert(spy_exec(c, "raise ValueError('x' * 300)", "long.py") == -1);
     assert(strlen(spy_error_message(c)) == 255 && strlen(spy_error_display(c)) == 300);
     spy_clear_error(c);
+    char long_message[301];
+    memset(long_message, 'y', 300); long_message[300] = 0;
+    assert(!spy_error(c, "ValueError", long_message) && !spy_error(c, "KeyError", "later"));
+    assert(!strcmp(spy_error_type(c), "ValueError") && strlen(spy_error_message(c)) == 255 && !strcmp(spy_error_display(c), long_message));
+    spy_clear_error(c);
     /* A raised exception's message is its str(), taken as the error reaches
      * the host: from a Python __str__, by a value operation, or failing. */
     assert(spy_exec(c, "class Loud(Exception):\n"
