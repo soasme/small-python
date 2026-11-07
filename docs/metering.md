@@ -294,7 +294,8 @@ These run as machines on the heap, in one native activation of
 - the `__str__`, `__repr__`, `__format__` and `__len__` that `str`,
   `repr`, `format` and `len` call;
 - property getters and `__getattr__`, `__enter__`, `__bool__`, binary
-  operator, comparison, `__getitem__`, `__setitem__` and `__contains__`
+  operator, comparison, `__getitem__`, `__setitem__`, `__delitem__` and
+  `__contains__`
   methods of instances, where a step of their own reaches them;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
@@ -303,14 +304,16 @@ These run as machines on the heap, in one native activation of
 Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
 function or comprehension is first compiled) runs every function and
 class body on the machine and gives every operator, subscript,
-augmented assignment, target list and f-string field a step of its own,
+augmented assignment, target list, deletion and f-string field a step
+of its own,
 so their special methods are among the calls above. Code compiled without pausing keeps faster steps that
 evaluate an assignment of one operator, or arithmetic on names and
 literals, whole.
 
 A call that native code makes runs in an activation of its own: another
 special method (outside code compiled while pausing, an augmented
-subscript assignment's or a target list's `__setitem__`; an unpacking's
+subscript assignment's or a target list's `__setitem__` and a deletion's
+`__delitem__`; an unpacking's
 `__iter__`, a property of a class with `__getattr__`), the items a
 `zip`, a `map` or a `filter` by a Python function takes from a generator,
 a host function,

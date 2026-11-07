@@ -13681,7 +13681,7 @@ static int expands(Node *n, int calls) {
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
                            n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
-                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || (n->kind == N_ASSIGN && n->op >= T_ADDEQ && n->op <= T_XOREQ)))) return 1;
+                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op >= T_ADDEQ && n->op <= T_XOREQ)))) return 1;
     if (n->kind == N_COMPREHENSION)
         return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
@@ -13962,7 +13962,10 @@ static void compile_delete(SPYContext *c, Program *p, Node *n) {
     }
     compile_expr(c, p, n->a);
     if (n->kind == N_INDEX) compile_expr(c, p, n->b);
-    emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
+    /* While calls can pause, BC_SET_TARGET deletes a subscript, calling a
+     * Python __delitem__ on the machine (store_call). */
+    if (n->kind == N_INDEX && p->calls == PAUSING) emit(c, p, BC_SET_TARGET, n, 1);
+    else emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
 }
 static void compile_statement(SPYContext *, Program *, Node *);
 static void compile_body(SPYContext *c, Program *p, Node *body) {
@@ -22083,21 +22086,34 @@ static NO_INLINE void iter_returned(SPYContext *c, Machine *m, Instruction *ins,
     if (block) block->value = iterator;
     else spy_release(iterator);
 }
-/* The Python __setitem__ of plain instance object's class, borrowed, or NULL. */
-static SPYValue *setitem_function(SPYContext *c, SPYValue *object) {
-    SPYValue *function = object->type != SPY_INSTANCE || object->as.map.base || builtin_base(c, object, "__setitem__", NULL) ?
-                         NULL : class_lookup(object->as.map.parent, "__setitem__");
+/* The Python method name, __setitem__ or __delitem__, of plain instance
+ * object's class, borrowed, or NULL. */
+static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name) {
+    SPYValue *function = object->type != SPY_INSTANCE || object->as.map.base || builtin_base(c, object, name, NULL) ?
+                         NULL : class_lookup(object->as.map.parent, name);
     return function && machine_function(c, function) ? function : NULL;
 }
+static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return item_function(c, object, "__setitem__"); }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
  * (store_into), the value atop m's stack; or BC_SAVE_TARGET's, taking the
  * instance, key and value from it, or BC_SET_TARGET's, taking the instance
- * and key above the value: that __setitem__, owned, with its env,
- * to call with the key and the value. */
+ * and key above the value: that __setitem__, owned, with its env, to call
+ * with the key and the value. BC_SET_TARGET with arg 1, a deletion, takes
+ * the object and key and calls a Python __delitem__ with the key, or
+ * deletes the item at once, returning NULL. */
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
     SPYValue *args[3];
+    if (ins->op == BC_SET_TARGET && ins->arg) {
+        args[1] = machine_pop(m); args[0] = machine_pop(m);
+        SPYValue *function = item_function(c, args[0], "__delitem__");
+        relocate(c, n);
+        if (function) return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
+        delete_evaluated(c, n, args[0], args[1]);
+        release_all(2, args);
+        return NULL;
+    }
     if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
     else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     else {
@@ -22432,7 +22448,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result) iter_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
-                        if (result && (code[pc - 1].op == BC_EXEC || code[pc - 1].arg)) spy_release(machine_pop(m));
+                        if (result && (code[pc - 1].op == BC_EXEC || (code[pc - 1].op == BC_STORE && code[pc - 1].arg))) spy_release(machine_pop(m));
                     } else if (kind == CALL_CHECKED) {
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
@@ -22623,7 +22639,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             b = machine_pop(m); a = machine_pop(m);
             raise_with_cause(c, a, ins->arg ? b : NULL); break;
         CASE(BC_SET_TARGET)
-            if (n->kind == N_INDEX && setitem_function(c, m->stack[m->len - 2])) goto store_step;
+            if (n->kind == N_INDEX && (setitem_function(c, m->stack[m->len - 2]) || ins->arg)) goto store_step;
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);
@@ -23067,7 +23083,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     store_step:
         /* A store to a subscript, BC_STORE's, BC_EXEC's assignment's,
          * BC_SET_TARGET's or BC_SAVE_TARGET's, is a call of a Python
-         * __setitem__ (store_call). */
+         * __setitem__, or of __delitem__ for a deletion (store_call). */
         callee_env = NULL;
         if ((value = store_call(c, m, &f, ins, &callee_env))) { special = CALL_STORE; goto enter_special; }
         continue;

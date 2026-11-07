@@ -1032,18 +1032,19 @@ int main(int argc, char **argv) {
                                  SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
     /* Code compiled while calls can pause pauses inside the special
      * methods of operators, subscripts, augmented assignments, target
-     * lists, len() and f-string fields. */
+     * lists, deletions, len() and f-string fields. */
     execute(c, "def spin():\n    for i in range(1500): pass\n"
                "class Special:\n    def __add__(self, o): spin(); return 1\n    def __lt__(self, o): spin(); return True\n"
                "    def __getitem__(self, k): spin(); return 2\n    def __setitem__(self, k, v): spin()\n"
                "    def __contains__(self, k): spin(); return True\n    def __format__(self, spec): spin(); return spec\n"
                "    def __repr__(self): spin(); return 'r'\n    def __iadd__(self, o): spin(); return 4\n    def __len__(self): spin(); return 6\n"
+               "    def __delitem__(self, k): spin()\n"
                "class Shown:\n    def __str__(self): spin(); return 'str'\n"
                "def special():\n    p, q = Special(), Shown()\n    t = p + 1\n    u = p < 1\n    w = p[0] + (0 in p)\n    p[0] = 1\n"
-               "    p[0] += 1\n    x, p[1] = 0, 1\n    r = Special()\n    r += 1\n"
+               "    p[0] += 1\n    x, p[1] = 0, 1\n    del p[0]\n    r = Special()\n    r += 1\n"
                "    return t + u + w + r + len(p) + len(f'{p:ab}{p!r}{q}{q!s:>4}')\n");
     pauses = 0;
-    assert(integer(c, run_paused(c, spy_eval(c, "special()", "special.py"), SPY_STOP_STEPS, &pauses)) == 5 + 4 + 3 + 3 + 4 + 6 && pauses > 14);
+    assert(integer(c, run_paused(c, spy_eval(c, "special()", "special.py"), SPY_STOP_STEPS, &pauses)) == 5 + 4 + 3 + 3 + 4 + 6 && pauses > 15);
     /* Unpacking, min, max, enumerate and filter take a generator's items
      * on the machine. */
     execute(c, "def slowgen():\n    for i in range(3):\n        spin()\n        yield i\n"
