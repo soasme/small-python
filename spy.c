@@ -16215,8 +16215,9 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
      * values open_locals sets, serve. A
      * replace()d code's parameters bind under its names and then take the
      * body's: the body's locals are declared after them. */
+    int direct = plain && !scope_order(c, scope);
     size_t fit = argc <= scope->positionals ? argc : scope->positionals;
-    int direct = plain && !scope_order(c, scope) && (argc == fit || (scope->stars & 1));
+    direct = direct && (argc == fit || (scope->stars & 1));
     SPYValue *env = direct ? kept_env(c, scope) : NULL;
     if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
     env->as.map.parent = spy_retain(fn->as.function.env);

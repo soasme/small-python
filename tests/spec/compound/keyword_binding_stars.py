@@ -4,7 +4,8 @@
 # positional-only name among them), *args takes the positional arguments
 # past the named ones or is a new empty tuple, and defaults fill the
 # others; each call gets
-# fresh containers, and unmatched, repeated or missing names still raise.
+# fresh containers, and unmatched, repeated or missing names still raise,
+# on a function's first call as on later ones.
 from harness import *
 
 def full(a, b=2, *args, c, d=4, **kw): return (a, b, args, c, d, kw)
@@ -53,3 +54,11 @@ expected = once + once + [
 assert_eq(calls(), expected)
 assert_eq(list(full(1, c=3, y=1, x=2)[5]), ["y", "x"])
 assert_eq(stars(**{"b": 1, "a": 2}), ((), {"b": 1, "a": 2}))
+
+def first(a="d_a", /, b="d_b", *args): return (a, b, args)
+try:
+    first("p1", "p2", "p3", b="k_b")
+except TypeError as e:
+    assert_eq(str(e), "first() got multiple values for argument 'b'")
+else:
+    raise AssertionError("first() bound 'b' twice")
