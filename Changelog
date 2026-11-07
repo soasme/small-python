@@ -61,6 +61,8 @@ Unreleased (0.8.0):
   statements a third faster)
 - calling an instance's special method by name (p.__lt__(q), self.__init__())
   runs about 2.5 times as fast
+- hasattr() and getattr() with a default on a missing attribute run about 2.7
+  times as fast
 
 2026-11-05 0.7.0:
 

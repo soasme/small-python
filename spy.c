@@ -901,6 +901,18 @@ static int append(Buffer *b, const char *s, size_t n) {
     return 0;
 }
 static int puts_buffer(Buffer *b, const char *s) { return append(b, s, strlen(s)); }
+/* The AttributeError for the attribute name that v lacks; hasattr() and
+ * getattr() with a default make many, so no format is parsed. */
+static SPYValue *missing_attribute(SPYContext *c, SPYValue *v, const char *name) {
+    if (c->error_type[0]) return NULL;
+    const char *type = type_name(v);
+    Buffer text = {.ctx = c};
+    if (!puts_buffer(&text, "'") && !append(&text, type, (size_t)shown(type, 100)) &&
+        !puts_buffer(&text, "' object has no attribute '") && !puts_buffer(&text, name) && !puts_buffer(&text, "'"))
+        spy_error(c, "AttributeError", text.data);
+    mem_free(text.data);
+    return NULL;
+}
 static SPYValue *value_new(SPYContext *, int);
 static SPYValue *buffer_text(Buffer *, int, int);
 /* Numbers and bytearrays end with their union member, and their
@@ -2727,8 +2739,11 @@ static const char *class_tname(SPYValue *cls) {
     SPYValue *name = name_text(cls, "__name__"), *qualname = name_text(cls, "__qualname__"), *module = name_local(cls, "__module__");
     if (!name || name->type != SPY_STRING) return NULL;
     if (!module || module->type != SPY_STRING || !qualname || qualname->type != SPY_STRING) return name->as.string.data;
+    const char *home = module->as.string.data;
+    if (strcmp(home, "_io") && strcmp(home, "typing") && strcmp(home, "types") && strcmp(home, "string.templatelib"))
+        return name->as.string.data;
     for (size_t i = 0; i < sizeof(dotted) / sizeof(*dotted); i++)
-        if (!strcmp(dotted[i][0], module->as.string.data) && !strcmp(dotted[i][1], qualname->as.string.data)) {
+        if (!strcmp(dotted[i][0], home) && !strcmp(dotted[i][1], qualname->as.string.data)) {
             static _Thread_local char buffers[8][128];
             static _Thread_local unsigned next;
             char *buffer = buffers[next++ % 8];
@@ -10518,7 +10533,7 @@ static SPYValue *member_get(SPYContext *c, SPYValue *d, SPYValue *object) {
     if (d->as.member.flags & DESC_VALUE) {
         if (!strcmp(name, "__class__")) return spy_retain(value_class(c, object));
         SPYValue *base = object->type == SPY_INSTANCE ? object->as.map.base : object;
-        if (!base) return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(object), 100), type_name(object), name);
+        if (!base) return missing_attribute(c, object, name);
         return attribute_value(c, base, name);
     }
     if (d->as.member.flags & DESC_GENERIC) {
@@ -11310,7 +11325,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             if (!descriptor && owner && !strcmp(name, "__module__"))
                 return v->as.native.static_method ? spy_retain(name_local(owner, "__module__")) : spy_none(c);
             if (descriptor || owner)
-                return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
+                return missing_attribute(c, v, name);
         }
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__self__")) return spy_retain(v->as.bound.self);
         if (v->type == SPY_BOUND_METHOD && !strcmp(name, "__module__")) return spy_none(c);
@@ -11369,7 +11384,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
          * method-wrapper has neither. */
         if (v->as.method.function->type == SPY_NATIVE && !v->as.method.plain && (!strcmp(name, "__func__") || !strcmp(name, "__module__"))) {
             if (!strcmp(name, "__module__") && native_kind(v) == NATIVE_BOUND) return spy_none(c);
-            return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
+            return missing_attribute(c, v, name);
         }
         if (!strcmp(name, "__func__")) return spy_retain(v->as.method.function);
         if (!strcmp(name, "__call__")) return descriptor_get(c, builtin_descriptor(c, c->types[SPY_METHOD], name), v, c->types[SPY_METHOD]);
@@ -11478,7 +11493,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             if (value) return descriptor_get(c, value, v, c->types[SPY_CLASS]);
         }
         if (v->type == SPY_CLASS) return errorf(c, "AttributeError", "type object '%.*s' has no attribute '%s'", shown(class_tname(v), 100), class_tname(v), name);
-        return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
+        return missing_attribute(c, v, name);
     }
     if (v->type == SPY_MODULE) {
         if (!strcmp(name, "__dict__")) return spy_retain(namespace_map(v));
@@ -11589,7 +11604,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!definition && !c->error_type[0]) definition = builtin_descriptor_lookup(c, cls, name);
         if (definition) return descriptor_get(c, definition, v, cls);
         if (c->error_type[0]) return NULL;
-        return errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(v), 100), type_name(v), name);
+        return missing_attribute(c, v, name);
     }
     return bound_method(c, v, method, name);
 }
@@ -19633,7 +19648,7 @@ static int delete_attribute_default(SPYContext *c, SPYValue *object, const char 
     if (!object || !name_local(object, name)) {
         if (target->type == SPY_CLASS)
             errorf(c, "AttributeError", "type object '%.*s' has no attribute '%s'", shown(class_tname(target), 100), class_tname(target), name);
-        else errorf(c, "AttributeError", "'%.*s' object has no attribute '%s'", shown(type_name(target), 100), type_name(target), name);
+        else missing_attribute(c, target, name);
         return -1;
     }
     delete_name(object, name); return 0;
@@ -30143,8 +30158,9 @@ static SPYValue *sample_value(SPYContext *c, int type) {
 static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *name) {
     int type = builtin_type_id(c, cls);
     if (type < 0 || c->error_type[0]) return NULL;
-    int index = slot_index(name);
-    if (index >= 0 && !(slots[index].types & (UINT64_C(1) << type))) return NULL;
+    /* Every slot has a special name, and object has no other attributes. */
+    int dunder = name[0] == '_' && name[1] == '_', index = dunder ? slot_index(name) : -1;
+    if ((index >= 0 && !(slots[index].types & (UINT64_C(1) << type))) || (type == 63 && !dunder)) return NULL;
     char key[128];
     snprintf(key, sizeof(key), "%p:%s", (void *)cls, name);
     if (!c->slots && !(c->slots = value_new(c, SPY_DICT))) return NULL;
