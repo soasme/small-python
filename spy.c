@@ -22659,12 +22659,28 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
     return NULL;
 }
 /* BC_CALL: the callee, argument list and keyword dict on the stack; a
- * generator's machine (calls 0) enters no call. */
+ * generator's machine (calls 0) enters no call. A bound method's function
+ * takes its self first, and a plain class's Python __init__ the new
+ * instance, the call's value on the stack (CALL_INIT), as in stack_call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
-    SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result;
+    SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
-    else result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
+    else if (calls && (function = bound_function(c, callee)) && string_keys(c, keywords))
+        self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
+    else if (calls && callee->type == SPY_CLASS && (function = plain_init(c, callee)) && machine_function(c, function) &&
+             string_keys(c, keywords)) {
+        if ((self = new_instance(c, callee)) && machine_push(c, m, spy_retain(self))) { spy_release(self); self = NULL; }
+        c->entering_init = function; c->entering_kind = CALL_INIT;
+    } else if (!c->error_type[0]) result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
+    if (self) {
+        SPYValue *all = spy_list(c);
+        int failed = !all || sequence_append(c, all, self);
+        for (size_t i = 0; !failed && i < args->as.seq.len; i++) failed = sequence_append(c, all, args->as.seq.items[i]);
+        if (!failed && (*env = function_env(c, function, all->as.seq.len, all->as.seq.items, keywords, 0)))
+            result = spy_retain(callee->type == SPY_CLASS ? callee : function);
+        spy_release(all); spy_release(self);
+    }
     spy_release(keywords); spy_release(args); spy_release(callee);
     return result;
 }
@@ -23855,6 +23871,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
             callee_env = NULL; value = keyword_call(c, m, 1, &callee_env);
+            if (UNLIKELY(callee_env && value->type == SPY_CLASS)) goto enter_init;
             if (callee_env) goto enter_call;
             machine_push(c, m, value); break;
         CASE(BC_STORE)

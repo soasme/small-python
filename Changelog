@@ -73,6 +73,8 @@ Unreleased (0.8.0):
   __round__ or __reversed__ without the C stack
 - code compiled while pausing is set pauses inside the items' Python
   __repr__ in repr(), str(), print() and f-strings of a list or tuple
+- calls with *args or **kwargs of methods, callable instances and classes
+  with a Python __init__ no longer use the C stack
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
