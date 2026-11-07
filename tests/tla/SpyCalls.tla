@@ -8,7 +8,7 @@
 (* Python special method a step waits for (a key's __hash__, __index__,   *)
 (* __instancecheck__, a generator's close, a dead instance's __del__, a   *)
 (* class statement's metaclass __new__, a new class's __set_name__ and    *)
-(* __init_subclass__),                                                    *)
+(* __init_subclass__, an attribute store's __setattr__ or setter),        *)
 (* pushes another call there, and the same run_machine goes on (a         *)
 (* machine call); a call that C makes (a host call, a special method      *)
 (* the machine does not take, a trace function) enters a new run_machine, *)

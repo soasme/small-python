@@ -64,6 +64,8 @@ Unreleased (0.8.0):
 - a class statement's metaclass __new__ runs without the C stack
 - a class statement's __set_name__ and __init_subclass__ calls run without
   the C stack
+- an attribute store's Python __setattr__, property setter or __set__ runs
+  without the C stack in function code
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do

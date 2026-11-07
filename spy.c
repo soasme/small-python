@@ -269,7 +269,7 @@ struct SPYContext {
     Call **calls; size_t calls_len, calls_cap; /* Functions running on the machine, innermost last; their storage is kept. */
     SPYValue *entering_init; /* Borrowed: the __init__ a class call step enters next, */
     int entering_kind;       /* as a call of this kind: CALL_INIT, or CALL_CHECKED for str() and repr(). */
-    SPYValue *fallback;      /* Owned: the __getattr__ an attribute step calls next (attribute_step). */
+    SPYValue *fallback;      /* Owned: the __getattr__ an attribute step calls next (attribute_step), or a setter's descriptor (setter_called). */
     /* Pausing (docs/metering.md 3.8): whether a spent budget or an interrupt
      * pauses; why a pause is due or was taken; the native activations of
      * run_machine now running; the machine of the module body a pausable
@@ -11782,8 +11782,20 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
+static ALWAYS_INLINE int node_set_own(SPYContext *, SPYValue *, Node *, SPYValue *);
 static HOT int node_set_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
     if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return set_attribute(c, v, n->b->text, value);
+    return node_set_own(c, v, n, value);
+}
+static int setter_called(SPYContext *, SPYValue *, Node *);
+/* node_set_attribute for a machine step, which returns 1, storing nothing,
+ * for a Python setter (store_call). */
+static HOT int node_store_attribute(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
+    if (!plain_instance(v) || !(node_access(c, v, n) & ATTR_WRITE)) return setter_called(c, v, n) ? 1 : set_attribute(c, v, n->b->text, value);
+    return node_set_own(c, v, n, value);
+}
+/* node_set_attribute's store into v's own entries. */
+static ALWAYS_INLINE int node_set_own(SPYContext *c, SPYValue *v, Node *n, SPYValue *value) {
     Entry *e = dict_slot(v, n->b);
     if (e && e->key->type == SPY_STRING) {
         SPYValue *old = e->value;
@@ -17673,6 +17685,27 @@ static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *);
+/* The Python function a store to attribute name of instance object calls
+ * (SetAttr): its class's __setattr__, a property's setter, or a data
+ * descriptor's __set__, *descriptor that descriptor; else NULL. */
+static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, const char *name, SPYValue **descriptor) {
+    SPYValue *owner = object->as.map.parent, *hook = class_lookup(owner, "__setattr__"), *function = NULL;
+    *descriptor = NULL;
+    if (hook && !default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR)) function = hook;
+    else if (data_descriptor(*descriptor = instance_lookup(owner, name)))
+        function = (*descriptor)->type == SPY_PROPERTY ? (*descriptor)->as.property.set :
+                   (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, "__set__") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Whether a store to attribute n of object, which node_set_attribute
+ * would not store at once, calls a Python setter on the machine: then
+ * store_call enters c->entering_init with the descriptor c->fallback. */
+static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
+    SPYValue *descriptor, *function = object->type == SPY_INSTANCE ? setter_function(c, object, n->b->text, &descriptor) : NULL;
+    if (!function) return 0;
+    c->entering_init = function; c->fallback = spy_retain(descriptor);
+    return 1;
+}
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
     /* An attribute or item of a literal or name, while tick has only the
      * line to record, takes them as they are, held across the store. */
@@ -23010,6 +23043,24 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         release_all(2, args);
         return NULL;
     }
+    if (n->kind == N_ATTR) {
+        /* BC_SET_TARGET's attribute setter (setter_function), the object
+         * atop the value, or BC_SAVE_TARGET's, the value atop the object:
+         * __setattr__ takes the name, a property's setter the instance and
+         * value, __set__ its descriptor first. */
+        SPYValue *value = ins->op == BC_SAVE_TARGET ? machine_pop(m) : NULL, *object = machine_pop(m);
+        SPYValue *function = c->entering_init, *descriptor = c->fallback;
+        c->fallback = NULL;
+        SPYValue *name = descriptor ? NULL : spy_string(c, n->b->text, strlen(n->b->text));
+        SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : name,
+                            value ? value : m->stack[m->len - 1]};
+        relocate(c, n);
+        size_t skip = descriptor && descriptor->type == SPY_PROPERTY;
+        *env = descriptor || name ? function_env(c, function, 3 - skip, argv + skip, NULL, 0) : NULL;
+        function = *env ? spy_retain(function) : NULL;
+        release_all(4, (SPYValue *[]){name, object, value, descriptor});
+        return function;
+    }
     if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
     else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     else {
@@ -23770,7 +23821,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);
-            else node_set_attribute(c, a, n, m->stack[m->len - 1]);
+            /* A Python setter takes the object back atop the value. */
+            else if (node_store_attribute(c, a, n, m->stack[m->len - 1]) > 0) { machine_push(c, m, a); a = NULL; goto store_step; }
             break;
         CASE(BC_LOAD_TARGET)
             if (n->kind == N_INDEX && !ins->arg && m->stack[m->len - 1]->type == SPY_INSTANCE) { a = spy_retain(m->stack[m->len - 1]); goto display_hash; }
@@ -23783,7 +23835,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, value);
-            else node_set_attribute(c, a, n, value);
+            else if (node_store_attribute(c, a, n, value) > 0) { machine_push(c, m, a); machine_push(c, m, value); a = NULL; goto store_step; }
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
