@@ -18220,7 +18220,7 @@ static SPYValue *apply_decorators(SPYContext *c, SPYValue *values, SPYValue *def
     }
     return definition;
 }
-static int finish_class(SPYContext *, SPYValue *, SPYValue *);
+static int finish_class(SPYContext *, SPYValue *, SPYValue *, SPYValue *, SPYValue **);
 static SPYValue *module_env(SPYContext *, SPYValue *);
 /* The most derived of a requested metaclass and those of the bases. */
 static SPYValue *derived_metaclass(SPYContext *c, SPYValue *meta, SPYValue *bases) {
@@ -18476,8 +18476,10 @@ static int class_slots(SPYContext *c, SPYValue *cls, SPYValue *namespace) {
     spy_release(list); spy_release(names);
     return status;
 }
-/* type.__new__(meta, name, bases, namespace, **keywords). */
-static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *given, SPYValue *namespace, SPYValue *keywords) {
+/* type.__new__(meta, name, bases, namespace, **keywords); given state, the
+ * class's callbacks are left in *state (finish_class). */
+static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPYValue *given, SPYValue *namespace, SPYValue *keywords,
+                              SPYValue **state) {
     SPYValue *storage = dictionary_value(c, namespace), *text = builtin_value(c, name, SPY_STRING);
     SPYValue *bases = builtin_value(c, given, SPY_TUPLE);
     if (!text) return errorf(c, "TypeError", "type.__new__() argument 1 must be str, not %s", type_name(name));
@@ -18533,11 +18535,7 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     SPYValue *qualname = name_local(cls, "__qualname__");
     if (!builtin_value(c, qualname, SPY_STRING)) errorf(c, "TypeError", "type __qualname__ must be a str, not %s", type_name(qualname));
     if (meta != c->types[SPY_CLASS]) cls->as.map.meta = spy_retain(meta);
-    if (!c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace)) finish_class(c, cls, keywords);
-    /* Last, as the class's attributes then move into the dictionary. */
-    SPYValue *dict = classdict && !c->error_type[0] ? instance_dict(c, cls) : NULL;
-    if (dict) cell_set(c, classdict, dict);
-    spy_release(dict);
+    if (!c->error_type[0] && !initialize_mro(c, cls) && !class_slots(c, cls, namespace)) finish_class(c, cls, keywords, classdict, state);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
 }
@@ -18752,16 +18750,29 @@ static void class_made(SPYContext *c, SPYValue *cls, SPYValue *name, SPYValue *e
                                    name->as.string.data, text->as.string.data);
     spy_release(text); spy_release(other);
 }
-static SPYValue *class_create(SPYContext *c, SPYValue *name, ClassState *s, SPYValue *classcell) {
-    SPYValue *cls = NULL;
+/* A class statement's class; for machine m, a class of type leaves its
+ * callbacks' state (finish_class) and __class__ cell or None on m's stack
+ * for class_step, which then runs them. */
+static SPYValue *class_create(SPYContext *c, SPYValue *name, ClassState *s, SPYValue *classcell, Machine *m) {
+    SPYValue *cls = NULL, *state = NULL;
     if (s->original && name_set(c, s->env, "__orig_bases__", s->original)) goto done;
-    if (s->meta == c->types[SPY_CLASS]) cls = create_class(c, s->meta, name, s->tuple, s->namespace, s->keywords);
-    else {
+    if (s->meta == c->types[SPY_CLASS]) {
+        cls = create_class(c, s->meta, name, s->tuple, s->namespace, s->keywords, m ? &state : NULL);
+        if (state) {
+            spy_release(state->as.seq.items[0]); spy_release(state->as.seq.items[1]);
+            state->as.seq.items[0] = spy_retain(name); state->as.seq.items[1] = spy_retain(s->env);
+        }
+    } else {
         SPYValue *args[] = {name, s->tuple, s->namespace};
         cls = call_keywords(c, s->meta, 3, args, s->keywords);
     }
-    if (cls) class_made(c, cls, name, s->env, classcell);
+    if (cls && state) {
+        int failed = machine_push(c, m, state);
+        state = NULL;
+        if (failed || machine_push(c, m, spy_retain(classcell ? classcell : c->none))) { spy_release(cls); cls = NULL; }
+    } else if (cls) class_made(c, cls, name, s->env, classcell);
 done:
+    spy_release(state);
     class_state_free(s);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
@@ -18803,7 +18814,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
         if (machine_push(c, m, state)) { spy_release(classcell); return NULL; }
         return machine_push(c, m, classcell ? classcell : spy_none(c)) ? NULL : spy_retain(c->unbound);
     }
-    cls = class_create(c, name, &s, classcell);
+    cls = class_create(c, name, &s, classcell, m);
     spy_release(classcell);
     return cls;
 }
@@ -19610,7 +19621,13 @@ static void error_note(SPYContext *c, const char *text) {
     spy_release(note);
     restore_error(c, &error);
 }
-static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
+static SPYValue *class_callback(SPYContext *, SPYValue *, SPYValue *, SPYValue **);
+/* A new class's wrapped methods and defaults; then its callbacks, which
+ * class_callback runs from a list: two Nones (a class statement's name and
+ * body env in class_create), the __classdictcell__ and keywords or Nones,
+ * then each namespace key and value, last first. Given state, the list is
+ * left in *state. */
+static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords, SPYValue *classdict, SPYValue **state) {
     static const char *names[] = {"__new__", "__init_subclass__", "__class_getitem__"};
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
         SPYValue *method = name_local(cls, names[i]);
@@ -19622,55 +19639,105 @@ static int finish_class(SPYContext *c, SPYValue *cls, SPYValue *keywords) {
     }
     if (!name_local(cls, "__doc__")) name_set(c, cls, "__doc__", c->none);
     if (name_local(cls, "__eq__") && !name_local(cls, "__hash__")) name_set(c, cls, "__hash__", c->none);
-    /* Notify the original namespace in definition order. A callback may add,
-     * replace, or delete attributes, including itself and later descriptors. */
-    SPYValue *snapshot = value_new(c, SPY_DICT), *dict = namespace_map(cls);
-    if (!snapshot) return -1;
-    for (size_t i = 0; i < dict->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &map_items(dict)[i];
-        map_append(c, snapshot, entry->key, entry->value, entry->hash);
+    /* The original namespace is notified in definition order. A callback may
+     * add, replace, or delete attributes, including itself and later ones. */
+    SPYValue *list = spy_list(c), *dict = namespace_map(cls);
+    if (!list || sequence_grow(c, list, 4 + 2 * dict->as.map.len)) { spy_release(list); return -1; }
+    SPYValue **items = list->as.seq.items;
+    *items++ = spy_retain(c->none);
+    *items++ = spy_retain(c->none);
+    *items++ = spy_retain(classdict ? classdict : c->none);
+    *items++ = spy_retain(keywords ? keywords : c->none);
+    for (size_t i = dict->as.map.len; i-- > 0;) {
+        /* Most values are of types special_method finds no method for. */
+        SPYValue *value = map_items(dict)[i].value;
+        if (value->type == SPY_FUNCTION || value->type == SPY_STRING || value->type == SPY_INT || value->type == SPY_TUPLE) continue;
+        *items++ = spy_retain(map_items(dict)[i].key);
+        *items++ = spy_retain(value);
     }
-    for (size_t i = 0; i < snapshot->as.map.len && !c->error_type[0]; i++) {
-        Entry *entry = &map_items(snapshot)[i];
-        SPYValue *method = special_method(c, entry->value, "__set_name__");
-        if (!method) continue;
-        SPYValue *args[] = {cls, entry->key};
-        SPYValue *result = call(c, method, 2, args);
-        spy_release(method);
-        if (!result) {
-            ErrorState error = take_error(c);
-            Buffer message = {.ctx = c};
-            puts_buffer(&message, "Error calling __set_name__ on '");
-            puts_buffer(&message, type_name(entry->value));
-            puts_buffer(&message, "' instance ");
-            format_value(&message, entry->key, 1);
-            puts_buffer(&message, " in '");
-            puts_buffer(&message, name_text(cls, "__name__")->as.string.data);
-            puts_buffer(&message, "'");
-            SPYValue *note = c->error_type[0] ? NULL : spy_string(c, message.data, message.len);
-            if (note && error.value) exception_add_note(c, error.value, note);
-            spy_release(note); mem_free(message.data);
-            restore_error(c, &error);
-        }
-        spy_release(result);
+    list->as.seq.len = (size_t)(items - list->as.seq.items);
+    if (state) *state = list;
+    else {
+        class_callback(c, cls, list, NULL);
+        spy_release(list);
     }
-    spy_release(snapshot);
-    if (c->error_type[0]) return -1;
-    /* super(cls, cls).__init_subclass__: a custom MRO may leave cls out. */
-    SPYValue *mro = cls->as.map.mro, *definition = NULL;
-    size_t start = 0;
-    while (start < mro->as.seq.len && mro->as.seq.items[start] != cls) start++;
-    if (start == mro->as.seq.len) {
-        const char *name = class_tname(cls);
-        errorf(c, "TypeError", "super(type, obj): obj (type %s) is not an instance or subtype of type (%s).", name, name);
-        return -1;
-    }
-    for (size_t i = start + 1; i < mro->as.seq.len && !definition; i++)
-        definition = name_local(mro->as.seq.items[i], "__init_subclass__");
-    SPYValue *method = definition ? descriptor_get(c, definition, NULL, cls) : NULL;
-    SPYValue *result = method ? call_keywords(c, method, 0, NULL, keywords) : NULL;
-    spy_release(method); spy_release(result);
     return c->error_type[0] ? -1 : 0;
+}
+/* A callback's result, NULL on its error, which a __set_name__'s error
+ * notes; its items leave cls's state. */
+static void class_called(SPYContext *c, SPYValue *cls, SPYValue *state, SPYValue *result) {
+    size_t len = state->as.seq.len;
+    SPYValue **items = state->as.seq.items;
+    if (len > 4 && !result && c->error_type[0]) {
+        ErrorState error = take_error(c);
+        Buffer message = {.ctx = c};
+        puts_buffer(&message, "Error calling __set_name__ on '");
+        puts_buffer(&message, type_name(items[len - 1]));
+        puts_buffer(&message, "' instance ");
+        format_value(&message, items[len - 2], 1);
+        puts_buffer(&message, " in '");
+        puts_buffer(&message, name_text(cls, "__name__")->as.string.data);
+        puts_buffer(&message, "'");
+        SPYValue *note = c->error_type[0] ? NULL : spy_string(c, message.data, message.len);
+        if (note && error.value) exception_add_note(c, error.value, note);
+        spy_release(note); mem_free(message.data);
+        restore_error(c, &error);
+    }
+    for (size_t n = len > 4 ? 2 : 1; n; n--) spy_release(items[--state->as.seq.len]);
+    spy_release(result);
+}
+/* The new class cls's callbacks from finish_class's state, each run here,
+ * until, given env, a Python __set_name__ or __init_subclass__ is next: its
+ * function to enter with *env (CALL_CHECKED), whose result class_called
+ * takes; else NULL, the state left with its first two items. */
+static SPYValue *class_callback(SPYContext *c, SPYValue *cls, SPYValue *state, SPYValue **env) {
+    SPYValue *function;
+    while (state->as.seq.len > 2 && !c->error_type[0]) {
+        SPYValue **items = state->as.seq.items, *result = NULL, *method;
+        size_t len = state->as.seq.len;
+        if (len == 3) {
+            /* Last, as the class's attributes then move into the dictionary. */
+            SPYValue *dict = items[2] != c->none ? instance_dict(c, cls) : NULL;
+            if (dict) cell_set(c, items[2], dict);
+            spy_release(dict);
+        } else if (len == 4) {
+            /* super(cls, cls).__init_subclass__: a custom MRO may leave cls out. */
+            SPYValue *mro = cls->as.map.mro, *definition = NULL;
+            size_t start = 0;
+            while (start < mro->as.seq.len && mro->as.seq.items[start] != cls) start++;
+            if (start == mro->as.seq.len) {
+                const char *name = class_tname(cls);
+                errorf(c, "TypeError", "super(type, obj): obj (type %s) is not an instance or subtype of type (%s).", name, name);
+                return NULL;
+            }
+            for (size_t i = start + 1; i < mro->as.seq.len && !definition; i++)
+                definition = name_local(mro->as.seq.items[i], "__init_subclass__");
+            SPYValue *keywords = items[3] == c->none ? NULL : items[3];
+            if (env && definition && definition->type == SPY_CLASSMETHOD && machine_function(c, function = definition->as.wrapper.function)) {
+                if (!(*env = function_env(c, function, 1, &cls, keywords, 0))) return NULL;
+                goto enter;
+            }
+            method = definition ? descriptor_get(c, definition, NULL, cls) : NULL;
+            result = method ? call_keywords(c, method, 0, NULL, keywords) : NULL;
+            spy_release(method);
+        } else {
+            SPYValue *argv[] = {items[len - 1], cls, items[len - 2]};
+            function = env && argv[0]->type == SPY_INSTANCE ? class_lookup(argv[0]->as.map.parent, "__set_name__") : NULL;
+            if (function && machine_function(c, function)) {
+                /* A binding error is the call's, which class_called notes. */
+                if ((*env = function_env(c, function, 3, argv, NULL, 0))) goto enter;
+            } else {
+                if (!(method = special_method(c, argv[0], "__set_name__")) && c->error_type[0]) return NULL;
+                result = method ? call(c, method, 2, argv + 1) : NULL;
+                spy_release(method);
+            }
+        }
+        class_called(c, cls, state, result);
+    }
+    return NULL;
+enter:
+    c->entering_init = function; c->entering_kind = CALL_CHECKED;
+    return spy_retain(function);
 }
 static int valid_exception_types(SPYContext *, SPYValue *);
 /* An exception class, or a tuple of them, all checked before matching. */
@@ -23117,15 +23184,21 @@ static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
  * is entered first (class_new_call). */
 static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     if (ins->arg == 7) {
-        SPYValue *cls = machine_pop(m), *classcell = machine_pop(m), *state = machine_pop(m);
-        if (state != c->none) class_made(c, cls, state->as.seq.items[6], state->as.seq.items[3], classcell == c->none ? NULL : classcell);
+        SPYValue *state = m->stack[m->len - 3], *cls, *classcell;
+        int list = state->type == SPY_LIST;
+        if (list && ((cls = class_callback(c, m->stack[m->len - 1], state, env)) || c->error_type[0])) return cls;
+        cls = machine_pop(m); classcell = machine_pop(m); state = machine_pop(m);
+        if (state != c->none)
+            class_made(c, cls, state->as.seq.items[list ? 0 : 6], state->as.seq.items[list ? 1 : 3], classcell == c->none ? NULL : classcell);
         spy_release(classcell); spy_release(state);
         if (c->error_type[0]) { spy_release(cls); return NULL; }
         return cls;
     }
+    /* Arg 0 leaves two items, as arg 5 keeps them, when it defers. */
+    size_t deferred = m->len + (ins->arg ? 0 : 2);
     SPYValue *cls = ins->arg ? class_part(c, m, f, ins) : build_class(c, f, ins->node, NULL, NULL, m);
     if (cls == c->unbound) { spy_release(cls); return class_new_call(c, m, env); }
-    if (cls && (ins->arg == 0 || ins->arg == 5) && (machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_none(c)))) { spy_release(cls); return NULL; }
+    if (cls && (ins->arg == 0 || ins->arg == 5) && m->len != deferred && (machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_none(c)))) { spy_release(cls); return NULL; }
     return cls;
 }
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
@@ -23148,7 +23221,7 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
             if (class_deferred(c, &state)) { class_state_free(&state); return spy_retain(c->unbound); }
         }
         m->len -= 2;
-        if (!body) body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell);
+        if (!body) body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell, m);
         spy_release(classcell); spy_release(v);
         return body;
     }
@@ -23187,6 +23260,12 @@ done:
 }
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
+    if (ins->op == BC_CLASS && ins->arg == 7) {
+        /* A class's callback: its step runs again for the next. */
+        if (result) m->pc = pc - 1;
+        class_called(c, m->stack[m->len - 1], m->stack[m->len - 3], result);
+        return m;
+    }
     if (!result) {
         /* As attribute: an AttributeError names the attribute and object. */
         if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], m->stack[m->len - 2]->as.string.data);
@@ -30060,7 +30139,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         /* Only type(object) refuses keywords; other counts but 3 are wrong first. */
         if (argc == 1) break;
         if (argc != 3) return builtin(c, argc, argv, (void *)(intptr_t)id);
-        SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords);
+        SPYValue *cls = create_class(c, c->types[SPY_CLASS], argv[0], argv[1], argv[2], keywords, NULL);
         /* type.__call__ initializes the result with its own metaclass. */
         SPYValue *init = cls && cls->type == SPY_CLASS && cls->as.map.meta ? special_method(c, cls, "__init__") : NULL;
         if (init) {
@@ -30516,7 +30595,7 @@ static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, 
     case 0: /* __new__ */
         if (new_check(c, type, argc, argv)) return NULL;
         if (argc != 4) return errorf(c, "TypeError", "type.__new__() takes exactly 3 arguments (%zu given)", argc - 1);
-        return create_class(c, argv[0], argv[1], argv[2], argv[3], keywords);
+        return create_class(c, argv[0], argv[1], argv[2], argv[3], keywords, NULL);
     case 1: /* __init__ */
         if (argc != 2 && argc != 4) return spy_error(c, "TypeError", "type.__init__() takes 1 or 3 arguments");
         if (argc == 2 && keywords && keywords->as.map.len) return spy_error(c, "TypeError", "type.__init__() takes no keyword arguments");
