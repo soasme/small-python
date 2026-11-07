@@ -8717,6 +8717,7 @@ static SPYValue *slice_new(SPYContext *c, SPYValue *start, SPYValue *stop, SPYVa
     }
     return v;
 }
+static SPYValue *index_result(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *index_object(SPYContext *c, SPYValue *value) {
     /* PyNumber_Index: ints and their subclasses are used directly. */
     SPYValue *integer = builtin_value(c, value, SPY_INT);
@@ -8725,6 +8726,11 @@ static SPYValue *index_object(SPYContext *c, SPYValue *value) {
     if (!method) return errorf(c, "TypeError", "'%s' object cannot be interpreted as an integer", type_name(value));
     SPYValue *index = call(c, method, 0, NULL);
     spy_release(method);
+    return index_result(c, value, index);
+}
+/* What value's __index__ returned, index, which it takes, as an exact int. */
+static SPYValue *index_result(SPYContext *c, SPYValue *value, SPYValue *index) {
+    SPYValue *integer;
     if (index && !(integer = builtin_value(c, index, SPY_INT))) {
         { char fq[256]; errorf(c, "TypeError", "%s.__index__() must return an int, not %s", type_fqname(value, fq, sizeof(fq)), type_name(index)); }
         spy_release(index); return NULL;
@@ -22015,6 +22021,18 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     c->entering_kind = CALL_CHECKED;
     return function;
 }
+/* The Python __instancecheck__ or __subclasscheck__ of argv[1]'s metaclass
+ * that callee, isinstance or issubclass, calls with argv[1] and argv[0],
+ * *name the method's; else NULL. */
+static NO_INLINE SPYValue *check_method(SPYContext *c, SPYValue *callee, SPYValue *const *argv, SPYValue **name) {
+    int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
+    if ((id != B_ISINSTANCE && id != B_ISSUBCLASS) || (id == B_ISINSTANCE && value_class(c, argv[0]) == argv[1])) return NULL;
+    const char *method = id == B_ISINSTANCE ? "__instancecheck__" : "__subclasscheck__";
+    SPYValue *function = class_lookup(argv[1]->as.map.meta, method);
+    if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, 17))) return NULL;
+    c->entering_kind = CALL_CHECKED;
+    return function;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -22052,6 +22070,17 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return NULL;
     }
     SPYValue *found[2], *convert = method < 0 && argc && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
+    if (!convert && method < 0 && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
+        /* isinstance() or issubclass() enters the metaclass's method
+         * (CALL_CHECKED), its name and the tested value on the stack. */
+        spy_release(callee);
+        if (machine_push(c, m, found[0])) { release_all(argc, argv); return NULL; }
+        if (machine_push(c, m, argv[0])) { spy_release(argv[1]); return NULL; }
+        found[0] = argv[1]; found[1] = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 2, found, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
+    }
     if (convert) {
         /* str(), repr() or format() of an instance enters its Python
          * __str__, __repr__ or __format__ (CALL_CHECKED), the name and
@@ -22129,7 +22158,8 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
-        (argc == 1 && callee->type == SPY_NATIVE && argv[0]->type == SPY_INSTANCE))
+        (callee->type == SPY_NATIVE && ((argc == 1 && argv[0]->type == SPY_INSTANCE) ||
+                                        (argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     if (method < 0 && source_builtin(callee)) {
         SPYValue *result = source_call(c, callee, argc, argv, env);
@@ -22237,6 +22267,16 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
          * (CALL_CHECKED) among them (print_from). */
         int status = print_call_step(c, m, argc, argc, NULL, &convert, env);
         return status > 0 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
+    }
+    if (!convert && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
+        /* So does isinstance() or issubclass() with a metaclass's method,
+         * the tested value's class leaving the stack. */
+        spy_release(callee);
+        argv[-1] = found[0];
+        found[0] = machine_pop(m); found[1] = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 2, found, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
     }
     if (convert) {
         /* The method's name takes the callee's place (CALL_CHECKED); a
@@ -22510,7 +22550,7 @@ static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 /* Which of an operator's special method calls one is: x's own first, y's
  * reflected one first, or the last. */
-enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST };
+enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
 /* An operator's call pushes its operands x and y and its phase. */
 static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
     return machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, phase));
@@ -22604,6 +22644,14 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         SPYValue *operands[] = {x, y};
         if ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0]) return function;
         c->entering_kind = CALL_OPERATOR;
+    }
+    /* A builtin sequence's item: an instance key's Python __index__ first,
+     * the item then of its int (operator_returned). */
+    if (kind == OPERATE_INDEX && y->type == SPY_INSTANCE && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
+        x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE) &&
+        (function = item_function(c, y, "__index__")) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
+        *env = function_env(c, function, 1, &y, NULL, 0);
+        return *env ? spy_retain(function) : NULL;
     }
     if (contains) {
         int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
@@ -22709,7 +22757,11 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
     int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small;
     spy_release(marker);
-    if (op == O_IN || op == O_NOTIN) {
+    if (phase == OPERATOR_INDEX) {
+        SPYValue *index = index_result(c, y, result);
+        result = index ? operation(c, ins, x, index) : NULL;
+        spy_release(index);
+    } else if (op == O_IN || op == O_NOTIN) {
         int truth = truthy(result);
         spy_release(result);
         result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
@@ -23046,6 +23098,11 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         else if (!strcmp(method, "__hash__")) string = hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
             string = number_result(c, v, method[2] == 'f', spy_retain(result));
+        else if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
+            /* isinstance() and issubclass() take the result's truth. */
+            int truth = truthy(result);
+            string = c->error_type[0] ? NULL : spy_bool(c, truth);
+        }
         else string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
         spy_release(result); spy_release(v); spy_release(name);
         if (string && m->len && m->stack[m->len - 1] == c->replacing) return print_returned(c, m, (size_t)ins->arg, string);

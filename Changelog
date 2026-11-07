@@ -55,6 +55,10 @@ Unreleased (0.8.0):
   the C stack
 - a key's Python __hash__ runs without the C stack in dict and set displays,
   dict subscripts, stores and deletions, and in tests of a dict or set
+- an instance's Python __index__ runs without the C stack when it indexes
+  a list, tuple, str, bytes, bytearray or range
+- a metaclass's Python __instancecheck__ and __subclasscheck__ run without
+  the C stack in isinstance() and issubclass()
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
