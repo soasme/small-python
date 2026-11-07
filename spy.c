@@ -8378,6 +8378,30 @@ static SPYValue *zip_items(SPYContext *c, SPYValue *v) {
     }
     return result;
 }
+/* What enumerate or filter v makes of item, its source's next item, taking
+ * it: the item numbered, or the item when the filter's function, None or
+ * any other, keeps it; NULL when it drops it, or with an error. */
+static NO_INLINE SPYValue *adapted_item(SPYContext *c, SPYValue *v, SPYValue *item) {
+    if (v->as.iterator.kind == I_FILTER) {
+        SPYValue *function = v->as.iterator.source->as.seq.items[0];
+        SPYValue *test = function->type == SPY_NONE ? spy_retain(item) : call(c, function, 1, &item);
+        int keep = test && truthy(test);
+        spy_release(test);
+        if (keep && !c->error_type[0]) return item;
+        spy_release(item);
+        return NULL;
+    }
+    SPYValue *index = spy_retain(v->as.iterator.counter), *result = value_new(c, SPY_TUPLE);
+    if (!index || !result || sequence_append(c, result, index) || sequence_append(c, result, item)) {
+        spy_release(result); result = NULL;
+    }
+    spy_release(index); spy_release(item);
+    SPYValue one = {.type = SPY_INT, .as.integer_data.small = 1};
+    SPYValue *next = integer_add(c, v->as.iterator.counter, &one, 0);
+    if (next) { spy_release(v->as.iterator.counter); v->as.iterator.counter = next; }
+    else { spy_release(result); result = NULL; }
+    return result;
+}
 static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
     SPYValue *item;
     if (iterator_fast(c, v, &item)) return item;
@@ -8488,34 +8512,14 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         break;
     case I_ENUMERATE: {
         SPYValue *item = iterator_next(c, source);
-        if (!item) break;
-        SPYValue *index = spy_retain(v->as.iterator.counter);
-        result = value_new(c, SPY_TUPLE);
-        if (!index || !result || sequence_append(c, result, index) || sequence_append(c, result, item)) {
-            spy_release(result); result = NULL;
-        }
-        spy_release(index); spy_release(item);
-        SPYValue one = {.type = SPY_INT, .as.integer_data.small = 1};
-        SPYValue *next = integer_add(c, v->as.iterator.counter, &one, 0);
-        if (next) { spy_release(v->as.iterator.counter); v->as.iterator.counter = next; }
-        else { spy_release(result); result = NULL; }
+        if (item) result = adapted_item(c, v, item);
         break;
     }
     case I_FILTER:
         /* source holds (function, iterator). */
-        while ((result = iterator_next(c, source->as.seq.items[1]))) {
-            SPYValue *function = source->as.seq.items[0], *test = function->type == SPY_NONE ? spy_retain(result) : call(c, function, 1, &result);
-            int keep = test ? truthy(test) : 0;
-            spy_release(test);
-            if (c->error_type[0]) {
-                spy_release(result);
-                /* As map: a StopIteration from the function ends this call only. */
-                if (error_is(c, "StopIteration")) { spy_clear_error(c); c->depth--; return NULL; }
-                result = NULL; break;
-            }
-            if (keep) break;
-            spy_release(result);
-        }
+        while ((result = iterator_next(c, source->as.seq.items[1])) && !(result = adapted_item(c, v, result)) && !c->error_type[0]) ;
+        /* As map: a StopIteration from the function ends this call only. */
+        if (!result && error_is(c, "StopIteration")) { spy_clear_error(c); c->depth--; return NULL; }
         break;
     case I_GETITEM: {
         if (v->as.iterator.index > INT64_MAX) { spy_error(c, "OverflowError", "sequence index exceeds signed 64-bit limit"); break; }
@@ -21361,6 +21365,7 @@ static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATO
  * can resume (consumer_of): sum, any, all, min, max, list, tuple, set,
  * frozenset, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
+static SPYValue *adapted_generator(SPYContext *, SPYValue *);
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A generator's __next__ and send, and a coroutine's send. */
@@ -21368,7 +21373,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
-    if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP))) return -1;
+    if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP) &&
+                  !adapted_generator(c, argv[0]))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
@@ -21382,7 +21388,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     return id;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
-    return (argc && (resumable(argv[0]) || (argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP))) ||
+    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR)) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* Consumer id, of callee, its native method method of name, takes
@@ -22333,12 +22339,35 @@ static ALWAYS_INLINE void loop_item(SPYContext *c, Machine *m, Frame *f, Instruc
     if (next->other) { store_target(c, f, next->node->args, item); spy_release(item); }
     else machine_push(c, m, item);
 }
+/* The generator the machine resumes for iterator v's next item, borrowed:
+ * the source of an enumerate, or of a filter whose function is None or
+ * native, which adapted_item makes the item of; else NULL. */
+static SPYValue *adapted_generator(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_ITERATOR || v->as.iterator.done) return NULL;
+    SPYValue *source = v->as.iterator.source;
+    if (v->as.iterator.kind == I_FILTER) {
+        if (machine_function(c, source->as.seq.items[0])) return NULL;
+        source = source->as.seq.items[1];
+    } else if (v->as.iterator.kind != I_ENUMERATE) return NULL;
+    return resumable(source) ? source : NULL;
+}
+/* Adapter v (adapted_generator) takes the item its generator yielded in
+ * flow: a yield of its item; of none when it drops it; else its end, a
+ * StopIteration from a filter's function, as in iterator_next, or an
+ * error. */
+static NO_INLINE Result adapted_flow(SPYContext *c, SPYValue *v, Result flow) {
+    if ((flow.value = adapted_item(c, v, flow.value)) || !c->error_type[0]) return flow;
+    if (error_is(c, "StopIteration")) spy_clear_error(c);
+    return (Result){FLOW_NORMAL, NULL};
+}
 /* The call a step enters on the machine for iterator v's next item, owned,
  * with its env: a Python __next__ of v's class, or a map's function given
  * its iterables' next items. 1 then; 0 when v has none; -1 when the map's
- * iterables ended or raised. */
+ * iterables ended or raised; 2 with the generator to resume instead
+ * (adapted_generator), borrowed. */
 static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function, *args;
+    if ((*fn = adapted_generator(c, v))) return 2;
     if (v->type == SPY_ITERATOR) {
         if (v->as.iterator.kind != I_MAP || !v->as.iterator.source->as.seq.len ||
             !machine_function(c, function = v->as.iterator.source->as.seq.items[0])) return 0;
@@ -22773,6 +22802,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                      * returns into this step. */
                     SPYValue *next;
                     int calling = next_call(c, iterator, &next, &callee_env);
+                    if (calling > 1) { value = next; goto resume_generator; }
                     if (calling > 0) { value = next; special = CALL_NEXT; goto enter_special; }
                     a = calling ? NULL : iterator_next(c, iterator);
                 }
@@ -22943,6 +22973,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             /* A map's function is a call returning its item (CALL_ITEM). */
             SPYValue *next;
             int calling = next_call(c, value, &next, &callee_env);
+            if (calling > 1) { value = next; goto resume_generator; }
             if (calling > 0) { value = next; special = CALL_ITEM; goto enter_special; }
             a = calling ? NULL : iterator_next(c, value);
             goto consume_item;
@@ -22980,15 +23011,23 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         } else if (flow.flow != FLOW_YIELD) generator_end(c, g, flow);
         m = resumer;
         f = m->frame; code = m->code->items; pc = m->pc;
-        Block *top = m->block_len ? &m->blocks[m->block_len - 1] : NULL;
-        if (top && top->kind == BLOCK_CONSUME) {
+        /* Its resumer's loop or consumer block. */
+        Block *top = &m->blocks[m->block_len - 1];
+        /* A generator an enumerate or filter takes from gives its item
+         * (adapted_step); one the filter drops, a yield of no item,
+         * resumes it again. */
+        if (flow.value && top->value != g) flow = adapted_flow(c, top->value, flow);
+        if (top->kind == BLOCK_CONSUME) {
             a = flow.flow == FLOW_YIELD ? flow.value : NULL;
+            int dropped = flow.flow == FLOW_YIELD && !a;
             flow = (Result){FLOW_NORMAL, NULL};
+            if (dropped) goto consume_generator;
             goto consume_item;
         }
         /* The loop's BC_NEXT, which resumed it. */
-        if (flow.flow != FLOW_YIELD && !c->error_type[0]) pc = code[pc - 1].target;
         if (flow.value) loop_item(c, m, &f, &code[pc - 1], flow.value);
+        else if (flow.flow == FLOW_YIELD) pc--;
+        else if (!c->error_type[0]) pc = code[pc - 1].target;
         flow = (Result){FLOW_NORMAL, NULL};
         continue;
     }

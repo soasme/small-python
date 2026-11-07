@@ -280,8 +280,10 @@ These run as machines on the heap, in one native activation of
 - calls of functions, bound methods and plain classes; classes with a
   Python `__new__`; instances with a Python `__call__`; Python
   decorators;
-- a loop's Python `__iter__` and `__next__`, and the function of a `map`
-  it takes items from;
+- a loop's Python `__iter__` and `__next__`, the function of a `map` it
+  takes items from, and the generator that an `enumerate`, or a `filter`
+  whose function is `None` or native, takes items from, for a loop or a
+  consumer below;
 - generators and maps consumed by `sum`, `any`, `all`, `min`, `max`,
   `list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, and, in
   code compiled while pausing, generators a target list unpacks;
@@ -310,8 +312,8 @@ A call that native code makes runs in an activation of its own: another
 special method (outside code compiled while pausing, an augmented
 subscript assignment's or a target list's `__setitem__`; an unpacking's
 `__iter__`, a property of a class with `__getattr__`), the items a
-builtin iterator such as `enumerate`, `zip` or `filter` takes from a
-generator, a host function,
+`zip`, a `map` or a `filter` by a Python function takes from a generator,
+a host function,
 the metaclass call that makes a class, an import, `exec` and `eval`, and
 a call from what the walker evaluates whole. Without pausing compiled
 in, the walker runs a function whose body holds no call or loop, which

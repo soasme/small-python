@@ -1044,11 +1044,13 @@ int main(int argc, char **argv) {
                "    return t + u + w + r + len(p) + len(f'{p:ab}{p!r}{q}{q!s:>4}')\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "special()", "special.py"), SPY_STOP_STEPS, &pauses)) == 5 + 4 + 3 + 3 + 4 + 6 && pauses > 14);
-    /* Unpacking, min and max take a generator's items on the machine. */
+    /* Unpacking, min, max, enumerate and filter take a generator's items
+     * on the machine. */
     execute(c, "def slowgen():\n    for i in range(3):\n        spin()\n        yield i\n"
-               "def minmax():\n    a, b, c = slowgen()\n    return max(slowgen()) + min(slowgen()) + c\n");
+               "def minmax():\n    a, b, c = slowgen()\n    for i, x in enumerate(slowgen()): c += i\n"
+               "    return max(slowgen()) + min(filter(None, slowgen())) + c\n");
     pauses = 0;
-    assert(integer(c, run_paused(c, spy_eval(c, "minmax()", "minmax.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 6);
+    assert(integer(c, run_paused(c, spy_eval(c, "minmax()", "minmax.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 9);
     /* A module whose import names are not augmented assignments. */
     assert(integer(c, spy_eval(c, "from __future__ import annotations\nclass A:\n    y: int\nlen(A.__annotations__)", "future.py")) == 1);
     /* An interrupt pauses too; spy_exec returns -1 when it pauses. */

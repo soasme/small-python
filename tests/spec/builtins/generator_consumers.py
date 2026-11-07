@@ -1,7 +1,8 @@
-# spec: PLS-315 19.3.35, 19.3.3, 19.3.34, 19.3.26, 13.16
+# spec: PLS-315 19.3.35, 19.3.3, 19.3.34, 19.3.26, 27.1.4, 27.1.5, 13.16
 # description: sum, any, all, min, max, list and tuple take a generator's
 # items in order until it ends, any and all stop at the first item that
 # decides, min and max compare each item with the best before the next,
+# an enumerate or filter over a generator takes its items one at a time,
 # and what the generator raises reaches their caller.
 from harness import *
 
@@ -164,3 +165,57 @@ except TypeError as e:
     assert str(e) == "'>' not supported between instances of 'str' and 'int'", str(e)
 else:
     raise AssertionError("no TypeError")
+
+# enumerate and filter over a generator, in loops and consumers: each item
+# is numbered or tested as the generator yields it, a StopIteration from a
+# filter's function ends that pass only, and an error reaches the caller.
+seen = []
+def tracked():
+    for x in [0, 1, "", 3]:
+        seen.append(("yield", x))
+        yield x
+def loud(x):
+    seen.append(("test", x))
+    return x
+def adapters():
+    out = []
+    for i, x in enumerate(tracked(), 10):
+        out.append((i, x))
+    for x in filter(None, tracked()):
+        out.append(x)
+    out.append(sum(filter(None, tracked())))
+    out.append(list(enumerate(tracked())))
+    out.append(max(filter(None, tracked())))
+    return out
+assert adapters() == [(10, 0), (11, 1), (12, ""), (13, 3), 1, 3, 4,
+                      [(0, 0), (1, 1), (2, ""), (3, 3)], 3]
+seen.clear()
+assert list(filter(loud, tracked())) == [1, 3]
+assert seen == [("yield", 0), ("test", 0), ("yield", 1), ("test", 1), ("yield", ""), ("test", ""), ("yield", 3), ("test", 3)], seen
+def stopping(x):
+    if x == 1: raise StopIteration
+    return True
+def partial():
+    source = tracked()
+    taken = filter(stopping, source)
+    first = [x for x in taken]
+    return first, next(source), list(taken)
+assert partial() == ([0], "", [3])
+def broken():
+    yield 1
+    raise KeyError("k")
+def raising():
+    try:
+        for x in enumerate(broken()): pass
+    except KeyError as e:
+        return e.args
+assert raising() == ("k",)
+def native_tests():
+    lists = (iter(x) for x in [[1], [], [2]])
+    taken = filter(next, lists)
+    first = [x for x in taken]
+    try:
+        for x in filter(int, (s for s in ["1", "x"])): pass
+    except ValueError as e:
+        return len(first), len(list(taken)), str(e)
+assert native_tests() == (1, 1, "invalid literal for int() with base 10: 'x'")
