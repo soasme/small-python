@@ -13647,9 +13647,9 @@ typedef struct {
 enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BLOCK_WITH, BLOCK_ASYNC_WITH, BLOCK_CONSUME };
 /* A builtin taking an iterable's items one at a time (consumer_add): sum,
  * any, all, list or tuple; min or max keeping its best item in best; and a sum's float total while it compensates.
- * A set adds each item; a callee, owned, takes the items collected in a
- * list at their end (a native method of it with name when method is not
- * -1): frozenset, sorted or str.join. A sort by a key function, its
+ * A set or frozenset adds each item, a dict each pair, counting them; a callee, owned, takes the items
+ * collected in a list at their end (a native method of it with name when
+ * method is not -1): sorted or str.join. A sort by a key function, its
  * callee, collects in result the keys of its block's list, to sort in
  * order descending or not; list.sort's list, the target, waits empty;
  * once the keys are taken, a sort whose comparisons call Python sorts in
@@ -14533,6 +14533,25 @@ static int sorted_items(SPYContext *c, SPYValue *list, SPYValue *iterable) {
     spy_release(iterator);
     return status;
 }
+/* dict gains the key and value of pair, element index of an update
+ * sequence, which PyDict_MergeFromSeq2 takes with PySequence_Fast. */
+static int dict_pair(SPYContext *c, SPYValue *dict, SPYValue *pair, size_t index) {
+    SPYValue *items = spy_list(c), *probe = items ? get_iterator(c, pair) : NULL;
+    if (!probe && error_is(c, "TypeError")) { spy_clear_error(c); spy_error(c, "TypeError", "object is not iterable"); }
+    spy_release(probe);
+    if (items && !c->error_type[0]) extend_display(c, items, pair);
+    if (error_is(c, "TypeError")) {
+        char note[96];
+        snprintf(note, sizeof(note), "Cannot convert dictionary update sequence element #%zu to a sequence", index);
+        error_note(c, note);
+    } else if (items && !c->error_type[0]) {
+        if (items->as.seq.len != 2)
+            errorf(c, "ValueError", "dictionary update sequence element #%zu has length %zu; 2 is required", index, items->as.seq.len);
+        else map_set(c, dict, items->as.seq.items[0], items->as.seq.items[1]);
+    }
+    spy_release(items);
+    return c->error_type[0] ? -1 : 0;
+}
 static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     /* Like PyDict_Merge, dict subclasses keeping dict iteration copy directly. */
     SPYValue *base = builtin_base(c, a, "__iter__", NULL);
@@ -14545,21 +14564,8 @@ static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
             if (pass(c)) break;
             SPYValue *pair = iterator_next(c, iterator);
             if (!pair) break;
-            /* PyDict_MergeFromSeq2 takes each element with PySequence_Fast. */
-            SPYValue *items = spy_list(c), *probe = items ? get_iterator(c, pair) : NULL;
-            if (!probe && error_is(c, "TypeError")) { spy_clear_error(c); spy_error(c, "TypeError", "object is not iterable"); }
-            spy_release(probe);
-            if (items && !c->error_type[0]) extend_display(c, items, pair);
-            if (error_is(c, "TypeError")) {
-                char note[96];
-                snprintf(note, sizeof(note), "Cannot convert dictionary update sequence element #%zu to a sequence", index);
-                error_note(c, note);
-            } else if (items && !c->error_type[0]) {
-                if (items->as.seq.len != 2)
-                    errorf(c, "ValueError", "dictionary update sequence element #%zu has length %zu; 2 is required", index, items->as.seq.len);
-                else map_set(c, dict, items->as.seq.items[0], items->as.seq.items[1]);
-            }
-            spy_release(items); spy_release(pair);
+            dict_pair(c, dict, pair, index);
+            spy_release(pair);
         }
         spy_release(iterator);
     }
@@ -21534,7 +21540,7 @@ static int zip_of_generator(SPYValue *v) {
 /* The builtin of consumer that callee, or its native method method, is
  * when called with argc arguments argv, the first a generator the machine
  * can resume (consumer_of): sum, any, all, min, max, list, tuple, set,
- * frozenset, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
+ * frozenset, dict, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
 static SPYValue *adapted_generator(SPYContext *, SPYValue *);
 /* Whether fn is a generator function, whose call runs none of its body. */
@@ -21557,14 +21563,14 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
-    if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP) && !zip_of_generator(argv[0]) &&
+    if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && (argv[0]->as.iterator.kind == I_MAP || argv[0]->as.iterator.kind == I_FILTER)) && !zip_of_generator(argv[0]) &&
                   !adapted_generator(c, argv[0]) && !iter_function(c, argv[0]))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
-             callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
+             callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET : callee == c->types[SPY_DICT] ? B_DICT :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
-        id != B_MAX && id != B_FROZENSET && id != B_SORTED && id != B_JOIN && (id != B_NEXT || !resumable(argv[0]))) return -1;
+        id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && (id != B_NEXT || !resumable(argv[0]))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -21595,10 +21601,11 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
     if (id == B_NEXT && method >= 0) generator = spy_retain(callee);
-    int collects = id == B_FROZENSET || id == B_SORTED || id == B_JOIN;
+    int collects = id == B_SORTED || id == B_JOIN;
     Consumer *consumer = allocate(c, sizeof(*consumer));
-    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_LIST || id == B_TUPLE || id == B_SET || collects ?
-                       value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : SPY_LIST) : NULL;
+    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || collects ?
+                       value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
+                                 id == B_DICT ? SPY_DICT : SPY_LIST) : NULL;
     int keyed = generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); return; }
@@ -22727,7 +22734,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
             string = number_result(c, v, method[2] == 'f', spy_retain(result));
         else string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
         spy_release(result); spy_release(v); spy_release(name);
-        if (string && m->stack[m->len - 1] == c->replacing) return print_returned(c, m, (size_t)ins->arg, string);
+        if (string && m->len && m->stack[m->len - 1] == c->replacing) return print_returned(c, m, (size_t)ins->arg, string);
         if (string) machine_push(c, m, string);
         return m;
     }
@@ -22846,6 +22853,38 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     }
     return 0;
 }
+/* For filter v whose function is on the machine: that function, owned,
+ * with its env, given the next item of v's iterator, which waits in v's
+ * counter for filter_returned; 1 then; -1 when the iterator ended or
+ * raised; 0 for iterator_next when the function is not on the machine or
+ * an item already waits. */
+static NO_INLINE int filter_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *function = v->as.iterator.source->as.seq.items[0], *item;
+    if (v->as.iterator.counter || !machine_function(c, function)) return 0;
+    if (!(item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) return -1;
+    v->as.iterator.counter = item;
+    if (!(*env = function_env(c, function, 1, &item, NULL, 0))) {
+        v->as.iterator.counter = NULL; spy_release(item); return -1;
+    }
+    *fn = spy_retain(function);
+    return 1;
+}
+/* What the function of filter v, given the item waiting in v's counter
+ * (filter_call), returned in test, taking it: the item when test is true;
+ * else NULL, with *again set unless an error is pending. */
+static NO_INLINE SPYValue *filter_returned(SPYContext *c, SPYValue *v, SPYValue *test, int *again) {
+    SPYValue *item = v->as.iterator.counter;
+    v->as.iterator.counter = NULL;
+    int keep = test && truthy(test);
+    spy_release(test);
+    if (keep && !c->error_type[0]) return item;
+    spy_release(item);
+    *again = !c->error_type[0];
+    return NULL;
+}
+static ALWAYS_INLINE int filtering(SPYValue *v) {
+    return v->type == SPY_ITERATOR && v->as.iterator.kind == I_FILTER && v->as.iterator.counter;
+}
 /* The call a step enters on the machine for iterator v's next item, owned,
  * with its env: a Python __next__ of v's class, or a map's function given
  * its iterables' next items. 1 then; 0 when v has none; -1 when the map's
@@ -22857,6 +22896,7 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
     if (v->type == SPY_ITERATOR) {
         int status = v->as.iterator.removed && zip_of_generator(v) ? zip_fill(c, v, fn) : 0;
         if (status) return status < 0 ? -1 : 2;
+        if (v->as.iterator.kind == I_FILTER) return filter_call(c, v, fn, env);
         if (v->as.iterator.kind != I_MAP || !v->as.iterator.source->as.seq.len ||
             !machine_function(c, function = v->as.iterator.source->as.seq.items[0])) return 0;
         if (!(args = zip_items(c, v))) return -1;
@@ -22932,13 +22972,26 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_ENTER) {
                         if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);
                     } else if (kind == CALL_ITEM) {
+                        SPYValue *source = m->blocks[m->block_len - 1].value;
+                        if (filtering(source)) {
+                            int again = 0;
+                            result = filter_returned(c, source, result, &again);
+                            if (again) goto consume_generator;
+                        }
                         if (!result && error_is(c, "StopIteration")) spy_clear_error(c);
                         flow.value = result;
                         goto item_returned;
                     } else if (kind == CALL_KEY) {
                         if (result && !key_took(c, m, result)) goto consume_generator;
-                    } else if (result) loop_item(c, m, &f, &code[pc - 1], result);
-                    else if (error_is(c, "StopIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
+                    } else {
+                        /* CALL_NEXT: a filter's test tries the next item when false. */
+                        SPYValue *iterator = m->blocks[m->block_len - 1].value;
+                        int again = 0;
+                        if (filtering(iterator)) result = filter_returned(c, iterator, result, &again);
+                        if (again) pc--;
+                        else if (result) loop_item(c, m, &f, &code[pc - 1], result);
+                        else if (error_is(c, "StopIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
+                    }
                     continue;
                 }
                 if (m->outermost) {
@@ -28096,8 +28149,13 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         if (found) s->result = spy_bool(c, !s->count);
         return found;
     }
-    if (s->id == B_SET || s->id == EXTEND_ITEMS) {
-        int status = s->id == B_SET ? set_add(c, s->result, item) : display_add(c, s->result, item);
+    if (s->id == B_DICT) {
+        int status = dict_pair(c, s->result, item, s->count++);
+        spy_release(item);
+        return status;
+    }
+    if (s->id == B_SET || s->id == B_FROZENSET || s->id == EXTEND_ITEMS) {
+        int status = s->id != EXTEND_ITEMS ? set_add(c, s->result, item) : display_add(c, s->result, item);
         spy_release(item);
         return status;
     }

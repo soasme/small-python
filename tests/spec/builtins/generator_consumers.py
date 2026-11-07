@@ -3,7 +3,8 @@
 # items in order until it ends, any and all stop at the first item that
 # decides, min and max compare each item with the best before the next,
 # an enumerate or filter over a generator takes its items one at a time,
-# and what the generator raises reaches their caller.
+# set and frozenset stop at an unhashable item, and what the generator
+# raises reaches their caller.
 from harness import *
 
 def count(n):
@@ -219,3 +220,15 @@ def native_tests():
     except ValueError as e:
         return len(first), len(list(taken)), str(e)
 assert native_tests() == (1, 1, "invalid literal for int() with base 10: 'x'")
+def unhashable_first():
+    taken = []
+    def items():
+        yield []
+        taken.append("after")
+        yield 1
+    out = []
+    for build in (set, frozenset):
+        try: build(items())
+        except TypeError as e: out.append(str(e))
+    return out, taken
+assert unhashable_first() == (["cannot use 'list' as a set element (unhashable type: 'list')"] * 2, [])
