@@ -1,9 +1,11 @@
-# spec: PLS-315 7.5.7, 13.2.2, 13.2.3, 13.3.2
-# description: A dict or set display, a dict subscription and a membership
-# test of a dict or set call an instance key's Python __hash__ once, its
-# result an int (-1 becoming -2) or its exception the operation's, a
-# TypeError naming the key's role. The operands are those evaluated before
-# the call: rebinding a name inside __hash__ does not change the container.
+# spec: PLS-315 7.5.7, 13.2.2, 13.2.3, 13.3.2, 14.2.2, 14.3, 14.7
+# description: A dict or set display, a dict subscription, a store to or
+# deletion of a dict item (an augmented one reading, then storing) and a
+# membership test of a dict or set call an instance key's Python __hash__
+# once each, its result an int (-1 becoming -2) or its exception the
+# operation's, a TypeError naming the key's role. The operands are those
+# evaluated before the call: rebinding a name inside __hash__ does not
+# change the container.
 # Methods that loop run in function statements as at module level.
 from harness import *
 
@@ -51,7 +53,23 @@ def failures(bad, d, s):
     except Exception as e: out.append((type(e).__name__, str(e)))
     try: bad in s
     except Exception as e: out.append((type(e).__name__, str(e)))
+    try: d[bad] = 1
+    except Exception as e: out.append((type(e).__name__, str(e)))
+    try: del d[bad]
+    except Exception as e: out.append((type(e).__name__, str(e)))
     return out
+
+def stores():
+    del log[:]
+    d, a, keys = {}, H(1), [H(2)]
+    d[a] = 1
+    d[keys[0]] = 2
+    x = d[a] = 5
+    d[a] += 10
+    d[keys[0]] += 1
+    d[H(3)] = 3
+    del d[H(3)]
+    return sorted(d.values()), x, list(log)
 
 def operations():
     del log[:]
@@ -68,12 +86,13 @@ def operations():
     out.append(list(log))
     return out
 
+roles = ("dict key", "set element", "dict key", "set element", "dict key", "dict key")
 expected = ["a", "b", True, False, True, 2, 1, "in", 1, "a"] + \
     [("TypeError", "cannot use 'Wrong' as a %s (__hash__ method should return an integer)" % role)
-     for role in ("dict key", "set element", "dict key", "set element")] + [("KeyError", "'failing'")] * 4 + \
+     for role in roles] + [("KeyError", "'failing'")] * 6 + \
     [("TypeError", "cannot use 'Arity' as a %s (Arity.__hash__() missing 1 required positional argument: 'extra')" % role)
-     for role in ("dict key", "set element", "dict key", "set element")] + \
-    [("KeyError", "<H>"), [1, 2, 1, 2, 1, 1, 2, 1, 3, 4, 1, 1, 2, -1, -1, -1, 1, 9, 9, 9, 9]]
+     for role in roles] + \
+    [("KeyError", "<H>"), [1, 2, 1, 2, 1, 1, 2, 1, 3, 4, 1, 1, 2, -1, -1, -1, 1, 9, 9, 9, 9, 9, 9]]
 
 def keyed(out):
     # The KeyError's text names the key object; compare its class only.
@@ -90,3 +109,5 @@ def rebound():
     table = {5: "again"}
     return table[Rebind()], table
 assert_eq(rebound(), ("again", {}))
+assert_eq(stores(), ([3, 15], 5, [1, 2, 1, 1, 1, 2, 2, 3, 3]))
+assert_eq(stores(), ([3, 15], 5, [1, 2, 1, 1, 1, 2, 2, 3, 3]))

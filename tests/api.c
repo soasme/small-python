@@ -1083,6 +1083,12 @@ int main(int argc, char **argv) {
     v = spy_eval(c, "refused() == (1, \"argument of type 'Refusing' is not a container or iterable\")", "refused.py");
     assert(v && spy_truth(c, v) == 1);
     spy_release(v);
+    /* A dict key's Python __hash__ pauses in a store, an augmented store
+     * and a deletion. */
+    execute(c, "class Keyed:\n    def __hash__(self):\n        for i in range(1000): pass\n        return 1\n"
+               "def keyed():\n    d, k = {}, Keyed()\n    d[k] = 1\n    d[k] += 1\n    total = d[k]\n    del d[k]\n    return total + len(d)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 3);
     /* So do zip and map of generators, in a loop and in a consumer. */
     execute(c, "def zipped():\n    total = 0\n    for i, x in zip(range(20), (x for x in Items())): total += i + x\n"
                "    return total + sum(map(abs, Items()))");

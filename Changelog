@@ -54,7 +54,7 @@ Unreleased (0.8.0):
 - a descriptor's Python __get__ and a class's own __getattribute__ run without
   the C stack
 - a key's Python __hash__ runs without the C stack in dict and set displays,
-  dict subscripts and in tests of a dict or set
+  dict subscripts, stores and deletions, and in tests of a dict or set
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
