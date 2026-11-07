@@ -400,6 +400,7 @@ struct SPYContext {
     /* A key whose Python __hash__ the machine called, owned, and the
      * hash, for the step that runs again to use once (hash_call). */
     SPYValue *hashed; int64_t hashed_value;
+    size_t finalizing;       /* The depth of calls with a __del__ on the machine (finalizer_call), or 0. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -1426,10 +1427,15 @@ static void schedule_collection(SPYContext *c) {
 /* A pass that finds garbage awaiting finalizers only finalizes it; collect
  * again to free what the finalizers left unreachable. The finalizers run
  * Python, which does not start another collection meanwhile. */
+/* Whether finalizers and weak reference callbacks wait: while they run,
+ * in C or on the machine (finalizer_call), whose call may not have begun. */
+static int finalizers_wait(SPYContext *c) {
+    return c->weak_running || c->stopped || (c->finalizing && c->calls_len >= c->finalizing);
+}
 static size_t collect(SPYContext *c) {
     c->collect_memory = SIZE_MAX;
     size_t count = collect_once(c);
-    while (c->finalize_calls_len && !c->weak_running && !c->stopped) {
+    while (c->finalize_calls_len && !finalizers_wait(c)) {
         weak_callbacks(c);
         count += collect_once(c);
     }
@@ -13762,7 +13768,7 @@ struct Machine {
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__ or a key's
  * __hash__ (hash_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -13868,10 +13874,11 @@ static int expands(Node *n, int calls) {
      * stays a walker statement, where the call nests in C. */
     if (calls && n->kind == N_FOR && !expands(n->args, calls) && !list_expands(n->b, calls) && !list_expands(n->c, calls))
         return expands(n->a, 0);
-    /* Applying a decorator is a call; a class body that holds a call or a
-     * loop runs on the machine (class_part). */
+    /* Applying a decorator is a call, as is the metaclass call of a class
+     * with bases or keywords (class_new_call); a class body that holds a
+     * call or a loop runs on the machine (class_part). */
     if (n->kind == N_DEF || n->kind == N_LAMBDA || n->kind == N_CLASS)
-        return (calls && (n->decorators || (n->kind == N_CLASS && (list_expands(n->b, CALLS) || loops(n->b))))) ||
+        return (calls && (n->decorators || (n->kind == N_CLASS && (n->args || list_expands(n->b, CALLS) || loops(n->b))))) ||
                list_expands(n->args, calls) || list_expands(n->decorators, calls);
     return list_expands(n->a, calls) || list_expands(n->b, calls) || list_expands(n->c, calls) || list_expands(n->args, calls);
 }
@@ -14351,7 +14358,11 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         if (!n->params && !n->annotate && !(n->flags & F_SETUP_ANNOTATIONS) && (list_expands(n->b, CALLS) || loops(n->b))) {
             /* A body that calls or loops is a call (class_part). */
             emit(c, p, BC_CLASS, n, stacked ? 3 : 4); emit(c, p, BC_CALLN, n, 0); emit(c, p, BC_CLASS, n, 5);
-        } else emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
+            emit(c, p, BC_CLASS, n, 7);
+        } else {
+            emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
+            if (!stacked && !n->params) emit(c, p, BC_CLASS, n, 7);
+        }
         for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
         emit(c, p, BC_STORE, n->a, 1); break;
     }
@@ -14638,10 +14649,13 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
 }
 /* The bookkeeping before evaluating node n: tick for the common case, and
  * tick_full when an error, a queued callback, a step limit, a new source
- * file or a trace function needs attention. */
-static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
+ * file or a trace function needs attention; 1 on the machine when a Python
+ * __del__ is due there first (finalizer). */
+static SPYValue *finalizer(SPYContext *);
+static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     if (c->error_type[0]) return -1;
     if (c->collect_due) collect(c);
+    if (machine && c->finalize_calls_len && finalizer(c)) return 1;
     if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
     c->line = n->line;
     if (c->py_depth) {
@@ -14676,7 +14690,7 @@ static int quiet(SPYContext *c, Frame *f) {
 }
 static void relocate(SPYContext *, Node *);
 static ALWAYS_INLINE int tick(SPYContext *c, Frame *f, Node *n) {
-    if (!quiet(c, f)) return tick_full(c, f, n);
+    if (!quiet(c, f)) return tick_full(c, f, n, 0);
     relocate(c, n);
     return 0;
 }
@@ -16744,13 +16758,26 @@ static void report_unraisable(SPYContext *c, const char *text, SPYValue *subject
     }
     spy_release(error); spy_release(hook);
 }
+/* CPython finalizes what an object's destruction frees before moving on,
+ * depth first: what was queued since the last waiting entries goes ahead of
+ * them. */
+static void finalize_ahead(SPYContext *c, size_t waiting) {
+    size_t queued = c->finalize_calls_len - waiting;
+    if (!queued || !waiting) return;
+    SPYValue **rotated = mem_malloc(c, c->finalize_calls_len * sizeof(*rotated));
+    if (!rotated) return;
+    memcpy(rotated, c->finalize_calls + waiting, queued * sizeof(*rotated));
+    memcpy(rotated + queued, c->finalize_calls, waiting * sizeof(*rotated));
+    memcpy(c->finalize_calls, rotated, c->finalize_calls_len * sizeof(*rotated));
+    mem_free(rotated);
+}
 /* Run __del__ of dead instances and close dead suspended generators and
  * asynchronous generators, then
  * callbacks of references whose targets died, at a statement boundary. Their
  * exceptions are unraisable, reported without disturbing the interrupted code.
  * While stopped they wait for the next outermost call. */
 static void weak_callbacks(SPYContext *c) {
-    if (c->weak_running || c->stopped) return;
+    if (finalizers_wait(c)) return;
     c->weak_running = 1;
     while (c->finalize_calls_len) {
         SPYValue *self = c->finalize_calls[0];
@@ -16769,18 +16796,7 @@ static void weak_callbacks(SPYContext *c) {
         if (c->error_type[0]) report_unraisable(c, failure, self, NULL);
         if (c->error_type[0]) spy_clear_error(c);
         spy_release(method); spy_release(self);
-        /* CPython finalizes what an object's destruction frees before moving
-         * on, depth first: what this one queued goes ahead of the rest. */
-        size_t queued = c->finalize_calls_len - waiting;
-        if (queued && waiting) {
-            SPYValue **rotated = mem_malloc(c, c->finalize_calls_len * sizeof(*rotated));
-            if (rotated) {
-                memcpy(rotated, c->finalize_calls + waiting, queued * sizeof(*rotated));
-                memcpy(rotated + queued, c->finalize_calls, waiting * sizeof(*rotated));
-                memcpy(c->finalize_calls, rotated, c->finalize_calls_len * sizeof(*rotated));
-                mem_free(rotated);
-            }
-        }
+        finalize_ahead(c, waiting);
     }
     while (c->weak_calls_len) {
         SPYValue *ref = c->weak_calls[0], *callback = spy_retain(name_local(ref, "__callback__"));
@@ -18722,6 +18738,20 @@ failed:
 }
 /* 16.4.1 steps 11-13, once the body ran: the class the metaclass makes,
  * its __class__ cell filled; s freed. */
+/* After its metaclass made cls, a class statement's __class__ cell holds it
+ * (16.4.1): classcell, the body's, else env's class cell. */
+static void class_made(SPYContext *c, SPYValue *cls, SPYValue *name, SPYValue *env, SPYValue *classcell) {
+    if (cls->type != SPY_CLASS) return;
+    if (!classcell) { name_set(c, env->as.map.class_cell, "__class__", cls); return; }
+    SPYValue *set = cell_contents(classcell);
+    if (set == cls) return;
+    SPYValue *text = stringify(c, cls, 1), *other = set ? stringify(c, set, 1) : NULL;
+    if (!set && text) errorf(c, "RuntimeError", "__class__ not set defining '%s' as %s. Was __classcell__ propagated to type.__new__?",
+                             name->as.string.data, text->as.string.data);
+    else if (text && other) errorf(c, "TypeError", "__class__ set to %s defining '%s' as %s", other->as.string.data,
+                                   name->as.string.data, text->as.string.data);
+    spy_release(text); spy_release(other);
+}
 static SPYValue *class_create(SPYContext *c, SPYValue *name, ClassState *s, SPYValue *classcell) {
     SPYValue *cls = NULL;
     if (s->original && name_set(c, s->env, "__orig_bases__", s->original)) goto done;
@@ -18730,24 +18760,25 @@ static SPYValue *class_create(SPYContext *c, SPYValue *name, ClassState *s, SPYV
         SPYValue *args[] = {name, s->tuple, s->namespace};
         cls = call_keywords(c, s->meta, 3, args, s->keywords);
     }
-    if (cls && cls->type == SPY_CLASS && classcell) {
-        SPYValue *set = cell_contents(classcell);
-        if (set != cls) {
-            SPYValue *text = stringify(c, cls, 1), *other = set ? stringify(c, set, 1) : NULL;
-            if (!set && text) errorf(c, "RuntimeError", "__class__ not set defining '%s' as %s. Was __classcell__ propagated to type.__new__?",
-                                     name->as.string.data, text->as.string.data);
-            else if (text && other) errorf(c, "TypeError", "__class__ set to %s defining '%s' as %s", other->as.string.data,
-                                           name->as.string.data, text->as.string.data);
-            spy_release(text); spy_release(other);
-        }
-    } else if (cls && cls->type == SPY_CLASS) name_set(c, s->env->as.map.class_cell, "__class__", cls);
+    if (cls) class_made(c, cls, name, s->env, classcell);
 done:
     class_state_free(s);
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
 }
+static NO_INLINE SPYValue *new_method(SPYContext *, SPYValue *);
+static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
+/* Whether a class statement's metaclass call enters the metaclass's Python
+ * __new__ on the machine (class_new_call): one with no keywords. */
+static int class_deferred(SPYContext *c, ClassState *s) {
+    return s->meta != c->types[SPY_CLASS] && s->meta->type == SPY_CLASS && !s->keywords->as.map.len && new_method(c, s->meta);
+}
+/* A class statement's class; or, for machine m with class_deferred, the
+ * unbound marker with its state, a tuple of the metaclass, bases, namespace,
+ * body env, original bases or None, keywords and name, and its __class__
+ * cell or None on m's stack (class_new_call). */
 static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function, SPYValue *name,
-                            SPYValue *bases, SPYValue *arguments, SPYValue *type_params) {
+                            SPYValue *bases, SPYValue *arguments, SPYValue *type_params, Machine *m) {
     /* A class statement's body, passed as a function by its __build_class__. */
     Frame body_frame;
     if (function && function->as.function.def->kind == N_CLASS) {
@@ -18765,6 +18796,13 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
         spy_release(call(c, function, 0, NULL));
     } else class_body(c, f->unit, n, s.env, type_params, &classcell);
     if (c->error_type[0]) { class_state_free(&s); spy_release(classcell); return NULL; }
+    if (m && class_deferred(c, &s)) {
+        SPYValue *items[] = {s.meta, s.tuple, s.namespace, s.env, s.original ? s.original : c->none, s.keywords, name};
+        SPYValue *state = tuple_of(c, 7, items);
+        class_state_free(&s);
+        if (machine_push(c, m, state)) { spy_release(classcell); return NULL; }
+        return machine_push(c, m, classcell ? classcell : spy_none(c)) ? NULL : spy_retain(c->unbound);
+    }
     cls = class_create(c, name, &s, classcell);
     spy_release(classcell);
     return cls;
@@ -18774,13 +18812,13 @@ static SPYValue *build_class_builtin(SPYContext *, size_t, SPYValue *const *, SP
  * (19.3.38); the builtin one runs the body directly, any other gets the body
  * as a function. */
 static SPYValue *class_statement(SPYContext *c, Frame *f, Node *n, SPYValue *name, SPYValue *bases,
-                                 SPYValue *arguments, SPYValue *type_params) {
+                                 SPYValue *arguments, SPYValue *type_params, Machine *m) {
     SPYValue *builtins = module_env(c, f->env)->as.map.parent;
     SPYValue *builder = builtins ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
     if (!builder) return c->error_type[0] ? NULL : spy_error(c, "NameError", "__build_class__ not found");
     if (builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin) {
         spy_release(builder);
-        return make_class(c, f, n, NULL, name, bases, arguments, type_params);
+        return make_class(c, f, n, NULL, name, bases, arguments, type_params, m);
     }
     SPYValue *body = function_new(c, f, n), *args = body ? value_new(c, SPY_TUPLE) : NULL, *cls = NULL;
     if (args && type_params && name_set(c, body->as.function.metadata, "__type_params__", type_params)) goto done;
@@ -18790,7 +18828,7 @@ done:
     spy_release(args); spy_release(body); spy_release(builder);
     return cls;
 }
-static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic_base, SPYValue *type_params) {
+static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic_base, SPYValue *type_params, Machine *m) {
     SPYValue *bases = spy_list(c), *arguments = value_new(c, SPY_DICT), *name = NULL, *cls = NULL;
     if (!bases || !arguments) goto done;
     SPYValue *builder = spy_string(c, "__build_class__", 15);
@@ -18798,7 +18836,7 @@ static SPYValue *build_class(SPYContext *c, Frame *f, Node *n, SPYValue *generic
     spy_release(builder);
     if (argument_error || (generic_base && sequence_append(c, bases, generic_base))) goto done;
     name = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
-    if (name) cls = class_statement(c, f, n, name, bases, arguments, type_params);
+    if (name) cls = class_statement(c, f, n, name, bases, arguments, type_params, m);
 done:
     spy_release(name); spy_release(bases); spy_release(arguments);
     return cls;
@@ -18812,7 +18850,7 @@ static SPYValue *build_class_builtin(SPYContext *c, size_t argc, SPYValue *const
     SPYValue *bases = spy_list(c), *arguments = value_new(c, SPY_DICT), *cls = NULL;
     for (size_t i = 2; bases && i < argc && !c->error_type[0]; i++) sequence_append(c, bases, argv[i]);
     if (bases && arguments && !c->error_type[0] && (!keywords || !extend_display(c, arguments, keywords)))
-        cls = make_class(c, NULL, NULL, argv[0], argv[1], bases, arguments, NULL);
+        cls = make_class(c, NULL, NULL, argv[0], argv[1], bases, arguments, NULL, NULL);
     spy_release(bases); spy_release(arguments);
     return cls;
 }
@@ -18963,7 +19001,7 @@ static SPYValue *generic_class(SPYContext *c, Frame *f, Node *n) {
     SPYValue *base = env ? call_intrinsic(c, "_generic_base", 1, &params) : NULL;
     if (base) {
         Frame frame = {env, f->unit, 0};
-        cls = build_class(c, &frame, n, base, params);
+        cls = build_class(c, &frame, n, base, params, NULL);
     }
     spy_release(base); spy_release(params); spy_release(env);
     return cls;
@@ -18971,7 +19009,7 @@ static SPYValue *generic_class(SPYContext *c, Frame *f, Node *n) {
 static NO_INLINE void execute_class(SPYContext *c, Frame *f, Node *n) {
     SPYValue *decorators = eval_decorators(c, f, n);
     if (!decorators) return;
-    SPYValue *cls = apply_decorators(c, decorators, n->params ? generic_class(c, f, n) : build_class(c, f, n, NULL, NULL));
+    SPYValue *cls = apply_decorators(c, decorators, n->params ? generic_class(c, f, n) : build_class(c, f, n, NULL, NULL, NULL));
     if (cls) name_set(c, f->env, n->a->text, cls);
     spy_release(cls); spy_release(decorators);
 }
@@ -21623,6 +21661,39 @@ static void finish_delegate(SPYContext *c, Machine *m) {
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE;
 }
+/* The Python __del__ on the machine, borrowed, of the instance first in
+ * line for finalization; else NULL, finalizing in C (weak_callbacks), as
+ * also inside it, past the recursion limit or under a trace function, whose
+ * errors are unraisable there. Its call, which m's next step waits for
+ * (CALL_FINALIZE), with *env its environment: the instance and the number
+ * of entries waiting after it go on m's stack (finalized). */
+static NO_INLINE SPYValue *finalizer(SPYContext *c) {
+    SPYValue *self = c->finalize_calls[0];
+    SPYValue *method = finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] ||
+                       c->py_depth >= c->recursion_limit ||
+                       self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
+    return method && machine_function(c, method) ? method : NULL;
+}
+static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
+    SPYValue *self = c->finalize_calls[0], *method = finalizer(c);
+    memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+    if (machine_push(c, m, self) || machine_push(c, m, spy_int(c, (int64_t)c->finalize_calls_len))) return NULL;
+    c->finalizing = c->calls_len + 1;
+    spy_retain(self);
+    *env = function_env(c, method, 1, &self, NULL, 1);
+    return *env ? spy_retain(method) : NULL;
+}
+/* The finalizer finalizer_call entered returned result, or NULL with its
+ * exception, which is unraisable. */
+static NO_INLINE void finalized(SPYContext *c, Machine *m, SPYValue *result) {
+    SPYValue *waiting = machine_pop(m), *self = machine_pop(m);
+    if (!result) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
+    spy_release(result); spy_release(self);
+    c->finalizing = 0;
+    finalize_ahead(c, (size_t)waiting->as.integer_data.small);
+    spy_release(waiting);
+    attend(c);
+}
 /* The call steps: a call's result, or NULL with an error; or, when the
  * callee's body is on the machine, the callee with *env its environment,
  * to enter there. */
@@ -23026,6 +23097,37 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
  * __build_class__ does not make it, or its body is not compiled, it is
  * made at once: the state is a tuple of it alone, and the call tuple().
  * The value to push, or NULL with an error. */
+static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins);
+/* A deferred class statement's metaclass call (make_class), its state and
+ * __class__ cell on m's stack: the metaclass, to enter its Python __new__
+ * (CALL_CHECKED) with the metaclass and arguments above them, as a class
+ * call does; else NULL. */
+static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
+    SPYValue **items = m->stack[m->len - 2]->as.seq.items, *meta = items[0];
+    if (items[4] != c->none && name_set(c, items[3], "__orig_bases__", items[4])) return NULL;
+    SPYValue *allocate = new_method(c, meta), *argv[] = {spy_retain(meta), spy_retain(items[6]), spy_retain(items[1]), spy_retain(items[2])};
+    if (machine_push(c, m, spy_retain(meta)) || machine_push(c, m, tuple_of(c, 3, argv + 1))) { release_all(4, argv); return NULL; }
+    c->entering_init = allocate;
+    *env = function_env(c, allocate, 4, argv, NULL, 1);
+    return *env ? spy_retain(meta) : NULL;
+}
+/* BC_CLASS but arg 2 (class_part, build_class). Arg 0 and 5 leave the
+ * class statement's state and __class__ cell, or two Nones, under the class
+ * for arg 7, which checks the cell (class_made); a metaclass call they defer
+ * is entered first (class_new_call). */
+static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
+    if (ins->arg == 7) {
+        SPYValue *cls = machine_pop(m), *classcell = machine_pop(m), *state = machine_pop(m);
+        if (state != c->none) class_made(c, cls, state->as.seq.items[6], state->as.seq.items[3], classcell == c->none ? NULL : classcell);
+        spy_release(classcell); spy_release(state);
+        if (c->error_type[0]) { spy_release(cls); return NULL; }
+        return cls;
+    }
+    SPYValue *cls = ins->arg ? class_part(c, m, f, ins) : build_class(c, f, ins->node, NULL, NULL, m);
+    if (cls == c->unbound) { spy_release(cls); return class_new_call(c, m, env); }
+    if (cls && (ins->arg == 0 || ins->arg == 5) && (machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_none(c)))) { spy_release(cls); return NULL; }
+    return cls;
+}
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
     Node *n = ins->node;
     SPYValue *bases, *arguments, *name, *body = NULL;
@@ -23037,13 +23139,16 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (ins->arg == 1) return generic_class(c, f, n);
     if (ins->arg == 5) {
-        SPYValue *classcell = machine_pop(m), *v = machine_pop(m), **items = v->as.seq.items;
+        SPYValue *classcell = m->stack[m->len - 1], *v = m->stack[m->len - 2], **items = v->as.seq.items;
+        ClassState state = {0};
         if (v->as.seq.len == 1) body = spy_retain(items[0]);
         else {
-            ClassState state = {spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), spy_retain(items[3]),
-                                items[4] == c->none ? NULL : spy_retain(items[4]), spy_retain(items[5])};
-            body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell);
+            state = (ClassState){spy_retain(items[0]), spy_retain(items[1]), spy_retain(items[2]), spy_retain(items[3]),
+                                 items[4] == c->none ? NULL : spy_retain(items[4]), spy_retain(items[5])};
+            if (class_deferred(c, &state)) { class_state_free(&state); return spy_retain(c->unbound); }
         }
+        m->len -= 2;
+        if (!body) body = class_create(c, items[6], &state, classcell == c->none ? NULL : classcell);
         spy_release(classcell); spy_release(v);
         return body;
     }
@@ -23064,7 +23169,7 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     int builtin = builder && builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin;
     spy_release(builder);
     if (!builtin || !n->flat) {
-        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, NULL);
+        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, NULL, NULL);
         SPYValue *alone = cls ? tuple_of(c, 1, &cls) : NULL;
         spy_release(cls);
         if (alone && !machine_push(c, m, alone)) body = spy_retain(c->types[SPY_TUPLE]);
@@ -23353,6 +23458,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result) iter_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_HASH) {
                         pc = hash_returned(c, m, &code[pc - 1], result, pc);
+                    } else if (kind == CALL_FINALIZE) {
+                        finalized(c, m, result);
+                        pc--;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || (code[pc - 1].op == BC_STORE && code[pc - 1].arg))) spy_release(machine_pop(m));
@@ -23409,7 +23517,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         Node *n = ins->node;
         if (n) {
             if (!quiet(c, &f)) {
-                if (tick_full(c, &f, n)) continue;
+                int ticked = tick_full(c, &f, n, !truth_known);
+                /* A dead instance's Python __del__ runs before the step. */
+                if (ticked > 0) goto finalize;
+                if (ticked) continue;
                 /* A due pause waits for a step of the pausable call's own
                  * activation, which holds no state but its machines'. */
                 if (c->pause_due && c->machines == 1 && !c->paused_at && !truth_known) {
@@ -23837,9 +23948,14 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg == 2) {
                 b = machine_pop(m); a = machine_pop(m); spy_release(machine_pop(m));
                 value = spy_string(c, source_name(n->a), strlen(source_name(n->a)));
-                machine_push(c, m, value ? class_statement(c, &f, n, value, a, b, NULL) : NULL);
+                machine_push(c, m, value ? class_statement(c, &f, n, value, a, b, NULL, NULL) : NULL);
                 spy_release(value);
-            } else machine_push(c, m, ins->arg ? class_part(c, m, &f, ins) : build_class(c, &f, n, NULL, NULL));
+            } else {
+                callee_env = NULL;
+                value = class_step(c, m, &f, ins, &callee_env);
+                if (callee_env) goto enter_init;
+                machine_push(c, m, value);
+            }
             break;
         CASE(BC_GENERIC_FUNCTION) {
             SPYValue *defaults = spy_list(c);
@@ -24070,6 +24186,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             m = &call->m;
             goto switch_call;
         }
+    finalize:
+        callee_env = NULL;
+        if (!(value = finalizer_call(c, m, &callee_env))) continue;
+        special = CALL_FINALIZE;
+        goto enter_special;
     }
 }
 #pragma GCC diagnostic pop

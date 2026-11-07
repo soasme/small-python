@@ -60,6 +60,8 @@ Unreleased (0.8.0):
 - a metaclass's Python __instancecheck__ and __subclasscheck__ run without
   the C stack in isinstance() and issubclass()
 - a generator's close() runs its handlers without the C stack
+- a dead instance's Python __del__ runs without the C stack
+- a class statement's metaclass __new__ runs without the C stack
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
