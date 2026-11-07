@@ -13712,7 +13712,7 @@ struct Machine {
  * __next__, a sort's key function, a consumer's next item, a with
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__ or a store's __setitem__. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_EXEC, CALL_EVAL };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -13801,7 +13801,8 @@ static int expands(Node *n, int calls) {
     if (!n) return 0;
     if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
-    if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && n->kind == N_CALL) ||
+    /* An import runs a module of source as a call (import_step). */
+    if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && (n->kind == N_CALL || n->kind == N_IMPORT || n->kind == N_FROM)) ||
         (calls >= BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
@@ -14282,6 +14283,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
     }
     case N_WITH: compile_with(c, p, n->args, n->b, n->op); break;
     case N_DELETE: compile_delete(c, p, n->a); break;
+    /* A store of None by the statement (import_step). */
+    case N_IMPORT: case N_FROM: emit(c, p, BC_NONE, n, 0); emit(c, p, BC_STORE, n, 1); break;
     default: { /* N_CLASS, the last statement that can contain a yield */
         /* Decorators, then the bases and keywords as __build_class__'s
          * arguments; a generic class's bases cannot suspend. */
@@ -16971,7 +16974,12 @@ static NO_INLINE int policy_event(SPYContext *c, const char *event, size_t n, SP
     spy_release(args);
     return status;
 }
-static SPYValue *load_source_module(SPYContext *c, const char *name) {
+static SPYValue *module_finish(SPYContext *, const char *, SPYValue *, SPYValue *, int);
+/* Begin importing name: the module, cached or new in sys.modules. A new
+ * module of source is returned with its parsed source in *unit and its
+ * package in *parent, to run before module_finish ends the import; any
+ * other is finished. */
+static SPYValue *module_begin(SPYContext *c, const char *name, SPYValue **unit_out, SPYValue **parent_out) {
     SPYValue *cached = name_local(c->modules, name);
     if (cached) return cached_module(c, name, cached);
     if (!strcmp(name, "builtins")) {
@@ -17074,20 +17082,20 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     for (size_t i = 0; c->lazy_modules && i < c->lazy_modules->as.map.len; i++)
         if (!strcmp(map_items(c->lazy_modules)[i].key->as.string.data, name)) { set_remove_at(c->lazy_modules, i); break; }
     spy_release(module_name);
-    Result result = {FLOW_NORMAL, NULL};
+    if (unit) { *unit_out = unit; *parent_out = parent; return module; }
     if (init) {
         /* A host module's init function fills the new module, as QuickJS's
          * JS_NewCModule initializers do. */
         if (init(c, module) && !c->error_type[0]) errorf(c, "SystemError", "initialization of %s failed without raising an exception", name);
         /* An init that made a package also makes it its own __package__. */
         if (!c->error_type[0] && name_local(module, "__path__")) name_set(c, module, "__package__", name_local(module, "__name__"));
-        if (c->error_type[0]) result.flow = FLOW_ERROR;
-    } else if (unit) {
-        Frame frame = {module, unit, 0};
-        result = execute_module(c, &frame);
     }
-    spy_release(result.value); spy_release(unit);
-    if (result.flow == FLOW_ERROR) {
+    return module_finish(c, name, module, parent, c->error_type[0] != 0);
+}
+/* End the import of name into module, from parent, which it takes: the
+ * module sys.modules holds, or NULL when the import failed. */
+static SPYValue *module_finish(SPYContext *c, const char *name, SPYValue *module, SPYValue *parent, int failed) {
+    if (failed) {
         /* A failed import must not leave a half-initialized cached module. */
         for (size_t i = 0; i < c->modules->as.map.len; i++) {
             Entry *e = &map_items(c->modules)[i];
@@ -17102,10 +17110,21 @@ static SPYValue *load_source_module(SPYContext *c, const char *name) {
     /* As in importlib, the result is whatever sys.modules holds once the module ran. */
     SPYValue *final = name_local(c->modules, name);
     if (final && final != module) { spy_retain(final); spy_release(module); module = final; }
-    if (parent) name_set(c, parent, dot + 1, module);
+    if (parent) name_set(c, parent, strrchr(name, '.') + 1, module);
     spy_release(parent);
     if (c->error_type[0]) { spy_release(module); return NULL; }
     return module;
+}
+/* Run the begun import of name, module_begin's results, which it takes. */
+static SPYValue *module_run(SPYContext *c, const char *name, SPYValue *module, SPYValue *unit, SPYValue *parent) {
+    Frame frame = {module, unit, 0};
+    Result result = execute_module(c, &frame);
+    spy_release(result.value); spy_release(unit);
+    return module_finish(c, name, module, parent, result.flow == FLOW_ERROR);
+}
+static SPYValue *load_source_module(SPYContext *c, const char *name) {
+    SPYValue *unit = NULL, *parent = NULL, *module = module_begin(c, name, &unit, &parent);
+    return unit ? module_run(c, name, module, unit, parent) : module;
 }
 /* Generics, unions, type parameters, and file objects are Python objects
  * defined by the embedded intrinsics module. It runs once per context, on
@@ -17601,6 +17620,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
             return status;
         }
     }
+    if (n->kind == N_IMPORT || n->kind == N_FROM) return 1;
     if (tick(c, f, n)) return -1;
     if (n->kind == N_NAME) {
         Entry *entry = name_slot(f->env, n);
@@ -22015,6 +22035,15 @@ static ALWAYS_INLINE int source_builtin(SPYValue *callee) {
     return callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
            (callee->as.native.data == (void *)(intptr_t)B_EXEC || callee->as.native.data == (void *)(intptr_t)B_EVAL);
 }
+/* Prepare unit, a module body with statements, to run in env on the
+ * machine: its docstring stored and its body compiled; -1 on an error. */
+static int unit_call(SPYContext *c, SPYValue *unit, SPYValue *env) {
+    /* A module's docstring is its first statement's store to __doc__. */
+    SPYValue *doc = unit->as.unit.expression ? NULL : docstring(c, unit->as.unit.body);
+    int status = doc ? name_set(c, env, "__doc__", doc) : c->error_type[0] ? -1 : 0;
+    spy_release(doc);
+    return status || module_program(c, unit);
+}
 /* exec() or eval(), callee, given argc arguments argv, which it takes, from
  * a step of the machine: the unit of source or of a module's code is a
  * call there, its module body on the machine (unit_enter): str's class
@@ -22032,11 +22061,7 @@ static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t a
         *env = NULL;
         return result;
     }
-    /* A module's docstring is its first statement's store to __doc__. */
-    SPYValue *doc = expression ? NULL : docstring(c, unit->as.unit.body);
-    int status = doc ? name_set(c, *env, "__doc__", doc) : c->error_type[0] ? -1 : 0;
-    spy_release(doc);
-    if (status || module_program(c, unit)) { spy_release(*env); *env = NULL; spy_release(unit); return NULL; }
+    if (unit_call(c, unit, *env)) { spy_release(*env); *env = NULL; spy_release(unit); return NULL; }
     c->entering_init = unit; c->entering_kind = eval && expression == 1 ? CALL_EVAL : CALL_EXEC;
     spy_release(unit);
     return spy_retain(c->types[SPY_STRING]);
@@ -22634,8 +22659,11 @@ static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return item
  * with the key and the value. BC_SET_TARGET with arg 1, a deletion, takes
  * the object and key and calls a Python __delitem__ with the key, or
  * deletes the item at once, returning NULL. */
+static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
+    if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
+    c->entering_kind = CALL_STORE;
     SPYValue *args[3];
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
@@ -22655,6 +22683,66 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     SPYValue *function = setitem_function(c, args[0]);
     relocate(c, n);
     return (*env = function_env(c, function, 3, args, NULL, 1)) ? spy_retain(function) : NULL;
+}
+/* BC_STORE of import statement n, None atop m's stack (store_slow): when
+ * the first module it imports, or the first package before it, is not
+ * yet in sys.modules and is source, its unit, to enter in *env, the new
+ * module, its import begun (module_begin) as a call (CALL_IMPORT); m holds
+ * the import's package, name and module for import_returned. Else NULL
+ * after the statement ran, taking the None, or with an error. Only the
+ * builtin __import__ of an eager statement of one module is followed. */
+static NO_INLINE SPYValue *import_step(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
+    SPYValue *globals = module_env(c, f->env);
+    SPYValue *builtins = globals->as.map.parent ? globals->as.map.parent : c->builtins;
+    SPYValue *function = name_local(builtins, "__import__");
+    const char *source = n->kind == N_IMPORT ? source_name(n->args->a) : n->a ? source_name(n->a) : "";
+    char *name = (n->flags & F_LAZY) || (n->kind == N_IMPORT && n->args->next) || !function || function->type != SPY_NATIVE ||
+                 function->as.native.call != builtin || function->as.native.data != (void *)(intptr_t)B_IMPORT ||
+                 ((n->flags & F_LAZY_COMPAT) && (c->settings[SET_LAZY_IMPORTS] || name_local(globals, "__lazy_modules__"))) ||
+                 (n->kind == N_FROM && !n->op && !strcmp(source, "__future__")) ? NULL :
+                 absolute_name(c, source, namespace_map(globals), n->kind == N_FROM ? n->op : 0);
+    spy_clear_error(c);
+    SPYValue *unit = NULL, *parent = NULL, *module = NULL;
+    for (char *end = name; end && !unit && !c->error_type[0];) {
+        if ((end = strchr(end, '.'))) *end = 0;
+        if (!name_local(c->modules, name)) {
+            module = module_begin(c, name, &unit, &parent);
+            /* An empty module runs no code. */
+            if (unit && !unit->as.unit.body) { module = module_run(c, name, module, unit, parent); unit = NULL; }
+            if (!unit) { spy_release(module); module = NULL; }
+        }
+        if (end && !unit) *end++ = '.';
+    }
+    SPYValue *text = unit ? spy_string(c, name, strlen(name)) : NULL;
+    if (unit && (!text || unit_call(c, unit, module) || grow_array(c, (void **)&m->stack, &m->cap, m->len + 3, sizeof(*m->stack)))) {
+        spy_release(text); spy_release(unit); unit = NULL;
+        spy_release(module_finish(c, name, module, parent, 1));
+    }
+    mem_free(name);
+    if (c->error_type[0]) return NULL;
+    if (!unit) {
+        spy_release(machine_pop(m));
+        Result r = execute_statements(c, f, n, 1);
+        spy_release(r.value);
+        return NULL;
+    }
+    m->stack[m->len++] = parent ? parent : spy_none(c);
+    m->stack[m->len++] = text;
+    m->stack[m->len++] = spy_retain(module);
+    *env = module;
+    c->entering_kind = CALL_IMPORT;
+    return unit;
+}
+/* End the import import_step began on m, whose module's body returned
+ * result, or NULL when it raised: whether it succeeded. */
+static NO_INLINE int import_returned(SPYContext *c, Machine *m, SPYValue *result) {
+    SPYValue *module = machine_pop(m), *name = machine_pop(m), *parent = machine_pop(m);
+    spy_release(result);
+    module = module_finish(c, name->as.string.data, module, parent->type == SPY_NONE ? NULL : parent, !result);
+    if (parent->type == SPY_NONE) spy_release(parent);
+    spy_release(name);
+    spy_release(module);
+    return module != NULL;
 }
 /* The Python __bool__ of instance v's class that a test calls on v,
  * owned, with its env, v on m's stack under it; else NULL. */
@@ -23031,7 +23119,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     if (kind >= CALL_EXEC) {
                         /* exec() returns None, from a module frame. */
                         m->owner = NULL;
-                        if (kind == CALL_EXEC && result) { spy_release(result); result = spy_none(c); }
+                        if (kind != CALL_EVAL && result) { spy_release(result); result = spy_none(c); }
                     }
                     m = call_leave(c, (Call *)m, result);
                     f = m->frame; code = m->code->items; pc = m->pc;
@@ -23068,7 +23156,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_KEY) {
                         if (result && !key_took(c, m, result)) goto consume_generator;
                     } else if (kind >= CALL_EXEC) {
-                        if (result) machine_push(c, m, result);
+                        /* An import's statement runs again, finding the module. */
+                        if (kind == CALL_IMPORT) pc -= import_returned(c, m, result);
+                        else if (result) machine_push(c, m, result);
                     } else {
                         /* CALL_NEXT: a filter's test tries the next item when false. */
                         SPYValue *iterator = m->blocks[m->block_len - 1].value;
@@ -23156,6 +23246,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
             continue;
         }
+
         CASE(BC_BLOCK)
             flow = execute_statements(c, &f, n, 0);
             if (flow.flow == FLOW_NORMAL) { spy_release(flow.value); flow.value = NULL; }
@@ -23713,7 +23804,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
          * BC_SET_TARGET's or BC_SAVE_TARGET's, is a call of a Python
          * __setitem__, or of __delitem__ for a deletion (store_call). */
         callee_env = NULL;
-        if ((value = store_call(c, m, &f, ins, &callee_env))) { special = CALL_STORE; goto enter_special; }
+        if ((value = store_call(c, m, &f, ins, &callee_env))) { special = c->entering_kind; goto enter_special; }
         continue;
     bool_step:
         /* BC_FALSE on instance a: a Python __bool__ is a call (CALL_CHECKED). */

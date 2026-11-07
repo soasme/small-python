@@ -54,10 +54,12 @@ static int fails(void);
 static size_t count, fail, live;
 static int lasting;
 /* A native module run() loads as fib when the program imports it, as the
- * spy command's loader does, when set. */
-static const char *native;
-static SPYValue *load_native(SPYContext *c, void *data, const char *name) {
-    if (!strcmp(name, "fib")) spy_std_load_native(c, name, data);
+ * spy command's loader does, and a module of source it loads as imported,
+ * each when set. */
+static const char *native, *imported;
+static SPYValue *load(SPYContext *c, void *data, const char *name) {
+    if (imported && !strcmp(name, "imported")) return spy_bytes(c, imported, strlen(imported));
+    if (native && !strcmp(name, "fib")) spy_std_load_native(c, name, data);
     return NULL;
 }
 
@@ -113,7 +115,7 @@ static size_t run(const char *source, const char *name, int *status) {
     if (c) {
         spy_set_output(c, discard, NULL, NULL);
         spy_set_limit(c, SPY_LIMIT_STEPS, 1000000);
-        if (native) spy_set_module_loader(c, load_native, (void *)native);
+        if (native || imported) spy_set_module_loader(c, load, (void *)native);
         const char *const args[] = {"prog", "caf\xc3\xa9", "\xff"};
         *status = spy_set_argv(c, 3, args, 3, args) || spy_std_init(c) || spy_exec(c, source, name);
         spy_clear_error(c);
@@ -335,6 +337,9 @@ int main(int argc, char **argv) {
     native = library;
     if (native) check("import fib\nprint(fib.fib(30))\n", "<native>", from, 0);
     native = NULL;
+    imported = "'''A module of source.'''\nvalue = [i * i for i in range(3)]\n";
+    if (argc == 1) check("import imported\nfrom imported import value\nprint(imported.value is value)\n", "<import>", from, 0);
+    imported = NULL;
     for (int i = 1; i < argc; i++) {
         char *source = read_file(argv[i]);
         check(source, argv[i], from, 0);

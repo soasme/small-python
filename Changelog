@@ -49,6 +49,8 @@ Unreleased (0.8.0):
   exec'd code's line events as CPython reports them
 - getattr() with a default and hasattr() of a missing instance attribute run
   about three times as fast
+- an import statement runs a module of source without the C stack, so a
+  paused call can pause inside it
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
 - print() calls an instance's Python __str__ without the C stack in code

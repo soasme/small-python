@@ -74,6 +74,14 @@ static SPYValue *loader(SPYContext *c, void *data, const char *name) {
     const char *source = "answer = 42\ndef add(x):\n    return x + answer\n";
     return spy_bytes(c, source, strlen(source));
 }
+/* Modules whose bodies loop, for imports that pause: looping, and
+ * breaking, which raises after its loop, counting its loads in data. */
+static SPYValue *looping_loader(SPYContext *c, void *data, const char *name) {
+    const char *source = !strcmp(name, "looping") ? "'''Loops.'''\nn = 0\nwhile n < 3000: n += 1\n" :
+                         !strcmp(name, "breaking") ? "n = 0\nwhile n < 3000: n += 1\nraise ValueError('broken')\n" : NULL;
+    if (source && name[0] == 'b') ++*(int *)data;
+    return source ? spy_bytes(c, source, strlen(source)) : NULL;
+}
 /* A policy that logs each event with its argument count, refuses those named
  * in data, and raises its own error for "custom". */
 typedef struct { const char *refuse; char log[256]; } Policy;
@@ -1098,6 +1106,19 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "class Looping:\n    n = 0\n    while n < 3000: n += 1\n    m = slow(n)\nLooping.m", "class.py"),
                                  SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
+    /* An import pauses in its module's body; one that raises leaves no
+     * module, so the next import runs it again. */
+    int loads = 0;
+    spy_set_module_loader(c, looping_loader, &loads);
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "def imported():\n    import looping\n    from looping import n\n    return n + len(looping.__doc__)\nimported()",
+                                             "import.py"), SPY_STOP_STEPS, &pauses)) == 3006 && pauses > 1);
+    pauses = 0;
+    v = spy_eval(c, "def failing():\n    for i in range(2):\n        try: import breaking\n        except ValueError as e: error = str(e)\n    return error\nfailing()", "import.py");
+    v = run_paused(c, v, SPY_STOP_STEPS, &pauses);
+    assert(v && !strcmp(spy_as_string(c, v, NULL), "broken") && loads == 2 && pauses > 1);
+    spy_release(v);
+    spy_set_module_loader(c, loader, &calls);
     /* Code compiled while calls can pause pauses inside the special
      * methods of operators, subscripts, augmented assignments, target
      * lists, deletions, unary operators, len(), int(), float(), hash(),
