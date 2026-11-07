@@ -291,12 +291,13 @@ These run as machines on the heap, in one native activation of
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`;
-- the `__str__`, `__repr__`, `__format__` and `__len__` that `str`,
-  `repr`, `format` and `len` call;
-- property getters and `__getattr__`, `__enter__`, `__bool__`, binary
-  operator, comparison, `__getitem__`, `__setitem__`, `__delitem__` and
-  `__contains__`
-  methods of instances, where a step of their own reaches them;
+- the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
+  `__float__` and `__hash__` that `str`, `repr`, `format`, `len`, `int`,
+  `float` and `hash` call;
+- property getters and `__getattr__`, `__enter__`, `__bool__`, unary and
+  binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
+  and `__contains__` methods of instances, where a step of their own
+  reaches them;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
   parameters or annotations and the builtin `__build_class__` makes it.
@@ -305,8 +306,7 @@ Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
 function or comprehension is first compiled) runs every function and
 class body on the machine and gives every operator, subscript,
 augmented assignment, target list, deletion and f-string field a step
-of its own,
-so their special methods are among the calls above. Code compiled without pausing keeps faster steps that
+of its own, so their special methods are among the calls above. Code compiled without pausing keeps faster steps that
 evaluate an assignment of one operator, or arithmetic on names and
 literals, whole.
 

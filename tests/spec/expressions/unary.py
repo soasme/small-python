@@ -84,3 +84,25 @@ class Negating(type):
     def __neg__(cls): return "neg"
 class WithNegating(metaclass=Negating): pass
 assert_eq(-WithNegating, "neg")
+
+# Inside a function, a special method that loops runs the same way; a
+# __pos__ returning NotImplemented returns it, `not` asks __bool__.
+class Looping:
+    def __neg__(self):
+        for _ in range(2): pass
+        return "neg"
+    def __pos__(self): return NotImplemented
+    def __invert__(self, extra): return 1
+    def __bool__(self): return False
+def unary_in_function():
+    u = Looping()
+    out = [-u, +u is NotImplemented, not u, -I(3), ~I(3)]
+    for x, op in ((u, "~"), (Late(), "-")):
+        try:
+            out.append(~x if op == "~" else -x)
+        except TypeError as e:
+            out.append(str(e))
+    return out
+assert_eq(unary_in_function(), ["neg", True, True, -3, -4,
+          "Looping.__invert__() missing 1 required positional argument: 'extra'",
+          "bad operand type for unary -: 'Late'"])

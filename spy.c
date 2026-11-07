@@ -475,6 +475,8 @@ static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
 static SPYValue *memory_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static int length_result(SPYContext *, SPYValue *, int64_t *);
+static int hash_result(SPYContext *, SPYValue *, int64_t *);
+static SPYValue *number_result(SPYContext *, SPYValue *, int, SPYValue *);
 static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
 static void error_note(SPYContext *, const char *);
@@ -2246,13 +2248,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         if (!method) return -1;
         SPYValue *hash = call(c, method, 0, NULL);
         spy_release(method);
-        if (!hash) return -1;
-        if (!is_int(hash)) {
-            spy_release(hash); spy_error(c, "TypeError", "__hash__ method should return an integer"); return -1;
-        }
-        *result = hash->as.integer_data.big ? hash_integer(hash) :
-            hash->as.integer_data.small == -1 ? -2 : hash->as.integer_data.small;
-        spy_release(hash); return *result == -1 ? -1 : 0;
+        return hash ? hash_result(c, hash, result) : -1;
     }
     case SPY_FROZENDICT: case SPY_FROZENSET: {
         /* CPython's frozenset mixing; frozen mappings hash their item pairs,
@@ -2283,6 +2279,15 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
     }
     errorf(c, "TypeError", "unhashable type: '%s'", type_name(value));
     return -1;
+}
+/* The hash a Python __hash__ returned, taking it: an int, -1 read as -2. */
+static int hash_result(SPYContext *c, SPYValue *hash, int64_t *result) {
+    if (!is_int(hash)) {
+        spy_release(hash); spy_error(c, "TypeError", "__hash__ method should return an integer"); return -1;
+    }
+    *result = hash->as.integer_data.big ? hash_integer(hash) :
+        hash->as.integer_data.small == -1 ? -2 : hash->as.integer_data.small;
+    spy_release(hash); return *result == -1 ? -1 : 0;
 }
 static int hash_value(SPYContext *c, SPYValue *value, int64_t *result) {
     /* A str keeps its hash once computed. */
@@ -21590,14 +21595,16 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     c->entering_kind = CALL_CHECKED;
     return allocator->as.wrapper.function;
 }
-/* The Python __str__, __repr__, __format__ or __len__ that callee, str,
- * repr, format or len, calls on its first argument, an instance, found[0] its name and
+/* The Python __str__, __repr__, __format__, __len__, __int__, __float__ or
+ * __hash__ that callee, str, repr, format, len, int, float or hash, calls on
+ * its first argument, an instance, found[0] its name and
  * found[1] the spec format passes it, or NULL; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
     if (argc > 2 || argv[0]->as.map.base) return NULL;
-    int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1, repr = id == B_REPR;
-    if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && id != B_LEN && callee != c->types[SPY_STRING])) return NULL;
+    int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
+        callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : -1, repr = id == B_REPR;
+    if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_HASH && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
@@ -21611,9 +21618,10 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         if (function || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
     }
     /* With no __str__ above object's, str() calls the instance's __repr__. */
-    const char *method = id == B_LEN ? "__len__" : repr ? "__repr__" : "__str__";
+    const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
+        id == B_HASH ? "__hash__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
-    if (!function && id != B_LEN) function = class_lookup(cls, "__repr__");
+    if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
     *spec = NULL;
     c->entering_kind = CALL_CHECKED;
@@ -21959,12 +21967,13 @@ static NO_INLINE SPYValue *with_enter(SPYContext *c, Machine *m, Instruction *in
     else if (!function) spy_release(exit);
     return NULL;
 }
-enum { OPERATE_INDEX, OPERATE_BINARY, OPERATE_COMPARE, OPERATE_INPLACE };
-/* What operator step ins does: a subscript, or a binary operator or
- * comparison *op. */
+enum { OPERATE_INDEX, OPERATE_BINARY, OPERATE_COMPARE, OPERATE_INPLACE, OPERATE_UNARY };
+/* What operator step ins does: a subscript, or a binary, augmented, unary
+ * operator or comparison *op. */
 static int step_operation(Instruction *ins, int *op) {
     Node *n = ins->node;
     if (ins->op == BC_BINARY) { *op = ins->arg; return OPERATE_BINARY; }
+    if (ins->op == BC_UNARY) { *op = ins->arg; return OPERATE_UNARY; }
     if (ins->op == BC_INPLACE) { *op = ins->arg; return OPERATE_INPLACE; }
     if (ins->op == BC_COMPARE) { *op = n->op; return OPERATE_COMPARE; }
     if (ins->op == BC_INDEX || n->kind == N_INDEX) return OPERATE_INDEX;
@@ -21995,7 +22004,10 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
     SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
-    if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
+    /* A unary operator calls its method on x alone (y is x); not tests truth. */
+    if (kind == OPERATE_UNARY)
+        function = op == O_NOT ? NULL : class_lookup(cls, op == '+' ? "__pos__" : op == '-' ? "__neg__" : "__invert__");
+    else if (kind == OPERATE_INDEX) function = builtin_base(c, x, "__getitem__", NULL) ? NULL : class_lookup(cls, "__getitem__");
     /* An augmented assignment takes the in-place method, else the plain one's rule. */
     else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
     else if (kind != OPERATE_COMPARE)
@@ -22004,7 +22016,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     else function = rich < 0 || (other != cls && subclass(other, cls)) ? NULL : class_lookup(cls, rich_names[rich]);
     if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y))) return NULL;
     SPYValue *args[] = {spy_retain(x), spy_retain(y)};
-    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    if ((*env = function_env(c, function, 2 - (kind == OPERATE_UNARY), args, NULL, 1))) return spy_retain(function);
     spy_release(machine_pop(m)); spy_release(machine_pop(m));
     return NULL;
 }
@@ -22014,7 +22026,8 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     relocate(c, ins->node);
     spy_retain(x); spy_retain(y);
     SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY ? binary(c, op, x, y) :
-                       kind == OPERATE_INPLACE ? augmented(c, op, x, y) : comparison(c, op, x, y);
+                       kind == OPERATE_INPLACE ? augmented(c, op, x, y) : kind == OPERATE_UNARY ? unary(c, op, x) :
+                       comparison(c, op, x, y);
     spy_release(x); spy_release(y);
     return result;
 }
@@ -22049,7 +22062,7 @@ static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction
         int truth = truthy(result);
         spy_release(result);
         result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
-    } else if (kind != OPERATE_INDEX && result == c->not_implemented) {
+    } else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
         spy_release(result);
         const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
         if (kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
@@ -22272,8 +22285,13 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         SPYValue *name = machine_pop(m), *whole = NULL, *string;
         Buffer b = { .ctx = c, .whole = &whole };
         int64_t length;
-        /* len() checks its length (length_result); the others' text is a str. */
-        if (!strcmp(name->as.string.data, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
+        /* len(), hash(), int() and float() check their results as natively;
+         * the others' text is a str. */
+        const char *method = name->as.string.data;
+        if (!strcmp(method, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
+        else if (!strcmp(method, "__hash__")) string = hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
+        else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
+            string = number_result(c, v, method[2] == 'f', spy_retain(result));
         else string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
         spy_release(result); spy_release(v); spy_release(name);
         if (string) machine_push(c, m, string);
@@ -22553,7 +22571,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             b = machine_pop(m); a = machine_pop(m); value = machine_pop(m);
             machine_push(c, m, slice_new(c, value, a, b)); spy_release(value); break;
         CASE(BC_UNARY)
-            a = machine_pop(m); machine_push(c, m, unary(c, ins->arg, a)); break;
+            a = machine_pop(m);
+            if (a->type == SPY_INSTANCE) { x = y = a; goto operator_step; }
+            machine_push(c, m, unary(c, ins->arg, a)); break;
         CASE(BC_BINARY)
             b = machine_pop(m); a = machine_pop(m);
             value = number_fast(c, ins->arg, a, b, 0);
@@ -23067,8 +23087,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (flow.value) { machine_push(c, m, flow.value); flow.value = NULL; }
         NEXT;
     operator_step:
-        /* BC_BINARY, BC_INDEX, BC_COMPARE or BC_INPLACE on x and y, an instance among
-         * them: a Python special method is a call (operator_call). */
+        /* BC_BINARY, BC_INDEX, BC_COMPARE or BC_INPLACE on x and y, or
+         * BC_UNARY on x, an instance among them: a Python special method
+         * is a call (operator_call). */
         callee_env = NULL;
         if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
             if (a) spy_release(a);
@@ -27575,6 +27596,18 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result || (s->id != B_ALL && s->id != B_ANY) ? result : spy_bool(c, s->id == B_ALL);
 }
+/* The number int() or float() of a returns from a's __int__ or __float__
+   result converted, taking converted. */
+static SPYValue *number_result(SPYContext *c, SPYValue *a, int real, SPYValue *converted) {
+    SPYValue *exact = builtin_value(c, converted, real ? SPY_FLOAT : SPY_INT), *result = NULL;
+    if (!exact) {
+        char fq[256];
+        errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(a, fq, sizeof(fq)),
+               real ? "__float__" : "__int__", real ? "a float" : "an int", type_name(converted));
+    } else if (real) result = spy_float(c, exact->as.real);
+    else result = exact->type == SPY_BOOL ? spy_int(c, exact->as.integer_data.small) : spy_retain(exact);
+    spy_release(converted); return result;
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -28262,16 +28295,9 @@ execution_fail:
                 return result;
             }
             if (method) {
-                SPYValue *converted = call(c, method, 0, NULL), *exact, *result = NULL;
+                SPYValue *converted = call(c, method, 0, NULL);
                 spy_release(method);
-                if (!converted) return NULL;
-                if (!(exact = builtin_value(c, converted, id == B_INT ? SPY_INT : SPY_FLOAT))) {
-                    char fq[256];
-                    errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(a, fq, sizeof(fq)), name,
-                           id == B_INT ? "an int" : "a float", type_name(converted));
-                } else if (id == B_FLOAT) result = spy_float(c, exact->as.real);
-                else result = exact->type == SPY_BOOL ? spy_int(c, exact->as.integer_data.small) : spy_retain(exact);
-                spy_release(converted); return result;
+                return converted ? number_result(c, a, id == B_FLOAT, converted) : NULL;
             }
             if (c->error_type[0]) return NULL;
         }
