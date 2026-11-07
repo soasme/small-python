@@ -21482,13 +21482,13 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
     block->value = source; block->consumer = s;
     return NULL;
 }
-/* BC_EXTEND of starred item a, which it takes, into the display atop m's
- * stack, sealing a tuple at the last (arg): 1 when a, a generator the
- * machine can resume or an instance with a Python __iter__, gives its
- * items on the machine (BLOCK_CONSUME, EXTEND_ITEMS); else 0, a extended
- * into the display and released. */
-static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *a, int arg) {
-    SPYValue *display = m->stack[m->len - 1];
+/* BC_EXTEND's or a call's BC_ARG's starred item a, which it takes, into
+ * display, a display or the call's arguments on m's stack, sealing a
+ * tuple at the last (arg): 1 when a, a generator the machine can resume or
+ * an instance with a Python __iter__, gives its items on the machine
+ * (BLOCK_CONSUME, EXTEND_ITEMS); else 0, a extended into the display and
+ * released. */
+static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg) {
     if ((!resumable(a) && !iter_function(c, a)) || is_dict(display)) {
         extend_display(c, display, a);
         if (arg) seal_tuple(c, display);
@@ -22875,7 +22875,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_ADD) CASE(BC_EXTEND)
             a = machine_pop(m);
             if (ins->op == BC_EXTEND) {
-                if (extend_step(c, m, a, ins->arg)) { a = NULL; goto consume_generator; }
+                if (extend_step(c, m, m->stack[m->len - 1], a, ins->arg)) { a = NULL; goto consume_generator; }
                 a = NULL;
                 break;
             }
@@ -22894,8 +22894,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             else if (ins->arg == N_KEYWORD) {
                 b = spy_string(c, n->text, strlen(n->text));
                 if (b) merge_keyword(c, keywords, b, a, fn);
-            } else if (ins->arg == N_STAR) extend_display(c, args, a);
-            else sequence_append(c, args, a);
+            } else if (ins->arg == N_STAR) {
+                if (extend_step(c, m, args, a, 0)) { a = NULL; goto consume_generator; }
+                a = NULL;
+            } else sequence_append(c, args, a);
             break;
         }
         CASE(BC_CALLF)

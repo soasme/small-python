@@ -289,7 +289,8 @@ These run as machines on the heap, in one native activation of
   `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `sorted` or
   `str.join`, and, in
   code compiled while pausing, the generators and such instances a target
-  list unpacks or a list, tuple or set display stars;
+  list unpacks or a list, tuple or set display stars, and the generators
+  and such instances a call's starred argument takes;
   generators resumed by
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;

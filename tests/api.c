@@ -1038,6 +1038,10 @@ int main(int argc, char **argv) {
                "def consume():\n    return len(list(Steps())) + sum(Items()) + sorted(Items())[-1] + sorted(x for x in Items())[0]");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "consume()", "consume.py"), SPY_STOP_STEPS, &pauses)) == 20 + 190 + 19 && pauses > 3);
+    /* So does a call's starred argument of a generator or such an instance. */
+    execute(c, "def spread(*items): return len(items)\ndef spreads(): return spread(*Items(), *Steps(), *(x for x in Items()))");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "spreads()", "spread.py"), SPY_STOP_STEPS, &pauses)) == 60 && pauses > 3);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown())\n    return 1");
