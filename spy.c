@@ -13712,7 +13712,7 @@ struct Machine {
  * __next__, a sort's key function, a consumer's next item, a with
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__ or a store's __setitem__. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_EXEC, CALL_EVAL };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -14590,11 +14590,12 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n) {
     c->line = n->line;
     if (c->py_depth) {
         /* A new line is a trace function's 'line' event; the definition
-         * node of a generator or a function on the machine only stands in
-         * for instructions without one. */
+         * node of a generator or a function on the machine, or a module
+         * body, only stands in for instructions without one. */
         struct ActiveFrame *top = &c->frames[c->py_depth - 1];
         top->line = n->line;
         int stand_in = top->owner->type == SPY_FUNCTION ? top->owner->as.function.def == n :
+                       top->owner->type == V_UNIT ? top->owner->as.unit.body == n :
                        (top->owner->type == SPY_GENERATOR || top->owner->type == SPY_COROUTINE ||
                         top->owner->type == SPY_ASYNC_GENERATOR) && top->owner->as.generator.node == n;
         if (c->settings[SET_TRACE] && n->line != top->traced && !stand_in) {
@@ -16289,6 +16290,30 @@ static ALWAYS_INLINE Call *call_enter(SPYContext *c, SPYValue *fn, SPYValue *env
         leave_frame(c, NULL);
     }
     release_locals(env); spy_release(fn);
+    return NULL;
+}
+static int setup_annotations(SPYContext *, Frame *, int);
+static int start_annotations(SPYContext *, Frame *, Node *, const char *);
+/* Enter the frame of unit, whose module body is on the machine
+ * (module_program), in env, called from the machine caller; it takes both
+ * references, releasing them when it fails. The body's instructions of no
+ * node tick on its first statement. */
+static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, Machine *caller) {
+    Frame frame = {env, unit, 0};
+    if (!enter_frame(c, env, unit)) {
+        if (!setup_annotations(c, &frame, unit->as.unit.setup_annotations) &&
+            !start_annotations(c, &frame, unit->as.unit.annotate, "__annotate__") &&
+            ((c->calls_len < c->calls_cap && c->calls[c->calls_len]) || !call_room(c))) {
+            Call *call = c->calls[c->calls_len++];
+            call->m.code = unit->as.unit.flat; call->m.pc = 0; call->m.owner = unit->as.unit.body;
+            call->m.frame = frame;
+            call->caller = caller; call->fn = unit;
+            call->caller_env = c->eval_env; c->eval_env = env;
+            return call;
+        }
+        leave_frame(c, NULL);
+    }
+    spy_release(env); spy_release(unit);
     return NULL;
 }
 /* Leave call, the innermost running, which returns value, or NULL when it
@@ -19118,6 +19143,7 @@ static NO_INLINE int trace_call(SPYContext *c) {
         return trace_event(c, TRACE_CALL, NULL) || trace_class_line(c, cls);
     }
     if (owner->type == SPY_FUNCTION && owner->as.function.def) top->line = owner->as.function.def->line;
+    else if (owner->type == V_UNIT) top->line = 0;
     else if (owner->type == SPY_GENERATOR || owner->type == SPY_COROUTINE || owner->type == SPY_ASYNC_GENERATOR) {
         /* A resumed generator continues the line where it was suspended. */
         top->line = owner->as.generator.line ? owner->as.generator.line : owner->as.generator.node ? owner->as.generator.node->line : top->line;
@@ -20367,6 +20393,23 @@ static Result module_end(SPYContext *c, Machine *m, SPYValue *outer, Result r) {
     c->eval_env = outer;
     return r;
 }
+/* Compile unit's body, which has statements, for the machine once: -1 on
+ * an error. */
+static int module_program(SPYContext *c, SPYValue *unit) {
+    if (unit->as.unit.flat) return 0;
+    Program *p = allocate(c, sizeof(*p));
+    if (!p) return -1;
+    p->calls = c->pausing ? PAUSING : BODY;
+    /* The body's value is its last statement's, when that is an expression. */
+    Node *body = unit->as.unit.body, *last = body;
+    while (last->next) last = last->next;
+    for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
+    if (last->kind == N_EXPR) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
+    else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
+    if (c->error_type[0]) { free_program(p); return -1; }
+    unit->as.unit.flat = p;
+    return 0;
+}
 static Result module_body(SPYContext *c, Frame *f) {
     /* The body a pausable call runs first, while no other is paused. */
     int pausable = c->pause_entry && c->pausing && !c->pause_root;
@@ -20374,19 +20417,7 @@ static Result module_body(SPYContext *c, Frame *f) {
     SPYValue *unit = f->unit;
     Node *body = unit->as.unit.body;
     if (f->interactive || unit->as.unit.expression || !body) return execute(c, f, body);
-    if (!unit->as.unit.flat) {
-        Program *p = allocate(c, sizeof(*p));
-        if (!p) return (Result){FLOW_ERROR, NULL};
-        p->calls = c->pausing ? PAUSING : BODY;
-        /* The body's value is its last statement's, when that is an expression. */
-        Node *last = body;
-        while (last->next) last = last->next;
-        for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
-        if (last->kind == N_EXPR) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
-        else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
-        if (c->error_type[0]) { free_program(p); return (Result){FLOW_ERROR, NULL}; }
-        unit->as.unit.flat = p;
-    }
+    if (module_program(c, unit)) return (Result){FLOW_ERROR, NULL};
     Machine *m = machine_new(c, unit->as.unit.flat, f->env, unit);
     if (!m) return (Result){FLOW_ERROR, NULL};
     m->owner = body;
@@ -21976,6 +22007,40 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     spy_release(callee);
     return result;
 }
+static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
+static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
+static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
+/* Whether callee is exec() or eval(). */
+static ALWAYS_INLINE int source_builtin(SPYValue *callee) {
+    return callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
+           (callee->as.native.data == (void *)(intptr_t)B_EXEC || callee->as.native.data == (void *)(intptr_t)B_EVAL);
+}
+/* exec() or eval(), callee, given argc arguments argv, which it takes, from
+ * a step of the machine: the unit of source or of a module's code is a
+ * call there, its module body on the machine (unit_enter): str's class
+ * then, with *env and c->entering_init the unit, borrowed from env, and
+ * c->entering_kind CALL_EXEC, or CALL_EVAL for an expression's value. Else
+ * the call's value, or NULL with an error. */
+static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
+    int eval = callee->as.native.data == (void *)(intptr_t)B_EVAL;
+    SPYValue *unit = argc && argc <= 3 ? source_unit(c, eval ? B_EVAL : B_EXEC, argc, argv, env) : builtin(c, argc, argv, callee->as.native.data);
+    release_all(argc, argv);
+    if (!*env) return unit;
+    int expression = unit->as.unit.expression;
+    if (expression == 2 || !unit->as.unit.body) {
+        SPYValue *result = run_source(c, eval, *env, unit);
+        *env = NULL;
+        return result;
+    }
+    /* A module's docstring is its first statement's store to __doc__. */
+    SPYValue *doc = expression ? NULL : docstring(c, unit->as.unit.body);
+    int status = doc ? name_set(c, *env, "__doc__", doc) : c->error_type[0] ? -1 : 0;
+    spy_release(doc);
+    if (status || module_program(c, unit)) { spy_release(*env); *env = NULL; spy_release(unit); return NULL; }
+    c->entering_init = unit; c->entering_kind = eval && expression == 1 ? CALL_EVAL : CALL_EXEC;
+    spy_release(unit);
+    return spy_retain(c->types[SPY_STRING]);
+}
 /* BC_CALLF: plain call node n, whose operands need no steps of their own;
  * or NULL with no error when a consumer of a generator began on m. */
 static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
@@ -21995,6 +22060,11 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
         (argc == 1 && callee->type == SPY_NATIVE && argv[0]->type == SPY_INSTANCE))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
+    if (method < 0 && source_builtin(callee)) {
+        SPYValue *result = source_call(c, callee, argc, argv, env);
+        spy_release(callee);
+        return result;
+    }
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
@@ -22107,6 +22177,14 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
+    }
+    if (calls && source_builtin(callee) && argc <= 3) {
+        SPYValue *args[3];
+        memcpy(args, argv, argc * sizeof(*argv));
+        m->len -= argc + 1;
+        result = source_call(c, callee, argc, args, env);
+        spy_release(callee);
+        return result;
     }
     int id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
@@ -22950,6 +23028,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     int kind = m->outermost;
                     SPYValue *result = flow.flow == FLOW_RETURN ? flow.value : NULL;
                     flow = (Result){FLOW_NORMAL, NULL};
+                    if (kind >= CALL_EXEC) {
+                        /* exec() returns None, from a module frame. */
+                        m->owner = NULL;
+                        if (kind == CALL_EXEC && result) { spy_release(result); result = spy_none(c); }
+                    }
                     m = call_leave(c, (Call *)m, result);
                     f = m->frame; code = m->code->items; pc = m->pc;
                     if (kind == CALL_INIT) {
@@ -22984,6 +23067,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         goto item_returned;
                     } else if (kind == CALL_KEY) {
                         if (result && !key_took(c, m, result)) goto consume_generator;
+                    } else if (kind >= CALL_EXEC) {
+                        if (result) machine_push(c, m, result);
                     } else {
                         /* CALL_NEXT: a filter's test tries the next item when false. */
                         SPYValue *iterator = m->blocks[m->block_len - 1].value;
@@ -23648,7 +23733,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     enter_special:
         m->pc = pc;
         {
-            Call *call = call_enter(c, value, callee_env, m);
+            Call *call = special >= CALL_EXEC ? unit_enter(c, value, callee_env, m) : call_enter(c, value, callee_env, m);
             if (!call) continue;
             call->m.outermost = special;
             m = &call->m;
@@ -28246,6 +28331,128 @@ static SPYValue *number_result(SPYContext *c, SPYValue *a, int real, SPYValue *c
     else result = exact->type == SPY_BOOL ? spy_int(c, exact->as.integer_data.small) : spy_retain(exact);
     spy_release(converted); return result;
 }
+/* compile(), eval() or exec() given argc arguments argv: the unit to run
+ * in *source_env, both owned, for eval() and exec() of source or of a
+ * module's code; else NULL or the call's value, as compile()'s unit or
+ * a function code's result. */
+static SPYValue *source_unit(SPYContext *c, int id, size_t argc, SPYValue *const *argv, SPYValue **source_env) {
+    SPYValue *a = argc ? argv[0] : NULL;
+    if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, NULL);
+    SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
+    if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
+    /* exec's fourth parameter, closure, is keyword-only. */
+    if (id == B_EXEC && argc == 4) return spy_error(c, "TypeError", "exec() takes at most 3 positional arguments (4 given)");
+    if (id == B_COMPILE ? argc != 3 : argc < 1 || argc > 3) return arity_error(c, id, argc);
+    const char *filename = "<string>";
+    char filename_buffer[sizeof(c->filename)];
+    int expression = id == B_EVAL;
+    if (id == B_COMPILE) {
+        SPYValue *path = filesystem_path(c, argv[1]);
+        if (!path) return NULL;
+        int embedded_null = strlen(path->as.string.data) != path->as.string.len;
+        put_text(filename_buffer, sizeof(filename_buffer), path->as.string.data);
+        spy_release(path);
+        if (embedded_null) return spy_error(c, "ValueError", "embedded null character");
+        filename = filename_buffer;
+        SPYValue *mode_value = builtin_value(c, argv[2], SPY_STRING);
+        if (!mode_value) return errorf(c, "TypeError", "compile() argument 'mode' must be str, not %s", type_name(argv[2]));
+        const char *mode = mode_value->as.string.data;
+        if (strlen(mode) != mode_value->as.string.len) return spy_error(c, "ValueError", "invalid compilation mode");
+        if (!strcmp(mode, "eval")) expression = 1;
+        else if (!strcmp(mode, "single")) expression = 2;
+        else if (strcmp(mode, "exec")) return spy_error(c, "ValueError", "compile() mode must be 'exec', 'eval' or 'single'");
+    }
+    SPYValue *env = id != B_COMPILE ? execution_env(c, argc, argv, id != B_EVAL) : NULL;
+    if (id != B_COMPILE && !env) return NULL;
+    SPYValue *unit = NULL;
+    if (closure && a->type != SPY_CODE) {
+        spy_error(c, "TypeError", "closure can only be used when source is a code object"); goto execution_fail;
+    }
+    if (a->type == SPY_CODE && id != B_COMPILE) {
+        if (a->as.unit.definition) {
+            /* A function's code runs as a call with no arguments. */
+            SPYValue *free = closure_names(c, a->as.unit.definition, 0), *result = NULL;
+            size_t needed = free ? free->as.seq.len : 0, given = closure && closure->type == SPY_TUPLE ? closure->as.seq.len : 0;
+            if (!free) {}
+            else if (needed && expression) spy_error(c, "TypeError", "code object passed to eval() may not contain free variables");
+            else if (closure && closure->type != SPY_TUPLE) spy_error(c, "TypeError", "closure must be a tuple of cells");
+            else if (closure && !needed) spy_error(c, "TypeError", "cannot use a closure with this code object");
+            else if (needed != given) errorf(c, "TypeError", "code object requires a closure of exactly length %zu", needed);
+            else {
+                SPYValue *fn = function_from_code(c, a, env->as.map.parent->as.map.namespace, closure);
+                result = fn ? call(c, fn, 0, NULL) : NULL;
+                spy_release(fn);
+            }
+            spy_release(free); spy_release(env);
+            if (!result) return NULL;
+            if (id == B_EVAL) return result;
+            spy_release(result); return spy_none(c);
+        }
+        if (closure) { spy_error(c, "TypeError", "cannot use a closure with this code object"); goto execution_fail; }
+        unit = spy_retain(a);
+    }
+    else {
+        SPYValue *text = builtin_value(c, a, SPY_STRING);
+        if (text) {
+            if (memchr(text->as.string.data, 0, text->as.string.len)) {
+                spy_error(c, "SyntaxError", "source code string cannot contain null bytes"); goto execution_fail;
+            }
+            /* The source is encoded to UTF-8 before it is parsed, so a lone
+             * surrogate (stored as ED A0..BF) raises UnicodeEncodeError. */
+            for (size_t i = 0; i + 1 < text->as.string.len; i++)
+                if ((unsigned char)text->as.string.data[i] == 0xed && (unsigned char)text->as.string.data[i + 1] >= 0xa0) {
+                    spy_release(text_encode(c, text, NULL, NULL)); goto execution_fail;
+                }
+            text = spy_retain(text);
+        } else {
+            SPYValue *bytes = builtin_value(c, a, SPY_BYTES);
+            if (!bytes) bytes = builtin_value(c, a, SPY_BYTEARRAY);
+            if (!bytes) {
+                if (id == B_COMPILE) spy_error(c, "TypeError", "compile() arg 1 must be a string, bytes or AST object");
+                else errorf(c, "TypeError", "%s() arg 1 must be a string, bytes or code object", id == B_EVAL ? "eval" : "exec");
+                goto execution_fail;
+            }
+            text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
+        }
+        if (text && c->policy && policy_event(c, "exec", 1, &a)) { spy_release(text); goto execution_fail; }
+        /* exec and eval inherit the running code's future statements. */
+        int flags = c->compile_flags;
+        if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
+        c->string_source++;
+        c->eval_input = expression;
+        /* eval() of a string ignores leading spaces and tabs. */
+        const char *code = text ? text->as.string.data : NULL;
+        while (code && id == B_EVAL && (*code == ' ' || *code == '\t')) code++;
+        if (text) unit = parse_source(c, code, filename, NULL);
+        c->eval_input = 0;
+        c->string_source--;
+        c->compile_flags = flags;
+        spy_release(text);
+        if (!unit) goto execution_fail;
+        if (expression == 2 && unit->as.unit.statements > 1) {
+            spy_error(c, "SyntaxError", "multiple statements found while compiling a single statement"); goto execution_fail;
+        }
+        unit->as.unit.expression = expression;
+    }
+    if (id == B_COMPILE) return unit;
+    env->as.map.scope = unit->as.unit.scope;
+    env->as.map.unit = spy_retain(unit);
+    *source_env = env;
+    return unit;
+execution_fail:
+    spy_release(env); spy_release(unit); return NULL;
+}
+/* Run unit in env, both taken, for eval() (eval) or exec(): eval()'s
+ * expression value, else None. */
+static SPYValue *run_source(SPYContext *c, int eval, SPYValue *env, SPYValue *unit) {
+    Frame frame = {env, unit, unit->as.unit.expression == 2};
+    Result r = execute_module(c, &frame);
+    int return_value = eval && unit->as.unit.expression == 1;
+    spy_release(env); spy_release(unit);
+    if (r.flow == FLOW_ERROR) { spy_release(r.value); return NULL; }
+    if (return_value && r.value) return r.value;
+    spy_release(r.value); return spy_none(c);
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -28456,115 +28663,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         spy_release(quotient); spy_release(remainder); return result;
     }
     case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
-        if (id == B_COMPILE && argc != 3) return builtin_keywords(c, argc, argv, id, NULL, NULL);
-        SPYValue *closure = id == B_EXEC_CLOSURE && argv[3]->type != SPY_NONE ? argv[3] : NULL;
-        if (id == B_EXEC_CLOSURE) { id = B_EXEC; argc = 3; }
-        /* exec's fourth parameter, closure, is keyword-only. */
-        if (id == B_EXEC && argc == 4) return spy_error(c, "TypeError", "exec() takes at most 3 positional arguments (4 given)");
-        if (id == B_COMPILE ? argc != 3 : argc < 1 || argc > 3) goto arity;
-        const char *filename = "<string>";
-        char filename_buffer[sizeof(c->filename)];
-        int expression = id == B_EVAL;
-        if (id == B_COMPILE) {
-            SPYValue *path = filesystem_path(c, argv[1]);
-            if (!path) return NULL;
-            int embedded_null = strlen(path->as.string.data) != path->as.string.len;
-            put_text(filename_buffer, sizeof(filename_buffer), path->as.string.data);
-            spy_release(path);
-            if (embedded_null) return spy_error(c, "ValueError", "embedded null character");
-            filename = filename_buffer;
-            SPYValue *mode_value = builtin_value(c, argv[2], SPY_STRING);
-            if (!mode_value) return errorf(c, "TypeError", "compile() argument 'mode' must be str, not %s", type_name(argv[2]));
-            const char *mode = mode_value->as.string.data;
-            if (strlen(mode) != mode_value->as.string.len) return spy_error(c, "ValueError", "invalid compilation mode");
-            if (!strcmp(mode, "eval")) expression = 1;
-            else if (!strcmp(mode, "single")) expression = 2;
-            else if (strcmp(mode, "exec")) return spy_error(c, "ValueError", "compile() mode must be 'exec', 'eval' or 'single'");
-        }
-        SPYValue *env = id != B_COMPILE ? execution_env(c, argc, argv, id != B_EVAL) : NULL;
-        if (id != B_COMPILE && !env) return NULL;
-        SPYValue *unit = NULL;
-        if (closure && a->type != SPY_CODE) {
-            spy_error(c, "TypeError", "closure can only be used when source is a code object"); goto execution_fail;
-        }
-        if (a->type == SPY_CODE && id != B_COMPILE) {
-            if (a->as.unit.definition) {
-                /* A function's code runs as a call with no arguments. */
-                SPYValue *free = closure_names(c, a->as.unit.definition, 0), *result = NULL;
-                size_t needed = free ? free->as.seq.len : 0, given = closure && closure->type == SPY_TUPLE ? closure->as.seq.len : 0;
-                if (!free) {}
-                else if (needed && expression) spy_error(c, "TypeError", "code object passed to eval() may not contain free variables");
-                else if (closure && closure->type != SPY_TUPLE) spy_error(c, "TypeError", "closure must be a tuple of cells");
-                else if (closure && !needed) spy_error(c, "TypeError", "cannot use a closure with this code object");
-                else if (needed != given) errorf(c, "TypeError", "code object requires a closure of exactly length %zu", needed);
-                else {
-                    SPYValue *fn = function_from_code(c, a, env->as.map.parent->as.map.namespace, closure);
-                    result = fn ? call(c, fn, 0, NULL) : NULL;
-                    spy_release(fn);
-                }
-                spy_release(free); spy_release(env);
-                if (!result) return NULL;
-                if (id == B_EVAL) return result;
-                spy_release(result); return spy_none(c);
-            }
-            if (closure) { spy_error(c, "TypeError", "cannot use a closure with this code object"); goto execution_fail; }
-            unit = spy_retain(a);
-        }
-        else {
-            SPYValue *text = builtin_value(c, a, SPY_STRING);
-            if (text) {
-                if (memchr(text->as.string.data, 0, text->as.string.len)) {
-                    spy_error(c, "SyntaxError", "source code string cannot contain null bytes"); goto execution_fail;
-                }
-                /* The source is encoded to UTF-8 before it is parsed, so a lone
-                 * surrogate (stored as ED A0..BF) raises UnicodeEncodeError. */
-                for (size_t i = 0; i + 1 < text->as.string.len; i++)
-                    if ((unsigned char)text->as.string.data[i] == 0xed && (unsigned char)text->as.string.data[i + 1] >= 0xa0) {
-                        spy_release(text_encode(c, text, NULL, NULL)); goto execution_fail;
-                    }
-                text = spy_retain(text);
-            } else {
-                SPYValue *bytes = builtin_value(c, a, SPY_BYTES);
-                if (!bytes) bytes = builtin_value(c, a, SPY_BYTEARRAY);
-                if (!bytes) {
-                    if (id == B_COMPILE) spy_error(c, "TypeError", "compile() arg 1 must be a string, bytes or AST object");
-                    else errorf(c, "TypeError", "%s() arg 1 must be a string, bytes or code object", id == B_EVAL ? "eval" : "exec");
-                    goto execution_fail;
-                }
-                text = decode_source(c, bytes->as.string.data, bytes->as.string.len, filename);
-            }
-            if (text && c->policy && policy_event(c, "exec", 1, &a)) { spy_release(text); goto execution_fail; }
-            /* exec and eval inherit the running code's future statements. */
-            int flags = c->compile_flags;
-            if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
-            c->string_source++;
-            c->eval_input = expression;
-            /* eval() of a string ignores leading spaces and tabs. */
-            const char *code = text ? text->as.string.data : NULL;
-            while (code && id == B_EVAL && (*code == ' ' || *code == '\t')) code++;
-            if (text) unit = parse_source(c, code, filename, NULL);
-            c->eval_input = 0;
-            c->string_source--;
-            c->compile_flags = flags;
-            spy_release(text);
-            if (!unit) goto execution_fail;
-            if (expression == 2 && unit->as.unit.statements > 1) {
-                spy_error(c, "SyntaxError", "multiple statements found while compiling a single statement"); goto execution_fail;
-            }
-            unit->as.unit.expression = expression;
-        }
-        if (id == B_COMPILE) return unit;
-        env->as.map.scope = unit->as.unit.scope;
-        env->as.map.unit = spy_retain(unit);
-        Frame frame = {env, unit, unit->as.unit.expression == 2};
-        Result r = execute_module(c, &frame);
-        int return_value = id == B_EVAL && unit->as.unit.expression == 1;
-        spy_release(env); spy_release(unit);
-        if (r.flow == FLOW_ERROR) { spy_release(r.value); return NULL; }
-        if (return_value && r.value) return r.value;
-        spy_release(r.value); return spy_none(c);
-execution_fail:
-        spy_release(env); spy_release(unit); return NULL;
+        SPYValue *env = NULL, *unit = source_unit(c, id, argc, argv, &env);
+        return env ? run_source(c, id == B_EVAL, env, unit) : unit;
     }
     case B_TYPE: {
         if (argc != 1) return spy_error(c, "TypeError", "type() takes 1 or 3 arguments");

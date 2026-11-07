@@ -336,6 +336,11 @@ def traced_class():
     return Annotated.i
 
 
+def traced_exec():
+    exec("x = 1\nfor i in range(2):\n    x += i\nx")
+    return eval("x if False else 5", {"x": 1})
+
+
 def traced_raise():
     try:
         raise ValueError("v")
@@ -348,6 +353,7 @@ sys.settrace(tracer)
 traced_loop(1)
 list(traced_generator())
 traced_class()
+traced_exec()
 try:
     traced_raise()
 except KeyError:
