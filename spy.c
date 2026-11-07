@@ -10705,7 +10705,17 @@ static SPYValue *special_method_maybe(SPYContext *c, SPYValue *v, const char *na
 static const char *const rich_names[] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};
 static const int rich_reflected[] = {R_GT, R_GE, R_EQ, R_NE, R_LT, R_LE};
 static SPYValue *rich_method(SPYContext *c, int op, SPYValue *self, SPYValue *other) {
-    SPYValue *method = special_method_maybe(c, self, rich_names[op]);
+    /* An instance's Python method is called with self, unbound. */
+    SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, rich_names[op]) : NULL;
+    SPYValue *method = function && function->type == SPY_FUNCTION ? NULL : special_method_maybe(c, self, rich_names[op]);
+    if (!method && function && function->type == SPY_FUNCTION) {
+        SPYValue *args[] = {self, other};
+        spy_retain(function);
+        SPYValue *result = call(c, function, 2, args);
+        spy_release(function);
+        if (result == c->not_implemented) { spy_release(result); return NULL; }
+        return result;
+    }
     if (!method) {
         if (c->error_type[0]) return NULL;
         /* Builtin bases define every comparison themselves. */
