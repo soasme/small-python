@@ -59,6 +59,8 @@ Unreleased (0.8.0):
   when the call returns, and raising and catching run about a third faster
 - calls of functions with *args or **kwargs run up to twice as fast (with
   statements a third faster)
+- calling an instance's special method by name (p.__lt__(q), self.__init__())
+  runs about 2.5 times as fast
 
 2026-11-05 0.7.0:
 

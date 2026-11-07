@@ -11648,8 +11648,17 @@ enum { ATTR_SLOW, ATTR_OWN, ATTR_METHOD, ATTR_PROPERTY, ATTR_READ = 3, ATTR_WRIT
  * whose slots could precede the class entries. */
 static int instance_access(SPYContext *c, SPYValue *cls, const char *name, SPYValue **method) {
     SPYValue *hook;
-    if (!plain_mro(c, cls) || (name[0] == '_' && name[1] == '_')) return ATTR_SLOW;
+    int dunder = name[0] == '_' && name[1] == '_';
+    if (!plain_mro(c, cls)) return ATTR_SLOW;
     int read = ATTR_SLOW;
+    /* A special name reads fast only as a method its class defines: no
+     * data descriptor of object's then comes first. */
+    if (dunder) {
+        *method = class_lookup(cls, name);
+        hook = class_lookup(cls, "__getattribute__");
+        return *method && (*method)->type == SPY_FUNCTION && (!hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) ?
+               ATTR_METHOD : ATTR_SLOW;
+    }
     if (!(hook = class_lookup(cls, "__getattribute__")) || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
         if (!(*method = class_lookup(cls, name))) read = class_lookup(cls, "__getattr__") ? ATTR_SLOW : ATTR_OWN;
         else read = (*method)->type == SPY_FUNCTION ? ATTR_METHOD :
