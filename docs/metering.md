@@ -288,7 +288,8 @@ These run as machines on the heap, in one native activation of
   and no `__len__` or `__length_hint__`, consumed by `sum`, `any`, `all`,
   `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `sorted` or
   `str.join`, and, in
-  code compiled while pausing, generators a target list unpacks;
+  code compiled while pausing, the generators and such instances a target
+  list unpacks;
   generators resumed by
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;

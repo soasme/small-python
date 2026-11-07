@@ -13685,6 +13685,11 @@ static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValu
 enum { CALLS = 1, BODY = 2, PAUSING = 3 };
 static int expands(Node *n, int calls);
 static int loops(Node *);
+/* Whether a target among n and those after it is a target list. */
+static int unpacks(Node *n) {
+    for (; n; n = n->next) if (n->kind == N_TUPLE || n->kind == N_LIST) return 1;
+    return 0;
+}
 static int list_expands(Node *n, int calls) {
     for (; n; n = n->next) if (expands(n, calls)) return 1;
     return 0;
@@ -13707,7 +13712,8 @@ static int expands(Node *n, int calls) {
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
                            n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
-                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op >= T_ADDEQ && n->op <= T_XOREQ)))) return 1;
+                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || (n->kind == N_ASSIGN && ((n->op >= T_ADDEQ && n->op <= T_XOREQ) ||
+                                                                                                  unpacks(n->a) || unpacks(n->args)))))) return 1;
     /* A list, set or dictionary comprehension runs on the machine of the
      * code holding it, which can pause in its body. */
     if (n->kind == N_COMPREHENSION)
@@ -21412,6 +21418,18 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE)) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
 }
+/* A consumer's source *v, owned (iter_function): an instance whose
+ * __iter__ is on the machine stays, its call the consumer's first
+ * (KEY_ITER); one whose __iter__ is a generator function gives its
+ * generator. The consumer's keyed. */
+static int consumer_source(SPYContext *c, SPYValue **v) {
+    if ((*v)->type != SPY_INSTANCE) return 0;
+    if (machine_function(c, iter_function(c, *v))) return KEY_ITER;
+    SPYValue *iterator = get_iterator(c, *v);
+    spy_release(*v);
+    *v = iterator;
+    return 0;
+}
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
  * owned. */
@@ -21424,32 +21442,28 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     Consumer *consumer = allocate(c, sizeof(*consumer));
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_LIST || id == B_TUPLE || id == B_SET || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : SPY_LIST) : NULL;
-    /* An instance's Python __iter__ is the first call (KEY_ITER), unless
-     * it makes a generator. */
-    if (generator && generator->type == SPY_INSTANCE && !machine_function(c, iter_function(c, generator))) {
-        SPYValue *iterator = get_iterator(c, generator);
-        spy_release(generator);
-        generator = iterator;
-    }
+    int keyed = generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
-                           .sent = sent, .keyed = generator && generator->type == SPY_INSTANCE ? KEY_ITER : 0};
+                           .sent = sent, .keyed = keyed};
     block->value = generator; block->consumer = consumer;
 }
 /* BC_UNPACK of target list n, the value atop m's stack: its items, owned,
- * or, for a generator the machine can resume, NULL, its items to be taken
- * on the machine (BLOCK_CONSUME) as an unpacking (UNPACK_ITEMS). */
+ * or, for a generator the machine can resume or an instance with a Python
+ * __iter__ (iter_function), NULL, its items to be taken on the machine
+ * (BLOCK_CONSUME) as an unpacking (UNPACK_ITEMS). */
 static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node *n) {
     SPYValue *value = m->stack[m->len - 1];
-    if (!resumable(value)) return unpack_target(c, f, n, value);
+    if (!resumable(value) && !iter_function(c, value)) return unpack_target(c, f, n, value);
     Consumer *s = allocate(c, sizeof(*s));
-    SPYValue *items = s ? spy_list(c) : NULL;
-    Block *block = items ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(s); spy_release(items); return NULL; }
-    *s = (Consumer){.id = UNPACK_ITEMS, .result = items};
+    SPYValue *items = s ? spy_list(c) : NULL, *source = items ? spy_retain(value) : NULL;
+    int keyed = source ? consumer_source(c, &source) : 0;
+    Block *block = source ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (!block) { mem_free(s); spy_release(items); spy_release(source); return NULL; }
+    *s = (Consumer){.id = UNPACK_ITEMS, .result = items, .keyed = keyed};
     s->count = target_count(n, &s->star);
-    block->value = spy_retain(value); block->consumer = s;
+    block->value = source; block->consumer = s;
     return NULL;
 }
 /* Whether the consumer atop m, given its generator's next item (NULL at
