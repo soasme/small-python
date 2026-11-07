@@ -940,6 +940,23 @@ int main(int argc, char **argv) {
     assert(spy_exec(c, "raise ValueError('x' * 300)", "long.py") == -1);
     assert(strlen(spy_error_message(c)) == 255 && strlen(spy_error_display(c)) == 300);
     spy_clear_error(c);
+    /* A raised exception's message is its str(), taken as the error reaches
+     * the host: from a Python __str__, by a value operation, or failing. */
+    assert(spy_exec(c, "class Loud(Exception):\n"
+                       "    def __str__(self): return 'loud ' + 'x' * 300\n"
+                       "class Mute(Exception):\n"
+                       "    def __str__(self): raise KeyError\n"
+                       "class Shown:\n"
+                       "    def __str__(self): raise Loud\n"
+                       "raise Loud", "lazy.py") == -1);
+    assert(!strcmp(spy_error_type(c), "__main__.Loud") && !strncmp(spy_error_message(c), "loud x", 6) && strlen(spy_error_display(c)) == 305);
+    spy_clear_error(c);
+    SPYValue *raising = spy_eval(c, "Shown()", "lazy.py");
+    assert(raising && !spy_str(c, raising) && !strncmp(spy_error_message(c), "loud x", 6));
+    spy_clear_error(c);
+    assert(spy_exec(c, "raise Mute", "lazy.py") == -1 && !strcmp(spy_error_message(c), "<exception str() failed>"));
+    spy_clear_error(c);
+    spy_release(raising);
 
     /* -OO: no asserts, __debug__ False, no docstrings; compile(optimize=-1) inherits it. */
     spy_set_optimize(c, 2);

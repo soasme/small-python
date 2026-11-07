@@ -509,6 +509,11 @@ static SPYValue *errorf(SPYContext *c, const char *type, const char *fmt, ...) {
     }
     return NULL;
 }
+/* The value operations hand the host what they return with the message of
+ * any error settled (error_settle). */
+static void error_settle(SPYContext *);
+static SPYValue *settled(SPYContext *c, SPYValue *v) { error_settle(c); return v; }
+static int settled_status(SPYContext *c, int status) { error_settle(c); return status; }
 /* Record the name attribute of the pending AttributeError, NameError or ImportError. */
 static void error_name_set(SPYContext *c, const char *name, size_t len) {
     mem_free(c->error_name);
@@ -1951,7 +1956,7 @@ static int truthy(SPYValue *v) {
 }
 int spy_truth(SPYContext *c, SPYValue *v) {
     int truth = truthy(v);
-    return c->error_type[0] ? -1 : truth;
+    return c->error_type[0] ? settled_status(c, -1) : truth;
 }
 /* Compare integers against floats without first rounding the integer to double.
  * Returns 2 for unordered (NaN). This also works where long double == double. */
@@ -2448,6 +2453,7 @@ static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) 
     if (status && role && !strcmp(c->error_type, "TypeError") &&
         (!c->exception || c->exception->as.map.parent == name_local(c->classes, "TypeError"))) {
         char message[sizeof(c->error_message)];
+        error_settle(c);
         snprintf(message, sizeof(message), "%s", c->error_message);
         spy_clear_error(c);
         errorf(c, "TypeError", "cannot use '%s' as %s (%s)", type_name(key), role, message);
@@ -3813,7 +3819,7 @@ static SPYValue *stringify(SPYContext *c, SPYValue *v, int repr) {
     /* A host may ask while an error is pending. */
     return buffer_text(&b, SPY_STRING, format_value(&b, v, repr));
 }
-SPYValue *spy_repr(SPYContext *c, SPYValue *v) { return stringify(c, v, 1); }
+SPYValue *spy_repr(SPYContext *c, SPYValue *v) { return settled(c, stringify(c, v, 1)); }
 /* Buffer b's text, or what __str__ or __repr__ returned into it, a str
  * subclass included, when that is the whole text. */
 static SPYValue *whole_text(Buffer *b, int failed) {
@@ -18857,19 +18863,17 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
         if (c->error_type[0]) { spy_release(exception); return NULL; }
     }
     chain_exception(c, exception);
+    /* The message waits for the host (error_settle): raising calls no __str__. */
     SPYValue *cls = exception->as.map.parent;
-    SPYValue *message = stringify(c, exception, 0);
-    if (!message) { spy_clear_error(c); message = spy_string(c, "<exception str() failed>", 24); }
     SPYValue *name = name_text(cls, "__qualname__"), *module = name_local(cls, "__module__");
     char type[sizeof(c->error_type)];
     if (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins"))
         snprintf(type, sizeof(type), "%s.%s", module->as.string.data, name->as.string.data);
     else snprintf(type, sizeof(type), "%s", name->as.string.data);
-    errorf(c, type, "%s", message ? message->as.string.data : "");
+    errorf(c, type, "%s", "");
     spy_release(c->exception); c->exception = exception;
     SPYValue *traceback = hidden_field(exception, "__traceback__");
     if (traceback && traceback->type == SPY_TRACEBACK) c->traceback = spy_retain(traceback);
-    spy_release(message);
     return NULL;
 }
 static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with_cause(c, value, NULL); }
@@ -19321,6 +19325,38 @@ static char *keyword_typo(SPYContext *c, SPYValue *exception) {
     mem_free(text.data);
     return result;
 }
+/* str() of the pending exception, or with syntax the SyntaxError's text
+ * naming a misspelt keyword, allocated; the pending error stays. */
+static char *pending_text(SPYContext *c, int syntax) {
+    char type[sizeof(c->error_type)], message[sizeof(c->error_message)], file[sizeof(c->filename)], *text = NULL;
+    SPYValue *exception = c->exception;
+    size_t line = c->line, fuel = c->fuel;
+    memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
+    memcpy(file, c->filename, sizeof(file));
+    c->exception = NULL;
+    SPYValue *traceback = c->traceback; c->traceback = NULL;
+    spy_clear_error(c);
+    if (syntax) text = keyword_typo(c, exception);
+    else {
+        SPYValue *full = spy_str(c, exception);
+        if (full && (text = mem_malloc(c, full->as.string.len + 1))) memcpy(text, full->as.string.data, full->as.string.len + 1);
+        spy_release(full);
+    }
+    spy_clear_error(c);
+    memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
+    memcpy(c->filename, file, sizeof(file)); c->filename_from = c->quiet_unit = NULL;
+    c->line = line; c->exception = exception; c->traceback = traceback; c->fuel = fuel;
+    attend(c);
+    return text;
+}
+/* A raised exception's message is its str(), taken as the error reaches the host. */
+static void error_settle(SPYContext *c) {
+    if (!c->error_type[0] || c->error_message[0] || !c->exception || c->error_text) return;
+    char *text = pending_text(c, 0);
+    const char *shown = text ? text : "<exception str() failed>";
+    if (snprintf(c->error_message, sizeof(c->error_message), "%s", shown) >= (int)sizeof(c->error_message) && text) c->error_text = text;
+    else mem_free(text);
+}
 /* The display is the stored message, unless that was cut to fit its buffer
  * (then str() of the exception) or names a misspelt keyword. */
 const char *spy_error_display(SPYContext *c) {
@@ -19328,26 +19364,7 @@ const char *spy_error_display(SPYContext *c) {
     int syntax = exception && exception->type == SPY_INSTANCE &&
         subclass(exception->as.map.parent, name_local(c->classes, "SyntaxError"));
     int cut = exception && strlen(c->error_message) == sizeof(c->error_message) - 1;
-    char *text = NULL;
-    if (syntax || cut) {
-        char type[sizeof(c->error_type)], message[sizeof(c->error_message)], file[sizeof(c->filename)];
-        size_t line = c->line, fuel = c->fuel;
-        memcpy(type, c->error_type, sizeof(type)); memcpy(message, c->error_message, sizeof(message));
-        memcpy(file, c->filename, sizeof(file));
-        c->exception = NULL;
-        spy_clear_error(c);
-        if (syntax) text = keyword_typo(c, exception);
-        else {
-            SPYValue *full = spy_str(c, exception);
-            if (full && (text = mem_malloc(c, full->as.string.len + 1))) memcpy(text, full->as.string.data, full->as.string.len + 1);
-            spy_release(full);
-        }
-        spy_clear_error(c);
-        memcpy(c->error_type, type, sizeof(type)); memcpy(c->error_message, message, sizeof(message));
-        memcpy(c->filename, file, sizeof(file)); c->filename_from = c->quiet_unit = NULL;
-        c->line = line; c->exception = exception; c->fuel = fuel;
-        attend(c);
-    }
+    char *text = syntax || cut ? pending_text(c, syntax) : NULL;
     const char *whole = c->error_text ? c->error_text : c->error_message;
     if (!text && (text = mem_malloc(c, strlen(whole) + 1))) strcpy(text, whole);
     mem_free(c->error_display);
@@ -31282,7 +31299,7 @@ static void enter(SPYContext *c) {
     schedule_poll(c);
     c->stopped = 0; c->output_used = 0;
 }
-static SPYValue *leave(SPYContext *c, SPYValue *result) { c->entries--; return result; }
+static SPYValue *leave(SPYContext *c, SPYValue *result) { error_settle(c); c->entries--; return result; }
 int spy_paused(const SPYContext *c) { return c->paused_at ? c->pause_due : 0; }
 /* Run the paused call on from its step: to its end, or to its next pause. */
 static SPYValue *resume(SPYContext *c) {
@@ -31340,20 +31357,20 @@ SPYValue *spy_tuple(SPYContext *c, size_t n, SPYValue *const *items) {
 }
 SPYValue *spy_dict(SPYContext *c) { return value_new(c, SPY_DICT); }
 SPYValue *spy_get_item(SPYContext *c, SPYValue *v, SPYValue *key) {
-    return same_context(c, v) && same_context(c, key) ? get_index(c, v, key) : NULL;
+    return same_context(c, v) && same_context(c, key) ? settled(c, get_index(c, v, key)) : NULL;
 }
 int spy_set_item(SPYContext *c, SPYValue *v, SPYValue *key, SPYValue *item) {
-    return same_context(c, v) && same_context(c, key) && same_context(c, item) ? set_index(c, v, key, item) : -1;
+    return same_context(c, v) && same_context(c, key) && same_context(c, item) ? settled_status(c, set_index(c, v, key, item)) : -1;
 }
 SPYValue *spy_get_attr(SPYContext *c, SPYValue *v, const char *name) {
-    return same_context(c, v) ? attribute(c, v, name) : NULL;
+    return same_context(c, v) ? settled(c, attribute(c, v, name)) : NULL;
 }
 int spy_set_attr(SPYContext *c, SPYValue *v, const char *name, SPYValue *item) {
-    return same_context(c, v) && same_context(c, item) ? set_attribute(c, v, name, item) : -1;
+    return same_context(c, v) && same_context(c, item) ? settled_status(c, set_attribute(c, v, name, item)) : -1;
 }
-SPYValue *spy_iter(SPYContext *c, SPYValue *v) { return same_context(c, v) ? get_iterator(c, v) : NULL; }
-SPYValue *spy_next(SPYContext *c, SPYValue *iterator) { return same_context(c, iterator) ? iterator_next(c, iterator) : NULL; }
-SPYValue *spy_str(SPYContext *c, SPYValue *v) { return same_context(c, v) ? stringify(c, v, 0) : NULL; }
+SPYValue *spy_iter(SPYContext *c, SPYValue *v) { return same_context(c, v) ? settled(c, get_iterator(c, v)) : NULL; }
+SPYValue *spy_next(SPYContext *c, SPYValue *iterator) { return same_context(c, iterator) ? settled(c, iterator_next(c, iterator)) : NULL; }
+SPYValue *spy_str(SPYContext *c, SPYValue *v) { return same_context(c, v) ? settled(c, stringify(c, v, 0)) : NULL; }
 SPYValue *spy_error_value(SPYContext *c) {
     if (!c->error_type[0]) return NULL;
     ErrorState state = take_error(c);
@@ -31362,7 +31379,7 @@ SPYValue *spy_error_value(SPYContext *c) {
     return value;
 }
 SPYValue *spy_raise(SPYContext *c, SPYValue *exception) {
-    return same_context(c, exception) ? raise_value(c, exception) : NULL;
+    return same_context(c, exception) ? settled(c, raise_value(c, exception)) : NULL;
 }
 /* Host files. open() is the intrinsic io layer over these _spy primitives,
  * which reach only mounted directories and descriptors this context opened. */

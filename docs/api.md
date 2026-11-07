@@ -236,8 +236,10 @@ size_t spy_error_line(const SPYContext *);
 ```
 
 The pending error: its exception type name and message (empty strings when
-none), and where it was raised. The strings belong to the context and stay
-valid until the error changes.
+none), and where it was raised. A raised exception's message is its str(),
+taken when the call that raised it returns to the host; the raise itself
+calls no `__str__`. The strings belong to the context and stay valid until
+the error changes.
 
 ```c
 const char *spy_error_display(SPYContext *);

@@ -55,6 +55,8 @@ Unreleased (0.8.0):
   code; an attribute read in an operator honors a property added later
 - exception classes have CPython's own __str__, __repr__ and __new__
 - generator functions run about 10% faster (generators benchmark 99 ms -> 88 ms)
+- raise no longer calls the exception's __str__; the host reads the message
+  when the call returns, and raising and catching run about 20% faster
 
 2026-11-05 0.7.0:
 
