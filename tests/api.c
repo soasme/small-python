@@ -1048,7 +1048,7 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "member()", "member.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
-               "def show():\n    for i in range(10): print(Shown(), i, Shown())\n    return 1");
+               "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "show()", "show.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
     /* print writes to the sys.stdout it began with, which __str__ rebinds. */
