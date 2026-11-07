@@ -1147,6 +1147,18 @@ int main(int argc, char **argv) {
                "    return t + u + w + r + n + len(p) + len(f'{p:ab}{p!r}{q}{q!s:>4}')\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "special()", "special.py"), SPY_STOP_STEPS, &pauses)) == 5 + 4 + 3 + 3 + 4 + 10 + 3 + 6 + 3 + 5 && pauses > 27);
+    /* Attribute stores and deletions call a Python setter or deleter on the
+     * machine, and delete other attributes at once. */
+    execute(c, "class Del:\n    def __delattr__(self, k): spin()\n"
+               "class Bad:\n    def __delattr__(self): spin()\n"
+               "class Prop:\n    def q(self, v=None): spin()\n    p = property(lambda self: 1, q, q)\n"
+               "class Get:\n    def __get__(self, o, t): return 1\n    def __set__(self, o, v): spin()\n    def __delete__(self, o): spin()\n"
+               "class Owner:\n    d = Get()\n"
+               "def deletes():\n    a, p, o, n = Del(), Prop(), Owner(), 0\n    del a.x\n    p.p = 1\n    del p.p\n    o.d = 1\n    del o.d\n"
+               "    o.y = 1\n    del o.y\n    f = deletes\n    f.z = 1\n    del f.z\n"
+               "    try:\n        del Bad().x\n    except TypeError:\n        n = 3\n    return n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "deletes()", "deletes.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 4);
     /* Unpacking, min, max, enumerate and filter take a generator's items
      * on the machine. */
     execute(c, "def slowgen():\n    for i in range(3):\n        spin()\n        yield i\n"

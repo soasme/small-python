@@ -14168,9 +14168,10 @@ static void compile_delete(SPYContext *c, Program *p, Node *n) {
     }
     compile_expr(c, p, n->a);
     if (n->kind == N_INDEX) compile_expr(c, p, n->b);
-    /* While calls can pause, BC_SET_TARGET deletes a subscript, calling a
-     * Python __delitem__ on the machine (store_call). */
-    if (n->kind == N_INDEX && p->calls == PAUSING) emit(c, p, BC_SET_TARGET, n, 1);
+    /* While calls can pause, BC_SET_TARGET deletes a subscript or an
+     * attribute, calling a Python __delitem__ or deleter on the machine
+     * (store_call). */
+    if (p->calls == PAUSING) emit(c, p, BC_SET_TARGET, n, 1);
     else emit(c, p, BC_DELETE, n, n->kind == N_INDEX ? 2 : 1);
 }
 static void compile_statement(SPYContext *, Program *, Node *);
@@ -17685,23 +17686,26 @@ static ALWAYS_INLINE int store_into(SPYContext *c, Frame *f, Node *n, SPYValue *
 static ALWAYS_INLINE int store_target(SPYContext *c, Frame *f, Node *n, SPYValue *value) { return store_into(c, f, n, value, 0); }
 static SPYValue *setitem_function(SPYContext *, SPYValue *);
 static int store_hooked(SPYContext *, SPYValue *, SPYValue *);
-/* The Python function a store to attribute name of instance object calls
- * (SetAttr): its class's __setattr__, a property's setter, or a data
- * descriptor's __set__, *descriptor that descriptor; else NULL. */
-static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, const char *name, SPYValue **descriptor) {
-    SPYValue *owner = object->as.map.parent, *hook = class_lookup(owner, "__setattr__"), *function = NULL;
+/* The Python function a store to, or with deleting a deletion of,
+ * attribute name of instance object calls (SetAttr): its class's
+ * __setattr__ or __delattr__, a property's setter or deleter, or a data
+ * descriptor's __set__ or __delete__, *descriptor that descriptor; else
+ * NULL. */
+static NO_INLINE SPYValue *setter_function(SPYContext *c, SPYValue *object, const char *name, SPYValue **descriptor, int deleting) {
+    SPYValue *owner = object->as.map.parent, *hook = class_lookup(owner, deleting ? "__delattr__" : "__setattr__"), *function = NULL;
     *descriptor = NULL;
-    if (hook && !default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR)) function = hook;
+    if (hook && !(deleting ? default_hook(hook, B_OBJECT_DELATTR, B_TYPE_DELATTR) : default_hook(hook, B_OBJECT_SETATTR, B_TYPE_SETATTR)))
+        function = hook;
     else if (data_descriptor(*descriptor = instance_lookup(owner, name)))
-        function = (*descriptor)->type == SPY_PROPERTY ? (*descriptor)->as.property.set :
-                   (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, "__set__") : NULL;
+        function = (*descriptor)->type == SPY_PROPERTY ? (deleting ? (*descriptor)->as.property.del : (*descriptor)->as.property.set) :
+                   (*descriptor)->type == SPY_INSTANCE ? class_lookup((*descriptor)->as.map.parent, deleting ? "__delete__" : "__set__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether a store to attribute n of object, which node_set_attribute
  * would not store at once, calls a Python setter on the machine: then
  * store_call enters c->entering_init with the descriptor c->fallback. */
 static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
-    SPYValue *descriptor, *function = object->type == SPY_INSTANCE ? setter_function(c, object, n->b->text, &descriptor) : NULL;
+    SPYValue *descriptor, *function = object->type == SPY_INSTANCE ? setter_function(c, object, n->b->text, &descriptor, 0) : NULL;
     if (!function) return 0;
     c->entering_init = function; c->fallback = spy_retain(descriptor);
     return 1;
@@ -23031,6 +23035,30 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     if (n->kind == N_IMPORT || n->kind == N_FROM) return import_step(c, m, f, n, env);
     c->entering_kind = CALL_STORE;
     SPYValue *args[3];
+    if (n->kind == N_ATTR) {
+        /* BC_SET_TARGET's attribute setter (setter_called), the object atop
+         * the value, or BC_SAVE_TARGET's, the value atop the object; or
+         * BC_SET_TARGET 1's deleter of the object atop m's stack, else
+         * the deletion at once: __setattr__ and __delattr__ take the name,
+         * a property's functions the instance (and value), and __set__ and
+         * __delete__ the descriptor first. */
+        int deleting = ins->op == BC_SET_TARGET && ins->arg;
+        SPYValue *value = ins->op == BC_SAVE_TARGET ? machine_pop(m) : NULL, *object = machine_pop(m), *function, *descriptor;
+        if (deleting) {
+            function = object->type == SPY_INSTANCE ? setter_function(c, object, n->b->text, &descriptor, 1) : NULL;
+            spy_retain(function ? descriptor : NULL);
+        } else { function = c->entering_init; descriptor = c->fallback; c->fallback = NULL; }
+        relocate(c, n);
+        if (!function) { delete_attribute(c, object, n->b->text); spy_release(object); return NULL; }
+        SPYValue *name = descriptor ? NULL : spy_string(c, n->b->text, strlen(n->b->text));
+        SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : name,
+                            deleting ? NULL : value ? value : m->stack[m->len - 1]};
+        size_t skip = descriptor && descriptor->type == SPY_PROPERTY;
+        *env = descriptor || name ? function_env(c, function, 3 - skip - (size_t)deleting, argv + skip, NULL, 0) : NULL;
+        function = *env ? spy_retain(function) : NULL;
+        release_all(4, (SPYValue *[]){name, object, value, descriptor});
+        return function;
+    }
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
         SPYValue *function = item_function(c, args[0], "__delitem__");
@@ -23042,24 +23070,6 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         delete_evaluated(c, n, args[0], args[1]);
         release_all(2, args);
         return NULL;
-    }
-    if (n->kind == N_ATTR) {
-        /* BC_SET_TARGET's attribute setter (setter_function), the object
-         * atop the value, or BC_SAVE_TARGET's, the value atop the object:
-         * __setattr__ takes the name, a property's setter the instance and
-         * value, __set__ its descriptor first. */
-        SPYValue *value = ins->op == BC_SAVE_TARGET ? machine_pop(m) : NULL, *object = machine_pop(m);
-        SPYValue *function = c->entering_init, *descriptor = c->fallback;
-        c->fallback = NULL;
-        SPYValue *name = descriptor ? NULL : spy_string(c, n->b->text, strlen(n->b->text));
-        SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : object, descriptor ? object : name,
-                            value ? value : m->stack[m->len - 1]};
-        relocate(c, n);
-        size_t skip = descriptor && descriptor->type == SPY_PROPERTY;
-        *env = descriptor || name ? function_env(c, function, 3 - skip, argv + skip, NULL, 0) : NULL;
-        function = *env ? spy_retain(function) : NULL;
-        release_all(4, (SPYValue *[]){name, object, value, descriptor});
-        return function;
     }
     if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
     else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
@@ -23817,7 +23827,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             b = machine_pop(m); a = machine_pop(m);
             raise_with_cause(c, a, ins->arg ? b : NULL); break;
         CASE(BC_SET_TARGET)
-            if (n->kind == N_INDEX && (store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1]) || ins->arg)) goto store_step;
+            if (ins->arg || (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1]))) goto store_step;
             if (n->kind == N_INDEX) b = machine_pop(m);
             a = machine_pop(m);
             if (b) set_index(c, a, b, m->stack[m->len - 1]);

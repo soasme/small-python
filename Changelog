@@ -66,6 +66,8 @@ Unreleased (0.8.0):
   the C stack
 - an attribute store's Python __setattr__, property setter or __set__ runs
   without the C stack in function code
+- code compiled while pausing is set pauses inside an attribute deletion's
+  Python __delattr__, property deleter or __delete__
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
