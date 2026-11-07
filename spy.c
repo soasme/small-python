@@ -28685,6 +28685,14 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (id == B_SETATTR) {
             return set_attribute(c, a, name, argv[2]) ? NULL : spy_none(c);
         }
+        /* A plain instance whose class answers name from its own entries
+         * alone (ATTR_OWN) misses without an AttributeError. */
+        SPYValue *method;
+        if ((argc == 3 || id == B_HASATTR) && plain_instance(a) && (instance_access(c, a->as.map.parent, name, &method) & ATTR_READ) == ATTR_OWN) {
+            SPYValue *own = name_local(a, name);
+            if (id == B_HASATTR) return spy_bool(c, !!own);
+            return spy_retain(own ? own : argv[2]);
+        }
         SPYValue *value = attribute(c, a, name);
         if (!value && error_is(c, "AttributeError") && (argc == 3 || id == B_HASATTR)) {
             spy_clear_error(c);

@@ -47,6 +47,8 @@ Unreleased (0.8.0):
 - frozenset() of a generator stops at an unhashable item, as set() does
 - exec() and eval() of source run without the C stack; a trace function sees
   exec'd code's line events as CPython reports them
+- getattr() with a default and hasattr() of a missing instance attribute run
+  about three times as fast
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
 - print() calls an instance's Python __str__ without the C stack in code
