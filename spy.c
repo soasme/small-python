@@ -16086,8 +16086,8 @@ static int same_key(SPYValue *a, SPYValue *b) {
                       !memcmp(a->as.string.data, b->as.string.data, a->as.string.len));
 }
 /* Bind keywords and defaults into the parameters of env, a plain function
- * environment whose first argc are bound, an empty *args, and the other
- * keywords into **kwargs: 0 when every parameter is bound, 1 when the call
+ * environment whose first argc are bound, an empty *args unless bound, and
+ * the other keywords into **kwargs: 0 when every parameter is bound, 1 when the call
  * needs bind_arguments, which reports what is wrong, with the parameters
  * past argc unbound again. */
 static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env, size_t argc, const Entry *kw, size_t kwc) {
@@ -16096,7 +16096,7 @@ static NO_INLINE int open_parameters(SPYContext *c, SPYValue *fn, SPYValue *env,
     size_t count = scope->parameters, posonly = 0, i, j;
     size_t kwargs = count + (scope->stars & 1), end = kwargs + (scope->stars >> 1);
     for (Node *arg = fn->as.function.def->args; arg && arg->op == P_POSONLY; arg = arg->next) posonly++;
-    if (scope->stars & 1) { spy_release(items[count].value); items[count].value = value_new(c, SPY_TUPLE); }
+    if ((scope->stars & 1) && items[count].value == c->unbound) { spy_release(items[count].value); items[count].value = value_new(c, SPY_TUPLE); }
     if (scope->stars & 2) { spy_release(items[kwargs].value); items[kwargs].value = value_new(c, SPY_DICT); }
     for (i = 0; i < kwc; i++) {
         const Entry *keyword = &kw[i];
@@ -16175,7 +16175,8 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
      * values open_locals sets, serve. A
      * replace()d code's parameters bind under its names and then take the
      * body's: the body's locals are declared after them. */
-    int direct = plain && !scope_order(c, scope) && argc <= scope->positionals;
+    size_t fit = argc <= scope->positionals ? argc : scope->positionals;
+    int direct = plain && !scope_order(c, scope) && (argc == fit || (scope->stars & 1));
     SPYValue *env = direct ? kept_env(c, scope) : NULL;
     if (!env && !(env = value_new(c, V_ENV))) { if (take) release_all(argc, argv); return NULL; }
     env->as.map.parent = spy_retain(fn->as.function.env);
@@ -16183,8 +16184,15 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
     env->as.map.unit = spy_retain(fn->as.function.unit);
     int failed;
     if (direct && fresh_locals(env)) {
-        failed = open_locals(c, env, argc, argv, take);
-        if (!failed && open_parameters(c, fn, env, argc, kw, kwc)) failed = bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
+        failed = open_locals(c, env, fit, argv, take);
+        /* The arguments past the positional parameters are *args. */
+        if (!failed && argc > fit) {
+            Entry *rest = &env->as.map.items[scope->parameters];
+            spy_release(rest->value);
+            failed = !(rest->value = spy_tuple(c, argc - fit, argv + fit));
+        }
+        if (!failed && open_parameters(c, fn, env, fit, kw, kwc)) failed = bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);
+        if (take) release_all(argc - fit, argv + fit);
     } else {
         failed = !plain ? bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords) || declare_locals(c, env) :
             declare_locals(c, env) || bind_keywords(c, fn, env, argc, argv, kw, kwc, keywords);

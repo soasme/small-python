@@ -1,8 +1,9 @@
 # spec: PLS-315 7.4.3
 # description: With *args or **kwargs, keywords bind to the named
 # parameters, the rest go to a new **kwargs in call order (a
-# positional-only name among them), *args is a new empty tuple when the
-# positional arguments fit, and defaults fill the others; each call gets
+# positional-only name among them), *args takes the positional arguments
+# past the named ones or is a new empty tuple, and defaults fill the
+# others; each call gets
 # fresh containers, and unmatched, repeated or missing names still raise.
 from harness import *
 
@@ -26,8 +27,12 @@ def calls():
         out.append(stars())
         out.append(no_rest(1, b=2))
         out.append(mutate(x=1))
+        out.append(full(1, 2, 3, 4, c=5, w=6))
+        out.append(stars(1, 2, k=3))
+        out.append(no_rest(1, 2, 3, b=4))
     for f in (lambda: full(1, a=2, c=3), lambda: full(1), lambda: no_rest(b=1),
-              lambda: posonly(q=1), lambda: no_rest(1, c=2, b=3)):
+              lambda: posonly(q=1), lambda: no_rest(1, c=2, b=3),
+              lambda: no_rest(1, 2, a=3, b=4), lambda: no_rest(1, 2, 3)):
         try:
             f()
         except TypeError as e:
@@ -36,13 +41,15 @@ def calls():
 
 once = [(1, 2, (), 3, 4, {}), (1, 5, (), 3, 4, {"z": 1, "y": 2}), (1, 2, (), 0, 9, {"e": 8}),
         (1, 0, {"p": 2, "r": 3}), (1, 2, {}), ((), {"x": 1}), ((), {}), (1, (), 2),
-        {"x": 1, "seen": True}]
+        {"x": 1, "seen": True}, (1, 2, (3, 4), 5, 4, {"w": 6}), ((1, 2), {"k": 3}), (1, (2, 3), 4)]
 expected = once + once + [
     "full() got multiple values for argument 'a'",
     "full() missing 1 required keyword-only argument: 'c'",
     "no_rest() missing 1 required positional argument: 'a'",
     "posonly() missing 1 required positional argument: 'p'",
-    "no_rest() got an unexpected keyword argument 'c'"]
+    "no_rest() got an unexpected keyword argument 'c'",
+    "no_rest() got multiple values for argument 'a'",
+    "no_rest() missing 1 required keyword-only argument: 'b'"]
 assert_eq(calls(), expected)
 assert_eq(list(full(1, c=3, y=1, x=2)[5]), ["y", "x"])
 assert_eq(stars(**{"b": 1, "a": 2}), ((), {"b": 1, "a": 2}))
