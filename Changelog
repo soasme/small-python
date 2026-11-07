@@ -57,6 +57,7 @@ Unreleased (0.8.0):
 - generator functions run about 10% faster (generators benchmark 99 ms -> 88 ms)
 - raise no longer calls the exception's __str__; the host reads the message
   when the call returns, and raising and catching run about a third faster
+- keyword calls of functions with *args or **kwargs run about twice as fast
 
 2026-11-05 0.7.0:
 
