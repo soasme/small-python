@@ -397,6 +397,9 @@ struct SPYContext {
     SPYInterrupt interrupt; void *interrupt_data;
     SPYValue *exceptions[X_COUNT]; /* Borrowed from classes, which never changes. */
     SPYValue *exception_fields; /* The hidden fields every exception starts with, its keys shared. */
+    /* A key whose Python __hash__ the machine called, owned, and the
+     * hash, for the step that runs again to use once (hash_call). */
+    SPYValue *hashed; int64_t hashed_value;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -2268,6 +2271,7 @@ static int hash_object(SPYContext *c, SPYValue *value, int64_t *result) {
         return hash_items(c, 3, items, 1, result);
     }
     case SPY_CLASS: case SPY_INSTANCE: {
+        if (value == c->hashed) { *result = c->hashed_value; c->hashed = NULL; spy_release(value); return 0; }
         if (value->type == SPY_CLASS && !value->as.map.meta) { *result = hash_pointer(value); return 0; }
         SPYValue *definition = class_lookup(value_class(c, value), "__hash__");
         if (definition && definition->type == SPY_NONE) break;
@@ -2476,12 +2480,12 @@ static ptrdiff_t map_find_hash(SPYValue *map, SPYValue *key, int64_t hash) {
         return i;
     return map_find_compare(map, key, hash, cursor, i);
 }
-static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) {
-    int status = hash_value(c, key, hash);
-    /* dict_unhashable_type: an exact TypeError names the container's role. */
+/* dict_unhashable_type: an exact TypeError hashing key for map names the
+ * container's role. */
+static void hash_failed(SPYContext *c, SPYValue *map, SPYValue *key) {
     const char *role = map->type == SPY_FROZENDICT ? "a frozendict key" : map->type == SPY_DICT ? "a dict key" :
         map->type == SPY_SET || map->type == SPY_FROZENSET ? "a set element" : NULL;
-    if (status && role && !strcmp(c->error_type, "TypeError") &&
+    if (role && !strcmp(c->error_type, "TypeError") &&
         (!c->exception || c->exception->as.map.parent == name_local(c->classes, "TypeError"))) {
         char message[sizeof(c->error_message)];
         error_settle(c);
@@ -2489,6 +2493,10 @@ static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) 
         spy_clear_error(c);
         errorf(c, "TypeError", "cannot use '%s' as %s (%s)", type_name(key), role, message);
     }
+}
+static int map_hash(SPYContext *c, SPYValue *map, SPYValue *key, int64_t *hash) {
+    int status = hash_value(c, key, hash);
+    if (status) hash_failed(c, map, key);
     return status;
 }
 static ptrdiff_t map_find(SPYValue *map, SPYValue *key) {
@@ -13746,8 +13754,9 @@ struct Machine {
  * the step that made a special call, a class call's __init__, a loop's
  * __next__, a sort's key function, a consumer's next item, a with
  * statement's __enter__, an operator's special method, a test's
- * __bool__, a loop's __iter__ or a store's __setitem__. */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+ * __bool__, a loop's __iter__, a store's __setitem__ or a key's
+ * __hash__ (hash_call). */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -13977,6 +13986,9 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
                 compile_expr(c, p, a->a); emit(c, p, BC_EXTEND, a, n->kind == N_TUPLE && !a->next);
             } else if (n->kind == N_DICT) {
                 compile_expr(c, p, a->a); compile_expr(c, p, a->b); emit(c, p, BC_MAP, a, 0);
+            } else if (n->kind == N_SET) {
+                /* An element is stored as a dict key is, with None (display_add). */
+                compile_expr(c, p, a); emit(c, p, BC_NONE, a, 0); emit(c, p, BC_MAP, a, 0);
             } else { compile_expr(c, p, a); emit(c, p, BC_ADD, a, n->kind == N_TUPLE && !a->next); }
         }
         break;
@@ -22510,9 +22522,57 @@ static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, in
  * method of instance y for a number x; or, for in, instance y's
  * __contains__; c->unbound when in takes y's items on the machine
  * (contains_step); else NULL. */
+/* The Python __hash__ of instance key, owned, with its env, to enter on m
+ * (CALL_HASH) with the key on the stack, over an operator's operands x and
+ * y, for the step that needs the hash (hash_returned); else NULL. */
+static NO_INLINE SPYValue *hash_call(SPYContext *c, Machine *m, SPYValue *key, SPYValue *x, SPYValue *y, SPYValue **env) {
+    SPYValue *function = key->type == SPY_INSTANCE && key != c->hashed && !key->as.map.base ? class_lookup(key->as.map.parent, "__hash__") : NULL;
+    size_t len = m->len;
+    if (!function || !machine_function(c, function) ||
+        (x && (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)))) || machine_push(c, m, spy_retain(key))) return NULL;
+    c->entering_kind = CALL_HASH;
+    if ((*env = function_env(c, function, 1, &key, NULL, 0))) return spy_retain(function);
+    /* A __hash__ that cannot bind fails again in C, as the step reports it. */
+    while (m->len > len) spy_release(machine_pop(m));
+    spy_clear_error(c);
+    return NULL;
+}
+static NO_INLINE size_t operator_finish(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, size_t);
+static SPYValue *operation(SPYContext *, Instruction *, SPYValue *, SPYValue *);
+/* The __hash__ hash_call entered for step ins returned result, the key's
+ * hash, kept for the step to use once: a display's step runs again; an
+ * operator's runs on its operands, under the key. The pc to go on at. */
+static NO_INLINE size_t hash_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    SPYValue *key = machine_pop(m);
+    int64_t hash = 0;
+    int hashed = result && !hash_result(c, result, &hash), display = ins->op == BC_MAP;
+    SPYValue *y = display ? NULL : machine_pop(m), *x = display ? NULL : machine_pop(m);
+    int op = 0;
+    if (!display) step_operation(ins, &op);
+    if (!hashed) hash_failed(c, display ? m->stack[m->len - 3] : op == O_IN || op == O_NOTIN ? y : x, key);
+    spy_release(c->hashed);
+    c->hashed = hashed ? key : NULL; c->hashed_value = hash;
+    if (!hashed) spy_release(key);
+    if (display) return hashed ? pc - 1 : pc;
+    pc = operator_finish(c, m, ins, y, hashed ? operation(c, ins, x, y) : NULL, pc);
+    spy_release(x); spy_release(y);
+    return pc;
+}
+/* Whether a lookup in container hashes its key with no other call first. */
+static int hashes_key(SPYValue *container, int lookup) {
+    return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
+           (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
+    c->entering_kind = CALL_OPERATOR;
+    /* A dict's item, or a dict's or set's member: its key's __hash__ first,
+     * the operands on the stack under the key for the operation. */
+    if ((kind == OPERATE_INDEX || contains) && hashes_key(contains ? y : x, contains)) {
+        if ((function = hash_call(c, m, contains ? x : y, x, y, env)) || c->error_type[0]) return function;
+        c->entering_kind = CALL_OPERATOR;
+    }
     if (contains) {
         int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
         if (last && (function = contains_call(c, m, x, y, env))) return function;
@@ -23169,6 +23229,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         spy_release(result);
                     } else if (kind == CALL_ITER) {
                         if (result) iter_returned(c, m, &code[pc - 1], result);
+                    } else if (kind == CALL_HASH) {
+                        pc = hash_returned(c, m, &code[pc - 1], result, pc);
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || (code[pc - 1].op == BC_STORE && code[pc - 1].arg))) spy_release(machine_pop(m));
@@ -23267,7 +23329,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!value && !c->error_type[0]) {
                 callee_env = NULL;
                 value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
-                if (callee_env) { special = CALL_OPERATOR; goto enter_special; }
+                if (callee_env) { special = c->entering_kind; goto enter_special; }
             }
             machine_push(c, m, value);
             NEXT;
@@ -23307,7 +23369,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
@@ -23338,6 +23400,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         CASE(BC_MAP)
+            if (m->stack[m->len - 2]->type == SPY_INSTANCE) { a = spy_retain(m->stack[m->len - 2]); goto display_hash; }
             b = machine_pop(m); a = machine_pop(m); map_set(c, m->stack[m->len - 1], a, b); break;
         CASE(BC_ARGS)
             if (!machine_push(c, m, spy_list(c))) machine_push(c, m, value_new(c, SPY_DICT));
@@ -23473,7 +23536,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (!value && !c->error_type[0]) {
                     callee_env = NULL;
                     value = y ? operate_step(c, m, ins, x, y, &callee_env) : eval(c, &f, n);
-                    if (callee_env) { special = CALL_OPERATOR; goto enter_special; }
+                    if (callee_env) { special = c->entering_kind; goto enter_special; }
                 }
                 if (!(a = value)) break;
                 truth = a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a);
@@ -23831,12 +23894,23 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (a) spy_release(a);
             if (b) spy_release(b);
             if (value == c->unbound) goto consume_generator;
-            special = CALL_OPERATOR;
+            special = c->entering_kind;
             goto enter_special;
         }
         pc = operator_finish(c, m, ins, y, c->error_type[0] ? NULL : operation(c, ins, x, y), pc);
         if (a) spy_release(a);
         if (b) spy_release(b);
+        continue;
+    display_hash:
+        /* A set or dict display's key a: a Python __hash__ is a call
+         * (hash_call) before the step runs again. */
+        callee_env = NULL;
+        value = hash_call(c, m, a, NULL, NULL, &callee_env);
+        spy_release(a);
+        if (value) { special = CALL_HASH; goto enter_special; }
+        if (c->error_type[0]) continue;
+        b = machine_pop(m); a = machine_pop(m); map_set(c, m->stack[m->len - 1], a, b);
+        spy_release(a); spy_release(b);
         continue;
     store_step:
         /* A store to a subscript, BC_STORE's, BC_EXEC's assignment's,
