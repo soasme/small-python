@@ -63,6 +63,7 @@ Unreleased (0.8.0):
   runs about 2.5 times as fast
 - hasattr() and getattr() with a default on a missing attribute run about 2.7
   times as fast
+- sorting strs runs about 40% faster
 
 2026-11-05 0.7.0:
 

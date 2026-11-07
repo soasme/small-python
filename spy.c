@@ -24052,15 +24052,17 @@ static ALWAYS_INLINE int sort_less(SPYContext *c, SPYValue *a, SPYValue *b) {
 }
 /* Keys of one plain kind compare without dispatch, as CPython's
  * unsafe_*_compare do; any others go through sort_less. */
-enum { SORT_ANY, SORT_INT, SORT_FLOAT, SORT_INT_TUPLE, SORT_INT_PAIR };
+enum { SORT_ANY, SORT_INT, SORT_FLOAT, SORT_INT_TUPLE, SORT_INT_PAIR, SORT_TEXT };
 static int small_int(SPYValue *v) { return v->type == SPY_INT && !v->as.integer_data.big; }
 static int sort_kind(SortItem *items, size_t len) {
     int kind = small_int(items[0].key) ? SORT_INT : items[0].key->type == SPY_FLOAT ? SORT_FLOAT :
-        items[0].key->type == SPY_TUPLE ? SORT_INT_PAIR : SORT_ANY;
+        items[0].key->type == SPY_TUPLE ? SORT_INT_PAIR : items[0].key->type == SPY_STRING ? SORT_TEXT : SORT_ANY;
     for (size_t i = 0; i < len && kind != SORT_ANY; i++) {
         SPYValue *k = items[i].key;
         if (kind == SORT_INT) kind = small_int(k) ? kind : SORT_ANY;
         else if (kind == SORT_FLOAT) kind = k->type == SPY_FLOAT ? kind : SORT_ANY;
+        /* plain_less compares these strs. */
+        else if (kind == SORT_TEXT) kind = k->type == SPY_STRING && k->as.string.len < 4096 ? kind : SORT_ANY;
         else if (k->type != SPY_TUPLE) kind = SORT_ANY;
         else {
             if (k->as.seq.len != 2) kind = SORT_INT_TUPLE;
@@ -24206,6 +24208,13 @@ static void sorter_end(SPYValue *items, struct Sorter *s, int descending) {
 typedef struct { SPYValue *value; int64_t key; } IntItem;
 typedef struct { SPYValue *value; double key; } FloatItem;
 typedef struct { SPYValue *value; int64_t key, next; } PairItem;
+typedef struct { SPYValue *value, *text; uint64_t key; } TextItem;
+/* A str's first eight bytes as a number that orders as they do. */
+static uint64_t text_prefix(SPYValue *text) {
+    uint64_t key = 0;
+    for (size_t i = 0; i < 8; i++) key = key << 8 | (i < text->as.string.len ? (unsigned char)text->as.string.data[i] : 0);
+    return key;
+}
 /* A stable merge sort of len items, ending in *result (items or scratch).
  * Strictly descending runs are reversed, short runs grow to 32 items by
  * insertion after their equals, and neighbouring runs then merge
@@ -24251,10 +24260,12 @@ static NO_INLINE void name(SPYContext *c, int kind, Item *items, Item *scratch, 
 #define KEY_LESS(a, b) kind_less(c, kind, (a).key, (b).key)
 #define NUMBER_LESS(a, b) ((a).key < (b).key)
 #define PAIR_LESS(a, b) ((a).key != (b).key ? (a).key < (b).key : (a).next < (b).next)
+#define TEXT_LESS(a, b) ((a).key != (b).key ? (a).key < (b).key : plain_less((a).text, (b).text) == 1)
 DEFINE_SORT(sort_items, SortItem, KEY_LESS, kind == SORT_ANY && c->error_type[0])
 DEFINE_SORT(sort_ints, IntItem, NUMBER_LESS, 0)
 DEFINE_SORT(sort_floats, FloatItem, NUMBER_LESS, 0)
 DEFINE_SORT(sort_pairs, PairItem, PAIR_LESS, 0)
+DEFINE_SORT(sort_texts, TextItem, TEXT_LESS, 0)
 #undef DEFINE_SORT
 /* Int keys sort by their distance from the least, a byte at a time from
  * the lowest, each pass a stable counting sort, when there are enough of
@@ -24291,6 +24302,7 @@ static NO_INLINE void sort_int_keys(SPYContext *c, int kind, IntItem *items, Int
 #undef KEY_LESS
 #undef NUMBER_LESS
 #undef PAIR_LESS
+#undef TEXT_LESS
 /* The keys' numbers into an array of twice len Items, sorted, and the
  * values back into out; nonzero when memory runs out. */
 #define SORT_NUMBERS(Item, sort, fill) do { \
@@ -24335,6 +24347,7 @@ static int sort_list(SPYContext *c, SPYValue *list, SPYValue *key, int reverse, 
         else SORT_NUMBERS(PairItem, sort_pairs, (packed[i].key = k->as.seq.items[0]->as.integer_data.small,
                                                  packed[i].next = k->as.seq.items[1]->as.integer_data.small));
     }
+    else if (kind == SORT_TEXT) SORT_NUMBERS(TextItem, sort_texts, (packed[i].key = text_prefix(k), packed[i].text = k));
     else if ((scratch = allocate_array(c, len, sizeof(*scratch)))) {
         sort_items(c, kind, items, scratch, ends, len, &from);
         for (size_t i = 0; i < len; i++) out[i] = from[reverse ? len - i - 1 : i].value;
