@@ -290,7 +290,9 @@ These run as machines on the heap, in one native activation of
   `str.join`, and, in
   code compiled while pausing, the generators and such instances a target
   list unpacks or a list, tuple or set display stars, and the generators
-  and such instances a call's starred argument takes;
+  and such instances a call's starred argument takes, and those, without
+  a `__contains__`, that an `in` or `not in` outside a comparison chain
+  searches, after calling their `__iter__`, comparing the items natively;
   generators resumed by
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;

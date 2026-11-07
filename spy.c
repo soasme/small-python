@@ -9780,9 +9780,13 @@ static const Operator *operator_of(int op) {
 }
 static SPYValue *binary_declined(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *binary_builtin(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 /* binary, except that an instance operand, whose method the machine
  * calls, gives NULL without an error. */
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    /* A lone in, whose container may be a generator the machine searches. */
+    if (op == O_IN || op == O_NOTIN)
+        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL : comparison(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -13596,8 +13600,9 @@ typedef struct {
 /* An assignment's unpacking, collecting in result the items for a target
  * list of count targets with a star at index star (unpack_step); a
  * display's starred item, adding them to result, the display, which it
- * seals as a tuple when count is set (extend_step). */
-enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3 };
+ * seals as a tuple when count is set (extend_step); an in, or a not in
+ * when count is set, seeking best among them (contains_step). */
+enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3, CONTAINS_ITEMS = -4 };
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
 static SPYValue *consumer_end(SPYContext *, Consumer *);
 /* A BLOCK_CONSUME's value is the generator its consumer takes the items of. */
@@ -13837,6 +13842,12 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         compile_expr(c, p, n->a); end = emit(c, p, BC_JUMP, n, 0);
         patch(p, branch, p->len); compile_expr(c, p, n->c); patch(p, end, p->len); break;
     case N_COMPARE: {
+        if (!n->args->next && (n->args->op == O_IN || n->args->op == O_NOTIN)) {
+            /* A lone in is a BC_BINARY, whose container may be a
+             * generator (binary_operand). */
+            compile_expr(c, p, n->a); compile_expr(c, p, n->args->a); emit(c, p, BC_BINARY, n->args, n->args->op);
+            break;
+        }
         size_t first = p->len;
         compile_expr(c, p, n->a);
         for (Node *cmp = n->args; cmp; cmp = cmp->next) {
@@ -22187,6 +22198,27 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
     for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
     return NULL;
 }
+/* For `x in y` or `x not in y`, as op, a lone test or the last of a chain, y a
+ * generator the machine can resume or a plain instance whose class has a
+ * Python __iter__ (iter_function) and no __contains__: 1 when the items of
+ * y, or of the iterator its __iter__ returns, are compared with x on the
+ * machine (BLOCK_CONSUME, CONTAINS_ITEMS), the truth going on the stack at
+ * their end; else 0, with an error pending when __iter__ failed, a
+ * TypeError replaced as the native search replaces it. */
+static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
+    if (!resumable(y) && (!iter_function(c, y) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
+    SPYValue *items = resumable(y) ? spy_retain(y) : get_iterator(c, y);
+    if (!items && error_is(c, "TypeError")) {
+        spy_clear_error(c);
+        errorf(c, "TypeError", "argument of type '%s' is not a container or iterable", type_name(y));
+    }
+    Consumer *s = items ? allocate(c, sizeof(*s)) : NULL;
+    Block *block = s ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (!block) { mem_free(s); spy_release(items); return 0; }
+    *s = (Consumer){.id = CONTAINS_ITEMS, .best = spy_retain(x), .count = op == O_NOTIN};
+    block->value = items; block->consumer = s;
+    return 1;
+}
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 /* Which of an operator's special method calls one is: x's own first, y's
  * reflected one first, or the last. */
@@ -22201,12 +22233,14 @@ static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, in
  * unary method, or direct method or rich comparison, unless y's class is
  * a subclass of x's whose reflected method comes first; the reflected
  * method of instance y for a number x; or, for in, instance y's
- * __contains__; else NULL. */
+ * __contains__; c->unbound when in takes y's items on the machine
+ * (contains_step); else NULL. */
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
     if (contains) {
-        if (ins->op == BC_COMPARE && !ins->arg && (function = contains_call(c, m, x, y, env))) return function;
+        int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
+        if (last && (function = contains_call(c, m, x, y, env))) return function;
         /* in takes the container's __contains__, given the item. */
         if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
             (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
@@ -22215,7 +22249,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
             for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
         }
-        return NULL;
+        return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
     }
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
@@ -22254,7 +22288,8 @@ static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValu
     int op = 0, kind = step_operation(ins, &op);
     relocate(c, ins->node);
     spy_retain(x); spy_retain(y);
-    SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY ? binary(c, op, x, y) :
+    /* A lone in is a BC_BINARY (binary_operand). */
+    SPYValue *result = kind == OPERATE_INDEX ? get_index(c, x, y) : kind == OPERATE_BINARY && op != O_IN && op != O_NOTIN ? binary(c, op, x, y) :
                        kind == OPERATE_INPLACE ? augmented(c, op, x, y) : kind == OPERATE_UNARY ? unary(c, op, x) :
                        comparison(c, op, x, y);
     spy_release(x); spy_release(y);
@@ -23375,6 +23410,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if ((value = operator_call(c, m, ins, x, y, &callee_env))) {
             if (a) spy_release(a);
             if (b) spy_release(b);
+            if (value == c->unbound) goto consume_generator;
             special = CALL_OPERATOR;
             goto enter_special;
         }
@@ -27889,6 +27925,13 @@ static void consumer_settle(SPYContext *c, Consumer *s) {
  * as CPython's sum. */
 static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     if (s->id == B_NEXT) { s->best = item; return 1; }
+    if (s->id == CONTAINS_ITEMS) {
+        int found = item == s->best || equal(item, s->best);
+        spy_release(item);
+        if (c->error_type[0]) return -1;
+        if (found) s->result = spy_bool(c, !s->count);
+        return found;
+    }
     if (s->id == B_SET || s->id == EXTEND_ITEMS) {
         int status = s->id == B_SET ? set_add(c, s->result, item) : display_add(c, s->result, item);
         spy_release(item);
@@ -27946,6 +27989,7 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         return NULL;
     }
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
+    if (s->id == CONTAINS_ITEMS && !s->result && !c->error_type[0]) return spy_bool(c, s->count);
     if (s->id == UNPACK_ITEMS && !c->error_type[0]) {
         SPYValue *items = s->result;
         s->result = NULL;

@@ -37,6 +37,8 @@ Unreleased (0.8.0):
   __iter__ and __next__ without the C stack
 - a call's starred argument takes a generator's or an instance's items
   without the C stack
+- in and not in over a generator or an instance's Python __iter__ take
+  its items without the C stack
 - print() with positional arguments alone calls an instance's Python
   __str__ without the C stack in code compiled while pausing
 - calling a class body's function directly returns its __class__ cell when
