@@ -71,6 +71,8 @@ Unreleased (0.8.0):
 - yield from a generator resumes it without the C stack, about 7% faster
 - abs(), round() and reversed() call an instance's Python __abs__,
   __round__ or __reversed__ without the C stack
+- code compiled while pausing is set pauses inside the items' Python
+  __repr__ in repr(), str(), print() and f-strings of a list or tuple
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do

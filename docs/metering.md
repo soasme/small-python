@@ -309,7 +309,9 @@ These run as machines on the heap, in one native activation of
   that `str`, `repr`, `format`, `len`, `int`, `float`, `hash`, `abs`,
   `round` and `reversed` call, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
-  the objects before it;
+  the objects before it, and the items' `__repr__` in `repr`, `str`,
+  `format` without a spec, `print` and f-string fields of a list or
+  tuple;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, and tests of a dict or set; the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or

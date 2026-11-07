@@ -1099,6 +1099,21 @@ int main(int argc, char **argv) {
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "show()", "show.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* repr(), str(), an f-string and print() of a list or tuple pause in
+     * an item's __repr__; a native item's removal or an item's error ends
+     * the job. */
+    execute(c, "class Item:\n    def __repr__(self): return str(slow(7))\n"
+               "class Remover:\n    __repr__ = staticmethod(lambda: (shown.pop(), 'r')[1])\n"
+               "class Raiser:\n    def __repr__(self): raise KeyError(slow(1))\n"
+               "def reprs():\n    global shown\n    out = []\n"
+               "    for i in range(5): out += [repr([Item(), i, Item()]), str((Item(),)), f'{[i, Item()]}']\n"
+               "    print([Item(), 'x'], (1, Item()))\n"
+               "    shown = [Remover(), Item()]\n    out.append(repr(shown))\n"
+               "    shown = [Remover(), Item()]\n    print(shown)\n"
+               "    try: repr([Raiser()])\n    except KeyError: out.append('raised')\n"
+               "    return len(''.join(out))");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "reprs()", "reprs.py"), SPY_STOP_STEPS, &pauses)) == 5 * 19 + 3 + 6 && pauses > 1);
     /* print writes to the sys.stdout it began with, which __str__ rebinds. */
     SPYContext *muted = spy_context_new();
     Output shown = {0};
