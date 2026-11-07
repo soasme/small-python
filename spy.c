@@ -7901,6 +7901,11 @@ static int plain_call(Node *n) {
         if (argc == 8 || arg->kind == N_KEYWORD || arg->kind == N_MAPPING || arg->kind == N_STAR) return 0;
     return 1;
 }
+/* Whether plain call n names sorted or a sort method, which may compare
+ * by Python on the machine: BC_CALLK's step finds out (key_consumer). */
+static int sort_call(Node *n) {
+    return n->a->kind == N_NAME ? !strcmp(n->a->text, "sorted") : n->a->kind == N_ATTR && !strcmp(n->a->b->text, "sort");
+}
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
 static int keyword_plain_call(Node *n) {
     size_t argc = 0, keywords = 0;
@@ -13556,17 +13561,28 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * list at their end (a native method of it with name when method is not
  * -1): frozenset, sorted or str.join. A sort by a key function, its
  * callee, collects in result the keys of its block's list, to sort in
- * order descending or not; list.sort's list, the target, waits empty. A
- * min or max by key keeps its best item and, in result, that item's key,
- * and the item whose key its callee is computing. next(), __next__ and
+ * order descending or not; list.sort's list, the target, waits empty;
+ * once the keys are taken, a sort whose comparisons call Python sorts in
+ * sorter (key_call). A min or max by key keeps its best item and, in
+ * result, that item's key, and the item whose key its callee is computing. next(), __next__ and
  * send (B_NEXT) keep their default in result, the value to send and then
  * the value the generator returned in sent, and the item it gave in best. */
 enum { KEY_SORT = 1, KEY_MIN, KEY_MAX };
+typedef struct { SPYValue *value, *key; } SortItem;
+/* A sort that stops at each comparison (sort_step). */
+struct Sorter {
+    SortItem *from, *to, item;
+    SPYValue *x, *y;
+    size_t *ends, len, runs, merged, r, start, mid, end, i, j, out, lo, stop, left;
+    int at, less;
+    SortItem items[];
+};
 typedef struct {
     int id, compensating, method, keyed, descending;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent;
     double total, compensation;
     size_t count, star;
+    struct Sorter *sorter;
 } Consumer;
 /* An assignment's unpacking, collecting in result the items for a target
  * list of count targets with a star at index star (unpack_step). */
@@ -13816,14 +13832,15 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         }
         break;
     case N_CALL:
-        if (plain_call(n) && (n->a->kind == N_NAME || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls)) {
+        if (plain_call(n) && (n->a->kind == N_NAME || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls) &&
+            !sort_call(n)) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
         if (plain_call(n) || keyword_plain_call(n)) {
             /* A plain method call's object is on the stack in its callee's
              * place, unless the method must be found before arguments that
              * run code (F_CALLEE_FIRST). */
-            int argc = 0, method = n->a->kind == N_ATTR && plain_call(n);
+            int argc = 0, plain = plain_call(n) && !sort_call(n), method = n->a->kind == N_ATTR && plain;
             compile_expr(c, p, method ? n->a->a : n->a);
             if (method && list_expands(n->args, p->calls)) {
                 size_t pc = emit(c, p, BC_ATTR, n->a, 0);
@@ -13831,7 +13848,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
                 if (pc != SIZE_MAX) p->items[pc].other = 1;
             }
             for (Node *a = n->args; a; a = a->next, argc++) compile_expr(c, p, a->kind == N_KEYWORD ? a->a : a);
-            emit(c, p, plain_call(n) ? BC_CALLN : BC_CALLK, n, argc); break;
+            emit(c, p, plain ? BC_CALLN : BC_CALLK, n, argc); break;
         }
         compile_expr(c, p, n->a); emit(c, p, BC_ARGS, n, 0);
         compile_arguments(c, p, n->args);
@@ -21141,7 +21158,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     if (b.consumer) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent);
-        mem_free(b.consumer);
+        mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
 }
 static ErrorState *save_error(SPYContext *c) {
@@ -21427,18 +21444,48 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     }
     return !status;
 }
+/* The Python rich comparison rich of plain instance x's class that comparing
+ * x with y calls first, borrowed: none when y's class is a subclass of x's,
+ * whose reflected method comes first; else NULL. */
+static SPYValue *rich_function(SPYContext *c, SPYValue *x, SPYValue *y, int rich) {
+    if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
+    SPYValue *cls = x->as.map.parent, *other = value_class(c, y);
+    SPYValue *function = other != cls && subclass(other, cls) ? NULL : class_lookup(cls, rich_names[rich]);
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* The comparison x op y whose x method returned result, taking it: a
+ * NotImplemented leaves y's reflected method and then the default. */
+static SPYValue *compared(SPYContext *c, int op, SPYValue *x, SPYValue *y, SPYValue *result) {
+    if (result != c->not_implemented) return result;
+    spy_release(result);
+    result = rich_method(c, rich_reflected[rich_kind(op)], y, x);
+    return result || c->error_type[0] ? result : comparison_declined(c, op, x, y);
+}
+/* Whether a sort of source, a list or tuple, compares its first items by a
+ * Python __lt__ (rich_function), to call on the machine. */
+static int instance_sort(SPYContext *c, SPYValue *source) {
+    return (source->type == SPY_LIST || source->type == SPY_TUPLE) && source->as.seq.len > 1 &&
+           rich_function(c, source->as.seq.items[1], source->as.seq.items[0], R_LT);
+}
 /* A call node's sort, min or max by a key function on the machine, keyword
  * call stack_keyword_call's with positional arguments argv and keywords
  * kw: sorted(iterable, key=...) or list.sort(key=...), with reverse= or not,
- * and min or max of an iterable or of the arguments, by key=. Its keys are
- * calls returning into the step (CALL_KEY), on block value: the list it
- * sorts, or an iterator of the items (key_call). 1 when it began, 0 when
+ * and min or max of an iterable or of the arguments, by key=; or a sort
+ * of instances with no key (instance_sort), compiled as a keyword call
+ * (sort_call). Its keys are calls returning into the step (CALL_KEY), on
+ * block value: the list it sorts, or an iterator of the items (key_call),
+ * and so are a sort's Python comparisons. 1 when it began, 0 when
  * the call is not one, -1 on an error. */
 static int sort_detach_into(SPYContext *, SPYValue *, SPYValue **);
+static struct Sorter *sorter_begin(SPYContext *, SPYValue *, SPYValue *, int);
+static int sort_step(struct Sorter *);
+static int sorter_compare(SPYContext *, struct Sorter *);
+static void sorter_end(SPYValue *, struct Sorter *, int);
 static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, size_t positional, SPYValue *const *argv,
                                   const Entry *kw, size_t kwc) {
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     int method = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_SORT;
+    if (method) callee = callee->as.bound.self;
     int keyed = method || id == B_SORTED ? KEY_SORT : id == B_MIN ? KEY_MIN : id == B_MAX ? KEY_MAX : 0;
     if (!keyed || (method ? positional != 0 : id == B_SORTED ? positional != 1 : !positional) ||
         (positional == 1 && resumable(argv[0]))) return 0;
@@ -21449,7 +21496,10 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         if (!slot || *slot) return 0;
         *slot = kw[i].value;
     }
-    if (!key || !machine_function(c, key)) return 0;
+    /* With no key, a sort of instances (instance_sort) takes the items as
+     * its keys. */
+    if (key && key->type == SPY_NONE) key = NULL;
+    if (key ? !machine_function(c, key) : keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
     /* sorted() takes its items before list.sort reads reverse, which reads
      * it before it empties the list. */
     SPYValue *items = NULL, *keys = NULL;
@@ -21462,17 +21512,18 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         spy_release(all);
     } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !sorted_items(c, items, argv[0])))) {
         descending = reverse ? truthy(reverse) : 0;
-        ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee->as.bound.self, &items)) &&
+        ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee, &items)) &&
                 !sequence_reserve(c, keys, items->as.seq.len);
+        for (size_t i = 0; ready && !key && i < items->as.seq.len; i++) keys->as.seq.items[keys->as.seq.len++] = spy_retain(items->as.seq.items[i]);
     }
     Block *block = ready ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (block) {
-        *consumer = (Consumer){.keyed = keyed, .descending = descending, .result = keys, .callee = spy_retain(key),
-                               .target = method ? spy_retain(callee->as.bound.self) : NULL};
+        *consumer = (Consumer){.keyed = keyed, .descending = descending, .result = keys, .callee = key ? spy_retain(key) : NULL,
+                               .target = method ? spy_retain(callee) : NULL};
         block->value = items; block->consumer = consumer;
         return 1;
     }
-    if (ready && method) sort_restore(c, callee->as.bound.self, items);
+    if (ready && method) sort_restore(c, callee, items);
     else spy_release(items);
     mem_free(consumer); spy_release(keys);
     return -1;
@@ -21490,7 +21541,21 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
             item = spy_retain(items->as.seq.items[done]);
             return (*env = function_env(c, s->callee, 1, &item, NULL, 1)) ? spy_retain(s->callee) : NULL;
         }
-        if (sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
+        /* A sort whose comparisons call a Python __lt__ calls each on the
+         * machine, returning into key_took; any other sorts natively. */
+        SPYValue *function;
+        if (!s->sorter && !(s->sorter = sorter_begin(c, items, s->result, s->descending))) {
+            if (c->error_type[0] || sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
+        }
+        while (s->sorter && sort_step(s->sorter)) {
+            struct Sorter *t = s->sorter;
+            if ((function = rich_function(c, t->x, t->y, R_LT))) {
+                SPYValue *args[] = {spy_retain(t->x), spy_retain(t->y)};
+                return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
+            }
+            if (sorter_compare(c, t)) return NULL;
+        }
+        if (s->sorter) sorter_end(items, s->sorter, s->descending);
         result = s->target ? spy_none(c) : spy_retain(items);
     } else {
         if ((item = iterator_next(c, items))) {
@@ -21510,6 +21575,14 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
  * or max keeps the item while it is the best; 0, or -1 on an error. */
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Consumer *s = m->blocks[m->block_len - 1].consumer;
+    if (s->keyed == KEY_SORT && s->sorter) {
+        /* The result of the sort's comparison under way. */
+        struct Sorter *t = s->sorter;
+        SPYValue *test = compared(c, '<', t->x, t->y, key);
+        t->less = test ? truthy(test) : 0;
+        spy_release(test);
+        return c->error_type[0] ? -1 : 0;
+    }
     if (s->keyed == KEY_SORT) {
         s->result->as.seq.items[s->result->as.seq.len++] = key;
         return 0;
@@ -21989,7 +22062,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     else if (kind != OPERATE_COMPARE)
         function = other != cls && subclass(other, cls) && class_lookup(other, o->reflected) != class_lookup(cls, o->reflected) ?
                    NULL : class_lookup(cls, o->direct);
-    else function = rich < 0 || (other != cls && subclass(other, cls)) ? NULL : class_lookup(cls, rich_names[rich]);
+    else function = rich < 0 ? NULL : rich_function(c, x, y, rich);
     if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y))) return NULL;
     SPYValue *args[] = {spy_retain(x), spy_retain(y)};
     if ((*env = function_env(c, function, 2 - (kind == OPERATE_UNARY), args, NULL, 1))) return spy_retain(function);
@@ -22038,18 +22111,16 @@ static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction
         int truth = truthy(result);
         spy_release(result);
         result = c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == !!truth);
-    } else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
+    } else if (kind == OPERATE_COMPARE) result = compared(c, op, x, y, result);
+    else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
         spy_release(result);
-        const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
+        const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : operator_of(op);
         if (kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
             /* A declined in-place method leaves the plain operator. */
             result = binary(c, o->token, x, y);
-        } else if (o) {
+        } else {
             result = value_class(c, x) != value_class(c, y) ? try_operator(c, y, o->reflected, x, NULL, 0) : NULL;
             if (!result && !c->error_type[0]) result = binary_declined(c, o->token, x, y);
-        } else {
-            result = rich_method(c, rich_reflected[rich_kind(op)], y, x);
-            if (!result && !c->error_type[0]) result = comparison_declined(c, op, x, y);
         }
         if (kind == OPERATE_INPLACE && !result) augmented_error(c, o->token, x, y);
     }
@@ -23528,7 +23599,6 @@ static int instance_check(SPYContext *c, SPYValue *a, SPYValue *target, int sub,
     if (c->error_type[0]) return -1;
     return sub ? recursive_issubclass(c, a, target) : object_isinstance(c, a, target);
 }
-typedef struct { SPYValue *value, *key; } SortItem;
 /* a < b for exact small ints, floats or short strs of one type: 1 or 0, or
  * -1 when the pair is of other kinds. */
 static int plain_less(SPYValue *a, SPYValue *b) {
@@ -23624,6 +23694,96 @@ static int float_key(double d, int64_t *key) {
     int64_t magnitude = (int64_t)(bits & INT64_MAX);
     *key = d == 0 ? 0 : bits >> 63 ? -1 - magnitude : magnitude;
     return d == d;
+}
+/* The sort of DEFINE_SORT below, making the same comparisons in the same
+ * order, but stopping at each, so that one calling Python runs on the
+ * machine: sort_step asks whether key x is less than key y and takes the
+ * answer, less, when called again. */
+/* The sorter of len items, which the caller puts in from. */
+static struct Sorter *sorter_new(SPYContext *c, size_t len) {
+    /* Its header, then two items and a run's end for each item. */
+    size_t unit = 2 * sizeof(SortItem) + sizeof(size_t);
+    struct Sorter *s = allocate_array(c, len + (sizeof(*s) + unit - 1) / unit, unit);
+    if (s) *s = (struct Sorter){.from = s->items, .to = s->items + len, .ends = (size_t *)(s->items + 2 * len), .len = len, .left = WORK};
+    return s;
+}
+enum { SORT_RUN = 1, SORT_DESCENDING, SORT_ASCENDING, SORT_INSERT, SORT_ORDERED, SORT_MERGE };
+#define ASK(at_, a, b) do { s->at = at_; s->x = (a).key; s->y = (b).key; return 1; case at_: ; } while (0)
+/* Whether s asks a comparison, s->x < s->y, whose truth goes in s->less;
+ * else from holds the items in order. */
+static int sort_step(struct Sorter *s) {
+    int less = s->less;
+    switch (s->at) {
+    case 0:
+        for (s->start = 0; s->start < s->len; s->start = s->end) {
+            s->end = s->start + 1;
+            if (s->end < s->len) ASK(SORT_RUN, s->from[s->end], s->from[s->start]);
+            if (s->end < s->len && less) {
+                while (++s->end < s->len) {
+                    ASK(SORT_DESCENDING, s->from[s->end], s->from[s->end - 1]);
+                    if (!less) break;
+                }
+                for (size_t i = s->start, j = s->end - 1; i < j; i++, j--) { SortItem swap = s->from[i]; s->from[i] = s->from[j]; s->from[j] = swap; }
+            } else while (s->end < s->len) {
+                ASK(SORT_ASCENDING, s->from[s->end], s->from[s->end - 1]);
+                if (less) break;
+                s->end++;
+            }
+            for (s->stop = s->len - s->start < 32 ? s->len : s->start + 32; s->end < s->stop; s->end++) {
+                s->item = s->from[s->end];
+                for (s->lo = s->end; s->lo > s->start; s->lo--) {
+                    ASK(SORT_INSERT, s->item, s->from[s->lo - 1]);
+                    if (!less) break;
+                    s->from[s->lo] = s->from[s->lo - 1];
+                }
+                s->from[s->lo] = s->item;
+            }
+            s->ends[s->runs++] = s->end;
+        }
+        while (s->runs > 1) {
+            for (s->r = s->start = s->merged = 0; s->r < s->runs; s->r += 2) {
+                s->mid = s->ends[s->r]; s->end = s->r + 1 < s->runs ? s->ends[s->r + 1] : s->mid;
+                s->i = s->out = s->start; s->j = s->mid;
+                if (s->j < s->end) ASK(SORT_ORDERED, s->from[s->j], s->from[s->j - 1]);
+                if (s->j < s->end && less)
+                    while (s->i < s->mid && s->j < s->end) {
+                        ASK(SORT_MERGE, s->from[s->j], s->from[s->i]);
+                        s->to[s->out++] = s->from[less ? s->j : s->i]; s->j += less; s->i += !less;
+                    }
+                memcpy(s->to + s->out, s->from + s->i, (s->mid - s->i) * sizeof(*s->to));
+                memcpy(s->to + s->out + s->mid - s->i, s->from + s->j, (s->end - s->j) * sizeof(*s->to));
+                s->ends[s->merged++] = s->start = s->end;
+            }
+            s->runs = s->merged;
+            SortItem *swap = s->from; s->from = s->to; s->to = swap;
+        }
+    }
+    return 0;
+}
+#undef ASK
+/* s's question answered natively, polling the interrupt; nonzero on an
+ * error. */
+static int sorter_compare(SPYContext *c, struct Sorter *s) {
+    s->less = sort_less(c, s->x, s->y);
+    return c->error_type[0] || working(c, &s->left, 1);
+}
+/* The sorter of items by keys, reversed first when descending, when their
+ * first comparison calls a Python __lt__ (rich_function); else NULL, or
+ * an error. */
+static struct Sorter *sorter_begin(SPYContext *c, SPYValue *items, SPYValue *keys, int descending) {
+    size_t len = items->as.seq.len;
+    SPYValue **key = keys->as.seq.items;
+    if (len < 2 || !rich_function(c, key[descending ? len - 2 : 1], key[descending ? len - 1 : 0], R_LT)) return NULL;
+    struct Sorter *s = sorter_new(c, len);
+    for (size_t i = 0; s && i < len; i++) {
+        size_t at = descending ? len - 1 - i : i;
+        s->from[i] = (SortItem){items->as.seq.items[at], key[at]};
+    }
+    return s;
+}
+/* items takes the order s sorted them in. */
+static void sorter_end(SPYValue *items, struct Sorter *s, int descending) {
+    for (size_t i = 0; i < s->len; i++) items->as.seq.items[i] = s->from[descending ? s->len - 1 - i : i].value;
 }
 /* Keys of the plain kinds sort as numbers held in the items themselves. */
 typedef struct { SPYValue *value; int64_t key; } IntItem;

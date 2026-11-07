@@ -290,7 +290,8 @@ These run as machines on the heap, in one native activation of
   generators resumed by
   `next` or by their `__next__` and `send` methods, and coroutines
   resumed by `send`;
-- the key functions of `sorted`, `list.sort`, `min` and `max`;
+- the key functions of `sorted`, `list.sort`, `min` and `max`, and the
+  Python `__lt__` comparisons of `sorted` and `list.sort`;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__` and `__hash__` that `str`, `repr`, `format`, `len`, `int`,
   `float` and `hash` call;

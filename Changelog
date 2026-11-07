@@ -26,6 +26,7 @@ Unreleased (0.8.0):
   float(), hash(), f-string and every function's special methods
 - min() and max() of a generator, and enumerate() or filter() over one,
   no longer use the C stack
+- sorted() and list.sort() call a Python __lt__ without the C stack
 - calling a class body's function directly returns its __class__ cell when
   the body loops or calls
 - sorted() of a non-iterable raises "'X' object is not iterable"
