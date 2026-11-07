@@ -59,6 +59,7 @@ Unreleased (0.8.0):
   a list, tuple, str, bytes, bytearray or range
 - a metaclass's Python __instancecheck__ and __subclasscheck__ run without
   the C stack in isinstance() and issubclass()
+- a generator's close() runs its handlers without the C stack
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do

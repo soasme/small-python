@@ -468,7 +468,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_TYPE_GETATTRIBUTE, B_TYPE_SETATTR, B_TYPE_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
        B_EXCEPTION_REDUCE, B_OSERROR_REDUCE, B_IMPORT_REDUCE, B_ATTRIBUTE_REDUCE, B_ATTRIBUTE_GETSTATE, B_EXCEPTION_SETSTATE,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */,
-       B_JOIN /* str.join consuming a generator (consume) */ };
+       B_JOIN /* str.join consuming a generator (consume) */, B_CLOSE /* a generator's close resuming it (consume) */ };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
     return dict ? dict : builtin_value(c, value, SPY_FROZENDICT);
@@ -21424,6 +21424,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         sort_restore(c, b.consumer->target, b.value);
         spy_release(b.consumer->target); b.value = NULL;
     }
+    if (b.consumer && b.consumer->id == B_CLOSE && b.consumer->count) b.value->as.generator.machine->drop = (int)b.consumer->count - 1;
     spy_release(b.value); spy_release(b.handled);
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
     if (b.consumer) {
@@ -21662,7 +21663,10 @@ static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
 }
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
-    /* A generator's __next__ and send, and a coroutine's send. */
+    /* A generator's close at a yield (B_CLOSE), its __next__ and send,
+     * and a coroutine's send. */
+    if (method == M_CLOSE)
+        return !argc && resumable(callee) && callee->as.generator.machine->awaiting == AWAIT_YIELD ? B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
@@ -21704,7 +21708,8 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
-    if (id == B_NEXT && method >= 0) generator = spy_retain(callee);
+    if ((id == B_NEXT || id == B_CLOSE) && method >= 0) generator = spy_retain(callee);
+    if (id == B_CLOSE) sent = exception_create(c, c->exceptions[X_GENERATOR_EXIT], 0, NULL);
     int collects = id == B_SORTED || id == B_JOIN;
     Consumer *consumer = allocate(c, sizeof(*consumer));
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || collects ?
@@ -21716,6 +21721,12 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
                            .sent = sent, .keyed = keyed};
     block->value = generator; block->consumer = consumer;
+    if (id == B_CLOSE) {
+        /* A close throws its GeneratorExit in at the yield (resumed_with),
+         * whose drop returns if it never resumes (pop_block). */
+        Machine *g = generator->as.generator.machine;
+        consumer->count = (size_t)g->drop + 1; g->drop = 0;
+    }
 }
 /* BC_UNPACK of target list n, the value atop m's stack: its items, owned,
  * or, for a generator the machine can resume or an instance with a Python
@@ -21760,6 +21771,8 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
  * on the stack, or the error pending. */
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
+    /* A generator closes on the GeneratorExit its close threw. */
+    if (!item && top->consumer->id == B_CLOSE && error_is(c, "GeneratorExit")) spy_clear_error(c);
     int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
     if (status > 0) {
         int id = top->consumer->id;
@@ -23163,21 +23176,25 @@ static Result generator_pause(SPYContext *, SPYValue *, Result);
 static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
 static void generator_close(SPYValue *);
 /* A generator resumer resumed returned value: next()'s StopIteration
- * takes it (B_NEXT); others drop it. */
+ * takes it (B_NEXT), as close returns it; others drop it. */
 static NO_INLINE void returned_to(Machine *resumer, SPYValue *value) {
     Block *top = resumer->block_len ? &resumer->blocks[resumer->block_len - 1] : NULL;
-    if (top && top->kind == BLOCK_CONSUME && top->consumer->id == B_NEXT) {
+    if (top && top->kind == BLOCK_CONSUME && (top->consumer->id == B_NEXT || top->consumer->id == B_CLOSE)) {
         spy_release(top->consumer->sent); top->consumer->sent = value;
     } else spy_release(value);
 }
 /* The value a generator's yield takes when resumer resumes it: what a
- * send atop resumer sends (B_NEXT), else None. */
+ * send atop resumer sends (B_NEXT), else None; a close raises its
+ * GeneratorExit there instead. */
 static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
     Block *top = &resumer->blocks[resumer->block_len - 1];
     SPYValue *sent = top->kind == BLOCK_CONSUME ? top->consumer->sent : NULL;
     if (!sent) return spy_none(c);
     top->consumer->sent = NULL;
-    return sent;
+    if (top->consumer->id != B_CLOSE) return sent;
+    top->consumer->count = 0;
+    raise_value(c, sent); spy_release(sent);
+    return spy_none(c);
 }
 /* Loop item item, which the loop step next took: stored to a name the
  * step stores (compile_next), or pushed. */
@@ -23926,8 +23943,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (generator_resume(c, value)) continue;
         value->as.generator.machine->resumer = m;
         m = value->as.generator.machine;
-        if (m->awaiting && !m->drop) machine_push(c, m, resumed_with(c, m->resumer));
+        if (!m->awaiting || m->drop) { m->awaiting = AWAIT_NONE; goto switch_call; }
         m->awaiting = AWAIT_NONE;
+        /* The value it takes, or a close's GeneratorExit raised there. */
+        machine_push(c, m, resumed_with(c, m->resumer));
+        if (c->error_type[0]) { f = m->frame; code = m->code->items; pc = m->pc; continue; }
         goto switch_call;
     generator_left: {
         /* A resumed generator's yield is its resumer's next item; its end
@@ -28539,6 +28559,11 @@ static void consumer_settle(SPYContext *c, Consumer *s) {
  * as CPython's sum. */
 static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     if (s->id == B_NEXT) { s->best = item; return 1; }
+    if (s->id == B_CLOSE) {
+        spy_release(item);
+        spy_error(c, "RuntimeError", "generator ignored GeneratorExit");
+        return -1;
+    }
     if (s->id == CONTAINS_ITEMS) {
         int found = item == s->best || equal(item, s->best);
         spy_release(item);
@@ -28596,6 +28621,12 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
 /* Consumer s's result, once its items ran out or decided it; or NULL with
  * the error that stopped it. */
 static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
+    if (s->id == B_CLOSE) {
+        /* What the generator returned. */
+        SPYValue *returned = s->sent;
+        s->sent = NULL;
+        return returned ? returned : spy_none(c);
+    }
     if (s->id == B_NEXT && !c->error_type[0]) {
         /* The item next() took; else its default, or StopIteration with
          * what the generator returned. */
