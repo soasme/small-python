@@ -136,8 +136,10 @@ SPYValue *spy_str(SPYContext *, SPYValue *);
 /* == Errors == */
 
 /* The pending error: its exception type name and message (empty strings when
- * none), and where it was raised. The strings belong to the context and stay
- * valid until the error changes. */
+ * none), and where it was raised. A raised exception's message is its str(),
+ * taken when the call that raised it returns to the host; the raise itself
+ * calls no `__str__`. The strings belong to the context and stay valid until
+ * the error changes. */
 const char *spy_error_type(const SPYContext *);
 const char *spy_error_message(const SPYContext *);
 const char *spy_error_filename(const SPYContext *);

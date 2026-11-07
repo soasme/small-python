@@ -1621,6 +1621,59 @@ dispatch: one more dispatching case made Apple clang merge the indirect
 jumps of every step into two (17 before), which cost strings 4%; count
 `br x` in `run_steps` after adding a case.
 
+### A raise formats nothing
+
+Raising an exception called `str()` on it to fill the context's message,
+which also ran a Python `__str__` that CPython never calls there. The
+message now waits until the error reaches the host (`error_settle`). A
+call of a class whose `__new__` and `__init__` are BaseException's goes
+straight to `exception_create`, and error type names and messages are
+copied without `snprintf`, which `tick_full` ran after every caught
+exception to copy the filename again. A loop raising and catching
+`ValueError(i)` 200,000 times: 135.9 ms -> 85.5 ms (CPython 30.3 ms),
+averaged over eight code layouts; the programs within noise. Most of the
+rest is the exception itself, an instance whose fields live in a
+dictionary.
+
+### *args and **kwargs bind by slot too
+
+`open_parameters` gave up on a function with `*args` or `**kwargs`. It
+now sets `*args` to the positional arguments past the named parameters,
+or an empty tuple, and `**kwargs` to a new dict of the keywords no named
+parameter takes, in call order; the call has already checked that they
+are distinct strs. `g(i, c=1, d=2)` to `def g(a, b=2, *, c=3, **k)`:
+115.6 ms -> 50.3 ms for 300,000 calls (CPython 55.8 ms); a `with`
+statement whose `__exit__(self, *a)` takes the three exception values:
+82.5 ms -> 51.9 ms (CPython 38.8 ms).
+
+### Special methods are called unbound
+
+A rich comparison made a bound method for an instance's Python `__lt__`
+on every comparison; `rich_method` now calls the class's function with
+both operands. Sorting 60,000 instances: 133.5 ms -> 115.7 ms (CPython
+58.8 ms). A special name read off an instance, as in `p.__lt__(q)` or
+`self.__init__()`, always took the general lookup; when its class defines
+it as a Python function and keeps the default `__getattribute__`, it now
+reads through the attribute cache like any method, since no data
+descriptor of `object` can precede it in the MRO: 169.3 ms -> 65.2 ms for
+1,000,000 calls.
+
+### A missing attribute is cheaper to report
+
+`hasattr()` and `getattr()` with a default build an AttributeError for
+every miss. A name `object` cannot have (it has only special names) no
+longer formats a cache key and probes `object`; the message is assembled
+without parsing a format, and the type is named once. 300,000 of each:
+362.7 ms -> 135.6 ms (CPython 35.2 ms, which makes no exception for
+them).
+
+### Strs sort by a numeric prefix
+
+A list of exact strs under 4096 bytes is packed with each str's first
+eight bytes as a big-endian number, so most comparisons are one integer
+comparison; equal prefixes compare in full. Sorting 200,000 digit
+strings: 87.7 ms -> 51.6 ms (CPython 61.2 ms).
+
 ### A profile-guided build
 
 `make CC=clang CONFIG_PGO=y` builds the engine twice: once instrumented,

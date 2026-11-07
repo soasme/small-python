@@ -153,7 +153,12 @@ static const char *const programs[] = {
     "    def __init__(self, v): super().__init__(v * 2)\n"
     "a = [B(i) for i in range(5)]\n"
     "a.append(a)\n"
-    "print(repr(a), A(2) == B(1))\n",
+    "class Q:\n"
+    "    def __eq__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return False\n"
+    "q = [1, Q()]\n"
+    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q])\n",
 
     "def gen(n):\n"
     "    try:\n"
