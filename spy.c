@@ -16430,6 +16430,10 @@ static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
     }
     return hit->init;
 }
+/* The builtin function's id, or -1 for any other value. */
+static int builtin_id(SPYValue *v) {
+    return v && v->type == SPY_NATIVE && v->as.native.call == builtin ? (int)(intptr_t)v->as.native.data : -1;
+}
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *result = NULL, *plain;
     /* The builtin types without a native constructor are marked 2. */
@@ -16458,6 +16462,11 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     if ((plain = plain_init(c, fn))) result = plain_construct(c, fn, plain, argc, argv, keywords);
     else {
         SPYValue *allocator = slot_new(c, fn);
+        /* BaseException's own __new__ and __init__ make the exception
+         * without binding either. */
+        if ((!keywords || !keywords->as.map.len) && builtin_id(allocator) == B_EXCEPTION_NEW &&
+            builtin_id(class_lookup(fn, "__init__")) == B_EXCEPTION_INIT)
+            return exception_create(c, fn, argc, argv);
         SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
         SPYValue *bound = method ? bind_method(c, fn, method) : NULL;
         if (bound) result = call_keywords(c, bound, argc, argv, keywords);
