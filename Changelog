@@ -19,7 +19,8 @@ Unreleased (0.8.0):
   C stack
 - sort keys, next(), send(), str(), repr(), __new__, properties, __getattr__
   and operator methods no longer use the C stack in most function code
-- class bodies that call or loop no longer use the C stack
+- class bodies that call or loop, and with statements' __exit__, no longer
+  use the C stack
 - code compiled while pausing is set pauses inside operator, unary operator,
   subscript, augmented assignment, target list, del, format(), len(), int(),
   float(), hash(), f-string and every function's special methods

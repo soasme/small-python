@@ -125,3 +125,46 @@ except ZeroDivisionError as e:
     tb = e.__traceback__
     while tb.tb_frame.f_code is not gen_passes.__code__: tb = tb.tb_next
     assert_eq(tb.tb_lineno - gen_passes.__code__.co_firstlineno, 3)
+
+# Inside a function, an __exit__ that loops sees how the body left: it
+# ends normally, returns, breaks, or raises, which a true result
+# suppresses; an exception __exit__ raises replaces the body's, whose
+# frame line stays the line that raised it.
+class Exiting:
+    def __init__(self, suppress=False, fail=False): self.suppress, self.fail, self.seen = suppress, fail, []
+    def __enter__(self): return self
+    def __exit__(self, kind, value, tb):
+        for _ in range(2): pass
+        self.seen.append(kind)
+        if self.fail: raise KeyError("exit")
+        return self.suppress
+def flows():
+    out = []
+    def returning(m):
+        with m: return "returned"
+    m = Exiting(); out.append(returning(m)); out.append(m.seen)
+    m = Exiting()
+    for i in range(3):
+        with m:
+            if i == 1: break
+    out.append((i, m.seen))
+    m = Exiting(suppress=True)
+    with m: 1 / 0
+    out.append(m.seen)
+    for m in (Exiting(), Exiting(fail=True)):
+        try:
+            with m:
+                raise ValueError("body")
+        except Exception as e:
+            out.append((type(e), m.seen, type(e.__context__)))
+    def raising():
+        with Exiting():
+            1 / 0
+    try:
+        raising()
+    except ZeroDivisionError as e:
+        frame = e.__traceback__.tb_next.tb_frame
+        out.append(frame.f_lineno - frame.f_code.co_firstlineno)
+    return out
+assert_eq(flows(), ["returned", [None], (1, [None, None]), [ZeroDivisionError],
+                    (ValueError, [ValueError], type(None)), (KeyError, [ValueError], ValueError), 2])

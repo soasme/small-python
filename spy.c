@@ -13535,7 +13535,7 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_WITH) X(BC_SET_TARGET) X(BC_LOAD_TARGET) X(BC_SAVE_TARGET) X(BC_INPLACE) \
     X(BC_FUNCTION) X(BC_DEFAULT) X(BC_COMPREHENSION) X(BC_SLICE) X(BC_UNPACK) X(BC_ASSERT) \
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
-    X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_AWITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
+    X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_WITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
     X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT)
 #define STEP_ENUM(op) op,
@@ -13951,10 +13951,8 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
         size_t start = last;
         last = p->items[start].other;
         emit(c, p, BC_LEAVE, p->items[start].node, 0); patch(p, start, p->len);
-        if (asynchronous) {
-            emit(c, p, BC_DELEGATE, p->items[start].node, DELEGATE_AEXIT);
-            emit(c, p, BC_END_AWITH, p->items[start].node, 0);
-        }
+        emit(c, p, asynchronous ? BC_DELEGATE : BC_CALLN, p->items[start].node, asynchronous ? DELEGATE_AEXIT : 3);
+        emit(c, p, BC_END_WITH, p->items[start].node, 0);
     }
 }
 /* A del target that suspends evaluates its object (and key) on the stack;
@@ -21187,10 +21185,14 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             c->handled = spy_retain(b->error ? b->error->value : b->handled);
             m->pc = b->target; r->flow = FLOW_NORMAL; return 1;
         }
-        if (b->kind == BLOCK_ASYNC_WITH) {
+        if (b->kind == BLOCK_WITH || b->kind == BLOCK_ASYNC_WITH) {
+            /* The flow waits in a cleanup block while the steps at its
+             * target call __exit__ (BC_CALLN) or await __aexit__'s result
+             * and end the statement (BC_END_WITH). */
             if (r->flow == FLOW_ERROR) b->error = save_error(c);
             if (c->error_type[0]) { pop_block(c, m, f); continue; }
             SPYValue *exit = b->value;
+            int asynchronous = b->kind == BLOCK_ASYNC_WITH;
             b->kind = BLOCK_CLEANUP; b->flow = r->flow;
             b->value = r->value; r->value = NULL;
             b->handled = c->handled;
@@ -21198,38 +21200,12 @@ static int machine_unwind(SPYContext *c, Machine *m, Frame *f, Result *r) {
             SPYValue *exception = b->error ? b->error->value : NULL;
             SPYValue *args[] = {exception ? exception->as.map.parent : c->none,
                                exception ? exception : c->none, exception_traceback(c, exception)};
-            SPYValue *awaitable = call(c, exit, 3, args);
-            spy_release(exit);
-            if (!awaitable || machine_push(c, m, awaitable)) {
-                pop_block(c, m, f); r->flow = FLOW_ERROR; continue;
-            }
+            SPYValue *awaitable = asynchronous ? call(c, exit, 3, args) : exit;
+            if (asynchronous) spy_release(exit);
+            int failed = !awaitable || machine_push(c, m, awaitable);
+            for (int i = 0; i < 3 && !failed && !asynchronous; i++) failed = machine_push(c, m, spy_retain(args[i]));
+            if (failed) { pop_block(c, m, f); r->flow = FLOW_ERROR; continue; }
             m->pc = b->target; r->flow = FLOW_NORMAL; return 1;
-        }
-        if (b->kind == BLOCK_WITH) {
-            ErrorState error = take_error(c);
-            SPYValue *outer = c->handled;
-            c->handled = spy_retain(error.value ? error.value : outer);
-            SPYValue *args[] = {error.value ? error.value->as.map.parent : c->none,
-                               error.value ? error.value : c->none, exception_traceback(c, error.value)};
-            size_t line = c->line, frame_line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
-            relocate(c, b->node); /* __exit__ is called at its manager's line (15.5) */
-            SPYValue *result = call(c, b->value, 3, args);
-            materialize_error(c);
-            int suppress = result && error.type[0] && truthy(result);
-            spy_release(result); spy_release(c->handled); c->handled = outer;
-            size_t target = b->target;
-            pop_block(c, m, f);
-            if (c->error_type[0]) { spy_release(r->value); *r = (Result){FLOW_ERROR, NULL}; }
-            else if (suppress) { m->pc = target; r->flow = FLOW_NORMAL; }
-            else if (error.type[0]) {
-                /* The exception leaves the frame from the line that raised it. */
-                restore_error(c, &error);
-                c->line = line;
-                if (c->py_depth) c->frames[c->py_depth - 1].line = frame_line;
-            }
-            spy_release(error.value);
-            if (r->flow == FLOW_NORMAL) return 1;
-            continue;
         }
         pop_block(c, m, f);
     }
@@ -22976,13 +22952,17 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             break;
         }
-        CASE(BC_END_AWITH) {
+        CASE(BC_END_WITH) {
             a = machine_pop(m);
             Block *block = &m->blocks[m->block_len - 1];
             int suppress = block->error && truthy(a);
             flow = (Result){suppress ? FLOW_NORMAL : block->flow, block->value};
             block->value = NULL;
-            if (block->error && !suppress && !c->error_type[0]) restore_error(c, block->error);
+            /* The exception leaves the frame from the line that raised it. */
+            if (block->error && !suppress && !c->error_type[0]) {
+                restore_error(c, block->error);
+                if (c->py_depth) c->frames[c->py_depth - 1].line = c->line;
+            }
             pop_block(c, m, &f); break;
         }
         CASE(BC_WITH)

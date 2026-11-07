@@ -294,7 +294,7 @@ These run as machines on the heap, in one native activation of
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__` and `__hash__` that `str`, `repr`, `format`, `len`, `int`,
   `float` and `hash` call;
-- property getters and `__getattr__`, `__enter__`, `__bool__`, unary and
+- property getters and `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and
   binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, where a step of their own
   reaches them;
