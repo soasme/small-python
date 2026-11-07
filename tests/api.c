@@ -1068,6 +1068,13 @@ int main(int argc, char **argv) {
     execute(c, "def member(): return (19 in Items()) + (21 not in Steps()) + (7 in (x for x in Items()))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "member()", "member.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* A deletion of a dictionary's item is native, and in over an instance
+     * whose __iter__ raises TypeError names the instance's type. */
+    execute(c, "class Refusing:\n    def __iter__(self):\n        for i in range(2): pass\n        raise TypeError('no')\n"
+               "def refused():\n    d = {1: 2, 3: 4}\n    del d[1]\n    try: 1 in Refusing()\n    except TypeError as e: return len(d), str(e)");
+    v = spy_eval(c, "refused() == (1, \"argument of type 'Refusing' is not a container or iterable\")", "refused.py");
+    assert(v && spy_truth(c, v) == 1);
+    spy_release(v);
     /* So do zip and map of generators, in a loop and in a consumer. */
     execute(c, "def zipped():\n    total = 0\n    for i, x in zip(range(20), (x for x in Items())): total += i + x\n"
                "    return total + sum(map(abs, Items()))");
