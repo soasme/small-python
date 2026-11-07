@@ -17760,7 +17760,7 @@ static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n, Machine *m) {
     }
     {
         SPYValue *local = container ? NULL : name_fast(f->env, n->a);
-        old = container ? (key ? get_index(c, container, key) : attribute(c, container, n->a->b->text)) :
+        old = container ? (key ? get_index(c, container, key) : node_attribute(c, container, n->a, 0)) :
             local ? spy_retain(local) : name_find(c, f->env, node_name(n->a));
         if (!old) goto done;
         rhs = eval(c, f, n->b);
@@ -17779,7 +17779,7 @@ static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n, Machine *m) {
     if (!value) goto done;
     if (!container) status = store_target(c, f, n->a, value);
     else if (key) status = set_index(c, container, key, value);
-    else status = set_attribute(c, container, n->a->b->text, value);
+    else status = node_set_attribute(c, container, n->a, value);
 done:
     spy_release(container); spy_release(key); spy_release(old); spy_release(rhs); spy_release(value);
     return status;
@@ -23030,7 +23030,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             break;
         CASE(BC_LOAD_TARGET)
             value = ins->arg ? target_copies(c, m, n) : n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
-                attribute(c, m->stack[m->len - 1], n->b->text);
+                node_attribute(c, m->stack[m->len - 1], n, 0);
             machine_push(c, m, value); break;
         CASE(BC_SAVE_TARGET)
             if (n->kind == N_INDEX && setitem_function(c, m->stack[m->len - 3])) goto store_step;
