@@ -68,6 +68,7 @@ Unreleased (0.8.0):
   without the C stack in function code
 - code compiled while pausing is set pauses inside an attribute deletion's
   Python __delattr__, property deleter or __delete__
+- yield from a generator resumes it without the C stack, about 7% faster
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do

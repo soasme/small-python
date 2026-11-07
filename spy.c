@@ -49,15 +49,18 @@
 /* Statement helpers called from one place in the recursive evaluator stay
  * out of line, as QuickJS's no_inline: inlined, their locals would enlarge
  * the frame of every nested call. The steps of a fast name read are always
- * inlined, as QuickJS's force_inline. */
+ * inlined, as QuickJS's force_inline; a hot step's rare branch is
+ * UNLIKELY, as QuickJS's unlikely. */
 #if defined(__GNUC__)
 #define NO_INLINE __attribute__((noinline))
 #define ALWAYS_INLINE inline __attribute__((always_inline))
 #define HOT __attribute__((aligned(64)))
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #else
 #define NO_INLINE
 #define ALWAYS_INLINE inline
 #define HOT
+#define UNLIKELY(x) (x)
 #endif
 
 /* The parser owns a tree per source unit. Functions keep that unit and their
@@ -21801,13 +21804,26 @@ static NO_INLINE void finalized(SPYContext *c, Machine *m, SPYValue *result) {
 /* The call steps: a call's result, or NULL with an error; or, when the
  * callee's body is on the machine, the callee with *env its environment,
  * to enter there. */
+static NO_INLINE int delegating(Machine *m);
 /* Whether a step may resume v's machine in its own run_machine: one not
- * running, ended or delegating; a loop step resumes only a generator's. */
+ * running, ended or delegating, but for a generator's yield from of a
+ * generator it may resume in its place; a loop step resumes only a
+ * generator's. */
 static ALWAYS_INLINE int suspended(SPYValue *v) {
     return !v->as.generator.running && !v->as.generator.done && v->as.generator.machine &&
-        v->as.generator.machine->awaiting < AWAIT_DELEGATE;
+        (v->as.generator.machine->awaiting < AWAIT_DELEGATE || delegating(v->as.generator.machine));
 }
 static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATOR && suspended(v); }
+/* Whether generator machine m's yield from waits on a generator, or a
+ * chain of them, that a step may resume in its place (resume_generator). */
+static NO_INLINE int delegating(Machine *m) {
+    while (m->awaiting == AWAIT_DELEGATE && m->generator->type == SPY_GENERATOR) {
+        SPYValue *d = m->delegate;
+        if (d->type != SPY_GENERATOR || d->as.generator.running || d->as.generator.done || !d->as.generator.machine) return 0;
+        if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
+    }
+    return 0;
+}
 /* Whether v is a zip or map, not strict, of a generator the machine
  * resumes (zip_fill), one made with a generator (its removed count). */
 static int zip_of_generator(SPYValue *v) {
@@ -23420,6 +23436,7 @@ static int generator_resume(SPYContext *, SPYValue *);
 static Result generator_pause(SPYContext *, SPYValue *, Result);
 static SPYValue *generator_end(SPYContext *, SPYValue *, Result);
 static void generator_close(SPYValue *);
+static NO_INLINE Machine *delegate_left(SPYContext *, Machine *, SPYValue **, Result *);
 /* A generator resumer resumed returned value: next()'s StopIteration
  * takes it (B_NEXT), as close returns it; others drop it. */
 static NO_INLINE void returned_to(Machine *resumer, SPYValue *value) {
@@ -23430,8 +23447,10 @@ static NO_INLINE void returned_to(Machine *resumer, SPYValue *value) {
 }
 /* The value a generator's yield takes when resumer resumes it: what a
  * send atop resumer sends (B_NEXT), else None; a close raises its
- * GeneratorExit there instead. */
+ * GeneratorExit there instead. A yield from resuming it passes on what
+ * its own resumer sends. */
 static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
+    while (resumer->awaiting == AWAIT_DELEGATE) if (!(resumer = resumer->resumer)) return spy_none(c);
     Block *top = &resumer->blocks[resumer->block_len - 1];
     SPYValue *sent = top->kind == BLOCK_CONSUME ? top->consumer->sent : NULL;
     if (!sent) return spy_none(c);
@@ -23945,6 +23964,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 spy_error(c, "TypeError", "cannot 'yield from' a coroutine object in a non-coroutine generator");
             if (m->delegate) {
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
+                /* A generator this yield from may resume yields or ends
+                 * into this machine (generator_left). */
+                if (!ins->arg && resumable(m->delegate)) {
+                    spy_release(a); a = NULL; m->drop = 0; value = m->delegate; goto resume_generator;
+                }
                 value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
                 if (value) { spy_release(a); m->pc = pc; YIELD(value); }
                 m->pc = pc; finish_delegate(c, m); pc = m->pc;
@@ -24197,10 +24221,18 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A loop step resumes generator value's machine here, which yields
          * or ends into this machine (generator_left). */
         m->pc = pc;
-        if (generator_resume(c, value)) continue;
+        if (generator_resume(c, value)) {
+            if (m->awaiting == AWAIT_DELEGATE) finish_delegate(c, m);
+            continue;
+        }
         value->as.generator.machine->resumer = m;
         m = value->as.generator.machine;
         if (!m->awaiting || m->drop) { m->awaiting = AWAIT_NONE; goto switch_call; }
+        /* One delegating resumes its delegate in turn. */
+        if (m->awaiting == AWAIT_DELEGATE) {
+            f = m->frame; code = m->code->items; pc = m->pc; value = m->delegate;
+            goto resume_generator;
+        }
         m->awaiting = AWAIT_NONE;
         /* The value it takes, or a close's GeneratorExit raised there. */
         machine_push(c, m, resumed_with(c, m->resumer));
@@ -24222,6 +24254,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             continue;
         }
         flow = generator_pause(c, g, flow);
+        if (UNLIKELY(resumer->awaiting == AWAIT_DELEGATE)) {
+            if (!(resumer = delegate_left(c, resumer, &g, &flow))) return flow;
+            if (flow.flow == FLOW_NORMAL) {
+                m = resumer; f = m->frame; code = m->code->items; pc = m->pc;
+                continue;
+            }
+        }
         if (flow.flow == FLOW_RETURN) {
             g->as.generator.returned = 1;
             returned_to(resumer, flow.value); flow.value = NULL;
@@ -24420,6 +24459,32 @@ static SPYValue *generator_end(SPYContext *c, SPYValue *g, Result result) {
             g->type == SPY_COROUTINE ? "coroutine raised StopIteration" : "generator raised StopIteration");
     }
     spy_release(result.value); generator_close(g); return NULL;
+}
+/* Generator machine m's yield from's delegate left with *flow: a return
+ * gives the yield from its value, and an error raises there, m running on
+ * (*flow then FLOW_NORMAL); a yield is m's own, given in turn to its
+ * resumer, NULL when C resumed it. The machine that takes it, *g the
+ * generator that yields it there. */
+static NO_INLINE Machine *delegate_left(SPYContext *c, Machine *m, SPYValue **g, Result *flow) {
+    for (;;) {
+        if (flow->flow != FLOW_YIELD) {
+            SPYValue *d = m->delegate;
+            if (flow->flow == FLOW_RETURN) {
+                d->as.generator.returned = 1; generator_close(d);
+                machine_push(c, m, flow->value ? flow->value : spy_none(c));
+            } else generator_end(c, d, *flow);
+            m->delegate = NULL; m->awaiting = AWAIT_NONE;
+            spy_release(d);
+            *flow = (Result){FLOW_NORMAL, NULL};
+            return m;
+        }
+        Machine *resumer = m->resumer;
+        if (!resumer) return NULL;
+        m->resumer = NULL; *g = m->generator;
+        *flow = generator_pause(c, *g, *flow);
+        if (resumer->awaiting != AWAIT_DELEGATE) return resumer;
+        m = resumer;
+    }
 }
 static SPYValue *generator_send(SPYContext *c, SPYValue *g, SPYValue *sent, SPYValue *thrown) {
     return generator_send_args(c, g, sent, thrown, thrown ? 1 : 0, &thrown);
