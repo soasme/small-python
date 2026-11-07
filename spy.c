@@ -22193,16 +22193,20 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     c->entering_kind = CALL_CHECKED;
     return allocator->as.wrapper.function;
 }
-/* The Python __str__, __repr__, __format__, __len__, __int__, __float__ or
- * __hash__ that callee, str, repr, format, len, int, float or hash, calls on
- * its first argument, an instance, found[0] its name and
- * found[1] the spec format passes it, or NULL; else NULL. */
+/* The Python __str__, __repr__, __format__, __len__, __int__, __float__,
+ * __hash__, __abs__, __round__ or __reversed__ that callee, str, repr,
+ * format, len, int, float, hash, abs, round or reversed, calls on its first
+ * argument, an instance, found[0] its name and found[1] the spec format or
+ * the ndigits round passes it, or NULL; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
     if (argc > 2 || argv[0]->as.map.base) return NULL;
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
-        callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : -1, repr = id == B_REPR;
-    if (argc != 1 + (id == B_FORMAT) * (argc == 2) || (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_HASH && callee != c->types[SPY_STRING])) return NULL;
+        callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT :
+        callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
+    if (argc != 1 + (id == B_FORMAT || id == B_ROUND) * (argc == 2) ||
+        (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_HASH && id != B_ABS &&
+         id != B_ROUND && id != B_REVERSED && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
@@ -22217,11 +22221,13 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     }
     /* With no __str__ above object's, str() calls the instance's __repr__. */
     const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
-        id == B_HASH ? "__hash__" : repr ? "__repr__" : "__str__";
+        id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
+        id == B_REVERSED ? "__reversed__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
-    *spec = NULL;
+    /* round() passes ndigits but None. */
+    *spec = argc == 2 && argv[1]->type != SPY_NONE ? spy_retain(argv[1]) : NULL;
     c->entering_kind = CALL_CHECKED;
     return function;
 }
@@ -22286,9 +22292,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return spy_retain(c->types[SPY_STRING]);
     }
     if (convert) {
-        /* str(), repr() or format() of an instance enters its Python
-         * __str__, __repr__ or __format__ (CALL_CHECKED), the name and
-         * instance on the stack. */
+        /* str(), repr(), format() and the others of an instance enter
+         * its Python method (conversion_method) (CALL_CHECKED), the name
+         * and instance on the stack. */
         spy_release(callee);
         if (argc == 2) spy_release(argv[1]);
         if (machine_push(c, m, found[0])) { spy_release(argv[0]); spy_release(found[1]); return NULL; }
@@ -23366,12 +23372,15 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         Buffer b = { .ctx = c, .whole = &whole };
         int64_t length;
         /* len(), hash(), int() and float() check their results as natively;
-         * the others' text is a str. */
+         * abs(), round() and reversed() return theirs; the others' text is a
+         * str. */
         const char *method = name->as.string.data;
         if (!strcmp(method, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__hash__")) string = hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
             string = number_result(c, v, method[2] == 'f', spy_retain(result));
+        else if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__"))
+            string = spy_retain(result);
         else if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
             /* isinstance() and issubclass() take the result's truth. */
             int truth = truthy(result);

@@ -279,15 +279,20 @@ These run as machines on the heap, in one native activation of
 
 - calls of functions, bound methods and plain classes; classes with a
   Python `__new__`; instances with a Python `__call__`; Python
-  decorators;
-- a loop's Python `__iter__` and `__next__`, the function of a `map` it
-  takes items from, the generator that an `enumerate`, or a `filter`
-  whose function is `None` or native, takes items from, and the
+  decorators; a class statement's metaclass `__new__`, and the new
+  class's `__set_name__` and `__init_subclass__` calls;
+- `exec` and `eval` of source, and the module of source an `import`
+  statement runs;
+- a loop's Python `__iter__` and `__next__`, the function of a `map` or
+  `filter` it takes items from, the generator that an `enumerate`, or a
+  `filter` whose function is `None` or native, takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
   beside list, tuple and range iterators, for a loop or a consumer below;
+- the generator a `yield from` delegates to, and those it delegates to
+  in turn, when a step above resumes the delegating generator;
 - generators, maps, and instances whose class has a Python `__iter__`
   and no `__len__` or `__length_hint__`, consumed by `sum`, `any`, `all`,
-  `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `sorted` or
+  `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `dict`, `sorted` or
   `str.join`, and, in
   code compiled while pausing, the generators and such instances a target
   list unpacks or a list, tuple or set display stars, and the generators
@@ -295,15 +300,26 @@ These run as machines on the heap, in one native activation of
   a `__contains__`, that an `in` or `not in` outside a comparison chain
   searches, after calling their `__iter__`, comparing the items natively;
   generators resumed by
-  `next` or by their `__next__` and `send` methods, and coroutines
-  resumed by `send`;
+  `next` or by their `__next__` and `send` methods, or closed at a
+  `yield` by `close`, and coroutines resumed by `send`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`, and the
   Python `__lt__` comparisons of `sorted` and `list.sort`;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
-  `__float__` and `__hash__` that `str`, `repr`, `format`, `len`, `int`,
-  `float` and `hash` call, and, in code compiled while pausing, the
+  `__float__`, `__hash__`, `__abs__`, `__round__` and `__reversed__`
+  that `str`, `repr`, `format`, `len`, `int`, `float`, `hash`, `abs`,
+  `round` and `reversed` call, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it;
+- a key's `__hash__` in dict and set displays, dict subscripts, stores
+  and deletions, and tests of a dict or set; the `__index__` of an
+  instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or
+  `range`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
+  `isinstance` and `issubclass`;
+- a descriptor's `__get__` and a class's own `__getattribute__`; an
+  attribute store's `__setattr__`, property setter or `__set__` in
+  function code, and, in code compiled while pausing, an attribute
+  deletion's `__delattr__`, property deleter or `__delete__`;
+- a dead instance's `__del__`;
 - property getters and `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and
   binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, where a step of their own
