@@ -16495,6 +16495,8 @@ static SPYValue *plain_construct(SPYContext *c, SPYValue *cls, SPYValue *init, s
  * allocator and its slot, so that object.__new__ accepts the arguments.
  * Borrowed. */
 static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
+    /* A builtin class has a native constructor; it takes no entry. */
+    if (cls->as.map.native || cls->as.map.flags == 2) return NULL;
     PlainClass *hit = &c->plain[(uintptr_t)cls / sizeof(SPYValue) % 16];
     if (hit->cls != cls || hit->epoch != c->classes_changed) {
         SPYValue *init = class_lookup(cls, "__init__");
