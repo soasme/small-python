@@ -13590,8 +13590,10 @@ typedef struct {
     struct Sorter *sorter;
 } Consumer;
 /* An assignment's unpacking, collecting in result the items for a target
- * list of count targets with a star at index star (unpack_step). */
-enum { UNPACK_ITEMS = -2 };
+ * list of count targets with a star at index star (unpack_step); a
+ * display's starred item, adding them to result, the display, which it
+ * seals as a tuple when count is set (extend_step). */
+enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3 };
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
 static SPYValue *consumer_end(SPYContext *, Consumer *);
 /* A BLOCK_CONSUME's value is the generator its consumer takes the items of. */
@@ -13685,6 +13687,12 @@ static Machine *machine_new(SPYContext *c, Program *code, SPYValue *env, SPYValu
 enum { CALLS = 1, BODY = 2, PAUSING = 3 };
 static int expands(Node *n, int calls);
 static int loops(Node *);
+/* Whether n is a list, tuple or set display with a starred item. */
+static int starred(Node *n) {
+    if (n->kind != N_LIST && n->kind != N_TUPLE && n->kind != N_SET) return 0;
+    for (Node *item = n->args; item; item = item->next) if (item->kind == N_STAR) return 1;
+    return 0;
+}
 /* Whether a target among n and those after it is a target list. */
 static int unpacks(Node *n) {
     for (; n; n = n->next) if (n->kind == N_TUPLE || n->kind == N_LIST) return 1;
@@ -13712,7 +13720,7 @@ static int expands(Node *n, int calls) {
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
                            n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
-                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || (n->kind == N_ASSIGN && ((n->op >= T_ADDEQ && n->op <= T_XOREQ) ||
+                           n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || starred(n) || (n->kind == N_ASSIGN && ((n->op >= T_ADDEQ && n->op <= T_XOREQ) ||
                                                                                                   unpacks(n->a) || unpacks(n->args)))))) return 1;
     /* A list, set or dictionary comprehension runs on the machine of the
      * code holding it, which can pause in its body. */
@@ -21466,6 +21474,27 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
     block->value = source; block->consumer = s;
     return NULL;
 }
+/* BC_EXTEND of starred item a, which it takes, into the display atop m's
+ * stack, sealing a tuple at the last (arg): 1 when a, a generator the
+ * machine can resume or an instance with a Python __iter__, gives its
+ * items on the machine (BLOCK_CONSUME, EXTEND_ITEMS); else 0, a extended
+ * into the display and released. */
+static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *a, int arg) {
+    SPYValue *display = m->stack[m->len - 1];
+    if ((!resumable(a) && !iter_function(c, a)) || is_dict(display)) {
+        extend_display(c, display, a);
+        if (arg) seal_tuple(c, display);
+        spy_release(a);
+        return 0;
+    }
+    Consumer *s = allocate(c, sizeof(*s));
+    int keyed = s ? consumer_source(c, &a) : 0;
+    Block *block = s && a ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (!block) { mem_free(s); spy_release(a); return 0; }
+    *s = (Consumer){.id = EXTEND_ITEMS, .result = spy_retain(display), .count = (size_t)arg, .keyed = keyed};
+    block->value = a; block->consumer = s;
+    return 1;
+}
 /* Whether the consumer atop m, given its generator's next item (NULL at
  * its end or on an error), takes another; when it does not, its result is
  * on the stack, or the error pending. */
@@ -21477,7 +21506,8 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         SPYValue *result = consumer_end(c, top->consumer);
         pop_block(c, m, f);
         /* An unpacking's items go on the stack last first, as BC_UNPACK's. */
-        if (id != UNPACK_ITEMS || !result) machine_push(c, m, result);
+        if (id == EXTEND_ITEMS) spy_release(result);
+        else if (id != UNPACK_ITEMS || !result) machine_push(c, m, result);
         else {
             for (size_t i = result->as.seq.len; i; i--) if (machine_push(c, m, spy_retain(result->as.seq.items[i - 1]))) break;
             spy_release(result);
@@ -22821,8 +22851,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_NEW) machine_push(c, m, display_new(c, n, ins->arg)); break;
         CASE(BC_ADD) CASE(BC_EXTEND)
             a = machine_pop(m);
-            if (ins->op == BC_ADD) display_add(c, m->stack[m->len - 1], a);
-            else extend_display(c, m->stack[m->len - 1], a);
+            if (ins->op == BC_EXTEND) {
+                if (extend_step(c, m, a, ins->arg)) { a = NULL; goto consume_generator; }
+                a = NULL;
+                break;
+            }
+            display_add(c, m->stack[m->len - 1], a);
             if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         CASE(BC_MAP)
@@ -27830,8 +27864,8 @@ static void consumer_settle(SPYContext *c, Consumer *s) {
  * as CPython's sum. */
 static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     if (s->id == B_NEXT) { s->best = item; return 1; }
-    if (s->id == B_SET) {
-        int status = set_add(c, s->result, item);
+    if (s->id == B_SET || s->id == EXTEND_ITEMS) {
+        int status = s->id == B_SET ? set_add(c, s->result, item) : display_add(c, s->result, item);
         spy_release(item);
         return status;
     }
@@ -27886,6 +27920,7 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         spy_release(returned);
         return NULL;
     }
+    if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
     if (s->id == UNPACK_ITEMS && !c->error_type[0]) {
         SPYValue *items = s->result;
         s->result = NULL;

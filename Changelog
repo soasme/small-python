@@ -32,8 +32,8 @@ Unreleased (0.8.0):
   instance's declines or before a base's, run without the C stack
 - a list, set or dict comprehension over a name, list or tuple pauses in its
   body
-- list(), sum(), sorted() and the other consumers, and target lists in code
-  compiled while pausing, take an instance's items through its Python
+- list(), sum(), sorted() and the other consumers, and target lists and
+  starred display items in code compiled while pausing, take an instance's items through its Python
   __iter__ and __next__ without the C stack
 - calling a class body's function directly returns its __class__ cell when
   the body loops or calls
