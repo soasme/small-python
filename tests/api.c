@@ -1030,6 +1030,14 @@ int main(int argc, char **argv) {
     execute(c, "def comprehend():\n    data = list(range(30))\n    return [slow(x) for x in data][-1] + {slow(x) for x in [1, 2]}.pop()");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "comprehend()", "comprehend.py"), SPY_STOP_STEPS, &pauses)) == 30 && pauses > 1);
+    /* So do list(), sum() and sorted() of an instance whose __iter__ or
+     * __next__ loops, and sorted() of a generator. */
+    execute(c, "class Steps:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
+               "    def __next__(self):\n        self.n = slow(self.n + 1)\n        if self.n > 20: raise StopIteration\n        return self.n\n"
+               "class Items:\n    def __iter__(self):\n        for i in range(20): yield slow(i)\n"
+               "def consume():\n    return len(list(Steps())) + sum(Items()) + sorted(Items())[-1] + sorted(x for x in Items())[0]");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "consume()", "consume.py"), SPY_STOP_STEPS, &pauses)) == 20 + 190 + 19 && pauses > 3);
     /* A class body that loops pauses inside it. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "class Looping:\n    n = 0\n    while n < 3000: n += 1\n    m = slow(n)\nLooping.m", "class.py"),

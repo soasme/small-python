@@ -284,8 +284,10 @@ These run as machines on the heap, in one native activation of
   takes items from, and the generator that an `enumerate`, or a `filter`
   whose function is `None` or native, takes items from, for a loop or a
   consumer below;
-- generators and maps consumed by `sum`, `any`, `all`, `min`, `max`,
-  `list`, `tuple`, `set`, `frozenset`, `sorted` or `str.join`, and, in
+- generators, maps, and instances whose class has a Python `__iter__`
+  and no `__len__` or `__length_hint__`, consumed by `sum`, `any`, `all`,
+  `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `sorted` or
+  `str.join`, and, in
   code compiled while pausing, generators a target list unpacks;
   generators resumed by
   `next` or by their `__next__` and `send` methods, and coroutines

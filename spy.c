@@ -13572,7 +13572,7 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * result, that item's key, and the item whose key its callee is computing. next(), __next__ and
  * send (B_NEXT) keep their default in result, the value to send and then
  * the value the generator returned in sent, and the item it gave in best. */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX };
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER };
 typedef struct { SPYValue *value, *key; } SortItem;
 /* A sort that stops at each comparison (sort_step). */
 struct Sorter {
@@ -21374,6 +21374,19 @@ static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATO
  * frozenset, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
 static SPYValue *adapted_generator(SPYContext *, SPYValue *);
+/* Whether fn is a generator function, whose call runs none of its body. */
+static int generator_function(SPYContext *c, SPYValue *fn) {
+    Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
+    return def && def->kind == N_DEF && !def->op && def->code && !def->flat;
+}
+/* The Python __iter__ of plain instance v's class, borrowed: one on the
+ * machine, or a generator function (generator_function); else NULL, also
+ * for a class with a length or length hint, which list() asks first. */
+static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
+    SPYValue *cls = v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__iter__", NULL) ? NULL : v->as.map.parent;
+    SPYValue *function = cls && !class_lookup(cls, "__len__") && !class_lookup(cls, "__length_hint__") ? class_lookup(cls, "__iter__") : NULL;
+    return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A generator's __next__ and send, and a coroutine's send. */
@@ -21382,7 +21395,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
     if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && argv[0]->as.iterator.kind == I_MAP) &&
-                  !adapted_generator(c, argv[0]))) return -1;
+                  !adapted_generator(c, argv[0]) && !iter_function(c, argv[0]))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
@@ -21396,7 +21409,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     return id;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
-    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR)) ||
+    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE)) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* Consumer id, of callee, its native method method of name, takes
@@ -21411,10 +21424,17 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     Consumer *consumer = allocate(c, sizeof(*consumer));
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_LIST || id == B_TUPLE || id == B_SET || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : SPY_LIST) : NULL;
+    /* An instance's Python __iter__ is the first call (KEY_ITER), unless
+     * it makes a generator. */
+    if (generator && generator->type == SPY_INSTANCE && !machine_function(c, iter_function(c, generator))) {
+        SPYValue *iterator = get_iterator(c, generator);
+        spy_release(generator);
+        generator = iterator;
+    }
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
-                           .sent = sent};
+                           .sent = sent, .keyed = generator && generator->type == SPY_INSTANCE ? KEY_ITER : 0};
     block->value = generator; block->consumer = consumer;
 }
 /* BC_UNPACK of target list n, the value atop m's stack: its items, owned,
@@ -21542,6 +21562,11 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
     SPYValue *items = top->value, *item, *result;
+    if (s->keyed == KEY_ITER) {
+        SPYValue *function = iter_function(c, items);
+        item = spy_retain(items);
+        return (*env = function_env(c, function, 1, &item, NULL, 1)) ? spy_retain(function) : NULL;
+    }
     if (s->keyed == KEY_SORT) {
         size_t done = s->result->as.seq.len;
         if (done < items->as.seq.len) {
@@ -21581,7 +21606,16 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
 /* The consumer atop m takes key, its item's key: a sort keeps it, and min
  * or max keeps the item while it is the best; 0, or -1 on an error. */
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
-    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    Block *top = &m->blocks[m->block_len - 1];
+    Consumer *s = top->consumer;
+    if (s->keyed == KEY_ITER) {
+        /* The iterator the instance's __iter__ returned is the source. */
+        SPYValue *iterator = iterator_returned(c, top->value, key);
+        if (!iterator) return -1;
+        spy_release(top->value);
+        top->value = iterator; s->keyed = 0;
+        return 0;
+    }
     if (s->keyed == KEY_SORT && s->sorter) {
         /* The result of the sort's comparison under way. */
         struct Sorter *t = s->sorter;
@@ -21947,8 +21981,17 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD)) {
         int began = key_consumer(c, m, callee, positional, argv, kw, kwc);
         if (began < 0) goto done;
+        /* Without keywords, a consumer (consumer_of) takes the call as a
+         * plain call's step does. */
+        int id = began || kwc ? -1 : consumer_of(c, callee, -1, positional, argv);
+        if (id >= 0) {
+            size_t blocks = m->block_len;
+            consume(c, m, id, callee, -1, NULL, spy_retain(argv[0]), positional > 1 ? spy_retain(argv[1]) : NULL);
+            began = m->block_len > blocks;
+            if (!began) goto done;
+        }
         if (began) {
-            /* The sort's block goes above the call's operands. */
+            /* The consumer's block goes above the call's operands. */
             Block block = m->blocks[--m->block_len];
             for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
             block.depth = m->len; m->blocks[m->block_len++] = block;
