@@ -39,6 +39,9 @@ Unreleased (0.8.0):
   without the C stack
 - in and not in over a generator or an instance's Python __iter__ take
   its items without the C stack
+- zip() and map() over generators take their items without the C stack
+- enumerate, filter, map and zip take their iterables' items again after
+  ending, as CPython's do
 - print() calls an instance's Python __str__ without the C stack in code
   compiled while pausing
 - calling a class body's function directly returns its __class__ cell when

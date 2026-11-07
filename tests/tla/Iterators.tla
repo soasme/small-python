@@ -11,8 +11,9 @@
 (* iter(callable, sentinel) calls until a result equals the sentinel;      *)
 (* next() returns a default instead of raising; a generator implements the *)
 (* protocol, its StopIteration becoming RuntimeError; dicts and sets      *)
-(* refuse to change size during iteration; and an exhausted iterator       *)
-(* releases its source, a dict subclass reached through a view included.   *)
+(* refuse to change size during iteration; an exhausted iterator releases  *)
+(* its source, a dict subclass reached through a view included; and        *)
+(* enumerate, filter, map and zip ask their iterables again on each next.  *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -58,7 +59,8 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "callable_sentinel_equality", "iter_of_iterator_is_self", "for_calls_iter_once",
           "list_iterator_mutation", "dict_changed_size", "set_changed_size", "dict_keys_replaced_ok",
           "iterator_type_names", "length_hint", "next_dunder_direct", "zip_strict", "map_multi",
-          "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source"}
+          "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
+          "adapters_ask_again"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -104,6 +106,7 @@ Case(c) ==
       [] c = "reversed_not_sequence" -> "TypeError: 'set' object is not reversible"
       [] c = "reversed_dunder" -> "['z', 'y']"
       [] c = "exhausted_releases_source" -> "['made', 'freed', 'exhausted', 'made', 'freed', 'exhausted']"
+      [] c = "adapters_ask_again" -> "[([1], 3), ([1], 3), ([(0, 1)], (1, 3)), ([(1,)], (3,))]"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

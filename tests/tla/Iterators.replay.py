@@ -137,6 +137,8 @@ SOURCES = {
                                  "for view in (dict.keys, lambda d: reversed(d.items())):\n"
                                  "    it = iter(view(Freed(k=1)))\n    result.append('made')\n"
                                  "    for _ in it: pass\n    result.append('exhausted')",
+    "adapters_ask_again": "result = []\nfor make in (lambda r: map(abs, r), lambda r: filter(None, r), enumerate, zip):\n"
+                          "    it = make(Revival())\n    result.append((list(it), next(it)))",
 }
 
 

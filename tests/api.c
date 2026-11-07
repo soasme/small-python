@@ -1046,6 +1046,11 @@ int main(int argc, char **argv) {
     execute(c, "def member(): return (19 in Items()) + (21 not in Steps()) + (7 in (x for x in Items()))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "member()", "member.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So do zip and map of generators, in a loop and in a consumer. */
+    execute(c, "def zipped():\n    total = 0\n    for i, x in zip(range(20), (x for x in Items())): total += i + x\n"
+               "    return total + sum(map(abs, Items()))");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 380 + 190 && pauses > 3);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

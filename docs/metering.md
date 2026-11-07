@@ -281,9 +281,10 @@ These run as machines on the heap, in one native activation of
   Python `__new__`; instances with a Python `__call__`; Python
   decorators;
 - a loop's Python `__iter__` and `__next__`, the function of a `map` it
-  takes items from, and the generator that an `enumerate`, or a `filter`
-  whose function is `None` or native, takes items from, for a loop or a
-  consumer below;
+  takes items from, the generator that an `enumerate`, or a `filter`
+  whose function is `None` or native, takes items from, and the
+  generators that a `zip` or a `map` without `strict` takes items from
+  beside list, tuple and range iterators, for a loop or a consumer below;
 - generators, maps, and instances whose class has a Python `__iter__`
   and no `__len__` or `__length_hint__`, consumed by `sum`, `any`, `all`,
   `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `sorted` or
@@ -329,8 +330,9 @@ special method (outside code compiled while pausing, an augmented
 subscript assignment's or a target list's `__setitem__` and a deletion's
 `__delitem__`; an unpacking's
 `__iter__`, a property of a class with `__getattr__`), the items a
-`zip`, a `map` or a `filter` by a Python function takes from a generator,
-a host function,
+`filter` by a Python function takes from a generator, and a strict
+`zip` or `map` or one taking from another iterator beside it, the
+comparisons of the items an `in` searches, a host function,
 the metaclass call that makes a class, an import, `exec` and `eval`, and
 a call from what the walker evaluates whole. Without pausing compiled
 in, the walker runs a function whose body holds no call or loop, which
