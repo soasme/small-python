@@ -22030,6 +22030,47 @@ static int step_operation(Instruction *ins, int *op) {
     *op = n->op;
     return OPERATE_BINARY;
 }
+/* For `x in y`, the last comparison of its chain, of a plain instance x
+ * and a list or tuple y, or a forward iterator over one that an earlier
+ * step of it left (contains_returned): the Python __eq__ that comparing
+ * x with the next item whose comparison calls one (rich_function) calls
+ * first, the item's or x's, owned, with its env, the items before it
+ * compared natively unequal; x, an iterator after the item, the two
+ * operands in the order of the call, and c->unbound pushed on m's stack.
+ * Else NULL, for the native search to decide, comparing only what calls
+ * no Python again. */
+static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+    SPYValue *seq = y, *function = NULL;
+    size_t at = 0;
+    if (y->type == SPY_ITERATOR) {
+        if (y->as.iterator.kind != I_SEQUENCE || y->as.iterator.done) return NULL;
+        seq = y->as.iterator.source; at = y->as.iterator.index;
+    }
+    if (x->type != SPY_INSTANCE || x->as.map.base || (seq->type != SPY_LIST && seq->type != SPY_TUPLE)) return NULL;
+    size_t first = at;
+    while (first < seq->as.seq.len && seq->as.seq.items[first] != x && !rich_function(c, seq->as.seq.items[first], x, R_EQ) &&
+           !rich_function(c, x, seq->as.seq.items[first], R_EQ)) first++;
+    if (first >= seq->as.seq.len || seq->as.seq.items[first] == x) return NULL;
+    for (; at < first; at++) {
+        SPYValue *item = spy_retain(seq->as.seq.items[at]);
+        int same = equal(item, x);
+        spy_release(item);
+        if (same || c->error_type[0] || pass(c)) return NULL;
+    }
+    SPYValue *item = seq->as.seq.items[at], *iterator = y == seq ? get_iterator(c, seq) : spy_retain(y);
+    SPYValue *left = (function = rich_function(c, item, x, R_EQ)) ? item : x, *right = left == x ? item : x;
+    if (!function) function = rich_function(c, x, item, R_EQ);
+    if (!iterator) return NULL;
+    iterator->as.iterator.index = at + 1;
+    SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+    if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, iterator) || machine_push(c, m, spy_retain(left)) ||
+        machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound))) {
+        release_all(2, args); return NULL;
+    }
+    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
+    return NULL;
+}
 /* The Python special method of instance x's class that operator step ins
  * calls on x and y, owned, with its env, to enter on m (CALL_OPERATOR),
  * x and y on the stack under it: __getitem__, a binary operator's direct
@@ -22040,6 +22081,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
     if (contains) {
+        if (ins->op == BC_COMPARE && !ins->arg && (function = contains_call(c, m, x, y, env))) return function;
         /* in takes the container's __contains__, given the item. */
         if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
             (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
@@ -22105,6 +22147,22 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
  * operator or comparison goes on with the rest of the operation. The pc
  * to run next. */
 static NO_INLINE size_t operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    if (m->stack[m->len - 1] == c->unbound) {
+        /* An item's comparison for in (contains_call): found, or the step
+         * again, to go on from the iterator after the item. */
+        spy_release(machine_pop(m));
+        SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
+        int found = test ? truthy(test) : 0;
+        spy_release(test); spy_release(left); spy_release(right);
+        if (found || c->error_type[0]) {
+            SPYValue *iterator = machine_pop(m);
+            spy_release(machine_pop(m));
+            pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : spy_bool(c, (ins->node->op == O_IN) == found), pc);
+            spy_release(iterator);
+            return pc;
+        }
+        return pc - 1;
+    }
     SPYValue *y = machine_pop(m), *x = machine_pop(m);
     int op = 0, kind = step_operation(ins, &op);
     if (op == O_IN || op == O_NOTIN) {

@@ -298,7 +298,9 @@ These run as machines on the heap, in one native activation of
 - property getters and `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and
   binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, where a step of their own
-  reaches them;
+  reaches them, and the `__eq__` that an instance's `in` a list or tuple,
+  or an iterator over one, calls on its items when it ends its
+  comparison chain;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
   parameters or annotations and the builtin `__build_class__` makes it.

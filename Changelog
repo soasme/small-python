@@ -27,6 +27,7 @@ Unreleased (0.8.0):
 - min() and max() of a generator, and enumerate() or filter() over one,
   no longer use the C stack
 - sorted() and list.sort() call a Python __lt__ without the C stack
+- an instance in a list or tuple calls a Python __eq__ without the C stack
 - calling a class body's function directly returns its __class__ cell when
   the body loops or calls
 - sorted() of a non-iterable raises "'X' object is not iterable"
