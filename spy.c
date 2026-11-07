@@ -13708,8 +13708,10 @@ static int expands(Node *n, int calls) {
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
                            n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
                            n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || (n->kind == N_ASSIGN && n->op >= T_ADDEQ && n->op <= T_XOREQ)))) return 1;
+    /* A list, set or dictionary comprehension runs on the machine of the
+     * code holding it, which can pause in its body. */
     if (n->kind == N_COMPREHENSION)
-        return expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
+        return (calls && n->op != N_TUPLE) || expands(n->a->a, calls) || (n->op != N_TUPLE && n->asynchronous);
     if ((n->kind == N_FOR || n->kind == N_WITH) && n->op) return 1;
     /* A loop whose iterable alone holds a call makes that call once: it
      * stays a walker statement, where the call nests in C. */

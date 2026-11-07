@@ -1026,6 +1026,10 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "call_back(lambda: sorted(range(15), key=slow))[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
     assert(!spy_eval(c, "call_back(lambda: sorted(range(30), key=slow))", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
     spy_clear_error(c);
+    /* A comprehension over a list or a name pauses in its body. */
+    execute(c, "def comprehend():\n    data = list(range(30))\n    return [slow(x) for x in data][-1] + {slow(x) for x in [1, 2]}.pop()");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "comprehend()", "comprehend.py"), SPY_STOP_STEPS, &pauses)) == 30 && pauses > 1);
     /* A class body that loops pauses inside it. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "class Looping:\n    n = 0\n    while n < 3000: n += 1\n    m = slow(n)\nLooping.m", "class.py"),
