@@ -22713,6 +22713,28 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         goto done;
     }
     if (c->error_type[0]) goto done;
+    SPYValue *allocate = calls && !init && callee->type == SPY_CLASS ? new_method(c, callee) : NULL;
+    if (allocate) {
+        /* A class call enters its Python __new__ (CALL_CHECKED) with the
+         * class first; the class, the arguments' tuple and the keywords'
+         * dict stay on the stack for its __init__ (constructed). */
+        SPYValue *args = tuple_of(c, positional, argv), *keywords = args ? entries_dict(c, kw, kwc) : NULL, *callee_env = NULL;
+        argv[-1] = spy_retain(callee);
+        if (keywords) callee_env = keyword_env(c, allocate, positional + 1, argv - 1, kw, kwc, NULL, 0);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        int failed = !callee_env || machine_push(c, m, spy_retain(callee));
+        if (failed) { spy_release(args); spy_release(keywords); }
+        else if ((failed = machine_push(c, m, args))) spy_release(keywords);
+        else failed = machine_push(c, m, keywords);
+        if (failed) {
+            if (callee_env) release_locals(callee_env);
+            spy_release(callee);
+            return NULL;
+        }
+        c->entering_init = allocate;
+        *env = callee_env;
+        return callee;
+    }
     if (calls && print_instances(c, callee, positional, argv)) {
         /* As a plain call's step (stack_call), with its keywords. */
         SPYValue *keywords = entries_dict(c, kw, kwc);
@@ -23588,25 +23610,25 @@ static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPY
  * args, all owned: as type_call, an instance of cls, of the type it has,
  * is initialized; result is the call's value, on m's stack. A Python
  * __init__ is the function returned, with *env its environment. */
-static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *args, SPYValue *result, SPYValue **env) {
+static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *args, SPYValue *keywords, SPYValue *result, SPYValue **env) {
     SPYValue *init = (result->type == SPY_INSTANCE && subclass(result->as.map.parent, cls)) ||
                      (result->type == SPY_CLASS && subclass(value_class(c, result), cls)) ? special_method(c, result, "__init__") : NULL;
     SPYValue *function = NULL;
     size_t argc = args->as.seq.len;
     spy_release(cls);
-    if (machine_push(c, m, result) || !init) { spy_release(args); spy_release(init); return NULL; }
+    if (machine_push(c, m, result) || !init) { spy_release(args); spy_release(keywords); spy_release(init); return NULL; }
     if (init->type == SPY_METHOD && machine_function(c, init->as.method.function) && argc < 8) {
         SPYValue *argv[9];
         argv[0] = spy_retain(init->as.method.self);
         for (size_t i = 0; i < argc; i++) argv[i + 1] = spy_retain(args->as.seq.items[i]);
-        if ((*env = function_env(c, init->as.method.function, argc + 1, argv, NULL, 1)))
+        if ((*env = function_env(c, init->as.method.function, argc + 1, argv, keywords, 1)))
             function = spy_retain(init->as.method.function);
     } else {
-        SPYValue *value = call(c, init, argc, args->as.seq.items);
+        SPYValue *value = keywords ? call_keywords(c, init, argc, args->as.seq.items, keywords) : call(c, init, argc, args->as.seq.items);
         if (value && value->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(value));
         spy_release(value);
     }
-    spy_release(init); spy_release(args);
+    spy_release(init); spy_release(args); spy_release(keywords);
     return function;
 }
 /* Attribute step n's call on v, which it owns: its property's getter, the
@@ -23835,8 +23857,12 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         machine_push(c, m, result);
         return m;
     }
-    if (v->type == SPY_TUPLE) {
-        if (!(function = constructed(c, m, machine_pop(m), v, result, &env))) return m;
+    if (v->type == SPY_TUPLE || v->type == SPY_DICT) {
+        /* A class call's __new__ returned, its keywords' dict above the
+         * arguments when it had keywords (stack_keyword_call). */
+        SPYValue *keywords = v->type == SPY_DICT ? v : NULL;
+        if (keywords) v = machine_pop(m);
+        if (!(function = constructed(c, m, machine_pop(m), v, keywords, result, &env))) return m;
         Call *call = call_enter(c, function, env, m);
         if (!call) return m;
         call->m.outermost = CALL_INIT;

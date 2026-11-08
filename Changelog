@@ -75,6 +75,7 @@ Unreleased (0.8.0):
   __repr__ in repr(), str(), print() and f-strings of a list or tuple
 - calls with *args or **kwargs of methods, callable instances and classes
   with a Python __init__ no longer use the C stack
+- keyword calls of classes with a Python __new__ no longer use the C stack
 - in over a list or tuple calls its items' Python __eq__ without the C stack
   also for a number or str and in if and while tests; x in a dict or set
   tests about 9% faster
