@@ -21599,8 +21599,17 @@ static Block *push_block(SPYContext *c, Machine *m, int kind, Instruction *ins) 
     return b;
 }
 static void sort_restore(SPYContext *, SPYValue *, SPYValue *);
+/* in over y replaces a TypeError getting y's iterator, as
+ * _PySequence_IterSearch does. */
+static void contains_refused(SPYContext *c, SPYValue *y) {
+    if (!error_is(c, "TypeError")) return;
+    spy_clear_error(c);
+    errorf(c, "TypeError", "argument of type '%s' is not a container or iterable", type_name(y));
+}
 static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     Block b = m->blocks[--m->block_len];
+    /* An in whose search an __iter__ began (KEY_ITER) ends with its error. */
+    if (b.consumer && b.consumer->id == CONTAINS_ITEMS && b.consumer->keyed == KEY_ITER) contains_refused(c, b.value);
     while (m->len > b.depth) spy_release(machine_pop(m));
     if (b.kind == BLOCK_HANDLER || b.kind == BLOCK_CLEANUP) {
         spy_release(c->handled); c->handled = b.handled; b.handled = NULL;
@@ -22827,15 +22836,14 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
  * TypeError replaced as the native search replaces it. */
 static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y) {
     if (!resumable(y) && (!iter_function(c, y) || class_lookup(y->as.map.parent, "__contains__"))) return 0;
-    SPYValue *items = resumable(y) ? spy_retain(y) : get_iterator(c, y);
-    if (!items && error_is(c, "TypeError")) {
-        spy_clear_error(c);
-        errorf(c, "TypeError", "argument of type '%s' is not a container or iterable", type_name(y));
-    }
+    /* An __iter__ on the machine is the search's first call (KEY_ITER). */
+    SPYValue *items = spy_retain(y);
+    int keyed = consumer_source(c, &items);
+    if (!items) contains_refused(c, y);
     Consumer *s = items ? allocate(c, sizeof(*s)) : NULL;
     Block *block = s ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(s); spy_release(items); return 0; }
-    *s = (Consumer){.id = CONTAINS_ITEMS, .best = spy_retain(x), .count = op == O_NOTIN};
+    *s = (Consumer){.id = CONTAINS_ITEMS, .best = spy_retain(x), .count = op == O_NOTIN, .keyed = keyed};
     block->value = items; block->consumer = s;
     return 1;
 }
