@@ -1129,6 +1129,19 @@ int main(int argc, char **argv) {
                "    return total");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "got()", "got.py"), SPY_STOP_STEPS, &pauses)) == 30 * 19 + 400 && pauses > 3);
+    /* So does setattr() in a __setattr__, a property's setter and a
+     * descriptor's __set__; a plain store and a setter's error are native. */
+    execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"
+               "class Set:\n    def __get__(self, o, t): return o._s\n    def __set__(self, o, value): o._s = slow(value)\n"
+               "class Kept:\n    s = Set()\n    @property\n    def p(self): return self._p\n"
+               "    @p.setter\n    def p(self, value): self._p = slow(value)\n    narrow = property(lambda self: 1, lambda self: 1)\n"
+               "def kept():\n    h, k, total = Hook(), Kept(), 0\n"
+               "    for i in range(30):\n        setattr(h, 'x', i); setattr(k, 's', 1); setattr(k, 'p', 2); setattr(k, 'plain', 3)\n"
+               "        total += h.x + k.s + k.p + k.plain\n"
+               "    try: setattr(k, 'narrow', 1)\n    except TypeError: total += 100\n"
+               "    return total");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "kept()", "kept.py"), SPY_STOP_STEPS, &pauses)) == 435 + 30 * 6 + 100 && pauses > 3);
     /* print writes to the sys.stdout it began with, which __str__ rebinds. */
     SPYContext *muted = spy_context_new();
     Output shown = {0};

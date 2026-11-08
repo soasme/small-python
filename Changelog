@@ -83,7 +83,8 @@ Unreleased (0.8.0):
 - list.extend() and dict.update() take a generator's items without the C
   stack
 - code compiled while pausing is set pauses inside the property getter,
-  __get__, __getattribute__ or __getattr__ that getattr() calls
+  __get__, __getattribute__ or __getattr__ that getattr() calls, and the
+  __setattr__, property setter or __set__ that setattr() calls
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do

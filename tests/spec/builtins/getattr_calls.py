@@ -1,4 +1,4 @@
-# spec: PLS-315 19.3.13, 7.2.1
+# spec: PLS-315 19.3.11, 7.3.4, 7.3.5
 # description: getattr(object, name) reads the attribute as attribute
 # syntax does: a property's getter, a descriptor's __get__, a class's own
 # __getattribute__, or __getattr__ after an AttributeError, each of which

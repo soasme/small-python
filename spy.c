@@ -7969,13 +7969,15 @@ static int sort_call(Node *n) {
 /* Whether plain call n names print, or repr, str or format of one
  * argument, whose arguments' Python __str__, or a list's or tuple's items'
  * __repr__, the step of a call with its operands on the stack calls
- * (print_from, repr_call), or getattr of two, whose attribute's Python
- * getter it calls (getattr_call). */
+ * (print_from, repr_call), or getattr of two or setattr of three, whose
+ * attribute's Python getter or setter it calls (getattr_call,
+ * setattr_call). */
 static int text_call(Node *n) {
     if (n->a->kind != N_NAME || !n->args) return 0;
     const char *name = n->a->text;
     return !strcmp(name, "print") || (!n->args->next && (!strcmp(name, "repr") || !strcmp(name, "str") || !strcmp(name, "format"))) ||
-           (!strcmp(name, "getattr") && n->args->next && !n->args->next->next);
+           (!strcmp(name, "getattr") && n->args->next && !n->args->next->next) ||
+           (!strcmp(name, "setattr") && n->args->next && n->args->next->next && !n->args->next->next->next);
 }
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
 static int keyword_plain_call(Node *n) {
@@ -22463,6 +22465,7 @@ static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Node *n) {
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
 static SPYValue *getattr_call(SPYContext *, Machine *, SPYValue **);
+static SPYValue *setattr_call(SPYContext *, Machine *, SPYValue **);
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
     if (n->a->kind == N_ATTR && (!(n->flags & F_CALLEE_FIRST) || callee == c->unbound)) {
@@ -22530,6 +22533,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (calls && argc == 2 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_GETATTR)
         return getattr_call(c, m, env);
+    if (calls && argc == 3 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
+        callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_SETATTR)
+        return setattr_call(c, m, env);
     if (!convert && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
         /* So does isinstance() or issubclass() with a metaclass's method,
          * the tested value's class leaving the stack. */
@@ -23382,6 +23388,31 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, SPYValue **en
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
     return NULL;
+}
+/* setattr() of an instance, a str and a value, the step of a call with
+ * its callee and operands on m's stack: the Python __setattr__, property
+ * setter or __set__ a store calls (setter_function) is the call to enter
+ * (CALL_STORE), None the call's value on the stack; else the store at
+ * once, its None or NULL. */
+static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, SPYValue **env) {
+    SPYValue **slots = &m->stack[m->len - 4], *descriptor;
+    const char *name = slots[2]->as.string.data;
+    SPYValue *function = setter_function(c, slots[1], name, &descriptor, 0);
+    if (function) {
+        /* __setattr__ takes the name, a property's setter the instance and
+         * value, and __set__ the descriptor first. */
+        SPYValue *argv[] = {descriptor && descriptor->type == SPY_INSTANCE ? descriptor : slots[1], descriptor ? slots[1] : slots[2], slots[3]};
+        size_t skip = descriptor && descriptor->type == SPY_PROPERTY;
+        *env = function_env(c, function, 3 - skip, argv + skip, NULL, 0);
+        c->entering_init = function; c->entering_kind = CALL_STORE;
+    }
+    int status = function ? !*env : set_attribute(c, slots[1], name, slots[3]);
+    m->len -= 4;
+    release_all(4, slots);
+    if (status) return NULL;
+    if (!function) return spy_none(c);
+    machine_push(c, m, spy_none(c));
+    return spy_retain(c->types[SPY_STRING]);
 }
 /* A test's __bool__, a str() or repr() call's __str__ or __repr__, an
  * attribute step's __getattr__ or a class call's __new__ returned result,
