@@ -168,7 +168,14 @@ static const char *const programs[] = {
     "        return False\n"
     "q = [1, Q()]\n"
     "def eqs(a, b): return [len(a), a == b, [len(a), a == b, [len(a), a == b, [len(a), a == b, [len(a), a == b, [len(a), a == b]]]]]][1:]\n"
-    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q], eqs(q, [1, Q()]))\n",
+    "def same(a): return a\n"
+    "def finds(a): return [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), "
+    "same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), "
+    "[len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), "
+    "same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), "
+    "[len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), "
+    "same(a).count(1), [len(a), same(a).count(1), [same(a).count(1)]]]]]]]]]]]]]]]]]]]]]]]][1:]\n"
+    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q], eqs(q, [1, Q()]), finds(q))\n",
 
     "def gen(n):\n"
     "    try:\n"

@@ -7980,6 +7980,14 @@ static int text_call(Node *n) {
            (!strcmp(name, "getattr") && n->args->next && !n->args->next->next) ||
            (!strcmp(name, "setattr") && n->args->next && n->args->next->next && !n->args->next->next->next);
 }
+/* Whether call node n may be index, count or remove of one item, whose
+ * items' Python __eq__ the step of a call with its operands on the stack
+ * calls (search_call). */
+static int search_node(Node *n) {
+    if (n->a->kind != N_ATTR || !n->args || n->args->next || n->args->kind == N_STAR || n->args->kind == N_KEYWORD) return 0;
+    const char *name = n->a->b->text;
+    return !strcmp(name, "index") || !strcmp(name, "count") || !strcmp(name, "remove");
+}
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
 static int keyword_plain_call(Node *n) {
     size_t argc = 0, keywords = 0;
@@ -12954,6 +12962,23 @@ done:
     spy_release(base); spy_release(replaced);
     return copy;
 }
+/* The value of index, count or remove, as method, of seq, a list or tuple,
+ * its item found at index at, or none (SIZE_MAX), count finding tally. */
+static SPYValue *search_result(SPYContext *c, int method, SPYValue *seq, size_t at, int64_t tally) {
+    if (method == M_COUNT) return spy_int(c, tally);
+    if (at == SIZE_MAX) return spy_error(c, "ValueError", method == M_REMOVE ? "list.remove(x): x not in list" :
+                                         seq->type == SPY_TUPLE ? "tuple.index(x): x not in tuple" : "list.index(x): x not in list");
+    if (method == M_INDEX) return spy_int(c, (int64_t)at);
+    if (at < seq->as.seq.len) {
+        /* An __eq__ may have shortened the list. */
+        if (spend(c, (seq->as.seq.len - at) / 64)) return NULL;
+        SPYValue *item = seq->as.seq.items[at];
+        seq->as.seq.len--;
+        memmove(seq->as.seq.items + at, seq->as.seq.items + at + 1, (seq->as.seq.len - at) * sizeof(*seq->as.seq.items));
+        spy_release(item);
+    }
+    return spy_none(c);
+}
 /* Method number method of the builtin value self, with positional
  * arguments; name names it in an arity error. */
 static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue *name, size_t argc, SPYValue *const *argv) {
@@ -12989,25 +13014,11 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
                 int matches = item == argv[0] || equal(item, argv[0]);
                 spy_release(item);
                 if (c->error_type[0]) return NULL;
-                if (matches) {
-                    if (method == M_INDEX) return spy_int(c, (int64_t)i);
-                    if (method == M_REMOVE) {
-                        if (i < self->as.seq.len) {
-                            if (spend(c, (self->as.seq.len - i) / 64)) return NULL;
-                            item = self->as.seq.items[i]; self->as.seq.len--;
-                            memmove(self->as.seq.items + i, self->as.seq.items + i + 1, (self->as.seq.len - i) * sizeof(*self->as.seq.items));
-                            spy_release(item);
-                        }
-                        return spy_none(c);
-                    }
-                    count++;
-                }
+                if (matches && method != M_COUNT) return search_result(c, method, self, i, 0);
+                count += matches;
                 if (spend(c, 1)) return NULL;
             }
-            if (method == M_COUNT) return spy_int(c, count);
-            if (method == M_REMOVE) return spy_error(c, "ValueError", "list.remove(x): x not in list");
-            if (self->type == SPY_TUPLE) return spy_error(c, "ValueError", "tuple.index(x): x not in tuple");
-            return spy_error(c, "ValueError", "list.index(x): x not in list");
+            return search_result(c, method, self, SIZE_MAX, count);
         }
         if (argc != 1) break;
         SPYValue *index = NULL;
@@ -14065,7 +14076,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         break;
     case N_CALL:
         if (plain_call(n) && (n->a->kind == N_NAME || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls) &&
-            !sort_call(n) && (p->calls != PAUSING || !text_call(n))) {
+            !sort_call(n) && (p->calls != PAUSING || (!text_call(n) && !search_node(n)))) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
         if (plain_call(n) || keyword_plain_call(n)) {
@@ -22590,6 +22601,20 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
 }
 /* BC_CALLN of method call node n: its object, then its arguments, on the
  * stack; the method found as plain_callee finds it. */
+static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
+/* The list or tuple of which a call of callee, or of its native method
+ * method, with argc arguments is index, count or remove of one item,
+ * which search_call runs, *id that method; else NULL. */
+static ALWAYS_INLINE SPYValue *searched(SPYValue *callee, int method, size_t argc, int *id) {
+    SPYValue *seq = callee;
+    if (method < 0) {
+        if (callee->type != SPY_BOUND_METHOD || callee->as.bound.module) return NULL;
+        method = callee->as.bound.method; seq = callee->as.bound.self;
+    }
+    *id = method;
+    return (method == M_INDEX || method == M_COUNT || method == M_REMOVE) && argc == 1 &&
+           (seq->type == SPY_LIST || seq->type == SPY_TUPLE) ? seq : NULL;
+}
 static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc - 1], *object = argv[0], *self = NULL, *result = NULL;
     int method = -1;
@@ -22611,9 +22636,19 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
+    int id;
+    SPYValue *seq = callee && calls ? searched(callee, method, argc, &id) : NULL;
+    if (seq) {
+        /* index, count or remove of a list or tuple (search_call). */
+        SPYValue *x = spy_retain(argv[1]);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        SPYValue *function = search_call(c, m, id, x, seq, 0, 0, env, &result);
+        spy_release(x); spy_release(callee);
+        return function ? spy_retain(c->types[SPY_STRING]) : result;
+    }
     /* A consumer takes a native method's arguments after its object. */
     size_t from = skip + (method >= 0 && !skip), given = argc + 1 - from;
-    int id = callee ? consumer_of(c, callee, method, given, argv + from) : -1;
+    id = callee ? consumer_of(c, callee, method, given, argv + from) : -1;
     SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL, *start = id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
     if (callee && id < 0) result = call_plain(c, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -22794,6 +22829,46 @@ static size_t python_item(SPYContext *c, SPYValue *x, SPYValue *seq, size_t at) 
             break;
     }
     return at;
+}
+/* index, count or remove, as method, of x in seq, a list or tuple, from
+ * index at on, count having found tally before it: the Python __eq__ that
+ * comparing the next item whose comparison calls one (rich_function) with x
+ * calls first, the item's or x's, borrowed in c->entering_init with its env
+ * (CALL_OPERATOR), the items before it compared natively; x, seq, method,
+ * tally, the item's index, the two operands in the order of the call and
+ * c->unbound pushed on m's stack (operator_returned). Else NULL, the
+ * method's value in *value (search_result). */
+static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SPYValue *x, SPYValue *seq, size_t at,
+                                       int64_t tally, SPYValue **env, SPYValue **value) {
+    size_t found = SIZE_MAX;
+    *value = NULL;
+    for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len; at++) {
+        SPYValue *item = seq->as.seq.items[at], *function;
+        if (item != x && (instance || item->type == SPY_INSTANCE) &&
+            ((function = rich_function(c, item, x, R_EQ)) || (function = rich_function(c, x, item, R_EQ)))) {
+            SPYValue *left = rich_function(c, item, x, R_EQ) ? item : x, *right = left == x ? item : x;
+            SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+            if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(seq)) || machine_push(c, m, int_value(c, method)) ||
+                machine_push(c, m, int_value(c, tally)) || machine_push(c, m, int_value(c, (int64_t)at)) ||
+                machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound))) {
+                release_all(2, args); return NULL;
+            }
+            if ((*env = function_env(c, function, 2, args, NULL, 1))) {
+                c->entering_init = function; c->entering_kind = CALL_OPERATOR;
+                return function;
+            }
+            for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
+            return NULL;
+        }
+        spy_retain(item);
+        int same = item == x || equal(item, x);
+        spy_release(item);
+        if (c->error_type[0] || spend(c, 1)) return NULL;
+        if (same && method != M_COUNT) { found = at; break; }
+        tally += same;
+    }
+    *value = search_result(c, method, seq, found, tally);
+    return NULL;
 }
 /* The first pair from at on of a and b, two lists or two tuples,
  * whose comparison calls a Python __eq__ (rich_function), the pairs
@@ -23141,6 +23216,25 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
         int found = test ? truthy(test) : 0;
         spy_release(test); spy_release(left); spy_release(right);
+        if (ins->op == BC_CALLN) {
+            /* An item's comparison for index, count or remove (search_call):
+             * the method's value, or the next item's comparison. */
+            SPYValue *index = machine_pop(m), *tally = machine_pop(m), *method = machine_pop(m), *seq = machine_pop(m), *x = machine_pop(m);
+            SPYValue *env = NULL, *function = NULL, *value = NULL;
+            size_t at = (size_t)index->as.integer_data.small;
+            int id = (int)method->as.integer_data.small;
+            if (found && id != M_COUNT) value = c->error_type[0] ? NULL : search_result(c, id, seq, at, 0);
+            else if (!c->error_type[0]) function = search_call(c, m, id, x, seq, at + 1, tally->as.integer_data.small + found, &env, &value);
+            Call *call = function ? call_enter(c, spy_retain(function), env, m) : NULL;
+            spy_release(index); spy_release(tally); spy_release(method); spy_release(seq); spy_release(x);
+            if (call) {
+                call->m.outermost = CALL_OPERATOR;
+                return &call->m;
+            }
+            if (function) for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
+            machine_push(c, m, value);
+            return m;
+        }
         if (op == T_EQ || op == T_NE) {
             /* A pair's comparison for == (equal_call): unequal, or the next
              * pair's, or the native comparison of the rest. */

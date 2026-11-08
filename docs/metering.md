@@ -335,7 +335,10 @@ These run as machines on the heap, in one native activation of
   comparison chain, the `__eq__` that `==` or `!=` of two lists or two
   tuples, outside a comparison chain, calls on their items, of an instance
   after identical items or equal `None`, `bool`, `int`, `float` or `str`
-  ones, pair after pair, and the reflected operator or comparison method of an
+  ones, pair after pair, the `__eq__` that `index`, `count` or `remove` of
+  one item in a list or tuple calls on its items, in a call whose object
+  holds a call or in code compiled while pausing, and the reflected
+  operator or comparison method of an
   instance on the right, called once the left operand, an `int`, `bool`,
   `float` or instance, declines, or first when the right operand's class
   is a subclass of the left's;

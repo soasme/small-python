@@ -85,6 +85,8 @@ Unreleased (0.8.0):
 - == and != of lists or tuples call their items' Python __eq__ without the C
   stack, and run about a quarter faster; tuples of different lengths compare
   their common items first, as CPython's do
+- code compiled while pausing is set pauses inside the items' Python __eq__
+  in index(), count() and remove() of a list or tuple
 - code compiled while pausing is set pauses inside the property getter,
   __get__, __getattribute__ or __getattr__ that getattr() calls, and the
   __setattr__, property setter or __set__ that setattr() calls
