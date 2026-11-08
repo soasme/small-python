@@ -13814,8 +13814,13 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * sorter (key_call). A min or max by key keeps its best item and, in
  * result, that item's key, and the item whose key its callee is computing. next(), __next__ and
  * send (B_NEXT) keep their default in result, the value to send and then
- * the value the generator returned in sent, and the item it gave in best. */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER };
+ * the value the generator returned in sent, and the item it gave in best.
+ * A sum on the machine (adds) adds result and item by a Python method
+ * (KEY_ADD): the one to call in best, the operator's method of phase
+ * (operator_call), with item first when swapped. */
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD };
+/* A sum's stages (sum_compensated). */
+enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
 /* A sort that stops at each comparison (sort_step). */
 struct Sorter {
@@ -13826,9 +13831,9 @@ struct Sorter {
     SortItem items[];
 };
 typedef struct {
-    int id, compensating, method, keyed, descending;
+    int id, compensating, method, keyed, descending, adds, phase, swapped, stage;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent;
-    double total, compensation;
+    double total, compensation, imag, imag_compensation;
     size_t count, star;
     struct Sorter *sorter;
 } Consumer;
@@ -22038,7 +22043,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
-                           .sent = sent, .keyed = keyed};
+                           .sent = sent, .keyed = keyed, .adds = id == B_SUM};
     block->value = generator; block->consumer = consumer;
     if (id == B_CLOSE || id == B_THROW) {
         /* A close or throw raises its exception in at the yield (resumed_with),
@@ -22191,6 +22196,10 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     mem_free(consumer); spy_release(keys);
     return -1;
 }
+/* Which of an operator's special method calls one is: x's own first, y's
+ * reflected one first, or the last. */
+enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
+static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, SPYValue **, SPYValue **);
 /* The key function the consumer atop m calls next, owned, with its env;
  * or NULL when its items are all taken, then its value on the stack, or
  * an error. */
@@ -22198,6 +22207,13 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
     SPYValue *items = top->value, *item, *result;
+    if (s->keyed == KEY_ADD) {
+        SPYValue *function = s->best, *args[] = {spy_retain(s->swapped ? s->item : s->result), spy_retain(s->swapped ? s->result : s->item)};
+        s->best = NULL;
+        if ((*env = function_env(c, function, 2, args, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
     if (s->keyed == KEY_ITER) {
         SPYValue *function = iter_function(c, items);
         item = spy_retain(items);
@@ -22244,6 +22260,21 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
+    if (s->keyed == KEY_ADD) {
+        /* The sum, or the last method to call after a declined one. */
+        SPYValue *x = s->result, *y = s->item, *self;
+        if (key == c->not_implemented) {
+            spy_release(key);
+            SPYValue *function = operator_declined(c, operator_of('+'), '+', x, y, s->phase, &self, &key);
+            if (function) {
+                s->best = spy_retain(function); s->phase = OPERATOR_LAST; s->swapped = self == y;
+                return 0;
+            }
+        }
+        spy_release(x); spy_release(y);
+        s->result = key; s->item = NULL; s->keyed = 0;
+        return key ? 0 : -1;
+    }
     if (s->keyed == KEY_ITER) {
         /* The iterator the instance's __iter__ returned is the source. */
         SPYValue *iterator = iterator_returned(c, top->value, key);
@@ -22445,13 +22476,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
-/* Whether callee is exec(), eval(), divmod() or pow(), whose call may run
- * on the machine (builtin_call). */
+/* Whether callee is exec(), eval(), divmod(), pow() or sum(), whose call
+ * may run on the machine (builtin_call). */
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
-    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64, "builtin mask");
+    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
     return callee->type == SPY_NATIVE && callee->as.native.call == builtin && id < 64 &&
-           (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW));
+           (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
+                                 UINT64_C(1) << B_SUM));
 }
 /* Prepare unit, a module body with statements, to run in env on the
  * machine: its docstring stored and its body compiled; -1 on an error. */
@@ -22485,12 +22517,35 @@ static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t a
     return spy_retain(c->types[SPY_STRING]);
 }
 static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
+/* sum() of argc arguments argv, an iterable and its start, which it
+ * takes: the total, or NULL with no error when the sum of the items so
+ * far and the next, one of them an instance, goes on on m (KEY_ADD). */
+static NO_INLINE SPYValue *sum_call(SPYContext *c, Machine *m, size_t argc, SPYValue **argv) {
+    Consumer s = {.id = B_SUM, .adds = 1, .result = argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)};
+    SPYValue *iterator = get_iterator(c, argv[0]);
+    while (iterator && !c->error_type[0] && !pass(c)) {
+        SPYValue *item = iterator_next(c, iterator);
+        if (!item || consumer_add(c, &s, item) || s.keyed) break;
+    }
+    release_all(argc, argv);
+    Consumer *consumer = s.keyed ? allocate(c, sizeof(*consumer)) : NULL;
+    Block *block = consumer ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+    if (block) {
+        *consumer = s;
+        block->value = iterator; block->consumer = consumer;
+        return NULL;
+    }
+    mem_free(consumer); spy_release(s.item); spy_release(iterator);
+    return consumer_end(c, &s);
+}
 /* A call of call node n of callee (machine_builtin) with argc arguments
  * argv, which it takes with callee: exec() and eval() as source_call; the
  * Python method divmod() or pow() of two (and a None modulus) calls
  * first, entered as an operator's (operator_call) with its env and
  * c->entering_init the method, CALL_OPERATOR, its operator pushed with the
- * phase, str's class then; else the call's value. */
+ * phase, str's class then; sum() adds on m (consume, sum_call), NULL
+ * with no error, when the total or an item is an instance; else
+ * the call's value. */
 static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv,
                                         SPYValue **env) {
     int id = (int)(intptr_t)callee->as.native.data;
@@ -22501,6 +22556,18 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
         return result;
     }
     relocate(c, n);
+    if (id == B_SUM) {
+        int consumer = consumer_of(c, callee, -1, argc, argv);
+        if (consumer >= 0) consume(c, m, consumer, callee, -1, NULL, argv[0], argc > 1 ? argv[1] : NULL);
+        else if (argc && argc <= 2 && (argc == 1 || (!builtin_value(c, argv[1], SPY_STRING) && !builtin_value(c, argv[1], SPY_BYTES) &&
+                                !builtin_value(c, argv[1], SPY_BYTEARRAY)))) result = sum_call(c, m, argc, argv);
+        else {
+            result = call_plain(c, callee, -1, n, argc, argv);
+            release_all(argc, argv);
+        }
+        spy_release(callee);
+        return consumer >= 0 ? NULL : result;
+    }
     if (argc == 2 + (id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
         (argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_INSTANCE)) {
         Instruction called = {.op = BC_BINARY, .arg = id == B_POW ? T_POW : O_DIVMOD};
@@ -23180,9 +23247,6 @@ static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *
     return 1;
 }
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
-/* Which of an operator's special method calls one is: x's own first, y's
- * reflected one first, or the last. */
-enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
 /* An operator's call pushes its operands x and y and its phase. */
 static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
     return machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, phase));
@@ -23412,6 +23476,24 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
     machine_push(c, m, value);
     return pc;
 }
+/* After the method of phase that operator o, or the comparison op when o
+ * is NULL, called on x and y declined: the method to call last, y's
+ * reflected one after x's unless y's class is x's for an operator, x's own
+ * after y's first, a Python function on the machine, borrowed, its self
+ * in *self; else NULL, the rest of the operation done in C into *result. */
+static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, int op, SPYValue *x, SPYValue *y, int phase,
+                                             SPYValue **self, SPYValue **result) {
+    int rich = rich_kind(op);
+    SPYValue *other = phase == OPERATOR_FIRST ? x : y;
+    *self = other == x ? y : x; *result = NULL;
+    const char *name = phase == OPERATOR_LAST || (o && phase == OPERATOR_FIRST && value_class(c, x) == value_class(c, y)) ? NULL :
+                       o ? (*self == y ? o->reflected : o->direct) : rich_names[*self == y ? rich_reflected[rich] : rich];
+    SPYValue *function = name ? item_function(c, *self, name) : NULL;
+    if (function || c->error_type[0]) return function;
+    *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
+    if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
+    return NULL;
+}
 /* A special method operator_call entered returned result into operator
  * step ins, its operands and phase on m's stack; NotImplemented from a
  * binary operator or comparison goes on with the other operand's method,
@@ -23503,19 +23585,13 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     } else if (kind != OPERATE_INDEX && kind != OPERATE_UNARY && result == c->not_implemented) {
         spy_release(result);
         const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
-        int rich = rich_kind(op);
         if (phase == OPERATOR_FIRST && kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
             /* A declined in-place method leaves the plain operator. */
             result = binary(c, o->token, x, y);
         } else {
-            /* After x's method, y's reflected one, unless y's class is x's
-             * for an operator; after y's first, x's own. */
-            SPYValue *self = phase == OPERATOR_FIRST ? y : x, *other = self == x ? y : x;
-            const char *name = phase == OPERATOR_LAST || (o && phase == OPERATOR_FIRST && value_class(c, x) == value_class(c, y)) ? NULL :
-                               o ? (self == y ? o->reflected : o->direct) : rich_names[self == y ? rich_reflected[rich] : rich];
-            SPYValue *function = name ? item_function(c, self, name) : NULL;
+            SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result);
             if (function && !operator_push(c, m, x, y, OPERATOR_LAST)) {
-                SPYValue *args[] = {spy_retain(self), spy_retain(other)};
+                SPYValue *args[] = {spy_retain(self), spy_retain(self == x ? y : x)};
                 SPYValue *env = function_env(c, function, 2, args, NULL, 1);
                 Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
                 if (call) {
@@ -23525,11 +23601,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
                 }
                 for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
                 result = NULL;
-            } else if (!c->error_type[0]) {
-                result = !name ? NULL : o ? try_operator(c, self, name, other, NULL, 0) :
-                         rich_method(c, self == y ? rich_reflected[rich] : rich, self, other);
-                if (!result && !c->error_type[0]) result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
-            } else result = NULL;
+            } else if (function) result = NULL;
         }
         if (kind == OPERATE_INPLACE && !result) augmented_error(c, o->token, x, y);
     }
@@ -24850,7 +24922,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
         value = m->blocks[m->block_len - 1].value;
-        if (!resumable(value) && (value->type != SPY_COROUTINE || !suspended(value))) {
+        if (m->blocks[m->block_len - 1].consumer->keyed || (!resumable(value) && (value->type != SPY_COROUTINE || !suspended(value)))) {
             m->pc = pc;
             callee_env = NULL;
             if (m->blocks[m->block_len - 1].consumer->keyed) {
@@ -29538,13 +29610,83 @@ static const char *attribute_slot_name(SPYContext *c, const char *owner, const c
     if (!name) { errorf(c, "TypeError", "attribute name must be string, not '%s'", type_name(argv[1])); return NULL; }
     return name->as.string.data;
 }
-/* A sum's compensated float total, as its result. */
+/* The Python method that x + y calls first, as operator_call finds it,
+ * a function on the machine, borrowed, its phase in *phase; or NULL. */
+static SPYValue *add_function(SPYContext *c, SPYValue *x, SPYValue *y, int *phase) {
+    *phase = OPERATOR_LAST;
+    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT) return item_function(c, y, "__radd__");
+    if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
+    SPYValue *cls = x->as.map.parent, *right = value_class(c, y), *function;
+    if (right != cls && subclass(right, cls) && class_lookup(right, "__radd__") != class_lookup(cls, "__radd__")) {
+        *phase = OPERATOR_REFLECTED;
+        return item_function(c, y, "__radd__");
+    }
+    *phase = OPERATOR_FIRST;
+    function = class_lookup(cls, "__add__");
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Neumaier's compensated addition of x to the sum *total, whose lost low
+ * bits *compensation keeps, and the value of such a sum. */
+static ALWAYS_INLINE void compensated_add(double *total, double *compensation, double x) {
+    double t = *total + x;
+    *compensation += fabs(*total) >= fabs(x) ? (*total - t) + x : (x - t) + *total;
+    *total = t;
+}
+static double compensated(double total, double compensation) {
+    return compensation && isfinite(compensation) ? total + compensation : total;
+}
+/* A sum's compensated float or complex total, as its result. */
 static void consumer_settle(SPYContext *c, Consumer *s) {
     if (!s->compensating) return;
     s->compensating = 0;
-    if (s->compensation && isfinite(s->compensation)) s->total += s->compensation;
+    double real = compensated(s->total, s->compensation), imag = compensated(s->imag, s->imag_compensation);
+    int pair = s->result->type == SPY_COMPLEX;
     spy_release(s->result);
-    s->result = spy_float(c, s->total);
+    s->result = pair ? complex_new(c, complex_parts(real, imag)) : spy_float(c, real);
+}
+/* The total of sum s, in its stage (SUM_INT, ...), takes item: in the
+ * float or complex stage a float, an int or an int subclass's instance,
+ * and in the complex one a complex or a float subclass's instance, added
+ * with compensation and released, 1, or -1 on an error; else 0, for item
+ * to be added with +, which leaves the stage unless it is the int stage
+ * and item an int or bool. A stage the total is not in is passed. */
+static int sum_compensated(SPYContext *c, Consumer *s, SPYValue *item) {
+    static const int types[] = {SPY_INT, SPY_FLOAT, SPY_COMPLEX};
+    while (s->stage < SUM_PLAIN && s->result->type != types[s->stage]) s->stage++;
+    int pair = s->stage == SUM_COMPLEX;
+    double real, imag = 0;
+    SPYValue *number;
+    if (s->stage == SUM_PLAIN) return 0;
+    if (s->stage == SUM_INT) {
+        if (item->type != SPY_INT && item->type != SPY_BOOL) s->stage++;
+        else if (!item->as.integer_data.big && !s->result->as.integer_data.big) {
+            /* Small ints add here unless they overflow. */
+            int64_t a = s->result->as.integer_data.small, b = item->as.integer_data.small;
+            if (b > 0 ? a > INT64_MAX - b : a < INT64_MIN - b) return 0;
+            spy_release(item); spy_release(s->result);
+            return (s->result = int_value(c, a + b)) ? 1 : -1;
+        }
+        return 0;
+    }
+    if (item->type == SPY_FLOAT) real = item->as.real;
+    else if (pair && item->type == SPY_COMPLEX) { real = creal(item->as.number); imag = cimag(item->as.number); }
+    else if ((number = builtin_value(c, item, SPY_INT))) {
+        if (isinf(real = integer_double(number))) {
+            spy_release(item);
+            spy_error(c, "OverflowError", "int too large to convert to float");
+            return -1;
+        }
+    } else if (pair && (number = builtin_value(c, item, SPY_FLOAT))) real = number->as.real;
+    else { s->stage++; return 0; }
+    spy_release(item);
+    if (!s->compensating) {
+        s->compensating = 1; s->compensation = s->imag_compensation = 0;
+        s->total = pair ? creal(s->result->as.number) : s->result->as.real;
+        s->imag = pair ? cimag(s->result->as.number) : 0;
+    }
+    compensated_add(&s->total, &s->compensation, real);
+    if (pair) compensated_add(&s->imag, &s->imag_compensation, imag);
+    return 1;
 }
 /* Consumer s takes item: 0 to go on, 1 when its result is known (any, all),
  * -1 on an error. A float total accumulates with Neumaier's compensation,
@@ -29578,16 +29720,14 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         return status ? status : s->id == UNPACK_ITEMS && s->star == SIZE_MAX && s->result->as.seq.len > s->count;
     }
-    if (s->id == B_SUM && s->result && s->result->type == SPY_FLOAT &&
-        (item->type == SPY_FLOAT || ((item->type == SPY_INT || item->type == SPY_BOOL) && !item->as.integer_data.big))) {
-        if (!s->compensating) { s->total = s->result->as.real; s->compensation = 0; s->compensating = 1; }
-        if (item->type == SPY_FLOAT) {
-            double x = item->as.real, t = s->total + x;
-            s->compensation += fabs(s->total) >= fabs(x) ? (s->total - t) + x : (x - t) + s->total;
-            s->total = t;
-        } else s->total += (double)item->as.integer_data.small;
+    if (s->compensating && item->type == SPY_FLOAT) {
+        compensated_add(&s->total, &s->compensation, item->as.real);
         spy_release(item);
         return 0;
+    }
+    if (s->id == B_SUM && s->result && s->stage < SUM_PLAIN) {
+        int status = sum_compensated(c, s, item);
+        if (status) return status < 0 ? -1 : 0;
     }
     if (s->id == B_MIN || s->id == B_MAX) {
         /* The best item so far, replaced by one that compares beyond it. */
@@ -29604,6 +29744,12 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         if (c->error_type[0]) return -1;
         if (truth != (s->id == B_ALL)) { s->result = spy_bool(c, truth); return 1; }
+        return 0;
+    }
+    SPYValue *function = s->adds && s->result && (s->result->type == SPY_INSTANCE || item->type == SPY_INSTANCE) ?
+                         add_function(c, s->result, item, &s->phase) : NULL;
+    if (function) {
+        s->best = spy_retain(function); s->item = item; s->keyed = KEY_ADD; s->swapped = s->phase != OPERATOR_FIRST;
         return 0;
     }
     SPYValue *next = s->result ? binary(c, '+', s->result, item) : NULL;

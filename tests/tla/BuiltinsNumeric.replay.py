@@ -8,6 +8,13 @@ class R:
     def __abs__(self): return "abs"
 class I:
     def __index__(self): return 10
+class Int(int): pass
+class F(float): pass
+class Z:
+    def __radd__(self, other): return 0.0
+class A:
+    def __add__(self, other): return ("add", other)
+    def __radd__(self, other): return ("radd", other)
 class D:
     def __divmod__(self, other): return "divmod"
     def __rpow__(self, other): return "rpow"
@@ -52,6 +59,9 @@ SOURCES = {
     "pow_keywords": 'result = pow(base=2, exp=10, mod=1000)',
     "pow_zero_zero": 'result = (pow(0, 0), pow(0.0, 0.0), 0 ** 0)',
     "sum_floats": 'result = (sum([0.1] * 10), sum([0.1] * 10) == 1.0, sum([1e100, 1.0, -1e100]))',
+    "sum_compensated": 'result = (sum([1e100, 1, -1e100]), sum([1e100, True, -1e100]), sum([1e100j, 1j, -1e100j]), sum([1e100 + 0j, 1, -1e100]))',
+    "sum_stages": 'result = (sum([Int(1), 1e100, 1.0, -1e100]), sum([1e100, F(1.0), 1.0, -1e100]), sum([1, Z(), 1e100, 1.0, -1e100]), sum([1e100, 1j, 1.0, -1e100]), sum([1e100, 1.0, -1e100], True))',
+    "sum_add": 'result = sum([A()]) + sum([0.5], A())',
     "sum_strings": "result = sum(['a', 'b'], '')",
     "sum_bytes": "result = sum([b'a'], b'')",
     "sum_start_kw": 'result = (sum([1, 2], start=10), sum([[1], [2]], []))',

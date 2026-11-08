@@ -7,7 +7,9 @@
 (* to the nearest multiple of 10 ** -ndigits, ties to even, returning an   *)
 (* int without ndigits (or __round__); bin(), oct(), and hex() of          *)
 (* __index__ values; min() and max() over an iterable or several arguments *)
-(* with key and default; sum() from start, refusing str and bytes starts;  *)
+(* with key and default; sum() from start, refusing str and bytes starts,  *)
+(* compensating its float and complex stages, each left for good at an     *)
+(* item it adds by +, as it adds an instance;                              *)
 (* and the int(), float(), complex(), and bool() constructors with their   *)
 (* string forms and argument errors.                                       *)
 (*                                                                         *)
@@ -52,7 +54,7 @@ Based(n, base, prefix) == "'" \o (IF n < 0 THEN "-" ELSE "") \o prefix \o Digits
 Cases == {"round_half_even", "round_float_digits", "round_none", "round_hook", "round_no_hook", "round_inf",
           "round_nan", "round_bad_ndigits", "abs_hook", "abs_bad", "divmod_float", "divmod_hook",
           "divmod_complex", "divmod_zero_float", "pow_float", "pow_mod_float", "pow_keywords",
-          "pow_zero_zero", "sum_floats", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
+          "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
           "min_first_of_equal", "max_mixed", "bin_index", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "int_forms",
@@ -102,6 +104,9 @@ Case(c) ==
       [] c = "pow_keywords" -> "24"
       [] c = "pow_zero_zero" -> "(1, 1.0, 1)"
       [] c = "sum_floats" -> "(1.0, True, 1.0)"
+      [] c = "sum_compensated" -> "(1.0, 1.0, 1j, (1+0j))"
+      [] c = "sum_stages" -> "(0.0, 0.0, 1.0, (1+1j), 0.0)"
+      [] c = "sum_add" -> "('radd', 0, 'add', 0.5)"
       [] c = "sum_strings" -> "TypeError: sum() can't sum strings [use ''.join(seq) instead]"
       [] c = "sum_bytes" -> "TypeError: sum() can't sum bytes [use b''.join(seq) instead]"
       [] c = "sum_start_kw" -> "(13, [1, 2])"

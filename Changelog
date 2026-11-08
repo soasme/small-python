@@ -77,6 +77,9 @@ Unreleased (0.8.0):
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their
   reflected methods without the C stack
+- sum() calls an instance's Python __add__ or __radd__ without the C stack
+- sum() compensates int items in a float total and a complex total's parts,
+  and leaves its int, float and complex stages as CPython's does
 - code compiled while pausing is set pauses inside the items' Python
   __repr__ in repr(), str(), print() and f-strings of a list or tuple
 - calls with *args or **kwargs of methods, callable instances and classes
