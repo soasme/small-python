@@ -3934,7 +3934,8 @@ enum {
     T_POWEQ, T_FLOOREQ, T_LSHIFTEQ, T_RSHIFTEQ, T_ANDEQ, T_OREQ, T_XOREQ,
     T_WALRUS, T_ELLIPSIS, T_ARROW,
     O_AND, O_OR, O_NOT, O_IN, O_NOTIN, O_IS, O_ISNOT,
-    T_LEXERROR /* where the lexer failed; see parse_normalized */
+    T_LEXERROR /* where the lexer failed; see parse_normalized */,
+    O_DIVMOD /* divmod(), an operator only to the machine (builtin_operator) */
 };
 enum {
     N_INT, N_FLOAT, N_IMAG, N_STRING, N_BYTES, N_NAME, N_NONE, N_BOOL, N_LIST, N_TUPLE, N_DICT,
@@ -9910,12 +9911,14 @@ static const Operator operators[] = {
     {'^', "__xor__", "__rxor__", "__ixor__"}
 };
 _Static_assert(sizeof(operators) / sizeof(*operators) == T_XOREQ - T_ADDEQ + 1, "operator table");
+static const Operator divmod_operator = {O_DIVMOD, "__divmod__", "__rdivmod__", NULL};
 static SPYValue *binary_special(SPYContext *, const Operator *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *view_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *set_intersect_iterable(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *percent_format(SPYContext *, SPYValue *, SPYValue *);
 /* The entry of binary operator op, which the table holds. */
 static const Operator *operator_of(int op) {
+    if (op == O_DIVMOD) return &divmod_operator;
     const Operator *o = operators;
     while (o->token != op) o++;
     return o;
@@ -9954,8 +9957,10 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     return binary_builtin(c, op, a, b);
 }
+static SPYValue *divmod_declined(SPYContext *, SPYValue *, SPYValue *);
 /* Binary op on a and b once their special methods declined it. */
 static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if (op == O_DIVMOD) return divmod_declined(c, a, b);
     if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
     if (op == '|' && dictionary_value(c, a) && dictionary_value(c, b)) return dict_union(c, a, b);
     if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
@@ -22440,10 +22445,13 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
-/* Whether callee is exec() or eval(). */
-static ALWAYS_INLINE int source_builtin(SPYValue *callee) {
-    return callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
-           (callee->as.native.data == (void *)(intptr_t)B_EXEC || callee->as.native.data == (void *)(intptr_t)B_EVAL);
+/* Whether callee is exec(), eval(), divmod() or pow(), whose call may run
+ * on the machine (builtin_call). */
+static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
+    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64, "builtin mask");
+    uintptr_t id = (uintptr_t)callee->as.native.data;
+    return callee->type == SPY_NATIVE && callee->as.native.call == builtin && id < 64 &&
+           (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW));
 }
 /* Prepare unit, a module body with statements, to run in env on the
  * machine: its docstring stored and its body compiled; -1 on an error. */
@@ -22476,6 +22484,35 @@ static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t a
     spy_release(unit);
     return spy_retain(c->types[SPY_STRING]);
 }
+static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
+/* A call of call node n of callee (machine_builtin) with argc arguments
+ * argv, which it takes with callee: exec() and eval() as source_call; the
+ * Python method divmod() or pow() of two (and a None modulus) calls
+ * first, entered as an operator's (operator_call) with its env and
+ * c->entering_init the method, CALL_OPERATOR, its operator pushed with the
+ * phase, str's class then; else the call's value. */
+static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv,
+                                        SPYValue **env) {
+    int id = (int)(intptr_t)callee->as.native.data;
+    SPYValue *result, *function = NULL;
+    if (id == B_EXEC || id == B_EVAL) {
+        result = source_call(c, callee, argc, argv, env);
+        spy_release(callee);
+        return result;
+    }
+    relocate(c, n);
+    if (argc == 2 + (id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
+        (argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_INSTANCE)) {
+        Instruction called = {.op = BC_BINARY, .arg = id == B_POW ? T_POW : O_DIVMOD};
+        function = operator_call(c, m, &called, argv[0], argv[1], env);
+    }
+    if (function) {
+        c->entering_init = function; spy_release(function);
+        result = spy_retain(c->types[SPY_STRING]);
+    } else result = c->error_type[0] ? NULL : call_plain(c, callee, -1, n, argc, argv);
+    release_all(argc, argv); spy_release(callee);
+    return result;
+}
 /* BC_CALLF: plain call node n, whose operands need no steps of their own;
  * or NULL with no error when a consumer of a generator began on m. */
 static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
@@ -22496,11 +22533,7 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         (callee->type == SPY_NATIVE && ((argc == 1 && argv[0]->type == SPY_INSTANCE) ||
                                         (argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
-    if (method < 0 && source_builtin(callee)) {
-        SPYValue *result = source_call(c, callee, argc, argv, env);
-        spy_release(callee);
-        return result;
-    }
+    if (method < 0 && machine_builtin(callee)) return builtin_call(c, m, n, callee, argc, argv, env);
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
@@ -22653,13 +22686,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
-    if (calls && source_builtin(callee) && argc <= 3) {
+    if (calls && machine_builtin(callee) && argc <= 3) {
         SPYValue *args[3];
         memcpy(args, argv, argc * sizeof(*argv));
         m->len -= argc + 1;
-        result = source_call(c, callee, argc, args, env);
-        spy_release(callee);
-        return result;
+        return builtin_call(c, m, n, callee, argc, args, env);
     }
     int id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
@@ -23342,7 +23373,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             self = y; other = x; phase = OPERATOR_REFLECTED;
         } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_function(c, x, y, rich);
     }
-    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, phase)) return NULL;
+    /* A builtin's operator (builtin_operator) goes with the phase. */
+    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, ins->node ? phase : phase | op << 2)) return NULL;
     SPYValue *args[] = {spy_retain(self), spy_retain(other)};
     if ((*env = function_env(c, function, 2 - (kind == OPERATE_UNARY), args, NULL, 1))) return spy_retain(function);
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
@@ -23459,6 +23491,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
     int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small;
     spy_release(marker);
+    if (phase >> 2) { op = phase >> 2; kind = OPERATE_BINARY; phase &= 3; }
     if (phase == OPERATOR_INDEX) {
         SPYValue *index = index_result(c, y, result);
         result = index ? operation(c, ins, x, index) : NULL;
@@ -29759,6 +29792,20 @@ static SPYValue *run_source(SPYContext *c, int eval, SPYValue *env, SPYValue *un
     if (return_value && r.value) return r.value;
     spy_release(r.value); return spy_none(c);
 }
+/* divmod(a, b) once their special methods declined it: of the numbers
+ * or of the builtin values of instances of number subclasses. */
+static SPYValue *divmod_declined(SPYContext *c, SPYValue *a, SPYValue *b) {
+    SPYValue *x = a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a;
+    SPYValue *y = b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b, *quotient = NULL, *remainder = NULL;
+    if (is_int(x) && is_int(y)) {
+        if (integer_divmod(c, x, y, &quotient, &remainder)) return NULL;
+    } else if (is_number(x) && is_number(y)) {
+        quotient = binary(c, T_FLOORDIV, x, y);
+        if (quotient) remainder = binary(c, '%', x, y);
+    } else return operand_error(c, "divmod()", a, b, NULL);
+    SPYValue *result = quotient && remainder ? spy_tuple(c, 2, (SPYValue *[]){quotient, remainder}) : NULL;
+    spy_release(quotient); spy_release(remainder); return result;
+}
 static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
     int id = (int)(intptr_t)data;
     SPYValue *a = argc ? argv[0] : NULL;
@@ -29930,8 +29977,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         if (!modulus) return binary(c, T_POW, a, b);
         SPYValue *operands[] = {a, b, modulus};
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
-            const Operator power = {T_POW, "__pow__", "__rpow__", "__ipow__"};
-            SPYValue *result = binary_special(c, &power, a, b, modulus);
+            SPYValue *result = binary_special(c, operator_of(T_POW), a, b, modulus);
             if (result || c->error_type[0]) return result;
             if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
             if (b->type == SPY_INSTANCE && b->as.map.base) b = b->as.map.base;
@@ -29951,22 +29997,12 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
     }
     case B_DIVMOD: {
         if (argc != 2) goto arity;
-        SPYValue *b = argv[1], *quotient = NULL, *remainder = NULL, *left = a, *right = b;
+        SPYValue *b = argv[1];
         if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || meta_class(a) || meta_class(b)) {
-            const Operator operation = {0, "__divmod__", "__rdivmod__", NULL};
-            SPYValue *result = binary_special(c, &operation, a, b, NULL);
+            SPYValue *result = binary_special(c, &divmod_operator, a, b, NULL);
             if (result || c->error_type[0]) return result;
-            if (a->type == SPY_INSTANCE && a->as.map.base) a = a->as.map.base;
-            if (b->type == SPY_INSTANCE && b->as.map.base) b = b->as.map.base;
         }
-        if (is_int(a) && is_int(b)) {
-            if (integer_divmod(c, a, b, &quotient, &remainder)) return NULL;
-        } else if (is_number(a) && is_number(b)) {
-            quotient = binary(c, T_FLOORDIV, a, b);
-            if (quotient) remainder = binary(c, '%', a, b);
-        } else return operand_error(c, "divmod()", left, right, NULL);
-        SPYValue *result = quotient && remainder ? spy_tuple(c, 2, (SPYValue *[]){quotient, remainder}) : NULL;
-        spy_release(quotient); spy_release(remainder); return result;
+        return divmod_declined(c, a, b);
     }
     case B_COMPILE: case B_EVAL: case B_EXEC: case B_EXEC_CLOSURE: {
         SPYValue *env = NULL, *unit = source_unit(c, id, argc, argv, &env);

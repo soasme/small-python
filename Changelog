@@ -75,6 +75,8 @@ Unreleased (0.8.0):
   __round__ or __reversed__ without the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
+- divmod() and pow() call an instance's Python __divmod__, __pow__ or their
+  reflected methods without the C stack
 - code compiled while pausing is set pauses inside the items' Python
   __repr__ in repr(), str(), print() and f-strings of a list or tuple
 - calls with *args or **kwargs of methods, callable instances and classes
