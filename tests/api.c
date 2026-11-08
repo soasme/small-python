@@ -1114,6 +1114,21 @@ int main(int argc, char **argv) {
                "    return len(''.join(out))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "reprs()", "reprs.py"), SPY_STOP_STEPS, &pauses)) == 5 * 19 + 3 + 6 && pauses > 1);
+    /* getattr() pauses in a property's getter, __getattr__, __getattribute__
+     * and a descriptor's __get__; their errors, and arity errors, propagate. */
+    execute(c, "class Got:\n    @property\n    def p(self): return slow(3)\n"
+               "    def __getattr__(self, name):\n        if name == 'gone': raise AttributeError(slow(name))\n        return slow(4)\n"
+               "class Narrow:\n    def __getattr__(self): pass\n"
+               "class Guard:\n    def __getattribute__(self, name): return slow(5)\n"
+               "class Get:\n    def __get__(self, o, t): return slow(6)\n"
+               "class Holder:\n    d = Get()\n    own = 1\n    bad = property(lambda: 1)\n"
+               "def got():\n    g, total = Got(), 0\n"
+               "    for i in range(30): total += getattr(g, 'p') + getattr(g, 'x') + getattr(Guard(), 'y') + getattr(Holder(), 'd') + getattr(Holder(), 'own')\n"
+               "    for name, obj in (('gone', g), ('bad', Holder()), ('z', Narrow()), ('missing', Holder())):\n"
+               "        try: getattr(obj, name)\n        except (AttributeError, TypeError): total += 100\n"
+               "    return total");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "got()", "got.py"), SPY_STOP_STEPS, &pauses)) == 30 * 19 + 400 && pauses > 3);
     /* print writes to the sys.stdout it began with, which __str__ rebinds. */
     SPYContext *muted = spy_context_new();
     Output shown = {0};

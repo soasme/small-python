@@ -311,7 +311,8 @@ These run as machines on the heap, in one native activation of
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list or
-  tuple;
+  tuple, and the property getter, `__get__`, `__getattribute__` or
+  `__getattr__` that `getattr` of two arguments calls;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, and tests of a dict or set; the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or

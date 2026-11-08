@@ -7969,11 +7969,13 @@ static int sort_call(Node *n) {
 /* Whether plain call n names print, or repr, str or format of one
  * argument, whose arguments' Python __str__, or a list's or tuple's items'
  * __repr__, the step of a call with its operands on the stack calls
- * (print_from, repr_call). */
+ * (print_from, repr_call), or getattr of two, whose attribute's Python
+ * getter it calls (getattr_call). */
 static int text_call(Node *n) {
     if (n->a->kind != N_NAME || !n->args) return 0;
     const char *name = n->a->text;
-    return !strcmp(name, "print") || (!n->args->next && (!strcmp(name, "repr") || !strcmp(name, "str") || !strcmp(name, "format")));
+    return !strcmp(name, "print") || (!n->args->next && (!strcmp(name, "repr") || !strcmp(name, "str") || !strcmp(name, "format"))) ||
+           (!strcmp(name, "getattr") && n->args->next && !n->args->next->next);
 }
 /* A call of at most 8 positional and keyword arguments, with a keyword. */
 static int keyword_plain_call(Node *n) {
@@ -11765,7 +11767,7 @@ static int machine_function(SPYContext *, SPYValue *);
  * machine, c->fallback, answers: v's class's __getattr__ after an
  * AttributeError, else its own __getattribute__, or a class attribute
  * whose type's __get__ is the attribute's (getter_call). */
-static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, Node *n) {
+static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
     SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : NULL, *definition;
     SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
     definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
@@ -11773,30 +11775,30 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, Node *n) {
     if (owner && !fallback) {
         /* A Python __getattribute__ is called as a __getattr__ would be. */
         if (custom) {
-            if (!machine_function(c, definition)) return attribute(c, v, n->b->text);
+            if (!machine_function(c, definition)) return attribute(c, v, name);
             c->fallback = spy_retain(definition);
             return NULL;
         }
         /* So is a class attribute's Python __get__, unless the instance's
          * own entry comes first, before a descriptor without __set__ or
          * __delete__ (PyObject_GenericGetAttr). */
-        SPYValue *descriptor = plain_mro(c, owner) ? class_lookup(owner, n->b->text) : NULL;
+        SPYValue *descriptor = plain_mro(c, owner) ? class_lookup(owner, name) : NULL;
         SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c ? descriptor->as.map.parent : NULL;
         SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
-        if (get && machine_function(c, get) && !name_local(v, n->b->text)) {
+        if (get && machine_function(c, get) && !name_local(v, name)) {
             /* The search may compare keys, which may delete the descriptor. */
             spy_retain(descriptor);
-            SPYValue *own = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__") ? NULL : instance_dict_search(c, v, n->b->text);
+            SPYValue *own = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__") ? NULL : instance_dict_search(c, v, name);
             if (own || c->error_type[0]) { spy_release(descriptor); return own; }
             c->fallback = descriptor;
             return NULL;
         }
     }
     if (!fallback || !machine_function(c, fallback) || custom)
-        return attribute(c, v, n->b->text);
+        return attribute(c, v, name);
     /* As attribute_lookup: __getattr__ is found before the lookup runs. */
     spy_retain(fallback);
-    SPYValue *result = attribute_value(c, v, n->b->text);
+    SPYValue *result = attribute_value(c, v, name);
     if (result || !error_is(c, "AttributeError")) { spy_release(fallback); return result; }
     spy_clear_error(c);
     c->fallback = fallback;
@@ -11814,7 +11816,7 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
     if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
-    return calls ? attribute_step(c, v, n) : attribute(c, v, n->b->text);
+    return calls ? attribute_step(c, v, n->b->text) : attribute(c, v, n->b->text);
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
@@ -22460,6 +22462,7 @@ static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Node *n) {
 /* BC_CALLN: plain call node n of argc arguments, taken from the stack after
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
+static SPYValue *getattr_call(SPYContext *, Machine *, SPYValue **);
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
     if (n->a->kind == N_ATTR && (!(n->flags & F_CALLEE_FIRST) || callee == c->unbound)) {
@@ -22524,6 +22527,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     /* So do str() and repr() of a list or tuple with such an item's
      * Python __repr__ (repr_call). */
     if (calls && argc == 1 && repr_job(c, callee, argv[0])) return repr_call(c, m, env);
+    if (calls && argc == 2 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
+        callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_GETATTR)
+        return getattr_call(c, m, env);
     if (!convert && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
         /* So does isinstance() or issubclass() with a metaclass's method,
          * the tested value's class leaving the stack. */
@@ -23336,6 +23342,47 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     spy_release(function);
     return NULL;
 }
+/* getattr() of an instance v and a str, the step of a call with its
+ * callee and operands on m's stack: a property's Python getter, or the
+ * Python __get__, __getattribute__ or __getattr__ an attribute step calls
+ * (attribute_step), is the call to enter, of kind c->entering_kind; for
+ * the last two the name, v and c->unbound replace the call's slots for
+ * the result (checked_returned). Else the attribute, or NULL. */
+static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, SPYValue **env) {
+    SPYValue **slots = &m->stack[m->len - 3], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL};
+    size_t argc = 1;
+    int kind = plain_instance(v) ? instance_access(c, v->as.map.parent, name->as.string.data, &method) & ATTR_READ : ATTR_SLOW;
+    if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) function = spy_retain(method->as.property.get);
+    else {
+        SPYValue *result = attribute_step(c, v, name->as.string.data);
+        if (c->error_type[0]) return NULL;
+        if (result) {
+            m->len -= 3;
+            release_all(3, slots);
+            return result;
+        }
+        function = c->fallback;
+        c->fallback = NULL;
+        if (function->type != SPY_INSTANCE) {
+            /* A __getattribute__ or __getattr__ (CALL_CHECKED). */
+            spy_release(slots[0]);
+            slots[0] = spy_retain(name); slots[2] = spy_retain(c->unbound);
+            argv[0] = spy_retain(v); argv[1] = name;
+            *env = function_env(c, function, 2, argv, NULL, 1);
+            c->entering_init = function; c->entering_kind = CALL_CHECKED;
+            spy_release(function);
+            return *env ? spy_retain(c->types[SPY_STRING]) : NULL;
+        }
+        /* A descriptor's __get__(descriptor, v, type(v)). */
+        argv[0] = function; argv[1] = v; argv[2] = spy_retain(v->as.map.parent); argc = 3;
+        function = spy_retain(class_lookup(argv[0]->as.map.parent, "__get__"));
+    }
+    m->len -= 3;
+    spy_release(slots[0]); spy_release(name);
+    if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
+    spy_release(function);
+    return NULL;
+}
 /* A test's __bool__, a str() or repr() call's __str__ or __repr__, an
  * attribute step's __getattr__ or a class call's __new__ returned result,
  * or NULL on an error, into step ins of m (CALL_CHECKED), whose next
@@ -23459,13 +23506,16 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     if (!result) {
         /* As attribute: an AttributeError names the attribute and object. */
         if (ins->op == BC_ATTR) attribute_failed(c, m->stack[m->len - 1], m->stack[m->len - 2]->as.string.data);
+        /* So does getattr() (getattr_call). */
+        else if (m->stack[m->len - 1] == c->unbound) attribute_failed(c, m->stack[m->len - 2], m->stack[m->len - 3]->as.string.data);
         /* A repr job's item failed: the job ends. */
         else if (m->len > 3 && m->stack[m->len - 3] == c->replacing && m->stack[m->len - 4]->type == SPY_LIST)
             repr_drop(c, m->stack[m->len - 4]->as.seq.items[0]);
         return m;
     }
     SPYValue *v = machine_pop(m), *function, *env;
-    if (ins->op == BC_ATTR) {
+    if (ins->op == BC_ATTR || v == c->unbound) {
+        if (v == c->unbound) { spy_release(v); v = machine_pop(m); }
         spy_release(machine_pop(m)); spy_release(v);
         machine_push(c, m, result);
         return m;
