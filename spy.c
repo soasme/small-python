@@ -9873,12 +9873,16 @@ static const Operator *operator_of(int op) {
 static SPYValue *binary_declined(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *binary_builtin(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *sequence_operand(SPYContext *, int, SPYValue *, SPYValue *);
 /* binary, except that an instance operand, whose method the machine
  * calls, gives NULL without an error. */
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
-    /* A lone in, whose container may be a generator the machine searches. */
+    /* A lone in, whose container may be a generator the machine searches,
+     * or a list or tuple with an item it compares by a Python __eq__
+     * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
-        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL : comparison(c, op, a, b);
+        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL :
+               b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -10079,6 +10083,35 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
     return errorf(c, "TypeError", "'%s' not supported between instances of '%s' and '%s'",
                   op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
 }
+static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
+/* Whether seq, a list or tuple, holds x, searched in place as list_contains
+ * does: each item is held across a comparison that may change seq; -1 on
+ * an error. For the machine, 2 instead at an item whose comparison with
+ * x, a builtin scalar, calls a Python __eq__ (python_item) after items
+ * that are scalars too, which the machine compares again (contains_call). */
+static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue *seq, int machine) {
+    int scalars = machine && x->type <= SPY_STRING;
+    for (size_t i = 0; i < seq->as.seq.len; i++) {
+        SPYValue *item = seq->as.seq.items[i];
+        if (item == x) return 1;
+        if (scalars && item->type > SPY_STRING) {
+            if (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i) return 2;
+            scalars = 0;
+        }
+        spy_retain(item);
+        int same = equal(item, x);
+        spy_release(item);
+        if (same) return 1;
+        if (c->error_type[0] || pass(c)) return -1;
+    }
+    return 0;
+}
+static NO_INLINE int sequence_search(SPYContext *c, SPYValue *x, SPYValue *seq) { return sequence_contains(c, x, seq, 0); }
+/* binary_operand's x op y, in or not in, y a list or tuple. */
+static NO_INLINE SPYValue *sequence_operand(SPYContext *c, int op, SPYValue *x, SPYValue *y) {
+    int found = sequence_contains(c, x, y, 1);
+    return found == 2 || found < 0 ? NULL : spy_bool(c, (op == O_IN) == found);
+}
 static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     int result;
     /* Exact small ints and floats compare first. */
@@ -10109,15 +10142,8 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     }
     if (op == O_IN || op == O_NOTIN) {
         result = 0;
-        /* An exact list or tuple is searched in place, as list_contains does:
-         * each item is held across a comparison that may change the list. */
         if (b->type == SPY_LIST || b->type == SPY_TUPLE) {
-            for (size_t i = 0; i < b->as.seq.len && !result; i++) {
-                SPYValue *item = spy_retain(b->as.seq.items[i]);
-                result = a == item || equal(item, a);
-                spy_release(item);
-                if (c->error_type[0] || (!result && pass(c))) return NULL;
-            }
+            if ((result = sequence_search(c, a, b)) < 0) return NULL;
             return spy_bool(c, op == O_IN ? result : !result);
         }
         SPYValue *base = builtin_base(c, b, "__contains__", NULL);
@@ -22727,15 +22753,25 @@ static int step_operation(Instruction *ins, int *op) {
     *op = n->op;
     return OPERATE_BINARY;
 }
-/* For `x in y`, the last comparison of its chain, of a plain instance x
- * and a list or tuple y, or a forward iterator over one that an earlier
- * step of it left (contains_returned): the Python __eq__ that comparing
- * x with the next item whose comparison calls one (rich_function) calls
- * first, the item's or x's, owned, with its env, the items before it
- * compared natively unequal; x, an iterator after the item, the two
- * operands in the order of the call, and c->unbound pushed on m's stack.
- * Else NULL, for the native search to decide, comparing only what calls
- * no Python again. */
+/* The first item of seq, a list or tuple, from at on that is x or whose
+ * comparison with x calls a Python __eq__ (rich_function); seq's length
+ * when none. */
+static size_t python_item(SPYContext *c, SPYValue *x, SPYValue *seq, size_t at) {
+    for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len; at++) {
+        SPYValue *item = seq->as.seq.items[at];
+        if (item == x || ((instance || item->type == SPY_INSTANCE) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))))
+            break;
+    }
+    return at;
+}
+/* For `x in y`, a lone test or the last comparison of its chain, y a list
+ * or tuple or a forward iterator over one that an earlier item's call left
+ * (operator_returned): the Python __eq__ that comparing x with the next
+ * item whose comparison calls one (python_item) calls first, the item's
+ * or x's, owned, with its env, the items before it compared natively
+ * unequal; x, an iterator after the item, the two operands in the order of
+ * the call, and c->unbound pushed on m's stack. Else NULL, for the native
+ * search to decide, comparing only what calls no Python again. */
 static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *seq = y, *function = NULL;
     size_t at = 0;
@@ -22743,10 +22779,8 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
         if (y->as.iterator.kind != I_SEQUENCE || y->as.iterator.done) return NULL;
         seq = y->as.iterator.source; at = y->as.iterator.index;
     }
-    if (x->type != SPY_INSTANCE || x->as.map.base || (seq->type != SPY_LIST && seq->type != SPY_TUPLE)) return NULL;
-    size_t first = at;
-    while (first < seq->as.seq.len && seq->as.seq.items[first] != x && !rich_function(c, seq->as.seq.items[first], x, R_EQ) &&
-           !rich_function(c, x, seq->as.seq.items[first], R_EQ)) first++;
+    if ((x->type == SPY_INSTANCE && x->as.map.base) || (seq->type != SPY_LIST && seq->type != SPY_TUPLE)) return NULL;
+    size_t first = python_item(c, x, seq, at);
     if (first >= seq->as.seq.len || seq->as.seq.items[first] == x) return NULL;
     for (; at < first; at++) {
         SPYValue *item = spy_retain(seq->as.seq.items[at]);
@@ -22896,8 +22930,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return *env ? spy_retain(function) : NULL;
     }
     if (contains) {
+        /* A list's or tuple's items, in any test but one inside a chain;
+         * a generator's or an iterable instance's, in an expression. */
         int last = ins->op == BC_BINARY || (ins->op == BC_COMPARE && !ins->arg);
-        if (last && (function = contains_call(c, m, x, y, env))) return function;
+        if ((y->type == SPY_LIST || y->type == SPY_TUPLE || y->type == SPY_ITERATOR) && (ins->op != BC_COMPARE || !ins->arg) &&
+            (function = contains_call(c, m, x, y, env))) return function;
         /* in takes the container's __contains__, given the item. */
         if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
             (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
@@ -22980,8 +23017,8 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
 static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (m->stack[m->len - 1] == c->unbound) {
-        /* An item's comparison for in (contains_call): found, or the step
-         * again, to go on from the iterator after the item. */
+        /* An item's comparison for in (contains_call): found, or the next
+         * item's, or the native search of the rest, from the iterator. */
         spy_release(machine_pop(m));
         SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
         int found = test ? truthy(test) : 0;
@@ -22993,7 +23030,16 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             spy_release(iterator);
             return m;
         }
-        m->pc = pc - 1;
+        SPYValue *iterator = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = contains_call(c, m, x, iterator, &env);
+        Call *call = function ? call_enter(c, function, env, m) : NULL;
+        if (call) {
+            spy_release(x); spy_release(iterator);
+            call->m.outermost = CALL_OPERATOR;
+            return &call->m;
+        }
+        if (function) for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
+        m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : operation(c, ins, x, iterator), pc);
+        spy_release(x); spy_release(iterator);
         return m;
     }
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
@@ -23436,7 +23482,22 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
 /* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;
  * or, for an instance's Python special method, the call to enter
  * (operator_call). */
+/* Test ins of x in or not in y, a list or tuple: its value, or c->unbound
+ * for the machine to search (sequence_contains). */
+static NO_INLINE SPYValue *sequence_test(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
+    int op = 0;
+    if (step_operation(ins, &op) != OPERATE_COMPARE || (op != O_IN && op != O_NOTIN)) return c->unbound;
+    relocate(c, ins->node);
+    int found = sequence_contains(c, x, y, 1);
+    return found == 2 ? c->unbound : found < 0 ? NULL : spy_bool(c, (op == O_IN) == found);
+}
 static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
+    /* Builtin operands call no Python method on the machine but the items'
+     * an in searches in a list or tuple (sequence_test) or an iterator. */
+    if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && y->type != SPY_ITERATOR) {
+        SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) : NULL;
+        if (value != c->unbound) return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
+    }
     SPYValue *function = operator_call(c, m, ins, x, y, env);
     return function || c->error_type[0] ? function : operate(c, ins->node, x, y);
 }

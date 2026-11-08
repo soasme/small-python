@@ -325,8 +325,9 @@ These run as machines on the heap, in one native activation of
 - property getters and `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and
   binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, where a step of their own
-  reaches them, and the `__eq__` that an instance's `in` a list or tuple,
-  or an iterator over one, calls on its items when it ends its
+  reaches them, and the `__eq__` that `in` a list or tuple, or an
+  iterator over one, calls on its items, of an instance or of a `None`,
+  `bool`, `int`, `float` or `str` after such items, unless it is inside a
   comparison chain, and the reflected operator or comparison method of an
   instance on the right, called once the left operand, an `int`, `bool`,
   `float` or instance, declines, or first when the right operand's class
