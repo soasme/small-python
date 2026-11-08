@@ -472,7 +472,8 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_OBJECT_GETATTRIBUTE, B_OBJECT_SETATTR, B_OBJECT_DELATTR, B_TYPE_GETATTRIBUTE, B_TYPE_SETATTR, B_TYPE_DELATTR, B_OBJECT_REDUCE, B_OBJECT_REDUCE_EX, B_OBJECT_GETSTATE, B_FILTER, B_VARS, B_FROZENSET, B_BYTEARRAY, B_SUBCLASSHOOK, B_FROZENDICT, B_WITH_TRACEBACK,
        B_EXCEPTION_REDUCE, B_OSERROR_REDUCE, B_IMPORT_REDUCE, B_ATTRIBUTE_REDUCE, B_ATTRIBUTE_GETSTATE, B_EXCEPTION_SETSTATE,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */,
-       B_JOIN /* str.join consuming a generator (consume) */, B_CLOSE /* a generator's close resuming it (consume) */ };
+       B_JOIN /* str.join consuming a generator (consume) */, B_CLOSE /* a generator's close resuming it (consume) */,
+       B_EXTEND /* list.extend or dict.update consuming a generator into its object (consume) */ };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
     return dict ? dict : builtin_value(c, value, SPY_FROZENDICT);
@@ -21903,12 +21904,15 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
     if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && (argv[0]->as.iterator.kind == I_MAP || argv[0]->as.iterator.kind == I_FILTER)) && !zip_of_generator(argv[0]) &&
                   !adapted_generator(c, argv[0]) && !iter_function(c, argv[0]))) return -1;
-    int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN : -1 :
+    int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
+                           (method == M_EXTEND && callee->type == SPY_LIST) ||
+                           (method == M_UPDATE && callee->type == SPY_DICT && argv[0]->type != SPY_INSTANCE) ? B_EXTEND : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET : callee == c->types[SPY_DICT] ? B_DICT :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
-        id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && (id != B_NEXT || !resumable(argv[0]))) return -1;
+        id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND &&
+        (id != B_NEXT || !resumable(argv[0]))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -21942,7 +21946,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     if (id == B_CLOSE) sent = exception_create(c, c->exceptions[X_GENERATOR_EXIT], 0, NULL);
     int collects = id == B_SORTED || id == B_JOIN;
     Consumer *consumer = allocate(c, sizeof(*consumer));
-    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || collects ?
+    SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
                                  id == B_DICT ? SPY_DICT : SPY_LIST) : NULL;
     int keyed = generator ? consumer_source(c, &generator) : 0;
@@ -29030,7 +29034,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         if (found) s->result = spy_bool(c, !s->count);
         return found;
     }
-    if (s->id == B_DICT) {
+    if (s->id == B_DICT || (s->id == B_EXTEND && s->result->type == SPY_DICT)) {
         int status = dict_pair(c, s->result, item, s->count++);
         spy_release(item);
         return status;
@@ -29040,7 +29044,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         return status;
     }
-    if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS) {
+    if (s->id == B_LIST || s->id == B_TUPLE || s->callee || s->id == UNPACK_ITEMS || s->id == B_EXTEND) {
         int status = sequence_append(c, s->result, item);
         spy_release(item);
         return status ? status : s->id == UNPACK_ITEMS && s->star == SIZE_MAX && s->result->as.seq.len > s->count;
@@ -29098,6 +29102,11 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         return NULL;
     }
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
+    /* list.extend and dict.update return None. */
+    if (s->id == B_EXTEND) {
+        spy_release(s->result);
+        s->result = c->error_type[0] ? NULL : spy_none(c);
+    }
     if (s->id == CONTAINS_ITEMS && !s->result && !c->error_type[0]) return spy_bool(c, s->count);
     if (s->id == UNPACK_ITEMS && !c->error_type[0]) {
         SPYValue *items = s->result;

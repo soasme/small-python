@@ -292,8 +292,8 @@ These run as machines on the heap, in one native activation of
   in turn, when a step above resumes the delegating generator;
 - generators, maps, and instances whose class has a Python `__iter__`
   and no `__len__` or `__length_hint__`, consumed by `sum`, `any`, `all`,
-  `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `dict`, `sorted` or
-  `str.join`, and, in
+  `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `dict`, `sorted`,
+  `str.join`, `list.extend` or `dict.update` (but an instance), and, in
   code compiled while pausing, the generators and such instances a target
   list unpacks or a list, tuple or set display stars, and the generators
   and such instances a call's starred argument takes, and those, without

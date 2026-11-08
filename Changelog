@@ -80,6 +80,8 @@ Unreleased (0.8.0):
   tests about 9% faster
 - a dict subclass's Python __missing__, and a builtin subclass's Python
   __getitem__, run without the C stack
+- list.extend() and dict.update() take a generator's items without the C
+  stack
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do
