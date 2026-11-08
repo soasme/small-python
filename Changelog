@@ -76,6 +76,10 @@ Unreleased (0.8.0):
 - calls with *args or **kwargs of methods, callable instances and classes
   with a Python __init__ no longer use the C stack
 - keyword calls of classes with a Python __new__ no longer use the C stack
+- a generator suspended in an except handler is closed when its last reference
+  goes, as CPython's is; a generator's frame no longer keeps it alive
+- repr() of a finished generator's frame no longer crashes, and names the
+  frame's code rather than a renamed generator
 - in over a list or tuple calls its items' Python __eq__ without the C stack
   also for a number or str and in if and while tests; x in a dict or set
   tests about 9% faster

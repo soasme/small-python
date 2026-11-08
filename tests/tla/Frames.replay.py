@@ -24,6 +24,9 @@ def act(p, namespace, fr, g):
     try:
         if op == "f_code":
             return fr.f_code.co_name
+        if op == "repr":
+            text = repr(fr)
+            return text[text.index("line "):]
         if op == "f_back":
             return "None" if fr.f_back is None else fr.f_back.f_code.co_name
         if op == "f_locals":
@@ -78,6 +81,9 @@ def outcome(p):
         next(g)
     if source == "gendone":
         list(g)
+    if source == "gendropped":
+        next(g)
+        g = None
     return act(p, namespace, fr, g)
 
 

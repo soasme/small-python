@@ -5,11 +5,12 @@
 (* writable attributes, and clear()): a frame's code, caller (f_back,      *)
 (* None for a generator's frame), locals, globals, builtins, instruction   *)
 (* index, owning generator (None once it finishes or for a function), and  *)
-(* line; f_trace, f_trace_lines, and f_trace_opcodes can be set (the       *)
-(* latter two only to bools), f_lineno only by a trace function, the rest  *)
-(* not at all; clear() drops the locals (of a generator's frame, once the  *)
-(* generator finishes), finalizes a generator that has not started, and    *)
-(* raises RuntimeError for an executing or suspended frame.                *)
+(* line, which with its code's name ends its repr; f_trace, f_trace_lines, *)
+(* and f_trace_opcodes can be set (the latter two only to bools), f_lineno *)
+(* only by a trace function, the rest not at all; clear() drops the locals *)
+(* (of a generator's frame, once the generator finishes), finalizes a      *)
+(* generator that has not started, and raises RuntimeError for an          *)
+(* executing or suspended frame.                                           *)
 (*                                                                         *)
 (* A program defines                                                       *)
 (*                                                                         *)
@@ -22,14 +23,15 @@
 (*                                                                         *)
 (* and takes the frame of work while it runs ("running", ACT doing the     *)
 (* operation) or after it returns ("finished"), or gen(1).gi_frame before  *)
-(* next ("gennew"), after one next ("gensusp"), or after exhaustion        *)
-(* ("gendone"), then reads an attribute or does an operation. The outcome  *)
-(* is the result or the exception.                                         *)
+(* next ("gennew"), after one next ("gensusp"), after exhaustion          *)
+(* ("gendone"), or after one next and dropping the generator, which closes *)
+(* it while the frame lives on ("gendropped"), then reads an attribute or  *)
+(* does an operation. The outcome is the result or the exception.          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Sources == {"running", "finished", "gennew", "gensusp", "gendone"}
-Ops == {"f_code", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
+Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped"}
+Ops == {"f_code", "repr", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
         "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear"}
 Programs == [source : Sources, op : Ops]
 
@@ -38,14 +40,15 @@ vars == <<program, outcome>>
 
 Pending == "pending"
 
-Generator(s) == s \in {"gennew", "gensusp", "gendone"}
+Generator(s) == s \in {"gennew", "gensusp", "gendone", "gendropped"}
 
 Locals(s) == CASE s \in {"running", "finished"} -> "['a', 'b', 'fr']" [] s = "gennew" -> "['a']" [] OTHER -> "['a', 'b']"
-Line(s) == CASE s \in {"running", "finished"} -> "9" [] s = "gennew" -> "10" [] s = "gensusp" -> "12" [] OTHER -> "13"
+Line(s) == CASE s \in {"running", "finished"} -> "9" [] s = "gennew" -> "10" [] s \in {"gensusp", "gendropped"} -> "12" [] OTHER -> "13"
 
 Run(p) ==
     LET s == p.source IN
     CASE p.op = "f_code" -> IF Generator(s) THEN "gen" ELSE "work"
+      [] p.op = "repr" -> IF Generator(s) THEN "line " \o Line(s) \o ", code gen>" ELSE "line " \o Line(s) \o ", code work>"
       [] p.op = "f_back" -> IF Generator(s) THEN "None" ELSE "caller"
       [] p.op = "f_locals" -> Locals(s)
       [] p.op = "f_globals" -> "the module's"
@@ -77,4 +80,7 @@ ClearRefused == Done /\ program.op = "clear" /\ program.source \in {"running", "
 
 \* A generator's frame has no caller while it is not running.
 GeneratorUnlinked == Done /\ program.op = "f_back" /\ Generator(program.source) => outcome = "None"
+
+\* A frame that outlives its generator names no generator.
+OutlivesGenerator == Done /\ program.op = "f_generator" /\ program.source = "gendropped" => outcome = "None"
 =============================================================================
