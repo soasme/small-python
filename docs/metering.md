@@ -337,7 +337,9 @@ These run as machines on the heap, in one native activation of
   after identical items or equal `None`, `bool`, `int`, `float` or `str`
   ones, pair after pair, the `__eq__` that `index`, `count` or `remove` of
   one item in a list or tuple calls on its items, in a call whose object
-  holds a call or in code compiled while pausing, and the reflected
+  holds a call or in code compiled while pausing, the `__lt__` or `__gt__`
+  that `min` or `max` of a list's or tuple's items or of the arguments
+  calls on them, in such calls, and the reflected
   operator or comparison method of an
   instance on the right, called once the left operand, an `int`, `bool`,
   `float` or instance, declines, or first when the right operand's class

@@ -175,7 +175,17 @@ static const char *const programs[] = {
     "same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), "
     "[len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), same(a).count(1), [len(a), "
     "same(a).count(1), [len(a), same(a).count(1), [same(a).count(1)]]]]]]]]]]]]]]]]]]]]]]]][1:]\n"
-    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q], eqs(q, [1, Q()]), finds(q))\n",
+    "class L:\n"
+    "    def __lt__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return False\n"
+    "def mins(r): return [len(r), min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), "
+    "min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), "
+    "min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), "
+    "min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), "
+    "min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), min(same(r)) is r[0], [len(r), "
+    "min(same(r)) is r[0], [min(same(r)) is r[0]]]]]]]]]]]]]]]]][1:]\n"
+    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q], eqs(q, [1, Q()]), finds(q), (lambda: mins([L(), L()]))())\n",
 
     "def gen(n):\n"
     "    try:\n"

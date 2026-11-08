@@ -7980,11 +7980,14 @@ static int text_call(Node *n) {
            (!strcmp(name, "getattr") && n->args->next && !n->args->next->next) ||
            (!strcmp(name, "setattr") && n->args->next && n->args->next->next && !n->args->next->next->next);
 }
-/* Whether call node n may be index, count or remove of one item, whose
- * items' Python __eq__ the step of a call with its operands on the stack
- * calls (search_call). */
-static int search_node(Node *n) {
-    if (n->a->kind != N_ATTR || !n->args || n->args->next || n->args->kind == N_STAR || n->args->kind == N_KEYWORD) return 0;
+/* Whether call node n may be index, count or remove of one item, or min
+ * or max of positional arguments, whose items' Python comparisons the step
+ * of a call with its operands on the stack calls (search_call, fold_call). */
+static int comparing_call(Node *n) {
+    if (!n->args) return 0;
+    for (Node *a = n->args; a; a = a->next) if (a->kind == N_STAR || a->kind == N_KEYWORD || a->kind == N_MAPPING) return 0;
+    if (n->a->kind == N_NAME) return !strcmp(n->a->text, "min") || !strcmp(n->a->text, "max");
+    if (n->a->kind != N_ATTR || n->args->next) return 0;
     const char *name = n->a->b->text;
     return !strcmp(name, "index") || !strcmp(name, "count") || !strcmp(name, "remove");
 }
@@ -14076,7 +14079,7 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         break;
     case N_CALL:
         if (plain_call(n) && (n->a->kind == N_NAME || (n->a->kind == N_ATTR && !expands(n->a->a, p->calls))) && !list_expands(n->args, p->calls) &&
-            !sort_call(n) && (p->calls != PAUSING || (!text_call(n) && !search_node(n)))) {
+            !sort_call(n) && (p->calls != PAUSING || (!text_call(n) && !comparing_call(n)))) {
             emit(c, p, BC_CALLF, n, 0); break;
         }
         if (plain_call(n) || keyword_plain_call(n)) {
@@ -22491,6 +22494,18 @@ static NO_INLINE SPYValue *target_copies(SPYContext *c, Machine *m, Node *n) {
  * its callee; a generator's machine (calls 0) enters no call. */
 static NO_INLINE SPYValue *stack_method_call(SPYContext *, Machine *, Node *, size_t, int, SPYValue **);
 static SPYValue *getattr_call(SPYContext *, Machine *, SPYValue **);
+static SPYValue *fold_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, SPYValue **, SPYValue **);
+/* min() or max() of argc arguments on m's stack after it (fold_call): the
+ * value, or a class with the comparison to enter in c->entering_init. */
+static NO_INLINE SPYValue *fold_begin(SPYContext *c, Machine *m, size_t argc, SPYValue **env) {
+    SPYValue **argv = &m->stack[m->len - argc], *value = NULL, *function = NULL;
+    int op = argv[-1]->as.native.data == (void *)(intptr_t)B_MAX ? '>' : '<';
+    SPYValue *seq = argc == 1 ? spy_retain(argv[0]) : tuple_of(c, argc, argv);
+    for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+    if (seq) function = fold_call(c, m, op, seq, spy_retain(seq->as.seq.items[0]), 1, env, &value);
+    spy_release(seq);
+    return function ? spy_retain(c->types[SPY_STRING]) : value;
+}
 static SPYValue *setattr_call(SPYContext *, Machine *, SPYValue **);
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
@@ -22559,6 +22574,12 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (calls && argc == 2 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_GETATTR)
         return getattr_call(c, m, env);
+    /* So do min() and max() of a list's or tuple's items or of the
+     * arguments, comparing them by a Python __lt__ or __gt__ (fold_call). */
+    if (calls && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
+        (callee->as.native.data == (void *)(intptr_t)B_MIN || callee->as.native.data == (void *)(intptr_t)B_MAX) &&
+        (argc > 1 || (argc && (argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) && argv[0]->as.seq.len)))
+        return fold_begin(c, m, argc, env);
     if (calls && argc == 3 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_SETATTR)
         return setattr_call(c, m, env);
@@ -22869,6 +22890,74 @@ static NO_INLINE SPYValue *search_call(SPYContext *c, Machine *m, int method, SP
     }
     *value = search_result(c, method, seq, found, tally);
     return NULL;
+}
+/* min or max, as op '<' or '>', of seq, a list or tuple, from index at on,
+ * best, owned, the least or greatest item before it: the Python comparison
+ * that comparing the next item with best calls first (rich_function), the
+ * item's op or best's reflected one, borrowed in c->entering_init with its
+ * env (CALL_OPERATOR), the items before it compared natively; best, seq,
+ * op, the operator called, the item's index, the call's two operands and
+ * c->replacing pushed on m's stack (fold_returned). Else NULL, the value in
+ * *value. */
+static NO_INLINE SPYValue *fold_call(SPYContext *c, Machine *m, int op, SPYValue *seq, SPYValue *best, size_t at,
+                                     SPYValue **env, SPYValue **value) {
+    int other = op == '<' ? '>' : '<';
+    *value = NULL;
+    for (; at < seq->as.seq.len; at++) {
+        SPYValue *item = seq->as.seq.items[at], *function = NULL;
+        int called = op;
+        if (item->type == SPY_INSTANCE || best->type == SPY_INSTANCE) {
+            function = rich_function(c, item, best, rich_kind(op));
+            if (!function && (function = rich_function(c, best, item, rich_kind(other)))) called = other;
+        }
+        if (function) {
+            SPYValue *left = called == op ? item : best, *right = called == op ? best : item;
+            SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+            if (machine_push(c, m, best) || machine_push(c, m, spy_retain(seq)) || machine_push(c, m, int_value(c, op)) ||
+                machine_push(c, m, int_value(c, called)) || machine_push(c, m, int_value(c, (int64_t)at)) ||
+                machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->replacing))) {
+                release_all(2, args); return NULL;
+            }
+            if ((*env = function_env(c, function, 2, args, NULL, 1))) {
+                c->entering_init = function; c->entering_kind = CALL_OPERATOR;
+                return function;
+            }
+            for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
+            return NULL;
+        }
+        spy_retain(item);
+        SPYValue *test = pass(c) ? NULL : comparison(c, op, item, best);
+        int better = test && truthy(test);
+        spy_release(test);
+        if (c->error_type[0]) { spy_release(item); spy_release(best); return NULL; }
+        if (better) { spy_release(best); best = item; }
+        else spy_release(item);
+    }
+    *value = best;
+    return NULL;
+}
+/* An item's comparison for min or max (fold_call) returned result: the
+ * better item kept, the next item's comparison or the value. */
+static NO_INLINE Machine *fold_returned(SPYContext *c, Machine *m, SPYValue *result) {
+    spy_release(machine_pop(m));
+    SPYValue *right = machine_pop(m), *left = machine_pop(m), *index = machine_pop(m), *called = machine_pop(m);
+    SPYValue *op = machine_pop(m), *seq = machine_pop(m), *best = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
+    int base = (int)op->as.integer_data.small, call = (int)called->as.integer_data.small;
+    SPYValue *test = compared(c, call, left, right, result);
+    int better = test && truthy(test);
+    if (better && !c->error_type[0]) { spy_release(best); best = spy_retain(call == base ? left : right); }
+    spy_release(test); spy_release(left); spy_release(right); spy_release(called); spy_release(op);
+    if (c->error_type[0]) spy_release(best);
+    else function = fold_call(c, m, base, seq, best, (size_t)index->as.integer_data.small + 1, &env, &value);
+    Call *entered = function ? call_enter(c, spy_retain(function), env, m) : NULL;
+    spy_release(index); spy_release(seq);
+    if (entered) {
+        entered->m.outermost = CALL_OPERATOR;
+        return &entered->m;
+    }
+    if (function) for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
+    machine_push(c, m, value);
+    return m;
 }
 /* The first pair from at on of a and b, two lists or two tuples,
  * whose comparison calls a Python __eq__ (rich_function), the pairs
@@ -23209,6 +23298,7 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
  * run on, at its pc. */
 static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
+    if (m->stack[m->len - 1] == c->replacing) return fold_returned(c, m, result);
     if (m->stack[m->len - 1] == c->unbound) {
         int op = 0;
         step_operation(ins, &op);
