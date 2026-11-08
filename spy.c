@@ -22317,8 +22317,9 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     return allocator->as.wrapper.function;
 }
 /* The Python __str__, __repr__, __format__, __len__, __int__, __float__,
- * __hash__, __abs__, __round__ or __reversed__ that callee, str, repr,
- * format, len, int, float, hash, abs, round or reversed, calls on its first
+ * __complex__, __bytes__, __hash__, __abs__, __round__ or __reversed__ that
+ * callee, str, repr, format, len, int, float, complex, bytes, hash, abs,
+ * round or reversed, calls on its first
  * argument, an instance, found[0] its name and found[1] the spec format or
  * the ndigits round passes it, or NULL; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
@@ -22326,10 +22327,11 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     if (argc > 2 || argv[0]->as.map.base) return NULL;
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT :
+        callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
     if (argc != 1 + (id == B_FORMAT || id == B_ROUND) * (argc == 2) ||
-        (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_HASH && id != B_ABS &&
-         id != B_ROUND && id != B_REVERSED && callee != c->types[SPY_STRING])) return NULL;
+        (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_COMPLEX && id != B_BYTES &&
+         id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
@@ -22344,7 +22346,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     }
     /* With no __str__ above object's, str() calls the instance's __repr__. */
     const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
-        id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
+        id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
         id == B_REVERSED ? "__reversed__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
@@ -23257,6 +23259,23 @@ static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SP
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
+/* x[y], x a class: its metaclass's Python __getitem__, or else its own
+ * Python __class_getitem__ classmethod, which a metaclass neither defines
+ * nor intercepts the lookup of, entered as an operator's last method with
+ * its env, x, y and the phase pushed on m's stack; else NULL. */
+static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+    SPYValue *meta = x->as.map.meta, *function = meta ? class_lookup(meta, "__getitem__") : NULL;
+    if (!function && (!meta || (!class_lookup(meta, "__class_getitem__") &&
+                                class_lookup(meta, "__getattribute__") == class_lookup(c->types[SPY_CLASS], "__getattribute__")))) {
+        function = class_lookup(x, "__class_getitem__");
+        function = function && function->type == SPY_CLASSMETHOD ? function->as.wrapper.function : NULL;
+    }
+    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, OPERATOR_LAST)) return NULL;
+    SPYValue *args[] = {spy_retain(x), spy_retain(y)};
+    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+    return NULL;
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -23303,6 +23322,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         self = y; other = x; phase = OPERATOR_LAST;
     } else {
         if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
+        if (kind == OPERATE_INDEX && x->type == SPY_CLASS) return class_item(c, m, x, y, env);
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
         if ((rich == R_EQ || rich == R_NE) && x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && sequence_python(c, x, y))
             return equal_call(c, m, x, y, python_pair(c, x, y, 0), env);
@@ -23879,6 +23899,17 @@ done:
     spy_release(name); spy_release(bases); spy_release(arguments);
     return body;
 }
+/* What complex() or bytes() of v makes of result, the value its method
+ * returned: a complex as the exact type, any bytes; else NULL with the
+ * TypeError as_complex and bytes_from_object raise. */
+static SPYValue *converted_result(SPYContext *c, SPYValue *v, const char *method, SPYValue *result) {
+    int number = method[2] == 'c';
+    SPYValue *exact = builtin_value(c, result, number ? SPY_COMPLEX : SPY_BYTES);
+    if (exact) return number ? complex_new(c, numeric_complex(c, exact)) : spy_retain(result);
+    char fq[256];
+    return errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(v, fq, sizeof(fq)), method,
+                  number ? "a complex" : "a bytes", type_name(result));
+}
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (ins->op == BC_CLASS && ins->arg == 7) {
@@ -23919,14 +23950,15 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         SPYValue *name = machine_pop(m), *whole = NULL, *string;
         Buffer b = { .ctx = c, .whole = &whole };
         int64_t length;
-        /* len(), hash(), int() and float() check their results as natively;
-         * abs(), round() and reversed() return theirs; the others' text is a
-         * str. */
+        /* len(), hash(), int(), float(), complex() and bytes() check their
+         * results as natively; abs(), round() and reversed() return theirs;
+         * the others' text is a str. */
         const char *method = name->as.string.data;
         if (!strcmp(method, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__hash__")) string = hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
             string = number_result(c, v, method[2] == 'f', spy_retain(result));
+        else if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) string = converted_result(c, v, method, result);
         else if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__"))
             string = spy_retain(result);
         else if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
@@ -24344,7 +24376,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
