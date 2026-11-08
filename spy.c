@@ -426,6 +426,7 @@ static int error_is(SPYContext *, const char *);
 static void attach_syntax_error(SPYContext *, const char *, const char *, const char *, const char *, int);
 static SPYValue *range_overflow(SPYContext *);
 static void chain_exception(SPYContext *, SPYValue *);
+static void materialize_error(SPYContext *);
 static int subclass(SPYValue *, SPYValue *);
 static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
@@ -475,6 +476,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_EXCEPTION_REDUCE, B_OSERROR_REDUCE, B_IMPORT_REDUCE, B_ATTRIBUTE_REDUCE, B_ATTRIBUTE_GETSTATE, B_EXCEPTION_SETSTATE,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */,
        B_JOIN /* str.join consuming a generator (consume) */, B_CLOSE /* a generator's close resuming it (consume) */,
+       B_THROW /* a generator's throw resuming it (consume) */,
        B_EXTEND /* list.extend or dict.update consuming a generator into its object (consume) */ };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
@@ -19228,6 +19230,24 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
     return NULL;
 }
 static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with_cause(c, value, NULL); }
+/* Raise exception thrown into a generator, NULL: chained, as CPython's
+ * throw, to own, the exception the generator handles, never to its
+ * caller's. */
+static NO_INLINE SPYValue *raise_thrown(SPYContext *c, SPYValue *exception, SPYValue *own) {
+    SPYValue *handled = c->handled, *inherited = c->inherited_exception;
+    c->handled = own; c->inherited_exception = NULL;
+    raise_value(c, exception);
+    c->handled = handled; c->inherited_exception = inherited;
+    return NULL;
+}
+/* A throw's delegate raised into a generator handling an exception:
+ * the error is chained to that exception, as CPython's throw chains it
+ * again at each generator it passes. */
+static NO_INLINE void delegate_raised(SPYContext *c) {
+    if (c->stopped || !c->error_type[0] || error_is(c, "StopIteration")) return;
+    materialize_error(c);
+    if (c->exception) chain_exception(c, c->exception);
+}
 /* OverflowError(ERANGE, strerror(ERANGE)), as a C math function's range error. */
 static SPYValue *range_overflow(SPYContext *c) {
     const char *message = strerror(ERANGE);
@@ -21666,7 +21686,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         sort_restore(c, b.consumer->target, b.value);
         spy_release(b.consumer->target); b.value = NULL;
     }
-    if (b.consumer && b.consumer->id == B_CLOSE && b.consumer->count) b.value->as.generator.machine->drop = (int)b.consumer->count - 1;
+    if (b.consumer && (b.consumer->id == B_CLOSE || b.consumer->id == B_THROW) && b.consumer->count) b.value->as.generator.machine->drop = (int)b.consumer->count - 1;
     spy_release(b.value); spy_release(b.handled);
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
     if (b.consumer) {
@@ -21765,12 +21785,12 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
          * getting close is unraisable (13.16.3). */
         if (!method && (closing || error_is(c, "AttributeError"))) {
             if (closing && !error_is(c, "AttributeError")) report_unraisable(c, "Exception ignored while closing generator ", iterator, NULL);
-            spy_clear_error(c); return raise_value(c, thrown);
+            spy_clear_error(c); return raise_thrown(c, thrown, c->handled);
         }
         if (!method) { if (halt) *halt = 1; return NULL; }
         SPYValue *result = call(c, method, closing ? 0 : argc, argv);
         spy_release(method);
-        if (closing) { spy_release(result); if (!c->error_type[0]) raise_value(c, thrown); return NULL; }
+        if (closing) { spy_release(result); return c->error_type[0] ? NULL : raise_thrown(c, thrown, c->handled); }
         return result;
     }
     if (sent && sent->type != SPY_NONE) {
@@ -21936,6 +21956,7 @@ static int zip_of_generator(SPYValue *v) {
  * frozenset, dict, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
 static SPYValue *adapted_generator(SPYContext *, SPYValue *);
+static SPYValue *thrown_exception(SPYContext *, size_t, SPYValue *const *);
 /* Whether fn is a generator function, whose call runs none of its body. */
 static int generator_function(SPYContext *c, SPYValue *fn) {
     Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
@@ -21953,8 +21974,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
-    if (method == M_CLOSE)
-        return !argc && resumable(callee) && callee->as.generator.machine->awaiting == AWAIT_YIELD ? B_CLOSE : -1;
+    if (method == M_CLOSE || method == M_THROW)
+        return argc == (method == M_THROW) && resumable(callee) && callee->as.generator.machine->awaiting == AWAIT_YIELD ?
+               method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
@@ -21999,7 +22021,8 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
-    if ((id == B_NEXT || id == B_CLOSE) && method >= 0) generator = spy_retain(callee);
+    if (id == B_THROW) { sent = thrown_exception(c, 1, &generator); spy_release(generator); }
+    if ((id == B_NEXT || id == B_CLOSE || id == B_THROW) && method >= 0) generator = spy_retain(callee);
     if (id == B_CLOSE) sent = exception_create(c, c->exceptions[X_GENERATOR_EXIT], 0, NULL);
     int collects = id == B_SORTED || id == B_JOIN;
     Consumer *consumer = allocate(c, sizeof(*consumer));
@@ -22012,8 +22035,8 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
                            .sent = sent, .keyed = keyed};
     block->value = generator; block->consumer = consumer;
-    if (id == B_CLOSE) {
-        /* A close throws its GeneratorExit in at the yield (resumed_with),
+    if (id == B_CLOSE || id == B_THROW) {
+        /* A close or throw raises its exception in at the yield (resumed_with),
          * whose drop returns if it never resumes (pop_block). */
         Machine *g = generator->as.generator.machine;
         consumer->count = (size_t)g->drop + 1; g->drop = 0;
@@ -24000,7 +24023,7 @@ static NO_INLINE Machine *delegate_left(SPYContext *, Machine *, SPYValue **, Re
  * takes it (B_NEXT), as close returns it; others drop it. */
 static NO_INLINE void returned_to(Machine *resumer, SPYValue *value) {
     Block *top = resumer->block_len ? &resumer->blocks[resumer->block_len - 1] : NULL;
-    if (top && top->kind == BLOCK_CONSUME && (top->consumer->id == B_NEXT || top->consumer->id == B_CLOSE)) {
+    if (top && top->kind == BLOCK_CONSUME && (top->consumer->id == B_NEXT || top->consumer->id == B_CLOSE || top->consumer->id == B_THROW)) {
         spy_release(top->consumer->sent); top->consumer->sent = value;
     } else spy_release(value);
 }
@@ -24014,9 +24037,9 @@ static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
     SPYValue *sent = top->kind == BLOCK_CONSUME ? top->consumer->sent : NULL;
     if (!sent) return spy_none(c);
     top->consumer->sent = NULL;
-    if (top->consumer->id != B_CLOSE) return sent;
+    if (top->consumer->id != B_CLOSE && top->consumer->id != B_THROW) return sent;
     top->consumer->count = 0;
-    raise_value(c, sent); spy_release(sent);
+    raise_thrown(c, sent, c->handled); spy_release(sent);
     return spy_none(c);
 }
 /* Loop item item, which the loop step next took: stored to a name the
@@ -24137,9 +24160,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         SPYValue *item = iterator_send(c, m->delegate, sent, thrown, argc, argv, &halt);
         if (item) return (Result){FLOW_YIELD, item};
         if (halt) return (Result){FLOW_HALT, NULL};
+        if (thrown && c->handled) delegate_raised(c);
         finish_delegate(c, m);
     } else {
-        if (thrown) raise_value(c, thrown);
+        if (thrown) raise_thrown(c, thrown, c->handled);
         else if (m->awaiting && !m->drop) machine_push(c, m, spy_retain(sent ? sent : c->none));
         m->awaiting = AWAIT_NONE;
     }
@@ -24953,8 +24977,8 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
     if (g->as.generator.running) return spy_error(c, "ValueError", g->type == SPY_COROUTINE ? "coroutine already executing" : "generator already executing");
     if (g->as.generator.done) {
         if (g->type == SPY_COROUTINE) return spy_error(c, "RuntimeError", "cannot reuse already awaited coroutine");
-        if (g->type == SPY_ASYNC_GENERATOR) return thrown ? raise_value(c, thrown) : spy_error(c, "StopAsyncIteration", "");
-        return thrown ? raise_value(c, thrown) : spy_error(c, "StopIteration", "");
+        if (g->type == SPY_ASYNC_GENERATOR) return thrown ? raise_thrown(c, thrown, NULL) : spy_error(c, "StopAsyncIteration", "");
+        return thrown ? raise_thrown(c, thrown, NULL) : spy_error(c, "StopIteration", "");
     }
     if (!g->as.generator.started && !thrown && sent && sent->type != SPY_NONE)
         return errorf(c, "TypeError", "can't send non-None value to a just-started %s",
@@ -24965,7 +24989,7 @@ static SPYValue *generator_send_args(SPYContext *c, SPYValue *g, SPYValue *sent,
         size_t line = c->line;
         if (enter_frame(c, g->as.generator.env, g)) return NULL;
         c->frames[c->py_depth - 1].line = g->as.generator.node ? g->as.generator.node->line : line;
-        raise_value(c, thrown); leave_frame(c, NULL); c->line = line;
+        raise_thrown(c, thrown, NULL); leave_frame(c, NULL); c->line = line;
         generator_close(g); return NULL;
     }
     if (generator_resume(c, g)) return NULL;
@@ -25054,6 +25078,33 @@ static SPYValue *generator_next(SPYContext *c, SPYValue *g) {
     if (!value && error_is(c, "StopIteration")) spy_clear_error(c);
     return value;
 }
+/* The exception a generator's throw with its argc arguments argv raises
+ * in it, owned; or NULL with an error, which the throw raises itself. */
+static SPYValue *thrown_exception(SPYContext *c, size_t argc, SPYValue *const *argv) {
+    SPYValue *exception = argv[0];
+    if (argc == 3 && argv[2]->type != SPY_NONE && argv[2]->type != SPY_TRACEBACK)
+        return spy_error(c, "TypeError", "throw() third argument must be a traceback object");
+    if (exception->type == SPY_CLASS && subclass(exception, c->exceptions[X_BASE_EXCEPTION])) {
+        if (argc > 1 && argv[1]->type == SPY_INSTANCE && subclass(argv[1]->as.map.parent, exception)) exception = spy_retain(argv[1]);
+        else if (argc > 1 && argv[1]->type == SPY_TUPLE) exception = instantiate_exception(c, exception, argv[1]->as.seq.len, argv[1]->as.seq.items, 0);
+        else exception = instantiate_exception(c, exception, argc > 1 && argv[1]->type != SPY_NONE ? 1 : 0, argv + 1, 0);
+        /* An instantiation's own error is the one thrown, as CPython's,
+         * before the throw's frame sees it. */
+        if (!exception && !c->stopped) {
+            if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+            ErrorState state = take_error(c);
+            if (!(exception = state.value)) restore_error(c, &state);
+        }
+    } else if (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, c->exceptions[X_BASE_EXCEPTION])) {
+        if (argc > 1 && argv[1]->type != SPY_NONE) return spy_error(c, "TypeError", "instance exception may not have a separate value");
+        exception = spy_retain(exception);
+    } else return errorf(c, "TypeError", "exceptions must be classes or instances deriving from BaseException, not %s",
+                        exception->type == SPY_CLASS ? "type" : type_name(exception));
+    /* As PyException_SetTraceback, past any __traceback__ a subclass defines;
+     * it replaces the field every exception has, which cannot fail. */
+    if (exception && argc == 3 && argv[2]->type == SPY_TRACEBACK) set_hidden_field(c, exception, "__traceback__", argv[2]);
+    return exception;
+}
 /* Method number method of generator g, called with its number of arguments. */
 static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t argc, SPYValue *const *argv) {
     if (method == M_ITER) return spy_retain(g);
@@ -25078,21 +25129,7 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
         if (error_is(c, "GeneratorExit")) { spy_clear_error(c); return spy_none(c); }
         return NULL;
     }
-    SPYValue *exception = argv[0];
-    if (argc == 3 && argv[2]->type != SPY_NONE && argv[2]->type != SPY_TRACEBACK)
-        return spy_error(c, "TypeError", "throw() third argument must be a traceback object");
-    if (exception->type == SPY_CLASS && subclass(exception, c->exceptions[X_BASE_EXCEPTION])) {
-        if (argc > 1 && argv[1]->type == SPY_INSTANCE && subclass(argv[1]->as.map.parent, exception)) exception = spy_retain(argv[1]);
-        else if (argc > 1 && argv[1]->type == SPY_TUPLE) exception = instantiate_exception(c, exception, argv[1]->as.seq.len, argv[1]->as.seq.items, 0);
-        else exception = instantiate_exception(c, exception, argc > 1 && argv[1]->type != SPY_NONE ? 1 : 0, argv + 1, 0);
-    } else if (exception->type == SPY_INSTANCE && subclass(exception->as.map.parent, c->exceptions[X_BASE_EXCEPTION])) {
-        if (argc > 1 && argv[1]->type != SPY_NONE) return spy_error(c, "TypeError", "instance exception may not have a separate value");
-        exception = spy_retain(exception);
-    } else return errorf(c, "TypeError", "exceptions must be classes or instances deriving from BaseException, not %s",
-                        exception->type == SPY_CLASS ? "type" : type_name(exception));
-    /* As PyException_SetTraceback, past any __traceback__ a subclass defines;
-     * it replaces the field every exception has, which cannot fail. */
-    if (exception && argc == 3 && argv[2]->type == SPY_TRACEBACK) set_hidden_field(c, exception, "__traceback__", argv[2]);
+    SPYValue *exception = thrown_exception(c, argc, argv);
     SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, argc, argv) : NULL;
     spy_release(exception); return result;
 }
@@ -29448,7 +29485,7 @@ static void consumer_settle(SPYContext *c, Consumer *s) {
  * -1 on an error. A float total accumulates with Neumaier's compensation,
  * as CPython's sum. */
 static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
-    if (s->id == B_NEXT) { s->best = item; return 1; }
+    if (s->id == B_NEXT || s->id == B_THROW) { s->best = item; return 1; }
     if (s->id == B_CLOSE) {
         spy_release(item);
         spy_error(c, "RuntimeError", "generator ignored GeneratorExit");
@@ -29517,7 +29554,7 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         s->sent = NULL;
         return returned ? returned : spy_none(c);
     }
-    if (s->id == B_NEXT && !c->error_type[0]) {
+    if ((s->id == B_NEXT || s->id == B_THROW) && !c->error_type[0]) {
         /* The item next() took; else its default, or StopIteration with
          * what the generator returned. */
         SPYValue *item = s->best ? s->best : s->result, *returned = s->sent;

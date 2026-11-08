@@ -300,8 +300,9 @@ These run as machines on the heap, in one native activation of
   a `__contains__`, that an `in` or `not in` outside a comparison chain
   searches, after calling their `__iter__`, comparing the items natively;
   generators resumed by
-  `next` or by their `__next__` and `send` methods, or closed at a
-  `yield` by `close`, and coroutines resumed by `send`;
+  `next` or by their `__next__` and `send` methods, or thrown into or
+  closed at a `yield` by `throw` (with one argument) or `close`, and
+  coroutines resumed by `send`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`, and the
   Python `__lt__` comparisons of `sorted` and `list.sort`;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,

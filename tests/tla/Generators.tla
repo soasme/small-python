@@ -13,8 +13,8 @@
 (*     while i < K:                                                        *)
 (*         try:                                                            *)
 (*             got = yield (i, last)        # await Y((i, last)) in a      *)
-(*         except ValueError:               # coroutine                    *)
-(*             got = 'caught'                                              *)
+(*         except ValueError as e:          # coroutine                    *)
+(*             got = 'caught' if e.__context__ is None else 'chained'      *)
 (*         except GeneratorExit:                                           *)
 (*             if variant == 'plain': raise                                *)
 (*             got = 'exit'                                                *)
@@ -25,6 +25,9 @@
 (*             except ValueError: got = 'blocked'                          *)
 (*         last, i = got, i + 1                                            *)
 (*     return 'done'                                                       *)
+(*                                                                         *)
+(* A throw is made while its caller handles `handled` (an IndexError) or   *)
+(* nothing; the body handles nothing at its loop's yield.                  *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -34,7 +37,8 @@ Kinds == {"generator", "coroutine"}
 Variants == {"plain", "stubborn"}
 Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError"}
-Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e>> : e \in Thrown} \cup {<<"close">>}
+Handled == {"None", "IndexError"}               \* what the caller of a throw handles
+Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h>> : e \in Thrown, h \in Handled} \cup {<<"close">>}
 
 \* Where the body is suspended: before its first line, at the loop's yield,
 \* at the yield inside the GeneratorExit handler, or finished.
@@ -81,8 +85,10 @@ Send(v) ==
          [] pc = "done" /\ kind = "generator" -> Stay(<<"stop", "None">>)
          [] pc = "done" -> Stay(<<"raise", "RuntimeError">>)     \* cannot reuse already awaited coroutine
 
-Throw(e) ==
-    /\ op' = <<"throw", e>>
+(* The exception thrown is chained to none the caller handles, so h never *)
+(* shows: the body's handler sees no context.                             *)
+Throw(e, h) ==
+    /\ op' = <<"throw", e, h>>
     /\ CASE pc = "loop" /\ e = "ValueError" -> Continue("caught")
          [] pc = "done" /\ kind = "coroutine" -> Stay(<<"raise", "RuntimeError">>)  \* cannot reuse already awaited coroutine
          [] OTHER -> Finish(<<"raise", e>>)  \* a just-started body never runs; elsewhere nothing catches e
@@ -96,7 +102,7 @@ Close ==
 Next ==
     /\ UNCHANGED <<kind, variant>>
     /\ \/ \E v \in Sent : Send(v)
-       \/ \E e \in Thrown : Throw(e)
+       \/ \E e \in Thrown, h \in Handled : Throw(e, h)
        \/ Close
 
 Spec == Init /\ [][(Next)]_vars
@@ -110,6 +116,9 @@ DoneIsFinal == [][(pc = "done" => pc' = "done")]_vars
 \* Throwing into a just-started generator raises at its start: the body
 \* never runs and the object is finished.
 ThrowAtStart == [][(pc = "start" /\ op'[1] = "throw" => pc' = "done" /\ result' = <<"raise", op'[2]>>)]_vars
+
+\* A throw's outcome is the same whatever its caller handles.
+ThrowIgnoresCaller == [][(op'[1] = "throw" => last' # "chained")]_vars
 
 \* close() on a finished or just-started object returns None and finishes it.
 CloseFinished == [][(pc \in {"start", "done"} /\ op' = <<"close">> => result' = <<"return", "None">> /\ pc' = "done")]_vars

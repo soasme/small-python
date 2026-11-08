@@ -60,6 +60,8 @@ Unreleased (0.8.0):
 - a metaclass's Python __instancecheck__ and __subclasscheck__ run without
   the C stack in isinstance() and issubclass()
 - a generator's close() runs its handlers without the C stack
+- a generator's throw() runs its handlers without the C stack; as in CPython,
+  its exception is not chained to its caller's, and its class's errors are thrown in
 - a dead instance's Python __del__ runs without the C stack
 - a class statement's metaclass __new__ runs without the C stack
 - a class statement's __set_name__ and __init_subclass__ calls run without

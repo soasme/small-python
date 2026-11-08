@@ -31,8 +31,8 @@ def make(kind, variant):
         while i < K:
             try:
                 got = yield (i, last)
-            except ValueError:
-                got = "caught"
+            except ValueError as e:
+                got = "caught" if e.__context__ is None else "chained"
             except GeneratorExit:
                 if variant == "plain":
                     raise
@@ -53,8 +53,8 @@ def make(kind, variant):
         while i < K:
             try:
                 got = await Y((i, last))
-            except ValueError:
-                got = "caught"
+            except ValueError as e:
+                got = "caught" if e.__context__ is None else "chained"
             except GeneratorExit:
                 if variant == "plain":
                     raise
@@ -85,6 +85,11 @@ def perform(kind, target, op):
                 value = next(target)
             else:
                 value = target.send(None if op[1] == "None" else op[1])
+        elif op[0] == "throw" and op[2] == "IndexError":
+            try:
+                raise IndexError
+            except IndexError:
+                value = target.throw({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
         elif op[0] == "throw":
             value = target.throw({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
         else:
