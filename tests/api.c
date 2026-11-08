@@ -1142,6 +1142,18 @@ int main(int argc, char **argv) {
                "    return total");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "kept()", "kept.py"), SPY_STOP_STEPS, &pauses)) == 435 + 30 * 6 + 100 && pauses > 3);
+    /* So does a lone == or != of lists or tuples in an __eq__ of their
+     * items, pair after pair; an instance operand's __eq__ too. */
+    execute(c, "class Eq:\n    def __init__(self, v): self.v = v\n"
+               "    def __eq__(self, o):\n        if self.v == 'bad': raise KeyError(o)\n        return slow(self.v) == getattr(o, 'v', o)\n"
+               "def equals():\n    total = 0\n"
+               "    for i in range(30):\n"
+               "        total += ([Eq(i), 1, Eq(2)] == [Eq(i), 1, Eq(2)]) + ((Eq(i), 2) != (Eq(i), 3)) + ([Eq(1), Eq(i)] == [Eq(0), Eq(i)])\n"
+               "        total += (Eq(i) == i) + ([1, 2] == [1, 2]) + ((Eq(i), [1]) == (i, [1]))\n"
+               "    try: [Eq('bad')] == [1]\n    except KeyError: total += 100\n"
+               "    return total");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "equals()", "equals.py"), SPY_STOP_STEPS, &pauses)) == 30 * 5 + 100 && pauses > 3);
     /* print writes to the sys.stdout it began with, which __str__ rebinds. */
     SPYContext *muted = spy_context_new();
     Output shown = {0};

@@ -13,11 +13,13 @@
 (* TypeError; a method's result is returned as is; chains evaluate each    *)
 (* operand once and stop at the first false link; built-in sequences       *)
 (* compare lexicographically and only with their own type, mappings and    *)
-(* sets by contents (sets ordering by subset), NaN is unequal to itself    *)
-(* while containers test identity first, and ints and floats compare       *)
-(* exactly; is compares identity; in uses __contains__ (its result made a  *)
-(* bool), then iteration, then __getitem__ with indices from 0, and        *)
-(* strings, bytes, and dicts and sets have their own rules.                *)
+(* sets by contents (sets ordering by subset), lists of other lengths      *)
+(* unequal at once while tuples compare their common items, an unequal     *)
+(* pair the comparison left past an end comparing the lengths, NaN is      *)
+(* unequal to itself while containers test identity first, and ints and    *)
+(* floats compare exactly; is compares identity; in uses __contains__ (its *)
+(* result made a bool), then iteration, then __getitem__ with indices from *)
+(* 0, and strings, bytes, and dicts and sets have their own rules.         *)
 (*                                                                         *)
 (* A program evaluates x OP y for an instance x of class A and y of class  *)
 (* B, B either unrelated to A or a subclass of it (RELATION), where A and  *)
@@ -37,7 +39,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "in_list", "in_str_type", "in_bytes_type", "in_identity", "contains_nonbool", "contains_falsy",
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
-          "hash_none_eq", "list_identity_shortcut"}
+          "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -128,6 +130,8 @@ Case(c) ==
       [] c = "eq_returns_value" -> <<"('x', False, 'x')", <<>>>>
       [] c = "hash_none_eq" -> <<"None", <<>>>>                           \* defining __eq__ clears __hash__
       [] c = "list_identity_shortcut" -> <<"(True, True)", <<"'eq'">>>>
+      [] c = "seq_length_eq" -> <<"(False, False)", <<"'eq'">>>>          \* lists of other lengths compare no items, tuples do
+      [] c = "seq_cleared" -> <<"True", <<>>>>                            \* an unequal pair past an end compares lengths
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 

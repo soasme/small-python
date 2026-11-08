@@ -49,6 +49,10 @@ SOURCES = {
     "eq_returns_value": "class V:\n    def __eq__(s, o): return 'x'\nresult = (V() == 1, V() != 1, 1 == V())",
     "hash_none_eq": "class V:\n    def __eq__(s, o): return True\nresult = V.__hash__",
     "list_identity_shortcut": "class E:\n    def __eq__(s, o): return t('eq')\ne = E()\nresult = ([e] == [e], [e] == [E()])",
+    "seq_length_eq": "class E:\n    def __eq__(s, o): return t('eq')\nresult = ([E()] == [E(), 1], (E(),) == (E(), 1))",
+    "seq_cleared": "class X:\n    def __eq__(s, o):\n        b.clear()\n        return NotImplemented\n"
+                   "class Y:\n    def __eq__(s, o):\n        a.clear()\n        return NotImplemented\n"
+                   "a, b = [X()], [Y()]\nresult = a == b",
 }
 
 

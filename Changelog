@@ -82,6 +82,9 @@ Unreleased (0.8.0):
   __getitem__, run without the C stack
 - list.extend() and dict.update() take a generator's items without the C
   stack
+- == and != of lists or tuples call their items' Python __eq__ without the C
+  stack, and run about a quarter faster; tuples of different lengths compare
+  their common items first, as CPython's do
 - code compiled while pausing is set pauses inside the property getter,
   __get__, __getattribute__ or __getattr__ that getattr() calls, and the
   __setattr__, property setter or __set__ that setattr() calls

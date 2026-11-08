@@ -167,7 +167,8 @@ static const char *const programs[] = {
     "        for i in range(1): pass\n"
     "        return False\n"
     "q = [1, Q()]\n"
-    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q])\n",
+    "def eqs(a, b): return [len(a), a == b, [len(a), a == b, [len(a), a == b, [len(a), a == b, [len(a), a == b, [len(a), a == b]]]]]][1:]\n"
+    "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q], eqs(q, [1, Q()]))\n",
 
     "def gen(n):\n"
     "    try:\n"
