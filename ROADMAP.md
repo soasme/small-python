@@ -12,7 +12,7 @@ says where the engine stands today, so the first step is clear.
 - [Distribution](#distribution): what one executable still lacks, the
   standard library, tree shaking
 - [Sandboxed runtime](#sandboxed-runtime): runtime policy, virtual file
-  systems, host functions, inspection, snapshots,
+  systems, host functions, resumable execution, inspection, snapshots,
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
@@ -213,6 +213,47 @@ a table so that repeated dictionary keys are sent once, measured against
 JSON as the baseline it has to beat (djs's wire format is 1.4 to 9 times
 faster than `JSON.stringify` plus `JSON.parse` in wasm).
 
+### Resumable execution
+
+Today a host function is a C callback that runs inside the engine's call,
+and a spent step budget stops the program for good. The JavaScript package
+waits for its host through JSPI, which suspends the whole wasm stack, C
+frames included; that works only in WebAssembly and only where JSPI exists.
+
+Let the engine return to the host at any step instead, and continue later
+from the same point, on every platform:
+
+- a synchronous host call returns "waiting on host call *n*" from the
+  evaluation entry point; the host answers it, possibly asynchronously, and
+  resumes the context;
+- an asynchronous host call returns an awaitable at once and records the
+  pending call in the context; results are delivered one at a time, in the
+  order the host supplies them, when the event loop is idle, so a run
+  depends on the order of results and never on when they arrived;
+- a spent step budget is a pause the host may resume, so the budget becomes
+  a time slice as well as a limit.
+
+Every frame that can be paused must then live in the heap, not on the C
+stack. Calls between Python functions whose bodies run on the machine
+already do ([Toward bytecode](#toward-bytecode)). What still holds a Python
+frame under a C frame:
+
+- bodies and statements the tree walker evaluates (a body without a call,
+  the statements after a body's last call, a `for` whose only call is its
+  iterable);
+- calls that C makes: special methods (`__eq__`, `__hash__`, operators,
+  `__init__` and other class-call steps, iteration protocols), sort keys,
+  builtins that call Python, and host and trace callbacks.
+
+Each moves onto the machine as a continuation, one measured commit at a
+time, with no benchmark slower than before. Until the last one has moved, a
+pause requested while such a frame is live is reported to the host instead
+of taken. Every pause point is in the TLA+ models and spec tests, including
+a pause inside a sort key, an `__eq__` and a generator. djs (a JavaScript
+engine for Pi's codemode) is built this way and is the reference design.
+Resumable execution comes before snapshots, which save a context exactly at
+such a pause, and it keeps spy faster than CPython 3.15 on every benchmark.
+
 ### Embedded inspector
 
 Trace execution, allocations, policy violations and imports, as structured
@@ -225,10 +266,8 @@ below consume.
 Save a context and resume it later, or fork it into several that continue
 independently: agent checkpointing, speculative execution, branching
 evaluation and durable workflows. A snapshot is taken when the context is
-idle, between top-level operations, so no frame is running: the engine
-does not pause inside a call (see
-[WebAssembly and the edge](#webassembly-and-the-edge) for host calls that
-wait without blocking a thread).
+idle or paused ([Resumable execution](#resumable-execution)), so every live
+frame is in the heap.
 
 A snapshot of the interpreter's memory is not a snapshot of the outside
 world. Pure Python state (values, frames, generators, coroutines) can be
@@ -302,8 +341,9 @@ is an async function, so the engine's whole stack, C frames included, is
 suspended until a message arrives while the event loop runs on. A host call
 from any Python code, inside a sort key or `__eq__` too, then waits on a
 promise without `SharedArrayBuffer`, and without threads for edge runtimes
-such as Cloudflare Workers. The engine did not change: it does not pause on
-its own, so ordinary calls keep their speed. Where JSPI is missing, the
+such as Cloudflare Workers. Once the engine pauses on its own
+([Resumable execution](#resumable-execution)), `read` returns to the host
+instead and the package needs neither JSPI nor a Worker. Until then, where JSPI is missing, the
 package keeps the `SharedArrayBuffer` inbox
 ([docs/packaging/javascript.md](docs/packaging/javascript.md) section 2.1).
 
@@ -415,9 +455,10 @@ walker. Move node kinds onto machine instructions one at a time, each only
 once it measures faster than the walker, then revisit locals in slots,
 which pay only once a machine step costs well under a walker node. A body
 that holds a call already runs on the machine, so that its calls do not
-recurse in C. They are weighed on speed alone: host calls wait
-through JSPI ([WebAssembly and the edge](#webassembly-and-the-edge)) and
-snapshots are taken at idle points, so neither needs them. The plan and its measurements are in
+recurse in C. The walker's remaining bodies and the calls C makes follow,
+so that any frame can pause
+([Resumable execution](#resumable-execution)); each step keeps every
+benchmark at least as fast as before. The plan and its measurements are in
 [docs/optimization.md](docs/optimization.md#toward-bytecode).
 
 Expected gain: two to three times on interpreter-bound programs.
