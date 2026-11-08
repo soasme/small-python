@@ -8,7 +8,8 @@
 # other operand's and then to identity, an __eq__'s result is tested for
 # truth, and exceptions from __eq__ or that test propagate. Items the
 # comparison adds or removes are seen as it reads them, and an unequal pair
-# left past an end compares the lengths, inside functions as at module level.
+# left past an end compares the lengths, also in a comparison chain, inside
+# functions as at module level.
 from harness import *
 
 log = []
@@ -99,6 +100,9 @@ def results():
     out += [left == right, left, right]
     left, right = [Clears("right"), 1], [Clears("left"), 2]
     out += [left != right]
+    p, q, r = [Item("c1")], [Item("c2")], [Item("c3", 1)]
+    t1, t2, t3 = (Item("c4"),), (Item("c5"),), (Item("c6"),)
+    out += [p == q == q, p == q != r, p == r == q, t1 == t2 == t3, [1] < [2] == [2], "yes" if p == q == q else "no"]
     out.append(list(log))
     return out
 
@@ -108,10 +112,12 @@ expected = [True, False, False, True,
             ("KeyError", "'eq'"), ("ValueError", "bool"),
             ("TypeError", "Arity.__eq__() takes 1 positional argument but 2 were given"),
             False, 3, False, [0], True, False, True, [], [], False,
+            True, True, False, True, True, "yes",
             [("a", "x"), ("b", "y"), ("a", "x"), ("b", "y"), ("a", "x"), ("b", "z"), ("a", "x"), ("b", "z"),
              ("a", "p"), ("b", "q"), ("a", "r"), ("a", "t"), ("a", "o"), ("o2", "a"), ("sub", "v"), ("v", "u"),
              ("declines", "d"), ("declines", "e"), ("bad", 1), ("grow", 0), ("shrink", 0),
-             ("w", 0), ("w2", 0), ("w", 0), ("w2", 0)]]
+             ("w", 0), ("w2", 0), ("w", 0), ("w2", 0),
+             ("c1", "c2"), ("c1", "c2"), ("c2", "c3"), ("c1", "c3"), ("c4", "c5"), ("c5", "c6"), ("c1", "c2")]]
 
 def main():
     return results()
