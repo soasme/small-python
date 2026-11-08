@@ -78,6 +78,8 @@ Unreleased (0.8.0):
 - in over a list or tuple calls its items' Python __eq__ without the C stack
   also for a number or str and in if and while tests; x in a dict or set
   tests about 9% faster
+- a dict subclass's Python __missing__, and a builtin subclass's Python
+  __getitem__, run without the C stack
 - raising and catching an exception runs about a third faster
 - enumerate, filter, map and zip take their iterables' items again after
   ending, as CPython's do

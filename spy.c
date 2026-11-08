@@ -22910,6 +22910,30 @@ static int hashes_key(SPYValue *container, int lookup) {
     return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
            (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
 }
+/* x[y], x an instance of a builtin's subclass: its class's Python
+ * __getitem__, or for a dict's subclass, of a key y that is a builtin
+ * scalar and absent, found without calling Python, its Python
+ * __missing__, entered as an operator's method with its env, x, y and the
+ * phase pushed on m's stack; else NULL. */
+static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+    SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = NULL;
+    int64_t hash;
+    if (!base) function = class_lookup(x->as.map.parent, "__getitem__");
+    else if (is_dict(base) && y->type <= SPY_STRING && !hash_value(c, y, &hash)) {
+        SPYValue *map = namespace_map(base);
+        MapCursor cursor = map_cursor(map, hash);
+        for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
+            SPYValue *key = map->as.map.items[i].key;
+            if (key == y || key->type > SPY_STRING || equal(key, y)) return NULL;
+        }
+        function = class_lookup(x->as.map.parent, "__missing__");
+    }
+    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
+    SPYValue *args[] = {spy_retain(x), spy_retain(y)};
+    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+    return NULL;
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -22955,6 +22979,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (!reflected || !(function = item_function(c, y, reflected))) return NULL;
         self = y; other = x; phase = OPERATOR_LAST;
     } else {
+        if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
         if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
         SPYValue *cls = x->as.map.parent, *right = value_class(c, y);
         /* y's reflected method comes first when y's class is a subclass
