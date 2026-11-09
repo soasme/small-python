@@ -1148,6 +1148,11 @@ int main(int argc, char **argv) {
                "        s.add(Hashed())\n    return d.get(h) + len(d) + len(s)");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hashing()", "hashing.py"), SPY_STOP_STEPS, &pauses)) == 59 && pauses > 1);
+    /* So do a loop and sum() over a class iterated by its Python __getitem__. */
+    execute(c, "class Indexed:\n    def __getitem__(self, i):\n        if i >= 20: raise IndexError(i)\n        return slow(i)\n"
+               "def indexed():\n    total = sum(Indexed())\n    for x in Indexed(): total += x\n    return total");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "indexed()", "indexed.py"), SPY_STOP_STEPS, &pauses)) == 380 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

@@ -288,19 +288,21 @@ These run as machines on the heap, in one native activation of
 - `exec` and `eval` of source, also of interactive input (mode
   `'single'`) and the Python `sys.displayhook` its values go to, and the
   module of source an `import` statement runs;
-- a loop's Python `__iter__` and `__next__`, the function of a `map` or
-  `filter` it takes items from, a `map`'s bound method or callable
+- a loop's Python `__iter__` and `__next__`, or the `__getitem__` of a
+  class without `__iter__`, also through `reversed`, the function of a
+  `map` or `filter` it takes items from, a `map`'s bound method or callable
   instance's `__call__` too, the generator that an `enumerate`, or a
   `filter` whose function is `None` or native, takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
   beside list, tuple and range iterators, for a loop or a consumer below;
 - the generator a `yield from` delegates to, and those it delegates to
   in turn, when a step above resumes the delegating generator;
-- generators, maps, and instances whose class has a Python `__iter__`
-  and no `__len__` or `__length_hint__`, consumed by `sum`, `any`, `all`,
-  `min`, `max`, `list`, `tuple`, `set`, `frozenset`, `sorted`,
-  `str.join`, `list.extend`, or `dict` and `dict.update` (but an
-  instance), and, in
+- generators, maps, and instances whose class has a Python `__iter__`,
+  or a Python `__getitem__` and no `__iter__`, and no `__len__` or
+  `__length_hint__`, and `reversed` iterators over an instance,
+  consumed by `sum`, `any`, `all`, `min`, `max`, `list`, `tuple`,
+  `set`, `frozenset`, `sorted`, `str.join`, `list.extend`, or `dict`
+  and `dict.update` (but an instance), and, in
   code compiled while pausing, the generators and such instances a target
   list unpacks or a list, tuple or set display stars, and the generators
   and such instances a call's starred argument takes, and those, without

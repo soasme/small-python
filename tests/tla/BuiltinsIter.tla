@@ -61,7 +61,7 @@ Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_d
           "map_shortest", "map_none", "map_bound", "filter_none", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
-          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
+          "sort_mutated", "sort_key_error", "sort_key_callables", "consume_getitem", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
           "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
@@ -110,6 +110,7 @@ Case(c) ==
       [] c = "map_none" -> "TypeError: 'NoneType' object is not callable"
       \* a bound method or callable instance is called with its self first
       [] c = "map_bound" -> "([3, 5], [12])"
+      [] c = "consume_getitem" -> "([0, 1, 2], 3, [0, 1, 2], [0, 1, 2], (0, 1, 2), [2, 1, 0])"
       [] c = "filter_none" -> "[1, 'a']"
       [] c = "enumerate_kw" -> "([(-1, 'a'), (0, 'b')], [(0, 'a')])"
       [] c = "enumerate_bad_start" -> "TypeError: 'float' object cannot be interpreted as an integer"

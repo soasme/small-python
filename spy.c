@@ -22090,6 +22090,26 @@ static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
     SPYValue *function = cls && !class_lookup(cls, "__len__") && !class_lookup(cls, "__length_hint__") ? class_lookup(cls, "__iter__") : NULL;
     return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
 }
+/* The Python __getitem__ on the machine of plain instance v's class,
+ * borrowed; else NULL. */
+static SPYValue *getitem_function(SPYContext *c, SPYValue *v) {
+    SPYValue *cls = v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__getitem__", NULL) ? NULL : v->as.map.parent;
+    SPYValue *function = cls ? class_lookup(cls, "__getitem__") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Whether instance v iterates by a getitem_function, its class having no
+ * __iter__ and, as for iter_function, no length. */
+static int getitem_iterated(SPYContext *c, SPYValue *v) {
+    SPYValue *cls = v->type == SPY_INSTANCE ? v->as.map.parent : NULL;
+    return cls && !class_lookup(cls, "__iter__") && !class_lookup(cls, "__len__") && !class_lookup(cls, "__length_hint__") && getitem_function(c, v);
+}
+/* Whether a call gives iterator v's next items (next_call_of): a map's,
+ * a filter's, or a __getitem__ or reversed one's over an instance. */
+static int called_iterator(SPYValue *v) {
+    if (v->type != SPY_ITERATOR) return 0;
+    int kind = v->as.iterator.kind;
+    return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE);
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
@@ -22101,8 +22121,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
-    if (!argc || (!resumable(argv[0]) && !(argv[0]->type == SPY_ITERATOR && (argv[0]->as.iterator.kind == I_MAP || argv[0]->as.iterator.kind == I_FILTER)) && !zip_of_generator(argv[0]) &&
-                  !adapted_generator(c, argv[0]) && !iter_function(c, argv[0]))) return -1;
+    if (!argc || (!resumable(argv[0]) && !called_iterator(argv[0]) && !zip_of_generator(argv[0]) &&
+                  !adapted_generator(c, argv[0]) && !iter_function(c, argv[0]) && !getitem_iterated(c, argv[0]))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT && argv[0]->type != SPY_INSTANCE) ? B_EXTEND : -1 :
@@ -22126,10 +22146,12 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
 /* A consumer's source *v, owned (iter_function): an instance whose
  * __iter__ is on the machine stays, its call the consumer's first
  * (KEY_ITER); one whose __iter__ is a generator function gives its
- * generator. The consumer's keyed. */
+ * generator, and one of __getitem__ alone its iterator. The consumer's
+ * keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
     if ((*v)->type != SPY_INSTANCE) return 0;
-    if (machine_function(c, iter_function(c, *v))) return KEY_ITER;
+    SPYValue *iter = iter_function(c, *v);
+    if (iter && machine_function(c, iter)) return KEY_ITER;
     SPYValue *iterator = get_iterator(c, *v);
     spy_release(*v);
     *v = iterator;
@@ -24916,6 +24938,31 @@ static ALWAYS_INLINE int filtering(SPYValue *v) {
  * iterables' next items. 1 then; 0 when v has none; -1 when the map's
  * iterables ended or raised; 2 with the generator to resume instead
  * (adapted_generator), borrowed. */
+/* next_call_of for a __getitem__ iterator v, or a reversed one over an
+ * instance: its source's Python __getitem__ on the machine, given the
+ * next index. */
+static NO_INLINE int getitem_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *function = getitem_function(c, v->as.iterator.source), *args[2] = {v->as.iterator.source, NULL};
+    int reversed = v->as.iterator.kind == I_REVERSED;
+    if (!function || (reversed ? !v->as.iterator.index : v->as.iterator.done || v->as.iterator.index > INT64_MAX)) return 0;
+    if (!(args[1] = spy_int(c, (int64_t)(reversed ? --v->as.iterator.index : v->as.iterator.index++)))) return -1;
+    *env = function_env(c, function, 2, args, NULL, 0);
+    spy_release(args[1]);
+    if (!*env) return -1;
+    *fn = spy_retain(function);
+    return 1;
+}
+/* Whether a call for iterator v's next item that failed ended its items:
+ * a StopIteration, or a __getitem__ iterator's IndexError, which ends it
+ * for good; the error is cleared. A reversed iterator ends at any error. */
+static NO_INLINE int next_ended(SPYContext *c, SPYValue *v) {
+    int kind = v->type == SPY_ITERATOR ? v->as.iterator.kind : -1;
+    if (kind == I_REVERSED) v->as.iterator.index = 0;
+    if (!error_is(c, "StopIteration") && !((kind == I_GETITEM || kind == I_REVERSED) && error_is(c, "IndexError"))) return 0;
+    spy_clear_error(c);
+    if (kind == I_GETITEM) v->as.iterator.done = 1;
+    return 1;
+}
 static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function, *args;
     if ((*fn = adapted_generator(c, v))) return 2;
@@ -24923,6 +24970,7 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
         int status = v->as.iterator.removed && zip_of_generator(v) ? zip_fill(c, v, fn) : 0;
         if (status) return status < 0 ? -1 : 2;
         if (v->as.iterator.kind == I_FILTER) return filter_call(c, v, fn, env);
+        if (v->as.iterator.kind == I_GETITEM || v->as.iterator.kind == I_REVERSED) return getitem_call(c, v, fn, env);
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
         if (!callee || !(function = machine_function(c, callee) ? callee : bound_function(c, callee))) return 0;
         if (!(args = zip_items(c, v))) return -1;
@@ -25025,7 +25073,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                             result = filter_returned(c, source, result, &again);
                             if (again) goto consume_generator;
                         }
-                        if (!result && error_is(c, "StopIteration")) spy_clear_error(c);
+                        if (!result) next_ended(c, source);
                         flow.value = result;
                         goto item_returned;
                     } else if (kind == CALL_KEY) {
@@ -25041,7 +25089,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (filtering(iterator)) result = filter_returned(c, iterator, result, &again);
                         if (again) pc--;
                         else if (result) loop_item(c, m, &f, &code[pc - 1], result);
-                        else if (error_is(c, "StopIteration")) { spy_clear_error(c); pc = code[pc - 1].target; }
+                        else if (next_ended(c, iterator)) pc = code[pc - 1].target;
                     }
                     continue;
                 }

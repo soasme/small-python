@@ -73,6 +73,9 @@ SOURCES = {
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
                           "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"
                           "result = (sorted([1, 3, 2], key=R), sorted([1, 2, 3, 4], key=W().m), max([1, 3, 2], key=W()))",
+    "consume_getitem": "class G:\n    def __getitem__(s, i):\n        if i >= 3: raise IndexError(i)\n        return i\n"
+                       "class L(G):\n    def __len__(s): return 3\n"
+                       "result = (list(G()), sum(G()), sorted(G()), [x for x in G()], tuple(iter(G())), list(reversed(L())))",
     "filter_none": "result = list(filter(None, [0, 1, '', 'a', None, []]))",
     "enumerate_kw": "result = (list(enumerate('ab', start=-1)), list(enumerate(iterable='a')))",
     "enumerate_bad_start": "result = enumerate('a', 1.5)",
