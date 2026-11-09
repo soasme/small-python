@@ -22788,7 +22788,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
-    if (argc != 1 + (id == B_FORMAT || id == B_ROUND) * (argc == 2) ||
+    if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
@@ -23102,7 +23102,7 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
         spy_release(callee);
         return consumer >= 0 ? NULL : result;
     }
-    if (argc == 2 + (id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
+    if (argc == 2 + (size_t)(id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
         (argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_INSTANCE)) {
         Instruction called = {.op = BC_BINARY, .arg = id == B_POW ? T_POW : O_DIVMOD};
         function = operator_call(c, m, &called, argv[0], argv[1], env);
@@ -23489,15 +23489,6 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD)) {
         int began = key_consumer(c, m, callee, positional, argv, kw, kwc);
         if (began < 0) goto done;
-        /* Without keywords, a consumer (consumer_of) takes the call as a
-         * plain call's step does. */
-        int id = began || kwc ? -1 : consumer_of(c, callee, -1, positional, argv);
-        if (id >= 0) {
-            size_t blocks = m->block_len;
-            consume(c, m, id, callee, -1, NULL, spy_retain(argv[0]), positional > 1 ? spy_retain(argv[1]) : NULL);
-            began = m->block_len > blocks;
-            if (!began) goto done;
-        }
         if (began) {
             /* The consumer's block goes above the call's operands. */
             Block block = m->blocks[--m->block_len];

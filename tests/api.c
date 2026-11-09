@@ -1168,6 +1168,10 @@ int main(int argc, char **argv) {
                "def entries():\n    class A(Entry()): x = 1\n    class B(list[int]): y = 2\n    return A(A.x + B.y + len(B([0])))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "entries()", "entries.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* A __class_getitem__ that cannot take the key raises from the subscript. */
+    execute(c, "class Arity:\n    def __class_getitem__(cls): return 1\n"
+               "def arity():\n    try: return Arity[slow(0)]\n    except TypeError: return 2");
+    assert(integer(c, run_paused(c, spy_eval(c, "arity()", "arity.py"), SPY_STOP_STEPS, &pauses)) == 2);
     /* So do dict() and dict.update() of a mapping with a Python keys() and __getitem__. */
     execute(c, "class Mapped:\n    def keys(self): return [slow(i) for i in range(10)]\n    def __getitem__(self, k): return slow(k)\n"
                "class Generated(Mapped):\n    def keys(self):\n        for i in range(10): yield slow(i)\n"

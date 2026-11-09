@@ -99,5 +99,7 @@ class Annotated:
     total: int = 0
     for item in Countdown(3):
         total += item
+    ordered = sorted([2, 1, 3], reverse=True)
 
 assert (Annotated.total, Annotated.item, Annotated.__annotations__) == (3, 0, {"total": int})
+assert Annotated.ordered == [3, 2, 1]
