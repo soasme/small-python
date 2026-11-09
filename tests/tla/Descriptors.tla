@@ -16,20 +16,23 @@
 (* A program defines a descriptor class D with the methods in METHODS,     *)
 (* each recording its arguments, then                                      *)
 (*                                                                         *)
-(*     class B: x = D()          class A(B): pass  (or x = 999, for super) *)
+(*     class B(base): x = D()    class A(B): pass  (or x = 999, for super) *)
 (*     a = A()                   and, if dict, a.__dict__["x"] = "inst"    *)
 (*                                                                         *)
-(* and does a.x, A.x, super(A, a).x, B.__dict__["x"].__get__(a),           *)
-(* a.x = 1, del a.x, or A.x = 1. The outcome is the result (a descriptor   *)
-(* call as get(instance, owner), set(instance, value), or delete(instance);*)
-(* the descriptor itself as D) or the exception, then a's dictionary after *)
-(* an assignment or deletion (A.__dict__["x"] after A.x = 1).              *)
+(* with base object or list, and does a.x, getattr(a, "x"), A.x,           *)
+(* super(A, a).x, B.__dict__["x"].__get__(a), a.x = 1, del a.x, or         *)
+(* A.x = 1. The outcome is the result (a descriptor call as                *)
+(* get(instance, owner), set(instance, value), or delete(instance); the    *)
+(* descriptor itself as D) or the exception, then a's dictionary after an  *)
+(* assignment or deletion (A.__dict__["x"] after A.x = 1). When raises, a  *)
+(* read's __get__ raises AttributeError, which the read names: x.          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Names == {"get", "set", "delete"}
-Ops == {"get", "classget", "superget", "direct", "set", "del", "classset"}
-Programs == [methods : SUBSET Names, dict : BOOLEAN, op : Ops]
+Ops == {"get", "getattr", "classget", "superget", "direct", "set", "del", "classset"}
+Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : BOOLEAN] :
+                p.raises => p.op \in {"get", "getattr"}}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -45,8 +48,11 @@ Get(p) == CASE Data(p) /\ Has(p, "get") -> "get(a, A)"                 \* a data
             [] Has(p, "get") -> "get(a, A)"
             [] OTHER -> "D"                                            \* no __get__: the descriptor itself
 
+\* A read's __get__ that raises AttributeError: the read names the attribute.
+Read(p) == IF p.raises /\ Get(p) = "get(a, A)" THEN "AttributeError x" ELSE Get(p)
+
 Run(p) ==
-    CASE p.op = "get" -> Get(p)
+    CASE p.op \in {"get", "getattr"} -> Read(p)
       [] p.op = "classget" -> IF Has(p, "get") THEN "get(None, A)" ELSE "D"
       [] p.op = "superget" -> IF Has(p, "get") THEN "get(a, A)" ELSE "D"
       [] p.op = "direct" -> IF Has(p, "get") THEN "get(a, None)" ELSE "AttributeError"
@@ -67,7 +73,7 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* A data descriptor with __get__ overrides the instance dictionary.
-DataOverrides == Done /\ program.op = "get" /\ Data(program) /\ Has(program, "get") => outcome = "get(a, A)"
+DataOverrides == Done /\ program.op = "get" /\ ~program.raises /\ Data(program) /\ Has(program, "get") => outcome = "get(a, A)"
 
 \* The instance dictionary overrides a non-data descriptor.
 InstanceOverrides == Done /\ program.op = "get" /\ ~Data(program) /\ program.dict => outcome = "'inst'"

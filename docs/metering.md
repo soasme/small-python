@@ -347,8 +347,9 @@ These run as machines on the heap, in one native activation of
   function code, and, in code compiled while pausing, an attribute
   deletion's `__delattr__`, property deleter or `__delete__`;
 - a dead instance's `__del__`;
-- property getters and `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and
-  binary operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
+- property getters, also of a builtin's or an exception's subclass, and
+  `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and binary
+  operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
   and `__contains__` methods of instances, where a step of their own
   reaches them, a builtin subclass's `__getitem__` and a dictionary
   subclass's `__missing__` for an absent `None`, `bool`, `int`, `float`

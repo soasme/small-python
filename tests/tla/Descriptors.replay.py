@@ -8,6 +8,8 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 def read(op, a, A, B, label):
     if op == "get":
         return label(a.x)
+    if op == "getattr":
+        return label(getattr(a, "x"))
     if op == "classget":
         return label(A.x)
     if op == "superget":
@@ -24,6 +26,8 @@ def outcome(p):
         return names.get(id(v), repr(v))
 
     def __get__(self, instance, owner=None):
+        if p["raises"]:
+            raise AttributeError("get")
         return "get(%s, %s)" % (label(instance), label(owner))
 
     def __set__(self, instance, value):
@@ -42,7 +46,7 @@ def outcome(p):
         body["__delete__"] = __delete__
     D = type("D", (), body)
     d = D()
-    B = type("B", (), {"x": d})
+    B = type("B", (list,) if p["base"] == "list" else (), {"x": d})
     A = type("A", (B,), {"x": 999} if p["op"] == "superget" else {})
     a = A()
     names.update({id(a): "a", id(A): "A", id(None): "None", id(d): "D"})
@@ -50,10 +54,10 @@ def outcome(p):
         a.__dict__["x"] = "inst"
     op = p["op"]
     try:
-        if op in ("get", "classget", "superget", "direct"):
+        if op in ("get", "getattr", "classget", "superget", "direct"):
             return read(op, a, A, B, label)
-    except AttributeError:
-        return "AttributeError"
+    except AttributeError as e:
+        return "AttributeError x" if p["raises"] and e.name == "x" else "AttributeError"
     try:
         if op == "classset":
             A.x = 1
