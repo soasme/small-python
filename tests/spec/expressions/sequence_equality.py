@@ -5,11 +5,13 @@
 # different lengths or sequences of different kinds compare no items, while
 # tuples of different lengths compare their common items first. A
 # subclass's reflected __eq__ comes first, NotImplemented falls back to the
-# other operand's and then to identity, an __eq__'s result is tested for
-# truth, and exceptions from __eq__ or that test propagate. Items the
+# other operand's and then to identity, as items of no Python __eq__
+# compare, an __eq__'s result is tested for truth, and exceptions from
+# __eq__ or that test propagate. Items the
 # comparison adds or removes are seen as it reads them, and an unequal pair
-# left past an end compares the lengths, also in a comparison chain, inside
-# functions as at module level.
+# left past an end compares the lengths, also in a comparison chain; a pair
+# of two lists of one length or two tuples compares its own items so,
+# nested to any depth, inside functions as at module level.
 from harness import *
 
 log = []
@@ -48,6 +50,8 @@ class Clears:
         spin()
         (left if self.side == "left" else right).clear()
         return NotImplemented
+
+class Plain: pass
 
 class Arity:
     def __eq__(self): spin()
@@ -103,6 +107,11 @@ def results():
     p, q, r = [Item("c1")], [Item("c2")], [Item("c3", 1)]
     t1, t2, t3 = (Item("c4"),), (Item("c5"),), (Item("c6"),)
     out += [p == q == q, p == q != r, p == r == q, t1 == t2 == t3, [1] < [2] == [2], "yes" if p == q == q else "no"]
+    n1, n2, n3 = Item("n1"), Item("n2"), Item("n3", 1)
+    out += [[[n1]] == [[n2]], ((n1,),) != ((n2,),), [(n1,)] == [(n2,)], [[[n1]]] == [[[n2]]], [[1, 2], n1] == [[1, 2], n2],
+            [[1], n1] == [[2], n2], [[n1], n2] == [[n3], n1], [(n1,), n2] == [(n2, 1), n1], [[n1], n2] == [[n1, 1], n1],
+            [[n1]] == [[n2]] == [[n3]], error(lambda: [[Item("bad")]] == [[1]]), [[n1], [n2]] != [[n2], [n1]],
+            [Plain(), n1] == [Plain(), n2], [[Plain()], n1] == [[Plain()], n2]]
     out.append(list(log))
     return out
 
@@ -113,11 +122,14 @@ expected = [True, False, False, True,
             ("TypeError", "Arity.__eq__() takes 1 positional argument but 2 were given"),
             False, 3, False, [0], True, False, True, [], [], False,
             True, True, False, True, True, "yes",
+            True, False, True, True, True, False, False, False, False, False, ("KeyError", "'eq'"), False, False, False,
             [("a", "x"), ("b", "y"), ("a", "x"), ("b", "y"), ("a", "x"), ("b", "z"), ("a", "x"), ("b", "z"),
              ("a", "p"), ("b", "q"), ("a", "r"), ("a", "t"), ("a", "o"), ("o2", "a"), ("sub", "v"), ("v", "u"),
              ("declines", "d"), ("declines", "e"), ("bad", 1), ("grow", 0), ("shrink", 0),
              ("w", 0), ("w2", 0), ("w", 0), ("w2", 0),
-             ("c1", "c2"), ("c1", "c2"), ("c2", "c3"), ("c1", "c3"), ("c4", "c5"), ("c5", "c6"), ("c1", "c2")]]
+             ("c1", "c2"), ("c1", "c2"), ("c2", "c3"), ("c1", "c3"), ("c4", "c5"), ("c5", "c6"), ("c1", "c2"),
+             ("n1", "n2"), ("n1", "n2"), ("n1", "n2"), ("n1", "n2"), ("n1", "n2"), ("n1", "n3"), ("n1", "n2"),
+             ("n1", "n2"), ("n2", "n3"), ("bad", 1), ("n1", "n2"), ("n2", "n1")]]
 
 def main():
     return results()

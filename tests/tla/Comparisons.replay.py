@@ -61,6 +61,9 @@ SOURCES = {
                        "    def __eq__(s, o): t(s.n + o.n); return True\n"
                        "d = {K('a'): 1, K('b'): 2}\nd[K('c')] = 3\nkept = [(k.n, v) for k, v in d.items()]\ndel d[K('e')]\n"
                        "result = kept + [len(d), len({K('f'), K('g')})]",
+    "seq_nested": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return True\n"
+                  "result = ([[E('a')], (E('b'),)] == [[E('c')], (E('d'),)], [[1], E('e')] == [[2], E('f')],\n"
+                  "          [E('g')] == [E('h')] == [E('i')])",
 }
 
 

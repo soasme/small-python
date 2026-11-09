@@ -336,9 +336,10 @@ These run as machines on the heap, in one native activation of
   iterator over one, calls on its items, of an instance or of a `None`,
   `bool`, `int`, `float` or `str` after such items, unless it is inside a
   comparison chain, the `__eq__` that `==` or `!=` of two lists or two
-  tuples, outside a comparison chain, calls on their items, of an instance
-  after identical items or equal `None`, `bool`, `int`, `float` or `str`
-  ones, pair after pair, the `__eq__` that `index`, `count` or `remove` of
+  tuples, also in a comparison chain, calls on their items, of an instance
+  after identical items, equal `None`, `bool`, `int`, `float` or `str`
+  ones, or pairs of such lists or tuples found equal so, pair after pair
+  and inside such pairs, the `__eq__` that `index`, `count` or `remove` of
   one item in a list or tuple calls on its items, in a call whose object
   holds a call or in code compiled while pausing, the `__lt__` or `__gt__`
   that `min` or `max` of a list's or tuple's items or of the arguments

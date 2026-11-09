@@ -77,6 +77,8 @@ Unreleased (0.8.0):
   of a dict, frozendict, set or frozenset call an instance key's Python
   __eq__ without the C stack
 - str.format calls its fields' Python __format__ without the C stack
+- == and != in a comparison chain, and of lists or tuples nested in lists or
+  tuples, call the items' Python __eq__ without the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

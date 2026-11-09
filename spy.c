@@ -407,6 +407,7 @@ struct SPYContext {
     SPYValue *hashed; int64_t hashed_value;
     SPYValue *looked; /* A lookup's result found in C (lookup_found), owned, for its step to take. */
     SPYValue *probing; /* On a machine's stack, marks a key's lookup under way (lookup_call). */
+    SPYValue *nesting; /* On a machine's stack, marks a sequence comparison whose pair's goes on above it (equal_call). */
     size_t finalizing;       /* The depth of calls with a __del__ on the machine (finalizer_call), or 0. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
@@ -9944,9 +9945,21 @@ static SPYValue *binary_declined(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *binary_builtin(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *comparison(SPYContext *, int, SPYValue *, SPYValue *);
 static SPYValue *sequence_operand(SPYContext *, int, SPYValue *, SPYValue *);
-static int sequence_python(SPYContext *, SPYValue *, SPYValue *);
+static int sequence_equal_from(SPYContext *, SPYValue *, SPYValue *, size_t, int);
 /* binary, except that an instance operand, whose method the machine
  * calls, gives NULL without an error. */
+/* comparison, except that an instance operand, or lists or tuples whose
+ * == calls an item's Python __eq__ (python_pair), gives NULL without an
+ * error. */
+static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) return NULL;
+    if ((op == T_EQ || op == T_NE) && (a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type &&
+        (a->type == SPY_TUPLE || a->as.seq.len == b->as.seq.len)) {
+        int equal = sequence_equal_from(c, a, b, 0, 1);
+        return equal < 0 || equal == 2 ? NULL : spy_bool(c, equal == (op == T_EQ));
+    }
+    return comparison(c, op, a, b);
+}
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -9954,7 +9967,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
-    if (op == T_EQ || op == T_NE) return sequence_python(c, a, b) ? NULL : comparison(c, op, a, b);
+    if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -23230,27 +23243,43 @@ static NO_INLINE Machine *fold_returned(SPYContext *c, Machine *m, SPYValue *res
     machine_push(c, m, value);
     return m;
 }
-/* The first pair from at on of a and b, two lists or two tuples,
- * whose comparison calls a Python __eq__ (rich_function), the pairs
- * before it identical or builtin scalars found equal; else SIZE_MAX, for
- * the native comparison to decide, comparing only what calls no Python
- * again. */
-static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at) {
+/* Whether a and b are two lists of one length or two tuples, whose ==
+ * compares their items. */
+static int sequence_pair(SPYValue *a, SPYValue *b) {
+    return a->type == b->type && (a->type == SPY_TUPLE || (a->type == SPY_LIST && a->as.seq.len == b->as.seq.len));
+}
+/* The first pair from at on of a and b, two lists or two tuples, whose
+ * comparison calls a Python __eq__ (rich_function), itself or in a pair of
+ * its own (sequence_pair), the pairs before it identical, builtin scalars
+ * found equal, or such sequences found equal so; else SIZE_MAX, for the
+ * native comparison to decide from *end on, the pairs before it equal so,
+ * comparing only what calls no Python again. */
+static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, size_t *end) {
     for (; at < a->as.seq.len && at < b->as.seq.len; at++) {
         SPYValue *x = a->as.seq.items[at], *y = b->as.seq.items[at];
         if (x == y) continue;
-        if (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE)
-            return rich_function(c, x, y, R_EQ) || rich_function(c, y, x, R_EQ) ? at : SIZE_MAX;
+        if (x->type == SPY_INSTANCE || y->type == SPY_INSTANCE) {
+            if (rich_function(c, x, y, R_EQ) || rich_function(c, y, x, R_EQ)) return at;
+            break;
+        }
+        if (sequence_pair(x, y)) {
+            /* Nesting too deep for C is the native comparison's error. */
+            size_t inner = 0, found = stack_excess(c) ? SIZE_MAX : python_pair(c, x, y, 0, &inner);
+            c->depth--;
+            if (found != SIZE_MAX) return at;
+            if (inner == x->as.seq.len && inner == y->as.seq.len) continue;
+            break;
+        }
         if (x->type > SPY_STRING || y->type > SPY_STRING || !equal(x, y)) break;
     }
+    *end = at;
     return SIZE_MAX;
 }
 /* Whether comparing a and b for == calls a Python __eq__ on the machine:
- * an instance, or two tuples, or lists of one length, with a python_pair. */
+ * an instance, or a sequence_pair with a python_pair. */
 static int sequence_python(SPYContext *c, SPYValue *a, SPYValue *b) {
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE ||
-           ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type && (a->type == SPY_TUPLE || a->as.seq.len == b->as.seq.len) &&
-            python_pair(c, a, b, 0) != SIZE_MAX);
+    size_t end;
+    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
 }
 /* Whether a and b, lists or tuples, are equal from item at on, as
  * list_richcompare decides, an unequal pair left past an end comparing the
@@ -23262,8 +23291,11 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
         if ((at & 63) == 63 && spend(c, 1)) return -1;
         if (x == y) continue;
         if (scalars && (x->type > SPY_STRING || y->type > SPY_STRING)) {
-            if ((x->type == SPY_INSTANCE || y->type == SPY_INSTANCE) && python_pair(c, a, b, at) == at) return 2;
+            size_t end = at;
+            if ((x->type == SPY_INSTANCE || y->type == SPY_INSTANCE || sequence_pair(x, y)) && python_pair(c, a, b, at, &end) != SIZE_MAX) return 2;
             scalars = 0;
+            /* The pairs it found equal. */
+            if (end > at) { at = end - 1; continue; }
         }
         spy_retain(x); spy_retain(y);
         int same = equal(x, y);
@@ -23278,16 +23310,27 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
  * first, owned, with its env; x, y, the next pair's index, the two
  * operands in the order of the call and c->unbound pushed on m's stack. */
 static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, size_t at, SPYValue **env) {
-    SPYValue *a = x->as.seq.items[at], *b = y->as.seq.items[at], *function = rich_function(c, a, b, R_EQ);
+    SPYValue *a = x->as.seq.items[at], *b = y->as.seq.items[at], *function;
+    size_t len = m->len, end;
+    /* A pair of sequences compares its own pairs, each sequence's x, y
+     * and next pair's index under them with c->nesting. */
+    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE) {
+        if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
+            machine_push(c, m, spy_retain(c->nesting))) goto fail;
+        x = a; y = b; at = python_pair(c, x, y, 0, &end);
+        a = x->as.seq.items[at]; b = y->as.seq.items[at];
+    }
+    function = rich_function(c, a, b, R_EQ);
     SPYValue *left = function ? a : b, *right = function ? b : a;
     if (!function) function = rich_function(c, b, a, R_EQ);
     SPYValue *args[] = {spy_retain(left), spy_retain(right)};
     if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
         machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound))) {
-        release_all(2, args); return NULL;
+        release_all(2, args); goto fail;
     }
     if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
-    for (int i = 0; i < 6; i++) spy_release(machine_pop(m));
+fail:
+    while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
 /* For `x in y`, a lone test or the last comparison of its chain, y a list
@@ -23718,7 +23761,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (kind == OPERATE_INDEX && x->type == SPY_CLASS) return class_item(c, m, x, y, env);
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
         if ((rich == R_EQ || rich == R_NE) && x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && sequence_python(c, x, y))
-            return equal_call(c, m, x, y, python_pair(c, x, y, 0), env);
+            return equal_call(c, m, x, y, python_pair(c, x, y, 0, &(size_t){0}), env);
         if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
         SPYValue *cls = x->as.map.parent, *right = value_class(c, y);
         /* y's reflected method comes first when y's class is a subclass
@@ -23832,23 +23875,33 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         if (op == T_EQ || op == T_NE) {
             /* A pair's comparison for == (equal_call): unequal, or the next
              * pair's, or the native comparison of the rest. */
-            SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
-            size_t at = (size_t)index->as.integer_data.small, next = found && !c->error_type[0] ? python_pair(c, x, y, at) : SIZE_MAX;
-            spy_release(index);
-            Call *call = next != SIZE_MAX && (function = equal_call(c, m, x, y, next, &env)) ? call_enter(c, function, env, m) : NULL;
-            if (call) {
+            for (;;) {
+                SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
+                size_t at = (size_t)index->as.integer_data.small, end = at,
+                       next = found && !c->error_type[0] ? python_pair(c, x, y, at, &end) : SIZE_MAX;
+                spy_release(index);
+                size_t len = m->len;
+                Call *call = next != SIZE_MAX && (function = equal_call(c, m, x, y, next, &env)) ? call_enter(c, function, env, m) : NULL;
+                if (call) {
+                    spy_release(x); spy_release(y);
+                    call->m.outermost = CALL_OPERATOR;
+                    return &call->m;
+                }
+                while (m->len > len) spy_release(machine_pop(m));
+                /* An unequal pair the comparison left past an end compares the lengths. */
+                int same = c->error_type[0] ? -1 : found ? sequence_equal_from(c, x, y, end, 0) :
+                           at > x->as.seq.len || at > y->as.seq.len ? x->as.seq.len == y->as.seq.len : 0;
+                /* An enclosing sequence's pair is equal when these are. */
+                if (m->len && m->stack[m->len - 1] == c->nesting) {
+                    spy_release(machine_pop(m)); spy_release(x); spy_release(y);
+                    found = same > 0;
+                    continue;
+                }
+                if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
+                m->pc = operator_finish(c, m, ins, y, value, pc);
                 spy_release(x); spy_release(y);
-                call->m.outermost = CALL_OPERATOR;
-                return &call->m;
+                return m;
             }
-            if (function) for (int i = 0; i < 6; i++) spy_release(machine_pop(m));
-            /* An unequal pair the comparison left past an end compares the lengths. */
-            int same = c->error_type[0] ? -1 : found ? sequence_equal_from(c, x, y, at, 0) :
-                       at > x->as.seq.len || at > y->as.seq.len ? x->as.seq.len == y->as.seq.len : 0;
-            if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
-            m->pc = operator_finish(c, m, ins, y, value, pc);
-            spy_release(x); spy_release(y);
-            return m;
         }
         /* An item's comparison for in (contains_call): found, or the next
          * item's, or the native search of the rest, from the iterator. */
@@ -24841,8 +24894,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_COMPARE) {
             b = machine_pop(m); a = machine_pop(m);
             int order = ordering(n->op) ? number_order(n->op, a, b) : -1;
-            if (order < 0 && (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE)) { x = a; y = b; goto operator_step; }
-            value = order >= 0 ? spy_bool(c, order) : comparison(c, n->op, a, b);
+            value = order >= 0 ? spy_bool(c, order) : compare_operand(c, n->op, a, b);
+            if (!value && !c->error_type[0]) { x = a; y = b; goto operator_step; }
             if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(b); }
             else {
                 if (value && c->error_type[0]) { spy_release(value); value = NULL; }
@@ -33053,9 +33106,10 @@ SPYContext *spy_context_new(void) {
     c->unbound = value_new(c, V_UNBOUND);
     c->replacing = value_new(c, V_UNBOUND);
     c->probing = value_new(c, V_UNBOUND);
+    c->nesting = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

@@ -40,7 +40,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key"}
+          "store_keeps_key", "seq_nested"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -138,6 +138,8 @@ Case(c) ==
       [] c = "lookup_reflected" -> <<"(False, False, 1)", <<"'m'", "'z'", "'m'", "'y'", "'m'", "'x'">>>>
       \* a display's or store's equal key keeps the stored key with the new value
       [] c = "store_keeps_key" -> <<"[('a', 3), 0, 1]", <<"'ab'", "'ac'", "'ae'", "'fg'">>>>
+      \* nested lists and tuples compare their own items pair by pair, also in a chain
+      [] c = "seq_nested" -> <<"(True, False, True)", <<"'ac'", "'bd'", "'gh'", "'hi'">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 
