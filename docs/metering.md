@@ -374,8 +374,9 @@ These run as machines on the heap, in one native activation of
   frozendict's subscript, or `in` of a dict, frozendict, set or
   frozenset, calls on an instance key and each stored key of its hash,
   the stored key's first and then, on `NotImplemented`, the key's, the
-  same `__eq__` that `|`, `&`, `-` or `^` of two sets or frozensets
-  calls when one of their elements is such an instance, and
+  same `__eq__` that `|`, `&`, `-` or `^` of two sets or frozensets,
+  their augmented assignment, or their comparison outside a comparison
+  chain, calls when one of their elements is such an instance, and
   the `__format__` that `str.format`, also called on `str` itself, and
   `str.format_map` of a dict call on each field's object, a nested
   spec's fields first;

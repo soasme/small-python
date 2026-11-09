@@ -1202,13 +1202,14 @@ int main(int argc, char **argv) {
                "    return (a < b) + (list(a) > list(b)) * 2 + ((a,) < (b,)) * 4");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "ordered()", "ordered.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
-    /* So do set operations whose elements compare by a Python __eq__. */
+    /* So do set operations, their augmented assignments and comparisons
+     * whose elements compare by a Python __eq__. */
     execute(c, "class Keyed:\n    def __init__(self, v): self.v = v\n    def __hash__(self): return self.v % 2\n"
                "    def __eq__(self, o): return slow(self.v) == o.v\n"
                "def operated():\n    a = {Keyed(i) for i in range(8)}\n    b = {Keyed(i) for i in range(4, 12)}\n"
-               "    return len(a | b) + len(a & b) * 100 + len(a - b) * 10000 + len(a ^ b) * 1000000");
+               "    a -= b\n    return len(a | b) + len(a & b) * 100 + len(a ^ b) * 10000 + (a < a | b) * 1000000 + (a == b) * 10000000");
     pauses = 0;
-    assert(integer(c, run_paused(c, spy_eval(c, "operated()", "operated.py"), SPY_STOP_STEPS, &pauses)) == 8040412 && pauses > 1);
+    assert(integer(c, run_paused(c, spy_eval(c, "operated()", "operated.py"), SPY_STOP_STEPS, &pauses)) == 1120012 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

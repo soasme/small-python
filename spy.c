@@ -9971,6 +9971,12 @@ static int sequence_equal_from(SPYContext *, SPYValue *, SPYValue *, size_t, int
  * == calls an item's Python __eq__ (python_pair) or whose ordering calls
  * a Python method (order_python), gives NULL without an error. */
 static int order_python(SPYContext *, int, SPYValue *, SPYValue *);
+static int set_walks(int, SPYValue *, SPYValue *);
+/* Comparison op of a, a set, and b: NULL without an error when it walks
+ * the elements on the machine (set_walks). */
+static NO_INLINE SPYValue *set_compared(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    return set_walks(op, a, b) ? NULL : comparison(c, op, a, b);
+}
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
@@ -9981,9 +9987,8 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
             return equal < 0 || equal == 2 ? NULL : spy_bool(c, equal == (op == T_EQ));
         }
     }
-    return comparison(c, op, a, b);
+    return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
-static int set_walks(int, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -10346,9 +10351,9 @@ static SPYValue *comparison(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     } else if (is_set(a) && is_set(b)) {
         int forward = op == '<' || op == T_LE;
         SPYValue *small = forward ? a : b, *large = forward ? b : a;
+        if ((op == '<' || op == '>') && small->as.map.len >= large->as.map.len) return spy_bool(c, 0);
         int subset = set_subset(c, small, large);
-        if (subset < 0) return NULL;
-        return spy_bool(c, subset && (op == T_LE || op == T_GE || small->as.map.len < large->as.map.len));
+        return subset < 0 ? NULL : spy_bool(c, subset);
     } else if ((a->type == SPY_STRING && b->type == SPY_STRING) ||
                ((a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && (b->type == SPY_BYTES || b->type == SPY_BYTEARRAY))) {
         size_t n = a->as.string.len < b->as.string.len ? a->as.string.len : b->as.string.len;
@@ -24107,10 +24112,15 @@ static Machine *lookup_step(SPYContext *c, Machine *m, Instruction *ins, SPYValu
     SPYValue *function = lookup_call(c, m, map, key, hash, cursor, &found, &env);
     return lookup_enter(c, m, ins, map, key, hash, function, env, found, pc);
 }
-/* Whether set operator op of x and y, exact sets or frozensets, may call
- * a Python __eq__ (set_walk): one of them holds an instance with one. */
+/* Whether set operator or comparison op of x and y, exact sets or
+ * frozensets, may call a Python __eq__ (set_walk): one of them holds an
+ * instance with one, and their lengths do not decide the comparison. */
 static int set_walks(int op, SPYValue *x, SPYValue *y) {
-    if ((op != '|' && op != '&' && op != '-' && op != '^') || !is_set(x) || !is_set(y)) return 0;
+    int rich = rich_kind(op);
+    if ((rich < 0 && op != '|' && op != '&' && op != '-' && op != '^') || !is_set(x) || !is_set(y)) return 0;
+    size_t a = x->as.map.len, b = y->as.map.len;
+    if (rich == R_EQ || rich == R_NE ? a != b : rich == R_LT ? a >= b : rich == R_LE ? a > b : rich == R_GT ? b >= a : rich == R_GE && b > a)
+        return 0;
     for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++)
         if (python_eq(i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key)) return 1;
     return 0;
@@ -24118,23 +24128,27 @@ static int set_walks(int op, SPYValue *x, SPYValue *y) {
 /* The walk atop m (set_walk) decides an entry, key of hash, found at
  * index found of the set searched, or -1: | and ^ add one not found to
  * the result, ^ removes one found from it, & keeps one found and - one
- * not found; the walk goes on with the next entry. */
+ * not found, and one not found decides a comparison; the walk goes on
+ * with the next entry. */
 static void walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found) {
-    SPYValue **state = &m->stack[m->len - 6], *result = state[0];
+    SPYValue **state = &m->stack[m->len - 7], *result = state[0];
     int op = (int)state[4]->as.integer_data.small;
-    if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
+    int64_t next = state[3]->as.integer_data.small + 1;
+    if (rich_kind(op) >= 0) {
+        if (found < 0) { spy_release(result); state[0] = spy_bool(c, op == T_NE); next = (int64_t)state[1]->as.map.len; }
+    } else if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
     else if (op == '^') set_remove_at(result, (size_t)found);
-    SPYValue *next = int_value(c, state[3]->as.integer_data.small + 1);
-    if (next) { spy_release(state[3]); state[3] = next; }
+    SPYValue *index = int_value(c, next);
+    if (index) { spy_release(state[3]); state[3] = index; }
 }
 /* The walk atop m from its next entry on: each entry's lookup in the set
  * searched, decided (walk_decide) where it calls no Python; the first
  * Python __eq__ entered, its lookup pushed above the walk (lookup_call).
- * At the end, or on an error, the walk popped, its result in c->looked;
- * then NULL. */
+ * At the end, or on an error, the walk popped, its result in c->looked,
+ * swapped into the set an augmented assignment updates; then NULL. */
 static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     for (;;) {
-        SPYValue **state = &m->stack[m->len - 6], *walked = state[1], *map = state[2], *function;
+        SPYValue **state = &m->stack[m->len - 7], *walked = state[1], *map = state[2], *function;
         size_t i = (size_t)state[3]->as.integer_data.small;
         if (c->error_type[0] || i >= walked->as.map.len) break;
         Entry entry = map_items(walked)[i];
@@ -24143,24 +24157,35 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
             return function;
         walk_decide(c, m, entry.key, entry.hash, found);
     }
-    for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
+    spy_release(machine_pop(m));
+    SPYValue *target = machine_pop(m);
+    for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
+    if (!c->error_type[0] && target != c->none) {
+        swap_contents(target, result);
+        spy_release(result);
+        result = target;
+    } else spy_release(target);
     if (c->error_type[0]) spy_release(result);
     else c->looked = result;
     return NULL;
 }
 /* For set operator step op of x and y (set_walks), the result built on
  * m as set_combine does: x's copy, given y's entries for | and ^, or x's
- * entries kept for & and -, each looked up in the other, on the machine.
+ * entries kept for & and -, each looked up in the other, on the machine;
+ * an augmented assignment to a set (inplace) then swaps it into x. A
+ * comparison's is whether each entry of the subset side is in the other.
  * The walk's state, the result, the set walked, the set searched, the
- * next entry's index and op, goes on m's stack under c->walking, and the
- * walk begins (walk_next). */
-static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, SPYValue **env) {
-    int adds = op == '|' || op == '^';
-    SPYValue *result = adds ? set_copy_type(c, x, x->type) : value_new(c, x->type);
+ * next entry's index, op and x or None, goes on m's stack under
+ * c->walking, and the walk begins (walk_next). */
+static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, int inplace, SPYValue **env) {
+    int adds = op == '|' || op == '^', rich = rich_kind(op);
+    SPYValue *result = rich >= 0 ? spy_bool(c, op != T_NE) : adds ? set_copy_type(c, x, x->type) : value_new(c, x->type);
+    SPYValue *walked = adds || rich == R_GT || rich == R_GE ? y : x, *searched = adds ? result : walked == x ? y : x;
     size_t len = m->len;
-    if (machine_push(c, m, result) || machine_push(c, m, spy_retain(adds ? y : x)) || machine_push(c, m, spy_retain(adds ? result : y)) ||
-        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op)) || machine_push(c, m, spy_retain(c->walking))) {
+    if (machine_push(c, m, result) || machine_push(c, m, spy_retain(walked)) || machine_push(c, m, spy_retain(searched)) ||
+        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op)) ||
+        machine_push(c, m, spy_retain(inplace && x->type == SPY_SET ? x : c->none)) || machine_push(c, m, spy_retain(c->walking))) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
     }
@@ -24332,8 +24357,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
     c->entering_kind = CALL_OPERATOR;
-    /* A set operation whose lookups may call a Python __eq__. */
-    if (kind == OPERATE_BINARY && is_set(x) && set_walks(op, x, y)) return set_walk(c, m, op, x, y, env);
+    /* A set operation, augmented assignment or comparison outside a chain,
+     * whose lookups may call a Python __eq__. */
+    if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || (kind == OPERATE_COMPARE && (ins->op != BC_COMPARE || !ins->arg))) && is_set(x)) {
+        int token = kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : op;
+        if (set_walks(token, x, y)) return set_walk(c, m, token, x, y, kind == OPERATE_INPLACE, env);
+    }
     /* A dict's item, or a dict's or set's member: its key's __hash__ first,
      * the operands on the stack under the key for the operation. */
     if ((kind == OPERATE_INDEX || contains) && (contains ? x : y)->type == SPY_INSTANCE && hashes_key(contains ? y : x, contains)) {
@@ -25750,7 +25779,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || a->type == SPY_SET) { x = a; y = b; goto operator_step; }
             machine_push(c, m, augmented(c, ins->arg, a, b)); break;
         CASE(BC_CONVERT)
             a = machine_pop(m); machine_push(c, m, convert_step(c, m, a, ins->arg)); break;
