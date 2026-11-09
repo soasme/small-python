@@ -9,7 +9,7 @@
 (* instance is callable when its class defines __call__ (looked up on the  *)
 (* type, so one set on the instance does not count).                       *)
 (*                                                                         *)
-(* A program defines class C with                                          *)
+(* A program defines class C, of base object, list or Exception, with      *)
 (*                                                                         *)
 (*     new   none | self (super().__new__(cls)) | other (returns 5)        *)
 (*     init  none | records (self.args = args) | returns (returns 1)       *)
@@ -17,13 +17,16 @@
 (*                | instance (c.__call__ = a function, after creation)     *)
 (*                                                                         *)
 (* where __new__ and __init__ take *args, then evaluates C(), C(1), or     *)
-(* C()(2). The outcome is the result (its type, and args if recorded), or  *)
-(* the exception.                                                          *)
+(* C()(2). The outcome is the result (its type, and args if recorded or an *)
+(* exception's), or the exception. A builtin base's __new__ makes the      *)
+(* instance: list's then initializes from an iterable, and                 *)
+(* BaseException's keeps the arguments as args.                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [new : {"none", "self", "other"}, init : {"none", "records", "returns"},
-             call : {"none", "class", "instance"}, op : {"C()", "C(1)", "C()(2)"}]
+Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other"},
+             init : {"none", "records", "returns"}, call : {"none", "class", "instance"},
+             op : {"C()", "C(1)", "C()(2)"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -32,10 +35,10 @@ Pending == "pending"
 
 \* Creating the object: what C(args) gives.
 Create(p, args) ==
-    CASE args = "(1,)" /\ p.new = "none" /\ p.init = "none" -> "TypeError"      \* C() takes no arguments
-      [] p.new = "other" -> "int 5"                                              \* __init__ is not called
+    CASE p.new = "other" -> "int 5"                                              \* __init__ is not called
       [] p.init = "returns" -> "TypeError"                                       \* __init__ should return None
-      [] p.init = "records" -> "C args=" \o args
+      [] p.init = "records" \/ p.base = "Exception" -> "C args=" \o args
+      [] args = "(1,)" /\ (p.new = "none" \/ p.base = "list") -> "TypeError"    \* C() takes no arguments; list(1)
       [] OTHER -> "C"
 
 Run(p) ==

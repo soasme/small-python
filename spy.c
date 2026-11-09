@@ -416,6 +416,7 @@ struct SPYContext {
     int code_work; /* Nonzero while source is parsed or compiled or a body's length charged: work bounded by the source (halt). */
     SPYValue *walking; /* On a machine's stack, marks a set operation's walk under way (set_walk). */
     SPYValue *keeping; /* On a machine's stack, marks a chain link's kept right operand under it (operator_keep). */
+    SPYValue *native_inits[16]; /* Beside plain: the __init__ of a class whose builtin __new__ makes its instance (plain_init). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -16835,31 +16836,76 @@ static SPYValue *plain_construct(SPYContext *c, SPYValue *cls, SPYValue *init, s
     spy_release(value);
     return result;
 }
+/* plain_init's entry at for cls, made anew. */
+static NO_INLINE SPYValue *plain_entry(SPYContext *c, SPYValue *cls, size_t at) {
+    SPYValue *init = class_lookup(cls, "__init__");
+    SPYValue *meta = cls->as.map.meta;
+    int called = !meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__");
+    int python = init && init->type == SPY_FUNCTION;
+    int plain = plain_mro(c, cls) && !(cls->as.map.flags & CLASS_ABSTRACT) && called &&
+        !subclass(cls, c->exceptions[X_BASE_EXCEPTION]) && python &&
+        slot_new(c, cls) == name_local(c->object, "__new__") && native_slot_new(c, cls) == name_local(c->object, "__new__");
+    int native = !plain && called && python && cls->as.map.mro && native_slot_new(c, cls) && !subclass(cls, c->types[SPY_CLASS]);
+    if (c->error_type[0]) return NULL;
+    c->plain[at] = (PlainClass){cls, plain ? init : NULL, class_lookup(cls, "__del__"), c->classes_changed};
+    c->native_inits[at] = native ? init : NULL;
+    return c->plain[at].init;
+}
 /* type.__call__: allocate with __new__, then initialize with __init__. */
 /* The Python __init__ function of cls when calling cls is just object.__new__
  * and that __init__: a plain MRO, neither abstract nor an exception, a
  * metaclass whose __call__ is type's, and object.__new__ as both its
  * allocator and its slot, so that object.__new__ accepts the arguments.
- * Borrowed. */
-static SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
+ * Borrowed. Beside it, c->native_inits keeps the Python __init__ of a
+ * builtin's or an exception's subclass, which such a metaclass calls
+ * after the builtin __new__ made the instance (init_instance): no Python
+ * __new__ and no subclass of type. */
+static ALWAYS_INLINE SPYValue *plain_init(SPYContext *c, SPYValue *cls) {
     /* A builtin class has a native constructor; it takes no entry. */
     if (cls->as.map.native || cls->as.map.flags == 2) return NULL;
-    PlainClass *hit = &c->plain[(uintptr_t)cls / sizeof(SPYValue) % 16];
-    if (hit->cls != cls || hit->epoch != c->classes_changed) {
-        SPYValue *init = class_lookup(cls, "__init__");
-        SPYValue *meta = cls->as.map.meta;
-        int plain = plain_mro(c, cls) && !(cls->as.map.flags & CLASS_ABSTRACT) &&
-            (!meta || class_lookup(meta, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) &&
-            !subclass(cls, c->exceptions[X_BASE_EXCEPTION]) && init && init->type == SPY_FUNCTION &&
-            slot_new(c, cls) == name_local(c->object, "__new__") && native_slot_new(c, cls) == name_local(c->object, "__new__");
-        if (c->error_type[0]) return NULL;
-        *hit = (PlainClass){cls, plain ? init : NULL, class_lookup(cls, "__del__"), c->classes_changed};
-    }
-    return hit->init;
+    size_t at = (uintptr_t)cls / sizeof(SPYValue) % 16;
+    PlainClass *hit = &c->plain[at];
+    return hit->cls == cls && hit->epoch == c->classes_changed ? hit->init : plain_entry(c, cls, at);
 }
 /* The builtin function's id, or -1 for any other value. */
 static int builtin_id(SPYValue *v) {
     return v && v->type == SPY_NATIVE && v->as.native.call == builtin ? (int)(intptr_t)v->as.native.data : -1;
+}
+/* What allocator, class fn's __new__, makes of the arguments, owned. */
+static ALWAYS_INLINE SPYValue *class_allocate(SPYContext *c, SPYValue *fn, SPYValue *allocator, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
+    SPYValue *bound = method ? bind_method(c, fn, method) : NULL, *result = NULL;
+    if (bound) result = call_keywords(c, bound, argc, argv, keywords);
+    else if (!c->error_type[0]) errorf(c, "TypeError", "cannot create '%s' instances", name_text(fn, "__name__")->as.string.data);
+    spy_release(bound); spy_release(method);
+    return result;
+}
+/* The instance a call of class cls makes before its __init__ (class_init)
+ * enters: object.__new__'s for a plain class, else its builtin __new__'s
+ * of the arguments, an instance of cls (plain_init). */
+static SPYValue *init_instance(SPYContext *c, SPYValue *cls, int plain, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    return plain ? new_instance(c, cls) : class_allocate(c, cls, native_slot_new(c, cls), argc, argv, keywords);
+}
+/* init_instance for a call of positional arguments argv and keywords kw. */
+static SPYValue *keyword_instance(SPYContext *c, SPYValue *cls, int plain, size_t argc, SPYValue *const *argv, Entry *kw, size_t kwc) {
+    SPYValue *keywords = plain || !kwc ? NULL : entries_dict(c, kw, kwc);
+    SPYValue *self = !plain && kwc && !keywords ? NULL : init_instance(c, cls, plain, argc, argv, keywords);
+    spy_release(keywords);
+    return self;
+}
+/* The Python __init__ a call of class cls enters on the machine
+ * (CALL_INIT), *plain whether its instance is object.__new__'s rather
+ * than a builtin __new__'s (plain_init). */
+static NO_INLINE SPYValue *class_init(SPYContext *c, SPYValue *cls, int *plain) {
+    SPYValue *init = plain_init(c, cls);
+    size_t at = (uintptr_t)cls / sizeof(SPYValue) % 16;
+    *plain = init != NULL;
+    /* plain_init's entry, unless a builtin class took none; a native
+     * instance's __init__ only for the machine, others' calls taking a
+     * plain one (plain_construct). */
+    if (init || c->error_type[0] || c->plain[at].cls != cls) return init;
+    SPYValue *native = c->native_inits[at];
+    return native && machine_function(c, native) ? native : NULL;
 }
 static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
     SPYValue *result = NULL, *plain;
@@ -16894,11 +16940,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
         if ((!keywords || !keywords->as.map.len) && builtin_id(allocator) == B_EXCEPTION_NEW &&
             builtin_id(class_lookup(fn, "__init__")) == B_EXCEPTION_INIT)
             return exception_create(c, fn, argc, argv);
-        SPYValue *method = allocator ? descriptor_get(c, allocator, NULL, fn) : NULL;
-        SPYValue *bound = method ? bind_method(c, fn, method) : NULL;
-        if (bound) result = call_keywords(c, bound, argc, argv, keywords);
-        else if (!c->error_type[0]) errorf(c, "TypeError", "cannot create '%s' instances", name_text(fn, "__name__")->as.string.data);
-        spy_release(bound); spy_release(method);
+        result = class_allocate(c, fn, allocator, argc, argv, keywords);
         /* A factory may return an unrelated object. Only instances of the
          * requested class are initialized, using the returned type's init. */
         if (result && ((result->type == SPY_INSTANCE && subclass(result->as.map.parent, fn)) ||
@@ -22980,11 +23022,12 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
-    SPYValue *init = method < 0 && callee->type == SPY_CLASS ? plain_init(c, callee) : NULL;
+    int plain = 0;
+    SPYValue *init = method < 0 && callee->type == SPY_CLASS ? class_init(c, callee, &plain) : NULL;
     if (init && machine_function(c, init)) {
         /* A class call enters its __init__ (CALL_INIT) with the new instance,
          * which is the call's value on the stack. */
-        if (!(self = new_instance(c, callee))) release_all(argc, argv);
+        if (!(self = init_instance(c, callee, plain, argc, argv, NULL))) release_all(argc, argv);
         else if (machine_push(c, m, spy_retain(self))) { spy_release(self); release_all(argc, argv); }
         else {
             memmove(argv + 1, argv, argc * sizeof(*argv));
@@ -23237,10 +23280,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(function);
         return NULL;
     }
-    SPYValue *init = callee->type == SPY_CLASS ? plain_init(c, callee) : NULL;
+    int plain = 0;
+    SPYValue *init = callee->type == SPY_CLASS ? class_init(c, callee, &plain) : NULL;
     if (init && machine_function(c, init)) {
         /* The new instance takes the class's place, as the call's value. */
-        if (!(self = new_instance(c, callee))) return NULL;
+        if (!(self = init_instance(c, callee, plain, argc, argv, NULL))) return NULL;
         argv[-1] = spy_retain(self);
         m->len -= argc;
         c->entering_init = init; c->entering_kind = CALL_INIT;
@@ -23435,9 +23479,10 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
     /* A bound method's self, or a plain class's new instance, takes the
      * callee's place before the arguments, entering the function or the
      * __init__ with it; the instance stays there as the call's value. */
-    SPYValue *init = callee->type == SPY_CLASS ? plain_init(c, callee) : NULL, *function = calls ? bound_function(c, callee) : NULL, *self = NULL;
+    int plain = 0;
+    SPYValue *init = callee->type == SPY_CLASS ? class_init(c, callee, &plain) : NULL, *function = calls ? bound_function(c, callee) : NULL, *self = NULL;
     if (function) self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
-    else if (init && calls && machine_function(c, init) && (self = new_instance(c, callee))) function = init;
+    else if (init && calls && machine_function(c, init) && (self = keyword_instance(c, callee, plain, positional, argv, kw, kwc))) function = init;
     if (function) {
         argv[-1] = self;
         SPYValue *callee_env = keyword_env(c, function, positional + 1, argv - 1, kw, kwc, NULL, 0);
@@ -23543,13 +23588,15 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
  * instance, the call's value on the stack (CALL_INIT), as in stack_call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
+    int plain = 0;
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
     else if (calls && (function = bound_function(c, callee)) && string_keys(c, keywords))
         self = spy_retain(callee->type == SPY_METHOD ? callee->as.method.self : callee);
-    else if (calls && callee->type == SPY_CLASS && (function = plain_init(c, callee)) && machine_function(c, function) &&
+    else if (calls && callee->type == SPY_CLASS && (function = class_init(c, callee, &plain)) && machine_function(c, function) &&
              string_keys(c, keywords)) {
-        if ((self = new_instance(c, callee)) && machine_push(c, m, spy_retain(self))) { spy_release(self); self = NULL; }
+        self = init_instance(c, callee, plain, args->as.seq.len, args->as.seq.items, keywords);
+        if (self && machine_push(c, m, spy_retain(self))) { spy_release(self); self = NULL; }
         c->entering_init = function; c->entering_kind = CALL_INIT;
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;

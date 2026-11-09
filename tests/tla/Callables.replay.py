@@ -19,7 +19,7 @@ def describe(r):
 
 def outcome(p):
     namespace = {}
-    exec("class C:\n    pass\n" + NEW[p["new"]] + INIT[p["init"]] + CALL[p["call"]], namespace)
+    exec("class C(%s):\n    pass\n" % p["base"] + NEW[p["new"]] + INIT[p["init"]] + CALL[p["call"]], namespace)
     C = namespace["C"]
     try:
         if p["op"] == "C()":
