@@ -25067,7 +25067,7 @@ static void class_prepared(SPYContext *c, Machine *m, Node *n, SPYValue *namespa
 }
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->node;
-    SPYValue *bases, *arguments, *name, *body = NULL;
+    SPYValue *bases = NULL, *arguments = NULL, *name, *body = NULL;
     if (ins->arg == 8)
         return setup_annotations(c, f, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, f, n->annotate, "__annotate_func__") ? NULL : spy_none(c);
     if (ins->arg == 6) {
