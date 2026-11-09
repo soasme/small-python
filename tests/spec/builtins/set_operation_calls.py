@@ -65,12 +65,15 @@ def compared():
     out = [a <= b, a < b, b >= a, b > a, a == e, a != e, a == d, a != d, a < e, a <= e, b <= a, d <= b,
            frozenset(a) == e, a >= e, a > e, a <= b <= b, a == b]
     if d <= b: out.append("taken")
+    if a < b < b | d: out.append("chain")
+    out += [b > a == e, a < b < a, error(lambda: a == e != {P(0)} <= {P(9), P(3)})]
     out.append(error(lambda: {P(9)} == {P(0)}))
     out.append(error(lambda: {P(0)} <= {P(9), P(3)}))
     return out
 
 expected_compared = [True, True, True, True, True, False, False, True, False, True, False, False, True, True,
-                     False, True, False, ("KeyError", "9"), ("KeyError", "9")]
+                     False, True, False, "chain", True, False, ("KeyError", "9"), ("KeyError", "9"),
+                     ("KeyError", "9")]
 
 def results():
     del log[:]

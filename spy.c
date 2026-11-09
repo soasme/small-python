@@ -415,6 +415,7 @@ struct SPYContext {
     size_t finalizing;       /* The depth of calls with a __del__ on the machine (finalizer_call), or 0. */
     int code_work; /* Nonzero while source is parsed or compiled or a body's length charged: work bounded by the source (halt). */
     SPYValue *walking; /* On a machine's stack, marks a set operation's walk under way (set_walk). */
+    SPYValue *keeping; /* On a machine's stack, marks a chain link's kept right operand under it (operator_keep). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -24337,6 +24338,14 @@ static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SP
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
+/* A link of a comparison chain, step ins, whose comparison of x and y
+ * calls on other operands than x and y keeps y, the next link's left
+ * operand, on m's stack under that comparison's, c->keeping over it, for
+ * operator_finish; once, when it is not kept already. */
+static void operator_keep(SPYContext *c, Machine *m, Instruction *ins, SPYValue *y) {
+    if (ins->op != BC_COMPARE || !ins->arg || (m->len && m->stack[m->len - 1] == c->keeping) || machine_push(c, m, spy_retain(y))) return;
+    if (machine_push(c, m, spy_retain(c->keeping))) spy_release(machine_pop(m));
+}
 /* For lookup step ins of plain instance key in map (machine_lookup), its
  * __hash__ run in C: when it compares key with another (lookup_found),
  * the lookup's first Python __eq__ (lookup_call); else NULL, with the
@@ -24358,11 +24367,14 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
     c->entering_kind = CALL_OPERATOR;
-    /* A set operation, augmented assignment or comparison outside a chain,
-     * whose lookups may call a Python __eq__. */
-    if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || (kind == OPERATE_COMPARE && (ins->op != BC_COMPARE || !ins->arg))) && is_set(x)) {
+    /* A set operation, augmented assignment or comparison, whose lookups
+     * may call a Python __eq__. */
+    if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) && is_set(x)) {
         int token = kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : op;
-        if (set_walks(token, x, y)) return set_walk(c, m, token, x, y, kind == OPERATE_INPLACE, env);
+        if (set_walks(token, x, y)) {
+            operator_keep(c, m, ins, y);
+            return set_walk(c, m, token, x, y, kind == OPERATE_INPLACE, env);
+        }
     }
     /* A dict's item, or a dict's or set's member: its key's __hash__ first,
      * the operands on the stack under the key for the operation. */
@@ -24412,9 +24424,10 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
         if ((rich == R_EQ || rich == R_NE) && x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && sequence_python(c, x, y))
             return equal_call(c, m, x, y, python_pair(c, x, y, 0, &(size_t){0}), env);
-        /* Their ordering, in any test but one inside a chain: by the items'
-         * __eq__, then the first unequal pair's method (order_decide). */
-        if ((ins->op != BC_COMPARE || !ins->arg) && order_python(c, op, x, y)) {
+        /* Their ordering: by the items' __eq__, then the first unequal
+         * pair's method (order_decide). */
+        if (order_python(c, op, x, y)) {
+            operator_keep(c, m, ins, y);
             size_t end, at = python_pair(c, x, y, 0, &end);
             if (at != SIZE_MAX) return equal_call(c, m, x, y, at, env);
             SPYValue *value, *entered = order_decide(c, m, ins, x, y, end, 1, env, &value);
@@ -24469,11 +24482,14 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
         return truth ? pc : ins->target;
     }
     if (ins->op == BC_COMPARE) {
+        SPYValue *kept = NULL;
+        if (m->len && m->stack[m->len - 1] == c->keeping) { spy_release(machine_pop(m)); y = kept = machine_pop(m); }
         if (value && ins->arg && truthy(value)) { spy_release(value); value = spy_retain(y); }
         else {
             if (value && c->error_type[0]) { spy_release(value); value = NULL; }
             pc = ins->target;
         }
+        spy_release(kept);
     }
     machine_push(c, m, value);
     return pc;
@@ -33990,9 +34006,10 @@ SPYContext *spy_context_new(void) {
     c->probing = value_new(c, V_UNBOUND);
     c->nesting = value_new(c, V_UNBOUND);
     c->walking = value_new(c, V_UNBOUND);
+    c->keeping = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

@@ -6,8 +6,8 @@
 # pair the lengths decide. An item's __eq__ is called once per pair and
 # again inside a nested sequence it belongs to; an exception from either
 # method propagates, and a list an __eq__ shortens ends the comparison by
-# the lengths, in a lone test, an if, a chain and an assignment, inside
-# functions as at module level.
+# the lengths, in a lone test, an if, a chain, also after its first link,
+# and an assignment, inside functions as at module level.
 from harness import *
 
 log = []
@@ -67,12 +67,17 @@ def results():
     victim = [P(3), P(4), P(5)]
     out.append(victim < [Shrinking(3), P(9), P(9)])
     out.append(list(log))
+    del log[:]
+    out += [[a] < [b] < [P(0)], [(a,)] <= [(a,)] < [(b,)], error(lambda: (a,) < (P(7),) < (b,)), list(log)]
     return out
 
 expected = ["less", True, False, True, True, True, ("KeyError", "7"), "", "not taken", "less", "shorter", "plain", True,
             [("eq", 1, 2), ("lt", 1, 2), ("eq", 1, 1), ("eq", 1, 1), ("plain", 1, 2), ("eq", 7, 1), ("eq", 1, 2),
              ("gt", 1, 2), ("lt", 2, 1), ("eq", 2, 1), ("lt", 2, 1), ("eq", 0, 1), ("lt", 0, 1), ("eq", 1, 2),
-             ("lt", 1, 2), ("eq", 5, 5), ("plain", 3, 4)]]
+             ("lt", 1, 2), ("eq", 5, 5), ("plain", 3, 4)],
+            "", "less", ("KeyError", "7"),
+            [("eq", 1, 2), ("lt", 1, 2), ("eq", 2, 0), ("lt", 2, 0), ("eq", 1, 2), ("eq", 1, 2), ("lt", 1, 2),
+             ("eq", 1, 7), ("lt", 1, 7), ("eq", 7, 2)]]
 
 def main():
     return results()

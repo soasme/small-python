@@ -12,8 +12,9 @@
 (* A program is either                                                     *)
 (*   - two sets a and b of elements from {0, 1, 2}, each a set or a        *)
 (*     frozenset, and one of  a | b, a & b, a - b, a ^ b, a <= b, a < b,   *)
-(*     a >= b, a > b, a == b, a.isdisjoint(b), a |= b, a &= b, a -= b,     *)
-(*     a ^= b, a.add(2), a.discard(2), a.remove(2), hash(a), a.add([]),    *)
+(*     a >= b, a > b, a == b, a.isdisjoint(b), a <= b <= a, a |= b,        *)
+(*     a &= b, a -= b, a ^= b, a.add(2), a.discard(2), a.remove(2),        *)
+(*     hash(a), a.add([]),                                                 *)
 (*     where with eq each element is an object hashing as its value whose  *)
 (*     Python __eq__ compares values, which changes no outcome; or         *)
 (*   - set(<items>) of up to three of 1, 1.0, True, 2.                     *)
@@ -25,7 +26,7 @@ EXTENDS Integers, Sequences, FiniteSets
 
 Kinds == {"set", "frozenset"}
 Elements == SUBSET {0, 1, 2}
-Binary == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "isdisjoint"}
+Binary == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "isdisjoint", "<= <="}
 Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list"}
 Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
@@ -58,6 +59,7 @@ Run(p) ==
                [] p.op = ">" -> Bool(b \subseteq a /\ a # b)
                [] p.op = "==" -> Bool(a = b)
                [] p.op = "isdisjoint" -> Bool(a \cap b = {})
+               [] p.op = "<= <=" -> Bool(a = b)                         \* a chain's links
                \* A set is changed in place; a frozenset name is rebound to a new one.
                [] p.op \in {"|=", "&=", "-=", "^="} -> <<p.ka, "", Combine(p.op, a, b)>>
                [] p.ka = "frozenset" /\ p.op \in {"add", "discard", "remove", "add list"} -> Error("AttributeError")

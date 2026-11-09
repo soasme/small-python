@@ -111,10 +111,11 @@ Unreleased (0.8.0):
   __getitem__ without the C stack
 - sorted() and list.sort() of tuples call their items' Python __eq__ and
   __lt__ without the C stack
-- <, <=, > and >= of two lists or two tuples call their items' Python
-  __eq__ and ordering methods without the C stack
+- <, <=, > and >= of two lists or two tuples, also in a chain, call their
+  items' Python __eq__ and ordering methods without the C stack
 - |, &, - and ^ of two sets, their augmented assignments and their
-  comparisons call their elements' Python __eq__ without the C stack
+  comparisons, also in a chain, call their elements' Python __eq__ without
+  the C stack
 - a class body with annotations runs its calls without the C stack
 - a generic class's body runs its calls without the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,

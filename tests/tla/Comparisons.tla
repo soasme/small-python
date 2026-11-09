@@ -40,7 +40,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "seq_order_calls"}
+          "store_keeps_key", "seq_nested", "seq_order_calls", "seq_order_chain"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -143,6 +143,8 @@ Case(c) ==
       \* an ordering of sequences orders the first pair unequal by __eq__, by
       \* the item's method or its reflection, and returns that result as is
       [] c = "seq_order_calls" -> <<"('b<c', 'y<x')", <<"'aa'", "'bc'", "'b<c'", "'xy'", "'y<x'">>>>
+      \* so does each link of a chain, whose next link orders its right operand
+      [] c = "seq_order_chain" -> <<"'b<c'", <<"'ab'", "'a<b'", "'bc'", "'b<c'">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 

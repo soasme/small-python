@@ -358,8 +358,8 @@ These run as machines on the heap, in one native activation of
   after identical items, equal `None`, `bool`, `int`, `float` or `str`
   ones, or pairs of such lists or tuples found equal so, pair after pair
   and inside such pairs, the `__eq__` and then the ordering method, or
-  its reflection, that `<`, `<=`, `>` or `>=` of two lists or two tuples
-  outside a comparison chain calls on such items, the `__eq__` that `index`, `count` or `remove` of
+  its reflection, that `<`, `<=`, `>` or `>=` of two lists or two tuples,
+  also in a comparison chain, calls on such items, the `__eq__` that `index`, `count` or `remove` of
   one item in a list or tuple calls on its items, in a call whose object
   holds a call or in code compiled while pausing, the `__lt__` or `__gt__`
   that `min` or `max` of a list's or tuple's items or of the arguments
@@ -375,7 +375,7 @@ These run as machines on the heap, in one native activation of
   frozenset, calls on an instance key and each stored key of its hash,
   the stored key's first and then, on `NotImplemented`, the key's, the
   same `__eq__` that `|`, `&`, `-` or `^` of two sets or frozensets,
-  their augmented assignment, or their comparison outside a comparison
+  their augmented assignment, or their comparison, also in a comparison
   chain, calls when one of their elements is such an instance, and
   the `__format__` that `str.format`, also called on `str` itself, and
   `str.format_map` of a dict call on each field's object, a nested
