@@ -303,7 +303,9 @@ These run as machines on the heap, in one native activation of
   `__length_hint__`, and `reversed` iterators over an instance,
   consumed by `sum`, `any`, `all`, `min`, `max`, `list`, `tuple`,
   `set`, `frozenset`, `sorted`, `str.join`, `list.extend`, or `dict`
-  and `dict.update` (but an instance), and, in
+  and `dict.update` (but an instance), and an instance's Python `keys`
+  and `__getitem__`, and the generator its `keys` returns, that `dict`
+  and `dict.update` merge it by as a mapping, and, in
   code compiled while pausing, the generators and such instances a target
   list unpacks or a list, tuple or set display stars, and the generators
   and such instances a call's starred argument takes, and those, without

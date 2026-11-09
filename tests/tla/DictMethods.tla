@@ -63,7 +63,7 @@ SortedItems(S) == LET s == SelectSeq(AllItems, LAMBDA e : e \in S) IN List([i \i
 Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
-Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
+Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "clear",
@@ -97,8 +97,6 @@ Generated(p) ==
 
 Case(c) ==
     CASE c = "ctor_forms" -> "[{'one': 1, 'two': 2}, {'one': 1, 'two': 2}, {'one': 1, 'two': 2}, {'two': 2, 'one': 1}, {'one': 1, 'two': 2}, {'a': 'A', 'b': 'B'}]"
-      [] c = "ctor_keys_attribute" -> "[{'a': 'aa'}, {'p': 1}, {'o': 'oo'}]"
-      [] c = "hashed_key_methods" -> "('x', 'x', 0, 1, [1, 2, 1, 1])"
       [] c = "ctor_equal" -> "True"
       [] c = "ctor_bad_item" -> "ValueError: dictionary update sequence element #0 has length 3; 2 is required"
       [] c = "ctor_bad_element" -> "TypeError: object is not iterable"
@@ -112,6 +110,10 @@ Case(c) ==
       [] c = "get_default" -> "(None, 'd', 0)"
       [] c = "pop_default" -> "(2, 'd', {})"
       [] c = "pop_missing" -> "KeyError: 1"
+      [] c = "hashed_key_methods" -> "('x', 'x', 0, 1, [1, 2, 1, 1])"
+      [] c = "ctor_keys_attribute" -> "[{'a': 'aa'}, {'p': 1}, {'o': 'oo'}]"
+      \* A mapping's keys are listed before the first is looked up (13.2.3 DictMerge).
+      [] c = "ctor_keys_listed" -> "({'a': 'A', 'b': 'B'}, None, ['ka', 'kb', 'ga', 'gb', 'ka', 'kb', 'ga', 'gb'])"
       [] c = "popitem_lifo" -> "((3, 3), (2, 2), {1: 1})"
       [] c = "popitem_empty" -> "KeyError: 'popitem(): dictionary is empty'"
       [] c = "setdefault" -> "(None, 1, 1, {'a': None, 'b': 1})"

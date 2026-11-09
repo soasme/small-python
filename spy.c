@@ -13896,8 +13896,12 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * the value the generator returned in sent, and the item it gave in best.
  * A sum on the machine (adds) adds result and item by a Python method
  * (KEY_ADD): the one to call in best, the operator's method of phase
- * (operator_call), with item first when swapped. */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD };
+ * (operator_call), with item first when swapped. dict() or dict.update()
+ * of a mapping on the machine (keys_function) calls its keys() first
+ * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
+ * gives, then is fed those keys, looking each up in the mapping
+ * (KEY_ITEMS). */
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
@@ -13911,7 +13915,7 @@ struct Sorter {
 };
 typedef struct {
     int id, compensating, method, keyed, descending, adds, phase, swapped, stage, fed;
-    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty;
+    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     struct Sorter *sorter;
@@ -13984,6 +13988,8 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->made) visit(b->consumer->made, data);
         if (b->consumer && b->consumer->pending) visit(b->consumer->pending, data);
         if (b->consumer && b->consumer->empty) visit(b->consumer->empty, data);
+        if (b->consumer && b->consumer->mapping) visit(b->consumer->mapping, data);
+        if (b->consumer && b->consumer->listed) visit(b->consumer->listed, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
@@ -14712,6 +14718,21 @@ static int merge_keyword(SPYContext *c, SPYValue *result, SPYValue *key, SPYValu
     }
     return map_set(c, result, key, value);
 }
+/* The iterator of keys, what mapping source's keys() returned; a
+ * TypeError when keys is not iterable names the method. */
+static SPYValue *keys_iterator(SPYContext *c, SPYValue *source, SPYValue *keys) {
+    SPYValue *iterator = get_iterator(c, keys);
+    if (!iterator && error_is(c, "TypeError") && !iterable_type(keys)) {
+        SPYValue *module = source->type == SPY_INSTANCE ? name_local(source->as.map.parent, "__module__") : NULL;
+        spy_clear_error(c);
+        /* %T names the module, unless it is builtins or __main__. */
+        if (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins") &&
+            strcmp(module->as.string.data, "__main__"))
+            errorf(c, "TypeError", "%s.%s.keys() must return an iterable, not %s", module->as.string.data, type_name(source), type_name(keys));
+        else errorf(c, "TypeError", "%s.keys() must return an iterable, not %s", type_name(source), type_name(keys));
+    }
+    return iterator;
+}
 static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, SPYValue *callable) {
     if (is_dict(result)) {
         if (!is_dict(source)) {
@@ -14726,15 +14747,15 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
             SPYValue *keys = call(c, method, 0, NULL);
             spy_release(method);
             if (!keys) return -1;
-            SPYValue *iterator = get_iterator(c, keys);
-            if (!iterator && error_is(c, "TypeError") && !iterable_type(keys)) {
-                SPYValue *module = source->type == SPY_INSTANCE ? name_local(source->as.map.parent, "__module__") : NULL;
-                spy_clear_error(c);
-                /* %T names the module, unless it is builtins or __main__. */
-                if (module && module->type == SPY_STRING && strcmp(module->as.string.data, "builtins") &&
-                    strcmp(module->as.string.data, "__main__"))
-                    errorf(c, "TypeError", "%s.%s.keys() must return an iterable, not %s", module->as.string.data, type_name(source), type_name(keys));
-                else errorf(c, "TypeError", "%s.keys() must return an iterable, not %s", type_name(source), type_name(keys));
+            SPYValue *iterator = keys_iterator(c, source, keys);
+            /* The keys are listed before the first is looked up; a list
+             * keys() returns is iterated as it is. */
+            if (iterator && keys->type != SPY_LIST) {
+                SPYValue *list = value_new(c, SPY_LIST);
+                if (!list || extend_display(c, list, iterator)) { spy_release(list); list = NULL; }
+                spy_release(iterator);
+                iterator = list ? get_iterator(c, list) : NULL;
+                spy_release(list);
             }
             spy_release(keys);
             if (!iterator) return -1;
@@ -21860,6 +21881,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty);
+        spy_release(b.consumer->mapping); spy_release(b.consumer->listed);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
 }
@@ -22145,6 +22167,15 @@ static SPYValue *getitem_function(SPYContext *c, SPYValue *v) {
     SPYValue *function = cls ? class_lookup(cls, "__getitem__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
+/* The Python keys() of plain instance v, found by its class's default
+ * attribute lookup, borrowed: dict() and dict.update() then merge v as a
+ * mapping on the machine (KEY_KEYS); else NULL. */
+static SPYValue *keys_function(SPYContext *c, SPYValue *v) {
+    if (!plain_instance(v) || name_local(v, "keys")) return NULL;
+    SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
+    SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, "keys") : NULL;
+    return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
+}
 /* Whether instance v iterates by a getitem_function, its class having no
  * __iter__ and, as for iter_function, no length. */
 static int getitem_iterated(SPYContext *c, SPYValue *v) {
@@ -22175,13 +22206,17 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
-    if (!argc || !machine_source(c, argv[0])) return -1;
+    /* dict() and dict.update() merge an instance as a mapping, on the
+     * machine when its keys() is Python (keys_function). */
+    int mapping = argc && argv[0]->type == SPY_INSTANCE &&
+                  (callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT));
+    if (!argc || (mapping ? !keys_function(c, argv[0]) : !machine_source(c, argv[0]))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
-                           (method == M_UPDATE && callee->type == SPY_DICT && argv[0]->type != SPY_INSTANCE) ? B_EXTEND : -1 :
+                           (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
-             callee == c->types[SPY_DICT] && argv[0]->type != SPY_INSTANCE ? B_DICT :
+             callee == c->types[SPY_DICT] ? B_DICT :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND &&
@@ -22225,7 +22260,9 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
                                  id == B_DICT ? SPY_DICT : SPY_LIST) : NULL;
-    int keyed = generator ? consumer_source(c, &generator) : 0;
+    /* dict() and dict.update() of an instance merge it as a mapping (consumer_id). */
+    int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE;
+    int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
@@ -22291,14 +22328,25 @@ static SPYValue *key_best(SPYContext *c, Consumer *s) {
     return s->best ? spy_retain(s->best) : s->empty ? spy_retain(s->empty) :
            errorf(c, "ValueError", "%s() iterable argument is empty", s->keyed == KEY_MAX ? "max" : "min");
 }
+static int keys_merge(SPYContext *, Block *, SPYValue *);
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
     if (!item && top->consumer->id == B_CLOSE && error_is(c, "GeneratorExit")) spy_clear_error(c);
+    if (top->consumer->listed) {
+        /* A merged mapping's keys from a generator, listed (keys_listing). */
+        Consumer *s = top->consumer;
+        if (item) { int failed = sequence_append(c, s->listed, item); spy_release(item); return !failed; }
+        if (c->error_type[0]) return 0;
+        SPYValue *keys = s->listed;
+        s->listed = NULL;
+        return !keys_merge(c, top, keys);
+    }
     if (top->consumer->fed) {
-        /* A fed min or max takes its item's key next (key_call), or ends. */
+        /* A fed min or max takes its item's key next (key_call), as a
+         * merged mapping its key's value, or ends. */
         if (item) { top->consumer->item = item; return 1; }
-        SPYValue *result = c->error_type[0] ? NULL : key_best(c, top->consumer);
+        SPYValue *result = c->error_type[0] ? NULL : top->consumer->keyed == KEY_ITEMS ? consumer_end(c, top->consumer) : key_best(c, top->consumer);
         pop_block(c, m, f);
         if (result) machine_push(c, m, result);
         return 0;
@@ -22494,10 +22542,27 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(function);
         return NULL;
     }
-    if (s->keyed == KEY_ITER) {
-        SPYValue *function = iter_function(c, items);
+    if (s->keyed == KEY_ITER || s->keyed == KEY_KEYS) {
+        SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : keys_function(c, items);
+        if (!machine_function(c, function)) {
+            /* A generator function's keys() makes its generator at once. */
+            if ((result = call(c, function, 1, &items))) key_took(c, m, result);
+            return NULL;
+        }
         item = spy_retain(items);
         return (*env = function_env(c, function, 1, &item, NULL, 1)) ? spy_retain(function) : NULL;
+    }
+    if (s->keyed == KEY_ITEMS) {
+        /* The merged mapping's value of the key it was fed: its Python
+         * __getitem__'s call, or found natively. */
+        SPYValue *function = getitem_function(c, s->mapping);
+        if (function) {
+            SPYValue *args[] = {spy_retain(s->mapping), spy_retain(s->item)};
+            return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
+        }
+        SPYValue *value = get_index(c, s->mapping, s->item);
+        if (value) key_took(c, m, value);
+        return NULL;
     }
     if (s->keyed == KEY_SORT) {
         SPYValue *function;
@@ -22545,6 +22610,33 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
     else machine_push(c, m, result);
     return NULL;
 }
+/* Consumer s of block top merges mapping s->mapping by looking up each
+ * of keys, a list it takes, in turn (KEY_ITEMS); 0, or -1 on an error. */
+static int keys_merge(SPYContext *c, Block *top, SPYValue *keys) {
+    Consumer *s = top->consumer;
+    spy_release(top->value);
+    top->value = get_iterator(c, keys);
+    spy_release(keys);
+    s->keyed = KEY_ITEMS; s->fed = 1;
+    return top->value ? 0 : -1;
+}
+/* What block top's mapping's keys() returned, keys, which it takes, is
+ * listed before the first key is looked up: a list as it is, a generator
+ * by the machine (listed), any other iterable at once. */
+static NO_INLINE int keys_listing(SPYContext *c, Block *top, SPYValue *keys) {
+    Consumer *s = top->consumer;
+    s->mapping = top->value; top->value = NULL;
+    if (keys->type == SPY_LIST) return keys_merge(c, top, keys);
+    if (resumable(keys)) {
+        top->value = keys; s->keyed = 0;
+        return (s->listed = value_new(c, SPY_LIST)) ? 0 : -1;
+    }
+    SPYValue *iterator = keys_iterator(c, s->mapping, keys), *list = iterator ? value_new(c, SPY_LIST) : NULL;
+    int failed = !list || extend_display(c, list, iterator);
+    spy_release(iterator); spy_release(keys);
+    if (failed) { spy_release(list); return -1; }
+    return keys_merge(c, top, list);
+}
 /* The consumer atop m takes key, its item's key: a sort keeps it, and min
  * or max keeps the item while it is the best; 0, or -1 on an error. */
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
@@ -22579,6 +22671,15 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         spy_release(top->value);
         top->value = iterator; s->keyed = 0;
         return 0;
+    }
+    if (s->keyed == KEY_KEYS) return keys_listing(c, top, key);
+    if (s->keyed == KEY_ITEMS) {
+        /* The mapping's value of the key it was fed is merged. */
+        SPYValue *fed = s->item;
+        s->item = NULL;
+        int failed = map_set(c, s->result, fed, key);
+        spy_release(fed); spy_release(key);
+        return failed ? -1 : 0;
     }
     if (s->keyed == KEY_SORT && s->sorter) {
         /* The result of the sort's comparison under way. */
