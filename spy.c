@@ -14811,12 +14811,21 @@ static int dict_pair(SPYContext *c, SPYValue *dict, SPYValue *pair, size_t index
     spy_release(items);
     return c->error_type[0] ? -1 : 0;
 }
+/* Whether instance a has an attribute keys, so is a mapping to dict(); -1
+ * on an error. */
+static int instance_keys(SPYContext *c, SPYValue *a) {
+    SPYValue *keys = a->type == SPY_INSTANCE ? attribute(c, a, "keys") : NULL;
+    if (!keys && error_is(c, "AttributeError")) spy_clear_error(c);
+    spy_release(keys);
+    return c->error_type[0] ? -1 : !!keys;
+}
 static int dict_update(SPYContext *c, SPYValue *dict, SPYValue *a) {
     /* Like PyDict_Merge, dict subclasses keeping dict iteration copy directly. */
     SPYValue *base = builtin_base(c, a, "__iter__", NULL);
     if (base && is_dict(base)) a = base;
-    if (is_dict(a) || a->type == SPY_MAPPINGPROXY || a->type == SPY_FRAME_LOCALS ||
-        (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "keys"))) extend_display(c, dict, a);
+    int keys = is_dict(a) || a->type == SPY_MAPPINGPROXY || a->type == SPY_FRAME_LOCALS ? 1 : instance_keys(c, a);
+    if (keys < 0) return -1;
+    if (keys) extend_display(c, dict, a);
     else {
         SPYValue *iterator = get_iterator(c, a);
         for (size_t index = 0; iterator && !c->error_type[0]; index++) {
@@ -22095,7 +22104,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT && argv[0]->type != SPY_INSTANCE) ? B_EXTEND : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
-             callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET : callee == c->types[SPY_DICT] ? B_DICT :
+             callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
+             callee == c->types[SPY_DICT] && argv[0]->type != SPY_INSTANCE ? B_DICT :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND &&

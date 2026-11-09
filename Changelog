@@ -87,6 +87,8 @@ Unreleased (0.8.0):
   after its parsing and compiling instead of stopping
 - map() calls a bound method or a callable instance's Python __call__
   without the C stack
+- dict() of an object with a keys attribute merges it as a mapping, also
+  when keys is the instance's own or its class has an __iter__
 - a map() or zip() taking items from a generator releases each item once
   given on, where it kept it alive until a collection
 - exec and eval of interactive input, and the Python sys.displayhook they
