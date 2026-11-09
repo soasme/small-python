@@ -325,10 +325,10 @@ These run as machines on the heap, in one native activation of
   `__eq__` and `__lt__` of the items of tuples they sort, and the Python
   comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
-  `__float__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
+  `__float__`, `__bool__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
   `__round__` and `__reversed__` that `str`, `repr`, `format`, `len`,
-  `int`, `float`, `complex` and `bytes` of one argument, `hash`, `abs`,
-  `round` and `reversed` call, and, in code compiled while pausing, the
+  `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
+  `round` and `reversed` call, the `__bool__` that `not` calls, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list or

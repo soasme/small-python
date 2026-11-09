@@ -22843,11 +22843,11 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     SPYValue **name = &found[0], **spec = &found[1];
     if (argc > 2 || argv[0]->as.map.base) return NULL;
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
-        callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT :
+        callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND) && argc == 2) ||
-        (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_COMPLEX && id != B_BYTES &&
+        (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
@@ -22862,7 +22862,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         if (function || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
     }
     /* With no __str__ above object's, str() calls the instance's __repr__. */
-    const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
+    const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" : id == B_BOOL ? "__bool__" :
         id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
         id == B_REVERSED ? "__reversed__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
@@ -23990,6 +23990,7 @@ static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
     return machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, phase));
 }
+static SPYValue *bool_call(SPYContext *, Machine *, SPYValue *, SPYValue **);
 /* Whether x's rich comparison rich declines any plain instance: x is
  * None, a str, bytes, tuple, list or dict, or a plain instance whose class
  * compares as object does, whose != calls its __eq__. */
@@ -24476,6 +24477,12 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
         }
         return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
+    }
+    /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth
+     * (checked_returned). */
+    if (kind == OPERATE_UNARY && op == O_NOT) {
+        c->entering_kind = CALL_CHECKED;
+        return bool_call(c, m, x, env);
     }
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
@@ -25304,7 +25311,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         call->m.outermost = CALL_INIT;
         return &call->m;
     }
-    if (ins->op != BC_FALSE) {
+    if (ins->op != BC_FALSE && ins->op != BC_UNARY) {
         SPYValue *name = machine_pop(m), *whole = NULL, *string;
         Buffer b = { .ctx = c, .whole = &whole };
         int64_t length;
@@ -25317,6 +25324,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
             string = number_result(c, v, method[2] == 'f', spy_retain(result));
         else if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) string = converted_result(c, v, method, result);
+        else if (!strcmp(method, "__bool__")) string = truth_result(c, v, 1, spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
         else if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__"))
             string = spy_retain(result);
         else if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
@@ -25333,7 +25341,8 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     }
     int truth = truth_result(c, v, 1, result);
     spy_release(v);
-    if (!truth) m->pc = ins->target;
+    if (ins->op == BC_UNARY) { if (!c->error_type[0]) machine_push(c, m, spy_bool(c, !truth)); }
+    else if (!truth) m->pc = ins->target;
     return m;
 }
 /* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;

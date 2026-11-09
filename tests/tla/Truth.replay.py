@@ -19,6 +19,8 @@ RETURNS = {"bool_true": ("__bool__", True), "bool_false": ("__bool__", False), "
 def instance(kind, side, log):
     def method(name, value):
         def call(self):
+            for _ in ():  # a loop: the method runs on the machine
+                pass
             log.append(side + "." + name[2:-2].replace("__", ""))
             return value
         return call
