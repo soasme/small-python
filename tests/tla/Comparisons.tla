@@ -39,7 +39,8 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "in_list", "in_str_type", "in_bytes_type", "in_identity", "contains_nonbool", "contains_falsy",
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
-          "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared"}
+          "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
+          "store_keeps_key"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -132,6 +133,11 @@ Case(c) ==
       [] c = "list_identity_shortcut" -> <<"(True, True)", <<"'eq'">>>>
       [] c = "seq_length_eq" -> <<"(False, False)", <<"'eq'">>>>          \* lists of other lengths compare no items, tuples do
       [] c = "seq_cleared" -> <<"True", <<>>>>                            \* an unequal pair past an end compares lengths
+      \* a dict's or set's lookup compares a key of the same hash by ==: the
+      \* stored key's __eq__, then on NotImplemented the looked-up key's, then identity
+      [] c = "lookup_reflected" -> <<"(False, False, 1)", <<"'m'", "'z'", "'m'", "'y'", "'m'", "'x'">>>>
+      \* a display's or store's equal key keeps the stored key with the new value
+      [] c = "store_keeps_key" -> <<"[('a', 3), 0, 1]", <<"'ab'", "'ac'", "'ae'", "'fg'">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 

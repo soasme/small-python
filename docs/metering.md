@@ -347,8 +347,14 @@ These run as machines on the heap, in one native activation of
   instance on the right, called once the left operand, an `int`, `bool`,
   `float` or instance, declines, or first when the right operand's class
   is a subclass of the left's, and the same methods of `divmod` and of
-  `pow` with no modulus or a `None` one, and the `__add__` or `__radd__`
-  that `sum` calls on a total or item that is an instance;
+  `pow` with no modulus or a `None` one, the `__add__` or `__radd__`
+  that `sum` calls on a total or item that is an instance, the `__eq__`
+  that a dict or set display, a dict's subscript, store or deletion, a
+  frozendict's subscript, or `in` of a dict, frozendict, set or
+  frozenset, calls on an instance key and each stored key of its hash,
+  the stored key's first and then, on `NotImplemented`, the key's, and
+  the `__format__` that `str.format` calls on each field's object, a
+  nested spec's fields first;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
   parameters or annotations and the builtin `__build_class__` makes it.

@@ -405,6 +405,8 @@ struct SPYContext {
     /* A key whose Python __hash__ the machine called, owned, and the
      * hash, for the step that runs again to use once (hash_call). */
     SPYValue *hashed; int64_t hashed_value;
+    SPYValue *looked; /* A lookup's result found in C (lookup_found), owned, for its step to take. */
+    SPYValue *probing; /* On a machine's stack, marks a key's lookup under way (lookup_call). */
     size_t finalizing;       /* The depth of calls with a __del__ on the machine (finalizer_call), or 0. */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
@@ -2497,15 +2499,30 @@ static ptrdiff_t map_next(SPYValue *map, int64_t hash, MapCursor *cursor) {
     }
     return -1;
 }
+/* The first entry of hash in map, or -1. */
+static ptrdiff_t map_first(SPYValue *map, int64_t hash) {
+    map = namespace_map(map);
+    MapCursor cursor = map_cursor(map, hash);
+    return map_next(map, hash, &cursor);
+}
+/* Whether a lookup of key, of hash, in map compares it with a stored key
+ * of that hash before finding key itself. */
+static int map_collides(SPYValue *map, SPYValue *key, int64_t hash) {
+    ptrdiff_t i = map_first(map, hash);
+    return i >= 0 && namespace_map(map)->as.map.items[i].key != key;
+}
+/* Whether entry i of map still holds candidate, its key when cursor began,
+ * and an indexed map was not reindexed since. */
+static int entry_unchanged(SPYValue *map, ptrdiff_t i, SPYValue *candidate, MapCursor cursor) {
+    return (size_t)i < map_used(map) && map->as.map.items[i].key == candidate && (!cursor.indexed || cursor.changes == map->as.map.changes);
+}
 /* The rest of a search from candidate i on, comparing through callbacks that
  * may change the map. */
 static NO_INLINE ptrdiff_t map_find_compare(SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, ptrdiff_t i) {
     int pending_error = map->ctx->error_type[0] != 0;
     do {
         SPYValue *candidate = spy_retain(map->as.map.items[i].key);
-        int matches = candidate == key || equal(candidate, key);
-        int unchanged = (size_t)i < map_used(map) && map->as.map.items[i].key == candidate &&
-            (!cursor.indexed || cursor.changes == map->as.map.changes);
+        int matches = candidate == key || equal(candidate, key), unchanged = entry_unchanged(map, i, candidate, cursor);
         spy_release(candidate);
         if (!pending_error && map->ctx->error_type[0]) return -1;
         if (!unchanged) cursor = map_cursor(map, hash);
@@ -12454,7 +12471,14 @@ static SPYValue *join_strings(SPYContext *c, SPYValue *items) {
  * Objects/stringlib/unicode_format.h. Markup characters are ASCII, so the
  * scanners walk UTF-8 bytes; field indexes accept Unicode decimal digits. */
 typedef struct { int state; int64_t number; } AutoNumber; /* state: 0 init, 1 automatic, 2 manual */
-typedef struct { size_t argc; SPYValue *const *argv; SPYValue *keywords; AutoNumber numbering; } FormatArgs;
+/* A format on the machine (suspend) stops at a field whose object's class
+ * has a Python __format__, the object and spec pending, the markup to
+ * resume at resume; and at a top-level field with a nested spec, its
+ * object pending, the spec from resume to spec_end. */
+typedef struct {
+    size_t argc; SPYValue *const *argv; SPYValue *keywords; AutoNumber numbering;
+    int suspend; size_t resume, spec_end; SPYValue *pending, *pending_spec;
+} FormatArgs;
 static int64_t format_field_index(SPYContext *c, const char *text, size_t start, size_t end) {
     if (start >= end) return -1;
     int64_t accumulator = 0;
@@ -12519,6 +12543,19 @@ static SPYValue *format_build(SPYContext *c, const char *text, size_t start, siz
     int status = format_markup(c, &out, text, start, end, args, depth);
     return format_finish(c, &out, status);
 }
+/* The Python __format__ of plain instance v's class, a function on the
+ * machine, borrowed, or NULL. */
+static SPYValue *format_function(SPYContext *c, SPYValue *v) {
+    SPYValue *function = v->type == SPY_INSTANCE && !v->as.map.base ? class_lookup(v->as.map.parent, "__format__") : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Append object formatted by spec to out: 0, or -1 on an error. */
+static int format_append(SPYContext *c, Buffer *out, SPYValue *object, SPYValue *spec) {
+    SPYValue *result = format_spec(c, object, spec), *string = result ? builtin_value(c, result, SPY_STRING) : NULL;
+    int status = string ? append(out, string->as.string.data, string->as.string.len) : -1;
+    spy_release(result);
+    return status;
+}
 /* parse_field and output_markup: pos is just past the opening '{'. */
 static int format_replacement(SPYContext *c, Buffer *out, const char *text, size_t *pos, size_t end, FormatArgs *args, int depth) {
     size_t at = *pos, name = at, spec = 0, spec_end = 0;
@@ -12555,21 +12592,28 @@ static int format_replacement(SPYContext *c, Buffer *out, const char *text, size
         }
     } else if (ch != '}') { spy_error(c, "ValueError", "expected '}' before end of string"); return -1; }
     *pos = at;
-    SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL, *result = NULL;
+    SPYValue *object = format_field_object(c, text, name, name_end, args), *format = NULL;
     if (object && conversion) {
         SPYValue *converted = conversion == 's' || conversion == 'r' || conversion == 'a' ? convert_field(c, object, (int)conversion) :
             conversion > 32 && conversion < 127 ? errorf(c, "ValueError", "Unknown conversion specifier %c", (int)conversion) :
             errorf(c, "ValueError", "Unknown conversion specifier \\x%x", conversion);
         spy_release(object); object = converted;
     }
+    if (object && expanding && args->suspend && depth == 2) {
+        args->pending = object; args->resume = spec; args->spec_end = spec_end;
+        return 2;
+    }
     if (object) format = expanding ? format_build(c, text, spec, spec_end, args, depth - 1) : spy_string(c, text + spec, spec_end - spec);
-    if (format) result = format_spec(c, object, format);
-    SPYValue *string = result ? builtin_value(c, result, SPY_STRING) : NULL;
-    int status = string ? append(out, string->as.string.data, string->as.string.len) : -1;
-    spy_release(object); spy_release(format); spy_release(result);
+    if (format && args->suspend && format_function(c, object)) {
+        args->pending = object; args->pending_spec = format; args->resume = at;
+        return 1;
+    }
+    int status = format ? format_append(c, out, object, format) : -1;
+    spy_release(object); spy_release(format);
     return status;
 }
-/* do_markup over MarkupIterator. */
+/* do_markup over MarkupIterator: 0, or -1 on an error, or 1 or 2 when a
+ * field is pending (FormatArgs). */
 static int format_markup(SPYContext *c, Buffer *out, const char *text, size_t pos, size_t end, FormatArgs *args, int depth) {
     while (pos < end) {
         size_t start = pos;
@@ -12587,13 +12631,14 @@ static int format_markup(SPYContext *c, Buffer *out, const char *text, size_t po
             else len--;
         }
         if (len && append(out, text + start, len)) return -1;
-        if (markup && format_replacement(c, out, text, &pos, end, args, depth)) return -1;
+        int status = markup ? format_replacement(c, out, text, &pos, end, args, depth) : 0;
+        if (status) return status;
     }
     return 0;
 }
 static SPYValue *string_format(SPYContext *c, SPYValue *self, size_t argc, SPYValue *const *argv, SPYValue *keywords, int positional) {
     static SPYValue *const none[1];
-    FormatArgs args = {argc, positional ? (argv ? argv : none) : NULL, keywords, {0, 0}};
+    FormatArgs args = {argc, positional ? (argv ? argv : none) : NULL, keywords, {0, 0}, 0, 0, 0, NULL, NULL};
     /* PEP 3101 allows two levels: "{0:{1}}" works, "{0:{1:{2}}}" does not. */
     return format_build(c, self->as.string.data, 0, self->as.string.len, &args, 2);
 }
@@ -22404,9 +22449,28 @@ static NO_INLINE SPYValue *check_method(SPYContext *c, SPYValue *callee, SPYValu
     c->entering_kind = CALL_CHECKED;
     return function;
 }
+static SPYValue *format_job(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue *, SPYValue **);
+static SPYValue *format_function(SPYContext *, SPYValue *);
+/* Whether str.format of self, a str, takes argc positional arguments
+ * argv, at most 8, one an instance or a container that a field may reach
+ * an instance with a Python __format__ through (format_job). */
+static NO_INLINE int format_instances(SPYValue *self, size_t argc, SPYValue *const *argv) {
+    if (self->type != SPY_STRING || argc > 8) return 0;
+    for (size_t i = 0; i < argc; i++)
+        if (UINT64_C(1) << argv[i]->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE |
+                                            UINT64_C(1) << SPY_DICT))
+            return 1;
+    return 0;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module &&
+        format_instances(callee->as.bound.self, argc, argv)) {
+        result = format_job(c, m, callee->as.bound.self, argc, argv, NULL, env);
+        spy_release(callee);
+        return result;
+    }
     if (method < 0 && unbind(c, &callee, &argc, argv)) {
         if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
         spy_release(callee);
@@ -22601,6 +22665,11 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                                         (argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     if (method < 0 && machine_builtin(callee)) return builtin_call(c, m, n, callee, argc, argv, env);
+    if (method == M_FORMAT && format_instances(callee, argc, argv)) {
+        SPYValue *result = format_job(c, m, callee, argc, argv, NULL, env);
+        spy_release(callee);
+        return result;
+    }
     SPYValue *result = call_plain(c, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
@@ -22718,8 +22787,18 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return status > 0 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
     }
     /* So do str() and repr() of a list or tuple with such an item's
-     * Python __repr__ (repr_call). */
+     * Python __repr__ (repr_call), and str.format of an instance with a
+     * Python __format__ (format_job). */
     if (calls && argc == 1 && repr_job(c, callee, argv[0])) return repr_call(c, m, env);
+    if (calls && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module &&
+        format_instances(callee->as.bound.self, argc, argv)) {
+        SPYValue *args[8], *self = callee->as.bound.self;
+        memcpy(args, argv, argc * sizeof(*argv));
+        m->len -= argc + 1;
+        result = format_job(c, m, self, argc, args, NULL, env);
+        spy_release(callee);
+        return result;
+    }
     if (calls && argc == 2 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_GETATTR)
         return getattr_call(c, m, env);
@@ -22814,6 +22893,19 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(x); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
+    /* str.format of an instance with a Python __format__ (format_job). */
+    SPYValue *format = !callee || !calls ? NULL : method == M_FORMAT ? callee :
+                       method < 0 && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT &&
+                       !callee->as.bound.module ? callee->as.bound.self : NULL;
+    if (format && format_instances(format, argc, argv + 1)) {
+        SPYValue *args[8];
+        memcpy(args, argv + 1, argc * sizeof(*argv));
+        m->len -= argc;
+        spy_release(machine_pop(m));
+        result = format_job(c, m, format, argc, args, NULL, env);
+        spy_release(callee);
+        return result;
+    }
     /* A consumer takes a native method's arguments after its object. */
     size_t from = skip + (method >= 0 && !skip), given = argc + 1 - from;
     id = callee ? consumer_of(c, callee, method, given, argv + from) : -1;
@@ -22890,6 +22982,16 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         if (status > 0) return spy_retain(c->types[SPY_STRING]);
         if (status < 0 && !keywords) goto done;
         return status ? NULL : spy_none(c);
+    }
+    if (calls && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module &&
+        format_instances(callee->as.bound.self, argc, argv)) {
+        /* str.format, as a plain call's step (stack_call), with keywords. */
+        SPYValue *keywords = entries_dict(c, kw, kwc), *self = spy_retain(callee->as.bound.self), *args[8];
+        for (size_t i = 0; i < positional; i++) args[i] = spy_retain(argv[i]);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        result = format_job(c, m, self, positional, args, keywords, env);
+        spy_release(keywords); spy_release(self);
+        return result;
     }
     if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD)) {
         int began = key_consumer(c, m, callee, positional, argv, kw, kwc);
@@ -23290,24 +23392,201 @@ static int hash_kept(SPYContext *c, SPYValue *key, int hashed, int64_t hash) {
     if (!hashed) spy_release(key);
     return hashed;
 }
+/* Whether a lookup in container hashes its key with no other call first. */
+static int hashes_key(SPYValue *container, int lookup) {
+    return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
+           (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
+}
+/* Whether a subscript or in of key in map, by operator step ins, looks
+ * it up on the machine (lookup_call): an exact dict's or frozendict's
+ * subscript, or in of an exact dict, frozendict, set or frozenset, with a
+ * plain instance key. */
+static int machine_lookup(SPYValue *map, SPYValue *key, int contains) {
+    return key->type == SPY_INSTANCE && !key->as.map.base && hashes_key(map, contains);
+}
+/* Whether step ins's lookup of key, of hash, in map compares key with a
+ * stored key; else, when key itself is the first entry of hash or, for
+ * an in, there is none, its result is c->looked. */
+static int lookup_found(SPYContext *c, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash) {
+    int op = 0, contains = step_operation(ins, &op) != OPERATE_INDEX;
+    ptrdiff_t i = map_first(map, hash);
+    if (i >= 0 && namespace_map(map)->as.map.items[i].key != key) return 1;
+    if (contains) c->looked = spy_bool(c, (op == O_IN) == (i >= 0));
+    else if (i >= 0) c->looked = spy_retain(namespace_map(map)->as.map.items[i].value);
+    return 0;
+}
+/* Take c->looked. */
+static SPYValue *looked(SPYContext *c) {
+    SPYValue *value = c->looked;
+    c->looked = NULL;
+    return value;
+}
+/* The call of function, a Python __eq__, on left and right for the lookup
+ * of key, of hash, in map at entry i, holding candidate, the cursor yielding
+ * it: function owned, with *env; map, key, hash, the cursor, i (twice,
+ * one more for the reflected call), the candidate, left, right and
+ * c->probing pushed on m's stack (lookup_returned). Else NULL, m's stack
+ * as it was. */
+static SPYValue *lookup_push(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, ptrdiff_t i,
+                             SPYValue *candidate, int reflected, SPYValue *function, SPYValue *left, SPYValue *right, SPYValue **env) {
+    SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+    size_t len = m->len;
+    if (machine_push(c, m, spy_retain(map)) || machine_push(c, m, spy_retain(key)) || machine_push(c, m, int_value(c, hash)) ||
+        machine_push(c, m, int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed))) ||
+        machine_push(c, m, int_value(c, (int64_t)cursor.changes)) || machine_push(c, m, int_value(c, i * 2 + reflected)) ||
+        machine_push(c, m, spy_retain(candidate)) || machine_push(c, m, spy_retain(left)) ||
+        machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->probing)) ||
+        !(*env = function_env(c, function, 2, args, NULL, 1))) {
+        if (m->len - len < 10) release_all(2, args);
+        while (m->len > len) spy_release(machine_pop(m));
+        return NULL;
+    }
+    return spy_retain(function);
+}
+/* The lookup of key in map (machine_lookup), of hash, from the entries
+ * cursor yields on: the Python __eq__ that comparing the next entry's key
+ * with key calls first (rich_function), the entry key's or key's, owned,
+ * with its env, pushed (lookup_push), the entries before it compared
+ * natively unequal. Else NULL, the entry found in *found, or -1, or an
+ * error; a comparison that changes map starts the lookup again. */
+static NO_INLINE SPYValue *lookup_call(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor,
+                                       ptrdiff_t *found, SPYValue **env) {
+    SPYValue *storage = namespace_map(map);
+    *found = -1;
+    for (ptrdiff_t i; (i = map_next(storage, hash, &cursor)) >= 0;) {
+        SPYValue *candidate = storage->as.map.items[i].key, *left = candidate, *function;
+        if (candidate == key) { *found = i; return NULL; }
+        if (!(function = rich_function(c, candidate, key, R_EQ)) && (function = rich_function(c, key, candidate, R_EQ))) left = key;
+        if (function) return lookup_push(c, m, storage, key, hash, cursor, i, candidate, 0, function, left, left == key ? candidate : key, env);
+        spy_retain(candidate);
+        int matches = equal(candidate, key), unchanged = entry_unchanged(storage, i, candidate, cursor);
+        spy_release(candidate);
+        if (c->error_type[0]) return NULL;
+        if (!unchanged) cursor = map_cursor(storage, hash);
+        else if (matches) { *found = i; return NULL; }
+    }
+    return NULL;
+}
+/* Whether lookup step ins stores into its map: a display's item, a
+ * store or a deletion (store_lookup). */
+static int lookup_stores(Instruction *ins) {
+    return ins->op == BC_MAP || ins->op == BC_STORE || ins->op == BC_EXEC || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET;
+}
+/* Whether a store or deletion of key in map looks it up on the machine
+ * (lookup_call): an exact dict's, or a display's into a set too, with a
+ * plain instance key. */
+static int store_lookup(SPYValue *map, SPYValue *key, int display) {
+    return key->type == SPY_INSTANCE && !key->as.map.base && (map->type == SPY_DICT || (display && map->type == SPY_SET));
+}
+/* Lookup step ins of key, of hash, in map ends on m with entry found, or
+ * -1, or the error pending: a subscript with the entry's value or a
+ * KeyError, in with its truth (operator_finish); a store with the value
+ * under the lookup's state in the entry, or a new one, a deletion with the
+ * entry removed, or a KeyError, as set_index and delete_index do. */
+static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash, ptrdiff_t found,
+                              size_t pc) {
+    if (lookup_stores(ins)) {
+        int deletion = ins->op == BC_SET_TARGET && ins->arg;
+        SPYValue *value = deletion ? NULL : machine_pop(m), *storage = namespace_map(map);
+        m->pc = pc;
+        if (ins->op != BC_MAP) relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
+        if (c->error_type[0]) {
+        } else if (deletion && found < 0) missing_key(c, key);
+        else if (deletion) {
+            Entry old = map_remove(storage, (size_t)found);
+            spy_release(old.key); spy_release(old.value);
+        } else if (found >= 0) {
+            SPYValue *old = storage->as.map.items[found].value;
+            class_changed(storage);
+            storage->as.map.items[found].value = spy_retain(value);
+            spy_release(old);
+        } else map_append(c, storage, key, value, hash);
+        if (!c->error_type[0] && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
+        spy_release(value);
+        return m;
+    }
+    int op = 0, index = step_operation(ins, &op) == OPERATE_INDEX;
+    SPYValue *value = c->error_type[0] ? NULL : !index ? spy_bool(c, (op == O_IN) == (found >= 0)) :
+                      found < 0 ? missing_key(c, key) : spy_retain(namespace_map(map)->as.map.items[found].value);
+    m->pc = operator_finish(c, m, ins, index ? key : map, value, pc);
+    return m;
+}
+/* The lookup's call of function with env (lookup_push) entered on m as an
+ * operator's, the call's machine; else, function NULL or its call failed,
+ * the step ended with entry found (lookup_finish). */
+static Machine *lookup_enter(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash,
+                             SPYValue *function, SPYValue *env, ptrdiff_t found, size_t pc) {
+    Call *call = function ? call_enter(c, function, env, m) : NULL;
+    if (call) {
+        call->m.outermost = CALL_OPERATOR;
+        return &call->m;
+    }
+    if (function) for (int i = 0; i < 10; i++) spy_release(machine_pop(m));
+    return lookup_finish(c, m, ins, map, key, hash, found, pc);
+}
+/* Lookup step ins of key, of hash, in map (machine_lookup) on m from the
+ * entries cursor yields: its next Python __eq__ entered (lookup_call), or
+ * its value pushed and m at the pc after the step. */
+static Machine *lookup_step(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor,
+                            size_t pc) {
+    SPYValue *env = NULL;
+    ptrdiff_t found;
+    SPYValue *function = lookup_call(c, m, map, key, hash, cursor, &found, &env);
+    return lookup_enter(c, m, ins, map, key, hash, function, env, found, pc);
+}
+/* The __eq__ of a key's lookup (lookup_push) returned result: on
+ * NotImplemented from the first call, the reflected Python __eq__ entered
+ * (operator_declined); else the entry found, or the next one's
+ * comparison, or the step's value. */
+static NO_INLINE Machine *lookup_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    spy_release(machine_pop(m));
+    SPYValue *right = machine_pop(m), *left = machine_pop(m), *candidate = machine_pop(m), *index = machine_pop(m);
+    SPYValue *changes = machine_pop(m), *at = machine_pop(m), *hash = machine_pop(m), *key = machine_pop(m), *map = machine_pop(m);
+    SPYValue *storage = namespace_map(map), *test = result, *self = NULL, *env = NULL, *function = NULL;
+    ptrdiff_t i = (ptrdiff_t)index->as.integer_data.small / 2;
+    MapCursor cursor = {(size_t)at->as.integer_data.small / 2, (size_t)changes->as.integer_data.small, (int)(at->as.integer_data.small & 1)};
+    int64_t h = hash->as.integer_data.small;
+    if (result == c->not_implemented) {
+        spy_release(result);
+        if (index->as.integer_data.small & 1) test = comparison_declined(c, T_EQ, left, right);
+        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test)))
+            function = lookup_push(c, m, storage, key, h, cursor, i, candidate, 1, function, self, left, &env);
+    }
+    if (function || c->error_type[0]) m = lookup_enter(c, m, ins, map, key, h, function, env, -1, pc);
+    else {
+        int matches = test && truthy(test), unchanged = entry_unchanged(storage, i, candidate, cursor);
+        if (c->error_type[0] || (unchanged && matches)) m = lookup_finish(c, m, ins, map, key, h, i, pc);
+        else m = lookup_step(c, m, ins, map, key, h, unchanged ? cursor : map_cursor(storage, h), pc);
+    }
+    release_all(10, (SPYValue *[]){test, right, left, candidate, index, changes, at, hash, key, map});
+    return m;
+}
 /* The __hash__ hash_call entered for step ins returned result, the key's
  * hash, kept for the step to use once: a display's step runs again; an
- * operator or a store runs on the operands it kept under the key. The pc
- * to go on at. */
-static NO_INLINE size_t hash_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+ * operator or a store runs on the operands it kept under the key, a
+ * lookup on the machine (lookup_step). The machine to run on, at its pc. */
+static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     SPYValue *key = machine_pop(m);
     int64_t hash = 0;
     int hashed = result && !hash_result(c, result, &hash), op = 0;
     /* A display's or BC_LOAD_TARGET's step runs again on its operands. */
+    m->pc = pc;
     if (ins->op == BC_MAP || ins->op == BC_LOAD_TARGET) {
         if (!hashed) hash_failed(c, m->stack[m->len - 2 - (ins->op == BC_MAP)], key);
-        return hash_kept(c, key, hashed, hash) ? pc - 1 : pc;
+        if (hash_kept(c, key, hashed, hash)) m->pc--;
+        return m;
     }
     if (ins->op == BC_STORE || ins->op == BC_EXEC || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) {
         /* A store's object, key and value, or a deletion's object and key. */
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m);
         if (!hashed) hash_failed(c, object, key);
+        if (hashed && store_lookup(object, key, 0) && map_collides(object, key, hash)) {
+            /* The value goes under the lookup's state (lookup_finish). */
+            if (!value || !machine_push(c, m, value)) m = lookup_step(c, m, ins, object, key, hash, map_cursor(object, hash), pc);
+            spy_release(key); spy_release(object); spy_release(item);
+            return m;
+        }
         if (hash_kept(c, key, hashed, hash)) {
             relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
             if (deletion) delete_evaluated(c, ins->node, object, item);
@@ -23315,20 +23594,20 @@ static NO_INLINE size_t hash_returned(SPYContext *c, Machine *m, Instruction *in
             if (!c->error_type[0] && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
         }
         spy_release(object); spy_release(item); spy_release(value);
-        return pc;
+        return m;
     }
     SPYValue *y = machine_pop(m), *x = machine_pop(m);
-    step_operation(ins, &op);
-    if (!hashed) hash_failed(c, op == O_IN || op == O_NOTIN ? y : x, key);
-    hash_kept(c, key, hashed, hash);
-    pc = operator_finish(c, m, ins, y, hashed ? operation(c, ins, x, y) : NULL, pc);
+    int contains = step_operation(ins, &op) != OPERATE_INDEX;
+    if (!hashed) hash_failed(c, contains ? y : x, key);
+    if (hashed && machine_lookup(contains ? y : x, key, contains) && lookup_found(c, ins, contains ? y : x, key, hash)) {
+        m = lookup_step(c, m, ins, contains ? y : x, key, hash, map_cursor(namespace_map(contains ? y : x), hash), pc);
+        spy_release(key);
+    } else {
+        hash_kept(c, key, hashed && !c->looked, hash);
+        m->pc = operator_finish(c, m, ins, y, hashed ? operation(c, ins, x, y) : NULL, pc);
+    }
     spy_release(x); spy_release(y);
-    return pc;
-}
-/* Whether a lookup in container hashes its key with no other call first. */
-static int hashes_key(SPYValue *container, int lookup) {
-    return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
-           (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
+    return m;
 }
 /* x[y], x an instance of a builtin's subclass: its class's Python
  * __getitem__, or for a dict's subclass, of a key y that is a builtin
@@ -23371,6 +23650,23 @@ static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SP
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
+/* For lookup step ins of plain instance key in map (machine_lookup), its
+ * __hash__ run in C: when it compares key with another (lookup_found),
+ * the lookup's first Python __eq__ (lookup_call); else NULL, with the
+ * result found in c->looked or the hash kept for the native lookup
+ * (hash_kept), or an error. */
+static NO_INLINE SPYValue *native_lookup(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, SPYValue **env) {
+    int64_t hash;
+    ptrdiff_t found;
+    if (map_hash(c, map, key, &hash)) return NULL;
+    if (!lookup_found(c, ins, map, key, hash)) {
+        if (!c->looked) hash_kept(c, spy_retain(key), 1, hash);
+        return NULL;
+    }
+    SPYValue *function = lookup_call(c, m, map, key, hash, map_cursor(namespace_map(map), hash), &found, env);
+    if (!function && !c->error_type[0]) hash_kept(c, spy_retain(key), 1, hash);
+    return function;
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -23381,6 +23677,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         SPYValue *operands[] = {x, y};
         if ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0]) return function;
         c->entering_kind = CALL_OPERATOR;
+        /* A key hashed in C whose Python __eq__ the lookup may call. */
+        if (machine_lookup(contains ? y : x, contains ? x : y, contains)) return native_lookup(c, m, ins, contains ? y : x, contains ? x : y, env);
     }
     /* A builtin sequence's item: an instance key's Python __index__ first,
      * the item then of its int (operator_returned). */
@@ -23447,6 +23745,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
 /* Operator step ins on x and y, in C. */
 static SPYValue *operation(SPYContext *c, Instruction *ins, SPYValue *x, SPYValue *y) {
     int op = 0, kind = step_operation(ins, &op);
+    /* A lookup found in C (lookup_found). */
+    if (c->looked) return looked(c);
     relocate(c, ins->node);
     spy_retain(x); spy_retain(y);
     /* A lone in is a BC_BINARY (binary_operand). */
@@ -23502,6 +23802,7 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
 static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (m->stack[m->len - 1] == c->replacing) return fold_returned(c, m, result);
+    if (m->stack[m->len - 1] == c->probing) return lookup_returned(c, m, ins, result, pc);
     if (m->stack[m->len - 1] == c->unbound) {
         int op = 0;
         step_operation(ins, &op);
@@ -23571,9 +23872,10 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         return m;
     }
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
-    int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small;
+    int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small, called = phase & ~3;
     spy_release(marker);
-    if (phase >> 2) { op = phase >> 2; kind = OPERATE_BINARY; phase &= 3; }
+    /* divmod() and pow() keep their operator with the phase (operator_call). */
+    if (called) { op = phase >> 2; kind = OPERATE_BINARY; phase &= 3; }
     if (phase == OPERATOR_INDEX) {
         SPYValue *index = index_result(c, y, result);
         result = index ? operation(c, ins, x, index) : NULL;
@@ -23590,7 +23892,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             result = binary(c, o->token, x, y);
         } else {
             SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result);
-            if (function && !operator_push(c, m, x, y, OPERATOR_LAST)) {
+            if (function && !operator_push(c, m, x, y, OPERATOR_LAST | called)) {
                 SPYValue *args[] = {spy_retain(self), spy_retain(self == x ? y : x)};
                 SPYValue *env = function_env(c, function, 2, args, NULL, 1);
                 Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
@@ -23635,10 +23937,21 @@ static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name
     return function && machine_function(c, function) ? function : NULL;
 }
 static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return item_function(c, object, "__setitem__"); }
+/* Whether a store of plain instance key into exact dict map, its hash run
+ * in C and kept (hash_kept), compares key with another (map_collides), or
+ * the hash failed. */
+static int store_collides(SPYContext *c, SPYValue *map, SPYValue *key) {
+    int64_t hash;
+    if (map_hash(c, map, key, &hash)) return 1;
+    hash_kept(c, spy_retain(key), 1, hash);
+    return map_collides(map, key, hash);
+}
 /* Whether a store of key into object is a call (store_call): a Python
- * __setitem__, or the key's Python __hash__ for a dict. */
+ * __setitem__, or the key's Python __hash__ for a dict, or a comparison
+ * of the key for an exact one (native_store). */
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key) {
-    return (object->type == SPY_INSTANCE && setitem_function(c, object)) || (hashes_key(object, 0) && hash_function(c, key));
+    return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
+           (hashes_key(object, 0) && (hash_function(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key))));
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
@@ -23648,6 +23961,37 @@ static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key
  * with the key and the value. BC_SET_TARGET with arg 1, a deletion, takes
  * the object and key and calls a Python __delitem__ with the key, or
  * deletes the item at once, returning NULL. */
+/* BC_MAP's item, its key an instance hashed in C (or its hash kept), its
+ * value atop m's stack over the key and the display: a dict's or set's
+ * entry found on the machine (store_lookup), the value under the lookup's
+ * state, or else stored in C. The machine to run on, at its pc. */
+static NO_INLINE Machine *display_store(SPYContext *c, Machine *m, Instruction *ins, size_t pc) {
+    SPYValue *value = machine_pop(m), *key = machine_pop(m), *map = m->stack[m->len - 1];
+    int64_t hash;
+    m->pc = pc;
+    if (!map_hash(c, map, key, &hash)) {
+        if (!store_lookup(map, key, 1) || !map_collides(map, key, hash)) map_set_hash(c, map, key, value, hash);
+        else if (!machine_push(c, m, spy_retain(value))) m = lookup_step(c, m, ins, map, key, hash, map_cursor(namespace_map(map), hash), pc);
+    }
+    spy_release(key); spy_release(value);
+    return m;
+}
+/* For a store or deletion (value NULL) of plain instance key in exact dict
+ * map (store_lookup), its __hash__ run in C and comparing key with another
+ * (store_collides): the lookup's first Python __eq__ (lookup_call), the
+ * value under its state; else NULL, the hash kept for the store in C
+ * (hash_kept), or an error. */
+static NO_INLINE SPYValue *native_store(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, SPYValue *value, SPYValue **env) {
+    SPYValue *function = NULL;
+    int64_t hash;
+    ptrdiff_t found;
+    if (map_hash(c, map, key, &hash) || (value && machine_push(c, m, spy_retain(value)))) return NULL;
+    c->entering_kind = CALL_OPERATOR;
+    if ((function = lookup_call(c, m, map, key, hash, map_cursor(map, hash), &found, env))) return function;
+    if (value) spy_release(machine_pop(m));
+    if (!c->error_type[0]) hash_kept(c, spy_retain(key), 1, hash);
+    return NULL;
+}
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
@@ -23681,7 +24025,9 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
         SPYValue *function = item_function(c, args[0], "__delitem__");
-        if (!function && hashes_key(args[0], 0) && ((function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0])) {
+        if (!function && hashes_key(args[0], 0) && ((function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
+                                                    (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], NULL, env))) ||
+                                                    c->error_type[0])) {
             release_all(2, args); return function;
         }
         relocate(c, n);
@@ -23699,7 +24045,10 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     SPYValue *function = setitem_function(c, args[0]);
     if (!function) {
         /* A dict's key's Python __hash__ (store_hooked), else the store in C. */
-        if ((function = hash_call(c, m, args[1], 3, args, env)) || c->error_type[0]) { release_all(3, args); return function; }
+        if ((function = hash_call(c, m, args[1], 3, args, env)) || c->error_type[0] ||
+            (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], args[2], env))) || c->error_type[0]) {
+            release_all(3, args); return function;
+        }
         relocate(c, n);
         if (!set_index(c, args[0], args[1], args[2]) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
         release_all(3, args);
@@ -24112,7 +24461,7 @@ static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *
         if (value != c->unbound) return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
     }
     SPYValue *function = operator_call(c, m, ins, x, y, env);
-    return function || c->error_type[0] ? function : operate(c, ins->node, x, y);
+    return function || c->error_type[0] ? function : c->looked ? looked(c) : operate(c, ins->node, x, y);
 }
 /* assign, out of line for the machine and inline in execute_statements. */
 static NO_INLINE int assign_step(SPYContext *c, Machine *m, Frame *f, Node *n) { return assign(c, f, n, m); }
@@ -24336,7 +24685,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_ITER) {
                         if (result) iter_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_HASH) {
-                        pc = hash_returned(c, m, &code[pc - 1], result, pc);
+                        m = hash_returned(c, m, &code[pc - 1], result, pc);
+                        f = m->frame; code = m->code->items; pc = m->pc;
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;
@@ -25053,8 +25403,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (value) { special = CALL_HASH; goto enter_special; }
         if (c->error_type[0]) continue;
         if (ins->op == BC_LOAD_TARGET) { machine_push(c, m, get_index(c, m->stack[m->len - 2], m->stack[m->len - 1])); continue; }
-        b = machine_pop(m); a = machine_pop(m); map_set(c, m->stack[m->len - 1], a, b);
-        spy_release(a); spy_release(b);
+        m = display_store(c, m, ins, pc);
+        f = m->frame; code = m->code->items; pc = m->pc;
         continue;
     store_step:
         /* A store to a subscript, BC_STORE's, BC_EXEC's assignment's,
@@ -30800,6 +31150,92 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
     repr_drop(c, v);
     return buffer_text(&b, SPY_STRING, status);
 }
+/* A str.format job, its state a list of the format str, the positional
+ * arguments' tuple, the numbering's state and number, the markup's
+ * position, the text so far, inside a nested spec its field's object,
+ * the spec's end and the spec so far (else None, 0, ""), and the
+ * keywords' dict or None, from its
+ * next field on: 1 at a field's Python __format__ (format_function), the
+ * call *function with *env to enter (CALL_CHECKED), the state,
+ * c->replacing, the method's name and the object on m's stack; else the
+ * text, or NULL on an error. */
+static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue **function, SPYValue **env) {
+    static SPYValue *const none[1];
+    SPYValue **items = state->as.seq.items, *self = items[0], *args = items[1];
+    FormatArgs format = {args->as.seq.len, args->as.seq.len ? args->as.seq.items : none, items[9] == c->none ? NULL : items[9],
+                         {(int)items[2]->as.integer_data.small, items[3]->as.integer_data.small}, 1, 0, 0, NULL, NULL};
+    size_t pos = (size_t)items[4]->as.integer_data.small;
+    int status = 0, nested;
+    *function = NULL;
+    for (;;) {
+        /* Inside a nested spec, which may end with its field's call. */
+        Buffer out = {.ctx = c};
+        SPYValue *object = NULL, *spec = NULL, *text = items[(nested = items[6] != c->none) ? 8 : 5];
+        status = append(&out, text->as.string.data, text->as.string.len);
+        if (!status) status = format_markup(c, &out, self->as.string.data, pos, nested ? (size_t)items[7]->as.integer_data.small :
+                                            self->as.string.len, &format, 2 - nested);
+        if (status < 0 || (!status && !nested)) return format_finish(c, &out, status);
+        if (status == 2) {
+            /* A nested spec's markup follows. */
+            object = format.pending; pos = format.resume;
+            SPYValue *parts[] = {format_finish(c, &out, 0), object, int_value(c, (int64_t)format.spec_end)};
+            for (int i = 0; i < 3; i++) { spy_release(items[5 + i]); items[5 + i] = parts[i]; }
+            if (!parts[0] || !parts[2]) return NULL;
+            continue;
+        }
+        if (!status) {
+            /* The nested spec's field formats its object by it. */
+            object = spy_retain(items[6]); spec = format_finish(c, &out, 0);
+            pos = (size_t)items[7]->as.integer_data.small + 1;
+            spy_release(items[6]); items[6] = spy_none(c);
+            spy_release(items[8]); items[8] = spy_string(c, "", 0);
+            if (!spec || !items[8]) { spy_release(object); spy_release(spec); return NULL; }
+            if (!format_function(c, object)) {
+                Buffer joined = {.ctx = c};
+                status = append(&joined, items[5]->as.string.data, items[5]->as.string.len) || format_append(c, &joined, object, spec);
+                spy_release(object); spy_release(spec);
+                SPYValue *done = format_finish(c, &joined, status);
+                if (!done) return NULL;
+                spy_release(items[5]); items[5] = done;
+                continue;
+            }
+        } else {
+            object = format.pending; spec = format.pending_spec; pos = format.resume;
+            SPYValue *done = format_finish(c, &out, 0);
+            if (!done) { spy_release(object); spy_release(spec); return NULL; }
+            spy_release(items[nested ? 8 : 5]); items[nested ? 8 : 5] = done;
+        }
+        SPYValue *parts[] = {int_value(c, format.numbering.state), int_value(c, format.numbering.number), int_value(c, (int64_t)pos)};
+        for (int i = 0; i < 3; i++) { spy_release(items[2 + i]); items[2 + i] = parts[i]; }
+        if (!parts[0] || !parts[1] || !parts[2] || machine_push(c, m, spy_retain(state)) ||
+            machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_string(c, "__format__", 10)) ||
+            machine_push(c, m, spy_retain(object)) ||
+            !(*env = function_env(c, format_function(c, object), 2, (SPYValue *[]){spy_retain(object), spy_retain(spec)}, NULL, 1))) {
+            spy_release(object); spy_release(spec);
+            return NULL;
+        }
+        *function = format_function(c, object);
+        spy_release(object); spy_release(spec);
+        c->entering_init = *function; c->entering_kind = CALL_CHECKED;
+        return spy_retain(c->types[SPY_STRING]);
+    }
+}
+/* str.format of self with argc positional arguments argv, which it takes,
+ * and the keywords' dict or NULL, on m: the call to enter, str's class
+ * with *env set (format_from); else the text, or NULL on an error, also
+ * one already pending. */
+static NO_INLINE SPYValue *format_job(SPYContext *c, Machine *m, SPYValue *self, size_t argc, SPYValue **argv, SPYValue *keywords,
+                                      SPYValue **env) {
+    SPYValue *args = spy_tuple(c, argc, argv), *state = args && !c->error_type[0] ? spy_list(c) : NULL, *function, *result = NULL;
+    release_all(argc, argv);
+    SPYValue *parts[] = {spy_retain(self), args, int_value(c, 0), int_value(c, 0), int_value(c, 0), spy_string(c, "", 0),
+                         spy_none(c), int_value(c, 0), spy_string(c, "", 0), keywords ? spy_retain(keywords) : spy_none(c)};
+    for (int i = 0; i < 10; i++) if (!parts[i] || !state || sequence_append(c, state, parts[i])) state = NULL;
+    release_all(10, parts);
+    if (state) result = format_from(c, m, state, &function, env);
+    spy_release(state);
+    return result;
+}
 /* str() or repr() of the list or tuple atop m's stack, under its callee,
  * that repr_job takes: the call to enter, str's class with *env set, its
  * state and c->replacing in place of callee and argument (repr_from); else
@@ -30830,14 +31266,25 @@ static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) 
 static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, size_t argc, SPYValue *text) {
     if (m->stack[m->len - 2]->type != SPY_LIST) return print_returned(c, m, argc, text);
     spy_release(machine_pop(m));
-    SPYValue *state = machine_pop(m), *function, *env;
-    if (!text || sequence_append(c, state, text)) {
-        repr_drop(c, state->as.seq.items[0]);
+    SPYValue *state = machine_pop(m), *function, *env, **items = state->as.seq.items;
+    /* A format job's text takes the field's. */
+    int format = items[0]->type == SPY_STRING;
+    SPYValue *joined = NULL, *part = text ? builtin_value(c, text, SPY_STRING) : NULL;
+    if (format && part) {
+        /* Into the nested spec, inside one (format_from). */
+        Buffer b = {.ctx = c};
+        int at = items[6] == c->none ? 5 : 8;
+        joined = buffer_text(&b, SPY_STRING, append(&b, items[at]->as.string.data, items[at]->as.string.len) ||
+                                                 append(&b, part->as.string.data, part->as.string.len));
+        if (joined) { spy_release(items[at]); items[at] = joined; }
+    }
+    if (!text || (format ? !joined : sequence_append(c, state, text))) {
+        if (!format) repr_drop(c, items[0]);
         spy_release(state); spy_release(text);
         return m;
     }
     spy_release(text);
-    SPYValue *result = repr_from(c, m, state, &function, &env);
+    SPYValue *result = (format ? format_from : repr_from)(c, m, state, &function, &env);
     spy_release(state);
     if (result && function) {
         spy_release(result);
@@ -32605,9 +33052,10 @@ SPYContext *spy_context_new(void) {
     c->ellipsis = value_new(c, SPY_ELLIPSIS);
     c->unbound = value_new(c, V_UNBOUND);
     c->replacing = value_new(c, V_UNBOUND);
+    c->probing = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

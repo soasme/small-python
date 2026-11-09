@@ -53,6 +53,14 @@ SOURCES = {
     "seq_cleared": "class X:\n    def __eq__(s, o):\n        b.clear()\n        return NotImplemented\n"
                    "class Y:\n    def __eq__(s, o):\n        a.clear()\n        return NotImplemented\n"
                    "a, b = [X()], [Y()]\nresult = a == b",
+    "lookup_reflected": "class K:\n    def __init__(s, n, r): s.n = n; s.r = r\n    def __hash__(s): return 1\n"
+                        "    def __eq__(s, o): t(s.n); return s.r\n"
+                        "d = {K('m', NotImplemented): 1}\n"
+                        "result = (K('z', NotImplemented) in d, K('y', False) in d, d[K('x', True)])",
+    "store_keeps_key": "class K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n"
+                       "    def __eq__(s, o): t(s.n + o.n); return True\n"
+                       "d = {K('a'): 1, K('b'): 2}\nd[K('c')] = 3\nkept = [(k.n, v) for k, v in d.items()]\ndel d[K('e')]\n"
+                       "result = kept + [len(d), len({K('f'), K('g')})]",
 }
 
 

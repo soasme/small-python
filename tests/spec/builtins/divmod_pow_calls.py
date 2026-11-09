@@ -5,7 +5,8 @@
 # classes are the same, and a right operand of a subclass that overrides
 # the reflected method goes first; a number on the left declines to an
 # instance's reflected method. Inside functions as at module level, both
-# declining raises TypeError, a method's exceptions propagate, and a
+# declining, the reflected method too, raises TypeError naming the
+# function, a method's exceptions propagate, and a
 # modulus is passed to __pow__.
 from harness import *
 
@@ -54,6 +55,16 @@ class Other:
         log.append(("rother", type(other).__name__))
         return "rother"
 
+class Declines:
+    def __rdivmod__(self, other):
+        spin()
+        log.append("declines rdivmod")
+        return NotImplemented
+    def __rpow__(self, other, modulus=None):
+        spin()
+        log.append("declines rpow")
+        return NotImplemented
+
 class Plain: pass
 class Int(int): pass
 
@@ -73,7 +84,8 @@ def results():
            pow(Operand("a"), 2), pow(2, Operand("b")), pow(Operand("a"), 2, None), pow(Operand("no"), Other()),
            pow(Operand("a"), Derived("e")), pow(Operand("a"), 2, 5),
            error(lambda: pow(Operand("no"), 2)), error(lambda: pow(Operand("no"), Operand("x"))),
-           error(lambda: pow(Plain(), 2))]
+           error(lambda: pow(Plain(), 2)), error(lambda: divmod(Operand("no"), Declines())),
+           error(lambda: pow(Operand("no"), Declines()))]
     out.append(list(log))
     return out
 
@@ -89,11 +101,14 @@ expected = [("divmod", "a", 1), ("rdivmod", "b", 1), ("rdivmod", "c", 1.5), ("rd
             ("TypeError", "unsupported operand type(s) for ** or pow(): 'Operand' and 'int'"),
             ("TypeError", "unsupported operand type(s) for ** or pow(): 'Operand' and 'Operand'"),
             ("TypeError", "unsupported operand type(s) for ** or pow(): 'Plain' and 'int'"),
+            ("TypeError", "unsupported operand type(s) for divmod(): 'Operand' and 'Declines'"),
+            ("TypeError", "unsupported operand type(s) for ** or pow(): 'Operand' and 'Declines'"),
             [("divmod", "a"), ("rdivmod", "b"), ("rdivmod", "c"), ("rdivmod", "d"),
              ("divmod", "no"), ("other", "Operand"), ("derived", "e"),
              ("divmod", "no"), ("divmod", "no"), ("divmod", "no"), ("rdivmod", "rno"), ("divmod", "bad"),
              ("pow", "a", None), ("rpow", "b"), ("pow", "a", None), ("pow", "no", None), ("rother", "Operand"),
-             ("rderived", "e"), ("pow", "a", 5), ("pow", "no", None), ("pow", "no", None)]]
+             ("rderived", "e"), ("pow", "a", 5), ("pow", "no", None), ("pow", "no", None),
+             ("divmod", "no"), "declines rdivmod", ("pow", "no", None), "declines rpow"]]
 
 def main():
     return results()

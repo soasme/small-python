@@ -1089,6 +1089,14 @@ int main(int argc, char **argv) {
                "def keyed():\n    d, k = {}, Keyed()\n    d[k] = 1\n    d[k] += 1\n    total = d[k]\n    del d[k]\n    return total + len(d)");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 3);
+    /* So do a display, a store, an augmented store, a deletion and a
+     * lookup in a colliding key's Python __eq__. */
+    execute(c, "class Same:\n    def __init__(self, n): self.n = n\n    def __hash__(self):\n        for i in range(1000): pass\n        return 1\n"
+               "    def __eq__(self, other):\n        for i in range(1000): pass\n        return self.n == other.n\n"
+               "def same():\n    d = {Same(1): 1, Same(2): 2}\n    d[Same(2)] += 10\n    d[Same(3)] = 3\n    del d[Same(1)]\n"
+               "    return d[Same(2)] + len(d) + (Same(3) in d)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "same()", "same.py"), SPY_STOP_STEPS, &pauses)) == 15 && pauses > 3);
     /* So do zip and map of generators, in a loop and in a consumer. */
     execute(c, "def zipped():\n    total = 0\n    for i, x in zip(range(20), (x for x in Items())): total += i + x\n"
                "    return total + sum(map(abs, Items()))");

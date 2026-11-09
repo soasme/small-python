@@ -187,6 +187,26 @@ static const char *const programs[] = {
     "min(same(r)) is r[0], [min(same(r)) is r[0]]]]]]]]]]]]]]]]][1:]\n"
     "print(repr(a), A(2) == B(1), [Q() in q, Q() in q, Q() in q, Q() in q, Q() in q, Q() in q], eqs(q, [1, Q()]), finds(q), (lambda: mins([L(), L()]))())\n",
 
+    /* Lookups, stores and str.format jobs on the machine, deeper and deeper. */
+    "class K:\n"
+    "    def __hash__(s): return 1\n"
+    "    def __eq__(s, o):\n"
+    "        for i in range(1): pass\n"
+    "        return NotImplemented\n"
+    "class F:\n"
+    "    def __format__(s, spec):\n"
+    "        for i in range(1): pass\n"
+    "        return 'f' + spec\n"
+    "d = {K(): 1}\n"
+    "def look(d): return [K() in d, [K() in d, [K() in d, [K() in d, [K() in d, [K() in d, [K() in d, [K() in d]]]]]]]][1:]\n"
+    "def fmt(f): return ['{}{x}'.format(f, x=f), ['{:{}}'.format(f, f), ['{0.f}'.format(f), ['{:{}}'.format(f, f), "
+    "['{}'.format(f), ['{:{}}'.format(f, f), ['{}'.format(f)]]]]]]][1:]\n"
+    "F.f = F()\n"
+    "e = {}\n"
+    "e[K()] = 1\n"
+    "e[K()] = 2\n"
+    "print(look(d), fmt(F()), len(e), len({K(), K()}))\n",
+
     "def gen(n):\n"
     "    try:\n"
     "        for i in range(n):\n"

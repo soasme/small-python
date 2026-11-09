@@ -69,7 +69,7 @@ Sum(s) == IF s = <<>> THEN 0 ELSE Head(s) + Sum(Tail(s))
 
 Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "ord_long", "ord_empty", "ord_bytes",
           "ord_int", "ascii_object", "repr_bad", "str_bad", "repr_recursive", "repr_bytes_quotes",
-          "format_hook", "format_object_spec", "format_object_empty", "format_bad_return",
+          "format_hook", "format_fields", "format_object_spec", "format_object_empty", "format_bad_return",
           "format_spec_type", "print_sep_end", "print_none_sep", "print_no_args", "print_flush",
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
           "print_str_calls", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
@@ -102,6 +102,9 @@ Case(c) ==
       [] c = "repr_recursive" -> "'[1, [...]]'"
       [] c = "repr_bytes_quotes" -> "('b\"\\'\"', 'b\\'\"\\'', 'b\\'\\\\\\'\"\\'')"
       [] c = "format_hook" -> "('F<x>', 'F<>', 'F<yz>')"
+      \* str.format formats a nested spec's field first, and objects reached by
+      \* attribute, index or keyword, through __format__
+      [] c = "format_fields" -> "'a<b<>>|c<>|h<>|d<>'"
       [] c = "format_object_spec" -> "TypeError: unsupported format string passed to object.__format__"
       [] c = "format_object_empty" -> "'<object '"
       [] c = "format_bad_return" -> "TypeError: BadFormat.__format__() must return a str, not int"
