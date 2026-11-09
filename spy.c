@@ -22462,25 +22462,71 @@ static NO_INLINE SPYValue *check_method(SPYContext *c, SPYValue *callee, SPYValu
     c->entering_kind = CALL_CHECKED;
     return function;
 }
-static SPYValue *format_job(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue *, SPYValue **);
+static SPYValue *format_job(SPYContext *, Machine *, SPYValue *, int, size_t, SPYValue **, SPYValue *, SPYValue **);
 static SPYValue *format_function(SPYContext *, SPYValue *);
-/* Whether str.format of self, a str, takes argc positional arguments
- * argv, at most 8, one an instance or a container that a field may reach
- * an instance with a Python __format__ through (format_job). */
-static NO_INLINE int format_instances(SPYValue *self, size_t argc, SPYValue *const *argv) {
-    if (self->type != SPY_STRING || argc > 8) return 0;
+static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *str_format_map(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether a call of callee, method number method of it or -1, with argc
+ * arguments argv, at most 8, is str.format (1) or str.format_map (2) of
+ * *self, a str: bound, or argv[0] (*skip 1), format_map's argument after
+ * it an exact dict; else 0. */
+static NO_INLINE int format_target(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **self,
+                                   size_t *skip) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    int map = function->type == SPY_NATIVE && function->as.native.kwcall == str_format_map;
+    *self = NULL; *skip = 0;
+    if (method == M_FORMAT) *self = callee;
+    else if (method >= 0 || argc > 8) return 0;
+    else if (callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module) *self = callee->as.bound.self;
+    else if (callee->type == SPY_METHOD && map) *self = callee->as.method.self;
+    else if (callee->type == SPY_NATIVE && argc &&
+             (map || (callee->as.native.kwcall == slot_call && callee->as.native.owner == c->types[SPY_STRING] &&
+                      !strcmp(callee->as.native.name->as.string.data, "format"))))
+        *self = argv[(*skip = 1) - 1];
+    if (!*self || (*self)->type != SPY_STRING) return 0;
+    return !map ? 1 : argc == *skip + 1 && argv[*skip]->type == SPY_DICT ? 2 : 0;
+}
+/* Whether a field may reach an instance with a Python __format__
+ * (format_job) through one of the argc values argv, of str.format, or
+ * the values of the dict argv[0], of str.format_map (kind 2): an
+ * instance or a container. */
+static NO_INLINE int format_instances(int kind, size_t argc, SPYValue *const *argv) {
+    const uint64_t reaching = UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT;
+    if (kind == 2) {
+        for (size_t i = 0; i < map_used(argv[0]); i++)
+            if (map_items(argv[0])[i].key && UINT64_C(1) << map_items(argv[0])[i].value->type & reaching) return 1;
+        return 0;
+    }
     for (size_t i = 0; i < argc; i++)
-        if (UINT64_C(1) << argv[i]->type & (UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE |
-                                            UINT64_C(1) << SPY_DICT))
-            return 1;
+        if (UINT64_C(1) << argv[i]->type & reaching) return 1;
     return 0;
+}
+static NO_INLINE int format_reaches(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    SPYValue *self;
+    size_t skip;
+    int kind = format_target(c, callee, method, argc, argv, &self, &skip);
+    return kind && format_instances(kind, argc - skip, argv + skip);
+}
+/* Whether callee, method number method of it or -1, may be str.format or
+ * str.format_map (format_target), tested before anything slower. */
+static ALWAYS_INLINE int format_callee(SPYValue *callee, int method) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    return method == M_FORMAT ||
+           (method < 0 && (callee->type == SPY_BOUND_METHOD ? callee->as.bound.method == M_FORMAT :
+                           function->type == SPY_NATIVE && (function->as.native.kwcall == str_format_map ||
+                                                            (callee->type == SPY_NATIVE && function->as.native.kwcall == slot_call))));
+}
+/* Whether a call of callee, method number method of it or -1, with argc
+ * arguments argv formats a str as a job (format_job): a field may reach
+ * an instance through them. */
+static ALWAYS_INLINE int format_reached(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    return format_callee(callee, method) && format_reaches(c, callee, method, argc, argv);
 }
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
-    if (method < 0 && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module &&
-        format_instances(callee->as.bound.self, argc, argv)) {
-        result = format_job(c, m, callee->as.bound.self, argc, argv, NULL, env);
+    if (method < 0 && format_reached(c, callee, method, argc, argv)) {
+        result = format_job(c, m, callee, method, argc, argv, NULL, env);
         spy_release(callee);
         return result;
     }
@@ -22675,11 +22721,13 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
         (callee->type == SPY_NATIVE && ((argc == 1 && argv[0]->type == SPY_INSTANCE) ||
-                                        (argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta))))
+                                        (argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
+                                        (argc > 1 && argv[0]->type == SPY_STRING &&
+                                         (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     if (method < 0 && machine_builtin(callee)) return builtin_call(c, m, n, callee, argc, argv, env);
-    if (method == M_FORMAT && format_instances(callee, argc, argv)) {
-        SPYValue *result = format_job(c, m, callee, argc, argv, NULL, env);
+    if (method == M_FORMAT && format_reached(c, callee, method, argc, argv)) {
+        SPYValue *result = format_job(c, m, callee, method, argc, argv, NULL, env);
         spy_release(callee);
         return result;
     }
@@ -22803,12 +22851,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
      * Python __repr__ (repr_call), and str.format of an instance with a
      * Python __format__ (format_job). */
     if (calls && argc == 1 && repr_job(c, callee, argv[0])) return repr_call(c, m, env);
-    if (calls && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module &&
-        format_instances(callee->as.bound.self, argc, argv)) {
-        SPYValue *args[8], *self = callee->as.bound.self;
+    if (calls && format_reached(c, callee, -1, argc, argv)) {
+        SPYValue *args[8];
         memcpy(args, argv, argc * sizeof(*argv));
         m->len -= argc + 1;
-        result = format_job(c, m, self, argc, args, NULL, env);
+        result = format_job(c, m, callee, -1, argc, args, NULL, env);
         spy_release(callee);
         return result;
     }
@@ -22907,15 +22954,12 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
     /* str.format of an instance with a Python __format__ (format_job). */
-    SPYValue *format = !callee || !calls ? NULL : method == M_FORMAT ? callee :
-                       method < 0 && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT &&
-                       !callee->as.bound.module ? callee->as.bound.self : NULL;
-    if (format && format_instances(format, argc, argv + 1)) {
-        SPYValue *args[8];
-        memcpy(args, argv + 1, argc * sizeof(*argv));
-        m->len -= argc;
-        spy_release(machine_pop(m));
-        result = format_job(c, m, format, argc, args, NULL, env);
+    if (callee && calls && format_reached(c, callee, method, argc + !skip, argv + skip)) {
+        SPYValue *args[9];
+        memcpy(args, argv + skip, (argc + !skip) * sizeof(*argv));
+        m->len -= argc + 1;
+        if (skip) spy_release(argv[0]);
+        result = format_job(c, m, callee, method, argc + !skip, args, NULL, env);
         spy_release(callee);
         return result;
     }
@@ -22996,14 +23040,17 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         if (status < 0 && !keywords) goto done;
         return status ? NULL : spy_none(c);
     }
-    if (calls && callee->type == SPY_BOUND_METHOD && callee->as.bound.method == M_FORMAT && !callee->as.bound.module &&
-        format_instances(callee->as.bound.self, argc, argv)) {
+    SPYValue *target;
+    size_t fields;
+    if (calls && format_callee(callee, -1) && format_target(c, callee, -1, positional, argv, &target, &fields) == 1 && argc <= 8 &&
+        format_instances(1, argc - fields, argv + fields)) {
         /* str.format, as a plain call's step (stack_call), with keywords. */
-        SPYValue *keywords = entries_dict(c, kw, kwc), *self = spy_retain(callee->as.bound.self), *args[8];
+        SPYValue *keywords = entries_dict(c, kw, kwc), *args[8];
         for (size_t i = 0; i < positional; i++) args[i] = spy_retain(argv[i]);
+        spy_retain(callee);
         for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
-        result = format_job(c, m, self, positional, args, keywords, env);
-        spy_release(keywords); spy_release(self);
+        result = format_job(c, m, callee, -1, positional, args, keywords, env);
+        spy_release(keywords); spy_release(callee);
         return result;
     }
     if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD)) {
@@ -31215,7 +31262,8 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
 static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue **function, SPYValue **env) {
     static SPYValue *const none[1];
     SPYValue **items = state->as.seq.items, *self = items[0], *args = items[1];
-    FormatArgs format = {args->as.seq.len, args->as.seq.len ? args->as.seq.items : none, items[9] == c->none ? NULL : items[9],
+    FormatArgs format = {args == c->none ? 0 : args->as.seq.len, args == c->none ? NULL : args->as.seq.len ? args->as.seq.items : none,
+                         items[9] == c->none ? NULL : items[9],
                          {(int)items[2]->as.integer_data.small, items[3]->as.integer_data.small}, 1, 0, 0, NULL, NULL};
     size_t pos = (size_t)items[4]->as.integer_data.small;
     int status = 0, nested;
@@ -31273,16 +31321,21 @@ static SPYValue *format_from(SPYContext *c, Machine *m, SPYValue *state, SPYValu
         return spy_retain(c->types[SPY_STRING]);
     }
 }
-/* str.format of self with argc positional arguments argv, which it takes,
- * and the keywords' dict or NULL, on m: the call to enter, str's class
- * with *env set (format_from); else the text, or NULL on an error, also
- * one already pending. */
-static NO_INLINE SPYValue *format_job(SPYContext *c, Machine *m, SPYValue *self, size_t argc, SPYValue **argv, SPYValue *keywords,
-                                      SPYValue **env) {
-    SPYValue *args = spy_tuple(c, argc, argv), *state = args && !c->error_type[0] ? spy_list(c) : NULL, *function, *result = NULL;
-    release_all(argc, argv);
+/* The str.format or str.format_map call (format_target) of callee with
+ * argc arguments argv, which it takes, and the keywords' dict or NULL, on
+ * m: the call to enter, str's class with *env set (format_from); else the
+ * text, or NULL on an error, also one already pending. */
+static NO_INLINE SPYValue *format_job(SPYContext *c, Machine *m, SPYValue *callee, int method, size_t argc, SPYValue **argv,
+                                      SPYValue *keywords, SPYValue **env) {
+    SPYValue *self;
+    size_t skip;
+    /* format_map's fields are its dict's, with no positional ones. */
+    int map = format_target(c, callee, method, argc, argv, &self, &skip) == 2;
+    SPYValue *args = map ? spy_none(c) : spy_tuple(c, argc - skip, argv + skip), *function, *result = NULL;
+    SPYValue *state = args && !c->error_type[0] ? spy_list(c) : NULL, *mapping = map ? argv[skip] : keywords;
     SPYValue *parts[] = {spy_retain(self), args, int_value(c, 0), int_value(c, 0), int_value(c, 0), spy_string(c, "", 0),
-                         spy_none(c), int_value(c, 0), spy_string(c, "", 0), keywords ? spy_retain(keywords) : spy_none(c)};
+                         spy_none(c), int_value(c, 0), spy_string(c, "", 0), mapping ? spy_retain(mapping) : spy_none(c)};
+    release_all(argc, argv);
     for (int i = 0; i < 10; i++) if (!parts[i] || !state || sequence_append(c, state, parts[i])) state = NULL;
     release_all(10, parts);
     if (state) result = format_from(c, m, state, &function, env);

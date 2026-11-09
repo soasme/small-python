@@ -354,8 +354,9 @@ These run as machines on the heap, in one native activation of
   frozendict's subscript, or `in` of a dict, frozendict, set or
   frozenset, calls on an instance key and each stored key of its hash,
   the stored key's first and then, on `NotImplemented`, the key's, and
-  the `__format__` that `str.format` calls on each field's object, a
-  nested spec's fields first;
+  the `__format__` that `str.format`, also called on `str` itself, and
+  `str.format_map` of a dict call on each field's object, a nested
+  spec's fields first;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
   parameters or annotations and the builtin `__build_class__` makes it.

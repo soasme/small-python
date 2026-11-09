@@ -46,6 +46,9 @@ SOURCES = {
     "format_fields": "class G:\n    def __init__(s, n): s.n = n\n    def __format__(s, spec): return s.n + '<' + spec + '>'\n"
                      "class H:\n    def __init__(s): s.g = G('h')\n"
                      "result = '{0:{1}}|{x}|{2.g}|{3[0]}'.format(G('a'), G('b'), H(), [G('d')], x=G('c'))",
+    "format_map_fields": "class G:\n    def __init__(s, n): s.n = n\n    def __format__(s, spec): return s.n + '<' + spec + '>'\n"
+                         "def positional():\n    try: return '{}'.format_map({})\n    except ValueError as e: return 'ValueError: ' + str(e)\n"
+                         "result = (str.format('{}|{k:x}', G('a'), k=G('b')), '{k}'.format_map({'k': G('c')}), positional())",
     "format_object_spec": "result = format(object(), 'x')",
     "format_object_empty": "result = format(object(), '')[:8]",
     "format_bad_return": 'result = format(BadFormat())',
