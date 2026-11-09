@@ -417,6 +417,7 @@ struct SPYContext {
     SPYValue *walking; /* On a machine's stack, marks a set operation's walk under way (set_walk). */
     SPYValue *keeping; /* On a machine's stack, marks a chain link's kept right operand under it (operator_keep). */
     SPYValue *native_inits[16]; /* Beside plain: the __init__ of a class whose builtin __new__ makes its instance (plain_init). */
+    SPYValue *defaulting; /* On a machine's stack, marks a getattr() call with a default under it (getattr_call). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -22973,7 +22974,7 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
     if (function) { c->entering_init = function; c->entering_kind = CALL_HASH; spy_release(function); }
     return function;
 }
-static SPYValue *getattr_call(SPYContext *, Machine *, SPYValue **);
+static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
 /* A call of callee, method number method of it or -1, on argc arguments
  * argv, an instance or a class among the first two, that enters a Python
  * method, taking callee and the arguments: a placeholder for the method's
@@ -23018,11 +23019,13 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
-    /* getattr() of an instance and a str, as a stack call's (getattr_call). */
-    if (method < 0 && argc == 2 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && builtin_id(callee) == B_GETATTR) {
-        if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 3, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
+    /* getattr() of an instance and a str, and a default, as a stack call's
+     * (getattr_call). */
+    if (method < 0 && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && builtin_id(callee) == B_GETATTR) {
+        if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         m->stack[m->len++] = callee; m->stack[m->len++] = argv[0]; m->stack[m->len++] = argv[1];
-        return getattr_call(c, m, env);
+        if (argc == 3) m->stack[m->len++] = argv[2];
+        return getattr_call(c, m, argc == 3, env);
     }
     if (method < 0 && format_reached(c, callee, method, argc, argv)) {
         result = format_job(c, m, callee, method, argc, argv, NULL, env);
@@ -23200,6 +23203,7 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         (callee->type == SPY_NATIVE && ((argc == 1 && argv[0]->type == SPY_INSTANCE) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        (argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE))) ||
+                                        (argc == 3 && argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE) ||
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
                                          (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
@@ -23337,9 +23341,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         spy_release(callee);
         return result;
     }
-    if (calls && argc == 2 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
+    if (calls && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_GETATTR)
-        return getattr_call(c, m, env);
+        return getattr_call(c, m, argc == 3, env);
     /* So do min() and max() of a list's or tuple's items or of the
      * arguments, comparing them by a Python __lt__ or __gt__ (fold_call). */
     if (calls && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
@@ -24992,23 +24996,30 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     spy_release(function);
     return NULL;
 }
-/* getattr() of an instance v and a str, the step of a call with its
- * callee and operands on m's stack: a property's Python getter, or the
- * Python __get__, __getattribute__ or __getattr__ an attribute step calls
- * (attribute_step), is the call to enter (CALL_CHECKED), the name, v and
- * c->unbound replacing the call's slots for the result (checked_returned).
- * Else the attribute, or NULL. */
-static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, SPYValue **env) {
-    SPYValue **slots = &m->stack[m->len - 3], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, name, NULL};
+/* getattr() of an instance v and a str, and a default when defaulted, the
+ * step of a call with its callee and operands on m's stack: a property's
+ * Python getter, or the Python __get__, __getattribute__ or __getattr__ an
+ * attribute step calls (attribute_step), is the call to enter
+ * (CALL_CHECKED), the name, v and c->unbound, or the name, v, the default
+ * and c->defaulting, replacing the call's slots for the result
+ * (checked_returned). Else the attribute, the default after an
+ * AttributeError, or NULL. */
+static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted, SPYValue **env) {
+    size_t n = 3 + (size_t)defaulted;
+    SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, name, NULL};
     size_t argc = 1;
     int kind = plain_instance(v) ? instance_access(c, v->as.map.parent, name->as.string.data, &method) & ATTR_READ : ATTR_SLOW;
+    SPYValue *own = kind == ATTR_OWN ? name_local(v, name->as.string.data) : NULL;
     if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) function = spy_retain(method->as.property.get);
     else {
-        SPYValue *result = attribute_step(c, v, name->as.string.data);
+        /* An own entry, or its miss with a default, is read without an
+         * AttributeError (ATTR_OWN). */
+        SPYValue *result = own || (defaulted && kind == ATTR_OWN) ? spy_retain(own ? own : slots[3]) : attribute_step(c, v, name->as.string.data);
+        if (defaulted && !result && error_is(c, "AttributeError")) { spy_clear_error(c); result = spy_retain(slots[3]); }
         if (c->error_type[0]) return NULL;
         if (result) {
-            m->len -= 3;
-            release_all(3, slots);
+            m->len -= n;
+            release_all(n, slots);
             return result;
         }
         function = c->fallback;
@@ -25025,7 +25036,9 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, SPYValue **en
     }
     for (size_t i = 0; argc < 3 && i < argc; i++) spy_retain(argv[i]);
     spy_release(slots[0]);
-    slots[0] = name; slots[2] = spy_retain(c->unbound);
+    slots[0] = name;
+    if (defaulted) { slots[2] = slots[3]; slots[3] = spy_retain(c->defaulting); }
+    else slots[2] = spy_retain(c->unbound);
     *env = function_env(c, function, argc, argv, NULL, 1);
     c->entering_init = function; c->entering_kind = CALL_CHECKED;
     spy_release(function);
@@ -25281,6 +25294,14 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         /* A class's callback: its step runs again for the next. */
         if (result) m->pc = pc - 1;
         class_called(c, m->stack[m->len - 1], m->stack[m->len - 3], result);
+        return m;
+    }
+    if (m->len && m->stack[m->len - 1] == c->defaulting) {
+        /* getattr() with a default: an AttributeError gives the default. */
+        if (!result && error_is(c, "AttributeError")) { spy_clear_error(c); result = spy_retain(m->stack[m->len - 2]); }
+        if (!result) return m;
+        for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
+        machine_push(c, m, result);
         return m;
     }
     if (!result) {
@@ -34095,9 +34116,10 @@ SPYContext *spy_context_new(void) {
     c->nesting = value_new(c, V_UNBOUND);
     c->walking = value_new(c, V_UNBOUND);
     c->keeping = value_new(c, V_UNBOUND);
+    c->defaulting = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

@@ -333,7 +333,8 @@ These run as machines on the heap, in one native activation of
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list or
   tuple, the property getter, `__get__`, `__getattribute__` or
-  `__getattr__` that `getattr` of two arguments calls, and the
+  `__getattr__` that `getattr` of two arguments, or of three when an
+  `AttributeError` gives the default, calls, and the
   `__setattr__`, property setter or `__set__` that `setattr` calls;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`

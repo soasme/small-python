@@ -10,6 +10,8 @@ def read(op, a, A, B, label):
         return label(a.x)
     if op == "getattr":
         return label(getattr(a, "x"))
+    if op == "getattrd":
+        return label(getattr(a, "x", "dflt"))
     if op == "classget":
         return label(A.x)
     if op == "superget":
@@ -54,7 +56,7 @@ def outcome(p):
         a.__dict__["x"] = "inst"
     op = p["op"]
     try:
-        if op in ("get", "getattr", "classget", "superget", "direct"):
+        if op in ("get", "getattr", "getattrd", "classget", "superget", "direct"):
             return read(op, a, A, B, label)
     except AttributeError as e:
         return "AttributeError x" if p["raises"] and e.name == "x" else "AttributeError"
