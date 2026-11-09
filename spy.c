@@ -13908,7 +13908,7 @@ struct Sorter {
 };
 typedef struct {
     int id, compensating, method, keyed, descending, adds, phase, swapped, stage;
-    SPYValue *result, *callee, *name, *target, *best, *item, *sent;
+    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     struct Sorter *sorter;
@@ -13978,6 +13978,8 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
         if (b->consumer && b->consumer->sent) visit(b->consumer->sent, data);
+        if (b->consumer && b->consumer->made) visit(b->consumer->made, data);
+        if (b->consumer && b->consumer->pending) visit(b->consumer->pending, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
@@ -21808,7 +21810,8 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
     if (b.consumer) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee);
-        spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent);
+        spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
+        spy_release(b.consumer->pending);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
 }
@@ -22253,6 +22256,43 @@ static int instance_sort(SPYContext *c, SPYValue *source) {
  * and so are a sort's Python comparisons. 1 when it began, 0 when
  * the call is not one, -1 on an error. */
 static int sort_detach_into(SPYContext *, SPYValue *, SPYValue **);
+static SPYValue *bound_function(SPYContext *, SPYValue *);
+static SPYValue *plain_init(SPYContext *, SPYValue *);
+static int key_took(SPYContext *, Machine *, SPYValue *);
+/* The Python comparison min's or max's consumer s calls next on key
+ * and its best key: key's own method, or after its NotImplemented
+ * (s->phase) the best key's reflected one; borrowed, or NULL. */
+static SPYValue *key_comparison(SPYContext *c, Consumer *s, SPYValue *key) {
+    int rich = s->keyed == KEY_MAX ? R_GT : R_LT;
+    SPYValue *best = s->result, *function = !s->phase ? rich_function(c, key, best, rich) :
+                     best->type == SPY_INSTANCE && !best->as.map.base ? class_lookup(best->as.map.parent, rich_names[rich_reflected[rich]]) : NULL;
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* The function on the machine a call of key, a key function, runs: its
+ * own, a bound method's or a Python __call__ (bound_function), or a
+ * class's Python __init__ (plain_init); borrowed, or NULL. */
+static SPYValue *key_function(SPYContext *c, SPYValue *key) {
+    SPYValue *function = machine_function(c, key) ? key : key->type == SPY_CLASS ? plain_init(c, key) : bound_function(c, key);
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* The call of consumer s's key function on item, which it takes: the
+ * function, owned, with *env, a class's new instance first, kept in
+ * s->made for key_took, or a bound method's or instance's self; else
+ * NULL, with the key computed in C and taken (key_took) or an error. */
+static NO_INLINE SPYValue *key_enter(SPYContext *c, Machine *m, Consumer *s, SPYValue *item, SPYValue **env) {
+    SPYValue *key = s->callee, *function = key_function(c, key), *args[] = {NULL, item};
+    if (!function) {
+        /* A key no longer on the machine, its class changed, runs in C. */
+        SPYValue *result = call(c, key, 1, &item);
+        spy_release(item);
+        if (result) key_took(c, m, result);
+        return NULL;
+    }
+    if (function != key) args[0] = key->type == SPY_CLASS ? (s->made = new_instance(c, key)) : key->type == SPY_METHOD ? key->as.method.self : key;
+    if (function != key && !args[0]) { spy_release(item); return NULL; }
+    spy_retain(function != key ? args[0] : NULL);
+    return (*env = function_env(c, function, 1 + (function != key), args + (function == key), NULL, 1)) ? spy_retain(function) : NULL;
+}
 static struct Sorter *sorter_begin(SPYContext *, SPYValue *, SPYValue *, int);
 static int sort_step(struct Sorter *);
 static int sorter_compare(SPYContext *, struct Sorter *);
@@ -22267,7 +22307,7 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         (positional == 1 && resumable(argv[0]))) return 0;
     SPYValue *key = NULL, *reverse = NULL;
     for (size_t i = 0; i < kwc; i++) {
-        const char *name = kw[i].key->as.string.data;
+        const char *name = builtin_value(c, kw[i].key, SPY_STRING)->as.string.data;
         SPYValue **slot = !strcmp(name, "key") ? &key : keyed == KEY_SORT && !strcmp(name, "reverse") ? &reverse : NULL;
         if (!slot || *slot) return 0;
         *slot = kw[i].value;
@@ -22275,7 +22315,7 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     /* With no key, a sort of instances (instance_sort) takes the items as
      * its keys. */
     if (key && key->type == SPY_NONE) key = NULL;
-    if (key ? !machine_function(c, key) : keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
+    if (key ? !key_function(c, key) : keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
     /* sorted() takes its items before list.sort reads reverse, which reads
      * it before it empties the list. */
     SPYValue *items = NULL, *keys = NULL;
@@ -22328,14 +22368,11 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         return (*env = function_env(c, function, 1, &item, NULL, 1)) ? spy_retain(function) : NULL;
     }
     if (s->keyed == KEY_SORT) {
-        size_t done = s->result->as.seq.len;
-        if (done < items->as.seq.len) {
-            item = spy_retain(items->as.seq.items[done]);
-            return (*env = function_env(c, s->callee, 1, &item, NULL, 1)) ? spy_retain(s->callee) : NULL;
-        }
+        SPYValue *function;
+        while (s->result->as.seq.len < items->as.seq.len)
+            if ((function = key_enter(c, m, s, spy_retain(items->as.seq.items[s->result->as.seq.len]), env)) || c->error_type[0]) return function;
         /* A sort whose comparisons call a Python __lt__ calls each on the
          * machine, returning into key_took; any other sorts natively. */
-        SPYValue *function;
         if (!s->sorter && !(s->sorter = sorter_begin(c, items, s->result, s->descending))) {
             if (c->error_type[0] || sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
         }
@@ -22350,9 +22387,17 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         if (s->sorter) sorter_end(items, s->sorter, s->descending);
         result = s->target ? spy_none(c) : spy_retain(items);
     } else {
-        if ((item = iterator_next(c, items))) {
+        if (s->pending) {
+            /* An item's key compared with the best one's by a Python method
+             * (key_comparison), returning into key_took. */
+            SPYValue *function = key_comparison(c, s, s->pending);
+            SPYValue *args[] = {spy_retain(s->phase ? s->result : s->pending), spy_retain(s->phase ? s->pending : s->result)};
+            return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
+        }
+        while ((item = iterator_next(c, items))) {
             s->item = spy_retain(item);
-            return (*env = function_env(c, s->callee, 1, &item, NULL, 1)) ? spy_retain(s->callee) : NULL;
+            SPYValue *function = key_enter(c, m, s, item, env);
+            if (function || c->error_type[0]) return function;
         }
         if (c->error_type[0]) return NULL;
         result = s->best ? spy_retain(s->best) :
@@ -22368,6 +22413,13 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
+    if (s->made) {
+        /* A class key's __init__ returned: its new instance is the key. */
+        if (key->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(key));
+        spy_release(key);
+        key = s->made; s->made = NULL;
+        if (c->error_type[0]) { spy_release(key); return -1; }
+    }
     if (s->keyed == KEY_ADD) {
         /* The sum, or the last method to call after a declined one. */
         SPYValue *x = s->result, *y = s->item, *self;
@@ -22403,11 +22455,24 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         s->result->as.seq.items[s->result->as.seq.len++] = key;
         return 0;
     }
+    int op = s->keyed == KEY_MAX ? '>' : '<', better = !s->best;
+    /* A key's Python comparison with the best key, and after its
+     * NotImplemented the best key's reflected one, are calls (key_call). */
+    if (s->pending && !s->phase && key == c->not_implemented) {
+        s->phase = 1;
+        if (key_comparison(c, s, s->pending)) { spy_release(key); return 0; }
+        s->phase = 0;
+    }
+    if (!s->pending && s->best && key_comparison(c, s, key)) { s->pending = key; return 0; }
     SPYValue *item = s->item;
     s->item = NULL;
-    int better = !s->best;
     if (s->best) {
-        SPYValue *test = comparison(c, s->keyed == KEY_MAX ? '>' : '<', key, s->result);
+        SPYValue *test = !s->pending ? comparison(c, op, key, s->result) : !s->phase ? compared(c, op, s->pending, s->result, key) :
+                         key != c->not_implemented ? key : comparison_declined(c, op, s->pending, s->result);
+        if (s->pending) {
+            if (test != key) spy_release(key);
+            key = s->pending; s->pending = NULL; s->phase = 0;
+        }
         better = test && truthy(test);
         spy_release(test);
     }
@@ -22572,6 +22637,75 @@ static ALWAYS_INLINE int format_callee(SPYValue *callee, int method) {
 static ALWAYS_INLINE int format_reached(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return format_callee(callee, method) && format_reaches(c, callee, method, argc, argv);
 }
+static int hashing_call(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue **);
+/* Whether a call of callee, method number method of it or -1, with argc
+ * arguments argv may be a hashing_call: a dict's get, setdefault or pop,
+ * or a native function, an instance among its first two arguments. */
+static ALWAYS_INLINE int may_hash(SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) method = callee->as.bound.method;
+    int native = method >= 0 ? method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP :
+                 callee->type == SPY_NATIVE || (callee->type == SPY_METHOD && callee->as.method.function->type == SPY_NATIVE);
+    return native && argc && (argv[0]->type == SPY_INSTANCE || (argc == 2 && argv[1]->type == SPY_INSTANCE));
+}
+static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *hashed_map(SPYValue *, int, size_t, SPYValue *const *, size_t *);
+static SPYValue *hash_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+/* A call of callee, method number method of it or -1, on argc arguments
+ * argv, which hashes key first (hashing_call): its Python __hash__,
+ * entered (CALL_HASH) as c->entering_init with *env, callee, the
+ * arguments, method and argc kept on m's stack for the call
+ * (hash_returned); else NULL. */
+static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *callee, int method, size_t argc, SPYValue *const *argv,
+                                          SPYValue *key, SPYValue **env) {
+    SPYValue *operands[11] = {callee}, *function;
+    memcpy(operands + 1, argv, argc * sizeof(*argv));
+    operands[argc + 1] = int_value(c, method); operands[argc + 2] = int_value(c, (int64_t)argc);
+    function = hash_call(c, m, key, argc + 3, operands, env);
+    spy_release(operands[argc + 1]); spy_release(operands[argc + 2]);
+    if (function) { c->entering_init = function; c->entering_kind = CALL_HASH; spy_release(function); }
+    return function;
+}
+/* A call of callee, method number method of it or -1, on argc arguments
+ * argv, an instance or a class among the first two, that enters a Python
+ * method, taking callee and the arguments: a placeholder for the method's
+ * value, else the call's value; c->unbound, taking nothing, when it
+ * enters none. */
+static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
+                                         SPYValue **argv, SPYValue **env) {
+    SPYValue *found[2], *convert = method < 0 && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
+    if (!convert && method < 0 && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
+        /* isinstance() or issubclass() enters the metaclass's method
+         * (CALL_CHECKED), its name and the tested value on the stack. */
+        spy_release(callee);
+        if (machine_push(c, m, found[0])) { release_all(argc, argv); return NULL; }
+        if (machine_push(c, m, argv[0])) { spy_release(argv[1]); return NULL; }
+        found[0] = argv[1]; found[1] = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 2, found, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
+    }
+    if (convert) {
+        /* str(), repr(), format() and the others of an instance enter
+         * its Python method (conversion_method) (CALL_CHECKED), the name
+         * and instance on the stack. */
+        spy_release(callee);
+        if (argc == 2) spy_release(argv[1]);
+        if (machine_push(c, m, found[0])) { spy_release(argv[0]); spy_release(found[1]); return NULL; }
+        if (machine_push(c, m, argv[0])) { spy_release(found[1]); return NULL; }
+        found[0] = spy_retain(argv[0]);
+        if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
+    }
+    /* A dict or set method hashing an instance key enters its __hash__
+     * (hash_call_step). */
+    SPYValue *key;
+    if (!may_hash(callee, method, argc, argv) || !hashing_call(c, callee, method, argc, argv, &key)) return c->unbound;
+    SPYValue *function = hash_call_step(c, m, callee, method, argc, argv, key, env);
+    SPYValue *result = function || c->error_type[0] ? NULL : call_plain(c, callee, method, n, argc, argv);
+    release_all(argc, argv); spy_release(callee);
+    return function ? spy_retain(c->types[SPY_STRING]) : result;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -22613,31 +22747,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
-    SPYValue *found[2], *convert = method < 0 && argc && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
-    if (!convert && method < 0 && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
-        /* isinstance() or issubclass() enters the metaclass's method
-         * (CALL_CHECKED), its name and the tested value on the stack. */
-        spy_release(callee);
-        if (machine_push(c, m, found[0])) { release_all(argc, argv); return NULL; }
-        if (machine_push(c, m, argv[0])) { spy_release(argv[1]); return NULL; }
-        found[0] = argv[1]; found[1] = spy_retain(argv[0]);
-        if (!(*env = function_env(c, convert, 2, found, NULL, 1))) return NULL;
-        c->entering_init = convert;
-        return spy_retain(c->types[SPY_STRING]);
-    }
-    if (convert) {
-        /* str(), repr(), format() and the others of an instance enter
-         * its Python method (conversion_method) (CALL_CHECKED), the name
-         * and instance on the stack. */
-        spy_release(callee);
-        if (argc == 2) spy_release(argv[1]);
-        if (machine_push(c, m, found[0])) { spy_release(argv[0]); spy_release(found[1]); return NULL; }
-        if (machine_push(c, m, argv[0])) { spy_release(found[1]); return NULL; }
-        found[0] = spy_retain(argv[0]);
-        if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
-        c->entering_init = convert;
-        return spy_retain(c->types[SPY_STRING]);
-    }
+    if (argc && (argv[0]->type == SPY_INSTANCE || (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
+        (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     int id = consumer_of(c, callee, method, argc, argv);
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL, argc > 1 ? spy_retain(argv[1]) : NULL);
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) :
@@ -22768,10 +22879,10 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     }
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
-                      callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE) ||
+                      callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || (argc && argv[0]->type == SPY_INSTANCE)) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
         (callee->type == SPY_NATIVE && ((argc == 1 && argv[0]->type == SPY_INSTANCE) ||
-                                        (argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
+                                        (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta))) ||
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
                                          (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
@@ -22948,6 +23059,17 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         m->len -= argc + 1;
         return builtin_call(c, m, n, callee, argc, args, env);
     }
+    SPYValue *key;
+    if (calls && may_hash(callee, -1, argc, argv) && hashing_call(c, callee, -1, argc, argv, &key)) {
+        /* The callee and arguments leave the stack for the key's __hash__ (hash_call_step). */
+        SPYValue *held[2], *function;
+        memcpy(held, argv, argc * sizeof(*argv));
+        m->len -= argc + 1;
+        function = hash_call_step(c, m, callee, -1, argc, held, key, env);
+        result = function || c->error_type[0] ? NULL : call_plain(c, callee, -1, n, argc, held);
+        release_all(argc, held); spy_release(callee);
+        return function ? spy_retain(c->types[SPY_STRING]) : result;
+    }
     int id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : call_plain(c, callee, -1, n, argc, argv);
@@ -23017,6 +23139,17 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     size_t from = skip + (method >= 0 && !skip), given = argc + 1 - from;
     id = callee ? consumer_of(c, callee, method, given, argv + from) : -1;
     SPYValue *generator = id >= 0 && given ? spy_retain(argv[from]) : NULL, *start = id >= 0 && given > 1 ? spy_retain(argv[from + 1]) : NULL;
+    SPYValue *key;
+    if (callee && id < 0 && calls && may_hash(callee, method, argc + !skip, argv + skip) && hashing_call(c, callee, method, argc + !skip, argv + skip, &key)) {
+        /* The object and arguments leave the stack for the key's __hash__ (hash_call_step). */
+        SPYValue *held[4], *function;
+        memcpy(held, argv, (argc + 1) * sizeof(*argv));
+        m->len -= argc + 1;
+        function = hash_call_step(c, m, callee, method, argc + !skip, held + skip, key, env);
+        result = function || c->error_type[0] ? NULL : call_plain(c, callee, method, n, argc + !skip, held + skip);
+        release_all(argc + 1, held); spy_release(callee);
+        return function ? spy_retain(c->types[SPY_STRING]) : result;
+    }
     if (callee && id < 0) result = call_plain(c, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start);
@@ -23166,7 +23299,9 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
              string_keys(c, keywords)) {
         if ((self = new_instance(c, callee)) && machine_push(c, m, spy_retain(self))) { spy_release(self); self = NULL; }
         c->entering_init = function; c->entering_kind = CALL_INIT;
-    } else if (!c->error_type[0]) result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
+    } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
+               key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
+    else if (!c->error_type[0]) result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);
         int failed = !all || sequence_append(c, all, self);
@@ -23714,6 +23849,24 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     if (ins->op == BC_MAP || ins->op == BC_LOAD_TARGET) {
         if (!hashed) hash_failed(c, m->stack[m->len - 2 - (ins->op == BC_MAP)], key);
         if (hash_kept(c, key, hashed, hash)) m->pc--;
+        return m;
+    }
+    if (ins->op == BC_CALLF || ins->op == BC_CALLN) {
+        /* A call's callee, arguments, method number and their count (hash_call_step). */
+        SPYValue *count = machine_pop(m), *number = machine_pop(m), *args[3];
+        size_t argc = (size_t)count->as.integer_data.small;
+        int method = (int)number->as.integer_data.small;
+        spy_release(count); spy_release(number);
+        for (size_t i = argc; i; i--) args[i - 1] = machine_pop(m);
+        SPYValue *callee = machine_pop(m);
+        size_t at;
+        if (!hashed) hash_failed(c, hashed_map(callee, method, argc, args, &at), key);
+        if (hash_kept(c, key, hashed, hash)) {
+            relocate(c, ins->node);
+            SPYValue *result = call_plain(c, callee, method, ins->node, argc, args);
+            if (result) machine_push(c, m, result);
+        }
+        release_all(argc, args); spy_release(callee);
         return m;
     }
     if (ins->op == BC_STORE || ins->op == BC_EXEC || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) {
@@ -25060,6 +25213,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             callee_env = NULL; value = keyword_call(c, m, 1, &callee_env);
             if (UNLIKELY(callee_env && value->type == SPY_CLASS)) goto enter_init;
             if (callee_env) goto enter_call;
+            if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); break;
         CASE(BC_STORE)
             if (store_into(c, &f, n, m->stack[m->len - 1], 1) > 0) goto store_step;
@@ -28973,6 +29127,33 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
 }
 enum { SET_ADD, SET_DISCARD, SET_REMOVE, SET_POP, SET_CLEAR, SET_COPY, SET_REDUCE };
 static const char *const set_item_names[] = {"add", "discard", "remove", "pop", "clear", "copy", "__reduce__"};
+static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *hash_function(SPYContext *, SPYValue *);
+/* The dict or set a call of callee, method number method of it or -1,
+ * with argc arguments argv looks argv[*at] up in: a dict's get,
+ * setdefault or pop, or a set's add, discard or remove, bound or given
+ * the set first; borrowed, else NULL. */
+static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue *const *argv, size_t *at) {
+    *at = 0;
+    if (method < 0 && callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    if (method == M_GET || method == M_SETDEFAULT || method == M_DICT_POP) return argc && argc <= 2 ? callee : NULL;
+    SPYValue *function = callee, *self = NULL;
+    if (method < 0 && callee->type == SPY_METHOD) { function = callee->as.method.function; self = callee->as.method.self; }
+    else if (method < 0 && argc == 2 && (argv[0]->type == SPY_SET || argv[0]->type == SPY_FROZENSET)) { self = argv[0]; *at = 1; }
+    return self && function->type == SPY_NATIVE && function->as.native.kwcall == set_item_method && argc == 1 + *at &&
+           ((intptr_t)function->as.native.data & 255) <= SET_REMOVE ? self : NULL;
+}
+/* Whether a call of callee, method number method of it or -1, with argc
+ * arguments argv hashes a key whose class has a Python __hash__
+ * (hash_function) first, in its dict or set (hashed_map), *key then; pop
+ * of an empty dict hashes none. */
+static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **key) {
+    size_t at;
+    SPYValue *map = hashed_map(callee, method, argc, argv, &at);
+    if (!map || !hash_function(c, argv[at])) return 0;
+    *key = argv[at];
+    return (method != M_DICT_POP && (callee->type != SPY_BOUND_METHOD || callee->as.bound.method != M_DICT_POP)) || map->as.map.len;
+}
 static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)((intptr_t)data >> 8), which = (int)((intptr_t)data & 255);
     SPYValue *self = method_self(c, argc, argv, type, set_item_names[which]);

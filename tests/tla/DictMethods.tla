@@ -10,7 +10,8 @@
 (* |=, which also takes pairs) keep the left operand's order, give the     *)
 (* right operand's values, and append its new keys in its order; equality  *)
 (* ignores order and dicts are unordered and unhashable; get, setdefault,  *)
-(* pop, popitem (last in, first out), fromkeys, copy (shallow), clear,     *)
+(* pop (hashing its key once, but not in an empty dict), popitem (last in, *)
+(* first out), fromkeys, copy (shallow), clear,                            *)
 (* reversed(), and __missing__ in subclasses behave as documented, a       *)
 (* missing key raising KeyError; and keys(), values(), and items() are     *)
 (* live views, keys and items set-like (their operators accept any         *)
@@ -64,7 +65,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
-          "pop_default", "pop_missing", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
+          "pop_default", "pop_missing", "hashed_key_methods", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
@@ -97,6 +98,7 @@ Generated(p) ==
 Case(c) ==
     CASE c = "ctor_forms" -> "[{'one': 1, 'two': 2}, {'one': 1, 'two': 2}, {'one': 1, 'two': 2}, {'two': 2, 'one': 1}, {'one': 1, 'two': 2}, {'a': 'A', 'b': 'B'}]"
       [] c = "ctor_keys_attribute" -> "[{'a': 'aa'}, {'p': 1}, {'o': 'oo'}]"
+      [] c = "hashed_key_methods" -> "('x', 'x', 0, 1, [1, 2, 1, 1])"
       [] c = "ctor_equal" -> "True"
       [] c = "ctor_bad_item" -> "ValueError: dictionary update sequence element #0 has length 3; 2 is required"
       [] c = "ctor_bad_element" -> "TypeError: object is not iterable"

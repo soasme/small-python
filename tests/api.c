@@ -1137,6 +1137,17 @@ int main(int argc, char **argv) {
     execute(c, "def single():\n    exec(compile('for i in range(20): slow(i) and None\\n', 's', 'single'), globals())\n    return 1");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "single()", "single.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* So do sort and max keys that are classes, bound methods or callable instances. */
+    execute(c, "class Slow:\n    def __init__(self, v): self.v = slow(v)\n    def __lt__(self, other): return self.v < other.v\n"
+               "def keyed():\n    d = Doubler()\n    return sorted(range(20), key=d.twice)[0] + max(range(20), key=d) + sorted(range(20), key=Slow)[5]");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 24 && pauses > 1);
+    /* So do dict.get, dict.setdefault and set.add of a key with a Python __hash__. */
+    execute(c, "class Hashed:\n    def __hash__(self):\n        for i in range(3000): pass\n        return 1\n"
+               "def hashing():\n    d, s = {}, set()\n    for i in range(20):\n        h = Hashed()\n        d.setdefault(h, i)\n"
+               "        s.add(Hashed())\n    return d.get(h) + len(d) + len(s)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "hashing()", "hashing.py"), SPY_STOP_STEPS, &pauses)) == 59 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

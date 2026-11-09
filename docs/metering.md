@@ -310,8 +310,10 @@ These run as machines on the heap, in one native activation of
   `next` or by their `__next__` and `send` methods, or thrown into or
   closed at a `yield` by `throw` (with one argument) or `close`, and
   coroutines resumed by `send`;
-- the key functions of `sorted`, `list.sort`, `min` and `max`, and the
-  Python `__lt__` comparisons of `sorted` and `list.sort`;
+- the key functions of `sorted`, `list.sort`, `min` and `max`, also
+  bound methods, callable instances' `__call__` and classes' `__init__`,
+  the Python `__lt__` comparisons of `sorted` and `list.sort`, and the
+  Python comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
   `__round__` and `__reversed__` that `str`, `repr`, `format`, `len`,
@@ -324,7 +326,8 @@ These run as machines on the heap, in one native activation of
   `__getattr__` that `getattr` of two arguments calls, and the
   `__setattr__`, property setter or `__set__` that `setattr` calls;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
-  and deletions, and tests of a dict or set; the `__index__` of an
+  and deletions, tests of a dict or set, and `dict.get`, `setdefault`
+  and `pop` and `set.add`, `discard` and `remove`; the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or
   `range`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
   `isinstance` and `issubclass`; the metaclass `__getitem__` or

@@ -51,6 +51,9 @@ SOURCES = {
     "popitem_lifo": 'd = {1: 1, 2: 2, 3: 3}\nresult = (d.popitem(), d.popitem(), d)',
     "popitem_empty": 'result = {}.popitem()',
     "setdefault": "d = {}\nresult = (d.setdefault('a'), d.setdefault('b', 1), d.setdefault('b', 2), d)",
+    "hashed_key_methods": "class K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): log.append(s.n); return s.n\n"
+                          "    def __eq__(s, o): return s.n == o.n\nlog = []\nd = {}\nd.setdefault(K(1), 'x')\ns = set()\ns.add(K(2))\n"
+                          "result = (d.get(K(1)), d.pop(K(1)), {}.pop(K(3), 0), len(s), log)",
     "ctor_keys_attribute": "class Both:\n    def __iter__(s): return iter([('x', 1)])\n    def keys(s): return ['a']\n    def __getitem__(s, k): return k * 2\n"
                            "class Own(Both):\n    def __init__(s): s.keys = lambda: ['o']\n    keys = None\n"
                            "class Pairs:\n    def __iter__(s): yield ('p', 1)\n"

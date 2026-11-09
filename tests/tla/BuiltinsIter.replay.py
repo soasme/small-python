@@ -70,6 +70,9 @@ SOURCES = {
     "map_none": 'result = list(map(None, [1]))',
     "map_bound": "class K:\n    def __init__(s, k): s.k = k\n    def add(s, v): return s.k + v\n    def __call__(s, v, w): return s.k * v + w\n"
                  "result = (list(map(K(2).add, [1, 3])), list(map(K(10), [1, 2], [2])))",
+    "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
+                          "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"
+                          "result = (sorted([1, 3, 2], key=R), sorted([1, 2, 3, 4], key=W().m), max([1, 3, 2], key=W()))",
     "filter_none": "result = list(filter(None, [0, 1, '', 'a', None, []]))",
     "enumerate_kw": "result = (list(enumerate('ab', start=-1)), list(enumerate(iterable='a')))",
     "enumerate_bad_start": "result = enumerate('a', 1.5)",

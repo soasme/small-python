@@ -10,8 +10,9 @@
 (* iterables, also strict; filter() with a function or None; all() and     *)
 (* any() stopping at the first deciding item; len() requiring a non-       *)
 (* negative index-sized __len__; and sorted() and list.sort(), stable with *)
-(* key and reverse (equal items keeping their order even reversed), using  *)
-(* only <, and refusing a list modified during the sort.                   *)
+(* key and reverse (equal items keeping their order even reversed), a key  *)
+(* that is a class, a bound method or a callable instance, using only <,   *)
+(* and refusing a list modified during the sort.                           *)
 (*                                                                         *)
 (* A program takes a list l of up to four items among 1, 2, and 3 and      *)
 (* reports one of OPS: the original positions of l's items as sorted()     *)
@@ -60,7 +61,7 @@ Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_d
           "map_shortest", "map_none", "map_bound", "filter_none", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
-          "sort_mutated", "sort_key_error", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
+          "sort_mutated", "sort_key_error", "sort_key_callables", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
           "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
@@ -123,6 +124,7 @@ Case(c) ==
       [] c = "sort_reverse_stable" -> "[(1, 'a'), (1, 'c'), (0, 'b')]"
       [] c = "sort_mutated" -> "ValueError: list modified during sort"
       [] c = "sort_key_error" -> "ZeroDivisionError: division by zero"
+      [] c = "sort_key_callables" -> "([3, 2, 1], [2, 4, 1, 3], 1)"
       [] c = "sort_lt_only" -> "[1, 2, 3]"
       [] c = "sort_gt_reflected" -> "[1, 2]"
       [] c = "len_negative" -> "ValueError: __len__() should return >= 0"
