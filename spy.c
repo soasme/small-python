@@ -26473,6 +26473,16 @@ static SPYValue *thrown_exception(SPYContext *c, size_t argc, SPYValue *const *a
     if (exception && argc == 3 && argv[2]->type == SPY_TRACEBACK) set_hidden_field(c, exception, "__traceback__", argv[2]);
     return exception;
 }
+/* Whether closing suspended generator g ends it without resuming it, as
+ * CPython's gen_close does: it yielded outside every try, with and except,
+ * not to an await or a yield from, and no trace or profile function would
+ * see the GeneratorExit unwind it. */
+static int close_quietly(SPYContext *c, SPYValue *g) {
+    Machine *m = g->as.generator.machine;
+    if (g->type == SPY_ASYNC_GENERATOR || !m || m->awaiting != AWAIT_YIELD || c->settings[SET_TRACE] || c->settings[SET_PROFILE]) return 0;
+    for (size_t i = 0; i < m->block_len; i++) if (m->blocks[i].kind != BLOCK_LOOP) return 0;
+    return 1;
+}
 /* Method number method of generator g, called with its number of arguments. */
 static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t argc, SPYValue *const *argv) {
     if (method == M_ITER) return spy_retain(g);
@@ -26480,7 +26490,7 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
     if (method == M_SEND) return generator_send(c, g, argv[0], NULL);
     if (method == M_CLOSE) {
         if (g->as.generator.running) return spy_error(c, "ValueError", g->type == SPY_COROUTINE ? "coroutine already executing" : "generator already executing");
-        if (!g->as.generator.started || g->as.generator.done) { generator_close(g); return spy_none(c); }
+        if (!g->as.generator.started || g->as.generator.done || close_quietly(c, g)) { generator_close(g); return spy_none(c); }
         SPYValue *exception = exception_create(c, c->exceptions[X_GENERATOR_EXIT], 0, NULL);
         SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, 1, &exception) : NULL;
         spy_release(exception);

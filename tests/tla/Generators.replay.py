@@ -29,15 +29,18 @@ def make(kind, variant):
     def body():
         last, i = None, 0
         while i < K:
-            try:
+            if variant == "bare":
                 got = yield (i, last)
-            except ValueError as e:
-                got = "caught" if e.__context__ is None else "chained"
-            except GeneratorExit:
-                if variant == "plain":
-                    raise
-                got = "exit"
-                yield ("ignored", i)
+            else:
+                try:
+                    got = yield (i, last)
+                except ValueError as e:
+                    got = "caught" if e.__context__ is None else "chained"
+                except GeneratorExit:
+                    if variant == "plain":
+                        raise
+                    got = "exit"
+                    yield ("ignored", i)
             if got == "stop":
                 return "early"
             if got == "reenter":
@@ -51,15 +54,18 @@ def make(kind, variant):
     async def coroutine():
         last, i = None, 0
         while i < K:
-            try:
+            if variant == "bare":
                 got = await Y((i, last))
-            except ValueError as e:
-                got = "caught" if e.__context__ is None else "chained"
-            except GeneratorExit:
-                if variant == "plain":
-                    raise
-                got = "exit"
-                await Y(("ignored", i))
+            else:
+                try:
+                    got = await Y((i, last))
+                except ValueError as e:
+                    got = "caught" if e.__context__ is None else "chained"
+                except GeneratorExit:
+                    if variant == "plain":
+                        raise
+                    got = "exit"
+                    await Y(("ignored", i))
             if got == "stop":
                 return "early"
             if got == "reenter":

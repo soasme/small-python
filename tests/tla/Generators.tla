@@ -27,14 +27,16 @@
 (*     return 'done'                                                       *)
 (*                                                                         *)
 (* A throw is made while its caller handles `handled` (an IndexError) or   *)
-(* nothing; the body handles nothing at its loop's yield.                  *)
+(* nothing. With variant 'bare' the loop's yield stands outside the try,   *)
+(* so a throw there propagates and close() ends the object without a      *)
+(* handler running.                                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 CONSTANT K          \* iterations of the body's loop
 
 Kinds == {"generator", "coroutine"}
-Variants == {"plain", "stubborn"}
+Variants == {"plain", "stubborn", "bare"}
 Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
@@ -89,7 +91,7 @@ Send(v) ==
 (* shows: the body's handler sees no context.                             *)
 Throw(e, h) ==
     /\ op' = <<"throw", e, h>>
-    /\ CASE pc = "loop" /\ e = "ValueError" -> Continue("caught")
+    /\ CASE pc = "loop" /\ e = "ValueError" /\ variant # "bare" -> Continue("caught")
          [] pc = "done" /\ kind = "coroutine" -> Stay(<<"raise", "RuntimeError">>)  \* cannot reuse already awaited coroutine
          [] OTHER -> Finish(<<"raise", e>>)  \* a just-started body never runs; elsewhere nothing catches e
 
