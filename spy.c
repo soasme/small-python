@@ -23990,6 +23990,15 @@ static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
 static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
     return machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, phase));
 }
+/* Whether x's rich comparison rich declines any plain instance: x is
+ * None, a str, bytes, tuple, list or dict, or a plain instance whose class
+ * compares as object does, whose != calls its __eq__. */
+static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
+    if (x->type == SPY_NONE || x->type == SPY_STRING || x->type == SPY_BYTES || x->type == SPY_TUPLE || x->type == SPY_LIST ||
+        x->type == SPY_DICT) return 1;
+    return plain_instance(x) && class_lookup(x->as.map.parent, rich_names[rich]) == name_local(c->object, rich_names[rich]) &&
+           (rich != R_NE || rich_declines(c, x, R_EQ));
+}
 /* The Python special method that operator step ins calls first on x and
  * y, owned, with its env, to enter on m (CALL_OPERATOR), x, y and the
  * phase on the stack under it (operator_push): instance x's __getitem__,
@@ -24472,7 +24481,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
     int phase = OPERATOR_FIRST;
-    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT) {
+    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT || (rich >= 0 && y->type == SPY_INSTANCE && rich_declines(c, x, rich))) {
         /* A number declines an operator or comparison with a plain
          * instance, whose reflected method is the last call. */
         if (!reflected || !(function = item_function(c, y, reflected))) return NULL;

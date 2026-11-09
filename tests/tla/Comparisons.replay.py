@@ -70,6 +70,11 @@ SOURCES = {
     "seq_order_chain": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"
                        "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
                        "result = [E('a')] < [E('b')] < [E('c')]",
+    "builtin_declines": "class E:\n    def __init__(s, n): s.n = n\n"
+                        "    def __eq__(s, o): return t(s.n + '==' + type(o).__name__)\n"
+                        "    def __gt__(s, o): return t(s.n + '>' + type(o).__name__)\n"
+                        "class P: pass\n"
+                        "result = (None == E('a'), 'x' < E('b'), P() == E('c'), (1,) == E('d'))",
 }
 
 

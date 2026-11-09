@@ -369,7 +369,8 @@ These run as machines on the heap, in one native activation of
   calls on them, in such calls, and the reflected
   operator or comparison method of an
   instance on the right, called once the left operand, an `int`, `bool`,
-  `float` or instance, declines, or first when the right operand's class
+  `float` or instance, declines, or, for a comparison, the left operand
+  is `None`, a `str`, `bytes`, `tuple`, `list` or `dict`, or first when the right operand's class
   is a subclass of the left's, and the same methods of `divmod` and of
   `pow` with no modulus or a `None` one, the `__add__` or `__radd__`
   that `sum` calls on a total or item that is an instance, the `__eq__`
