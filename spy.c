@@ -14566,7 +14566,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
             compile_arguments(c, p, n->args);
         }
-        if (!n->params && !n->annotate && !(n->flags & F_SETUP_ANNOTATIONS) && ((n->args && c->pausing) || list_expands(n->b, CALLS) || loops(n->b))) {
+        if (!n->params && ((n->args && c->pausing) || list_expands(n->b, CALLS) || loops(n->b))) {
             /* A body that calls or loops, or, compiled while pausing, a class
              * of bases or keywords, whose metaclass's __prepare__ may be a
              * call, is a call (class_part). */
@@ -14608,9 +14608,9 @@ static int loops(Node *body) {
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
     /* An annotation or lazy value function's body is one walker statement,
-     * as is a class body with type parameters or annotations (class_body);
-     * while calls can pause, every other body runs on the machine. */
-    if (n->kind == N_CLASS && (n->params || n->annotate || (n->flags & F_SETUP_ANNOTATIONS))) return 0;
+     * as is a class body with type parameters (class_body); while calls
+     * can pause, every other body runs on the machine. */
+    if (n->kind == N_CLASS && n->params) return 0;
     if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS || (mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
@@ -14619,6 +14619,8 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (generator) n->code = p;
     else n->flat = p;
     c->code_work++;
+    /* A class body with annotations first sets them up (class_part). */
+    if (UNLIKELY(n->kind == N_CLASS && (n->annotate || (n->flags & F_SETUP_ANNOTATIONS)))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
     compile_body(c, p, n->b);
     c->code_work--;
     /* The implicit return has no node: it runs on the last line executed;
@@ -25011,10 +25013,15 @@ static void class_prepared(SPYContext *c, Machine *m, Node *n, SPYValue *namespa
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->node;
     SPYValue *bases, *arguments, *name, *body = NULL;
+    if (ins->arg == 8)
+        return setup_annotations(c, f, n->flags & F_SETUP_ANNOTATIONS) || start_annotations(c, f, n->annotate, "__annotate_func__") ? NULL : spy_none(c);
     if (ins->arg == 6) {
-        /* The body's end, in its env, whose scope's owner is the class statement. */
+        /* The body's end, in its env, whose scope's owner is the class
+         * statement, traced as class_body traces it. */
         SPYValue *classcell = NULL;
-        if (class_body_end(c, f->env->as.map.scope->owner, f->env, &classcell)) { spy_release(classcell); return NULL; }
+        n = f->env->as.map.scope->owner;
+        if (n->annotate && (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_class_line(c, n)) return NULL;
+        if (class_body_end(c, n, f->env, &classcell)) { spy_release(classcell); return NULL; }
         return classcell ? classcell : spy_none(c);
     }
     if (ins->arg == 1) return generic_class(c, f, n);

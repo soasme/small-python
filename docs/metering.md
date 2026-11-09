@@ -381,7 +381,7 @@ These run as machines on the heap, in one native activation of
   spec's fields first;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, when the class has no type
-  parameters or annotations and the builtin `__build_class__` makes it.
+  parameters and the builtin `__build_class__` makes it.
 
 Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
 function or comprehension is first compiled) runs every function and

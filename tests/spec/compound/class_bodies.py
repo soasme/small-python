@@ -103,3 +103,12 @@ class Annotated:
 
 assert (Annotated.total, Annotated.item, Annotated.__annotations__) == (3, 0, {"total": int})
 assert Annotated.ordered == [3, 2, 1]
+
+# So does a generic class's body.
+class Generic[T]:
+    total = 0
+    for item in Countdown(3):
+        total += item
+    ordered = sorted([2, 1, 3], reverse=True)
+
+assert (Generic.total, Generic.item, Generic.ordered) == (3, 0, [3, 2, 1])

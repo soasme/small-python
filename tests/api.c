@@ -388,6 +388,14 @@ int main(int argc, char **argv) {
         execute(second, "import sys\nassert sys.argv == []\n");
         spy_context_free(first); spy_context_free(second); spy_context_free(unset);
     }
+    /* A trace function sees each pass of a loop in a generic class's body. */
+    SPYContext *traced = spy_context_new();
+    assert(traced && !spy_std_init(traced));
+    execute(traced, "import sys\nlines = []\ndef tracer(frame, event, arg):\n"
+                    "    if frame.f_code.co_name == 'Generic' and event == 'line': lines.append(frame.f_lineno)\n    return tracer\n"
+                    "sys.settrace(tracer)\nclass Generic[T]:\n    for i in range(2):\n        pass\nsys.settrace(None)\n"
+                    "assert lines == [7, 8, 9, 8, 9, 8], lines\n");
+    spy_context_free(traced);
     SPYContext *c = spy_context_new();
     assert(c && !spy_std_init(c));
     Output o = {0};
@@ -1168,6 +1176,11 @@ int main(int argc, char **argv) {
                "def entries():\n    class A(Entry()): x = 1\n    class B(list[int]): y = 2\n    return A(A.x + B.y + len(B([0])))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "entries()", "entries.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does an annotated class body that calls. */
+    execute(c, "def annotated():\n    class A:\n        x: int = 1\n        for i in range(3000): y = slow(2)\n"
+               "    return A.x + A.y + len(A.__annotations__)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "annotated()", "annotated.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* A __class_getitem__ that cannot take the key raises from the subscript. */
     execute(c, "class Arity:\n    def __class_getitem__(cls): return 1\n"
                "def arity():\n    try: return Arity[slow(0)]\n    except TypeError: return 2");

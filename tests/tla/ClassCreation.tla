@@ -14,12 +14,13 @@
 (* of type) defines __new__ and __init__, and possibly __prepare__, each   *)
 (* passing flag on to type.__new__ but not to type.__init__. Every hook    *)
 (* logs its name; the class body logs "body" when it calls, else it only   *)
-(* assigns. The outcome is the log and whether the statement raised.       *)
+(* assigns, and may begin with an annotated assignment, which changes no   *)
+(* outcome. The outcome is the log and whether the statement raised.       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Metas == {"none", "meta", "prepare"}
-Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN]
+Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN, annotated : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

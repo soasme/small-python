@@ -51,6 +51,8 @@ def source(p):
         arguments.append("flag=1")
     lines = ["@deco"] if p["deco"] else []
     lines.append("class C(%s):" % ", ".join(arguments))
+    if p["annotated"]:
+        lines.append("    x: int = 0")
     lines.append("    log.append('body')" if p["calls"] else "    n = 1")
     lines += ["    %s = D()" % name for name in "ab"[:p["set_names"]]]
     return "\n".join(lines) + "\n"
