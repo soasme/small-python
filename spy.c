@@ -14547,8 +14547,10 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
             compile_arguments(c, p, n->args);
         }
-        if (!n->params && !n->annotate && !(n->flags & F_SETUP_ANNOTATIONS) && (list_expands(n->b, CALLS) || loops(n->b))) {
-            /* A body that calls or loops is a call (class_part). */
+        if (!n->params && !n->annotate && !(n->flags & F_SETUP_ANNOTATIONS) && ((n->args && c->pausing) || list_expands(n->b, CALLS) || loops(n->b))) {
+            /* A body that calls or loops, or, compiled while pausing, a class
+             * of bases or keywords, whose metaclass's __prepare__ may be a
+             * call, is a call (class_part). */
             emit(c, p, BC_CLASS, n, stacked ? 3 : 4); emit(c, p, BC_CALLN, n, 0); emit(c, p, BC_CLASS, n, 5);
             emit(c, p, BC_CLASS, n, 7);
         } else {
@@ -18770,25 +18772,45 @@ static SPYValue *create_class(SPYContext *c, SPYValue *meta, SPYValue *name, SPY
     if (c->error_type[0]) { spy_release(cls); return NULL; }
     return cls;
 }
-/* PEP 560: a base that is not a class may supply replacement bases. */
-static int update_bases(SPYContext *c, SPYValue *bases, SPYValue *original) {
-    SPYValue *result = spy_list(c);
-    if (!result) return -1;
-    int changed = 0;
-    for (size_t i = 0; i < original->as.seq.len && !c->error_type[0]; i++) {
-        SPYValue *base = original->as.seq.items[i];
+/* result gains the bases entries, owned, a base's __mro_entries__
+ * returned; or -1. */
+static int mro_entries_add(SPYContext *c, SPYValue *result, SPYValue *entries) {
+    if (entries && entries->type != SPY_TUPLE) spy_error(c, "TypeError", "__mro_entries__ must return a tuple");
+    else if (entries) extend_display(c, result, entries);
+    spy_release(entries);
+    return c->error_type[0] ? -1 : 0;
+}
+static int unbind(SPYContext *, SPYValue **, size_t *, SPYValue **);
+/* PEP 560: a base that is not a class may supply replacement bases. From
+ * original's base *at on, result gains each base's entries or the base;
+ * 1 at the end when a base had entries, or changed is set, with bases
+ * then holding result's items; else 0, or -1. With call, a
+ * __mro_entries__ on the machine is not called but left in *call, owned,
+ * with its env, and 2 returned, *at after its base. */
+static int update_bases(SPYContext *c, SPYValue *bases, SPYValue *original, SPYValue *result, size_t *at, int changed,
+                        SPYValue **call_, SPYValue **env) {
+    for (; *at < original->as.seq.len && !c->error_type[0]; ++*at) {
+        SPYValue *base = original->as.seq.items[*at], *args[] = {original, NULL};
         SPYValue *method = base->type == SPY_CLASS ? NULL : attribute(c, base, "__mro_entries__");
+        size_t argc = 1;
         if (!method) {
             if (error_is(c, "AttributeError")) spy_clear_error(c);
             if (!c->error_type[0]) sequence_append(c, result, base);
             continue;
         }
+        changed = 1;
+        if (call_ && (machine_function(c, method) || unbind(c, &method, &argc, args))) {
+            /* A bound method's self, or a callable instance, goes first. */
+            *env = function_env(c, method, argc, args, NULL, 0);
+            if (argc == 2) spy_release(args[0]);
+            if (!*env) { spy_release(method); return -1; }
+            *call_ = method;
+            ++*at;
+            return 2;
+        }
         SPYValue *entries = call(c, method, 1, &original);
         spy_release(method);
-        if (entries && entries->type != SPY_TUPLE) spy_error(c, "TypeError", "__mro_entries__ must return a tuple");
-        else if (entries) extend_display(c, result, entries);
-        spy_release(entries);
-        changed = 1;
+        mro_entries_add(c, result, entries);
     }
     if (!c->error_type[0] && changed) {
         /* Move the resolved list's items into bases. */
@@ -18799,7 +18821,6 @@ static int update_bases(SPYContext *c, SPYValue *bases, SPYValue *original) {
         for (size_t i = 0; i < len; i++) spy_release(items[i]);
         if (items != bases->as.seq.within) mem_free(items);
     }
-    spy_release(result);
     return c->error_type[0] ? -1 : changed;
 }
 static int sort_list(SPYContext *, SPYValue *, SPYValue *, int, SPYValue *const *);
@@ -18917,16 +18938,38 @@ static void class_state_free(ClassState *s) {
     spy_release(s->meta); spy_release(s->tuple); spy_release(s->namespace);
     spy_release(s->env); spy_release(s->original); spy_release(s->keywords);
 }
+/* 16.4.1 step 7's end: the body's env in s for the namespace in it, which
+ * must be a mapping; or -1, s freed. */
+static int class_mapping(SPYContext *c, SPYValue *parent, ClassState *s) {
+    if (s->namespace && !mapping_type(c, s->namespace)) {
+        SPYValue *meta_name = s->meta->type == SPY_CLASS ? name_text(s->meta, "__name__") : NULL;
+        errorf(c, "TypeError", "%s.__prepare__() must return a mapping, not %s",
+               meta_name ? meta_name->as.string.data : "<metaclass>", type_name(s->namespace));
+    } else if (s->namespace) s->env = class_env(c, parent, s->namespace);
+    if (s->env) return 0;
+    class_state_free(s);
+    return -1;
+}
 /* 16.4.1 steps 1-7: the metaclass, the namespace __prepare__ gives and
- * the body's env, in s; or -1, s freed. */
-static int class_prepare(SPYContext *c, SPYValue *parent, SPYValue *name, SPYValue *bases, SPYValue *arguments, ClassState *s) {
+ * the body's env, in s; or -1, s freed. Bases are resolved (update_bases)
+ * here unless original is given: the bases before they were, owned, or
+ * None when they were the same. With prepare, a __prepare__ on the
+ * machine is not called but left in *prepare, owned, with its env, and s
+ * without a namespace. */
+static int class_prepare(SPYContext *c, SPYValue *parent, SPYValue *name, SPYValue *bases, SPYValue *arguments, SPYValue *original,
+                         ClassState *s, SPYValue **prepare, SPYValue **env) {
     *s = (ClassState){0};
-    SPYValue *original = NULL;
     if (!(s->keywords = value_new(c, SPY_DICT))) goto failed;
-    if (!(original = value_new(c, SPY_TUPLE)) || extend_display(c, original, bases)) goto failed;
-    int resolved = update_bases(c, bases, original);
-    if (resolved < 0) goto failed;
-    if (resolved) { s->original = original; original = NULL; }
+    if (!original) {
+        SPYValue *result = spy_list(c);
+        size_t at = 0;
+        int resolved = !result || !(original = value_new(c, SPY_TUPLE)) || extend_display(c, original, bases) ? -1 :
+                       update_bases(c, bases, original, result, &at, 0, NULL, NULL);
+        spy_release(result);
+        if (resolved < 0) goto failed;
+        if (!resolved) { spy_release(original); original = spy_none(c); }
+    }
+    if (original != c->none) { s->original = original; original = NULL; }
     /* The metaclass keyword selects the metaclass; the rest go to it. */
     SPYValue *meta = NULL;
     for (size_t i = 0; i < arguments->as.map.len; i++) {
@@ -18943,24 +18986,25 @@ static int class_prepare(SPYContext *c, SPYValue *parent, SPYValue *name, SPYVal
     if (!s->tuple || extend_display(c, s->tuple, bases)) goto failed;
     if (meta == c->types[SPY_CLASS]) s->namespace = value_new(c, SPY_DICT);
     else {
-        SPYValue *prepare = attribute(c, meta, "__prepare__");
-        if (!prepare && error_is(c, "AttributeError")) { spy_clear_error(c); s->namespace = value_new(c, SPY_DICT); }
-        else if (prepare) {
-            SPYValue *args[] = {name, s->tuple};
-            s->namespace = call_keywords(c, prepare, 2, args, s->keywords);
-            spy_release(prepare);
+        SPYValue *function = attribute(c, meta, "__prepare__"), *args[] = {name, s->tuple, NULL};
+        size_t argc = 2;
+        if (!function && error_is(c, "AttributeError")) { spy_clear_error(c); s->namespace = value_new(c, SPY_DICT); }
+        else if (function && prepare && (machine_function(c, function) || unbind(c, &function, &argc, args))) {
+            /* A bound method's self, or a callable instance, goes first. */
+            *env = function_env(c, function, argc, args, s->keywords->as.map.len ? s->keywords : NULL, 0);
+            if (argc == 3) spy_release(args[0]);
+            if (!*env) { spy_release(function); goto failed; }
+            *prepare = function;
+            spy_release(original);
+            return 0;
+        } else if (function) {
+            s->namespace = call_keywords(c, function, 2, args, s->keywords);
+            spy_release(function);
         }
     }
     if (!s->namespace) goto failed;
-    if (!mapping_type(c, s->namespace)) {
-        SPYValue *meta_name = meta->type == SPY_CLASS ? name_text(meta, "__name__") : NULL;
-        errorf(c, "TypeError", "%s.__prepare__() must return a mapping, not %s",
-               meta_name ? meta_name->as.string.data : "<metaclass>", type_name(s->namespace));
-        goto failed;
-    }
-    if (!(s->env = class_env(c, parent, s->namespace))) goto failed;
     spy_release(original);
-    return 0;
+    return class_mapping(c, parent, s);
 failed:
     spy_release(original); class_state_free(s);
     return -1;
@@ -19031,7 +19075,7 @@ static SPYValue *make_class(SPYContext *c, Frame *f, Node *n, SPYValue *function
     }
     ClassState s;
     SPYValue *classcell = NULL, *cls;
-    if (class_prepare(c, function ? function->as.function.env : f->env, name, bases, arguments, &s)) return NULL;
+    if (class_prepare(c, function ? function->as.function.env : f->env, name, bases, arguments, NULL, &s, NULL, NULL)) return NULL;
     if (function) {
         /* An ordinary function keeps its names in its own frame, so as in
          * CPython the namespace only holds what __prepare__ put there. */
@@ -24584,7 +24628,7 @@ static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, SPYValue **en
  * __build_class__ does not make it, or its body is not compiled, it is
  * made at once: the state is a tuple of it alone, and the call tuple().
  * The value to push, or NULL with an error. */
-static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins);
+static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env);
 /* A deferred class statement's metaclass call (make_class), its state and
  * __class__ cell on m's stack: the metaclass, to enter its Python __new__
  * (CALL_CHECKED) with the metaclass and arguments above them, as a class
@@ -24616,12 +24660,33 @@ static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instr
     }
     /* Arg 0 leaves two items, as arg 5 keeps them, when it defers. */
     size_t deferred = m->len + (ins->arg ? 0 : 2);
-    SPYValue *cls = ins->arg ? class_part(c, m, f, ins) : build_class(c, f, ins->node, NULL, NULL, m);
+    SPYValue *cls = ins->arg ? class_part(c, m, f, ins, env) : build_class(c, f, ins->node, NULL, NULL, m);
+    if (*env) return cls;
     if (cls == c->unbound) { spy_release(cls); return class_new_call(c, m, env); }
     if (cls && (ins->arg == 0 || ins->arg == 5) && m->len != deferred && (machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_none(c)))) { spy_release(cls); return NULL; }
     return cls;
 }
-static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins) {
+/* A class statement n's body function, given its state s, freed, which
+ * goes under it on m's stack as a tuple of the metaclass, bases,
+ * namespace, body env, original bases or None, keywords and name. */
+static SPYValue *class_begin(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue *name, ClassState *s) {
+    SPYValue *body = NULL, *items[] = {s->meta, s->tuple, s->namespace, s->env, s->original ? s->original : c->none, s->keywords, name};
+    SPYValue *state = class_body_begin(c, f->unit, n, s->env, NULL) ? NULL : tuple_of(c, 7, items);
+    if (state && !machine_push(c, m, state) && (body = function_new(c, f, n))) body->as.function.attributes = spy_retain(s->env);
+    class_state_free(s);
+    return body;
+}
+/* A class statement's __prepare__ on the machine returned namespace, or
+ * failed: the body's function on m's stack, its state, a tuple as
+ * class_begin leaves but of no namespace or env, replaced. */
+static void class_prepared(SPYContext *c, Machine *m, Node *n, SPYValue *namespace) {
+    SPYValue *pending = machine_pop(m), **items = pending->as.seq.items;
+    ClassState s = {spy_retain(items[0]), spy_retain(items[1]), namespace, NULL, items[4] == c->none ? NULL : spy_retain(items[4]), spy_retain(items[5])};
+    if (namespace && !class_mapping(c, m->frame.env, &s)) machine_push(c, m, class_begin(c, m, &m->frame, n, items[6], &s));
+    else if (!namespace) class_state_free(&s);
+    spy_release(pending);
+}
+static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->node;
     SPYValue *bases, *arguments, *name, *body = NULL;
     if (ins->arg == 6) {
@@ -24645,7 +24710,13 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
         spy_release(classcell); spy_release(v);
         return body;
     }
-    if (ins->arg == 3) {
+    /* After a base's __mro_entries__ returned (checked_returned), the step
+     * goes on with progress: the original bases, those resolved and the
+     * next base's index, under the bases and arguments. */
+    SPYValue *progress = NULL, *original = NULL, *resolved = NULL, *call_ = NULL;
+    if (m->len && m->stack[m->len - 1] == c->unbound) {
+        spy_release(machine_pop(m)); arguments = machine_pop(m); bases = machine_pop(m); progress = machine_pop(m);
+    } else if (ins->arg == 3) {
         arguments = machine_pop(m); bases = machine_pop(m); spy_release(machine_pop(m));
     } else {
         SPYValue *builder = spy_string(c, "__build_class__", 15);
@@ -24658,8 +24729,8 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (!(name = spy_string(c, source_name(n->a), strlen(source_name(n->a))))) goto done;
     SPYValue *builtins = module_env(c, f->env)->as.map.parent;
-    SPYValue *builder = builtins ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
-    int builtin = builder && builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin;
+    SPYValue *builder = builtins && !progress ? name_lookup(c, builtins, name_of("__build_class__")) : NULL;
+    int builtin = progress || (builder && builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin);
     spy_release(builder);
     if (!builtin || !n->flat) {
         SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, NULL, NULL);
@@ -24668,14 +24739,49 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
         if (alone && !machine_push(c, m, alone)) body = spy_retain(c->types[SPY_TUPLE]);
         goto done;
     }
+    size_t at = 0;
+    if (progress) {
+        original = spy_retain(progress->as.seq.items[0]); resolved = spy_retain(progress->as.seq.items[1]);
+        at = (size_t)progress->as.seq.items[2]->as.integer_data.small;
+    } else if (!(original = value_new(c, SPY_TUPLE)) || extend_display(c, original, bases) || !(resolved = spy_list(c))) {
+        spy_release(original);
+        goto done;
+    }
+    int changed = update_bases(c, bases, original, resolved, &at, progress != NULL, &call_, env);
+    if (changed == 2) {
+        /* The call returns into checked_returned, its progress on the stack. */
+        SPYValue *items[] = {original, resolved, spy_int(c, (int64_t)at)};
+        SPYValue *next = items[2] ? value_new(c, SPY_LIST) : NULL;
+        for (int i = 0; next && i < 3; i++) if (sequence_append(c, next, items[i])) { spy_release(next); next = NULL; }
+        spy_release(items[2]);
+        if (!next || machine_push(c, m, next) || machine_push(c, m, spy_retain(bases)) || machine_push(c, m, spy_retain(arguments)) ||
+            machine_push(c, m, spy_retain(c->unbound))) {
+            release_locals(*env); *env = NULL; spy_release(call_); call_ = NULL;
+        }
+        c->entering_init = call_; c->entering_kind = CALL_CHECKED;
+        body = call_;
+    }
+    spy_release(resolved);
+    if (changed != 1) {
+        spy_release(original);
+        if (changed) goto done;
+        original = spy_none(c);
+    }
     ClassState s;
-    if (class_prepare(c, f->env, name, bases, arguments, &s)) goto done;
-    SPYValue *items[] = {s.meta, s.tuple, s.namespace, s.env, s.original ? s.original : c->none, s.keywords, name};
-    SPYValue *state = class_body_begin(c, f->unit, n, s.env, NULL) ? NULL : tuple_of(c, 7, items);
-    if (state && !machine_push(c, m, state) && (body = function_new(c, f, n))) body->as.function.attributes = spy_retain(s.env);
-    class_state_free(&s);
+    SPYValue *prepare = NULL;
+    if (class_prepare(c, f->env, name, bases, arguments, original, &s, &prepare, env)) goto done;
+    if (prepare) {
+        /* The __prepare__ call returns into class_prepared, its state on the stack. */
+        SPYValue *items[] = {s.meta, s.tuple, c->none, c->none, s.original ? s.original : c->none, s.keywords, name};
+        if (machine_push(c, m, tuple_of(c, 7, items))) { release_locals(*env); *env = NULL; spy_release(prepare); prepare = NULL; }
+        class_state_free(&s);
+        c->entering_init = prepare; c->entering_kind = CALL_CHECKED;
+        body = prepare;
+        goto done;
+    }
+    body = class_begin(c, m, f, n, name, &s);
 done:
-    spy_release(name); spy_release(bases); spy_release(arguments);
+    spy_release(name); spy_release(bases); spy_release(arguments); spy_release(progress);
     return body;
 }
 /* What complex() or bytes() of v makes of result, the value its method
@@ -24691,6 +24797,13 @@ static SPYValue *converted_result(SPYContext *c, SPYValue *v, const char *method
 }
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
+    if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
+        /* A class's base's __mro_entries__ returned, its step running
+         * again (class_part); or its __prepare__. */
+        if (m->stack[m->len - 1] != c->unbound) class_prepared(c, m, ins->node, result);
+        else if (result && !mro_entries_add(c, m->stack[m->len - 4]->as.seq.items[1], result)) m->pc = pc - 1;
+        return m;
+    }
     if (ins->op == BC_CLASS && ins->arg == 7) {
         /* A class's callback: its step runs again for the next. */
         if (result) m->pc = pc - 1;

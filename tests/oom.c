@@ -146,6 +146,14 @@ static const char *const programs[] = {
     "    return G().missing\n"
     "print(f())\n",
 
+    "class E:\n"
+    "    def __mro_entries__(self, bases):\n"
+    "        for i in range(1): pass\n"
+    "        return (object,)\n"
+    "class C(E()):\n"
+    "    for i in range(1): pass\n"
+    "print(C.__orig_bases__)\n",
+
     "x = [i * i for i in range(20)]\n"
     "d = {str(i): i for i in x}\n"
     "s = {i % 7 for i in x}\n"

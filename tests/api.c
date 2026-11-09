@@ -1153,6 +1153,16 @@ int main(int argc, char **argv) {
                "def indexed():\n    total = sum(Indexed())\n    for x in Indexed(): total += x\n    return total");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "indexed()", "indexed.py"), SPY_STOP_STEPS, &pauses)) == 380 && pauses > 1);
+    /* So does a metaclass's Python __prepare__, also for a body that only assigns. */
+    execute(c, "class Prepared(type):\n    @classmethod\n    def __prepare__(m, name, bases):\n        for i in range(3000): pass\n        return {'v': name == 'B'}\n"
+               "def prepared():\n    class A(metaclass=Prepared): w = v\n    class B(A): w = v + 1\n    return A.w + B.w");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "prepared()", "prepared.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
+    /* So does a base's Python __mro_entries__. */
+    execute(c, "class Entry:\n    def __mro_entries__(self, bases):\n        for i in range(3000): pass\n        return (int,)\n"
+               "def entries():\n    class A(Entry()): x = 1\n    class B(list[int]): y = 2\n    return A(A.x + B.y + len(B([0])))");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "entries()", "entries.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

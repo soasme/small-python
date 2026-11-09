@@ -283,8 +283,9 @@ These run as machines on the heap, in one native activation of
 
 - calls of functions, bound methods and plain classes; classes with a
   Python `__new__`, also called with keywords; instances with a Python `__call__`; Python
-  decorators; a class statement's metaclass `__new__`, and the new
-  class's `__set_name__` and `__init_subclass__` calls;
+  decorators; a class statement's bases' `__mro_entries__`, its
+  metaclass `__prepare__` and `__new__`, and the new class's
+  `__set_name__` and `__init_subclass__` calls;
 - `exec` and `eval` of source, also of interactive input (mode
   `'single'`) and the Python `sys.displayhook` its values go to, and the
   module of source an `import` statement runs;

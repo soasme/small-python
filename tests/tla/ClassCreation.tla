@@ -9,16 +9,17 @@
 (*         a = D()                 # 0, 1, or 2 attributes whose class     *)
 (*         b = D()                 #   defines __set_name__                *)
 (*                                                                         *)
-(* where B may define __init_subclass__(cls, **kw), and Meta (a subclass   *)
+(* where B may define __init_subclass__(cls, **kw), or be given by an      *)
+(* object whose __mro_entries__ returns (B,), and Meta (a subclass        *)
 (* of type) defines __new__ and __init__, and possibly __prepare__, each   *)
 (* passing flag on to type.__new__ but not to type.__init__. Every hook    *)
-(* logs its name; the class body logs "body". The outcome is the log and   *)
-(* whether the statement raised.                                           *)
+(* logs its name; the class body logs "body" when it calls, else it only   *)
+(* assigns. The outcome is the log and whether the statement raised.       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Metas == {"none", "meta", "prepare"}
-Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN]
+Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -34,7 +35,7 @@ Create(p) ==
         fails == p.flag /\ ~p.subclass_hook
         typeNew == SubSeq(names, 1, p.set_names)
                    \o (IF p.subclass_hook THEN <<IF p.flag THEN "init_subclass flag" ELSE "init_subclass">> ELSE <<>>)
-        before == (IF p.meta = "prepare" THEN <<"prepare">> ELSE <<>>) \o <<"body">>
+        before == (IF p.entries THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" THEN <<"prepare">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>)
                   \o (IF custom THEN <<"new">> ELSE <<>>) \o typeNew
     IN  IF fails THEN <<before, "TypeError">>
         ELSE <<before \o (IF custom THEN <<"init">> ELSE <<>>) \o (IF p.deco THEN <<"decorate">> ELSE <<>>), "ok">>
@@ -51,8 +52,11 @@ Logged(x) == \E i \in DOMAIN Log : Log[i] = x
 
 \* The namespace is prepared before the body runs, and the body before the
 \* metaclass is called.
-BodyBetween == Done => (Logged("prepare") => Index("prepare") < Index("body"))
-                       /\ (Logged("new") => Index("body") < Index("new"))
+BodyBetween == Done /\ Logged("body") => (Logged("prepare") => Index("prepare") < Index("body"))
+                                         /\ (Logged("new") => Index("body") < Index("new"))
+
+\* The bases are resolved before anything else runs.
+EntriesFirst == Done /\ Logged("mro_entries") => Index("mro_entries") = 1
 
 \* __set_name__ runs before __init_subclass__, and both before Meta.__init__.
 HooksInOrder == Done /\ Logged("set_name a") /\ Logged("init") => Index("set_name a") < Index("init")

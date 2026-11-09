@@ -29,6 +29,13 @@ class Hook:
 class Plain:
     pass
 
+class Entries:
+    def __init__(self, base):
+        self.base = base
+    def __mro_entries__(self, bases):
+        log.append("mro_entries")
+        return (self.base,)
+
 def deco(cls):
     log.append("decorate")
     return cls
@@ -36,14 +43,15 @@ def deco(cls):
 
 
 def source(p):
-    arguments = ["Hook" if p["subclass_hook"] else "Plain"]
+    base = "Hook" if p["subclass_hook"] else "Plain"
+    arguments = ["Entries(%s)" % base if p["entries"] else base]
     if p["meta"] != "none":
         arguments.append("metaclass=" + ("Meta" if p["meta"] == "meta" else "Prepare"))
     if p["flag"]:
         arguments.append("flag=1")
     lines = ["@deco"] if p["deco"] else []
     lines.append("class C(%s):" % ", ".join(arguments))
-    lines.append("    log.append('body')")
+    lines.append("    log.append('body')" if p["calls"] else "    n = 1")
     lines += ["    %s = D()" % name for name in "ab"[:p["set_names"]]]
     return "\n".join(lines) + "\n"
 
