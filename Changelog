@@ -109,6 +109,10 @@ Unreleased (0.8.0):
   before looking up the first
 - dict() and dict.update() of a mapping call its Python keys() and
   __getitem__ without the C stack
+- sorted() and list.sort() of tuples call their items' Python __eq__ and
+  __lt__ without the C stack
+- <, <=, > and >= of two lists or two tuples call their items' Python
+  __eq__ and ordering methods without the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

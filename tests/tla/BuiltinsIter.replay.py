@@ -94,6 +94,9 @@ SOURCES = {
     "sort_mutated": 'l = []\nl.extend(Mutator(v, l) for v in (2, 1))\nl.sort()',
     "sort_key_error": 'result = sorted([1, 2], key=lambda x: 1 / (x - 1))',
     "sort_lt_only": 'class L:\n    def __init__(self, v): self.v = v\n    def __lt__(self, o): return self.v < o.v\nresult = [x.v for x in sorted([L(2), L(1), L(3)])]',
+    "sort_tuple_ties": 'class T:\n    def __init__(self, v): self.v = v\n    def __eq__(self, o): log.append(1); return self.v == o.v\n'
+                       '    def __lt__(self, o): return self.v < o.v\nlog = []\n'
+                       'result = ([t[1].v for t in sorted([(0, T(2)), (0, T(1)), (0, T(0))])], bool(log))',
     "sort_gt_reflected": 'class G:\n    def __init__(self, v): self.v = v\n    def __gt__(self, o): return self.v > o.v\nresult = [x.v for x in sorted([G(2), G(1)])]',
     "len_negative": 'result = len(NegLen())',
     "len_big": 'result = len(BigLen())',

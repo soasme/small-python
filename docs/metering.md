@@ -319,8 +319,9 @@ These run as machines on the heap, in one native activation of
   bound methods, callable instances' `__call__` and classes' `__init__`,
   and the items those with keywords take from generators and the other
   sources above,
-  the Python `__lt__` comparisons of `sorted` and `list.sort`, and the
-  Python comparisons of `min`'s and `max`'s instance keys;
+  the Python `__lt__` comparisons of `sorted` and `list.sort`, also the
+  `__eq__` and `__lt__` of the items of tuples they sort, and the Python
+  comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
   `__round__` and `__reversed__` that `str`, `repr`, `format`, `len`,
@@ -356,7 +357,9 @@ These run as machines on the heap, in one native activation of
   tuples, also in a comparison chain, calls on their items, of an instance
   after identical items, equal `None`, `bool`, `int`, `float` or `str`
   ones, or pairs of such lists or tuples found equal so, pair after pair
-  and inside such pairs, the `__eq__` that `index`, `count` or `remove` of
+  and inside such pairs, the `__eq__` and then the ordering method, or
+  its reflection, that `<`, `<=`, `>` or `>=` of two lists or two tuples
+  outside a comparison chain calls on such items, the `__eq__` that `index`, `count` or `remove` of
   one item in a list or tuple calls on its items, in a call whose object
   holds a call or in code compiled while pausing, the `__lt__` or `__gt__`
   that `min` or `max` of a list's or tuple's items or of the arguments

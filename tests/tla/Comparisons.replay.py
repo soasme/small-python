@@ -64,6 +64,9 @@ SOURCES = {
     "seq_nested": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return True\n"
                   "result = ([[E('a')], (E('b'),)] == [[E('c')], (E('d'),)], [[1], E('e')] == [[2], E('f')],\n"
                   "          [E('g')] == [E('h')] == [E('i')])",
+    "seq_order_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o): t(s.n + o.n); return s.n == o.n\n"
+                       "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
+                       "result = ((E('a'), E('b')) < (E('a'), E('c')), [E('x')] > [E('y')])",
 }
 
 

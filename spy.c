@@ -9967,14 +9967,18 @@ static int sequence_equal_from(SPYContext *, SPYValue *, SPYValue *, size_t, int
 /* binary, except that an instance operand, whose method the machine
  * calls, gives NULL without an error. */
 /* comparison, except that an instance operand, or lists or tuples whose
- * == calls an item's Python __eq__ (python_pair), gives NULL without an
- * error. */
+ * == calls an item's Python __eq__ (python_pair) or whose ordering calls
+ * a Python method (order_python), gives NULL without an error. */
+static int order_python(SPYContext *, int, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) return NULL;
-    if ((op == T_EQ || op == T_NE) && (a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type &&
-        (a->type == SPY_TUPLE || a->as.seq.len == b->as.seq.len)) {
-        int equal = sequence_equal_from(c, a, b, 0, 1);
-        return equal < 0 || equal == 2 ? NULL : spy_bool(c, equal == (op == T_EQ));
+    if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
+        if (op != T_EQ && op != T_NE) {
+            if (order_python(c, op, a, b)) return NULL;
+        } else if (a->type == SPY_TUPLE || a->as.seq.len == b->as.seq.len) {
+            int equal = sequence_equal_from(c, a, b, 0, 1);
+            return equal < 0 || equal == 2 ? NULL : spy_bool(c, equal == (op == T_EQ));
+        }
     }
     return comparison(c, op, a, b);
 }
@@ -13905,12 +13909,15 @@ enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
-/* A sort that stops at each comparison (sort_step). */
+/* A sort that stops at each comparison (sort_step). The comparison of
+ * two tuple keys stops at each Python one of their items (sorter_call):
+ * the pair at item, cx and cy, borrowed, compared by rich; unequal once an
+ * item differs, open while the keys' comparison goes on. */
 struct Sorter {
     SortItem *from, *to, item;
-    SPYValue *x, *y;
-    size_t *ends, len, runs, merged, r, start, mid, end, i, j, out, lo, stop, left;
-    int at, less;
+    SPYValue *x, *y, *cx, *cy;
+    size_t *ends, len, runs, merged, r, start, mid, end, i, j, out, lo, stop, left, at_item;
+    int at, less, rich, unequal, open;
     SortItem items[];
 };
 typedef struct {
@@ -22396,10 +22403,11 @@ static SPYValue *compared(SPYContext *c, int op, SPYValue *x, SPYValue *y, SPYVa
     return result || c->error_type[0] ? result : comparison_declined(c, op, x, y);
 }
 /* Whether a sort of source, a list or tuple, compares its first items by a
- * Python __lt__ (rich_function), to call on the machine. */
+ * Python rich comparison (sort_calls), to call on the machine. */
+static int sort_calls(SPYContext *, SPYValue *, SPYValue *);
 static int instance_sort(SPYContext *c, SPYValue *source) {
     return (source->type == SPY_LIST || source->type == SPY_TUPLE) && source->as.seq.len > 1 &&
-           rich_function(c, source->as.seq.items[1], source->as.seq.items[0], R_LT);
+           sort_calls(c, source->as.seq.items[1], source->as.seq.items[0]);
 }
 /* A call node's sort, min or max by a key function on the machine, keyword
  * call stack_keyword_call's with positional arguments argv and keywords
@@ -22450,7 +22458,7 @@ static NO_INLINE SPYValue *key_enter(SPYContext *c, Machine *m, Consumer *s, SPY
 }
 static struct Sorter *sorter_begin(SPYContext *, SPYValue *, SPYValue *, int);
 static int sort_step(struct Sorter *);
-static int sorter_compare(SPYContext *, struct Sorter *);
+static SPYValue *sorter_call(SPYContext *, struct Sorter *);
 static void sorter_end(SPYValue *, struct Sorter *, int);
 static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, size_t positional, SPYValue *const *argv,
                                   const Entry *kw, size_t kwc) {
@@ -22573,13 +22581,13 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         if (!s->sorter && !(s->sorter = sorter_begin(c, items, s->result, s->descending))) {
             if (c->error_type[0] || sort_list(c, items, NULL, s->descending, (SPYValue *const *)s->result->as.seq.items)) return NULL;
         }
-        while (s->sorter && sort_step(s->sorter)) {
+        while (s->sorter && (s->sorter->open || sort_step(s->sorter))) {
             struct Sorter *t = s->sorter;
-            if ((function = rich_function(c, t->x, t->y, R_LT))) {
-                SPYValue *args[] = {spy_retain(t->x), spy_retain(t->y)};
+            if ((function = sorter_call(c, t))) {
+                SPYValue *args[] = {spy_retain(t->cx), spy_retain(t->cy)};
                 return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
             }
-            if (sorter_compare(c, t)) return NULL;
+            if (c->error_type[0] || working(c, &t->left, 1)) return NULL;
         }
         if (s->sorter) sorter_end(items, s->sorter, s->descending);
         result = s->target ? spy_none(c) : spy_retain(items);
@@ -22682,11 +22690,15 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         return failed ? -1 : 0;
     }
     if (s->keyed == KEY_SORT && s->sorter) {
-        /* The result of the sort's comparison under way. */
+        /* The result of the sort's comparison under way: of two items of
+         * tuple keys by __eq__, which goes on to the next item or decides
+         * by __lt__ there, or by __lt__ the answer. */
         struct Sorter *t = s->sorter;
-        SPYValue *test = compared(c, '<', t->x, t->y, key);
-        t->less = test ? truthy(test) : 0;
+        SPYValue *test = compared(c, t->rich == R_EQ ? T_EQ : '<', t->cx, t->cy, key);
+        int truth = test ? truthy(test) : 0;
         spy_release(test);
+        if (t->rich == R_EQ) { t->open = 1; t->at_item += truth; t->unequal = !truth; }
+        else t->less = truth;
         return c->error_type[0] ? -1 : 0;
     }
     if (s->keyed == KEY_SORT) {
@@ -23751,6 +23763,26 @@ static int sequence_python(SPYContext *c, SPYValue *a, SPYValue *b) {
     size_t end;
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
 }
+/* Whether instance v's == is identity: its class has no Python __eq__. */
+static int identity_equal(SPYValue *v) {
+    if (v->type != SPY_INSTANCE || v->as.map.base) return 0;
+    SPYValue *eq = class_lookup(v->as.map.parent, "__eq__");
+    return !eq || eq->type != SPY_FUNCTION;
+}
+/* Whether ordering op of a and b, two lists or two tuples, calls a
+ * Python method on the machine: an item's __eq__ (python_pair), or the
+ * ordering method of the first pair of distinct instances whose == is
+ * identity, the pairs before it found equal so. */
+static int order_python(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if ((a->type != SPY_LIST && a->type != SPY_TUPLE) || b->type != a->type || (op != '<' && op != T_LE && op != '>' && op != T_GE))
+        return 0;
+    size_t end, at = python_pair(c, a, b, 0, &end);
+    if (at != SIZE_MAX) return 1;
+    if (end >= a->as.seq.len || end >= b->as.seq.len) return 0;
+    SPYValue *x = a->as.seq.items[end], *y = b->as.seq.items[end];
+    int rich = op == '<' ? R_LT : op == T_LE ? R_LE : op == '>' ? R_GT : R_GE;
+    return identity_equal(x) && identity_equal(y) && (rich_function(c, x, y, rich) || rich_function(c, y, x, rich_reflected[rich]));
+}
 /* Whether a and b, lists or tuples, are equal from item at on, as
  * list_richcompare decides, an unequal pair left past an end comparing the
  * lengths; -1 on an error. For the machine, 2 at the pair python_pair finds,
@@ -23802,6 +23834,34 @@ static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SP
 fail:
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
+}
+static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
+/* For an ordering step ins of x and y, two lists or two tuples whose items
+ * before at are equal, at itself unequal when known: the Python method
+ * that comparing the first unequal pair from at on calls first, owned,
+ * entered as that pair's operator (operator_call); else NULL, *value the
+ * comparison's truth, by that pair natively or the lengths. */
+static NO_INLINE SPYValue *order_decide(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, size_t at, int unequal,
+                                        SPYValue **env, SPYValue **value) {
+    int op = 0;
+    step_operation(ins, &op);
+    *value = NULL;
+    for (; !unequal && at < x->as.seq.len && at < y->as.seq.len; at++) {
+        if ((at & 63) == 63 && spend(c, 1)) return NULL;
+        SPYValue *a = spy_retain(x->as.seq.items[at]), *b = spy_retain(y->as.seq.items[at]);
+        unequal = a != b && !equal(a, b);
+        spy_release(a); spy_release(b);
+        if (c->error_type[0]) return NULL;
+        if (unequal) break;
+    }
+    if (at >= x->as.seq.len || at >= y->as.seq.len) {
+        int order = x->as.seq.len < y->as.seq.len ? -1 : x->as.seq.len > y->as.seq.len;
+        *value = spy_bool(c, op == '<' ? order < 0 : op == '>' ? order > 0 : op == T_LE ? order <= 0 : order >= 0);
+        return NULL;
+    }
+    SPYValue *a = x->as.seq.items[at], *b = y->as.seq.items[at], *function = operator_call(c, m, ins, a, b, env);
+    if (!function && !c->error_type[0]) *value = comparison(c, op, a, b);
+    return function;
 }
 /* For `x in y`, a lone test or the last comparison of its chain, y a list
  * or tuple or a forward iterator over one that an earlier item's call left
@@ -24250,6 +24310,15 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* A list's or tuple's items compared by a Python __eq__ (equal_call). */
         if ((rich == R_EQ || rich == R_NE) && x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && sequence_python(c, x, y))
             return equal_call(c, m, x, y, python_pair(c, x, y, 0, &(size_t){0}), env);
+        /* Their ordering, in any test but one inside a chain: by the items'
+         * __eq__, then the first unequal pair's method (order_decide). */
+        if ((ins->op != BC_COMPARE || !ins->arg) && order_python(c, op, x, y)) {
+            size_t end, at = python_pair(c, x, y, 0, &end);
+            if (at != SIZE_MAX) return equal_call(c, m, x, y, at, env);
+            SPYValue *value, *entered = order_decide(c, m, ins, x, y, end, 1, env, &value);
+            spy_release(value);
+            return entered;
+        }
         if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
         SPYValue *cls = x->as.map.parent, *right = value_class(c, y);
         /* y's reflected method comes first when y's class is a subclass
@@ -24360,9 +24429,10 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             machine_push(c, m, value);
             return m;
         }
-        if (op == T_EQ || op == T_NE) {
+        if (op != O_IN && op != O_NOTIN) {
             /* A pair's comparison for == (equal_call): unequal, or the next
-             * pair's, or the native comparison of the rest. */
+             * pair's, or the native comparison of the rest; an ordering's
+             * then decides at the first unequal pair (order_decide). */
             for (;;) {
                 SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
                 size_t at = (size_t)index->as.integer_data.small, end = at,
@@ -24376,16 +24446,26 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
                     return &call->m;
                 }
                 while (m->len > len) spy_release(machine_pop(m));
+                int nested = m->len && m->stack[m->len - 1] == c->nesting, ordered = !nested && op != T_EQ && op != T_NE;
                 /* An unequal pair the comparison left past an end compares the lengths. */
-                int same = c->error_type[0] ? -1 : found ? sequence_equal_from(c, x, y, end, 0) :
+                int same = c->error_type[0] ? -1 : ordered ? 0 : found ? sequence_equal_from(c, x, y, end, 0) :
                            at > x->as.seq.len || at > y->as.seq.len ? x->as.seq.len == y->as.seq.len : 0;
                 /* An enclosing sequence's pair is equal when these are. */
-                if (m->len && m->stack[m->len - 1] == c->nesting) {
+                if (nested) {
                     spy_release(machine_pop(m)); spy_release(x); spy_release(y);
                     found = same > 0;
                     continue;
                 }
-                if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
+                if (ordered && same >= 0) {
+                    function = order_decide(c, m, ins, x, y, found ? end : at - 1, !found, &env, &value);
+                    call = function ? call_enter(c, function, env, m) : NULL;
+                    if (call) {
+                        spy_release(x); spy_release(y);
+                        call->m.outermost = CALL_OPERATOR;
+                        return &call->m;
+                    }
+                    while (m->len > len) spy_release(machine_pop(m));
+                } else if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
                 m->pc = operator_finish(c, m, ins, y, value, pc);
                 spy_release(x); spy_release(y);
                 return m;
@@ -26717,19 +26797,54 @@ static int sort_step(struct Sorter *s) {
     return 0;
 }
 #undef ASK
-/* s's question answered natively, polling the interrupt; nonzero on an
- * error. */
-static int sorter_compare(SPYContext *c, struct Sorter *s) {
-    s->less = sort_less(c, s->x, s->y);
-    return c->error_type[0] || working(c, &s->left, 1);
+/* Whether a and b are tuples, whose comparison goes item by item. */
+static int tuple_pair(SPYValue *a, SPYValue *b) { return a->type == SPY_TUPLE && b->type == SPY_TUPLE; }
+/* The Python rich comparison s's question s->x < s->y calls next, with
+ * its pair in cx and cy, to enter on the machine; else NULL, s->less
+ * answered natively. Two tuples compare as sequence_order does: each pair
+ * of items, but one item twice, by __eq__ until one is unequal, which then
+ * decides by __lt__, else the lengths do. */
+static SPYValue *sorter_call(SPYContext *c, struct Sorter *s) {
+    SPYValue *a = s->x, *b = s->y, *function;
+    if (!s->open) s->at_item = 0, s->unequal = 0;
+    s->open = 0;
+    if (!tuple_pair(a, b)) {
+        if ((function = rich_function(c, a, b, R_LT))) { s->cx = a; s->cy = b; s->rich = R_LT; return function; }
+        s->less = sort_less(c, a, b);
+        return NULL;
+    }
+    size_t n = a->as.seq.len < b->as.seq.len ? a->as.seq.len : b->as.seq.len;
+    for (; !s->unequal && s->at_item < n; s->at_item++) {
+        SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
+        if (x == y) continue;
+        if ((function = rich_function(c, x, y, R_EQ))) { s->cx = x; s->cy = y; s->rich = R_EQ; return function; }
+        int same = equal(x, y);
+        if (c->error_type[0]) return NULL;
+        s->unequal = !same;
+        if (s->unequal) break;
+    }
+    if (!s->unequal) { s->less = a->as.seq.len < b->as.seq.len; return NULL; }
+    SPYValue *x = a->as.seq.items[s->at_item], *y = b->as.seq.items[s->at_item];
+    if ((function = rich_function(c, x, y, R_LT))) { s->cx = x; s->cy = y; s->rich = R_LT; return function; }
+    s->less = sort_less(c, x, y);
+    return NULL;
+}
+/* Whether sorting keys like a and b calls a Python rich comparison: a's
+ * __lt__ (rich_function), or for two tuples the __eq__ of a pair of their
+ * items, which ties before it reach. */
+static int sort_calls(SPYContext *c, SPYValue *a, SPYValue *b) {
+    if (!tuple_pair(a, b)) return rich_function(c, a, b, R_LT) != NULL;
+    for (size_t i = 0; i < a->as.seq.len && i < b->as.seq.len; i++)
+        if (rich_function(c, a->as.seq.items[i], b->as.seq.items[i], R_EQ)) return 1;
+    return 0;
 }
 /* The sorter of items by keys, reversed first when descending, when their
- * first comparison calls a Python __lt__ (rich_function); else NULL, or
- * an error. */
+ * first comparison calls a Python rich comparison (sort_calls); else
+ * NULL, or an error. */
 static struct Sorter *sorter_begin(SPYContext *c, SPYValue *items, SPYValue *keys, int descending) {
     size_t len = items->as.seq.len;
     SPYValue **key = keys->as.seq.items;
-    if (len < 2 || !rich_function(c, key[descending ? len - 2 : 1], key[descending ? len - 1 : 0], R_LT)) return NULL;
+    if (len < 2 || !sort_calls(c, key[descending ? len - 2 : 1], key[descending ? len - 1 : 0])) return NULL;
     struct Sorter *s = sorter_new(c, len);
     for (size_t i = 0; s && i < len; i++) {
         size_t at = descending ? len - 1 - i : i;

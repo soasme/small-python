@@ -1174,6 +1174,17 @@ int main(int argc, char **argv) {
                "def merged():\n    d = dict(Mapped())\n    d.update(Generated())\n    return sum(d.values()) + len(dict(Generated()))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "merged()", "merged.py"), SPY_STOP_STEPS, &pauses)) == 55 && pauses > 1);
+    /* So does a sort of tuples whose tied items compare by Python __eq__ and __lt__. */
+    execute(c, "class Tied:\n    def __init__(self, v): self.v = v\n    def __eq__(self, o): return slow(self.v) == o.v\n"
+               "    def __lt__(self, o): return slow(self.v) < o.v\n"
+               "def tied():\n    ts = sorted([(0, Tied(i % 3)) for i in range(12)])\n    return sum(k * t[1].v for k, t in enumerate(ts))");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "tied()", "tied.py"), SPY_STOP_STEPS, &pauses)) == 98 && pauses > 1);
+    /* So does ordering tuples whose items compare by them. */
+    execute(c, "def ordered():\n    a = tuple(Tied(0) for i in range(12)) + (Tied(1),)\n    b = tuple(Tied(0) for i in range(12)) + (Tied(2),)\n"
+               "    return (a < b) + (list(a) > list(b)) * 2 + ((a,) < (b,)) * 4");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "ordered()", "ordered.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");
