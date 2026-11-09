@@ -443,8 +443,8 @@ Python frames run between it and the host (docs/metering.md 3.8): the call
 returns NULL (spy_exec -1) without an error, and spy_paused tells why
 (SPY_STOP_STEPS or SPY_STOP_INTERRUPT). A further budget spent before that
 step stops the call, unless it is spent parsing or compiling source or
-charging a body's length on entry, which pause after they finish. Other calls may run while one is paused; they stop
-rather than pause.
+charging a body's length on entry, which pause after they finish. Other
+calls may run while one is paused; they stop rather than pause.
 
 ```c
 SPYValue *spy_resume(SPYContext *);

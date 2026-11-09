@@ -263,8 +263,10 @@ size_t spy_steps_used(const SPYContext *);
  * where only Python frames run between it and the host (docs/metering.md
  * 3.8): the call returns NULL (spy_exec -1) without an error, and
  * spy_paused tells why (SPY_STOP_STEPS or SPY_STOP_INTERRUPT). A further
- * budget spent before that step stops the call. Other calls may run while
- * one is paused; they stop rather than pause. */
+ * budget spent before that step stops the call, unless it is spent
+ * parsing or compiling source or charging a body's length on entry, which
+ * pause after they finish. Other calls may run while one is paused; they
+ * stop rather than pause. */
 int spy_paused(const SPYContext *);
 /* Run the paused call on with fresh budgets: its value, as spy_eval
  * returns it, or NULL with an error or paused again. Freeing the context
