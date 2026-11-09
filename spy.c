@@ -13888,7 +13888,10 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * order descending or not; list.sort's list, the target, waits empty;
  * once the keys are taken, a sort whose comparisons call Python sorts in
  * sorter (key_call). A min or max by key keeps its best item and, in
- * result, that item's key, and the item whose key its callee is computing. next(), __next__ and
+ * result, that item's key, the item whose key its callee is computing,
+ * and in empty its default for no items; one fed takes its items as other
+ * consumers do, each then its item for the key. A list collecting the
+ * items of a keyed sort keeps its keywords in pending (key_consumer). next(), __next__ and
  * send (B_NEXT) keep their default in result, the value to send and then
  * the value the generator returned in sent, and the item it gave in best.
  * A sum on the machine (adds) adds result and item by a Python method
@@ -13907,8 +13910,8 @@ struct Sorter {
     SortItem items[];
 };
 typedef struct {
-    int id, compensating, method, keyed, descending, adds, phase, swapped, stage;
-    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending;
+    int id, compensating, method, keyed, descending, adds, phase, swapped, stage, fed;
+    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     struct Sorter *sorter;
@@ -13980,6 +13983,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->sent) visit(b->consumer->sent, data);
         if (b->consumer && b->consumer->made) visit(b->consumer->made, data);
         if (b->consumer && b->consumer->pending) visit(b->consumer->pending, data);
+        if (b->consumer && b->consumer->empty) visit(b->consumer->empty, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
@@ -21855,7 +21859,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     if (b.consumer) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
-        spy_release(b.consumer->pending);
+        spy_release(b.consumer->pending); spy_release(b.consumer->empty);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
 }
@@ -22154,6 +22158,12 @@ static int called_iterator(SPYValue *v) {
     int kind = v->as.iterator.kind;
     return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE);
 }
+/* Whether a consumer takes v's items on the machine: a generator it can
+ * resume, an iterator whose items are calls, a zip or map of generators,
+ * an enumerate or filter of one, or an instance iterating in Python. */
+static int machine_source(SPYContext *c, SPYValue *v) {
+    return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(c, v) || iter_function(c, v) || getitem_iterated(c, v);
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
@@ -22165,8 +22175,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
-    if (!argc || (!resumable(argv[0]) && !called_iterator(argv[0]) && !zip_of_generator(argv[0]) &&
-                  !adapted_generator(c, argv[0]) && !iter_function(c, argv[0]) && !getitem_iterated(c, argv[0]))) return -1;
+    if (!argc || !machine_source(c, argv[0])) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT && argv[0]->type != SPY_INSTANCE) ? B_EXTEND : -1 :
@@ -22270,11 +22279,43 @@ static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, S
 /* Whether the consumer atop m, given its generator's next item (NULL at
  * its end or on an error), takes another; when it does not, its result is
  * on the stack, or the error pending. */
+static NO_INLINE int key_consumer(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, const Entry *, size_t);
+/* Whether consumer s calls a key or comparison next (key_call), not
+ * taking an item: a keyed one, but a fed min or max with no item. */
+static ALWAYS_INLINE int key_working(const Consumer *s) {
+    return s->keyed && (!s->fed || s->item || s->pending);
+}
+/* A keyed min's or max's result once its items are taken, owned: its
+ * best item, else its default, else NULL with the ValueError. */
+static SPYValue *key_best(SPYContext *c, Consumer *s) {
+    return s->best ? spy_retain(s->best) : s->empty ? spy_retain(s->empty) :
+           errorf(c, "ValueError", "%s() iterable argument is empty", s->keyed == KEY_MAX ? "max" : "min");
+}
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
     if (!item && top->consumer->id == B_CLOSE && error_is(c, "GeneratorExit")) spy_clear_error(c);
+    if (top->consumer->fed) {
+        /* A fed min or max takes its item's key next (key_call), or ends. */
+        if (item) { top->consumer->item = item; return 1; }
+        SPYValue *result = c->error_type[0] ? NULL : key_best(c, top->consumer);
+        pop_block(c, m, f);
+        if (result) machine_push(c, m, result);
+        return 0;
+    }
     int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;
+    if (status > 0 && top->consumer->id == B_LIST && top->consumer->pending) {
+        /* A keyed sort goes on over the items collected (key_consumer);
+         * one key_consumer cannot take sorts natively. */
+        Consumer *s = top->consumer;
+        SPYValue *items = s->result, *callee = s->callee, *keywords = s->pending;
+        s->result = s->callee = s->pending = NULL;
+        pop_block(c, m, f);
+        int began = key_consumer(c, m, callee, 1, &items, map_items(keywords), keywords->as.map.len);
+        if (!began) machine_push(c, m, call_keywords(c, callee, 1, &items, keywords));
+        release_all(3, (SPYValue *[]){items, callee, keywords});
+        return began > 0;
+    }
     if (status > 0) {
         int id = top->consumer->id;
         SPYValue *result = consumer_end(c, top->consumer);
@@ -22369,18 +22410,43 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     int method = callee->type == SPY_BOUND_METHOD && !callee->as.bound.module && callee->as.bound.method == M_SORT;
     if (method) callee = callee->as.bound.self;
     int keyed = method || id == B_SORTED ? KEY_SORT : id == B_MIN ? KEY_MIN : id == B_MAX ? KEY_MAX : 0;
-    if (!keyed || (method ? positional != 0 : id == B_SORTED ? positional != 1 : !positional) ||
-        (positional == 1 && resumable(argv[0]))) return 0;
-    SPYValue *key = NULL, *reverse = NULL;
+    if (!keyed || (method ? positional != 0 : id == B_SORTED ? positional != 1 : !positional)) return 0;
+    SPYValue *key = NULL, *reverse = NULL, *empty = NULL;
     for (size_t i = 0; i < kwc; i++) {
         const char *name = builtin_value(c, kw[i].key, SPY_STRING)->as.string.data;
-        SPYValue **slot = !strcmp(name, "key") ? &key : keyed == KEY_SORT && !strcmp(name, "reverse") ? &reverse : NULL;
+        SPYValue **slot = !strcmp(name, "key") ? &key : keyed == KEY_SORT ? !strcmp(name, "reverse") ? &reverse : NULL :
+                          !strcmp(name, "default") && positional == 1 ? &empty : NULL;
         if (!slot || *slot) return 0;
         *slot = kw[i].value;
     }
+    if (key && key->type == SPY_NONE) key = NULL;
+    if (positional == 1 && machine_source(c, argv[0]) && keyed != KEY_SORT) {
+        /* min and max take each item on the machine, then its key (fed). */
+        SPYValue *items = get_iterator(c, argv[0]);
+        Consumer *consumer = items ? allocate(c, sizeof(*consumer)) : NULL;
+        Block *block = consumer ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
+        if (!block) { mem_free(consumer); spy_release(items); return -1; }
+        *consumer = (Consumer){.keyed = keyed, .fed = 1, .callee = key ? spy_retain(key) : NULL, .empty = empty ? spy_retain(empty) : NULL};
+        block->value = items; block->consumer = consumer;
+        return 1;
+    }
+    if (positional == 1 && machine_source(c, argv[0])) {
+        /* A sort's items the machine takes are collected first, as list()
+         * does; the keyed block then replaces the collecting one
+         * (consumer_took). */
+        SPYValue *keywords = value_new(c, SPY_DICT);
+        for (size_t i = 0; keywords && i < kwc; i++)
+            if (map_append(c, keywords, kw[i].key, kw[i].value, kw[i].hash)) { spy_release(keywords); keywords = NULL; }
+        if (!keywords) return -1;
+        size_t blocks = m->block_len;
+        consume(c, m, B_LIST, c->types[SPY_LIST], -1, NULL, spy_retain(argv[0]), NULL);
+        if (m->block_len == blocks) { spy_release(keywords); return -1; }
+        Consumer *s = m->blocks[blocks].consumer;
+        s->callee = spy_retain(callee); s->pending = keywords;
+        return 1;
+    }
     /* With no key, a sort of instances (instance_sort) takes the items as
      * its keys. */
-    if (key && key->type == SPY_NONE) key = NULL;
     if (key ? !key_function(c, key) : keyed != KEY_SORT || !instance_sort(c, method ? callee : argv[0])) return 0;
     /* sorted() takes its items before list.sort reads reverse, which reads
      * it before it empties the list. */
@@ -22401,7 +22467,7 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
     Block *block = ready ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (block) {
         *consumer = (Consumer){.keyed = keyed, .descending = descending, .result = keys, .callee = key ? spy_retain(key) : NULL,
-                               .target = method ? spy_retain(callee) : NULL};
+                               .target = method ? spy_retain(callee) : NULL, .empty = empty ? spy_retain(empty) : NULL};
         block->value = items; block->consumer = consumer;
         return 1;
     }
@@ -22460,14 +22526,19 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
             SPYValue *args[] = {spy_retain(s->phase ? s->result : s->pending), spy_retain(s->phase ? s->pending : s->result)};
             return (*env = function_env(c, function, 2, args, NULL, 1)) ? spy_retain(function) : NULL;
         }
+        if (s->fed) {
+            /* The item a fed min or max took, given its key: a call, or
+             * natively, then the next item (consume_generator). */
+            if (!s->callee) { key_took(c, m, spy_retain(s->item)); return NULL; }
+            return key_enter(c, m, s, spy_retain(s->item), env);
+        }
         while ((item = iterator_next(c, items))) {
             s->item = spy_retain(item);
             SPYValue *function = key_enter(c, m, s, item, env);
             if (function || c->error_type[0]) return function;
         }
         if (c->error_type[0]) return NULL;
-        result = s->best ? spy_retain(s->best) :
-                 errorf(c, "ValueError", "%s() iterable argument is empty", s->keyed == KEY_MAX ? "max" : "min");
+        result = key_best(c, s);
     }
     pop_block(c, m, f);
     if (c->error_type[0]) spy_release(result);
@@ -25754,13 +25825,15 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
         value = m->blocks[m->block_len - 1].value;
-        if (m->blocks[m->block_len - 1].consumer->keyed || (!resumable(value) && (value->type != SPY_COROUTINE || !suspended(value)))) {
+        if (key_working(m->blocks[m->block_len - 1].consumer) || (!resumable(value) && (value->type != SPY_COROUTINE || !suspended(value)))) {
             m->pc = pc;
             callee_env = NULL;
-            if (m->blocks[m->block_len - 1].consumer->keyed) {
-                if (!(value = key_call(c, m, &f, &callee_env))) continue;
-                special = CALL_KEY;
-                goto enter_special;
+            if (key_working(m->blocks[m->block_len - 1].consumer)) {
+                size_t depth = m->block_len;
+                if ((value = key_call(c, m, &f, &callee_env))) { special = CALL_KEY; goto enter_special; }
+                /* A fed min or max whose key was taken natively takes its next item. */
+                if (!c->error_type[0] && m->block_len == depth) goto consume_generator;
+                continue;
             }
             /* A map's function is a call returning its item (CALL_ITEM). */
             SPYValue *next;

@@ -61,7 +61,7 @@ Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_d
           "map_shortest", "map_none", "map_bound", "filter_none", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
-          "sort_mutated", "sort_key_error", "sort_key_callables", "consume_getitem", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
+          "sort_mutated", "sort_key_error", "sort_key_callables", "key_sources", "consume_getitem", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
           "len_float", "len_unsized", "sum_iter", "aiter_sync", "slice_builtin", "range_iter_type",
           "iter_sentinel_reentrant", "iter_sentinel_reduce", "iter_sequence_state"}
 Programs == [op : Ops, l : Lists]
@@ -126,6 +126,7 @@ Case(c) ==
       [] c = "sort_mutated" -> "ValueError: list modified during sort"
       [] c = "sort_key_error" -> "ZeroDivisionError: division by zero"
       [] c = "sort_key_callables" -> "([3, 2, 1], [2, 4, 1, 3], 1)"
+      [] c = "key_sources" -> "([1, 0], 0, 'd', [0, 1, 'k0', 'k1', 0, 'k0', 1, 'k1'])"
       [] c = "sort_lt_only" -> "[1, 2, 3]"
       [] c = "sort_gt_reflected" -> "[1, 2]"
       [] c = "len_negative" -> "ValueError: __len__() should return >= 0"

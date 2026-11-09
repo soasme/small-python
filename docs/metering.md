@@ -315,6 +315,8 @@ These run as machines on the heap, in one native activation of
   coroutines resumed by `send`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`, also
   bound methods, callable instances' `__call__` and classes' `__init__`,
+  and the items those with keywords take from generators and the other
+  sources above,
   the Python `__lt__` comparisons of `sorted` and `list.sort`, and the
   Python comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,

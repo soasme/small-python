@@ -73,6 +73,9 @@ SOURCES = {
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
                           "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"
                           "result = (sorted([1, 3, 2], key=R), sorted([1, 2, 3, 4], key=W().m), max([1, 3, 2], key=W()))",
+    "key_sources": "def g(n):\n    for i in range(n):\n        log.append(i)\n        yield i\nlog = []\n"
+                   "def k(v):\n    log.append('k%d' % v)\n    return -v\n"
+                   "result = (sorted(g(2), key=k), max(g(2), key=k), min(g(0), key=k, default='d'), log)",
     "consume_getitem": "class G:\n    def __getitem__(s, i):\n        if i >= 3: raise IndexError(i)\n        return i\n"
                        "class L(G):\n    def __len__(s): return 3\n"
                        "result = (list(G()), sum(G()), sorted(G()), [x for x in G()], tuple(iter(G())), list(reversed(L())))",

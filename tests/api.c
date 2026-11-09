@@ -1158,6 +1158,11 @@ int main(int argc, char **argv) {
                "def prepared():\n    class A(metaclass=Prepared): w = v\n    class B(A): w = v + 1\n    return A.w + B.w");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "prepared()", "prepared.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
+    /* So do sorted() and max() with keywords of a generator. */
+    execute(c, "def keygen():\n    for i in range(4):\n        for j in range(1000): pass\n        yield i\n"
+               "def keyed_source():\n    return sorted(keygen(), reverse=True)[0] + max(keygen(), key=lambda v: -v, default=9)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed_source()", "keyed_source.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
     /* So does a base's Python __mro_entries__. */
     execute(c, "class Entry:\n    def __mro_entries__(self, bases):\n        for i in range(3000): pass\n        return (int,)\n"
                "def entries():\n    class A(Entry()): x = 1\n    class B(list[int]): y = 2\n    return A(A.x + B.y + len(B([0])))");
