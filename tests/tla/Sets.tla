@@ -13,7 +13,9 @@
 (*   - two sets a and b of elements from {0, 1, 2}, each a set or a        *)
 (*     frozenset, and one of  a | b, a & b, a - b, a ^ b, a <= b, a < b,   *)
 (*     a >= b, a > b, a == b, a.isdisjoint(b), a |= b, a &= b, a -= b,     *)
-(*     a ^= b, a.add(2), a.discard(2), a.remove(2), hash(a), a.add([]); or *)
+(*     a ^= b, a.add(2), a.discard(2), a.remove(2), hash(a), a.add([]),    *)
+(*     where with eq each element is an object hashing as its value whose  *)
+(*     Python __eq__ compares values, which changes no outcome; or         *)
 (*   - set(<items>) of up to three of 1, 1.0, True, 2.                     *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
@@ -26,7 +28,7 @@ Elements == SUBSET {0, 1, 2}
 Binary == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "isdisjoint"}
 Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list"}
 Numbers == {"1", "1.0", "True", "2"}
-Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements]
+Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
 
 VARIABLES program, outcome

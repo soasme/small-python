@@ -146,6 +146,16 @@ static const char *const programs[] = {
     "    return G().missing\n"
     "print(f())\n",
 
+    "class K:\n"
+    "    def __hash__(self): return 0\n"
+    "    def __eq__(self, other):\n"
+    "        for i in range(1): pass\n"
+    "        return False\n"
+    "def f():\n"
+    "    for i in range(1): pass\n"
+    "    return len({K()} | {K(), K()})\n"
+    "print(f())\n",
+
     "class E:\n"
     "    def __mro_entries__(self, bases):\n"
     "        for i in range(1): pass\n"

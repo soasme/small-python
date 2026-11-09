@@ -414,6 +414,7 @@ struct SPYContext {
     SPYValue *nesting; /* On a machine's stack, marks a sequence comparison whose pair's goes on above it (equal_call). */
     size_t finalizing;       /* The depth of calls with a __del__ on the machine (finalizer_call), or 0. */
     int code_work; /* Nonzero while source is parsed or compiled or a body's length charged: work bounded by the source (halt). */
+    SPYValue *walking; /* On a machine's stack, marks a set operation's walk under way (set_walk). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -9982,6 +9983,7 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
     }
     return comparison(c, op, a, b);
 }
+static int set_walks(int, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -9990,7 +9992,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE ? NULL : binary(c, op, a, b);
+    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -23754,11 +23756,14 @@ static int sequence_python(SPYContext *c, SPYValue *a, SPYValue *b) {
     size_t end;
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX);
 }
+/* Whether v is a plain instance whose class has a Python __eq__. */
+static int python_eq(SPYValue *v) {
+    SPYValue *eq = v->type == SPY_INSTANCE && !v->as.map.base ? class_lookup(v->as.map.parent, "__eq__") : NULL;
+    return eq && eq->type == SPY_FUNCTION;
+}
 /* Whether instance v's == is identity: its class has no Python __eq__. */
 static int identity_equal(SPYValue *v) {
-    if (v->type != SPY_INSTANCE || v->as.map.base) return 0;
-    SPYValue *eq = class_lookup(v->as.map.parent, "__eq__");
-    return !eq || eq->type != SPY_FUNCTION;
+    return v->type == SPY_INSTANCE && !v->as.map.base && !python_eq(v);
 }
 /* Whether ordering op of a and b, two lists or two tuples, calls a
  * Python method on the machine: an item's __eq__ (python_pair), or the
@@ -24047,8 +24052,10 @@ static int store_lookup(SPYValue *map, SPYValue *key, int display) {
  * KeyError, in with its truth (operator_finish); a store with the value
  * under the lookup's state in the entry, or a new one, a deletion with the
  * entry removed, or a KeyError, as set_index and delete_index do. */
+static Machine *walk_found(SPYContext *, Machine *, Instruction *, SPYValue *, int64_t, ptrdiff_t, size_t);
 static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash, ptrdiff_t found,
                               size_t pc) {
+    if (m->len && m->stack[m->len - 1] == c->walking) return walk_found(c, m, ins, key, hash, found, pc);
     if (lookup_stores(ins)) {
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *storage = namespace_map(map);
@@ -24097,6 +24104,76 @@ static Machine *lookup_step(SPYContext *c, Machine *m, Instruction *ins, SPYValu
     ptrdiff_t found;
     SPYValue *function = lookup_call(c, m, map, key, hash, cursor, &found, &env);
     return lookup_enter(c, m, ins, map, key, hash, function, env, found, pc);
+}
+/* Whether set operator op of x and y, exact sets or frozensets, may call
+ * a Python __eq__ (set_walk): one of them holds an instance with one. */
+static int set_walks(int op, SPYValue *x, SPYValue *y) {
+    if ((op != '|' && op != '&' && op != '-' && op != '^') || !is_set(x) || !is_set(y)) return 0;
+    for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++)
+        if (python_eq(i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key)) return 1;
+    return 0;
+}
+/* The walk atop m (set_walk) decides an entry, key of hash, found at
+ * index found of the set searched, or -1: | and ^ add one not found to
+ * the result, ^ removes one found from it, & keeps one found and - one
+ * not found; the walk goes on with the next entry. */
+static void walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found) {
+    SPYValue **state = &m->stack[m->len - 6], *result = state[0];
+    int op = (int)state[4]->as.integer_data.small;
+    if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
+    else if (op == '^') set_remove_at(result, (size_t)found);
+    SPYValue *next = int_value(c, state[3]->as.integer_data.small + 1);
+    if (next) { spy_release(state[3]); state[3] = next; }
+}
+/* The walk atop m from its next entry on: each entry's lookup in the set
+ * searched, decided (walk_decide) where it calls no Python; the first
+ * Python __eq__ entered, its lookup pushed above the walk (lookup_call).
+ * At the end, or on an error, the walk popped, its result in c->looked;
+ * then NULL. */
+static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
+    for (;;) {
+        SPYValue **state = &m->stack[m->len - 6], *walked = state[1], *map = state[2], *function;
+        size_t i = (size_t)state[3]->as.integer_data.small;
+        if (c->error_type[0] || i >= walked->as.map.len) break;
+        Entry entry = map_items(walked)[i];
+        ptrdiff_t found;
+        if ((function = lookup_call(c, m, map, entry.key, entry.hash, map_cursor(map, entry.hash), &found, env)) || c->error_type[0])
+            return function;
+        walk_decide(c, m, entry.key, entry.hash, found);
+    }
+    for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
+    SPYValue *result = machine_pop(m);
+    if (c->error_type[0]) spy_release(result);
+    else c->looked = result;
+    return NULL;
+}
+/* For set operator step op of x and y (set_walks), the result built on
+ * m as set_combine does: x's copy, given y's entries for | and ^, or x's
+ * entries kept for & and -, each looked up in the other, on the machine.
+ * The walk's state, the result, the set walked, the set searched, the
+ * next entry's index and op, goes on m's stack under c->walking, and the
+ * walk begins (walk_next). */
+static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, SPYValue **env) {
+    int adds = op == '|' || op == '^';
+    SPYValue *result = adds ? set_copy_type(c, x, x->type) : value_new(c, x->type);
+    size_t len = m->len;
+    if (machine_push(c, m, result) || machine_push(c, m, spy_retain(adds ? y : x)) || machine_push(c, m, spy_retain(adds ? result : y)) ||
+        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op)) || machine_push(c, m, spy_retain(c->walking))) {
+        while (m->len > len) spy_release(machine_pop(m));
+        return NULL;
+    }
+    return walk_next(c, m, env);
+}
+/* A set walk's lookup (walk_next) ended with entry found, or -1: decided,
+ * the walk goes on, entering its next Python __eq__ (lookup_enter, which
+ * returns here if the call fails); at its end, or on an error, operator
+ * step ins ends with its result. */
+static Machine *walk_found(SPYContext *c, Machine *m, Instruction *ins, SPYValue *key, int64_t hash, ptrdiff_t found, size_t pc) {
+    SPYValue *env = NULL, *function;
+    if (!c->error_type[0]) walk_decide(c, m, key, hash, found);
+    if ((function = walk_next(c, m, &env))) return lookup_enter(c, m, ins, NULL, key, hash, function, env, -1, pc);
+    m->pc = operator_finish(c, m, ins, c->none, c->error_type[0] ? NULL : looked(c), pc);
+    return m;
 }
 /* The __eq__ of a key's lookup (lookup_push) returned result: on
  * NotImplemented from the first call, the reflected Python __eq__ entered
@@ -24253,6 +24330,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
     c->entering_kind = CALL_OPERATOR;
+    /* A set operation whose lookups may call a Python __eq__. */
+    if (kind == OPERATE_BINARY && is_set(x) && set_walks(op, x, y)) return set_walk(c, m, op, x, y, env);
     /* A dict's item, or a dict's or set's member: its key's __hash__ first,
      * the operands on the stack under the key for the operation. */
     if ((kind == OPERATE_INDEX || contains) && (contains ? x : y)->type == SPY_INSTANCE && hashes_key(contains ? y : x, contains)) {
@@ -33851,9 +33930,10 @@ SPYContext *spy_context_new(void) {
     c->replacing = value_new(c, V_UNBOUND);
     c->probing = value_new(c, V_UNBOUND);
     c->nesting = value_new(c, V_UNBOUND);
+    c->walking = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;
