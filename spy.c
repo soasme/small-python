@@ -13865,13 +13865,14 @@ typedef struct { int flow; SPYValue *value; } Result;
     X(BC_RAISE) X(BC_DECORATE) X(BC_CONVERT) X(BC_FORMAT) X(BC_JOIN) X(BC_TEMPLATE) \
     X(BC_INTERPOLATION) X(BC_AENTER) X(BC_AWITH) X(BC_END_WITH) X(BC_PATTERN) X(BC_STAR_BEGIN) \
     X(BC_STAR_MATCH) X(BC_STAR_DONE) X(BC_STAR_CAUGHT) X(BC_STAR_RERAISE) X(BC_DELETE) \
-    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT)
+    X(BC_BUILDER) X(BC_CLASS) X(BC_GENERIC_FUNCTION) X(BC_TEST) X(BC_CALLF) X(BC_CALLN) X(BC_CALLK) X(BC_RETURN) X(BC_ANNOTATE) X(BC_BLOCK) X(BC_INCREMENT) X(BC_DISPLAY)
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
 typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
 /* calls: BODY for a function body whose calls run on the machine (expands). */
-struct Program { Instruction *items; size_t len, cap; int calls; };
+/* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
+struct Program { Instruction *items; size_t len, cap; int calls, display; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -14366,7 +14367,7 @@ static int increment(Node *n) {
 }
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
-    if (!expands(n, p->calls)) { emit(c, p, increment(n) ? BC_INCREMENT : BC_EXEC, n, 0); return; }
+    if (!expands(n, p->calls) && !(p->display && n->kind == N_EXPR)) { emit(c, p, increment(n) ? BC_INCREMENT : BC_EXEC, n, 0); return; }
     switch (n->kind) {
     case N_EXPR:
         /* A yield statement drops the sent value rather than popping it (arg 2). */
@@ -14375,7 +14376,9 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             if (!leaf) compile_expr(c, p, n->a->a);
             emit(c, p, BC_YIELD, n->a, leaf | 2); break;
         }
-        compile_expr(c, p, n->a); emit(c, p, BC_POP, n, 0); break;
+        compile_expr(c, p, n->a);
+        if (p->display) emit(c, p, BC_DISPLAY, n, 0);
+        emit(c, p, BC_POP, n, 0); break;
     case N_ASSIGN:
         if (n->op != '=') {
             Node *target = n->a;
@@ -16555,7 +16558,7 @@ static int start_annotations(SPYContext *, Frame *, Node *, const char *);
  * references, releasing them when it fails. The body's instructions of no
  * node tick on its first statement. */
 static NO_INLINE Call *unit_enter(SPYContext *c, SPYValue *unit, SPYValue *env, Machine *caller) {
-    Frame frame = {env, unit, 0};
+    Frame frame = {env, unit, unit->as.unit.expression == 2};
     if (!enter_frame(c, env, unit)) {
         if (!setup_annotations(c, &frame, unit->as.unit.setup_annotations) &&
             !start_annotations(c, &frame, unit->as.unit.annotate, "__annotate__") &&
@@ -20687,6 +20690,16 @@ static NO_INLINE int display_value(SPYContext *c, SPYValue *value) {
     spy_release(text);
     return c->error_type[0] ? -1 : name_set(c, c->builtins, "_", value);
 }
+/* BC_DISPLAY of value, which it takes, on m: a Python sys.displayhook,
+ * owned, with *env to call on value; else NULL, with the display's None
+ * pushed unless it failed. */
+static NO_INLINE SPYValue *display_call(SPYContext *c, Machine *m, SPYValue *value, SPYValue **env) {
+    SPYValue *sys = sys_module(c), *hook = sys ? name_local(sys, "displayhook") : NULL;
+    if (hook && machine_function(c, hook)) return (*env = function_env(c, hook, 1, &value, NULL, 1)) ? spy_retain(hook) : NULL;
+    if (!display_value(c, value)) machine_push(c, m, spy_none(c));
+    spy_release(value);
+    return NULL;
+}
 /* Annotations are not evaluated here; a value is assigned, and complex
  * targets still evaluate their object and subscript. */
 /* Where a body keeps __conditional_annotations__: a module's namespace, but
@@ -20815,13 +20828,13 @@ static int module_program(SPYContext *c, SPYValue *unit) {
     if (unit->as.unit.flat) return 0;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = c->pausing ? PAUSING : BODY;
+    p->calls = c->pausing ? PAUSING : BODY; p->display = unit->as.unit.expression == 2;
     /* The body's value is its last statement's, when that is an expression. */
     Node *body = unit->as.unit.body, *last = body;
     while (last->next) last = last->next;
     c->code_work++;
     for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
-    if (last->kind == N_EXPR) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
+    if (last->kind == N_EXPR && !p->display) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
     else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
     c->code_work--;
     if (c->error_type[0]) { free_program(p); return -1; }
@@ -20834,13 +20847,13 @@ static Result module_body(SPYContext *c, Frame *f) {
     int pausable = c->pause_entry;
     SPYValue *unit = f->unit;
     Node *body = unit->as.unit.body;
-    Machine *m = f->interactive || unit->as.unit.expression || !body || module_program(c, unit) ? NULL :
+    Machine *m = (f->interactive && unit->as.unit.expression != 2) || unit->as.unit.expression == 1 || !body || module_program(c, unit) ? NULL :
                  machine_new(c, unit->as.unit.flat, f->env, unit);
     c->pause_entry = 0;
     /* The walker runs it as an outermost call that does not pause. */
     if (pausable && !m) c->pause_due = 0;
     if (!m) return c->error_type[0] ? (Result){FLOW_ERROR, NULL} : execute(c, f, body);
-    m->owner = body;
+    m->owner = body; m->frame.interactive = f->interactive;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
     if (pausable) c->pause_root = m;
@@ -22656,7 +22669,7 @@ static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t a
     release_all(argc, argv);
     if (!*env) return unit;
     int expression = unit->as.unit.expression;
-    if (expression == 2 || !unit->as.unit.body) {
+    if (!unit->as.unit.body) {
         SPYValue *result = run_source(c, eval, *env, unit);
         *env = NULL;
         return result;
@@ -25047,6 +25060,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (a) for (size_t i = a->as.seq.len; i; i--)
                 if (machine_push(c, m, spy_retain(a->as.seq.items[i - 1]))) break;
             if (!a && !c->error_type[0]) goto consume_generator;
+            break;
+        CASE(BC_DISPLAY)
+            /* An interactive expression statement's value goes to the
+             * display hook, a Python one a call (display_call). */
+            if ((value = display_call(c, m, machine_pop(m), &callee_env))) goto enter_call;
             break;
         CASE(BC_ASSERT)
             a = ins->arg ? machine_pop(m) : NULL;

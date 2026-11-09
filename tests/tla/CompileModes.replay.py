@@ -8,7 +8,8 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 SOURCES = {"expr": "1 + 1\n", "assign": "x = 1\n", "list": "x = 1; 2\n", "lines": "x = 1\ny = 2\n",
            "compound": "if 1:\n    3\n    4\n", "none": "None\n", "empty": "", "indented": " 1\n",
-           "trailing": "1 + 1\n\n", "starred": "*[1], 2\n"}
+           "trailing": "1 + 1\n\n", "starred": "*[1], 2\n", "loop": "for i in range(2): i\n",
+           "function": "def f():\n    5\n", "class": "class C:\n    5\n"}
 
 
 def outcome(p):

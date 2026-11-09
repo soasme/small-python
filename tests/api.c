@@ -1133,6 +1133,10 @@ int main(int argc, char **argv) {
                "def mapped():\n    d = Doubler()\n    return sum(map(d, range(30))) + sum(map(d.twice, range(30)))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "mapped()", "mapped.py"), SPY_STOP_STEPS, &pauses)) == 1740 && pauses > 1);
+    /* So does exec of interactive input, displaying its values. */
+    execute(c, "def single():\n    exec(compile('for i in range(20): slow(i) and None\\n', 's', 'single'), globals())\n    return 1");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "single()", "single.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

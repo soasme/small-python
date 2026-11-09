@@ -89,6 +89,8 @@ Unreleased (0.8.0):
   without the C stack
 - a map() or zip() taking items from a generator releases each item once
   given on, where it kept it alive until a collection
+- exec and eval of interactive input, and the Python sys.displayhook they
+  call, no longer use the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

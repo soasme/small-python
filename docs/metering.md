@@ -285,8 +285,9 @@ These run as machines on the heap, in one native activation of
   Python `__new__`, also called with keywords; instances with a Python `__call__`; Python
   decorators; a class statement's metaclass `__new__`, and the new
   class's `__set_name__` and `__init_subclass__` calls;
-- `exec` and `eval` of source, and the module of source an `import`
-  statement runs;
+- `exec` and `eval` of source, also of interactive input (mode
+  `'single'`) and the Python `sys.displayhook` its values go to, and the
+  module of source an `import` statement runs;
 - a loop's Python `__iter__` and `__next__`, the function of a `map` or
   `filter` it takes items from, a `map`'s bound method or callable
   instance's `__call__` too, the generator that an `enumerate`, or a
