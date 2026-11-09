@@ -413,6 +413,7 @@ struct SPYContext {
     SPYValue *probing; /* On a machine's stack, marks a key's lookup under way (lookup_call). */
     SPYValue *nesting; /* On a machine's stack, marks a sequence comparison whose pair's goes on above it (equal_call). */
     size_t finalizing;       /* The depth of calls with a __del__ on the machine (finalizer_call), or 0. */
+    int code_work; /* Nonzero while source is parsed or compiled or a body's length charged: work bounded by the source (halt). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -602,10 +603,12 @@ static NO_INLINE SPYValue *call(SPYContext *c, SPYValue *fn, size_t argc, SPYVal
  * fails with the stop's error, so no handler or finally body runs on. */
 static void schedule_poll(SPYContext *);
 static NO_INLINE int halt(SPYContext *c, int reason) {
-    /* While a pausable call runs, its first spent budget or interrupt makes
-     * a pause due at its next step where it can pause, with one more budget
-     * to reach it in. */
-    if (c->pause_root && !c->pause_due && !c->stopped && (reason == SPY_STOP_STEPS || reason == SPY_STOP_INTERRUPT)) {
+    /* While a pausable call is entered or runs, its first spent budget or
+     * interrupt makes a pause due at its next step where it can pause, with
+     * one more budget to reach it in; during work bounded by the source
+     * (code_work), every spent budget does, unless the call is paused. */
+    if ((c->pause_root || c->pause_entry) && (!c->pause_due || (c->code_work && !c->paused_at)) && !c->stopped &&
+        (reason == SPY_STOP_STEPS || reason == SPY_STOP_INTERRUPT)) {
         c->pause_due = reason; c->quiet_unit = NULL;
         c->fuel = c->step_limit ? c->step_limit : SIZE_MAX;
         schedule_poll(c);
@@ -670,7 +673,11 @@ static void *mem_realloc(SPYContext *, void *, size_t);
 static NO_INLINE int watched_call(SPYContext *c) {
     struct ActiveFrame *frame = &c->frames[c->py_depth - 1];
     Scope *scope = frame->env->type == V_ENV ? frame->env->as.map.scope : frame->owner->type == V_UNIT ? frame->owner->as.unit.scope : NULL;
-    return ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) || spend(c, scope ? scope->nodes / 8 : 0) || watched_pass(c);
+    if ((c->settings[SET_TRACE] || c->settings[SET_PROFILE]) && trace_call(c)) return -1;
+    c->code_work++;
+    int spent = spend(c, scope ? scope->nodes / 8 : 0);
+    c->code_work--;
+    return spent || watched_pass(c);
 }
 /* Room for one more frame, or -1 at the recursion limit. */
 static NO_INLINE int frame_room(SPYContext *c) {
@@ -8260,8 +8267,10 @@ static int caller_future_flags(SPYContext *c) {
 }
 static SPYValue *decode_source(SPYContext *, const char *, size_t, const char *);
 static SPYValue *parse(SPYContext *c, const char *source, size_t len, const char *filename) {
+    c->code_work++;
     SPYValue *text = decode_source(c, source, len, filename);
     SPYValue *unit = text ? parse_source(c, text->as.string.data, filename, NULL) : NULL;
+    c->code_work--;
     spy_release(text);
     return unit;
 }
@@ -14582,7 +14591,9 @@ static int compile_generator(SPYContext *c, Node *n) {
     p->calls = mode;
     if (generator) n->code = p;
     else n->flat = p;
+    c->code_work++;
     compile_body(c, p, n->b);
+    c->code_work--;
     /* The implicit return has no node: it runs on the last line executed;
      * a class body's returns its __class__ cell (class_part). */
     emit(c, p, n->kind == N_CLASS ? BC_CLASS : BC_NONE, NULL, 6); emit(c, p, BC_FLOW, NULL, FLOW_RETURN);
@@ -20807,23 +20818,27 @@ static int module_program(SPYContext *c, SPYValue *unit) {
     /* The body's value is its last statement's, when that is an expression. */
     Node *body = unit->as.unit.body, *last = body;
     while (last->next) last = last->next;
+    c->code_work++;
     for (Node *s = body; s != last && !c->error_type[0]; s = s->next) compile_statement(c, p, s);
     if (last->kind == N_EXPR) { compile_expr(c, p, last->a); emit(c, p, BC_FLOW, last, FLOW_RETURN); }
     else { compile_statement(c, p, last); emit(c, p, BC_NONE, NULL, 0); emit(c, p, BC_FLOW, NULL, FLOW_RETURN); }
+    c->code_work--;
     if (c->error_type[0]) { free_program(p); return -1; }
     unit->as.unit.flat = p;
     return 0;
 }
 static Result module_body(SPYContext *c, Frame *f) {
-    /* The body a pausable call runs first, while no other is paused. */
-    int pausable = c->pause_entry && c->pausing && !c->pause_root;
-    c->pause_entry = 0;
+    /* The body a pausable call runs first (eval_source), compiled while
+     * its entry may still pause (halt). */
+    int pausable = c->pause_entry;
     SPYValue *unit = f->unit;
     Node *body = unit->as.unit.body;
-    if (f->interactive || unit->as.unit.expression || !body) return execute(c, f, body);
-    if (module_program(c, unit)) return (Result){FLOW_ERROR, NULL};
-    Machine *m = machine_new(c, unit->as.unit.flat, f->env, unit);
-    if (!m) return (Result){FLOW_ERROR, NULL};
+    Machine *m = f->interactive || unit->as.unit.expression || !body || module_program(c, unit) ? NULL :
+                 machine_new(c, unit->as.unit.flat, f->env, unit);
+    c->pause_entry = 0;
+    /* The walker runs it as an outermost call that does not pause. */
+    if (pausable && !m) c->pause_due = 0;
+    if (!m) return c->error_type[0] ? (Result){FLOW_ERROR, NULL} : execute(c, f, body);
     m->owner = body;
     SPYValue *outer = c->eval_env;
     c->eval_env = f->env;
@@ -30366,14 +30381,14 @@ static SPYValue *source_unit(SPYContext *c, int id, size_t argc, SPYValue *const
         /* exec and eval inherit the running code's future statements. */
         int flags = c->compile_flags;
         if (id != B_COMPILE) c->compile_flags = caller_future_flags(c);
-        c->string_source++;
+        c->string_source++; c->code_work++;
         c->eval_input = expression;
         /* eval() of a string ignores leading spaces and tabs. */
         const char *code = text ? text->as.string.data : NULL;
         while (code && id == B_EVAL && (*code == ' ' || *code == '\t')) code++;
         if (text) unit = parse_source(c, code, filename, NULL);
         c->eval_input = 0;
-        c->string_source--;
+        c->string_source--; c->code_work--;
         c->compile_flags = flags;
         spy_release(text);
         if (!unit) goto execution_fail;
@@ -33720,14 +33735,16 @@ void spy_set_optimize(SPYContext *c, int level) { c->optimize = level < 0 ? 0 : 
 static SPYValue *source_end(SPYContext *, SPYValue *, Result);
 static SPYValue *eval_source(SPYContext *c, const char *source, const char *filename, int interactive) {
     spy_clear_error(c);
+    /* An outermost call pauses while no other is paused. */
+    int pausable = c->pause_entry = !interactive && c->entries == 1 && c->pausing && !c->pause_root;
     SPYValue *unit = parse(c, source, strlen(source), filename ? filename : "<string>");
-    if (!unit) return NULL;
     Frame frame = {c->globals, unit, interactive};
-    c->pause_entry = !interactive && c->entries == 1;
-    Result result = execute_module(c, &frame);
+    Result result = unit ? execute_module(c, &frame) : (Result){FLOW_ERROR, NULL};
     c->pause_entry = 0;
     if (result.flow == FLOW_PAUSE) { c->paused_unit = unit; return NULL; }
-    return source_end(c, unit, result);
+    /* A pause due in its parsing or compiling ends with the call. */
+    if (pausable) c->pause_due = 0;
+    return unit ? source_end(c, unit, result) : NULL;
 }
 /* The value of evaluating unit, which ended with result. */
 static SPYValue *source_end(SPYContext *c, SPYValue *unit, Result result) {

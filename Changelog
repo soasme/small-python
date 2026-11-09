@@ -83,6 +83,8 @@ Unreleased (0.8.0):
 - a generator whose locals hold the generator is closed by a collection while
   its gi_frame is held
 - a generator expression's frame exposes its locals as a FrameLocalsProxy
+- with pausing set, a long program, module, function or exec string pauses
+  after its parsing and compiling instead of stopping
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

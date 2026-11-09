@@ -954,7 +954,8 @@ paused, with fresh budgets, and returns its value, or NULL with an error or
 paused again. A call pauses only at a step where its frames are all on the
 engine's machine: a pause that becomes due inside native code, such as an
 import, `exec` or a host function, waits until that code returns, and a
-further budget spent before then stops the call. Code compiled while the
+further budget spent before then stops the call, except one spent parsing
+or compiling source or charging a body's length as it is entered. Code compiled while the
 limit is set gives every operator, subscript and f-string field a step of
 its own, so their special methods pause too; set it before running the
 code. Other calls may run while one is paused; freeing the context stops a

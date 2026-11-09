@@ -2,14 +2,17 @@
 (***************************************************************************)
 (* Pausing a call (docs/metering.md 3.8), as spy.c's halt, run_steps,     *)
 (* module_end, spy_resume and spy_context_free do it. A program is a      *)
-(* sequence of machine steps and native calls; a native call spends Cost  *)
-(* steps one at a time with no point at which the call can pause, as a    *)
-(* host function calling back into the engine does.                       *)
+(* sequence of machine steps, native calls and code work; a native call   *)
+(* spends Cost steps one at a time with no point at which the call can    *)
+(* pause, as a host function calling back into the engine does, and code  *)
+(* work, parsing or compiling source or charging a body's length, spends  *)
+(* CodeCost so, more than a budget.                                       *)
 (*                                                                         *)
 (* With pausing set, the first spent budget of an outermost call makes a  *)
 (* pause due and refills the budget; the call pauses at its next machine  *)
 (* step, before running it. A budget spent while a pause is due stops the *)
-(* call. spy_resume refills the budget and runs on from the paused step;  *)
+(* call, except in code work, which refills it each time (code_work).     *)
+(* spy_resume refills the budget and runs on from the paused step;        *)
 (* freeing the context stops a paused call.                               *)
 (*                                                                         *)
 (* TLC checks that after every step:                                      *)
@@ -18,16 +21,18 @@
 (*    call: then nothing but the machines holds its state.                *)
 (*  - No step is lost or run twice: a call that ends ran each step of the *)
 (*    program once, however often it paused.                              *)
-(*  - An outermost call, or a resume, spends at most two budgets.         *)
+(*  - An outermost call, or a resume, spends at most two budgets besides *)
+(*    code work, and code work never stops the call.                      *)
 (*  - A paused call stays paused until it is resumed or freed.            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 CONSTANTS Budget,   \* the largest step budget an outermost call gets
-          Cost      \* the steps of a native call
+          Cost,     \* the steps of a native call
+          CodeCost  \* the steps of code work
 
 \* The program: its steps and native calls, back to back and apart.
-Program == <<"step", "native", "step", "step", "native", "native", "step">>
+Program == <<"code", "step", "native", "step", "code", "step", "native", "native", "step">>
 
 VARIABLES state,    \* "idle", "running", "paused", "stopped", "done" or "freed"
           pc,       \* the next instruction of the call
@@ -35,7 +40,7 @@ VARIABLES state,    \* "idle", "running", "paused", "stopped", "done" or "freed"
           fuel,     \* steps left in the budget
           due,      \* a pause is due
           ran,      \* ran[i]: times instruction i ran
-          spent,    \* steps spent since the outermost call or the resume
+          spent,    \* steps spent since the outermost call or the resume, but code work's
           limit     \* the step limit the host set
 
 vars == <<state, pc, inside, fuel, due, ran, spent, limit>>
@@ -47,6 +52,10 @@ Init == /\ state = "idle" /\ pc = 1 /\ inside = 0 /\ fuel = Budget /\ due = FALS
 Spend == IF fuel > 0 THEN /\ fuel' = fuel - 1 /\ UNCHANGED <<due, state>>
          ELSE IF ~due THEN /\ due' = TRUE /\ fuel' = limit - 1 /\ UNCHANGED state
          ELSE /\ state' = "stopped" /\ UNCHANGED <<due, fuel>>
+
+\* spend(1) in code work: every spent budget makes a pause due and refills.
+SpendCode == IF fuel > 0 THEN /\ fuel' = fuel - 1 /\ UNCHANGED due
+             ELSE /\ due' = TRUE /\ fuel' = limit - 1
 
 Start == /\ state = "idle" /\ state' = "running"
          /\ \E b \in 1..Budget : limit' = b /\ fuel' = b
@@ -73,6 +82,14 @@ Native == /\ state = "running" /\ pc <= Len(Program) /\ Program[pc] = "native"
                      THEN /\ inside' = 0 /\ ran' = [ran EXCEPT ![pc] = @ + 1] /\ pc' = pc + 1
                      ELSE /\ inside' = inside + 1 /\ UNCHANGED <<ran, pc>>
 
+\* Code work: no pause point inside, nor before it; it never stops the call.
+Code == /\ state = "running" /\ pc <= Len(Program) /\ Program[pc] = "code"
+        /\ SpendCode
+        /\ IF inside + 1 = CodeCost
+           THEN /\ inside' = 0 /\ ran' = [ran EXCEPT ![pc] = @ + 1] /\ pc' = pc + 1
+           ELSE /\ inside' = inside + 1 /\ UNCHANGED <<ran, pc>>
+        /\ UNCHANGED <<state, spent, limit>>
+
 End == /\ state = "running" /\ pc > Len(Program) /\ state' = "done"
        /\ UNCHANGED <<pc, inside, fuel, due, ran, spent, limit>>
 
@@ -87,12 +104,12 @@ Resume == /\ state = "paused" /\ state' = "running"
 Free == /\ state = "paused" /\ state' = "freed"
         /\ UNCHANGED <<pc, inside, fuel, due, ran, spent, limit>>
 
-Next == Start \/ Step \/ Native \/ End \/ Resume \/ Free
+Next == Start \/ Step \/ Native \/ Code \/ End \/ Resume \/ Free
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK == /\ state \in {"idle", "running", "paused", "stopped", "done", "freed"}
-          /\ pc \in 1..Len(Program) + 1 /\ inside \in 0..Cost /\ fuel \in 0..limit
+          /\ pc \in 1..Len(Program) + 1 /\ inside \in 0..Cost + CodeCost /\ fuel \in 0..limit
 
 \* A pause is due when taken, and never inside a native call.
 PausesAtSteps == state = "paused" => (due /\ inside = 0)
@@ -100,6 +117,8 @@ PausesAtSteps == state = "paused" => (due /\ inside = 0)
 EachStepOnce == /\ \A i \in 1..Len(Program) : ran[i] <= 1
                 /\ \A i \in 1..Len(Program) : i < pc => ran[i] = 1
                 /\ state = "done" => \A i \in 1..Len(Program) : ran[i] = 1
-\* Two budgets bound what an outermost call or a resume spends.
-Bounded == spent <= 2 * limit
+\* Two budgets bound what an outermost call or a resume spends besides code
+\* work, which never stops the call.
+Bounded == /\ spent <= 2 * limit
+           /\ state = "stopped" => Program[pc] # "code"
 =============================================================================

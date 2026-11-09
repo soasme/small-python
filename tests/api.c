@@ -1056,6 +1056,32 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "call_back(lambda: sorted(range(15), key=slow))[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
     assert(!spy_eval(c, "call_back(lambda: sorted(range(30), key=slow))", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
     spy_clear_error(c);
+    /* Parsing and compiling source, and charging a body's length on entry,
+     * is work bounded by the source: it pauses after, over as many budgets
+     * as it takes, in a long program, function, module and exec. */
+    char *longer = malloc(3000 * 16 + 64);
+    assert(longer);
+    size_t at = (size_t)sprintf(longer, "def longest():\n");
+    for (int i = 0; i < 3000; i++) at += (size_t)sprintf(longer + at, "    x%d = 1\n", i);
+    sprintf(longer + at, "    return 7\nexec('y = 1\\n' * 3000)\nlongest() + y");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, longer, "longer.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 1);
+    /* While a call is paused, another's long source stops it, the paused
+     * call staying paused; one that fails to compile leaves no pause due. */
+    v = spy_eval(c, "total = 0\nfor i in range(3000): total += i\ntotal", "first.py");
+    assert(!v && spy_paused(c) == SPY_STOP_STEPS);
+    assert(!spy_eval(c, longer, "longer.py") && spy_stopped(c) == SPY_STOP_STEPS && spy_paused(c) == SPY_STOP_STEPS);
+    spy_clear_error(c);
+    pauses = 0;
+    assert(integer(c, run_paused(c, v, SPY_STOP_STEPS, &pauses)) == 4498500 && pauses > 1);
+    longer[at] = 0;
+    strcat(longer, "    return 7\n)");
+    assert(!spy_eval(c, longer, "broken.py") && !strcmp(spy_error_type(c), "SyntaxError") && !spy_paused(c));
+    spy_clear_error(c);
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "total = 0\nfor i in range(3000): total += i\ntotal", "first.py"), SPY_STOP_STEPS, &pauses)) == 4498500 &&
+           pauses > 1);
+    free(longer);
     /* A comprehension over a list or a name pauses in its body. */
     execute(c, "def comprehend():\n    data = list(range(30))\n    return [slow(x) for x in data][-1] + {slow(x) for x in [1, 2]}.pop()");
     pauses = 0;

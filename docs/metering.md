@@ -270,8 +270,12 @@ running it, returning NULL (`spy_exec` -1) with no error set;
 `spy_paused` tells why (`SPY_STOP_STEPS` or `SPY_STOP_INTERRUPT`).
 `spy_resume` runs the call on from that step with fresh budgets and
 returns what `spy_eval` would have, or pauses again. A budget spent while
-a pause is due stops the call as without pausing, so an outermost call or
-a resume does at most two budgets of work.
+a pause is due stops the call as without pausing, except in work bounded
+by source text: parsing or compiling source, and charging a body's length
+as its frame is entered (3.2), refill the budget each time they spend it,
+so a long program, module, function or `exec` string pauses after that
+work instead of stopping. An outermost call or a resume does at most two
+budgets of work besides that.
 
 A call can pause only where nothing but its machines holds its state.
 These run as machines on the heap, in one native activation of
