@@ -6,7 +6,15 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
 def iterator(kind, called):
-    body = {"__iter__": lambda self: self, "__next__": lambda self: 1}
+    calls = []
+
+    def __next__(self):
+        calls.append(1)
+        if len(calls) == 1:
+            return 1
+        called.append("next")
+        raise StopIteration(8)
+    body = {"__iter__": lambda self: self, "__next__": __next__}
     if kind == "defined":
         def send(self, value):
             called.append("send")
@@ -38,7 +46,7 @@ def outcome(p):
     it = iterator(p["kind"], called)
 
     def g():
-        yield from it
+        return (yield from it)
     gen = g()
     next(gen)
     try:
@@ -46,8 +54,12 @@ def outcome(p):
             result = repr(gen.close())
         elif p["step"] == "throw":
             result = repr(gen.throw(KeyError))
-        else:
+        elif p["step"] == "send":
             result = repr(gen.send(1))
+        else:
+            result = repr(next(gen))
+    except StopIteration as error:
+        result = "StopIteration %r" % error.value
     except (ValueError, KeyError, ZeroDivisionError, AttributeError) as error:
         result = type(error).__name__
     return {"result": result, "called": "".join(called), "finished": gen.gi_frame is None}

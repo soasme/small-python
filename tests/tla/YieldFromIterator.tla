@@ -8,14 +8,16 @@
 (* error getting the method (other than AttributeError) is unraisable, so  *)
 (* the delegator still closes, while an error from calling it propagates; *)
 (* for throw, such an error propagates before the delegator resumes, which *)
-(* stays suspended.                                                        *)
+(* stays suspended. next() calls its __next__, whose StopIteration ends    *)
+(* the yield from with the exception's value.                             *)
 (*                                                                         *)
 (* A program runs                                                          *)
 (*                                                                         *)
 (*     def g():                                                            *)
-(*         yield from it                                                   *)
+(*         return (yield from it)                                          *)
 (*                                                                         *)
-(* after one next(), then one step: close(), throw(KeyError), or send(1).  *)
+(* after one next(), then one step: close(), throw(KeyError), send(1), or  *)
+(* next(), where it's __next__ returns 1, then raises StopIteration(8).    *)
 (* Each of it's send, throw and close is defined (send and throw return 7, *)
 (* close returns None), raises ValueError when called, is missing, or is   *)
 (* broken: looking it up raises ZeroDivisionError. The outcome is the      *)
@@ -25,19 +27,20 @@
 EXTENDS Naturals, Sequences
 
 Kinds == {"defined", "raises", "missing", "broken"}
-Programs == [kind : Kinds, step : {"close", "throw", "send"}]
+Programs == [kind : Kinds, step : {"close", "throw", "send", "next"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
 Pending == [result |-> "pending", called |-> "", finished |-> FALSE]
 
-Method(step) == CASE step = "close" -> "close" [] step = "throw" -> "throw" [] OTHER -> "send"
+Method(step) == CASE step = "close" -> "close" [] step = "throw" -> "throw" [] step = "next" -> "next" [] OTHER -> "send"
 
 Run(p) ==
     LET m == Method(p.step)
-        called == IF p.kind \in {"defined", "raises"} THEN m ELSE ""
-    IN CASE p.kind = "defined" /\ p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
+        called == IF p.kind \in {"defined", "raises"} \/ p.step = "next" THEN m ELSE ""
+    IN CASE p.step = "next" -> [result |-> "StopIteration 8", called |-> called, finished |-> TRUE]
+         [] p.kind = "defined" /\ p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
          [] p.kind = "defined" -> [result |-> "7", called |-> called, finished |-> FALSE]
          \* The method's own exception propagates, and ends the delegator.
          [] p.kind = "raises" -> [result |-> "ValueError", called |-> called, finished |-> TRUE]
