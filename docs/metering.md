@@ -288,7 +288,8 @@ These run as machines on the heap, in one native activation of
 - `exec` and `eval` of source, and the module of source an `import`
   statement runs;
 - a loop's Python `__iter__` and `__next__`, the function of a `map` or
-  `filter` it takes items from, the generator that an `enumerate`, or a
+  `filter` it takes items from, a `map`'s bound method or callable
+  instance's `__call__` too, the generator that an `enumerate`, or a
   `filter` whose function is `None` or native, takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
   beside list, tuple and range iterators, for a loop or a consumer below;

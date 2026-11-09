@@ -2,7 +2,8 @@
 # description: A map calls its function with the next item of each
 # iterable, left to right, once per item a loop or a consumer takes; a
 # StopIteration from the function ends it, and other exceptions reach the
-# caller.
+# caller. A bound method, or a callable instance's __call__, is called with
+# its self first.
 from harness import *
 
 log = []
@@ -72,3 +73,25 @@ assert strict() == 'map() argument 2 is longer than argument 1'
 items = iter([0, 3, 0, 5])
 assert any(map(lambda v: v, items)) is True
 assert list(items) == [0, 5]
+
+class Scale:
+    def __init__(self, k): self.k = k
+    def times(self, v, w=1): return self.k * v * w
+    def __call__(self, v):
+        if v == 3:
+            raise StopIteration
+        return self.k + v
+
+class Narrow:
+    def __call__(self): pass
+
+def bound():
+    s = Scale(10)
+    try:
+        list(map(Narrow(), [1]))
+    except TypeError as e:
+        narrow = str(e)
+    return (list(map(s.times, [1, 2], [3, 4])), [x for x in map(s, [1, 2, 3, 4])], sum(map(Scale(1), [5, 3])),
+            list(map(s.times, [])), narrow)
+
+assert bound() == ([30, 80], [11, 12], 6, [], 'Narrow.__call__() takes 1 positional argument but 2 were given')

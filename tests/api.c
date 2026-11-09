@@ -1128,6 +1128,11 @@ int main(int argc, char **argv) {
                "    return total + sum(map(abs, Items()))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 380 + 190 && pauses > 3);
+    /* So does map of a callable instance or a bound method. */
+    execute(c, "class Doubler:\n    def __call__(self, x): return slow(2 * x)\n    def twice(self, x): return slow(x + x)\n"
+               "def mapped():\n    d = Doubler()\n    return sum(map(d, range(30))) + sum(map(d.twice, range(30)))");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "mapped()", "mapped.py"), SPY_STOP_STEPS, &pauses)) == 1740 && pauses > 1);
     /* print() pauses in an instance's __str__, writing in order. */
     execute(c, "class Shown:\n    def __str__(self): return str(slow(7))\n"
                "def show():\n    for i in range(10): print(Shown(), i, Shown()); print(Shown(), sep='-', end='')\n    return 1");

@@ -57,7 +57,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_dict", "next_default", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "filter_none", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
+          "map_shortest", "map_none", "map_bound", "filter_none", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
           "sort_mutated", "sort_key_error", "sort_lt_only", "sort_gt_reflected", "len_negative", "len_big",
@@ -107,6 +107,8 @@ Case(c) ==
       [] c = "map_strict" -> "ValueError: map() argument 2 is shorter than argument 1"
       [] c = "map_shortest" -> "[2, 9]"
       [] c = "map_none" -> "TypeError: 'NoneType' object is not callable"
+      \* a bound method or callable instance is called with its self first
+      [] c = "map_bound" -> "([3, 5], [12])"
       [] c = "filter_none" -> "[1, 'a']"
       [] c = "enumerate_kw" -> "([(-1, 'a'), (0, 'b')], [(0, 'a')])"
       [] c = "enumerate_bad_start" -> "TypeError: 'float' object cannot be interpreted as an integer"

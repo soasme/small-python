@@ -68,6 +68,8 @@ SOURCES = {
     "map_strict": 'result = list(map(pow, [1, 2], [3], strict=True))',
     "map_shortest": 'result = list(map(pow, [2, 3, 4], [1, 2]))',
     "map_none": 'result = list(map(None, [1]))',
+    "map_bound": "class K:\n    def __init__(s, k): s.k = k\n    def add(s, v): return s.k + v\n    def __call__(s, v, w): return s.k * v + w\n"
+                 "result = (list(map(K(2).add, [1, 3])), list(map(K(10), [1, 2], [2])))",
     "filter_none": "result = list(filter(None, [0, 1, '', 'a', None, []]))",
     "enumerate_kw": "result = (list(enumerate('ab', start=-1)), list(enumerate(iterable='a')))",
     "enumerate_bad_start": "result = enumerate('a', 1.5)",

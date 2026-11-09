@@ -24732,8 +24732,9 @@ static ALWAYS_INLINE int filtering(SPYValue *v) {
     return v->type == SPY_ITERATOR && v->as.iterator.kind == I_FILTER && v->as.iterator.counter;
 }
 /* The call a step enters on the machine for iterator v's next item, owned,
- * with its env: a Python __next__ of v's class, or a map's function given
- * its iterables' next items. 1 then; 0 when v has none; -1 when the map's
+ * with its env: a Python __next__ of v's class, or a map's function, or
+ * its bound method's or callable instance's (bound_function), given its
+ * iterables' next items. 1 then; 0 when v has none; -1 when the map's
  * iterables ended or raised; 2 with the generator to resume instead
  * (adapted_generator), borrowed. */
 static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
@@ -24743,9 +24744,18 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
         int status = v->as.iterator.removed && zip_of_generator(v) ? zip_fill(c, v, fn) : 0;
         if (status) return status < 0 ? -1 : 2;
         if (v->as.iterator.kind == I_FILTER) return filter_call(c, v, fn, env);
-        if (v->as.iterator.kind != I_MAP || !v->as.iterator.source->as.seq.len ||
-            !machine_function(c, function = v->as.iterator.source->as.seq.items[0])) return 0;
+        SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
+        if (!callee || !(function = machine_function(c, callee) ? callee : bound_function(c, callee))) return 0;
         if (!(args = zip_items(c, v))) return -1;
+        /* A bound method or callable instance's self goes first. */
+        if (function != callee) {
+            SPYValue *bound = value_alloc(c, SPY_TUPLE, args->as.seq.len + 1);
+            int failed = !bound || sequence_append(c, bound, callee->type == SPY_METHOD ? callee->as.method.self : callee);
+            for (size_t i = 0; !failed && i < args->as.seq.len; i++) failed = sequence_append(c, bound, args->as.seq.items[i]);
+            spy_release(args);
+            if (failed) { spy_release(bound); return -1; }
+            args = bound;
+        }
         *env = function_env(c, function, args->as.seq.len, args->as.seq.items, NULL, 0);
         spy_release(args);
     } else {
