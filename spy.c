@@ -8563,7 +8563,8 @@ static NO_INLINE SPYValue *adapted_item(SPYContext *c, SPYValue *v, SPYValue *it
     if (v->as.iterator.kind != I_ENUMERATE && v->as.iterator.kind != I_FILTER) {
         /* A zip's or map's generator's item waits with the others (zip_fill). */
         SPYValue *pending = v->as.iterator.counter ? v->as.iterator.counter : (v->as.iterator.counter = value_new(c, SPY_TUPLE));
-        if (!pending || sequence_append(c, pending, item)) spy_release(item);
+        if (pending) sequence_append(c, pending, item);
+        spy_release(item);
         return NULL;
     }
     if (v->as.iterator.kind == I_FILTER) {
@@ -24694,8 +24695,10 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
         if (resumable(s)) { *g = s; return 1; }
         if (!iterator_fast(c, s, &item)) return 0;
         if (!item) return c->error_type[0] ? -1 : 0;
-        if (!v->as.iterator.counter && !(v->as.iterator.counter = value_new(c, SPY_TUPLE))) { spy_release(item); return -1; }
-        if (sequence_append(c, v->as.iterator.counter, item)) { spy_release(item); return -1; }
+        int failed = (!v->as.iterator.counter && !(v->as.iterator.counter = value_new(c, SPY_TUPLE))) ||
+                     sequence_append(c, v->as.iterator.counter, item);
+        spy_release(item);
+        if (failed) return -1;
     }
     return 0;
 }
