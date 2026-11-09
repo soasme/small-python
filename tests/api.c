@@ -388,13 +388,18 @@ int main(int argc, char **argv) {
         execute(second, "import sys\nassert sys.argv == []\n");
         spy_context_free(first); spy_context_free(second); spy_context_free(unset);
     }
-    /* A trace function sees each pass of a loop in a generic class's body. */
+    /* A trace function sees each pass of a loop in a generic class's body,
+     * and in a body a Python __build_class__ passes to the builtin one. */
     SPYContext *traced = spy_context_new();
     assert(traced && !spy_std_init(traced));
     execute(traced, "import sys\nlines = []\ndef tracer(frame, event, arg):\n"
                     "    if frame.f_code.co_name == 'Generic' and event == 'line': lines.append(frame.f_lineno)\n    return tracer\n"
                     "sys.settrace(tracer)\nclass Generic[T]:\n    for i in range(2):\n        pass\nsys.settrace(None)\n"
-                    "assert lines == [7, 8, 9, 8, 9, 8], lines\n");
+                    "assert lines == [7, 8, 9, 8, 9, 8], lines\n"
+                    "def builder(func, name, *bases): return __build_class__(func, name, *bases)\n"
+                    "space = {'__builtins__': dict(vars(__build_class__.__self__), __build_class__=builder), '__name__': 'built'}\n"
+                    "lines.clear()\nsys.settrace(tracer)\nexec('class Generic:\\n    for i in range(2):\\n        pass\\n', space)\n"
+                    "sys.settrace(None)\nassert lines == [1, 2, 3, 2, 3, 2], lines\n");
     spy_context_free(traced);
     SPYContext *c = spy_context_new();
     assert(c && !spy_std_init(c));
@@ -1181,6 +1186,11 @@ int main(int argc, char **argv) {
                "    return A.x + A.y + len(A.__annotations__)");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "annotated()", "annotated.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does a generic class's body that calls, and its base's __mro_entries__. */
+    execute(c, "def generic():\n    class G[T](Entry()):\n        for i in range(3000): y = slow(2)\n"
+               "    return G.y + len(G.__type_params__) + issubclass(G, int)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "generic()", "generic.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* A __class_getitem__ that cannot take the key raises from the subscript. */
     execute(c, "class Arity:\n    def __class_getitem__(cls): return 1\n"
                "def arity():\n    try: return Arity[slow(0)]\n    except TypeError: return 2");

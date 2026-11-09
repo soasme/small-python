@@ -381,8 +381,8 @@ These run as machines on the heap, in one native activation of
   `str.format_map` of a dict call on each field's object, a nested
   spec's fields first;
 - list, set and dictionary comprehensions;
-- class bodies that hold a call or a loop, when the class has no type
-  parameters and the builtin `__build_class__` makes it.
+- class bodies that hold a call or a loop, also of a generic class, when
+  the builtin `__build_class__` makes the class.
 
 Code compiled while pausing is set (`SPY_LIMIT_PAUSE` is 1 when a module,
 function or comprehension is first compiled) runs every function and

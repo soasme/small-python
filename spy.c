@@ -14571,15 +14571,18 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             emit(c, p, BC_BUILDER, n, 0); emit(c, p, BC_ARGS, n, 0);
             compile_arguments(c, p, n->args);
         }
-        if (!n->params && ((n->args && c->pausing) || list_expands(n->b, CALLS) || loops(n->b))) {
+        if (n->params || (n->args && c->pausing) || list_expands(n->b, CALLS) || loops(n->b)) {
             /* A body that calls or loops, or, compiled while pausing, a class
              * of bases or keywords, whose metaclass's __prepare__ may be a
-             * call, is a call (class_part). */
+             * call, is a call (class_part); so is a generic class, whose
+             * generic base's __mro_entries__ is, its type parameters' env
+             * under it (arg 1). */
+            if (n->params) emit(c, p, BC_CLASS, n, 1);
             emit(c, p, BC_CLASS, n, stacked ? 3 : 4); emit(c, p, BC_CALLN, n, 0); emit(c, p, BC_CLASS, n, 5);
             emit(c, p, BC_CLASS, n, 7);
         } else {
-            emit(c, p, BC_CLASS, n, stacked ? 2 : n->params ? 1 : 0);
-            if (!stacked && !n->params) emit(c, p, BC_CLASS, n, 7);
+            emit(c, p, BC_CLASS, n, stacked ? 2 : 0);
+            if (!stacked) emit(c, p, BC_CLASS, n, 7);
         }
         for (Node *decorator = n->decorators; decorator; decorator = decorator->next) emit(c, p, BC_DECORATE, n, 0);
         emit(c, p, BC_STORE, n->a, 1); break;
@@ -14612,10 +14615,8 @@ static int loops(Node *body) {
  * the machine: a body of neither always ends, so it may run on the walker. */
 static int compile_generator(SPYContext *c, Node *n) {
     int generator = n->kind != N_CLASS && ((n->kind == N_DEF && n->op) || list_expands(n->b, 0)), mode = c->pausing ? PAUSING : BODY;
-    /* An annotation or lazy value function's body is one walker statement,
-     * as is a class body with type parameters (class_body); while calls
-     * can pause, every other body runs on the machine. */
-    if (n->kind == N_CLASS && n->params) return 0;
+    /* An annotation or lazy value function's body is one walker statement;
+     * while calls can pause, every other body runs on the machine. */
     if (!generator && (!n->b || n->b->kind == N_ANNOTATIONS || (mode == BODY && !(list_expands(n->b, CALLS) || loops(n->b))))) return 0;
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
@@ -25005,6 +25006,7 @@ static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instr
         int list = state->type == SPY_LIST;
         if (list && ((cls = class_callback(c, m->stack[m->len - 1], state, env)) || c->error_type[0])) return cls;
         cls = machine_pop(m); classcell = machine_pop(m); state = machine_pop(m);
+        if (ins->node->params) spy_release(machine_pop(m));
         if (state != c->none)
             class_made(c, cls, state->as.seq.items[list ? 0 : 6], state->as.seq.items[list ? 1 : 3], classcell == c->none ? NULL : classcell);
         spy_release(classcell); spy_release(state);
@@ -25019,12 +25021,19 @@ static NO_INLINE SPYValue *class_step(SPYContext *c, Machine *m, Frame *f, Instr
     if (cls && (ins->arg == 0 || ins->arg == 5) && m->len != deferred && (machine_push(c, m, spy_none(c)) || machine_push(c, m, spy_none(c)))) { spy_release(cls); return NULL; }
     return cls;
 }
+/* The frame a class statement n's header runs in: f, or for a generic
+ * class that of its type parameters' env, which with them and its generic
+ * base, a tuple, is on top of m's stack. */
+static Frame generic_frame(Machine *m, Node *n, Frame *f) {
+    return n->params ? (Frame){m->stack[m->len - 1]->as.seq.items[0], f->unit, 0} : *f;
+}
 /* A class statement n's body function, given its state s, freed, which
  * goes under it on m's stack as a tuple of the metaclass, bases,
  * namespace, body env, original bases or None, keywords and name. */
 static SPYValue *class_begin(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue *name, ClassState *s) {
     SPYValue *body = NULL, *items[] = {s->meta, s->tuple, s->namespace, s->env, s->original ? s->original : c->none, s->keywords, name};
-    SPYValue *state = class_body_begin(c, f->unit, n, s->env, NULL) ? NULL : tuple_of(c, 7, items);
+    SPYValue *params = n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL;
+    SPYValue *state = class_body_begin(c, f->unit, n, s->env, params) ? NULL : tuple_of(c, 7, items);
     if (state && !machine_push(c, m, state) && (body = function_new(c, f, n))) body->as.function.attributes = spy_retain(s->env);
     class_state_free(s);
     return body;
@@ -25035,7 +25044,8 @@ static SPYValue *class_begin(SPYContext *c, Machine *m, Frame *f, Node *n, SPYVa
 static void class_prepared(SPYContext *c, Machine *m, Node *n, SPYValue *namespace) {
     SPYValue *pending = machine_pop(m), **items = pending->as.seq.items;
     ClassState s = {spy_retain(items[0]), spy_retain(items[1]), namespace, NULL, items[4] == c->none ? NULL : spy_retain(items[4]), spy_retain(items[5])};
-    if (namespace && !class_mapping(c, m->frame.env, &s)) machine_push(c, m, class_begin(c, m, &m->frame, n, items[6], &s));
+    Frame f = generic_frame(m, n, &m->frame);
+    if (namespace && !class_mapping(c, f.env, &s)) machine_push(c, m, class_begin(c, m, &f, n, items[6], &s));
     else if (!namespace) class_state_free(&s);
     spy_release(pending);
 }
@@ -25053,7 +25063,14 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
         if (class_body_end(c, n, f->env, &classcell)) { spy_release(classcell); return NULL; }
         return classcell ? classcell : spy_none(c);
     }
-    if (ins->arg == 1) return generic_class(c, f, n);
+    if (ins->arg == 1) {
+        SPYValue *items[3] = {NULL, NULL, NULL};
+        items[0] = generic_env(c, f, n->params, &items[1]);
+        items[2] = items[0] ? call_intrinsic(c, "_generic_base", 1, &items[1]) : NULL;
+        SPYValue *generic = items[2] ? tuple_of(c, 3, items) : NULL;
+        release_all(3, items);
+        return generic;
+    }
     if (ins->arg == 5) {
         SPYValue *classcell = m->stack[m->len - 1], *v = m->stack[m->len - 2], **items = v->as.seq.items;
         ClassState state = {0};
@@ -25076,10 +25093,15 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
         spy_release(machine_pop(m)); arguments = machine_pop(m); bases = machine_pop(m); progress = machine_pop(m);
     } else if (ins->arg == 3) {
         arguments = machine_pop(m); bases = machine_pop(m); spy_release(machine_pop(m));
-    } else {
+    }
+    /* A generic class's header runs in its type parameters' env. */
+    Frame g = generic_frame(m, n, f);
+    f = &g;
+    if (!progress && ins->arg == 4) {
         SPYValue *builder = spy_string(c, "__build_class__", 15);
         bases = spy_list(c); arguments = value_new(c, SPY_DICT);
-        if (!builder || !bases || !arguments || eval_arguments(c, f, n->args, builder, bases, arguments)) {
+        if (!builder || !bases || !arguments || eval_arguments(c, f, n->args, builder, bases, arguments) ||
+            (n->params && sequence_append(c, bases, m->stack[m->len - 1]->as.seq.items[2]))) {
             spy_release(builder); spy_release(bases); spy_release(arguments);
             return NULL;
         }
@@ -25091,7 +25113,8 @@ static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instr
     int builtin = progress || (builder && builder->type == SPY_NATIVE && builder->as.native.kwcall == build_class_builtin);
     spy_release(builder);
     if (!builtin || !n->flat) {
-        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, NULL, NULL);
+        SPYValue *params = n->params ? m->stack[m->len - 1]->as.seq.items[1] : NULL;
+        SPYValue *cls = c->error_type[0] ? NULL : class_statement(c, f, n, name, bases, arguments, params, NULL);
         SPYValue *alone = cls ? tuple_of(c, 1, &cls) : NULL;
         spy_release(cls);
         if (alone && !machine_push(c, m, alone)) body = spy_retain(c->types[SPY_TUPLE]);

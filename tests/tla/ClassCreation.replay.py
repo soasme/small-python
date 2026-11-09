@@ -50,7 +50,7 @@ def source(p):
     if p["flag"]:
         arguments.append("flag=1")
     lines = ["@deco"] if p["deco"] else []
-    lines.append("class C(%s):" % ", ".join(arguments))
+    lines.append("class C%s(%s):" % ("[T]" if p["generic"] else "", ", ".join(arguments)))
     if p["annotated"]:
         lines.append("    x: int = 0")
     lines.append("    log.append('body')" if p["calls"] else "    n = 1")
