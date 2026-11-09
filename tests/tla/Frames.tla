@@ -25,12 +25,14 @@
 (* operation) or after it returns ("finished"), or gen(1).gi_frame before  *)
 (* next ("gennew"), after one next ("gensusp"), after exhaustion          *)
 (* ("gendone"), or after one next and dropping the generator, which closes *)
-(* it while the frame lives on ("gendropped"), then reads an attribute or  *)
-(* does an operation. The outcome is the result or the exception.          *)
+(* it while the frame lives on ("gendropped"), also once its local b holds *)
+(* the generator itself, which a collection then closes ("genself"), then  *)
+(* reads an attribute or does an operation. The outcome is the result or   *)
+(* the exception.                                                          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped"}
+Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped", "genself"}
 Ops == {"f_code", "repr", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
         "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear"}
 Programs == [source : Sources, op : Ops]
@@ -40,10 +42,10 @@ vars == <<program, outcome>>
 
 Pending == "pending"
 
-Generator(s) == s \in {"gennew", "gensusp", "gendone", "gendropped"}
+Generator(s) == s \in {"gennew", "gensusp", "gendone", "gendropped", "genself"}
 
 Locals(s) == CASE s \in {"running", "finished"} -> "['a', 'b', 'fr']" [] s = "gennew" -> "['a']" [] OTHER -> "['a', 'b']"
-Line(s) == CASE s \in {"running", "finished"} -> "9" [] s = "gennew" -> "10" [] s \in {"gensusp", "gendropped"} -> "12" [] OTHER -> "13"
+Line(s) == CASE s \in {"running", "finished"} -> "9" [] s = "gennew" -> "10" [] s \in {"gensusp", "gendropped", "genself"} -> "12" [] OTHER -> "13"
 
 Run(p) ==
     LET s == p.source IN
@@ -82,5 +84,5 @@ ClearRefused == Done /\ program.op = "clear" /\ program.source \in {"running", "
 GeneratorUnlinked == Done /\ program.op = "f_back" /\ Generator(program.source) => outcome = "None"
 
 \* A frame that outlives its generator names no generator.
-OutlivesGenerator == Done /\ program.op = "f_generator" /\ program.source = "gendropped" => outcome = "None"
+OutlivesGenerator == Done /\ program.op = "f_generator" /\ program.source \in {"gendropped", "genself"} => outcome = "None"
 =============================================================================

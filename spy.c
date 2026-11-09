@@ -211,7 +211,11 @@ struct SPYValue {
          * unit. While running, index is its 1-based place on the context's
          * frame stack; afterwards line and back keep its final state. */
         /* generator: borrowed, holding the frame, in place of an owner
-         * until the frame takes it (frame_take). */
+         * until the frame takes it (frame_take). Until the generator lets
+         * go of its environment, env is NULL and the frame reaches the
+         * generator's (frame_env), as CPython's frame of a generator
+         * does: the generator's locals do not keep it alive through its
+         * frame. */
         struct { SPYValue *env, *owner, *back, *extra, *trace, *generator; size_t line, index; int trace_lines_off, trace_opcodes, cleared; } frame;
         /* view: what obj's __buffer__ returned, handed to __release_buffer__. */
         struct { SPYValue *obj, *source, *view; ptrdiff_t *layout, offset; size_t itemsize; int64_t hash;
@@ -745,6 +749,9 @@ static NO_INLINE void frame_link_back(SPYContext *c, SPYValue *frame) {
 /* The function, unit or generator a frame is of. */
 static SPYValue *frame_owner(SPYValue *frame) {
     return frame->as.frame.owner ? frame->as.frame.owner : frame->as.frame.generator;
+}
+static SPYValue *frame_env(SPYValue *frame) {
+    return frame->as.frame.env ? frame->as.frame.env : frame->as.frame.generator->as.generator.env;
 }
 static NO_INLINE void leave_traced_frame(SPYContext *c, SPYValue *value) {
     if (c->settings[SET_TRACE] || c->settings[SET_PROFILE]) trace_leave(c, value);
@@ -1370,6 +1377,7 @@ static int finalize_later(SPYValue *v) {
  * and the frame's own: the frame then holds it, not it the frame. */
 static NO_INLINE void frame_take(SPYValue *v) {
     SPYValue *frame = v->as.generator.frame;
+    if (!frame->as.frame.env) frame->as.frame.env = spy_retain(v->as.generator.env);
     v->refs++; v->as.generator.done = 1; v->as.generator.frame = NULL;
     frame->as.frame.owner = v; frame->as.frame.generator = NULL; frame->refs--;
 }
@@ -11392,7 +11400,6 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (v->as.generator.frame) return spy_retain(v->as.generator.frame);
         SPYValue *frame = value_new(c, SPY_FRAME);
         if (!frame) return NULL;
-        frame->as.frame.env = spy_retain(v->as.generator.env);
         frame->as.frame.generator = v;
         v->as.generator.frame = spy_retain(frame);
         return frame;
@@ -17982,7 +17989,11 @@ static void generator_close(SPYValue *v) {
         machine_edges(v->as.generator.machine, release_owned, NULL);
         free_machine(v->ctx, v->as.generator.machine); v->as.generator.machine = NULL;
     }
-    spy_release(v->as.generator.env); v->as.generator.env = NULL;
+    /* A frame that reached the environment through the generator takes it. */
+    SPYValue *frame = v->as.generator.frame;
+    if (frame && !frame->as.frame.env) frame->as.frame.env = v->as.generator.env;
+    else spy_release(v->as.generator.env);
+    v->as.generator.env = NULL;
     spy_release(v->as.generator.unit); v->as.generator.unit = NULL;
     v->as.generator.done = 1;
 }
@@ -26437,9 +26448,8 @@ static SPYValue *frame_object(SPYContext *c, size_t i) {
         SPYValue *frame = kept ? spy_retain(kept) : value_new(c, SPY_FRAME);
         if (!frame) return NULL;
         if (!kept) {
-            frame->as.frame.env = spy_retain(entry->env);
             if (generator) frame->as.frame.generator = owner;
-            else frame->as.frame.owner = spy_retain(owner);
+            else frame->as.frame.owner = spy_retain(owner), frame->as.frame.env = spy_retain(entry->env);
             if (generator) owner->as.generator.frame = spy_retain(frame);
         }
         frame->as.frame.index = i + 1;
@@ -26455,14 +26465,17 @@ static size_t frame_line(SPYContext *c, SPYValue *frame) {
         return owner->as.generator.line ? owner->as.generator.line : owner->as.generator.node ? owner->as.generator.node->line : 0;
     return frame->as.frame.line;
 }
+/* Whether frame runs a function or a generator expression, whose locals
+ * its own environment binds. */
 static int function_frame(SPYValue *frame) {
-    SPYValue *env = frame->as.frame.env;
-    return env->type == V_ENV && !env->as.map.namespace && env->as.map.scope && env->as.map.scope->kind == S_FUNCTION;
+    SPYValue *env = frame_env(frame);
+    Scope *scope = env->type == V_ENV && !env->as.map.namespace ? env->as.map.scope : NULL;
+    return scope && (scope->kind == S_FUNCTION || (scope->kind == S_COMPREHENSION && !inlined_comprehension(env)));
 }
 /* The environment holding a frame's local variable key: the frame's own, or
  * the enclosing function's for a free variable. NULL if key is no local. */
 static SPYValue *frame_local_env(SPYContext *c, SPYValue *frame, SPYValue *key) {
-    SPYValue *text = builtin_value(c, key, SPY_STRING), *env = frame->as.frame.env;
+    SPYValue *text = builtin_value(c, key, SPY_STRING), *env = frame_env(frame);
     if (!text || !function_frame(frame) || strlen(text->as.string.data) != text->as.string.len) return NULL;
     const char *name = text->as.string.data;
     if (name_local(env, name)) return env;
@@ -26484,7 +26497,7 @@ static SPYValue *frame_local_env(SPYContext *c, SPYValue *frame, SPYValue *key) 
 static SPYValue *frame_contents(SPYContext *c, SPYValue *frame, int what) {
     SPYValue *result = value_new(c, what == FRAME_DICT ? SPY_DICT : SPY_LIST);
     if (!result) return NULL;
-    SPYValue *env = frame->as.frame.env, *names = function_frame(frame) && !frame->as.frame.cleared ? local_snapshot(c, env) : value_new(c, SPY_DICT);
+    SPYValue *env = frame_env(frame), *names = function_frame(frame) && !frame->as.frame.cleared ? local_snapshot(c, env) : value_new(c, SPY_DICT);
     SPYValue *extra = frame->as.frame.extra;
     for (int source = 0; source < 2 && names && !c->error_type[0]; source++) {
         SPYValue *map = source ? extra : names;
@@ -26528,7 +26541,7 @@ static int frame_local_set(SPYContext *c, SPYValue *frame, SPYValue *key, SPYVal
     return value ? map_set(c, frame->as.frame.extra, key, value) : delete_index(c, frame->as.frame.extra, key);
 }
 static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *name) {
-    SPYValue *env = frame->as.frame.env, *owner = frame_owner(frame);
+    SPYValue *env = frame_env(frame), *owner = frame_owner(frame);
     if (!strcmp(name, "f_globals")) return spy_retain(namespace_map(module_env(c, env)));
     if (!strcmp(name, "f_builtins")) {
         SPYValue *builtins = name_local(namespace_map(module_env(c, env)), "__builtins__");
@@ -26576,7 +26589,7 @@ static SPYValue *frame_clear(SPYContext *c, SPYValue *frame) {
         SPYValue *result = generator_method(c, owner, M_CLOSE, 0, NULL);
         return result ? (spy_release(result), spy_none(c)) : NULL;
     }
-    SPYValue *old = frame->as.frame.env;
+    SPYValue *old = frame_env(frame);
     if (function_frame(frame)) {
         SPYValue *env = value_new(c, V_ENV);
         if (!env) return NULL;

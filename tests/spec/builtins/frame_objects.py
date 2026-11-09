@@ -13,6 +13,15 @@ def function_frame(a):
     return frame
 frame = function_frame(1)
 assert_eq(type(frame).__name__, "frame")
+# A generator expression's frame is a function frame: its locals proxy
+# reads its loop variable, while it runs and after it is gone.
+def genexpr_frame():
+    g = (current().f_back for _ in [7])
+    f = next(g)
+    running = (type(f.f_locals).__name__, f.f_locals["_"], f.f_code.co_name)
+    del g
+    return running, type(f.f_locals).__name__
+assert_eq(genexpr_frame(), (("FrameLocalsProxy", 7, "<genexpr>"), "FrameLocalsProxy"))
 assert_eq(frame.f_code.co_name, "function_frame")
 assert_is(frame.f_globals, globals())
 assert_is(frame.f_builtins, host.module_cache()["builtins"].__dict__)

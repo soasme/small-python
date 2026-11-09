@@ -1,5 +1,7 @@
 # Replays Frames.tla: each case takes the spec's frame and compares the
 # attribute or operation's result with the model's.
+from harness import host
+
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -84,6 +86,11 @@ def outcome(p):
     if source == "gendropped":
         next(g)
         g = None
+    if source == "genself":
+        next(g)
+        fr.f_locals["b"] = g
+        g = None
+        host.collect()
     return act(p, namespace, fr, g)
 
 
