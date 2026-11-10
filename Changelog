@@ -170,6 +170,11 @@ Unreleased (0.8.0):
   __instancecheck__ or __subclasscheck__ without the C stack
 - a property's Python getter on a class with a Python __getattr__ runs, and
   falls back to __getattr__, without the C stack
+- throw() and close() into a yield from or await of an iterator with a
+  Python throw or close call it without the C stack
+- throw() into a generator suspended in a yield from or await passes its
+  arguments on unchecked: an iterator's throw receives them, and invalid ones
+  raise TypeError at the yield from, as CPython's do
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

@@ -13997,7 +13997,7 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__ or a key's
  * __hash__ (hash_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_DELEGATE, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -22078,6 +22078,32 @@ static SPYValue *close_exception(SPYContext *c) {
     if (exception) chain_exception(c, exception);
     return exception;
 }
+static SPYValue *thrown_exception(SPYContext *, size_t, SPYValue *const *);
+/* Whether v, a throw's exception or first argument, matches GeneratorExit. */
+static int exits(SPYContext *c, SPYValue *v) {
+    SPYValue *k = v->type == SPY_INSTANCE ? v->as.map.parent : v->type == SPY_CLASS ? v : NULL;
+    return k && subclass(k, c->exceptions[X_GENERATOR_EXIT]);
+}
+/* raise_thrown of a throw's exception, or of the exception its arguments
+ * give (c->unbound, generator_throw): an error checking them sets *halt,
+ * the generator not resuming. */
+static SPYValue *raise_given(SPYContext *c, SPYValue *thrown, size_t argc, SPYValue *const *argv, int *halt) {
+    SPYValue *exception = thrown == c->unbound ? thrown_exception(c, argc, argv) : spy_retain(thrown);
+    if (exception) raise_thrown(c, exception, c->handled);
+    else *halt = 1;
+    spy_release(exception);
+    return NULL;
+}
+/* throw() into generator g with argc arguments argv: one suspended in a
+ * yield from or await passes them on as given (c->unbound, iterator_send),
+ * and the generator the throw raises in checks them (thrown_exception). */
+static SPYValue *generator_throw(SPYContext *c, SPYValue *g, size_t argc, SPYValue *const *argv) {
+    int delegating = !g->as.generator.running && g->as.generator.machine && g->as.generator.machine->awaiting >= AWAIT_DELEGATE;
+    SPYValue *exception = delegating ? c->unbound : thrown_exception(c, argc, argv);
+    SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, argc, argv) : NULL;
+    if (!delegating) spy_release(exception);
+    return result;
+}
 /* *halt, when given, is set if getting the iterator's throw failed: the
  * delegating generator does not resume (13.16.3). */
 static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent, SPYValue *thrown,
@@ -22086,22 +22112,21 @@ static SPYValue *iterator_send(SPYContext *c, SPYValue *iterator, SPYValue *sent
         return awaitable_method(c, iterator, thrown ? M_THROW : M_SEND, thrown ? argc : 1,
                                       thrown ? argv : (SPYValue *[]){sent ? sent : c->none});
     if (iterator->type == SPY_COROUTINE_ITERATOR) iterator = iterator->as.iterator.source;
-    if ((iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE) &&
-        !(thrown && subclass(thrown->as.map.parent, c->exceptions[X_GENERATOR_EXIT])))
-        return generator_send_args(c, iterator, sent, thrown, argc, argv);
+    int closing = thrown && exits(c, thrown == c->unbound ? argv[0] : thrown);
+    if ((iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE) && !closing)
+        return thrown == c->unbound ? generator_throw(c, iterator, argc, argv) : generator_send_args(c, iterator, sent, thrown, argc, argv);
     if (thrown) {
-        int closing = subclass(thrown->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
         SPYValue *method = attribute(c, iterator, closing ? "close" : "throw");
         /* A missing close or throw passes the exception on; any other error
          * getting close is unraisable (13.16.3). */
         if (!method && (closing || error_is(c, "AttributeError"))) {
             if (closing && !error_is(c, "AttributeError")) report_unraisable(c, "Exception ignored while closing generator ", iterator, NULL);
-            spy_clear_error(c); return raise_thrown(c, thrown, c->handled);
+            spy_clear_error(c); return raise_given(c, thrown, argc, argv, halt);
         }
         if (!method) { if (halt) *halt = 1; return NULL; }
         SPYValue *result = call(c, method, closing ? 0 : argc, argv);
         spy_release(method);
-        if (closing) { spy_release(result); return c->error_type[0] ? NULL : raise_thrown(c, thrown, c->handled); }
+        if (closing) { spy_release(result); return c->error_type[0] ? NULL : raise_given(c, thrown, argc, argv, halt); }
         return result;
     }
     if (sent && sent->type != SPY_NONE) {
@@ -22244,12 +22269,25 @@ static Machine *innermost(Machine *m) {
     while (m->awaiting == AWAIT_DELEGATE && m->delegate->type != SPY_INSTANCE) m = m->delegate->as.generator.machine;
     return m;
 }
-/* Whether a close of, or a throw into, a generator or coroutine raises at
- * its yield on the machine (consume): one suspended there, or delegating
- * to a yield (delegating). */
-static int throws_in(SPYValue *g) {
-    return (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && suspended(g) &&
-           innermost(g->as.generator.machine)->awaiting == AWAIT_YIELD;
+/* Whether a close of, or a throw of exception into, a generator or
+ * coroutine raises at its yield on the machine (consume): one suspended
+ * there, or delegating to a yield (delegating). */
+static SPYValue *method_function(SPYContext *, SPYValue *, const char *);
+static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
+    if ((g->type != SPY_GENERATOR && g->type != SPY_COROUTINE) || !suspended(g)) return 0;
+    Machine *m = innermost(g->as.generator.machine);
+    SPYValue *k = !exception ? c->exceptions[X_GENERATOR_EXIT] : exception->type == SPY_INSTANCE ? exception->as.map.parent :
+                  exception->type == SPY_CLASS ? exception : NULL;
+    /* A yield from passes on a throw of what is no exception, which
+     * raises there (generator_throw). */
+    if (g->as.generator.machine->awaiting == AWAIT_DELEGATE && !(k && subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
+    if (m->awaiting != AWAIT_DELEGATE) return m->awaiting == AWAIT_YIELD;
+    /* Or at a yield from of an instance with a Python close, or throw of
+     * an exception instance, which it takes as thrown (delegate_next); a
+     * throw of a class reaches it in C as given. */
+    SPYValue *function = exception && exception->type != SPY_INSTANCE ? NULL :
+        method_function(c, m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
+    return function && machine_function(c, function);
 }
 /* The Python __next__ on the machine of instance v's class, borrowed;
  * else NULL. */
@@ -22287,7 +22325,6 @@ static int zip_of_generator(SPYValue *v) {
  * frozenset, dict, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
 static SPYValue *adapted_generator(SPYContext *, SPYValue *);
-static SPYValue *thrown_exception(SPYContext *, size_t, SPYValue *const *);
 /* Whether fn is a generator function, whose call runs none of its body. */
 static int generator_function(SPYContext *c, SPYValue *fn) {
     Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
@@ -22341,7 +22378,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
-        return argc == (method == M_THROW) && throws_in(callee) ? method == M_THROW ? B_THROW : B_CLOSE : -1;
+        return argc == (method == M_THROW) && throws_in(c, callee, argc ? argv[0] : NULL) ? method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
@@ -22417,7 +22454,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
          * outermost (delegate_closed). */
         int closing = id == B_CLOSE || subclass(sent->as.map.parent, c->exceptions[X_GENERATOR_EXIT]);
         if (id == B_THROW && closing && g->awaiting == AWAIT_DELEGATE) { consumer->made = sent; consumer->sent = close_exception(c); }
-        for (; g->awaiting == AWAIT_DELEGATE; g = g->delegate->as.generator.machine) g->throwing = closing ? CLOSING : THROWING;
+        for (; g->awaiting == AWAIT_DELEGATE && g->delegate->type != SPY_INSTANCE; g = g->delegate->as.generator.machine) g->throwing = closing ? CLOSING : THROWING;
         consumer->count = (size_t)g->drop + 1; g->drop = 0;
     }
 }
@@ -25725,16 +25762,32 @@ static NO_INLINE void returned_to(Machine *resumer, SPYValue *value) {
  * send atop resumer sends (B_NEXT), else None; a close raises its
  * GeneratorExit there instead. A yield from resuming it passes on what
  * its own resumer sends. */
-static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
-    while (resumer->awaiting == AWAIT_DELEGATE) if (!(resumer = resumer->resumer)) return spy_none(c);
+static ALWAYS_INLINE Consumer *resuming(Machine *resumer) {
+    while (resumer->awaiting == AWAIT_DELEGATE) if (!(resumer = resumer->resumer)) return NULL;
     Block *top = &resumer->blocks[resumer->block_len - 1];
-    SPYValue *sent = top->kind == BLOCK_CONSUME ? top->consumer->sent : NULL;
+    return top->kind == BLOCK_CONSUME ? top->consumer : NULL;
+}
+static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
+    Consumer *s = resuming(resumer);
+    SPYValue *sent = s ? s->sent : NULL;
     if (!sent) return spy_none(c);
-    top->consumer->sent = NULL;
-    if (top->consumer->id != B_CLOSE && top->consumer->id != B_THROW) return sent;
-    top->consumer->count = 0;
+    s->sent = NULL;
+    if (s->id != B_CLOSE && s->id != B_THROW) return sent;
+    s->count = 0;
     raise_thrown(c, sent, c->handled); spy_release(sent);
     return spy_none(c);
+}
+/* The exception a throw or close raises at generator machine m's yield
+ * from of an instance, owned, which it takes from the consumer resuming
+ * m; else NULL. The outermost raises a thrown GeneratorExit itself, not
+ * the one closing its delegates (delegate_closed). */
+static SPYValue *delegate_thrown(Machine *m) {
+    Consumer *s = resuming(m->resumer);
+    SPYValue *thrown = s && (s->id == B_CLOSE || s->id == B_THROW) ? s->sent : NULL;
+    if (!thrown) return NULL;
+    s->sent = NULL; s->count = 0;
+    if (s->made && m->resumer->awaiting != AWAIT_DELEGATE) { spy_release(thrown); thrown = s->made; s->made = NULL; }
+    return thrown;
 }
 /* Loop item item, which the loop step next took: stored to a name the
  * step stores (compile_next), or pushed. */
@@ -25880,22 +25933,43 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
 static ALWAYS_INLINE int next_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
     return v->type == SPY_ITERATOR || v->type == SPY_INSTANCE ? next_call_of(c, v, fn, env) : 0;
 }
-/* The next step of generator machine m's yield from, sent sent, which it
- * takes: the Python __next__ of an iterator instance it waits on, or its
- * send of a value not None, a call with *env its environment that returns
- * into m (CALL_DELEGATE); else NULL, the delegate sent to in C, *item what
- * it yields or NULL, the delegation ended (finish_delegate). */
-static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, SPYValue *sent, SPYValue **env, SPYValue **item) {
-    int next = !sent || sent->type == SPY_NONE;
-    SPYValue *function = next ? next_function(c, m->delegate) : method_function(c, m->delegate, "send"), *call = NULL;
+/* The next step of generator machine m's yield from of a delegate it
+ * does not resume as a generator, resumed by m's resumer or not: a call
+ * returning into m as *kind, with *env its environment, of an iterator
+ * instance's Python __next__, its send of a value not None (CALL_DELEGATE),
+ * its throw of a throw's exception (CALL_THROWN), or its close for a
+ * close, that exception on m's stack (CALL_CLOSED); else NULL, the
+ * delegate sent to in C, *item what it yields or NULL, the delegation
+ * ended (finish_delegate). */
+static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, int resumed, int *kind, SPYValue **env, SPYValue **item) {
+    SPYValue *d = m->delegate, *thrown = resumed ? delegate_thrown(m) : NULL, *sent = resumed && !thrown ? resumed_with(c, m->resumer) : NULL;
+    int closing = thrown && subclass(thrown->as.map.parent, c->exceptions[X_GENERATOR_EXIT]), next = !thrown && (!sent || sent->type == SPY_NONE);
+    SPYValue *function = thrown ? method_function(c, d, closing ? "close" : "throw") : next ? next_function(c, d) : method_function(c, d, "send"), *call = NULL;
+    *kind = !thrown ? CALL_DELEGATE : closing ? CALL_CLOSED : CALL_THROWN;
     *item = NULL;
-    if (function && machine_function(c, function)) {
-        SPYValue *args[] = {spy_retain(m->delegate), next ? NULL : spy_retain(sent)};
-        if ((*env = function_env(c, function, 2 - next, args, NULL, 1))) call = spy_retain(function);
-    } else *item = iterator_send(c, m->delegate, sent, NULL, 0, NULL, NULL);
-    spy_release(sent);
-    if (!call && !*item) finish_delegate(c, m);
+    if (function && machine_function(c, function) && !(closing && machine_push(c, m, spy_retain(thrown)))) {
+        SPYValue *args[] = {spy_retain(d), next || closing ? NULL : spy_retain(thrown ? thrown : sent)};
+        if ((*env = function_env(c, function, next || closing ? 1 : 2, args, NULL, 1))) call = spy_retain(function);
+    } else if (!c->error_type[0]) *item = iterator_send(c, d, sent, thrown, 1, &thrown, NULL);
+    spy_release(sent); spy_release(thrown);
+    if (!call && !*item) { if (thrown && c->handled) delegate_raised(c); finish_delegate(c, m); }
     return call;
+}
+/* A call delegate_next made, of kind, returned result into m: the item
+ * its yield from yields, owned; else NULL, the delegation ended, a close
+ * raising its exception at the yield from, a throw's error chained again
+ * to the exception m handles. */
+static NO_INLINE SPYValue *delegate_returned(SPYContext *c, Machine *m, int kind, SPYValue *result) {
+    if (kind == CALL_CLOSED) {
+        SPYValue *thrown = machine_pop(m);
+        spy_release(result); result = NULL;
+        if (!c->error_type[0]) raise_thrown(c, thrown, c->handled);
+        spy_release(thrown);
+    }
+    if (result) return result;
+    if (kind != CALL_DELEGATE && c->handled) delegate_raised(c);
+    finish_delegate(c, m);
+    return NULL;
 }
 /* Run machine m: generator's, or else the innermost call's, then the
  * calls it makes, until the outermost of them returns. */
@@ -25952,10 +26026,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;
-                    } else if (kind == CALL_DELEGATE) {
-                        /* An iterator's __next__ gives a yield from's item. */
-                        if (result) YIELD(result);
-                        finish_delegate(c, m); pc = m->pc;
+                    } else if (kind >= CALL_DELEGATE && kind <= CALL_CLOSED) {
+                        /* An iterator's method gives a yield from's item. */
+                        if ((result = delegate_returned(c, m, kind, result))) YIELD(result);
+                        pc = m->pc;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || (code[pc - 1].op == BC_STORE && code[pc - 1].arg))) spy_release(machine_pop(m));
@@ -26552,11 +26626,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (b) spy_release(b);
         continue;
     delegate_step: {
-        /* A yield from's next step, sent value, when its delegate is no
-         * generator the machine resumes (delegate_next). */
+        /* A yield from's next step when its delegate is no generator the
+         * machine resumes (delegate_next), value the delegate when m's
+         * resumer resumed it. */
         SPYValue *item;
         m->pc = pc; callee_env = NULL;
-        if ((value = delegate_next(c, m, value, &callee_env, &item))) { special = CALL_DELEGATE; goto enter_special; }
+        if ((value = delegate_next(c, m, value != NULL, &special, &callee_env, &item))) goto enter_special;
         if (item) YIELD(item);
         pc = m->pc;
         continue;
@@ -26598,7 +26673,6 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (m->awaiting == AWAIT_DELEGATE) {
             f = m->frame; code = m->code->items; pc = m->pc; value = m->delegate;
             if (value->type != SPY_INSTANCE) goto resume_generator;
-            value = resumed_with(c, m->resumer);
             goto delegate_step;
         }
         m->awaiting = AWAIT_NONE;
@@ -26964,9 +27038,7 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
         if (error_is(c, "GeneratorExit")) { spy_clear_error(c); return spy_none(c); }
         return NULL;
     }
-    SPYValue *exception = thrown_exception(c, argc, argv);
-    SPYValue *result = exception ? generator_send_args(c, g, NULL, exception, argc, argv) : NULL;
-    spy_release(exception); return result;
+    return generator_throw(c, g, argc, argv);
 }
 
 static SPYValue *awaitable_method(SPYContext *c, SPYValue *op, int method, size_t argc, SPYValue *const *argv) {

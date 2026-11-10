@@ -10,15 +10,18 @@
 (* for throw, such an error propagates before the delegator resumes, which *)
 (* stays suspended. next() calls its __next__, whose StopIteration ends    *)
 (* the yield from with the exception's value, also when a loop resumes g   *)
-(* through an outer generator's yield from.                                *)
+(* through an outer generator's yield from; a throw into that outer        *)
+(* generator reaches the iterator as a throw into g does.                  *)
 (*                                                                         *)
 (* A program runs                                                          *)
 (*                                                                         *)
 (*     def g():                                                            *)
 (*         return (yield from it)                                          *)
 (*                                                                         *)
-(* after one next(), then one step: close(), throw(KeyError), send(1),     *)
-(* next(), or list() of an outer generator, yield ("ret", (yield from g)), *)
+(* after one next(), then one step: close(), throw(KeyError()), send(1),   *)
+(* next(), list() of an outer generator, yield ("ret", (yield from g)), or *)
+(* throw(KeyError()) into one, return (yield from g), started instead of   *)
+(* g.                                                                      *)
 (* where it's __next__ returns 1, then raises StopIteration(8).            *)
 (* Each of it's send, throw and close is defined (send and throw return 7, *)
 (* close returns None), raises ValueError when called, is missing, or is   *)
@@ -29,14 +32,14 @@
 EXTENDS Naturals, Sequences
 
 Kinds == {"defined", "raises", "missing", "broken"}
-Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop"}]
+Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop", "nested"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
 Pending == [result |-> "pending", called |-> "", finished |-> FALSE]
 
-Method(step) == CASE step = "close" -> "close" [] step = "throw" -> "throw" [] step \in {"next", "loop"} -> "next" [] OTHER -> "send"
+Method(step) == CASE step = "close" -> "close" [] step \in {"throw", "nested"} -> "throw" [] step \in {"next", "loop"} -> "next" [] OTHER -> "send"
 
 Run(p) ==
     LET m == Method(p.step)
@@ -51,7 +54,7 @@ Run(p) ==
          [] p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]
          [] p.kind = "broken" -> [result |-> "ZeroDivisionError", called |-> called, finished |-> p.step = "send"]
          \* No throw: the exception is raised in the delegator.
-         [] p.step = "throw" -> [result |-> "KeyError", called |-> called, finished |-> TRUE]
+         [] p.step \in {"throw", "nested"} -> [result |-> "KeyError", called |-> called, finished |-> TRUE]
          [] OTHER -> [result |-> "AttributeError", called |-> called, finished |-> TRUE]
 
 Init == program \in Programs /\ outcome = Pending

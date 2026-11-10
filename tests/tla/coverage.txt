@@ -197,7 +197,7 @@ Contents | - navigation
 13 Expressions > 13.16 Yield expressions | Generators
 13 Expressions > 13.16 Yield expressions > 13.16.1 `yield` *expression* | Generators
 13 Expressions > 13.16 Yield expressions > 13.16.2 Asynchronous generators | AsyncGenerators
-13 Expressions > 13.16 Yield expressions > 13.16.3 YieldFrom ( *it* ) | YieldFrom, Awaitables, YieldFromIterator
+13 Expressions > 13.16 Yield expressions > 13.16.3 YieldFrom ( *it* ) | YieldFrom, Awaitables, YieldFromIterator, DelegateThrowArguments
 13 Expressions > 13.17 Evaluation order | Evaluation
 13 Expressions > 13.18 Operator precedence | Precedence
 14 Simple Statements | = sections
@@ -487,7 +487,7 @@ Contents | - navigation
 27 Control Abstraction Objects > 27.1 Iteration > 27.1.8 zip ( ...*iterables*, *strict*=False ) | BuiltinsIter
 27 Control Abstraction Objects > 27.2 Generator objects | = sections
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.1 GeneratorResume ( *g*, *mode*, *value* ) | Generators
-27 Control Abstraction Objects > 27.2 Generator objects > 27.2.2 Methods | Generators
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.2 Methods | Generators, DelegateThrowArguments
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.3 Attributes | Generators, Frames
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.4 Finalization | GC, Generators
 27 Control Abstraction Objects > 27.3 Awaitables | Awaitables

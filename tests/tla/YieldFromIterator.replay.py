@@ -48,12 +48,16 @@ def outcome(p):
     def g():
         return (yield from it)
     gen = g()
-    next(gen)
+
+    def nested():
+        return (yield from gen)
+    top = nested() if p["step"] == "nested" else gen
+    next(top)
     try:
         if p["step"] == "close":
             result = repr(gen.close())
-        elif p["step"] == "throw":
-            result = repr(gen.throw(KeyError))
+        elif p["step"] in ("throw", "nested"):
+            result = repr(top.throw(KeyError()))
         elif p["step"] == "send":
             result = repr(gen.send(1))
         elif p["step"] == "loop":
