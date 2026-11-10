@@ -2,7 +2,7 @@
 
 Formal models of parts of the Python 3.15 language, model-checked with TLC
 and tied to real implementations by replaying them. `make test-tla` uses
-[tpp](https://github.com/soasme/tlaplusplus) instead when it is installed:
+[manyan](https://github.com/soasme/manyan) instead when it is installed:
 it reads the same models and options and finds the same states (all models
 agree on their distinct-state counts), in about half TLC's time.
 

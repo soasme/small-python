@@ -1,6 +1,6 @@
 """Model-check the TLA+ specifications in tests/tla and replay them on Python.
 
-usage: tla_check.py ENGINE [--oracle PYTHON] [--java JAVA] [--jar TLA2TOOLS | --tpp TPP] [--only NAME]
+usage: tla_check.py ENGINE [--oracle PYTHON] [--java JAVA] [--jar TLA2TOOLS | --manyan MANYAN] [--only NAME]
 
 Each NAME.tla has a NAME.cfg naming its invariants and properties; TLC checks
 them over the model's whole state space. A model with a NAME.replay.py also
@@ -301,13 +301,13 @@ def main():
     parser.add_argument("--oracle", type=Path)
     parser.add_argument("--java", default=os.environ.get("JAVA", shutil.which("java") or "java"))
     parser.add_argument("--jar", type=Path, default=JAR)
-    parser.add_argument("--tpp", help="check with tpp, which reads TLC's models and options, instead of TLC")
+    parser.add_argument("--manyan", help="check with manyan, which reads TLC's models and options, instead of TLC")
     parser.add_argument("--only", default="")
     args = parser.parse_args()
     args.engine = args.engine.resolve()
     args.oracle = args.oracle and args.oracle.resolve()
-    if args.tpp:
-        checker = [args.tpp]
+    if args.manyan:
+        checker = [args.manyan]
     elif args.jar.exists():
         checker = [args.java, "-XX:+UseParallelGC", "-cp", str(args.jar), "tlc2.TLC"]
     else:
