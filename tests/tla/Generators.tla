@@ -1,9 +1,11 @@
 ---------------------------- MODULE Generators ----------------------------
 (***************************************************************************)
 (* The life cycle of a generator or coroutine object driven from outside   *)
-(* through next(), send(), throw(), and close(), as The Python Language    *)
-(* Reference specifies it (reference/expressions.html#generator-iterator-  *)
-(* methods and reference/datamodel.html#coroutine-objects).                *)
+(* through next(), send(), throw(), and close(), and ended by dropping its *)
+(* last reference, which closes it before the next statement, as The       *)
+(* Python Language Reference specifies it (reference/expressions.html      *)
+(* #generator-iterator-methods, reference/datamodel.html#coroutine-objects *)
+(* and PEP 342's generator finalization).                                  *)
 (*                                                                         *)
 (* The object runs one fixed body, written out in tla_check.py, where each *)
 (* step of this spec becomes a Python call; `op` names the call and        *)
@@ -16,6 +18,7 @@
 (*         except ValueError as e:          # coroutine                    *)
 (*             got = 'caught' if e.__context__ is None else 'chained'      *)
 (*         except GeneratorExit:                                           *)
+(*             log.append('exit')                                          *)
 (*             if variant == 'plain': raise                                *)
 (*             got = 'exit'                                                *)
 (*             yield ('ignored', i)                                        *)
@@ -29,7 +32,8 @@
 (* A throw is made while its caller handles `handled` (an IndexError) or   *)
 (* nothing. With variant 'bare' the loop's yield stands outside the try,   *)
 (* so a throw there propagates and close() ends the object without a      *)
-(* handler running.                                                        *)
+(* handler running. A drop's result is what its close logged; what the     *)
+(* close raised is reported, not seen.                                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -40,11 +44,12 @@ Variants == {"plain", "stubborn", "bare"}
 Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
-Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h>> : e \in Thrown, h \in Handled} \cup {<<"close">>}
+Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h>> : e \in Thrown, h \in Handled} \cup {<<"close">>, <<"drop">>}
 
 \* Where the body is suspended: before its first line, at the loop's yield,
-\* at the yield inside the GeneratorExit handler, or finished.
-Pcs == {"start", "loop", "ignored", "done"}
+\* at the yield inside the GeneratorExit handler, or finished; or the object
+\* is gone.
+Pcs == {"start", "loop", "ignored", "done", "gone"}
 
 VARIABLES kind, variant, pc, i, last, op, result
 vars == <<kind, variant, pc, i, last, op, result>>
@@ -53,7 +58,7 @@ Results ==
     {<<"yield", n, l>> : n \in 0..K, l \in Sent \cup {"caught", "blocked", "exit"}} \cup
     {<<"stop", v>> : v \in {"None", "done", "early"}} \cup
     {<<"raise", e>> : e \in Thrown \cup {"TypeError", "RuntimeError"}} \cup
-    {<<"return", "None">>, <<"init">>}
+    {<<"return", "None">>, <<"init">>, <<"dropped", "exit">>, <<"dropped", "none">>}
 
 TypeOK ==
     /\ kind \in Kinds /\ variant \in Variants /\ pc \in Pcs
@@ -101,19 +106,32 @@ Close ==
        THEN pc' = "ignored" /\ result' = <<"raise", "RuntimeError">> /\ UNCHANGED <<i, last>>  \* ignored GeneratorExit
        ELSE Finish(<<"return", "None">>)
 
+(* The last reference goes: a body suspended in the loop's try runs its    *)
+(* GeneratorExit handler, as close() would; elsewhere no handler runs.      *)
+Drop ==
+    /\ op' = <<"drop">>
+    /\ pc' = "gone" /\ UNCHANGED <<i, last>>
+    /\ result' = <<"dropped", IF pc = "loop" /\ variant # "bare" THEN "exit" ELSE "none">>
+
 Next ==
     /\ UNCHANGED <<kind, variant>>
+    /\ pc # "gone"
     /\ \/ \E v \in Sent : Send(v)
        \/ \E e \in Thrown, h \in Handled : Throw(e, h)
        \/ Close
+       \/ Drop
 
 Spec == Init /\ [][(Next)]_vars
 
 -----------------------------------------------------------------------------
 (* Properties the Language Reference states.                               *)
 
-\* A finished generator stays finished, whatever is done to it.
-DoneIsFinal == [][(pc = "done" => pc' = "done")]_vars
+\* A finished generator stays finished, whatever is done to it but a drop.
+DoneIsFinal == [][(pc = "done" => pc' \in {"done", "gone"})]_vars
+
+\* Dropping a body suspended in the loop's try runs its handler, before the
+\* program goes on.
+DropCloses == [][(op' = <<"drop">> => (result'[2] = "exit" <=> pc = "loop" /\ variant # "bare"))]_vars
 
 \* Throwing into a just-started generator raises at its start: the body
 \* never runs and the object is finished.

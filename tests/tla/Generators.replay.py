@@ -6,6 +6,7 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
 K = 2
+log = []
 
 
 class Y:
@@ -37,6 +38,7 @@ def make(kind, variant):
                 except ValueError as e:
                     got = "caught" if e.__context__ is None else "chained"
                 except GeneratorExit:
+                    log.append("exit")
                     if variant == "plain":
                         raise
                     got = "exit"
@@ -62,6 +64,7 @@ def make(kind, variant):
                 except ValueError as e:
                     got = "caught" if e.__context__ is None else "chained"
                 except GeneratorExit:
+                    log.append("exit")
                     if variant == "plain":
                         raise
                     got = "exit"
@@ -76,8 +79,12 @@ def make(kind, variant):
             last, i = got, i + 1
         return "done"
 
+    def release():
+        nonlocal me
+        me = None
+
     me = body() if kind == "generator" else coroutine()
-    return me
+    return me, release
 
 
 def text(value):
@@ -113,10 +120,18 @@ for walk in walks():
     count += 1
     steps = states(walk)
     start = next(steps)
-    target = make(start["kind"], start["variant"])
+    target, release = make(start["kind"], start["variant"])
     recent = []
     for state in steps:
-        actual = perform(start["kind"], target, state["op"])
+        if state["op"] == ("drop",):
+            # The object's last reference goes; it is closed before the
+            # next statement.
+            del log[:]
+            release()
+            target = None
+            actual = ("dropped", log[0] if log else "none")
+        else:
+            actual = perform(start["kind"], target, state["op"])
         recent = (recent + [state["op"]])[-8:]
         if actual != state["result"]:
             failures += 1
@@ -125,7 +140,7 @@ for walk in walks():
             break
     # Two close() calls finish any object (the spec's CloseTwice), so none is
     # left to be finalized while suspended.
-    for attempt in range(2):
+    for attempt in range(2 if target else 0):
         try:
             target.close()
             break

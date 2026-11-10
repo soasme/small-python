@@ -13941,6 +13941,7 @@ typedef struct {
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
+    size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
     struct Sorter *sorter;
 } Consumer;
 /* An assignment's unpacking, collecting in result the items for a target
@@ -22142,21 +22143,17 @@ static void finish_delegate(SPYContext *c, Machine *m) {
     }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE;
 }
-/* The Python __del__ on the machine, borrowed, of the instance first in
- * line for finalization; else NULL, finalizing in C (weak_callbacks), as
- * also inside it, past the recursion limit or under a trace function, whose
- * errors are unraisable there. Its call, which m's next step waits for
+/* The call of finalizer's __del__, which m's next step waits for
  * (CALL_FINALIZE), with *env its environment: the instance and the number
- * of entries waiting after it go on m's stack (finalized). */
-static NO_INLINE SPYValue *finalizer(SPYContext *c) {
-    SPYValue *self = c->finalize_calls[0];
-    SPYValue *method = finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] ||
-                       c->py_depth >= c->recursion_limit ||
-                       self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
-    return method && machine_function(c, method) ? method : NULL;
-}
+ * of entries waiting after it go on m's stack (finalized); or c->unbound
+ * when a dead generator's close began on m (finalize_close). */
+static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
     SPYValue *self = c->finalize_calls[0], *method = finalizer(c);
+    if (self->type == SPY_GENERATOR) {
+        finalize_close(c, m);
+        return c->error_type[0] ? NULL : c->unbound;
+    }
     memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
     if (machine_push(c, m, self) || machine_push(c, m, spy_int(c, (int64_t)c->finalize_calls_len))) return NULL;
     c->finalizing = c->calls_len + 1;
@@ -22395,11 +22392,59 @@ static SPYValue *key_best(SPYContext *c, Consumer *s) {
     return s->best ? spy_retain(s->best) : s->empty ? spy_retain(s->empty) :
            errorf(c, "ValueError", "%s() iterable argument is empty", s->keyed == KEY_MAX ? "max" : "min");
 }
+/* What finalizes the value first in line for finalization on the machine,
+ * borrowed: an instance's Python __del__, or a dead generator suspended
+ * at a yield inside a try or with, which closes there (finalize_close);
+ * else NULL, finalizing in C (weak_callbacks), as also inside it, past the
+ * recursion limit or under a trace function, whose errors are unraisable
+ * there. */
+static int close_quietly(SPYContext *, SPYValue *);
+static NO_INLINE SPYValue *finalizer(SPYContext *c) {
+    SPYValue *self = c->finalize_calls[0];
+    if (finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->py_depth >= c->recursion_limit)
+        return NULL;
+    if (self->type == SPY_GENERATOR)
+        return resumable(self) && self->as.generator.started && self->as.generator.machine->awaiting == AWAIT_YIELD &&
+               !close_quietly(c, self) ? self : NULL;
+    SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
+    return method && machine_function(c, method) ? method : NULL;
+}
+/* Close the dead generator first in line for finalization on m: its
+ * GeneratorExit raised at its yield (consume), the finalizers queued
+ * meanwhile waiting, and the step that was due run again after it
+ * (finalize_closed). */
+static void finalize_close(SPYContext *c, Machine *m) {
+    SPYValue *g = c->finalize_calls[0];
+    memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+    size_t depth = m->block_len;
+    consume(c, m, B_CLOSE, g, M_CLOSE, NULL, NULL, NULL);
+    if (m->block_len > depth) { m->blocks[depth].consumer->finalizing = c->finalize_calls_len + 1; c->weak_running = 1; }
+    spy_release(g);
+}
+/* The close finalize_close began ended, given what its generator yielded
+ * (item) or its error: either is unraisable; the generator is done with. */
+static NO_INLINE int finalize_closed(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
+    Block *top = &m->blocks[m->block_len - 1];
+    SPYValue *g = spy_retain(top->value);
+    size_t waiting = top->consumer->finalizing - 1;
+    if (item) { spy_release(item); spy_error(c, "RuntimeError", "generator ignored GeneratorExit"); }
+    if (c->error_type[0]) report_unraisable(c, "Exception ignored while closing generator ", g, NULL);
+    if (c->error_type[0]) spy_clear_error(c);
+    pop_block(c, m, f);
+    spy_release(g);
+    c->weak_running = 0;
+    finalize_ahead(c, waiting);
+    attend(c);
+    return 0;
+}
 static int keys_merge(SPYContext *, Block *, SPYValue *);
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
-    if (!item && top->consumer->id == B_CLOSE && error_is(c, "GeneratorExit")) spy_clear_error(c);
+    if (UNLIKELY(top->consumer->id == B_CLOSE)) {
+        if (!item && error_is(c, "GeneratorExit")) spy_clear_error(c);
+        if (top->consumer->finalizing) return finalize_closed(c, m, f, item);
+    }
     if (top->consumer->listed) {
         /* A merged mapping's keys from a generator, listed (keys_listing). */
         Consumer *s = top->consumer;
@@ -26444,6 +26489,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     finalize:
         callee_env = NULL;
         if (!(value = finalizer_call(c, m, &callee_env))) continue;
+        /* The step runs again once a dead generator closed (finalize_close). */
+        if (value == c->unbound) { pc--; goto consume_generator; }
         special = CALL_FINALIZE;
         goto enter_special;
     }

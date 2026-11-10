@@ -416,6 +416,13 @@ int main(int argc, char **argv) {
     assert(!strcmp(o.text, "finalized\n"));
     assert(strstr(errors.text, "Exception ignored while calling deallocator <function Last.__del__ at ")
            && strstr(errors.text, "ZeroDivisionError: division by zero\n"));
+    /* So does a dead generator's close, from its finally or its yield there. */
+    o.len = errors.len = 0;
+    execute(c, "def g(again):\n    try:\n        yield 1\n    finally:\n        print('closing')\n        if again: yield 2\n        1 / 0\n"
+               "x = g(0)\nnext(x)\ndel x\nprint('after')\nx = g(1)\nnext(x)\nx = None\nprint('end')");
+    assert(!strcmp(o.text, "closing\nafter\nclosing\nend\n"));
+    assert(strstr(errors.text, "Exception ignored while closing generator <generator object g at ")
+           && strstr(errors.text, "ZeroDivisionError: division by zero\n") && strstr(errors.text, "RuntimeError: generator ignored GeneratorExit\n"));
     /* Each stream flushes through its own callback. */
     spy_set_error_output(c, output, flush_output, &errors);
     execute(c, "import sys\nsys.stderr.flush()");
