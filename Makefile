@@ -255,6 +255,7 @@ test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cy
 	$(PYTHON) tests/std.py ./spy
 	CC='$(CC)' CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/native.py ./spy
 	CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/executable.py
+	$(PYTHON) tests/commands.py
 	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.

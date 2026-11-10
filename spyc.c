@@ -453,6 +453,7 @@ static void discover(Build *b, Module *entry) {
         }
     }
 }
+static int by_name(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
 /* -D PKG.*: every module and package below PKG, at any depth. */
 static void include_all(Build *b, const Origin *o, Module *package) {
     for (size_t i = 0; i < package->locations.len; i++) {
@@ -461,7 +462,7 @@ static void include_all(Build *b, const Origin *o, Module *package) {
         Strings names = {0};
         for (struct dirent *e; dir && (e = readdir(dir));) push(&names, concat(e->d_name, "", ""));
         if (dir) closedir(dir);
-        qsort(names.items, names.len, sizeof(char *), (int (*)(const void *, const void *))strcmp);
+        qsort(names.items, names.len, sizeof(char *), by_name);
         for (size_t j = 0; j < names.len; j++) {
             const char *e = names.items[j];
             size_t n = strlen(e);
@@ -556,18 +557,35 @@ static int write_file(const char *path, const Buffer *data) {
     if (f) wrote(path);
     return write_to(f, path, data);
 }
+/* Where spy.h and the libraries are: beside spyc in a build tree, as qjsc
+ * finds quickjs.h, or else under CONFIG_PREFIX. */
+static char *home(const char *self, const char *installed) {
+    const char *slash = strrchr(self, '/');
+    char *dir = slash ? slice(self, (size_t)(slash - self)) : concat(".", "", "");
+    char *header = concat(dir, "/spy.h", "");
+    FILE *probe = fopen(header, "rb");
+    free(header);
+    if (probe) { fclose(probe); return dir; }
+    free(dir);
+    return concat(CONFIG_PREFIX, installed, "");
+}
 #ifdef _WIN32
-/* As qjsc without CONFIG_CC: the C file is all spyc can give here. */
+/* As qjsc without CONFIG_CC: the C file is all spyc can give here, so
+ * spyc run and spyc test have nothing to run. */
 static int compile(const char *self, const char *output, const Buffer *c, const Strings *more, int standard, int verbose) {
     (void)self; (void)output; (void)c; (void)more; (void)standard; (void)verbose;
     fputs("spyc: error: executable output is not supported on this platform; use -e or -c\n", stderr);
     return 1;
 }
+static int cache(const char *self, int argc, char **argv, const Buffer *c, const Strings *more, int standard, int verbose, char **path) {
+    (void)argc; (void)argv; (void)path;
+    return compile(self, NULL, c, more, standard, verbose);
+}
+static int launch(const char *path, char **args, int replace) { (void)path; (void)args; (void)replace; return 1; }
 #else
 /* The executable: CONFIG_CC compiles the C file, written to a temporary
  * file, and MORE (the C modules and the arguments after --) against spy.h
- * and the libraries beside spyc in a build tree, as qjsc finds quickjs.h,
- * or else under CONFIG_PREFIX. The compiler runs in its own process group,
+ * and the libraries (home). The compiler runs in its own process group,
  * which an interruption stops as a whole. */
 static int compile(const char *self, const char *output, const Buffer *c, const Strings *more, int standard, int verbose) {
     const char *temp = getenv("TMPDIR");
@@ -575,14 +593,7 @@ static int compile(const char *self, const char *output, const Buffer *c, const 
     int fd = mkstemp(source);
     if (fd < 0) { fprintf(stderr, "spyc: error: cannot write %s\n", source); free(source); return 1; }
     wrote(source);
-    const char *slash = strrchr(self, '/');
-    char *dir = slash ? slice(self, (size_t)(slash - self)) : concat(".", "", "");
-    char *header = concat(dir, "/spy.h", "");
-    FILE *probe = fopen(header, "rb");
-    int tree = probe != NULL;
-    if (probe) fclose(probe);
-    char *include = tree ? concat(dir, "", "") : concat(CONFIG_PREFIX, "/include", "");
-    char *lib = tree ? concat(dir, "", "") : concat(CONFIG_PREFIX, "/lib", "");
+    char *include = home(self, "/include"), *lib = home(self, "/lib");
     Strings args = {0};
     for (const char *p = CONFIG_CC; *(p += strspn(p, " "));) {
         size_t n = strcspn(p, " ");
@@ -623,8 +634,71 @@ static int compile(const char *self, const char *output, const Buffer *c, const 
     unlink(source);
     for (sig_atomic_t i = 0; i < written_len; i++)
         if (written[i] == source) { written[i] = written[written_len - 1]; written_len--; }
-    free(source); free(dir); free(header); free(include); free(lib); free_strings(&args);
+    free(source); free(include); free(lib); free_strings(&args);
     return status;
+}
+/* FNV-1a over bytes, and over a file's bytes. */
+static uint64_t hash(uint64_t h, const void *data, size_t n) {
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)data)[i]) * 0x100000001b3u;
+    return h;
+}
+static uint64_t hash_file(uint64_t h, const char *path) {
+    char block[65536];
+    FILE *f = fopen(path, "rb");
+    for (size_t n; f && (n = fread(block, 1, sizeof block, f));) h = hash(h, block, n);
+    if (f) fclose(f);
+    return h;
+}
+/* spyc run and spyc test build into the cache, .spyc in the working
+ * directory (docs/build.md 2.3). An executable is named by two hashes: its
+ * slot, of the build's arguments, and its stamp, of what it is made from:
+ * the C file, the compiler, the C modules, spy.h and the libraries. A name
+ * that exists is complete: the compiler writes beside it, and the file is
+ * renamed into place. The build then removes its slot's other stamps. *PATH
+ * names the executable. */
+static char temp[64];
+static int cache(const char *self, int argc, char **argv, const Buffer *c, const Strings *more, int standard, int verbose, char **path) {
+    uint64_t slot = 0xcbf29ce484222325u, stamp = hash(slot, CONFIG_CC, sizeof CONFIG_CC);
+    for (int i = 1; i < argc; i++) slot = hash(slot, argv[i], strlen(argv[i]) + 1);
+    stamp = hash(stamp, c->data, c->len);
+    for (size_t i = 0; i < more->len; i++) stamp = hash_file(stamp, more->items[i]);
+    char *include = home(self, "/include"), *lib = home(self, "/lib");
+    const char *made[][2] = {{include, "/spy.h"}, {include, "/spy-std.h"}, {lib, "/libspy-std.a"}, {lib, "/libspy.a"}};
+    for (size_t i = 0; i < 4; i++) {
+        if (i % 3 && !standard) continue;
+        char *file = concat(made[i][0], made[i][1], "");
+        stamp = hash_file(stamp, file);
+        free(file);
+    }
+    free(include); free(lib);
+    char name[64];
+    snprintf(name, sizeof name, ".spyc/%016" PRIx64 "-%016" PRIx64, slot, stamp);
+    *path = concat(name, "", "");
+    if (!access(name, X_OK)) return 0;
+    snprintf(temp, sizeof temp, "%s.%ld", name, (long)getpid());
+    mkdir(".spyc", 0777);
+    if (compile(self, temp, c, more, standard, verbose)) return 1;
+    if (rename(temp, name)) { fprintf(stderr, "spyc: error: cannot write %s\n", name); return 1; }
+    Strings old = {0};
+    DIR *dir = opendir(".spyc");
+    for (struct dirent *e; dir && (e = readdir(dir));)
+        if (strlen(e->d_name) == 33 && !strncmp(e->d_name, name + 6, 17) && strcmp(e->d_name, name + 6)) push(&old, concat(".spyc/", e->d_name, ""));
+    if (dir) closedir(dir);
+    for (size_t i = 0; i < old.len; i++) unlink(old.items[i]);
+    free_strings(&old);
+    return 0;
+}
+/* PATH with ARGS, in place of spyc (spyc run), or as a child whose status
+ * is returned: its exit status, or 128 and the signal that ended it. */
+static int launch(const char *path, char **args, int replace) {
+    pid_t pid;
+    int code, error = 0;
+    fflush(stdout);
+    if (replace) execv(path, args), error = errno;
+    else if (!(error = posix_spawn(&pid, path, NULL, NULL, args, environ)) && waitpid(pid, &code, 0) == pid)
+        return WIFEXITED(code) ? WEXITSTATUS(code) : 128 + WTERMSIG(code);
+    fprintf(stderr, "spyc: error: cannot run %s: %s\n", path, strerror(error));
+    return 1;
 }
 #endif
 /* A C identifier for an entry: spy_ and its name, as spyc -c names it. */
@@ -642,14 +716,25 @@ static char *c_name(const char *entry, int module) {
 typedef struct { char *file, *package, *symbol; Module module; } EntryPoint;
 
 static int usage(void) {
-    fputs("usage: spyc [options] [-o program] (input.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]\n"
-          "       spyc -e [options] [-o program.c] (input.py | -m module) [module.c | libmodule.a]...\n"
-          "       spyc -c [options] [-o modules.c] (input.py | -m module)...\n"
+    fputs("usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]\n"
+          "       spyc [build] -e [options] [-o program.c] (input.py | -m module) [module.c | libmodule.a]...\n"
+          "       spyc [build] -c [options] [-o modules.c] (input.py | -m module)...\n"
+          "       spyc run [options] [module.c | libmodule.a]... (input.py | -m module) [argument]...\n"
+          "       spyc test [options] [module.c | libmodule.a]... [test.py | directory]...\n"
+          "       spyc clean\n"
+          "       spyc version\n"
           "options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,\n"
           "         -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror, -v\n", stderr);
     return 2;
 }
-int main(int argc, char **argv) {
+static int takes_value(const char *a) {
+    return !strcmp(a, "-o") || !strcmp(a, "-m") || !strcmp(a, "-M") || !strcmp(a, "-I") || !strcmp(a, "-x") ||
+           !strcmp(a, "-D") || !strcmp(a, "-N") || !strcmp(a, "--alias") || !strcmp(a, "--metafile") || !strcmp(a, "--deps");
+}
+/* A build of ARGV (ARGV[0] names the command). With CACHED, for spyc run and
+ * spyc test, the arguments end at the entry, *REST is the index after it,
+ * and the executable is built in the cache, which *CACHED then names. */
+static int build(const char *self, int argc, char **argv, char **cached, int *rest) {
     Build b = {0};
     Strings files = {0}, mains = {0}, includes = {0}, more = {0};   /* more: the C modules, then cc's arguments */
     const char *output = NULL, *metafile = NULL, *deps = NULL, *loader_name = NULL;
@@ -680,8 +765,7 @@ int main(int argc, char **argv) {
             push(&more, concat(a, "", ""));
             continue;
         }
-        int takes = !strcmp(a, "-o") || !strcmp(a, "-m") || !strcmp(a, "-M") || !strcmp(a, "-I") || !strcmp(a, "-x") ||
-                    !strcmp(a, "-D") || !strcmp(a, "-N") || !strcmp(a, "--alias") || !strcmp(a, "--metafile") || !strcmp(a, "--deps");
+        int takes = takes_value(a);
         if (takes && !value) { status = usage(); goto done; }
         if (takes) i++;
         if (!strcmp(a, "-c")) bare = 1;
@@ -713,12 +797,13 @@ int main(int argc, char **argv) {
             free(name);
         } else if (a[0] == '-') { status = usage(); goto done; }
         else push(&files, concat(a, "", ""));
+        if (cached && files.len + mains.len) { *rest = i + 1; break; }
     }
     entries = files.len + mains.len;
     if (!entries || (bare && with_main) || (!bare && entries > 1) || (bare && (b.registered.len || b.natives.len || optimize)) ||
-        ((bare || with_main) && passed)) { status = usage(); goto done; }
+        ((bare || with_main) && passed) || (cached && (bare || with_main || passed || output))) { status = usage(); goto done; }
     int executable = !bare && !with_main;
-    if (!output) output = executable ? "a.out" : "out.c";
+    if (!output) output = cached ? ".spyc" : executable ? "a.out" : "out.c";
     for (size_t i = 0; i < files.len; i++) if (!strcmp(files.items[i], output)) { status = usage(); goto done; }
     for (size_t i = 0; i < b.natives.len; i++) if (!strcmp(more.items[i], output)) { status = usage(); goto done; }
 
@@ -909,7 +994,9 @@ int main(int argc, char **argv) {
                   "    return status;\n}\n");
     }
 
-    if (executable ? compile(argv[0], output, &out, &more, b.registered.len > 0, verbose) : write_file(output, &out)) { status = 1; goto done; }
+    if (cached ? cache(self, *rest, argv, &out, &more, b.registered.len > 0, verbose, cached) :
+        executable ? compile(self, output, &out, &more, b.registered.len > 0, verbose) : write_file(output, &out)) { status = 1; goto done; }
+    if (cached) output = *cached;
 
     if (metafile) {
         put(&meta, "{\n  \"inputs\": {");
@@ -978,5 +1065,93 @@ done:
     free_strings(&b.roots); free_strings(&b.externals); free_strings(&b.registered); free_strings(&b.natives); free_strings(&b.aliases); free_strings(&b.stars);
     free_strings(&files); free_strings(&mains); free_strings(&includes); free_strings(&more);
     if (b.c) spy_context_free(b.c);
+    return status;
+}
+
+/* spyc test: each test file below PATH, test_*.py, in name order; hidden
+ * directories are passed over. PATH itself is a test if it is a file. */
+static void gather(Strings *tests, const char *path, int named) {
+    struct stat st;
+    const char *base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    if (stat(path, &st)) return;
+    if (!S_ISDIR(st.st_mode)) {
+        if (named || (!strncmp(base, "test_", 5) && !strcmp(base + strlen(base) - 3, ".py"))) push(tests, concat(path, "", ""));
+        return;
+    }
+    Strings names = {0};
+    DIR *dir = opendir(path);
+    for (struct dirent *e; dir && (e = readdir(dir));) if (e->d_name[0] != '.') push(&names, concat(e->d_name, "", ""));
+    if (dir) closedir(dir);
+    qsort(names.items, names.len, sizeof(char *), by_name);
+    for (size_t i = 0; i < names.len; i++) {
+        char *child = !strcmp(path, ".") ? concat(names.items[i], "", "") : concat(path, *base ? "/" : "", names.items[i]);
+        gather(tests, child, 0);
+        free(child);
+    }
+    free_strings(&names);
+}
+static int test(const char *self, int argc, char **argv) {
+    Strings words = {0}, paths = {0}, tests = {0};
+    int status = 0, passed = 0, failed = 0, rest = 0;
+    push(&words, concat("test", "", ""));
+    for (int i = 1; i < argc; i++) {
+        size_t n = strlen(argv[i]);
+        int module = n > 2 && (!strcmp(argv[i] + n - 2, ".c") || !strcmp(argv[i] + n - 2, ".a"));
+        if (!strcmp(argv[i], "-m")) status = usage();
+        else if (argv[i][0] != '-' && !module) push(&paths, concat(argv[i], "", ""));
+        else {
+            push(&words, concat(argv[i], "", ""));
+            if (takes_value(argv[i]) && i + 1 < argc) push(&words, concat(argv[++i], "", ""));
+        }
+    }
+    if (!paths.len) push(&paths, concat(".", "", ""));
+    for (size_t i = 0; !status && i < paths.len; i++) {
+        size_t before = tests.len;
+        gather(&tests, paths.items[i], 1);
+        if (tests.len == before) { fprintf(stderr, "spyc: error: no tests in %s\n", paths.items[i]); status = 1; }
+    }
+    for (size_t i = 0; !status && i < tests.len; i++) {
+        char *program = NULL, *args[] = {tests.items[i], NULL};
+        push(&words, tests.items[i]);
+        int code = build(self, (int)words.len, words.items, &program, &rest), built = !code;
+        words.len--;
+        if (code == 2) status = 2;
+        else if (built) code = launch(program, args, 0);
+        if (!status && !code) printf("ok    %s\n", tests.items[i]);
+        else if (!status && built) printf("FAIL  %s (exit %d)\n", tests.items[i], code);
+        else if (!status) printf("FAIL  %s (build)\n", tests.items[i]);
+        failed += code != 0;
+        passed += code == 0;
+        free(program);
+    }
+    if (!status) printf("%d passed, %d failed\n", passed, failed);
+    free_strings(&words); free_strings(&paths); free_strings(&tests);
+    return status ? status : failed > 0;
+}
+/* spyc clean: the cache's files, then the cache, if nothing else is in it. */
+static int clean(void) {
+    Strings names = {0};
+    DIR *dir = opendir(".spyc");
+    if (!dir) return 0;
+    for (struct dirent *e; (e = readdir(dir));)
+        if (strspn(e->d_name, "0123456789abcdef") == 16 && e->d_name[16] == '-') push(&names, concat(".spyc/", e->d_name, ""));
+    closedir(dir);
+    for (size_t i = 0; i < names.len; i++) unlink(names.items[i]);
+    free_strings(&names);
+    if (!rmdir(".spyc")) return 0;
+    fprintf(stderr, "spyc: error: cannot remove .spyc: %s\n", strerror(errno));
+    return 1;
+}
+int main(int argc, char **argv) {
+    const char *verb = argc > 1 ? argv[1] : "";
+    if (!strcmp(verb, "version")) return argc > 2 ? usage() : puts("spyc " SPY_VERSION) < 0;
+    if (!strcmp(verb, "clean")) return argc > 2 ? usage() : clean();
+    if (!strcmp(verb, "test")) return test(argv[0], argc - 1, argv + 1);
+    if (strcmp(verb, "run")) return build(argv[0], argc - !strcmp(verb, "build"), argv + !strcmp(verb, "build"), NULL, NULL);
+    char *program = NULL;
+    int rest = 0, status = build(argv[0], argc - 1, argv + 1, &program, &rest);
+    /* The program's arguments: the entry as given, then the rest. */
+    if (!status) status = launch(program, argv + rest, 1);
+    free(program);
     return status;
 }
