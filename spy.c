@@ -14162,14 +14162,13 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
         emit(c, p, n->kind == N_NAME || n->constant ? BC_LOAD : operator_right(n) ? BC_OPERATE : BC_EVAL, n, 0);
         return;
     }
-    size_t branch, end;
+    size_t branch, end, parts;
     switch (n->kind) {
-    case N_JOINED: {
+    case N_JOINED:
         /* The parts stay on the stack for the join, as many as arg. */
-        int parts = 0;
+        parts = 0;
         for (Node *part = n->args; part; part = part->next, parts++) compile_expr(c, p, part);
-        emit(c, p, BC_JOIN, n, parts); break;
-    }
+        emit(c, p, BC_JOIN, n, (int)parts); break;
     case N_TEMPLATE:
         emit(c, p, BC_NEW, n, SPY_LIST);
         for (Node *part = n->args; part; part = part->next) {
