@@ -36,11 +36,11 @@ The rules are in place ([manual 3.4.8](docs/manual.md#348-stability)):
 `spy_version()` reports the library's version next to the header's
 `SPY_VERSION`, every declaration in `spy.h` states its ownership and errors,
 and `make check-api` compiles the last release's declarations against the
-current header and compares `libspy.a`'s exports with it. 0.8.0 makes the
+current header and compares `libspy.a`'s exports with it. 0.8.0 made the
 last incompatible changes planned (`spy_type` reports only the data types a
 host converts and `SPY_OBJECT`; limits are set through `spy_set_limit`
 alone), and every release from it to 1.0.0 stays compatible with it.
-Remaining: release 0.8.0, then declare the API and ABI stable at 1.0.0.
+Remaining: declare the API and ABI stable at 1.0.0.
 
 ### Build options
 
