@@ -56,6 +56,10 @@ def outcome(p):
             result = repr(gen.throw(KeyError))
         elif p["step"] == "send":
             result = repr(gen.send(1))
+        elif p["step"] == "loop":
+            def outer():
+                yield ("ret", (yield from gen))
+            result = repr(list(outer()))
         else:
             result = repr(next(gen))
     except StopIteration as error:

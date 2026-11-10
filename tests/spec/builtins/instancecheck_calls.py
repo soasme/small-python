@@ -3,8 +3,9 @@
 # defines a Python __instancecheck__ or __subclasscheck__ call it once with
 # the class and the tested object, the result's truth their bool and its
 # exception theirs; isinstance of an instance of exactly that class calls
-# none. Methods that loop run in function statements, with arguments that
-# need evaluating or not, as at module level.
+# none. An instance whose class defines them is checked alike. Methods that
+# loop run in function statements, with arguments that need evaluating or
+# not, as at module level.
 from harness import *
 
 log = []
@@ -75,3 +76,30 @@ del log[:]
 assert_eq([isinstance(1, A), isinstance(5, A), issubclass(str, A), error(isinstance, 1, B)],
           [True, False, True, ("TypeError", arity)])
 assert_eq(log, [("i", "A", 1), ("i", "A", 5), ("s", "A", "str")])
+
+# An instance whose class defines the methods is checked by them too; an
+# instance of a tuple's subclass is a tuple of classes, whatever its class defines.
+class Checker:
+    def __instancecheck__(self, obj):
+        for _ in range(2): pass
+        log.append(("ci", obj))
+        return obj == 1
+    def __subclasscheck__(self, sub):
+        for _ in range(2): pass
+        log.append(("cs", sub.__name__))
+        if sub is bool: raise KeyError("sub")
+        return []
+
+class Classes(tuple):
+    def __instancecheck__(self, obj): return True
+
+def instances():
+    del log[:]
+    check = Checker()
+    out = [isinstance(1, check), isinstance(one() + 1, check), issubclass(int, check), error(issubclass, bool, check),
+           isinstance(1, Classes((str,))), isinstance(1, Classes((int,)))]
+    out.append(list(log))
+    return out
+
+assert_eq(instances(), [True, False, False, ("KeyError", "'sub'"), False, True,
+                        [("ci", 1), ("ci", 2), ("cs", "int"), ("cs", "bool")]])

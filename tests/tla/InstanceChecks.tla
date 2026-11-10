@@ -7,20 +7,21 @@
 (* the methods take effect when a metaclass defines them and not when the  *)
 (* class itself does; their results are converted to bool; an object       *)
 (* whose type is exactly the class is its instance without the hook; a     *)
-(* tuple of classes checks each; and a second argument that is neither a   *)
-(* class nor a tuple of classes raises TypeError.                          *)
+(* tuple of classes checks each; a second argument that is an instance    *)
+(* is checked by its class's hooks; and one that is neither a class nor a  *)
+(* tuple of classes, without hooks, raises TypeError.                      *)
 (*                                                                         *)
 (* A program defines class C, under a metaclass whose hooks return 1,      *)
 (* return 0, or raise ValueError, or with the hooks defined on C itself,   *)
 (* or with none, and class D(C); then calls isinstance(x, CLS) for x a C,  *)
 (* a D, or 1, or issubclass(X, CLS) for X C, D, or int, where CLS is C,    *)
-(* (str, C), or 5. The outcome is the result or the exception.             *)
+(* (str, C), 5, or C(). The outcome is the result or the exception.        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Hooks == {"true", "false", "raise", "onclass", "none"}
 Subjects == {"C", "D", "int"}
-Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "five"}]
+Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "five", "instance"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -36,7 +37,10 @@ Check(p) ==
       [] p.hook = "raise" -> "ValueError"
       [] OTHER -> Default(p)
 
-Run(p) == IF p.cls = "five" THEN "TypeError" ELSE Check(p)
+\* An instance's class's hooks check against it; a metaclass's are not its class's.
+Run(p) == CASE p.cls = "five" -> "TypeError"
+            [] p.cls = "instance" -> IF p.hook = "onclass" THEN "True" ELSE "TypeError"
+            [] OTHER -> Check(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -46,7 +50,7 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* Hooks defined on the class itself change nothing.
-ClassHooksIgnored == Done /\ program.hook = "onclass" /\ program.cls # "five" => outcome = Default(program)
+ClassHooksIgnored == Done /\ program.hook = "onclass" /\ program.cls \in {"C", "tuple"} => outcome = Default(program)
 
 \* Every result is a bool or an exception.
 Bools == Done => outcome \in {"True", "False", "ValueError", "TypeError"}

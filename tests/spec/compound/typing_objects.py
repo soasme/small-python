@@ -1,5 +1,6 @@
 # spec: PLS-315 29.1, 29.5, 29.7, 16.7
 # description: The typing intrinsics reached through language constructs: NoDefault, unions, and Generic.
+# A union of classes and None is made alike inside functions, and a metaclass's __or__ comes first.
 from harness import *
 
 def generic[T, *Ts, **P](): pass
@@ -97,3 +98,26 @@ assert_type(Generic(), Generic)
 with assert_raises(TypeError, message="Cannot inherit from plain Generic"):
     class Sub(Generic):
         pass
+
+class OrMeta(type):
+    def __or__(cls, other): return "meta"
+
+class Ored(metaclass=OrMeta): pass
+
+class Plainly: pass
+
+def same(x): return x
+
+def unions():
+    out = [int | str, None | Plainly, Plainly | None | int, Ored | int, (int | str).__args__, int | str == str | int,
+           same(int) | str, None | same(Plainly)]
+    try:
+        int | 3
+    except TypeError as e:
+        out.append(str(e))
+    return out
+
+expected = [int | str, None | Plainly, Plainly | None | int, "meta", (int, str), True, int | str, None | Plainly,
+            "unsupported operand type(s) for |: 'type' and 'int'"]
+assert_eq(unions(), expected)
+assert_eq(unions(), expected)

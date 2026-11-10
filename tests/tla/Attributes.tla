@@ -12,6 +12,7 @@
 (*                __set__ stores into o.__dict__, and whose __delete__     *)
 (*                removes it from there                                    *)
 (*     property   a property with only a getter, returning 'pget'          *)
+(*     raising    a property with only a getter, raising AttributeError    *)
 (*     slot       __slots__ = ('a',)                                       *)
 (*                                                                         *)
 (* with or without a __getattr__ returning 'ga'. The steps are o.a,        *)
@@ -20,20 +21,21 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Kinds == {"none", "value", "nondata", "data", "property", "slot"}
+Kinds == {"none", "value", "nondata", "data", "property", "raising", "slot"}
 Values == {"v1", "v2"}
 Missing == "missing"
 
 VARIABLES kind, getattr, stored, op, result
 vars == <<kind, getattr, stored, op, result>>
 
-DataDescriptor == kind \in {"data", "property", "slot"}
+DataDescriptor == kind \in {"data", "property", "raising", "slot"}
 
 \* o.a: a data descriptor wins over the instance, which wins over the rest
-\* of the class; failing that, __getattr__.
+\* of the class; failing that, or on a getter's AttributeError, __getattr__.
 Lookup ==
     CASE kind = "data" -> "dget"
       [] kind = "property" -> "pget"
+      [] kind = "raising" -> Missing
       [] stored # Missing -> stored
       [] kind = "nondata" -> "nget"
       [] kind = "value" -> "cls"
@@ -44,14 +46,14 @@ Get == /\ op' = "get"
 
 \* o.a = v: a data descriptor's __set__, otherwise the instance's __dict__.
 Set(v) == /\ op' = "set " \o v
-          /\ IF kind = "property"
+          /\ IF kind \in {"property", "raising"}
              THEN result' = "AttributeError" /\ UNCHANGED stored
              ELSE result' = "ok" /\ stored' = v
           /\ UNCHANGED <<kind, getattr>>
 
 \* del o.a: a data descriptor's __delete__, otherwise the instance's own.
 Del == /\ op' = "del"
-       /\ CASE kind = "property" -> result' = "AttributeError" /\ UNCHANGED stored
+       /\ CASE kind \in {"property", "raising"} -> result' = "AttributeError" /\ UNCHANGED stored
             [] kind = "data" -> result' = "ok" /\ stored' = Missing
             [] stored # Missing -> result' = "ok" /\ stored' = Missing
             [] OTHER -> result' = "AttributeError" /\ UNCHANGED stored
@@ -68,12 +70,12 @@ TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ stored \in Values \cup {Missi
 DescriptorWins == op = "get" /\ kind \in {"data", "property"} => result \in {"dget", "pget"}
 
 \* What is set is what is got, unless a data descriptor intervenes.
-SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data", "property"}) /\ op' = "get"
+SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data", "property", "raising"}) /\ op' = "get"
                  => result' = stored]_vars
 
 \* __getattr__ is only consulted when lookup fails, so o.a never fails with it.
 GetattrFallback == op = "get" /\ getattr => result # "AttributeError"
 
 \* A read-only property cannot change.
-ReadOnly == kind = "property" => stored = Missing
+ReadOnly == kind \in {"property", "raising"} => stored = Missing
 =============================================================================

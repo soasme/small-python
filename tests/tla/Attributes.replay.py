@@ -20,6 +20,10 @@ class Data:
         obj.__dict__.pop("a", None)
 
 
+def refuse(self):
+    raise AttributeError("refused")
+
+
 def make(kind, getattr):
     namespace = {}
     if kind == "value":
@@ -30,6 +34,8 @@ def make(kind, getattr):
         namespace["a"] = Data()
     elif kind == "property":
         namespace["a"] = property(lambda self: "pget")
+    elif kind == "raising":
+        namespace["a"] = property(refuse)
     elif kind == "slot":
         namespace["__slots__"] = ("a",)
     if getattr:

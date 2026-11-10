@@ -6,8 +6,12 @@
 # can supply __class_getitem__, a plain function or staticmethod stored
 # later is called with the key alone, and None or a missing one raises
 # TypeError, as does a method that cannot take the key. A builtin generic
-# class, a subclass of one, and type itself make a GenericAlias.
+# class, a subclass of one, and type itself make a GenericAlias, also as
+# the program's first.
 from harness import *
+
+first = frozendict[str, int]
+assert_eq(repr(first), "frozendict[str, int]")
 
 log = []
 

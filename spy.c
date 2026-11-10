@@ -8361,14 +8361,14 @@ static SPYValue *storage_view(SPYContext *c, SPYValue *view) {
     if (v) v->as.bound.self = spy_retain(view_map(view));
     return v;
 }
-/* What source's __iter__ returned, which it takes, when it is an
- * iterator; else NULL with the error. */
-static SPYValue *iterator_returned(SPYContext *c, SPYValue *source, SPYValue *iterator) {
+/* What source's __iter__ or __await__, as name, returned, which it takes,
+ * when it is an iterator; else NULL with the error. */
+static SPYValue *iterator_returned(SPYContext *c, SPYValue *source, SPYValue *iterator, const char *name) {
     if (iterator->type == SPY_TEMPLATE_ITERATOR || iterator->type == SPY_ITERATOR || iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(iterator)) return iterator;
     SPYValue *method = special_method(c, iterator, "__next__");
     if (!method) {
         char fq[256];
-        errorf(c, "TypeError", "%s.__iter__() must return an iterator, not %s", type_fqname(source, fq, sizeof(fq)), type_name(iterator));
+        errorf(c, "TypeError", "%s.%s() must return an iterator, not %s", type_fqname(source, fq, sizeof(fq)), name, type_name(iterator));
         spy_release(iterator); return NULL;
     }
     spy_release(method);
@@ -8410,7 +8410,7 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         if (method) {
             SPYValue *iterator = call(c, method, 0, NULL);
             spy_release(method);
-            return iterator ? iterator_returned(c, source, iterator) : NULL;
+            return iterator ? iterator_returned(c, source, iterator, "__iter__") : NULL;
         }
         if (c->error_type[0]) return NULL;
         /* The sequence protocol needs only a __getitem__ in the class. */
@@ -9993,6 +9993,7 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
     }
     return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
+static int class_union(int, SPYValue *, SPYValue *);
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -10001,7 +10002,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) ? NULL : binary(c, op, a, b);
+    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -11881,8 +11882,9 @@ static int machine_function(SPYContext *, SPYValue *);
 /* attribute, for an attribute step: NULL with no error when a call on the
  * machine, c->fallback, answers: v's class's __getattr__ after an
  * AttributeError, else its own __getattribute__, or a class attribute
- * whose type's __get__ is the attribute's (getter_call). */
-static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
+ * whose type's __get__ is the attribute's (getter_call); or, for a step
+ * that chains (node_attribute), a property's getter before __getattr__. */
+static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name, int chains) {
     SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : NULL, *definition;
     SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
     definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
@@ -11916,6 +11918,11 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
     }
     if (!fallback || !machine_function(c, fallback) || custom)
         return attribute(c, v, name);
+    SPYValue *descriptor = chains ? class_lookup(owner, name) : NULL;
+    if (descriptor && descriptor->type == SPY_PROPERTY && machine_function(c, descriptor->as.property.get)) {
+        c->fallback = spy_retain(descriptor);
+        return NULL;
+    }
     /* As attribute_lookup: __getattr__ is found before the lookup runs. */
     spy_retain(fallback);
     SPYValue *result = attribute_value(c, v, name);
@@ -11936,7 +11943,7 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
         if (kind == ATTR_METHOD) return descriptor_get(c, n->attr_method, v, v->as.map.parent);
     }
     if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
-    return calls ? attribute_step(c, v, n->b->text) : attribute(c, v, n->b->text);
+    return calls ? attribute_step(c, v, n->b->text, 1) : attribute(c, v, n->b->text);
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
@@ -13922,7 +13929,7 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * A sum on the machine (adds) adds result and item by a Python method
  * (KEY_ADD): the one to call in best, the operator's method of phase
  * (operator_call), with item first when swapped. dict() or dict.update()
- * of a mapping on the machine (keys_function) calls its keys() first
+ * of a mapping on the machine (method_function) calls its keys() first
  * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
  * gives, then is fed those keys, looking each up in the mapping
  * (KEY_ITEMS). */
@@ -13990,7 +13997,7 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__ or a key's
  * __hash__ (hash_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_DELEGATE, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
@@ -17535,11 +17542,14 @@ static SPYValue *load_intrinsics(SPYContext *c) {
 static SPYValue *intrinsic(SPYContext *c, const char *name) {
     if (!c->intrinsics) {
         if (c->intrinsics_loading) return errorf(c, "SystemError", "intrinsic '%s' used while loading intrinsics", name);
-        /* Loading them spends nothing of the program's budget. */
+        /* Loading them spends nothing of the program's budget, nor
+         * changes the call a step is entering. */
         size_t fuel = c->fuel;
+        int kind = c->entering_kind;
+        SPYValue *init = c->entering_init;
         c->fuel = SIZE_MAX;
         c->intrinsics = load_intrinsics(c);
-        c->fuel = fuel;
+        c->fuel = fuel; c->entering_kind = kind; c->entering_init = init;
         if (!c->intrinsics) return NULL;
     }
     SPYValue *value = name_local(c->intrinsics, name);
@@ -22148,16 +22158,10 @@ static SPYValue *await_iterator(SPYContext *c, SPYValue *value, const char *meth
     }
     SPYValue *iterator = call(c, method, 0, NULL);
     spy_release(method);
-    if (!iterator) return NULL;
-    if (iterator->type == SPY_TEMPLATE_ITERATOR || iterator->type == SPY_ITERATOR || iterator->type == SPY_GENERATOR || iterator->type == SPY_COROUTINE_ITERATOR || awaitable_iterator(iterator))
-        return iterator;
-    method = special_method(c, iterator, "__next__");
-    if (method) { spy_release(method); return iterator; }
-    { char fq[256]; errorf(c, "TypeError", "%s.__await__() must return an iterator, not %s", type_fqname(value, fq, sizeof(fq)), type_name(iterator)); }
-    spy_release(iterator);
-    return NULL;
+    return iterator ? iterator_returned(c, value, iterator, "__await__") : NULL;
 }
 /* __aiter__ for async for (statement) or aiter(), with their messages. */
+static SPYValue *async_returned(SPYContext *, SPYValue *, SPYValue *, int);
 static SPYValue *async_iterator(SPYContext *c, SPYValue *value, int statement) {
     SPYValue *method = special_method(c, value, "__aiter__");
     if (!method) {
@@ -22167,7 +22171,11 @@ static SPYValue *async_iterator(SPYContext *c, SPYValue *value, int statement) {
     }
     SPYValue *iterator = call(c, method, 0, NULL);
     spy_release(method);
-    if (!iterator) return NULL;
+    return iterator ? async_returned(c, value, iterator, statement) : NULL;
+}
+/* What value's __aiter__ returned, which it takes, when it is an async
+ * iterator; else NULL with the error. */
+static SPYValue *async_returned(SPYContext *c, SPYValue *value, SPYValue *iterator, int statement) {
     SPYValue *next = special_method(c, iterator, "__anext__");
     if (next) { spy_release(next); return iterator; }
     if (!c->error_type[0]) {
@@ -22230,9 +22238,10 @@ static ALWAYS_INLINE int suspended(SPYValue *v) {
 static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATOR && suspended(v); }
 /* Whether a yield from or await of v resumes it on the machine. */
 static NO_INLINE int delegable(SPYValue *v) { return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && suspended(v); }
-/* The machine a yield from or await of machine m's waits on at last, or m. */
+/* The machine a yield from or await of machine m's waits on at last, or m:
+ * the one waiting on an iterator not a generator. */
 static Machine *innermost(Machine *m) {
-    while (m->awaiting == AWAIT_DELEGATE) m = m->delegate->as.generator.machine;
+    while (m->awaiting == AWAIT_DELEGATE && m->delegate->type != SPY_INSTANCE) m = m->delegate->as.generator.machine;
     return m;
 }
 /* Whether a close of, or a throw into, a generator or coroutine raises at
@@ -22242,13 +22251,23 @@ static int throws_in(SPYValue *g) {
     return (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && suspended(g) &&
            innermost(g->as.generator.machine)->awaiting == AWAIT_YIELD;
 }
+/* The Python __next__ on the machine of instance v's class, borrowed;
+ * else NULL. */
+static NO_INLINE SPYValue *next_function(SPYContext *c, SPYValue *v) {
+    SPYValue *function = v->type != SPY_INSTANCE || builtin_base(c, v, "__next__", NULL) ? NULL : class_lookup(v->as.map.parent, "__next__");
+    return function && machine_function(c, function) ? function : NULL;
+}
+/* Whether instance v has a Python __next__, out of delegating's loop. */
+static NO_INLINE int next_method(SPYContext *c, SPYValue *v) { return next_function(c, v) != NULL; }
 /* Whether generator machine m's yield from waits on a generator, or a
- * chain of them, that a step may resume in its place (resume_generator). */
+ * chain of them, that a step may resume in its place (resume_generator),
+ * or on an iterator whose __next__ the machine calls. */
 static NO_INLINE int delegating(Machine *m) {
     while (m->awaiting == AWAIT_DELEGATE && (m->generator->type == SPY_GENERATOR || m->generator->type == SPY_COROUTINE)) {
         SPYValue *d = m->delegate;
+        /* An iterator's Python __next__ is a call (delegate_next). */
         if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE) || d->as.generator.running || d->as.generator.done ||
-            !d->as.generator.machine) return 0;
+            !d->as.generator.machine) return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) : 0;
         if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
     }
     return 0;
@@ -22289,13 +22308,13 @@ static SPYValue *getitem_function(SPYContext *c, SPYValue *v) {
     SPYValue *function = cls ? class_lookup(cls, "__getitem__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
-/* The Python keys() of plain instance v, found by its class's default
- * attribute lookup, borrowed: dict() and dict.update() then merge v as a
- * mapping on the machine (KEY_KEYS); else NULL. */
-static SPYValue *keys_function(SPYContext *c, SPYValue *v) {
-    if (!plain_instance(v) || name_local(v, "keys")) return NULL;
+/* The Python method name of plain instance v, found by its class's
+ * default attribute lookup, borrowed; else NULL. dict() and dict.update()
+ * merge v as a mapping on the machine by its keys() (KEY_KEYS). */
+static SPYValue *method_function(SPYContext *c, SPYValue *v, const char *name) {
+    if (!plain_instance(v) || name_local(v, name)) return NULL;
     SPYValue *cls = v->as.map.parent, *hook = class_lookup(cls, "__getattribute__");
-    SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, "keys") : NULL;
+    SPYValue *function = !hook || default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE) ? class_lookup(cls, name) : NULL;
     return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
 }
 /* Whether instance v iterates by a getitem_function, its class having no
@@ -22328,10 +22347,10 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
     /* dict() and dict.update() merge an instance as a mapping, on the
-     * machine when its keys() is Python (keys_function). */
+     * machine when its keys() is Python (method_function). */
     int mapping = argc && argv[0]->type == SPY_INSTANCE &&
                   (callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT));
-    if (!argc || (mapping ? !keys_function(c, argv[0]) : !machine_source(c, argv[0]))) return -1;
+    if (!argc || (mapping ? !method_function(c, argv[0], "keys") : !machine_source(c, argv[0]))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
@@ -22725,7 +22744,7 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         return NULL;
     }
     if (s->keyed == KEY_ITER || s->keyed == KEY_KEYS) {
-        SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : keys_function(c, items);
+        SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : method_function(c, items, "keys");
         if (!machine_function(c, function)) {
             /* A generator function's keys() makes its generator at once. */
             if ((result = call(c, function, 1, &items))) key_took(c, m, result);
@@ -22848,7 +22867,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     }
     if (s->keyed == KEY_ITER) {
         /* The iterator the instance's __iter__ returned is the source. */
-        SPYValue *iterator = iterator_returned(c, top->value, key);
+        SPYValue *iterator = iterator_returned(c, top->value, key, "__iter__");
         if (!iterator) return -1;
         spy_release(top->value);
         top->value = iterator; s->keyed = 0;
@@ -22950,6 +22969,15 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     c->entering_kind = CALL_CHECKED;
     return allocator->as.wrapper.function;
 }
+/* The Python __bool__ of instance v's class, borrowed, or with none its
+ * __len__, *length set, whose result is v's truth (truth_result); else
+ * NULL. */
+static SPYValue *truth_function(SPYContext *c, SPYValue *v, int *length) {
+    if (v->as.map.base || builtin_base(c, v, "__bool__", "__len__")) return NULL;
+    SPYValue *function = class_lookup(v->as.map.parent, "__bool__");
+    if (!function && (function = class_lookup(v->as.map.parent, "__len__"))) *length = 1;
+    return function && machine_function(c, function) ? function : NULL;
+}
 /* The Python __str__, __repr__, __format__, __len__, __int__, __float__,
  * __complex__, __bytes__, __hash__, __abs__, __round__ or __reversed__ that
  * callee, str, repr, format, len, int, float, complex, bytes, hash, abs,
@@ -22978,8 +23006,17 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         /* With none above object's, an empty spec formats as str(). */
         if (function || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
     }
+    if (id == B_BOOL) {
+        /* False names a __len__ bool() takes the truth of. */
+        int length = 0;
+        *spec = NULL;
+        if (!(function = truth_function(c, argv[0], &length)) ||
+            !(*name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8))) return NULL;
+        c->entering_kind = CALL_CHECKED;
+        return function;
+    }
     /* With no __str__ above object's, str() calls the instance's __repr__. */
-    const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" : id == B_BOOL ? "__bool__" :
+    const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
         id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
         id == B_REVERSED ? "__reversed__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
@@ -22990,14 +23027,16 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     c->entering_kind = CALL_CHECKED;
     return function;
 }
-/* The Python __instancecheck__ or __subclasscheck__ of argv[1]'s metaclass
- * that callee, isinstance or issubclass, calls with argv[1] and argv[0],
- * *name the method's; else NULL. */
+/* The Python __instancecheck__ or __subclasscheck__ of argv[1]'s metaclass,
+ * or of an instance argv[1]'s class, not a builtin's, that callee,
+ * isinstance or issubclass, calls with argv[1] and argv[0], *name the
+ * method's; else NULL. */
 static NO_INLINE SPYValue *check_method(SPYContext *c, SPYValue *callee, SPYValue *const *argv, SPYValue **name) {
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
-    if ((id != B_ISINSTANCE && id != B_ISSUBCLASS) || (id == B_ISINSTANCE && value_class(c, argv[0]) == argv[1])) return NULL;
+    if ((id != B_ISINSTANCE && id != B_ISSUBCLASS) || (id == B_ISINSTANCE && value_class(c, argv[0]) == argv[1]) ||
+        (argv[1]->type == SPY_INSTANCE && argv[1]->as.map.base)) return NULL;
     const char *method = id == B_ISINSTANCE ? "__instancecheck__" : "__subclasscheck__";
-    SPYValue *function = class_lookup(argv[1]->as.map.meta, method);
+    SPYValue *function = class_lookup(argv[1]->type == SPY_CLASS ? argv[1]->as.map.meta : argv[1]->as.map.parent, method);
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, 17))) return NULL;
     c->entering_kind = CALL_CHECKED;
     return function;
@@ -23099,8 +23138,8 @@ static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
 static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                          SPYValue **argv, SPYValue **env) {
     SPYValue *found[2], *convert = method < 0 && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
-    if (!convert && method < 0 && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
-        /* isinstance() or issubclass() enters the metaclass's method
+    if (!convert && method < 0 && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
+        /* isinstance() or issubclass() enters its check (check_method)
          * (CALL_CHECKED), its name and the tested value on the stack. */
         spy_release(callee);
         if (machine_push(c, m, found[0])) { release_all(argc, argv); return NULL; }
@@ -23473,8 +23512,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (calls && argc == 3 && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
         callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_SETATTR)
         return setattr_call(c, m, env);
-    if (!convert && argc == 2 && argv[1]->type == SPY_CLASS && argv[1]->as.map.meta && (convert = check_method(c, callee, argv, found))) {
-        /* So does isinstance() or issubclass() with a metaclass's method,
+    if (!convert && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
+        /* So does isinstance() or issubclass() with a Python check (check_method),
          * the tested value's class leaving the stack. */
         spy_release(callee);
         argv[-1] = found[0];
@@ -24518,10 +24557,19 @@ static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SP
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
+/* function, owned, with its env of a and b, entered as an operator's last
+ * method of x and y, which go on m's stack with the phase; else NULL. */
+static SPYValue *last_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue *x, SPYValue *y, SPYValue *a, SPYValue *b, SPYValue **env) {
+    if (operator_push(c, m, x, y, OPERATOR_LAST)) return NULL;
+    SPYValue *args[] = {spy_retain(a), spy_retain(b)};
+    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+    return NULL;
+}
 static SPYValue *class_getitem(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* x[y], x a class: its metaclass's Python __getitem__, or else its own
  * Python __class_getitem__ classmethod, which a metaclass neither defines
- * nor intercepts the lookup of, or the loaded intrinsic _class_getitem for
+ * nor intercepts the lookup of, or the intrinsic _class_getitem for
  * type and the builtin generic classes, entered as an operator's last
  * method with its env, x, y and the phase pushed on m's stack; else NULL. */
 static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
@@ -24530,14 +24578,20 @@ static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SP
                                 class_lookup(meta, "__getattribute__") == class_lookup(c->types[SPY_CLASS], "__getattribute__")))) {
         function = class_lookup(x, "__class_getitem__");
         function = function && function->type == SPY_CLASSMETHOD ? function->as.wrapper.function : NULL;
-        if ((function ? function->type == SPY_NATIVE && function->as.native.kwcall == class_getitem : x == c->types[SPY_CLASS]) && c->intrinsics)
-            function = name_local(c->intrinsics, "_class_getitem");
+        if (function ? function->type == SPY_NATIVE && function->as.native.kwcall == class_getitem : x == c->types[SPY_CLASS])
+            function = intrinsic(c, "_class_getitem");
     }
-    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, OPERATOR_LAST)) return NULL;
-    SPYValue *args[] = {spy_retain(x), spy_retain(y)};
-    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
-    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
-    return NULL;
+    return function && machine_function(c, function) ? last_call(c, m, function, x, y, x, y, env) : NULL;
+}
+/* Whether x | y is type.__or__ of classes of no metaclass or None, one a
+ * class, the intrinsic _union's call (union_call). */
+static int class_union(int op, SPYValue *x, SPYValue *y) {
+    return op == '|' && (x->type == SPY_CLASS || y->type == SPY_CLASS) &&
+           (x->type == SPY_NONE || (x->type == SPY_CLASS && !x->as.map.meta)) && (y->type == SPY_NONE || (y->type == SPY_CLASS && !y->as.map.meta));
+}
+static NO_INLINE SPYValue *union_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
+    SPYValue *function = intrinsic(c, "_union");
+    return function && machine_function(c, function) ? last_call(c, m, function, x, y, x, y, env) : NULL;
 }
 /* A link of a comparison chain, step ins, whose comparison of x and y
  * calls on other operands than x and y keeps y, the next link's left
@@ -24603,11 +24657,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* in takes the container's __contains__, given the item. */
         if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
             (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
-            !operator_push(c, m, x, y, OPERATOR_LAST)) {
-            SPYValue *args[] = {spy_retain(y), spy_retain(x)};
-            if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
-            for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
-        }
+            (function = last_call(c, m, function, x, y, y, x, env))) return function;
         return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
     }
     /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth
@@ -24616,6 +24666,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         c->entering_kind = CALL_CHECKED;
         return bool_call(c, m, x, env);
     }
+    if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
@@ -24869,23 +24920,35 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     spy_release(x); spy_release(y);
     return m;
 }
-/* The Python __iter__ of the instance atop m's stack that a loop calls on
- * it, owned, with its env, the instance left there; else NULL. */
-static NO_INLINE SPYValue *iter_call(SPYContext *c, Machine *m, SPYValue **env) {
-    SPYValue *v = m->stack[m->len - 1];
-    SPYValue *function = v->as.map.base || builtin_base(c, v, "__iter__", NULL) ? NULL : class_lookup(v->as.map.parent, "__iter__");
-    if (!function || !machine_function(c, function)) return NULL;
-    SPYValue *self = spy_retain(v);
-    return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;
-}
-/* A loop's __iter__ returned result into step ins, the iterable on m's
- * stack: the loop's block, when result is an iterator. */
-static NO_INLINE void iter_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
-    SPYValue *source = machine_pop(m), *iterator = iterator_returned(c, source, result);
+/* An iter_call returned result into step ins, the iterable on m's stack:
+ * the loop's block, when result is an iterator; or a yield from's or an
+ * await's delegate, the step then running again (1). */
+static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
+    if (ins->op == BC_DELEGATE)
+        return !!(m->delegate = iterator_returned(c, m->stack[m->len - 1], result, ins->arg ? "__await__" : "__iter__"));
+    SPYValue *source = machine_pop(m);
+    SPYValue *iterator = ins->arg == 2 ? async_returned(c, source, result, 1) : iterator_returned(c, source, result, "__iter__");
     spy_release(source);
     Block *block = iterator ? push_block(c, m, BLOCK_LOOP, ins) : NULL;
     if (block) block->value = iterator;
     else spy_release(iterator);
+    return 0;
+}
+/* The Python method name, __iter__, __aiter__ or __await__, of the
+ * instance atop m's stack that step ins, a loop, an async for, a yield
+ * from or an await, calls on it, owned, with its env, the instance left
+ * there; or c->unbound when it is a generator function, called at once,
+ * whose generator the step takes (iter_returned); else NULL. */
+static NO_INLINE SPYValue *iter_call(SPYContext *c, Machine *m, Instruction *ins, const char *name, SPYValue **env) {
+    SPYValue *v = m->stack[m->len - 1];
+    SPYValue *function = v->as.map.base || builtin_base(c, v, name, NULL) ? NULL : class_lookup(v->as.map.parent, name);
+    if (!function || (!machine_function(c, function) && !generator_function(c, function))) return NULL;
+    SPYValue *self = spy_retain(v);
+    if (machine_function(c, function)) return (*env = function_env(c, function, 1, &self, NULL, 1)) ? spy_retain(function) : NULL;
+    SPYValue *result = call(c, function, 1, &self);
+    spy_release(self);
+    if (result) iter_returned(c, m, ins, result);
+    return c->error_type[0] ? NULL : c->unbound;
 }
 /* The Python method name, __setitem__ or __delitem__, of plain instance
  * object's class, borrowed, or NULL. */
@@ -25095,14 +25158,17 @@ static NO_INLINE int import_returned(SPYContext *c, Machine *m, SPYValue *result
     spy_release(module);
     return module != NULL;
 }
-/* The Python __bool__ of instance v's class that a test calls on v,
- * owned, with its env, v on m's stack under it; else NULL. */
+/* The Python __bool__ or __len__ of instance v's class that a test calls
+ * on v (truth_function), owned, with its env, v on m's stack under it, and
+ * for __len__ False above v; else NULL. */
 static NO_INLINE SPYValue *bool_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **env) {
-    SPYValue *function = v->as.map.base || builtin_base(c, v, "__bool__", "__len__") ? NULL : class_lookup(v->as.map.parent, "__bool__");
-    if (!function || !machine_function(c, function) || machine_push(c, m, spy_retain(v))) return NULL;
+    int length = 0;
+    SPYValue *function = truth_function(c, v, &length);
+    if (!function || machine_push(c, m, spy_retain(v))) return NULL;
+    if (length && machine_push(c, m, spy_retain(c->booleans[0]))) { spy_release(machine_pop(m)); return NULL; }
     SPYValue *self = spy_retain(v);
     if ((*env = function_env(c, function, 1, &self, NULL, 1))) return spy_retain(function);
-    spy_release(machine_pop(m));
+    for (int i = 0; i <= length; i++) spy_release(machine_pop(m));
     return NULL;
 }
 /* A class call's __new__ returned result, given class cls and arguments
@@ -25131,7 +25197,8 @@ static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue 
     return function;
 }
 /* Attribute step n's call on v, which it owns: its property's getter, or
- * the getter of the property c->fallback; else, with v on m's stack
+ * the getter of the property c->fallback, with v and its class's
+ * __getattr__ on m's stack when it has one (CALL_CHECKED); else, with v on m's stack
  * (CALL_CHECKED), the __get__ of the descriptor c->fallback, or the
  * __getattr__ or __getattribute__ c->fallback. The function to enter, its
  * kind c->entering_kind, else NULL. */
@@ -25142,8 +25209,13 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     c->entering_kind = CALL_MACHINE;
     if (!function || function->type == SPY_PROPERTY) {
         SPYValue *property = function ? function : n->attr_method;
+        SPYValue *fallback = function ? class_lookup(v->as.map.parent, "__getattr__") : NULL;
         function = spy_retain(property->as.property.get);
         if (property != n->attr_method) spy_release(property);
+        if (fallback) {
+            c->entering_kind = CALL_CHECKED;
+            if (machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(fallback))) { spy_release(v); spy_release(function); return NULL; }
+        }
     } else if (c->entering_kind = CALL_CHECKED, machine_push(c, m, spy_retain(v)) ||
                (function->type != SPY_INSTANCE && !(argv[1] = spy_string(c, n->b->text, strlen(n->b->text))))) {
         spy_release(v); spy_release(function);
@@ -25185,7 +25257,7 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
     else {
         /* An own entry, or its miss with a default, is read without an
          * AttributeError (ATTR_OWN). */
-        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, name->as.string.data);
+        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, name->as.string.data, 0);
         if (result || c->error_type[0] || !c->fallback) {
             result = getattr_returned(c, defaulted ? slots[3] : NULL, result);
             if (!result) return NULL;
@@ -25480,6 +25552,23 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         class_called(c, m->stack[m->len - 1], m->stack[m->len - 3], result);
         return m;
     }
+    if (ins->op == BC_ATTR && m->stack[m->len - 1]->type == SPY_FUNCTION) {
+        /* A property's getter returned before __getattr__ (getter_call),
+         * which its AttributeError calls. */
+        SPYValue *fallback = machine_pop(m), *args[2];
+        if (result || !error_is(c, "AttributeError")) spy_release(fallback);
+        else {
+            spy_clear_error(c);
+            args[0] = spy_retain(m->stack[m->len - 1]);
+            args[1] = spy_string(c, ins->node->b->text, strlen(ins->node->b->text));
+            SPYValue *env = args[1] ? function_env(c, fallback, 2, args, NULL, 1) : NULL;
+            if (!args[1]) spy_release(args[0]);
+            Call *call = env ? call_enter(c, fallback, env, m) : (spy_release(fallback), NULL);
+            if (!call) return m;
+            call->m.outermost = CALL_CHECKED;
+            return &call->m;
+        }
+    }
     if (m->len && m->stack[m->len - 1] == c->defaulting) {
         if (!(result = getattr_returned(c, m->stack[m->len - 2], result))) return m;
         for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
@@ -25521,13 +25610,13 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         /* len(), hash(), int(), float(), complex() and bytes() check their
          * results as natively; abs(), round() and reversed() return theirs;
          * the others' text is a str. */
-        const char *method = name->as.string.data;
+        const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
         if (!strcmp(method, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__hash__")) string = hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
         else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
             string = number_result(c, v, method[2] == 'f', spy_retain(result));
         else if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) string = converted_result(c, v, method, result);
-        else if (!strcmp(method, "__bool__")) string = truth_result(c, v, 1, spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
+        else if (!strcmp(method, "__bool__")) string = truth_result(c, v, name != c->booleans[0], spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
         else if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__"))
             string = spy_retain(result);
         else if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
@@ -25542,7 +25631,10 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         if (string) machine_push(c, m, string);
         return m;
     }
-    int truth = truth_result(c, v, 1, result);
+    /* False above the value marks its __len__'s truth (bool_call). */
+    int boolean = v != c->booleans[0];
+    if (!boolean) { spy_release(v); v = machine_pop(m); }
+    int truth = truth_result(c, v, boolean, result);
     spy_release(v);
     if (ins->op == BC_UNARY) { if (!c->error_type[0]) machine_push(c, m, spy_bool(c, !truth)); }
     else if (!truth) m->pc = ins->target;
@@ -25777,8 +25869,7 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
         *env = function_env(c, function, args->as.seq.len, args->as.seq.items, NULL, 0);
         spy_release(args);
     } else {
-        if (v->type != SPY_INSTANCE || builtin_base(c, v, "__next__", NULL)) return 0;
-        if (!(function = class_lookup(v->as.map.parent, "__next__")) || !machine_function(c, function)) return 0;
+        if (!(function = next_function(c, v))) return 0;
         args = spy_retain(v);
         *env = function_env(c, function, 1, &args, NULL, 1);
     }
@@ -25788,6 +25879,23 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
 }
 static ALWAYS_INLINE int next_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
     return v->type == SPY_ITERATOR || v->type == SPY_INSTANCE ? next_call_of(c, v, fn, env) : 0;
+}
+/* The next step of generator machine m's yield from, sent sent, which it
+ * takes: the Python __next__ of an iterator instance it waits on, or its
+ * send of a value not None, a call with *env its environment that returns
+ * into m (CALL_DELEGATE); else NULL, the delegate sent to in C, *item what
+ * it yields or NULL, the delegation ended (finish_delegate). */
+static NO_INLINE SPYValue *delegate_next(SPYContext *c, Machine *m, SPYValue *sent, SPYValue **env, SPYValue **item) {
+    int next = !sent || sent->type == SPY_NONE;
+    SPYValue *function = next ? next_function(c, m->delegate) : method_function(c, m->delegate, "send"), *call = NULL;
+    *item = NULL;
+    if (function && machine_function(c, function)) {
+        SPYValue *args[] = {spy_retain(m->delegate), next ? NULL : spy_retain(sent)};
+        if ((*env = function_env(c, function, 2 - next, args, NULL, 1))) call = spy_retain(function);
+    } else *item = iterator_send(c, m->delegate, sent, NULL, 0, NULL, NULL);
+    spy_release(sent);
+    if (!call && !*item) finish_delegate(c, m);
+    return call;
 }
 /* Run machine m: generator's, or else the innermost call's, then the
  * calls it makes, until the outermost of them returns. */
@@ -25837,13 +25945,17 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
                         spy_release(result);
                     } else if (kind == CALL_ITER) {
-                        if (result) iter_returned(c, m, &code[pc - 1], result);
+                        if (result) pc -= iter_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_HASH) {
                         m = hash_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;
+                    } else if (kind == CALL_DELEGATE) {
+                        /* An iterator's __next__ gives a yield from's item. */
+                        if (result) YIELD(result);
+                        finish_delegate(c, m); pc = m->pc;
                     } else if (kind == CALL_STORE) {
                         spy_release(result);
                         if (result && (code[pc - 1].op == BC_EXEC || (code[pc - 1].op == BC_STORE && code[pc - 1].arg))) spy_release(machine_pop(m));
@@ -26189,8 +26301,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             m->awaiting = AWAIT_YIELD; m->drop = ins->arg >> 1;
             m->pc = pc; YIELD(value);
         CASE(BC_DELEGATE)
+            if (ins->arg <= DELEGATE_AWAITABLE && !m->delegate && m->stack[m->len - 1]->type == SPY_INSTANCE) {
+                callee_env = NULL;
+                if ((value = iter_call(c, m, ins, ins->arg ? "__await__" : "__iter__", &callee_env)) && value != c->unbound) {
+                    special = CALL_ITER; goto enter_special;
+                }
+                if (c->error_type[0]) break;
+            }
             a = machine_pop(m);
-            m->delegate = ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
+            /* An __iter__ or __await__ the machine called gave the delegate (iter_returned). */
+            m->delegate = m->delegate ? m->delegate : ins->arg ? await_iterator(c, a, ins->arg == DELEGATE_AENTER ? "__aenter__" :
                                                   ins->arg == DELEGATE_AEXIT ? "__aexit__" : NULL) :
                 a->type != SPY_COROUTINE ? get_iterator(c, a) : iterable_coroutine(m->generator) ? await_iterator(c, a, NULL) :
                 spy_error(c, "TypeError", "cannot 'yield from' a coroutine object in a non-coroutine generator");
@@ -26201,9 +26321,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (ins->arg <= DELEGATE_AWAITABLE && delegable(m->delegate)) {
                     spy_release(a); a = NULL; m->drop = 0; value = m->delegate; goto resume_generator;
                 }
-                value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
-                if (value) { spy_release(a); m->pc = pc; YIELD(value); }
-                m->pc = pc; finish_delegate(c, m); pc = m->pc;
+                spy_release(a); a = NULL; value = NULL;
+                goto delegate_step;
             }
             break;
         CASE(BC_RETURN)
@@ -26232,9 +26351,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             flow = (Result){ins->arg, ins->arg == FLOW_RETURN ? machine_pop(m) : NULL}; break;
         CASE(BC_LOOP) {
-            if (ins->arg == 1 && m->stack[m->len - 1]->type == SPY_INSTANCE) {
+            if ((ins->arg == 1 || ins->arg == 2) && m->stack[m->len - 1]->type == SPY_INSTANCE) {
                 callee_env = NULL;
-                if ((value = iter_call(c, m, &callee_env))) { special = CALL_ITER; goto enter_special; }
+                if ((value = iter_call(c, m, ins, ins->arg == 2 ? "__aiter__" : "__iter__", &callee_env))) {
+                    if (value == c->unbound) break;
+                    special = CALL_ITER; goto enter_special;
+                }
                 if (c->error_type[0]) break;
             }
             if (ins->arg) {
@@ -26429,6 +26551,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if (a) spy_release(a);
         if (b) spy_release(b);
         continue;
+    delegate_step: {
+        /* A yield from's next step, sent value, when its delegate is no
+         * generator the machine resumes (delegate_next). */
+        SPYValue *item;
+        m->pc = pc; callee_env = NULL;
+        if ((value = delegate_next(c, m, value, &callee_env, &item))) { special = CALL_DELEGATE; goto enter_special; }
+        if (item) YIELD(item);
+        pc = m->pc;
+        continue;
+    }
     consume_generator:
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
@@ -26465,7 +26597,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* One delegating resumes its delegate in turn. */
         if (m->awaiting == AWAIT_DELEGATE) {
             f = m->frame; code = m->code->items; pc = m->pc; value = m->delegate;
-            goto resume_generator;
+            if (value->type != SPY_INSTANCE) goto resume_generator;
+            value = resumed_with(c, m->resumer);
+            goto delegate_step;
         }
         m->awaiting = AWAIT_NONE;
         /* The value it takes, or a close's GeneratorExit raised there. */

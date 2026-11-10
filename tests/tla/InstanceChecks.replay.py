@@ -19,7 +19,7 @@ def outcome(p):
     else:
         C = type("C", (), hooks("true") if hook == "onclass" else {})
     D = type("D", (C,), {})
-    cls = {"C": C, "tuple": (str, C), "five": 5}[p["cls"]]
+    cls = {"C": C, "tuple": (str, C), "five": 5}[p["cls"]] if p["cls"] != "instance" else C()
     try:
         if p["check"] == "isinstance":
             result = isinstance({"C": C, "D": D, "int": int}[p["subject"]]() if p["subject"] != "int" else 1, cls)

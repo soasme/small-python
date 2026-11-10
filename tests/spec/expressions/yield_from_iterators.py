@@ -6,7 +6,8 @@
 # there. While __next__ runs, the delegating generator is running, and
 # its gi_yieldfrom is not the iterator. throw and close go to the iterator's
 # methods; chains of yield from, a loop, list() and an await of the
-# iterator behave alike, inside functions as at module level.
+# iterator behave alike, as do a send the iterator itself holds and a
+# callable iterator's resumptions, inside functions as at module level.
 from harness import *
 
 log = []
@@ -105,3 +106,23 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(results(), expected)
+
+# A send found on the iterator itself, and a resumption by a callable
+# iterator's calls, behave alike.
+def own():
+    del log[:]
+    it = It(3); it.send = lambda v: ("own", v)
+    x = g(it)
+    out = [next(x), x.send(5), next(x)]
+    out.append(list(iter(g(It(3)).__next__, 40)))
+    bare = g(Bare())
+    out += [next(bare), error(lambda: bare.send(1))]
+    return out
+
+class Bare:
+    def __iter__(self): return self
+    def __next__(self):
+        for _ in range(2): pass
+        return "bare"
+
+assert_eq(own(), [1, ("own", 5), 2, [1, 2, 3], "bare", ("AttributeError", "'Bare' object has no attribute 'send'")])

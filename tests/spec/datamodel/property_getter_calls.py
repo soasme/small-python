@@ -5,8 +5,11 @@
 # An AttributeError from a property's getter read by getattr(), or from
 # a descriptor's __get__, names the attribute and object unless it already
 # names one; other exceptions pass unchanged, inside functions as at
-# module level. (Whether a reference names the error of a property's
-# getter is left open: CPython's does until it specializes the reference.)
+# module level. When the class has a __getattr__, an AttributeError from
+# the getter calls it with the instance and the name, its result or
+# exception the reference's; other exceptions pass it by. (Whether a
+# reference names the error of a property's getter is left open: CPython's
+# does until it specializes the reference.)
 from harness import *
 
 def spin():
@@ -81,3 +84,27 @@ try:
 except AttributeError as e:
     assert_eq((e.name, e.obj is plain), ("d", True))
 assert_eq((items.p, getattr(items, "p")), (1, 1))
+
+class Fallback:
+    def __init__(self, mode): self.mode = mode
+    @property
+    def p(self):
+        spin()
+        if self.mode == "attr": raise AttributeError("inner")
+        if self.mode == "key": raise KeyError("key")
+        return "prop"
+    def __getattr__(self, name):
+        spin()
+        if self.mode == "attr": return ("fallback", name)
+        raise AttributeError(name + " missing")
+
+class Refusing(Fallback):
+    def __getattr__(self, name): raise AttributeError
+
+def fallbacks():
+    return [Fallback("ok").p, Fallback("attr").p, error(lambda: Fallback("key").p),
+            error(lambda: Refusing("attr").p), [Fallback("attr").p for _ in range(2)]]
+
+expected = ["prop", ("fallback", "p"), ("KeyError", "'key'"), ("", "p", "Refusing"), [("fallback", "p")] * 2]
+assert_eq(fallbacks(), expected)
+assert_eq([Fallback("ok").p, Fallback("attr").p, error(lambda: Refusing("attr").p)], expected[:2] + expected[3:4])
