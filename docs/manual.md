@@ -21,6 +21,8 @@ Version 0.9.0
   - [3.4 C API](#34-c-api)
   - [3.5 Python binding](#35-python-binding)
   - [3.6 Rust crates](#36-rust-crates)
+  - [3.7 Go module](#37-go-module)
+  - [3.8 Java artifacts](#38-java-artifacts)
 - [4 Internals](#4-internals)
   - [4.1 Source representation](#41-source-representation)
   - [4.2 Executable generation](#42-executable-generation)
@@ -167,14 +169,22 @@ usage: spy [--mount dir]... [-O | -OO] [-c source | file.py | -] [arg]...
 | `-` or no arguments | Read a complete program from stdin |
 | `arg` | An argument of the program, which follows it into `sys.argv` |
 
-The interactive shell keeps global variables between submissions. A blank line
-ends a compound statement. It currently uses a small C input loop; multiline
-editing, contextual colorization, completion, and a Python-written shell remain
-unimplemented. As python's, `sys.argv` is the file and its arguments,
-`['-c', arg...]` for `-c`, `['-', arg...]` for `-`, and `['']` for stdin
-alone and the shell, and `sys.orig_argv` is the whole command line, `spy`
-and its options included. `-m` and the other CPython switches are not
-implemented.
+`sys.argv` is set as Python sets it:
+
+| Run | `sys.argv` |
+| --- | --- |
+| `spy file.py arg...` | `['file.py', arg...]` |
+| `spy -c source arg...` | `['-c', arg...]` |
+| `spy - arg...` | `['-', arg...]` |
+| `spy` (stdin) or the shell | `['']` |
+
+`sys.orig_argv` is the whole command line, `spy` and its options included.
+`-m` and the other CPython switches are not implemented.
+
+The interactive shell keeps global variables between submissions, and a blank
+line ends a compound statement. It is a small C input loop: multiline
+editing, contextual colorization, completion, and a Python-written shell are
+not implemented yet.
 
 #### 2.3.2 `spyc` program generator
 
@@ -189,37 +199,51 @@ usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | li
 ```
 
 `spyc` bundles a program and the modules it imports into one C translation
-unit: it finds each import as CPython's path finder would over the entry's
+unit. It finds each import as CPython's path finder would, over the entry's
 directory and each `-I` root, embeds the sources, and serves them through a
-generated `SPYModuleLoader`. A missing import fails the build unless the
-program guards it with `try`/`except ImportError`. `-x` leaves a module to the
-host, `-D` adds modules that only dynamic imports name, and `-M` registers a
-module of the standard layer, which the program then links (`spy-std.c`). A
-C module, `NAME.c` exporting `spy_init_NAME`, is compiled into the program
-and registered as `NAME`; the arguments after `--` go to the compiler, so
-`spyc -o pong pong.py raylib.c -- -lraylib` builds
-[`examples/pong`](../examples/pong) in one step. An archive, `libNAME.a`
-with a member exporting `spy_init_NAME`, is linked in and registered as
-`NAME` the same way, whatever language built it:
+generated `SPYModuleLoader`. A missing import fails the build, unless the
+program guards it with `try`/`except ImportError`. spyc produces no native
+code or bytecode for Python functions.
+
+| Command | Effect |
+| --- | --- |
+| `spyc` or `spyc build` | Build a program |
+| `spyc run` | Build into the cache `.spyc` of the working directory, then run the program with the arguments after the entry. It compiles again only when a source, a C module, a header, or a library changed |
+| `spyc test` | Run each `test_*.py` below the paths that way; count those that exit with 0 |
+| `spyc clean` | Remove the cache |
+| `spyc version` | Print the version |
+
+Outputs:
+
+| Option | Output |
+| --- | --- |
+| (none) | An executable (`a.out` without `-o`) |
+| `-e` | The C file of that executable (`out.c` without `-o`) |
+| `-c` | A C file for a host with its own `main`: each entry's source as `const char spy_name[]` (`game.py` gives `spy_game`) and the loader `spy_name_load` |
+
+For an executable, spyc compiles a C file with a `main` that runs the entry.
+It uses the compiler and link flags of its own build, against the `spy.h` and
+libraries beside it or under the installation prefix; `-v` prints that
+command. The program mounts its working directory and has its command line
+as `sys.argv`. On Windows spyc writes C only (`-e` or `-c`). A failed or
+interrupted build removes the files it began to write.
+
+What goes into the program:
+
+| Input | Effect |
+| --- | --- |
+| `-x MODULE` | Leave the module to the host |
+| `-D MODULE` | Add a module that only dynamic imports name |
+| `-M MODULE` | Register a module of the standard layer, which the program then links (`spy-std.c`) |
+| `NAME.c` | A C module exporting `spy_init_NAME`, compiled in and registered as `NAME` |
+| `libNAME.a` | An archive with a member exporting `spy_init_NAME`, linked in and registered as `NAME`, whatever language built it |
+| `-- ARGS` | Arguments for the compiler |
+
+So `spyc -o pong pong.py raylib.c -- -lraylib` builds
+[`examples/pong`](../examples/pong) in one step, and
 [`examples/jsonify`](../examples/jsonify) writes its `json` module in Rust.
-The program mounts its working directory and has its command line as
-`sys.argv`. `-O`,
-`-OO`, `--minify`, `--metafile`, `--deps`, `--analyze`, and `-v` complete the
-options. By default spyc outputs an executable (`a.out` without `-o`): it
-compiles a C file with a `main` that runs the entry, using the compiler and
-link flags of its own build, against the `spy.h` and libraries beside it or
-under the installation prefix; `-v` prints that command. `-e` writes the C file
-instead (`out.c` without `-o`). With `-c` the file holds each entry's source as
-`const char spy_name[]` (`game.py` gives `spy_game`) and the loader
-`spy_name_load`, for a host with its own `main`. A failed or interrupted build
-removes the files it began to write. On Windows spyc writes C only (`-e` or
-`-c`). `spyc run` builds the program into the cache `.spyc` of the working
-directory, compiling again only when a source, a C module, a header, or a
-library changed, and runs it with the arguments after the entry; `spyc test`
-runs each `test_*.py` below the paths that way and counts those that exit
-with 0; `spyc build` is spyc without a command; `spyc clean` removes the cache; `spyc version`
-prints the version. spyc produces no native code or bytecode for Python functions. [Building
-programs](build.md) is the full reference.
+`-O`, `-OO`, `--minify`, `--metafile`, `--deps`, `--analyze`, and `-v`
+complete the options. [Building programs](build.md) is the full reference.
 
 ### 2.4 Local tests
 
@@ -228,91 +252,126 @@ make test
 make sanitize
 ```
 
-`make test` builds everything, runs the C API tests (ownership, context
-isolation, error recovery, reference cycles, deep graph destruction, an
-execution budget), the allocation-failure and thread tests, the host file and
-standalone-executable checks, and the language specification suite.
-`tests/oom` runs a set of programs once per allocation each makes (from
-malloc, or a value or block the context reuses), with exactly that allocation
-failing, then once per allocation with it and every
-later one failing, as SQLite's tests do; every run must end in a result or an
-exception and free everything it allocated. `tests/threads` runs a context
-on each of four threads at once, which share nothing.
+#### 2.4.1 `make test`
 
-Conformance to PLS-315 rests on two kinds of evidence, and no other:
+`make test` builds everything, then runs:
 
-- `make test-spec` runs the specification tests in `tests/spec`, small
-  self-checking scripts that each name the clauses of PLS-315
-  (`docs/standards/3_15.md`) they exercise, import only
-  `tests/spec/harness.py`, and state their expectations directly, so the suite
-  needs neither a library nor another implementation. They run on
-  `tests/run-spec`, a driver that runs the bare core with no library module;
-  the host facilities a test reaches (Annex B) come through the harness's
-  `host`, built on the engine primitives there and on CPython's library facade
-  on the oracle. `tests/spec_coverage.py` fails unless every clause of the
-  normative chapters has a test. The `ports` chapter holds CPython's language
-  test modules with each library import replaced by a core equivalent, the
-  `doctests` chapter CPython's doctest-based tests, and the `programs` chapter
-  1,356 programs (arithmetic, comparisons, argument binding, class creation,
-  rounding, string search, template strings, asynchronous generator states, and
-  more) with the output CPython 3.15 gives them. `make test-spec-oracle` also
-  runs every test on the pinned CPython oracle, which must pass it, to validate
-  the tests.
-- `make test-tla` model-checks the TLA+ specifications in `tests/tla` with TLC
-  (fetched by `make tla-tools`; it needs a Java runtime), or with `manyan` when it
-  is installed (`MANYAN=` forces TLC), and replays every
-  transition of the bounded models on spy's `tests/run-spec`, through the same
-  harness `host` (`make test-tla-oracle` replays them on the oracle too). They cover generator and coroutine methods, try/with
-  control flow and exception context, name resolution, integer arithmetic,
-  argument binding, unpacking, method resolution order, operator dispatch,
-  attribute access, pattern matching, evaluation order, class creation,
-  `yield from`, async generators, `except*`, the iteration protocol, `super()`,
-  dict order, and object finalization and cycle collection; `SpyGC.tla` also
-  checks spy's own memory-management algorithm against the language model
-  step for step. The [README](../tests/tla/README.md) states what these checks
-  do and do not establish.
+- the C API tests: ownership, context isolation, error recovery, reference
+  cycles, deep graph destruction, and an execution budget;
+- the allocation-failure tests (`tests/oom`);
+- the thread tests (`tests/threads`): a context on each of four threads at
+  once, sharing nothing;
+- the host file and standalone-executable checks;
+- the language specification suite.
 
-The pinned CPython 3.15.2 oracle (`make oracle`) validates tests and models;
-no test needs it to run.
+`tests/oom` runs a set of programs once per allocation each makes, with
+exactly that allocation failing, then once per allocation with it and every
+later one failing, as SQLite's tests do. An allocation is a `malloc`, or a
+value or block the context reuses. Every run must end in a result or an
+exception, and free everything it allocated.
 
-`make test-unicode` checks representations, printability, `chr`/`ord`, and identifier
-properties for all 1,114,112 code points, plus 297,124 source/NFKC cases against
-the pinned oracle, and resolves all 160,282 character names and aliases
-through `\N{...}`. These checks pass; they do not
+#### 2.4.2 Conformance
+
+Conformance to PLS-315 rests on two kinds of evidence, and no other.
+
+**Specification tests.** `make test-spec` runs the tests in `tests/spec`.
+
+- Each is a small, self-checking script. It names the clauses of PLS-315
+  (`docs/standards/3_15.md`) it exercises, imports only
+  `tests/spec/harness.py`, and states its expectations directly. The suite
+  needs neither a library nor another implementation.
+- They run on `tests/run-spec`, a driver for the bare core with no library
+  module. The host facilities a test reaches (Annex B) come through the
+  harness's `host`: built on the engine primitives on spy, and on CPython's
+  library facade on the oracle.
+- `tests/spec_coverage.py` fails unless every clause of the normative
+  chapters has a test.
+- `make test-spec-oracle` also runs every test on the pinned CPython oracle,
+  which must pass it.
+
+Besides the tests written from the standard, three chapters come from
+elsewhere:
+
+| Chapter | Contents |
+| --- | --- |
+| `ports` | CPython's language test modules, each library import replaced by a core equivalent |
+| `doctests` | CPython's doctest-based tests |
+| `programs` | 1,356 programs (arithmetic, comparisons, argument binding, class creation, rounding, string search, template strings, asynchronous generator states, and more) with the output CPython 3.15 gives them |
+
+**TLA+ models.** `make test-tla` model-checks the specifications in
+`tests/tla`, then replays every transition of the bounded models on spy's
+`tests/run-spec`, through the same harness `host`. `make test-tla-oracle`
+replays them on the oracle too.
+
+- The checker is TLC (fetched by `make tla-tools`; it needs a Java runtime),
+  or `manyan` when it is installed. `MANYAN=` forces TLC.
+- The models cover generator and coroutine methods, try/with control flow
+  and exception context, name resolution, integer arithmetic, argument
+  binding, unpacking, method resolution order, operator dispatch, attribute
+  access, pattern matching, evaluation order, class creation, `yield from`,
+  async generators, `except*`, the iteration protocol, `super()`, dict
+  order, and object finalization and cycle collection.
+- `SpyGC.tla` also checks spy's own memory-management algorithm against the
+  language model, step for step.
+- The [README](../tests/tla/README.md) states what these checks do and do
+  not establish.
+
+The pinned CPython 3.15.2 oracle (`make oracle`) validates tests and models.
+No test needs it to run.
+
+#### 2.4.3 Unicode
+
+`make test-unicode` checks, for all 1,114,112 code points, representations,
+printability, `chr`/`ord`, and identifier properties. It also checks 297,124
+source/NFKC cases against the pinned oracle, and resolves all 160,282
+character names and aliases through `\N{...}`. These checks pass. They do not
 establish complete Unicode or unittest compatibility.
 
-`make sanitize` rebuilds everything with AddressSanitizer, its leak checker
-and its check for locals used after their function returns, and
-UndefinedBehaviorSanitizer, then runs `make test` and the Python package's
-tests, so the engine, `spy`, `spyc`, the programs `spyc` generates, and the
-packages' sandboxed worker all run instrumented. `make CC=clang
-SANITIZERS=memory sanitize` runs the same tests under MemorySanitizer, which
-reports reads of uninitialized memory, and `make CC=clang SANITIZERS=thread
-sanitize` under ThreadSanitizer, which reports state that contexts on
-different threads share. No report is recoverable.
-`tests/sanitize.c`, linked into every instrumented program, compiles in the
-options and appends every report to one file that must stay empty, so a report
-fails the run even from a process whose status or output a test ignores.
-Under AddressSanitizer the context's allocation caches poison what they hold,
-so using a released value is reported even when its allocation is cached for
-reuse. The worker's own code is not leak-checked: leak checking needs
-`ptrace`, which the worker's sandbox refuses, but the engine code the worker
-runs is leak-checked in every other program.
+#### 2.4.4 Sanitizers
+
+| Command | Runs `make test` under |
+| --- | --- |
+| `make sanitize` | AddressSanitizer (with its leak checker and its check for locals used after return) and UndefinedBehaviorSanitizer; also the Python package's tests |
+| `make CC=clang SANITIZERS=memory sanitize` | MemorySanitizer: reads of uninitialized memory |
+| `make CC=clang SANITIZERS=thread sanitize` | ThreadSanitizer: state that contexts on different threads share |
+
+- Everything runs instrumented: the engine, `spy`, `spyc`, the programs
+  `spyc` generates, and the packages' sandboxed worker.
+- No report is recoverable. `tests/sanitize.c`, linked into every
+  instrumented program, compiles in the options and appends every report to
+  one file that must stay empty. A report therefore fails the run even from a
+  process whose status or output a test ignores.
+- Under AddressSanitizer, the context's allocation caches poison what they
+  hold, so using a released value is reported even when its allocation is
+  cached for reuse.
+- The worker's own code is not leak-checked: leak checking needs `ptrace`,
+  which the worker's sandbox refuses. The engine code the worker runs is
+  leak-checked in every other program.
+- Linux CI runs `make sanitize`. On the initial macOS host, AddressSanitizer
+  hung during its own initialization; `make SANITIZERS=undefined sanitize`
+  passed there.
+
+#### 2.4.5 Fuzzing and coverage
 
 `make fuzz` runs the libFuzzer targets ([fuzz/README](../fuzz/README)) for
 `FUZZ_SECONDS` each, seeded from the examples and the specification tests:
-the engine through `exec`, through `compile`, and with one allocation
-failing, and `spyc`'s own bundling code. `make fuzz-replay` then runs every input the fuzzers kept under
+
+- the engine through `exec`;
+- the engine through `compile`;
+- the engine with one allocation failing;
+- `spyc`'s own bundling code.
+
+`make fuzz-replay` then runs every input the fuzzers kept under
 MemorySanitizer.
 
-These tools report the memory errors that the tests and fuzzed inputs reach;
-they cannot show that code nothing executes is free of them. `make coverage`
-(clang) measures what `make test` and the package tests execute, with an
-annotated copy of every source under `.obj/coverage/html`. It fails unless every
-line of the engine sources runs, and lists by function the lines that do not
-(`tools/coverage.py`); CI runs it on macOS, so a change that leaves a line
-unexecuted fails there. Linux CI runs `make sanitize`. On the initial macOS host, AddressSanitizer hung during its own
-initialization; `make SANITIZERS=undefined sanitize` passed there.
+These tools report the memory errors that the tests and fuzzed inputs reach.
+They cannot show that code nothing executes is free of them. `make coverage`
+(clang) measures what `make test` and the package tests execute:
+
+- It writes an annotated copy of every source under `.obj/coverage/html`.
+- It fails unless every line of the engine sources runs, and lists by
+  function the lines that do not (`tools/coverage.py`).
+- CI runs it on macOS, so a change that leaves a line unexecuted fails there.
 
 ### 2.5 Upstream Cython tests
 
@@ -342,15 +401,18 @@ are separate from passes. The source module is evaluated unchanged for each
 docstring group; examples then run in order in a persistent context. No imports,
 decorators, assertions, or unsupported constructs are removed.
 
-The pinned Cython checkout contains 102 `.py` and 807 `.pyx` files directly in
-`tests/run`, plus build fixtures and support files. The adapter currently covers
-static doctests from `.py` modules. `make cython-dynamic-report` additionally
-executes unchanged modules in isolated oracle processes to discover runtime
-class docstrings and `__test__` groups. Its current result is 367 passing and
-11,176 failing examples, with 12 adapter-ineligible files and four discovery
-errors; these errors remain failures of the strict coverage gate. Cython's own runner also compiles extension
-modules, runs unittest cases, checks compiler diagnostics, and processes
-multi-file build tests. Those categories need separate support.
+The pinned Cython checkout has 102 `.py` and 807 `.pyx` files directly in
+`tests/run`, plus build fixtures and support files.
+
+- The adapter covers static doctests from `.py` modules.
+- `make cython-dynamic-report` also runs unchanged modules in isolated
+  oracle processes, to discover runtime class docstrings and `__test__`
+  groups. Its current result is 367 passing and 11,176 failing examples, with
+  12 adapter-ineligible files and four discovery errors. The errors remain
+  failures of the strict coverage gate.
+- Cython's own runner also compiles extension modules, runs unittest cases,
+  checks compiler diagnostics, and processes multi-file build tests. Those
+  categories need separate support.
 
 The current full adapter result is **343 passing and 11,107 failing examples**
 from 89 attempted files; 13 other files were adapter-ineligible. Most failures
@@ -385,21 +447,38 @@ core-language programs.
 
 ### 3.1 Python language support
 
-The target is [PLS-315:2026-draft2](standards/3_15.md). It distinguishes Core
-language, Host services (its Annex B host hooks), and CPython Extension
-compatibility. The language
-edition, engine release, and upstream test revisions are separate identifiers.
+The target is [PLS-315:2026-draft2](standards/3_15.md). It has three
+profiles:
 
-spy conforms to the Core profile of PLS-315, by the evidence of [Local tests](#24-local-tests)
-and no other: on the bare core, it passes all 357 specification tests, which `make
-test-spec-oracle` also validates on the pinned CPython 3.15 build, covering
-each of the 180 clauses of chapters 6–29 and Annexes A–B; and all 112 TLA+
-models check, with every transition of the 111 that replay on an engine
-passing on spy, as on the oracle. Where
-PLS-315 leaves a choice to the host or the implementation, spy's choice is
-stated below. Porting CPython's language test modules into `tests/spec/ports`
-continues; a port that finds a difference is a defect in spy or the standard,
-and it is fixed there.
+- **Core**: the language.
+- **Host services**: its Annex B host hooks.
+- **CPython Extension compatibility**: the CPython C API and ABI.
+
+The language edition, the engine release, and the upstream test revisions are
+separate identifiers.
+
+#### 3.1.1 Conformance
+
+spy conforms to the Core profile of PLS-315. The evidence is
+[Local tests](#24-local-tests), and nothing else. On the bare core:
+
+- spy passes all 357 specification tests. `make test-spec-oracle` also runs
+  them on the pinned CPython 3.15 build. Together they cover each of the 180
+  clauses of chapters 6–29 and Annexes A–B.
+- All 112 TLA+ models check. Of the 111 that replay on an engine, every
+  transition passes on spy, as it does on the oracle.
+
+Where PLS-315 leaves a choice to the host or the implementation, this
+section states spy's choice.
+
+Porting CPython's language test modules into `tests/spec/ports` continues.
+A port that finds a difference is a defect in spy or in the standard, and is
+fixed there.
+
+spy has no CPython C API/ABI layer. That belongs to the Extension profile,
+which spy does not claim.
+
+#### 3.1.2 Overview
 
 | Area | Support |
 | --- | --- |
@@ -420,375 +499,579 @@ and it is fixed there.
 | Methods | List `append`, `extend`, `insert`, `pop`, `remove`, `clear`, `copy`, `reverse`, `sort`; list/tuple `count`/`index`; dictionary `get`, `keys`, `values`, `items`, `update`, `copy`, `clear`, `pop`, `popitem`, `setdefault`; str/bytes `startswith`, `endswith`, `find`, `rfind`, `index`, `rindex`, `count`; string `join`, `splitlines`, `isprintable`, `isidentifier`, and positional/named-field `format`; slice `indices`; numeric `conjugate`; integer `bit_length`/`bit_count` |
 | Dynamic source | Code objects, three-argument `compile` in `exec`/`eval`/`single` modes, `eval`/`exec` with dictionary globals, mapping locals, and custom builtin dictionaries |
 
-Fixed-width host conversions raise `OverflowError`; they do not silently
-truncate.
+Fixed-width host conversions raise `OverflowError`. They never truncate
+silently.
 
-Syntax exceptions expose message, filename, source line, and position fields.
-Their string form includes the basename and line when available.
+#### 3.1.3 Classes
 
-Classes use C3 multiple inheritance, explicit and zero-argument `super`, and
-lexical `__class__` cells. Construction calls `__set_name__` on a snapshot of
-the namespace, then the inherited `__init_subclass__`, before class decorators.
-Plain `__init_subclass__` and `__class_getitem__` functions become class methods.
-Three-argument `type()` shares this construction path. Metaclasses support
-`__prepare__`, `__new__`, `__init__`, custom `mro()`, and base resolution through
-`__mro_entries__`. Class namespace writes and reads honor mapping overrides;
-native `type.__new__` accepts dictionaries, frozendicts, and their subclasses. Class metadata includes
-`__firstlineno__` and `__static_attributes__`. `__slots__` (a string, an iterable,
-or a mapping's keys) become sorted, name-mangled `member_descriptor` attributes;
-without a `__dict__` slot or a base with a dictionary, instances refuse new
-attributes with CPython's messages, and `__weakref__`/`__dict__` slots, class
-variable conflicts, `int`/`bytes` bases, and conflicting slotted bases are
-checked. A class's `__name__` and `__qualname__` live outside its `__dict__`;
-a class that introduces an instance dictionary or weak references gets the
-shared `<attribute '__dict__'>` and `<attribute '__weakref__'>` descriptors in
-its `__dict__`, following CPython's rules for builtin bases (`__weakref__` reads
-as None). Descriptor
-lookup honors data-descriptor precedence and supports `__get__`, `__set__`,
-and `__delete__`. Builtin types expose method descriptors and slot wrappers
-(`list.append`, `int.__add__`, `object.__repr__`) with CPython reprs and
-names; they are created on first lookup and do not change implicit
-special-method dispatch. Dictionary `keys`, `values`, and `items` return live
-views; keys and items views are set-like, and `mapping` returns a read-only
-native C `mappingproxy`. Class `__dict__` also returns a live, read-only proxy.
-Proxies forward mapping methods, support generic aliases, and copy an exact
-dictionary before comparison with an arbitrary reflected-equality callback,
-following Python 3.15. Their implementation no longer uses embedded Python.
-Native `frozendict` shares dictionary lookup, views, unpacking, and pattern
-matching. Its hash combines stored key hashes with value hashes and caches the
-completed result. Exact frozen copies can reuse the original value; subclass
-copies produce plain frozen mappings. `eval` and `exec` accept frozen globals
-with an existing `__builtins__` entry and reject writes and deletions. The
-pickle module is a library facility outside the core; the spec tests check the
-reduction protocol it uses through a core stand-in.
-The builtins module provides every CPython 3.15 builtin except `input`,
-which needs a host stream, and `help`, `copyright`, `credits`, and
-`license`, which come from the `site` module. `open` reaches only host
-directories mounted with `spy_mount` (see [Host services and
-limits](#346-host-services-and-limits)); without a mount every path raises
-`PermissionError`. It returns `_io`-named `FileIO`, `BufferedReader`,
-`BufferedWriter`, `BufferedRandom`, and `TextIOWrapper` objects with CPython's
-modes, argument validation, reprs, `with`/iteration, `readline`/`readlines`,
-`seek`/`tell`/`truncate`, universal and explicit newline handling, and
-`UnsupportedOperation` (an `OSError` and `ValueError`). Buffered objects pass
-straight through to the descriptor. Text files decode `utf-8` (the 3.15
-default), `latin-1`, or `ascii`, the codecs `str.encode` supports; integer
-descriptors and `opener` are refused. `OSError(errno, strerror, filename,
-winerror, filename2)` follows CPython: the errno selects the subclass, the
-attributes are set, a filename shortens `args`, and `str` gives
-`[Errno N] message: 'name'`. Exception fields (`args`, the chaining
-attributes, and each class's members such as `errno`, `msg`, `value`, or
-`name`) are kept outside the instance `__dict__`, as CPython's C members are:
-deleting one follows CPython, and `BaseExceptionGroup`'s `message` and
-`exceptions` are read-only. A group accepts any sequence and keeps the repr of
-a custom one. `__reduce__` and `__setstate__` follow `BaseException`,
-`OSError`, `ImportError`, and `AttributeError`. Unicode errors take and expose
-`encoding`, `object`, `start`, `end`, and `reason`, and codec failures raise
-them with those fields, covering a run of unencodable characters. The class
-attributes are `member_descriptor` and `getset_descriptor` objects with
-`__get__`, `__set__`, and `__delete__`. `exit` and `quit`
-raise `SystemExit` with their code, and `SystemExit.code` follows CPython.
-`__build_class__` creates a class as a class statement does, calling an
-ordinary function for the body; `__lazy_import__` returns a lazy import object
-as the `lazy import` statement does; `breakpoint` calls the `breakpointhook` of a
-loaded `sys` module, raising "lost sys.breakpointhook" when that is absent, and
-returns `None` when no `sys` is loaded. Builtin argument counts and
-keywords are checked with CPython's messages. `types.FunctionType` creates a
-function from a code object, and `exec` and `eval` run a function's code
-object as a call with no arguments. A closure for either must consist of cells
-bound in the function's defining scopes with the same globals, because spy
-functions share their defining environment rather than holding cells.
-`compile` accepts `flags`, `dont_inherit`, `optimize`, `module`, and
-`_feature_version` with CPython's validation; flags do not change the
-resulting code, and `PyCF_ONLY_AST` raises `NotImplementedError`.
-Exceptions carry traceback objects as CPython builds them: an error adds an
-entry for each frame it passes through, `raise exc` continues `exc`'s
-traceback, and a bare `raise` adds none. Entries have `tb_next` (assignable,
-with loop detection), `tb_frame`, `tb_lineno` (the statement's line), and
-`tb_lasti` (always 0, since there is no bytecode); `__exit__`,
-`generator.throw`, `with_traceback`, and `types.TracebackType(...)` accept
-and pass them.
-The 3.15 `sentinel` builtin creates unique named objects (PEP 661) that
-record their creating module, copy as themselves, reduce to their name, and
-form unions with `|`. `object.__reduce__`, `__reduce_ex__`, and `__getstate__`
-follow `typeobject.c`: `__getnewargs_ex__`/`__getnewargs__`, `__dict__` and
-slot state, list and dict items, and `copyreg` (imported from the host when
-needed) for protocols below 2. Builtin functions expose `__self__`. Functions, bound methods, and builtin
-method descriptors expose `__get__`. A builtin base that precedes the defining
-class in the MRO supplies its own slot on attribute access, as CPython's type
-lookup does, so enum mixins such as `IntFlag` and `StrEnum` resolve their
-methods correctly. Setting an
-attribute of a builtin object without `__dict__` raises CPython's three
-`AttributeError` forms, and unsupported orderings name the operator and types.
-`isinstance` and `issubclass` follow `Objects/abstract.c`: exact types check
-the MRO, tuples are searched, other targets use `__instancecheck__` or
-`__subclasscheck__`, and objects with a tuple `__bases__` act as classes,
-with recursion limits on cyclic bases.
-`ImportError` accepts `name`, `path`, and `name_from` keywords and keeps a lone
-argument as `msg`. `AttributeError` accepts `name` and `obj`, and `NameError`
-accepts `name`. Failed attribute lookups and name lookups fill these attributes,
-as CPython does.
-Exception notes and `add_note` are supported; a failed `__set_name__` callback
-retains its exception and receives a note identifying the descriptor and class.
-Instance reads, writes, and deletions support `__getattribute__`, `__setattr__`,
-and `__delattr__`, with explicit `object` methods for default behavior.
-`__getattr__` follows failed reads; implicit special-method lookup bypasses
-these interception hooks. Properties receive their class attribute name and
-expose writable `__name__` metadata. Custom `__class_getitem__` supports class
-subscription; builtin generic aliases and unions use embedded intrinsic objects.
-Parenthesized manager lists work for synchronous and asynchronous managers.
-Built-in functions have `__doc__` text for slot wrappers and `None` otherwise,
-and `__text_signature__` `None`. Bytes support
-literals, sequence operations, integer/iterable construction, and string/bytes
-method families. Bytearray methods include `resize` and Python 3.15's `take_bytes`; bounds and
-storage are rechecked after conversion callbacks. `memoryview` wraps bytes,
-bytearrays, other views, and objects with `__buffer__`. It supports native
-struct formats (including `e`, `?`, and `P`) and `cast` between 1-D and N-D
-shapes. Indexing, slicing, item assignment, comparison, hashing, `tolist`,
-`tobytes`, `hex`, `toreadonly`, `release`, and the context-manager protocol
-are provided. Bytes consumers accept views. A bytearray with live exports
-refuses to resize, and raises CPython's `BufferError`. `bytes` and `bytearray`
-expose `__buffer__`. Struct-module formats beyond native single items,
-multi-dimensional sub-views, and CPython's allocation introspection remain
-unsupported. Encoding and decoding provide the core codecs of PLS-315 Table
-23-1; spy's host supplies no others. Every intrinsic iterator has its own
-type, with `__reduce__` and `__setstate__` as 27.1.1 gives. The sequence, dict, set,
-range, and reversed iterators provide CPython's `__length_hint__`, and
-`list()`, `list.extend`, and `bytearray.extend` propagate errors from a user
-iterable's `__len__` or `__length_hint__` as `PyObject_LengthHint` does. Syntax errors for parameter
-lists, assignment, deletion, loop, `with`, and keyword-argument targets, `assert`
-and condition `=` typos, starred arguments, string prefixes, unbalanced brackets,
-missing indented blocks, and conditional expressions follow CPython's lexer and `invalid_*` grammar rules;
-errors CPython raises from its compiler (`'break' outside loop`, `'return'
-outside function`, misplaced `async for`, `async with`, and `await`) are raised
-only after the whole source parses. Some diagnostics still differ from CPython.
-These are open compatibility issues, not changes to the standard.
-Classes defining `__eq__` without `__hash__` become unhashable. Dictionary/set
-entries store hashes; maps with more than eight entries also keep an
-open-addressed index by hash, and smaller ones scan the entries. `hash()` calls
-user-defined hash methods, validates their results, and normalizes oversized
-integers. Numeric hashes preserve equality across integers, floats, and complex
-numbers. Tuples cache successful hashes; slices and ranges are hashable when
-their components permit it. String/bytes hashes use unsalted FNV-1a with its
-high half folded into the low, which PLS-315 leaves to the implementation;
-there is no per-process randomization. A dict counts the keys it removes, and its
-iterators compare the count: once keys were removed and as many added, the
-next `__next__` raises "dictionary keys changed during iteration" instead of
-ending (PLS-315 26.1.4).
-Numeric and compound hash algorithms adapt CPython's implementation under its
-[license](licenses/python.txt).
+Inheritance and construction:
 
-Class factories may return unrelated objects without calling `__init__`.
-Returned subclasses use their own initializer. `object.__new__`, `object.__init__`,
-and `BaseException.__new__` are available with allocation/type checks. Numeric,
-string, sequence, dictionary, and set subclasses retain an underlying builtin
-value.
+- Classes use C3 multiple inheritance, explicit and zero-argument `super`,
+  and lexical `__class__` cells.
+- Construction calls `__set_name__` on a snapshot of the namespace, then the
+  inherited `__init_subclass__`, and only then the class decorators.
+- Plain `__init_subclass__` and `__class_getitem__` functions become class
+  methods.
+- Three-argument `type()` takes the same construction path.
+- Metaclasses support `__prepare__`, `__new__`, `__init__`, custom `mro()`,
+  and base resolution through `__mro_entries__`.
+- Class namespace reads and writes honor mapping overrides. Native
+  `type.__new__` accepts dictionaries, frozendicts, and their subclasses.
+- Instantiating a class whose own `__abstractmethods__` is true raises
+  CPython's `TypeError`, naming the methods in sorted order.
 
-F-strings support expressions, debug fields, conversions, nested format
-specifications, raw literals, and generator suspension inside fields. String
-`format` and `format_map` follow CPython's parser: automatic and manual
-numbering, attribute and index field paths, conversions, nested replacement
-fields in specifications (two levels), and CPython's diagnostics. The format-spec
-mini-language for `str`, `int`, `bool`, `float`, and `complex` is ported from
-CPython: fill code points, alignment, sign, `z`, `#`, zero padding, Unicode
-digit widths, `,`/`_` integer and fractional grouping, every presentation type,
-the short float repr, and CPython's diagnostics; `n` uses the C locale. Percent
-formatting for `str`, `bytes`, and `bytearray` follows CPython's conversions,
-flags, `*` widths and precisions, mapping keys, and diagnostics. Unicode escaping, printability, identifier properties, and
-`\N{...}` escapes (names and aliases, case-insensitive; Hangul and derived
-ideograph names computed) use checked-in Unicode 17.0.0 data. Source identifiers undergo NFKC normalization
-before scope analysis and private-name mangling; dynamic string attribute and
-keyword names retain their original spelling. Byte sources, CLI files, and imports
-honor first/second-line encoding comments and UTF-8 BOMs. Unicode string sources
-ignore encoding comments. UTF-8, ASCII, Latin-1 and ISO-8859-15 source decoding is native;
-other source encodings are left to the host. CR and CRLF become
-LF before parsing, including inside string literals. Indentation uses eight-column
-tab stops and checks for inconsistent mixing with spaces. The lexer rejects invalid UTF-8.
-Normalization functions (`unicodedata`) are a library facility outside the core.
+Calling a class:
 
-Module/class namespaces and explicit execution mappings are live; optimized
-function locals are snapshots. Class and execution locals may be arbitrary
-mappings. Globals must be dictionaries, including subclasses. Function code objects expose argument counts, names,
-filenames, first-line metadata, and CPython's sorted `co_freevars` and
-`co_cellvars` (including names passed through to nested scopes and the
-implicit `__class__`). A function's `__closure__` holds cells that read and
-write the defining scope's variable; `types.CellType` cells compare by
-contents. A function's `__code__` may be replaced, and code objects run under
-`exec` and `eval`; code with free variables is rejected there as in CPython. Code objects are cached per parsed definition, so
-functions created from the same definition share their code object. `gi_code`,
-`cr_code`, and `ag_code` retain that identity after the suspended instance closes.
-Code objects retain parsed syntax and internal
-generator instructions; there is no public bytecode format. `sorted` and
-`list.sort` support stable key sorting and reverse ordering, evaluating each
-key once. In-place sorting detects mutation by callbacks and restores the list.
+- A class factory may return an unrelated object; `__init__` is then not
+  called. A returned subclass instance uses its own initializer.
+- `object.__new__`, `object.__init__`, and `BaseException.__new__` are
+  available, with their allocation and type checks.
+- Numeric, string, sequence, dictionary, and set subclasses keep an
+  underlying builtin value.
 
-Generator functions preserve operands, loop state, active exceptions, and
-pending cleanup across suspension. Explicit `close()` runs cleanup and returns
-a generator return value. A suspended generator that becomes unreachable, by
-reference release or cycle collection, is closed first (27.2.4). Frames are live
-objects, and `yield` may appear in any expression position, class bases
-included. Raise expressions and
-explicit causes may yield or await; assertions retain their original message objects.
-Lists, tuples, strings, bytes, and ranges support slicing. Range bounds, indices,
-steps, and `slice.indices()` lengths use arbitrary-precision integers. Range
-iteration, reverse iteration, integer membership, equality, `count`, and `index`
-are supported; `len` rejects lengths exceeding the host's supported size.
-Slices compare their three components lexicographically, preserving identity
-shortcuts and user-defined comparison results.
+Class metadata:
 
-Coroutines and asynchronous generators share the owned suspension stacks.
-Async context-manager exits may suspend during return, loop exits, and exception
-handling. Asynchronous-generator operation objects reject concurrent operations
-and reuse. Comprehensions share that execution machinery, including nested
-async clauses and awaited elements/filters. spy's host provides no HostWarn, so
-warnings such as an unawaited coroutine's are ignored (PLS-315 B.4.1). The
-core does not provide an event loop.
+- Classes have `__firstlineno__` and `__static_attributes__`.
+- `__name__` and `__qualname__` live outside the class `__dict__`.
+- A class that introduces an instance dictionary or weak references gets the
+  shared `<attribute '__dict__'>` and `<attribute '__weakref__'>`
+  descriptors in its `__dict__`, following CPython's rules for builtin bases.
+  `__weakref__` reads as `None`.
+- Class `__dict__` is a live, read-only `mappingproxy`.
 
-Future statements are checked as CPython's compiler does: they must come
-first (after at most a docstring), name a known feature (`braces` is "not a
-chance"), and `barry_as_FLUFL` or compile()'s `CO_FUTURE_BARRY_AS_BDFL` flag
-makes `<>` the inequality operator. The statement still imports `__future__`
-when a host provides it and binds nothing otherwise. Under `from __future__
-import annotations` (PEP 563) annotations become strings written as CPython's
-AST unparser writes them; functions return them from `__annotate__`, and module
-and class bodies store them in an eager `__annotations__` dict. compile(),
-exec(), and eval() inherit the running code's future statements unless
-`dont_inherit` is true. Compiler-phase
-SyntaxErrors from compile(), exec(), and eval() strings have no `text`, as in
-CPython.
+`__slots__`:
 
-Instantiating a class whose own `__abstractmethods__` is true raises CPython's
-TypeError naming the sorted methods. Source nesting follows CPython's limits:
-200 levels of brackets ("too many nested parentheses"), and expressions too
-deep for the parser raise MemoryError ("Parser stack overflowed"); prefix
-operator runs and long operator chains do not count against the C stack per
-operator, and the compiler's checks are bounded by stack use.
+- A string, an iterable, or a mapping's keys.
+- Slots become sorted, name-mangled `member_descriptor` attributes.
+- Without a `__dict__` slot or a base with a dictionary, instances refuse new
+  attributes, with CPython's messages.
+- `__weakref__` and `__dict__` slots, conflicts with class variables, `int`
+  and `bytes` bases, and conflicting slotted bases are all checked.
 
-There is no CPython C API/ABI layer; that belongs to the Extension profile,
-which spy does not claim.
+#### 3.1.4 Attributes and descriptors
 
-Template strings use C objects with read-only `strings`, `interpolations`, and
-`values` attributes. Interpolations retain `value`, `expression`, `conversion`,
-and `format_spec`; constructing a template does not call the value's conversion
-or formatting methods. Iteration omits empty literal strings. Template and
-interpolation types are final and can be obtained with `type(t'')` and
-`type(t'{0}'.interpolations[0])` without a library import. The standard-library
-`string.templatelib` package is not part of the core.
+- Descriptor lookup gives data descriptors precedence and supports
+  `__get__`, `__set__`, and `__delete__`.
+- Instance reads, writes, and deletions go through `__getattribute__`,
+  `__setattr__`, and `__delattr__`. The explicit `object` methods give the
+  default behavior. `__getattr__` follows a failed read.
+- Implicit special-method lookup bypasses these interception hooks.
+- Properties receive their class attribute name and have writable
+  `__name__`.
+- A custom `__class_getitem__` supports class subscription. Builtin generic
+  aliases and unions use embedded intrinsic objects (see
+  [3.1.12](#3112-not-yet-in-c)).
+- Builtin types expose method descriptors and slot wrappers (`list.append`,
+  `int.__add__`, `object.__repr__`) with CPython's reprs and names. They are
+  created on first lookup and do not change implicit special-method dispatch.
+- Builtin functions expose `__self__`. Functions, bound methods, and builtin
+  method descriptors expose `__get__`.
+- Builtin functions have `__doc__` text for slot wrappers and `None`
+  otherwise, and a `__text_signature__` of `None`.
+- A builtin base that comes before the defining class in the MRO supplies
+  its own slot on attribute access, as CPython's type lookup does. Enum mixins
+  such as `IntFlag` and `StrEnum` therefore resolve their methods correctly.
+- Setting an attribute of a builtin object without `__dict__` raises
+  CPython's three `AttributeError` forms. Unsupported orderings name the
+  operator and the types.
+- `isinstance` and `issubclass` follow `Objects/abstract.c`: exact types
+  check the MRO, tuples are searched, other targets use `__instancecheck__`
+  or `__subclasscheck__`, and objects with a tuple `__bases__` act as
+  classes, with recursion limits on cyclic bases.
+- Object reduction (`object.__reduce__`, `__reduce_ex__`, `__getstate__`)
+  follows `typeobject.c`: `__getnewargs_ex__`/`__getnewargs__`, `__dict__` and
+  slot state, list and dict items, and `copyreg` (imported from the host when
+  needed) for protocols below 2. The `pickle` module is a library facility
+  outside the core; the spec tests check the reduction protocol through a
+  core stand-in.
 
-Generic and related intrinsic objects currently use Python source embedded in
-`spy-intrinsics.h`, generated from `intrinsics.py` and interpreted by `spy` on
-first use. This adds no external dependency or Python build requirement, but it
-is a remaining deviation from the requested C11-only implementation of language
-semantics. The parser, evaluator, value storage, and collector are C11.
+#### 3.1.5 Builtins
+
+The builtins module provides every CPython 3.15 builtin except:
+
+- `input`, which needs a host stream;
+- `help`, `copyright`, `credits`, and `license`, which come from the `site`
+  module.
+
+Builtin argument counts and keywords are checked with CPython's messages.
+Particular builtins:
+
+- **`open`** reaches only host directories mounted with `spy_mount` (see
+  [Host services and limits](#346-host-services-and-limits)). Without a
+  mount, every path raises `PermissionError`.
+  - It returns `_io`-named `FileIO`, `BufferedReader`, `BufferedWriter`,
+    `BufferedRandom`, and `TextIOWrapper` objects.
+  - They have CPython's modes, argument validation, reprs, `with` and
+    iteration, `readline`/`readlines`, `seek`/`tell`/`truncate`, universal
+    and explicit newline handling, and `UnsupportedOperation` (an `OSError`
+    and a `ValueError`).
+  - Buffered objects pass straight through to the descriptor.
+  - Text files decode `utf-8` (the 3.15 default), `latin-1`, or `ascii`: the
+    codecs `str.encode` supports.
+  - Integer descriptors and `opener` are refused.
+- **`exit` and `quit`** raise `SystemExit` with their code.
+  `SystemExit.code` follows CPython.
+- **`__build_class__`** creates a class as a class statement does, calling an
+  ordinary function for the body.
+- **`__lazy_import__`** returns a lazy import object, as the `lazy import`
+  statement does.
+- **`breakpoint`** calls the `breakpointhook` of a loaded `sys` module. It
+  raises "lost sys.breakpointhook" when that hook is absent, and returns
+  `None` when no `sys` is loaded.
+- **`sentinel`** (new in 3.15, PEP 661) creates unique named objects. They
+  record their creating module, copy as themselves, reduce to their name, and
+  form unions with `|`.
+- **`compile`** accepts `flags`, `dont_inherit`, `optimize`, `module`, and
+  `_feature_version`, with CPython's validation. The flags do not change the
+  resulting code. `PyCF_ONLY_AST` raises `NotImplementedError`.
+- **`types.FunctionType`** creates a function from a code object.
+- **`sorted` and `list.sort`** sort stably by key, in either direction,
+  evaluating each key once. In-place sorting detects mutation by callbacks
+  and restores the list.
+
+#### 3.1.6 Exceptions
+
+- **Fields.** `args`, the chaining attributes, and each class's members
+  (such as `errno`, `msg`, `value`, or `name`) are kept outside the instance
+  `__dict__`, as CPython's C members are. Deleting one follows CPython. The
+  class attributes are `member_descriptor` and `getset_descriptor` objects
+  with `__get__`, `__set__`, and `__delete__`.
+- **`OSError(errno, strerror, filename, winerror, filename2)`** follows
+  CPython: the errno selects the subclass, the attributes are set, a filename
+  shortens `args`, and `str` gives `[Errno N] message: 'name'`.
+- **`ImportError`** accepts `name`, `path`, and `name_from` keywords, and
+  keeps a lone argument as `msg`. **`AttributeError`** accepts `name` and
+  `obj`; **`NameError`** accepts `name`. Failed attribute and name lookups
+  fill these attributes, as CPython does.
+- **Unicode errors** take and expose `encoding`, `object`, `start`, `end`,
+  and `reason`. Codec failures raise them with those fields, covering a run
+  of unencodable characters.
+- **Groups.** `BaseExceptionGroup`'s `message` and `exceptions` are
+  read-only. A group accepts any sequence and keeps the repr of a custom one.
+- **Reduction.** `__reduce__` and `__setstate__` follow `BaseException`,
+  `OSError`, `ImportError`, and `AttributeError`.
+- **Notes.** `add_note` and exception notes are supported. A failed
+  `__set_name__` callback keeps its exception and receives a note naming the
+  descriptor and the class.
+- **Syntax errors** expose the message, filename, source line, and position.
+  Their string form includes the basename and line when available.
+
+Tracebacks are built as CPython builds them:
+
+- An error adds an entry for each frame it passes through.
+- `raise exc` continues `exc`'s traceback; a bare `raise` adds none.
+- Entries have `tb_next` (assignable, with loop detection), `tb_frame`,
+  `tb_lineno` (the statement's line), and `tb_lasti` (always 0: there is no
+  bytecode).
+- `__exit__`, `generator.throw`, `with_traceback`, and
+  `types.TracebackType(...)` accept and pass them on.
+
+#### 3.1.7 Bytes, buffers, and sequences
+
+Bytes and bytearrays:
+
+- Bytes support literals, sequence operations, construction from an integer
+  or an iterable, and the string/bytes method families.
+- Bytearray methods include `resize` and Python 3.15's `take_bytes`. Bounds
+  and storage are rechecked after conversion callbacks.
+- A bytearray with live exports refuses to resize, raising CPython's
+  `BufferError`.
+- `bytes` and `bytearray` expose `__buffer__`, and bytes consumers accept
+  views.
+
+`memoryview`:
+
+- Wraps bytes, bytearrays, other views, and objects with `__buffer__`.
+- Supports native struct formats (including `e`, `?`, and `P`), and `cast`
+  between 1-D and N-D shapes.
+- Provides indexing, slicing, item assignment, comparison, hashing,
+  `tolist`, `tobytes`, `hex`, `toreadonly`, `release`, and the
+  context-manager protocol.
+- Not supported: struct-module formats beyond native single items,
+  multi-dimensional sub-views, and CPython's allocation introspection.
+
+Codecs: encoding and decoding provide the core codecs of PLS-315 Table 23-1.
+spy's host supplies no others.
+
+Iterators:
+
+- Every intrinsic iterator has its own type, with `__reduce__` and
+  `__setstate__` as 27.1.1 gives.
+- The sequence, dict, set, range, and reversed iterators provide CPython's
+  `__length_hint__`.
+- `list()`, `list.extend`, and `bytearray.extend` pass on errors from a user
+  iterable's `__len__` or `__length_hint__`, as `PyObject_LengthHint` does.
+
+Slicing and ranges:
+
+- Lists, tuples, strings, bytes, and ranges support slicing.
+- Range bounds, indices, steps, and `slice.indices()` lengths are
+  arbitrary-precision integers.
+- Ranges support iteration, reverse iteration, integer membership, equality,
+  `count`, and `index`. `len` rejects lengths larger than the host's size
+  type.
+- Slices compare their three components lexicographically, keeping identity
+  shortcuts and user-defined comparison results.
+
+#### 3.1.8 Hashing, dictionaries, and mappings
+
+Hashing:
+
+- A class that defines `__eq__` without `__hash__` becomes unhashable.
+- `hash()` calls user-defined hash methods, validates their results, and
+  normalizes oversized integers.
+- Numeric hashes keep equality across integers, floats, and complex numbers.
+- Tuples cache successful hashes. Slices and ranges are hashable when their
+  components are.
+- String and bytes hashes use unsalted FNV-1a with its high half folded into
+  the low. PLS-315 leaves this to the implementation. There is no
+  per-process randomization.
+- The numeric and compound hash algorithms adapt CPython's implementation
+  under its [license](licenses/python.txt).
+
+Dictionaries and sets:
+
+- Entries store their hashes. Maps with more than eight entries also keep an
+  open-addressed index by hash; smaller ones scan the entries.
+- A dict counts the keys it removes, and its iterators compare that count.
+  Once keys were removed and as many added, the next `__next__` raises
+  "dictionary keys changed during iteration" instead of ending (PLS-315
+  26.1.4).
+- `keys`, `values`, and `items` return live views. Keys and items views are
+  set-like, and their `mapping` is a read-only native `mappingproxy`.
+
+Mapping proxies forward mapping methods and support generic aliases. Before a
+comparison with an arbitrary reflected-equality callback, they copy an exact
+dictionary, following Python 3.15. They are implemented in C.
+
+Frozen dictionaries:
+
+- `frozendict` shares dictionary lookup, views, unpacking, and pattern
+  matching.
+- Its hash combines the stored key hashes with the value hashes, and caches
+  the completed result.
+- An exact frozen copy may reuse the original value; a subclass copy produces
+  a plain frozen mapping.
+- `eval` and `exec` accept frozen globals that already have a
+  `__builtins__` entry, and reject writes and deletions.
+
+#### 3.1.9 Strings, formatting, and Unicode
+
+- **F-strings** support expressions, debug fields, conversions, nested format
+  specifications, raw literals, and generator suspension inside fields.
+- **`format` and `format_map`** follow CPython's parser: automatic and manual
+  numbering, attribute and index field paths, conversions, nested
+  replacement fields in specifications (two levels), and CPython's
+  diagnostics.
+- **The format-spec mini-language** for `str`, `int`, `bool`, `float`, and
+  `complex` is ported from CPython: fill code points, alignment, sign, `z`,
+  `#`, zero padding, Unicode digit widths, `,`/`_` integer and fractional
+  grouping, every presentation type, the short float repr, and CPython's
+  diagnostics. `n` uses the C locale.
+- **Percent formatting** for `str`, `bytes`, and `bytearray` follows
+  CPython's conversions, flags, `*` widths and precisions, mapping keys, and
+  diagnostics.
+- **Unicode data.** Escaping, printability, identifier properties, and
+  `\N{...}` escapes use checked-in Unicode 17.0.0 data. `\N{...}` takes names
+  and aliases, case-insensitively; Hangul and derived ideograph names are
+  computed. Normalization functions (`unicodedata`) are a library facility
+  outside the core.
+- **Template strings** are C objects with read-only `strings`,
+  `interpolations`, and `values` attributes.
+  - Interpolations keep `value`, `expression`, `conversion`, and
+    `format_spec`. Constructing a template does not call the value's
+    conversion or formatting methods.
+  - Iteration omits empty literal strings.
+  - The Template and Interpolation types are final. They can be obtained
+    without a library import, as `type(t'')` and
+    `type(t'{0}'.interpolations[0])`. The standard-library
+    `string.templatelib` package is not part of the core.
+
+#### 3.1.10 Source text
+
+- Byte sources, CLI files, and imports honor encoding comments on the first
+  or second line, and UTF-8 BOMs. Unicode string sources ignore encoding
+  comments.
+- UTF-8, ASCII, Latin-1, and ISO-8859-15 decoding is native. Other source
+  encodings are left to the host.
+- The lexer rejects invalid UTF-8.
+- CR and CRLF become LF before parsing, including inside string literals.
+- Indentation uses eight-column tab stops and rejects inconsistent mixing of
+  tabs and spaces.
+- Source identifiers are NFKC-normalized before scope analysis and
+  private-name mangling. Dynamic string attribute and keyword names keep
+  their original spelling.
+
+Future statements are checked as CPython's compiler checks them:
+
+- They must come first, after at most a docstring, and name a known feature.
+  `braces` is "not a chance".
+- `barry_as_FLUFL`, or `compile()`'s `CO_FUTURE_BARRY_AS_BDFL` flag, makes
+  `<>` the inequality operator.
+- The statement still imports `__future__` when a host provides it, and
+  binds nothing otherwise.
+- Under `from __future__ import annotations` (PEP 563), annotations become
+  strings, written as CPython's AST unparser writes them. Functions return
+  them from `__annotate__`; module and class bodies store them in an eager
+  `__annotations__` dict.
+- `compile()`, `exec()`, and `eval()` inherit the running code's future
+  statements unless `dont_inherit` is true.
+
+Syntax errors:
+
+- These follow CPython's lexer and `invalid_*` grammar rules: parameter
+  lists; assignment, deletion, loop, `with`, and keyword-argument targets;
+  `assert` and condition `=` typos; starred arguments; string prefixes;
+  unbalanced brackets; missing indented blocks; and conditional expressions.
+- Errors that CPython raises from its compiler (`'break' outside loop`,
+  `'return' outside function`, misplaced `async for`, `async with`, and
+  `await`) are raised only after the whole source parses.
+- Compiler-phase `SyntaxError`s from `compile()`, `exec()`, and `eval()`
+  strings have no `text`, as in CPython.
+- Some diagnostics still differ from CPython. These are open compatibility
+  issues, not changes to the standard.
+
+Nesting limits follow CPython:
+
+- 200 levels of brackets ("too many nested parentheses").
+- An expression too deep for the parser raises `MemoryError` ("Parser stack
+  overflowed").
+- Runs of prefix operators and long operator chains do not use C stack per
+  operator, and the compiler's checks are bounded by stack use.
+
+#### 3.1.11 Code, scopes, and suspension
+
+Namespaces:
+
+- Module and class namespaces and explicit execution mappings are live.
+  Optimized function locals are snapshots.
+- Class and execution locals may be arbitrary mappings. Globals must be
+  dictionaries, subclasses included.
+
+Code objects:
+
+- They expose argument counts, names, filenames, first-line metadata, and
+  CPython's sorted `co_freevars` and `co_cellvars`, including names passed
+  through to nested scopes and the implicit `__class__`.
+- They are cached per parsed definition, so functions made from the same
+  definition share one code object. `gi_code`, `cr_code`, and `ag_code` keep
+  that identity after the suspended instance closes.
+- They hold parsed syntax and internal generator instructions. There is no
+  public bytecode format.
+- A function's `__code__` may be replaced.
+
+Closures and dynamic execution:
+
+- A function's `__closure__` holds cells that read and write the defining
+  scope's variable. `types.CellType` cells compare by contents.
+- `exec` and `eval` run a code object, a function's included, as a call with
+  no arguments. Code with free variables is rejected there, as in CPython.
+- A closure given to `exec`, `eval`, or `types.FunctionType` must consist of
+  cells bound in the function's defining scopes, with the same globals,
+  because spy functions share their defining environment rather than holding
+  cells.
+
+Generators:
+
+- They keep operands, loop state, active exceptions, and pending cleanup
+  across suspension.
+- An explicit `close()` runs cleanup and returns the generator's return
+  value.
+- A suspended generator that becomes unreachable, by reference release or
+  cycle collection, is closed first (27.2.4).
+- Frames are live objects.
+- `yield` may appear in any expression position, class bases included.
+  Raise expressions and explicit causes may yield or await.
+- Assertions keep their original message objects.
+
+Coroutines and asynchronous generators:
+
+- They share the generators' owned suspension stacks.
+- Async context-manager exits may suspend during a return, a loop exit, and
+  exception handling.
+- Asynchronous-generator operation objects reject concurrent operations and
+  reuse.
+- Comprehensions run on the same machinery, nested async clauses and awaited
+  elements and filters included.
+- spy's host provides no HostWarn, so warnings such as an unawaited
+  coroutine's are ignored (PLS-315 B.4.1).
+- The core provides no event loop.
+
+Parenthesized context-manager lists work for synchronous and asynchronous
+managers.
+
+#### 3.1.12 Not yet in C
+
+The parser, evaluator, value storage, and collector are C11. Generic and
+related intrinsic objects still use Python source embedded in
+`spy-intrinsics.h`, generated from `intrinsics.py` and interpreted by `spy`
+on first use. This adds no external dependency and needs no Python to build.
+It is a remaining gap against the requested C11-only implementation of
+language semantics.
 
 ### 3.2 Modules
 
-The core accepts a host module-loader callback. The callback receives the
-context and returns the source as an owned bytes value, which the engine
-decodes and parses like a file (PEP 263, BOM, null-byte check). Each
-context caches modules by name. A module is cached before execution to support
-simple circular imports. Failed initialization removes that module's cache
-entry. Each source module has a namespace, `__name__`, and `__package__`.
-Packages have `__path__`; the current loader does not search its contents.
-As in importlib, an import returns the module that `sys.modules` holds once
-the source has run, and a submodule that importing its parent placed in
-`sys.modules` needs no loading. A module-level `__getattr__` supplies missing
-attributes (PEP 562). Failed imports set `ImportError.name`. A missing `from`
-name reports the module, its file, and `name_from`, as CPython does.
+The host supplies modules through a module-loader callback. The callback
+receives the context and returns the source as an owned bytes value. The
+engine decodes and parses it like a file (PEP 263, BOM, null-byte check).
 
-For `pkg.mod`, the core first requests `pkg.mod.__init__` from the callback,
-then `pkg.mod` if no package source exists. Asked for `pkg.mod`, the callback
-may register it with `spy_new_module` instead of returning source; the
-import then runs that init, as it does for a native module (3.4.9). The CLI
-maps dots to directory separators and reads the resulting `.py` file under
-the original script directory, or the current directory for stdin and `-c`.
-A regular file with `.so` in place of `.py` (`.dll` on Windows) is a native
-module and comes first, as CPython's extension modules do; a package's
-`__init__` is always source. There is no default filesystem loader in an
-embedded context. Relative imports use `__package__`.
-Import statements honor the frame's builtin `__import__` function; the default
-implementation loads sources through the callback. The `builtins` module exposes
-the context's builtin namespace directly and needs no loader.
+Loading:
 
-Module specs, package search paths, meta-path finders, and CPython
-extension modules are host services (PLS-315 Annex B) that the `spy`
-command's loader does not provide.
+- For `pkg.mod`, the core first asks the callback for `pkg.mod.__init__`,
+  then for `pkg.mod` if there is no package source.
+- Asked for `pkg.mod`, the callback may register it with `spy_new_module`
+  instead of returning source. The import then runs that init, as it does for
+  a native module ([3.4.9](#349-native-modules)).
+- An embedded context has no default filesystem loader.
 
-Python 3.15 lazy imports (`lazy import`, `lazy from ... import`) bind
-`lazy_import` placeholders at module level outside `try` blocks. Reading a
-placeholder through a module global, class namespace, or module attribute
-calls `__import__` and replaces the binding; a failure is chained to an
-ImportError cause naming the lazy import. `from` imports of an already-loaded
-module bind the attribute directly. `sys.set_lazy_imports('all')` makes every
-eligible module-level import lazy, and `sys.set_lazy_imports_filter` may keep
-any of them eager (PLS-315 B.1.4).
+The `spy` command's loader:
+
+- Maps dots to directory separators and reads the `.py` file under the
+  original script's directory, or under the current directory for stdin and
+  `-c`.
+- A regular file with `.so` in place of `.py` (`.dll` on Windows) is a
+  native module and comes first, as CPython's extension modules do. A
+  package's `__init__` is always source.
+- Does not provide module specs, package search paths, meta-path finders, or
+  CPython extension modules. These are host services (PLS-315 Annex B).
+
+The module cache:
+
+- Each context caches modules by name.
+- A module is cached before it runs, so simple circular imports work. A
+  failed initialization removes its entry.
+- As in importlib, an import returns the module that `sys.modules` holds once
+  the source has run. A submodule that importing its parent placed in
+  `sys.modules` needs no loading.
+
+Modules:
+
+- Each source module has a namespace, `__name__`, and `__package__`.
+  Packages have `__path__`, but the current loader does not search it.
+- Relative imports use `__package__`.
+- A module-level `__getattr__` supplies missing attributes (PEP 562).
+- Import statements call the frame's builtin `__import__`. The default one
+  loads sources through the callback.
+- The `builtins` module is the context's builtin namespace itself, and needs
+  no loader.
+- A failed import sets `ImportError.name`. A missing `from` name reports the
+  module, its file, and `name_from`, as CPython does.
+
+Lazy imports (Python 3.15 `lazy import` and `lazy from ... import`):
+
+- At module level, outside `try` blocks, they bind `lazy_import`
+  placeholders.
+- Reading a placeholder through a module global, a class namespace, or a
+  module attribute calls `__import__` and replaces the binding. A failure is
+  chained to an `ImportError` cause naming the lazy import.
+- A `from` import of an already-loaded module binds the attribute directly.
+- `sys.set_lazy_imports('all')` makes every eligible module-level import
+  lazy, and `sys.set_lazy_imports_filter` may keep any of them eager (PLS-315
+  B.1.4).
 
 ### 3.3 Standard library and host services
 
-The core engine (`spy.c`, `libspy.a`) provides the language and its builtins
-and no module but `builtins`; a program reaches every intrinsic through the
-language (PLS-315 Annex C lists the Core expressions). Every other module is
-the host's choice. A host registers modules with `spy_new_module`, and
-`spy_init_primitives` fills one with the engine primitives for modules written
-in Python: the module cache, frames, the recursion and integer-string limits,
-the handled exception, collection, the weak table, host output, and the
-command line, and the tokenizer. Hosts
-register it as `_spy`; a context where none did has no such module. A standard
-layer, `spy-std.c` (`libspy-std.a`, declared in `spy-std.h`), supplies the host
-module `sys`, written on those primitives and specified, after CPython 3.15,
-by [PLS-STD-315](standards/std.md). `spy_std_init_module` registers one
-module and `spy_std_init` all of them; it also loads native
-modules (3.4.9). The `spy` command calls
-`spy_std_init`, `spyc -M` names the modules a generated program registers, and
-the conformance driver `tests/run-spec` registers none, only `_spy`. Their
-Python sources live in `modules/` and are embedded into `spy-std-modules.h`; an
-import finds them before the host loader, needs no loader, and parses them only
-on first use. `print` and interactive display write to `sys.stdout`, and
-`breakpoint` calls `sys.breakpointhook`, once a `sys` module is loaded; until
-then output goes to the host callback, display uses its default, and
-`breakpoint` returns `None` (PLS-315 Annex B). There is no `gc` module: the
-engine collects cycles by itself (4.4), and a host controls collection
-through the C API (3.4.7). `sys`
-keeps the runtime state natively: `modules`, `exception()`, the recursion and
-integer string-conversion limits, reference counts, and `stdout`/`stderr`
-streams that write to the host output and error callbacks;
-`implementation.name` is `smallpython`. `_getframe()` returns frame objects for
-running calls (functions, generators, class bodies, and modules); a function
-frame's `f_locals` is a write-through `FrameLocalsProxy` as in PEP 667, and
-line numbers are those of the executing statement.
-[PLS-STD-315](standards/std.md) specifies every name of both modules after
-CPython 3.15 and lists those not provided: `sys.monitoring`, audit hooks, and
-the thread and extension-module interfaces, among others. The lazy-import mode
-and filter, the asynchronous-generator hooks, coroutine origin tracking, the
-hook that receives unraisable exceptions, and the trace and profile functions
-are settings the engine keeps and `sys` changes through the `_spy._setting`
-primitive; trace functions see the 'call', 'line', 'return', and 'exception'
-events of Python frames; `sys.excepthook` and `sys.unraisablehook` write
-CPython's traceback display without source lines. When a host registered `sys`
-but no program imported it, the first unraisable exception imports it, so the
-report appears as under CPython, whose `sys` is always loaded. `tests/std.py`
-checks the rest against CPython.
+The core engine (`spy.c`, `libspy.a`) provides the language and its builtins,
+and no module but `builtins`. A program reaches every intrinsic through the
+language; PLS-315 Annex C lists the Core expressions. Every other module is
+the host's choice.
+
+#### 3.3.1 Modules a host registers
+
+A host registers modules with `spy_new_module`. Three kinds are shipped:
+
+| Module | Registered by | Contents |
+| --- | --- | --- |
+| `_spy` | Any host, with `spy_init_primitives` | The engine primitives for modules written in Python: the module cache, frames, the recursion and integer-string limits, the handled exception, collection, the weak table, host output, the command line, and the tokenizer |
+| `sys` | `spy_std_init_module` or `spy_std_init` (`spy-std.c`, `libspy-std.a`, `spy-std.h`) | The standard layer, written on those primitives and specified after CPython 3.15 by [PLS-STD-315](standards/std.md) |
+| Native modules | `spy_std_init`, which loads them with `spy_std_load_native` | One module in a shared library ([3.4.9](#349-native-modules)) |
+
+A context where no host registered `_spy` has no such module. The standard
+layer's Python sources live in `modules/` and are embedded into
+`spy-std-modules.h`. An import finds them before the host loader, needs no
+loader, and parses each only on first use.
+
+Who registers what:
+
+- The `spy` command calls `spy_std_init`.
+- `spyc -M` names the modules a generated program registers.
+- The conformance driver `tests/run-spec` registers only `_spy`.
+
+#### 3.3.2 `sys`
+
+Before and after a `sys` module is loaded:
+
+| | Without `sys` | With `sys` |
+| --- | --- | --- |
+| `print`, interactive display | The host output callback; display uses its default | `sys.stdout` |
+| `breakpoint` | Returns `None` | Calls `sys.breakpointhook` |
+
+(PLS-315 Annex B.) When a host registered `sys` but no program imported it,
+the first unraisable exception imports it, so the report appears as under
+CPython, whose `sys` is always loaded.
+
+`sys` keeps the runtime state natively:
+
+- `modules`, `exception()`, the recursion and integer string-conversion
+  limits, and reference counts.
+- `stdout` and `stderr` streams that write to the host's output and error
+  callbacks.
+- `implementation.name` is `smallpython`.
+- `_getframe()` returns frame objects for running calls: functions,
+  generators, class bodies, and modules. A function frame's `f_locals` is a
+  write-through `FrameLocalsProxy`, as in PEP 667. Line numbers are those of
+  the executing statement.
+
+The engine keeps these settings, and `sys` changes them through the
+`_spy._setting` primitive:
+
+- the lazy-import mode and filter;
+- the asynchronous-generator hooks;
+- coroutine origin tracking;
+- the hook that receives unraisable exceptions;
+- the trace and profile functions. Trace functions see the `'call'`,
+  `'line'`, `'return'`, and `'exception'` events of Python frames.
+
+`sys.excepthook` and `sys.unraisablehook` write CPython's traceback display,
+without source lines.
+
+[PLS-STD-315](standards/std.md) specifies every name of `sys` after CPython
+3.15, and lists those not provided: `sys.monitoring`, audit hooks, and the
+thread and extension-module interfaces, among others. `tests/std.py` checks
+the rest against CPython.
+
+There is no `gc` module. The engine collects cycles by itself
+([4.4](#44-garbage-collection)), and a host controls collection through the
+C API ([3.4.7](#347-collection)).
+
+#### 3.3.3 Weak references
 
 No `weakref` module is built in. The engine keeps weak references for its
-hosts: the primitives `_weak_bind(target, reference, callback)` and
-`_weak_get(reference)` register a reference object in a per-context table of
-borrowed (referent, reference) pairs and read its referent back. Instances of classes without `__slots__` (or with `__weakref__` in
-them), classes, functions, bound methods, builtin functions, sets, frozensets,
-generators, coroutines, code objects, and modules are weakly referenceable,
-as in CPython. Releasing a referent, or collecting it in a cycle, clears its
-references and queues their callbacks, which run at the next statement
-boundary; callback exceptions are discarded because there is no error stream.
-Closures retain their whole defining environment, so a closure can keep alive
-a local that CPython would have released.
+hosts:
 
-Other standard-library modules are not built in. The `builtins` module exposes
-language builtins. Core `print` requires an output callback; other source
-imports require a loader. An embedding application opts into those
-capabilities. Optional Python-level C library wrappers remain future work.
+- `_weak_bind(target, reference, callback)` registers a reference object in a
+  per-context table of borrowed (referent, reference) pairs.
+  `_weak_get(reference)` reads its referent back.
+- Weakly referenceable, as in CPython: instances of classes without
+  `__slots__` (or with `__weakref__` in them), classes, functions, bound
+  methods, builtin functions, sets, frozensets, generators, coroutines, code
+  objects, and modules.
+- Releasing a referent, or collecting it in a cycle, clears its references
+  and queues their callbacks. They run at the next statement boundary.
+  Callback exceptions are discarded, because there is no error stream.
+- Closures keep their whole defining environment alive, so a closure can
+  keep a local that CPython would have released.
 
-Removing standard-library dependencies does not remove requirements for
-classes, exceptions, Unicode, imports, or async syntax. The specification keeps
-those requirements in the Core profile and treats unavailable host services
+#### 3.3.4 Everything else
+
+Other standard-library modules are not built in. Core `print` needs an output
+callback, and other source imports need a loader; an embedding application
+opts into those. Optional Python-level wrappers of C libraries are future
+work.
+
+Leaving out the standard library does not remove the requirements for
+classes, exceptions, Unicode, imports, or async syntax. The specification
+keeps those in the Core profile, and treats unavailable host services
 separately.
 
 ### 3.4 C API
@@ -847,186 +1130,226 @@ instance or class, so a native callback can fail with any exception.
 
 #### 3.4.5 Evaluation
 
-`spy_eval(ctx, source, filename)` parses and executes source, returning the final
-expression value or `None`. `spy_exec` discards that value and returns status.
-`spy_eval_interactive` also displays each non-`None` expression through the
-output callback, including expressions inside interactive loops and conditionals.
-Function and class bodies retain ordinary execution behavior. Successful display
-updates the builtin `_` binding. All three entry points preserve globals between calls. A new top-level evaluation clears the
-previous error and resets the step counter. Parsing precedes all execution;
-runtime errors do not roll back preceding assignments.
+| Function | Returns |
+| --- | --- |
+| `spy_eval(ctx, source, filename)` | The final expression's value, or `None` |
+| `spy_exec` | A status; the value is discarded |
+| `spy_eval_interactive` | As `spy_eval`, and displays each non-`None` expression through the output callback |
+
+- Interactive display covers expressions inside interactive loops and
+  conditionals. Function and class bodies execute as usual. A successful
+  display updates the builtin `_`.
+- All three keep globals between calls.
+- A new top-level evaluation clears the previous error and resets the step
+  counter.
+- Parsing precedes all execution. A runtime error does not roll back the
+  assignments before it.
 
 Use `spy_get_global` and `spy_set_global` for host access to global bindings.
 Do not recursively call `spy_eval` from a callback on the same context.
 
 #### 3.4.6 Host services and limits
 
-`spy_set_output` installs text output; `spy_set_module_loader` installs module
-source loading. Neither service is installed by the core automatically. Every
-host callback receives the context first, except the interrupt and a native's
-release callback, which must not call into the engine. A callback that fails may set its own
+The core installs no host service by itself. Every host callback receives
+the context first, except the interrupt and a native's release callback,
+which must not call into the engine. A callback that fails may set its own
 error, which takes the place of the engine's generic one.
 
-`spy_mount(ctx, directory, path, flags)` lets `open` reach a host directory
-at an absolute guest path, or at the directory's own resolved path when
-`path` is `NULL`; `SPY_MOUNT_READ_ONLY` refuses writes with `EROFS`. Nothing
-else is reachable: a guest path is normalized lexically, must fall inside a
-mount (the longest matching one), and is then resolved on the host with
-`realpath`, so `..` and symbolic links cannot leave the mount, and files are
-opened with `O_NOFOLLOW`. Relative paths start at the first mount. The context
-owns every descriptor `open` creates and closes the rest when it is freed;
-other descriptors, such as the process's standard streams, are unreachable.
-The `spy` command mounts its working directory at its own path. File access
-needs a POSIX host; elsewhere `spy_mount` and `open` raise `OSError`.
+**Streams.**
 
-`spy_set_argv(ctx, argc, argv, orig_argc, orig_argv)` gives the context the
-program's command lines, which the standard layer's `sys` copies into
-`sys.argv` (the script's) and `sys.orig_argv` (the whole one the process was
-started with) when it is first imported. The strings are copied and decoded
-as UTF-8 with `surrogateescape`, so any bytes are kept; it returns 0, or -1
-with `MemoryError`. Until a host sets it both lists are empty. Programs that
-`spyc` builds set it from `main`, and the `spy` command from its arguments
-(2.3.1).
+| Function | Installs |
+| --- | --- |
+| `spy_set_output` | Text output, and a flush callback sharing its data pointer; without one, output is unbuffered |
+| `spy_set_error_output` | Error text (the standard layer's `sys.stderr`), with its own write and flush callbacks; without them, error text shares the output callbacks |
+| `spy_set_input` | The line reader behind `input()`. It returns an owned str, with or without its line ending, or `NULL` at the end of input. Without a reader, `input()` raises `EOFError` |
+| `spy_set_module_loader` | Module source loading ([3.2](#32-modules)) |
 
-`spy_new_module(ctx, name, init)` registers a module. An import finds it before the loader. The first import
-creates the module object with `__name__`, `__package__`, and `__builtins__`
-set and calls `init(ctx, module)`, which fills it (with `spy_set_attr`,
-`spy_native` values, or Python source through `spy_exec_module`) and returns 0,
-or -1 with an error set to fail the import. An init that sets `__path__` makes
-a package, whose submodules register under dotted names.
-The flush callback given to `spy_set_output` shares the output callback's
-data pointer; without one, output is treated as unbuffered.
-`spy_set_error_output` gives error text (the standard layer's `sys.stderr`)
-its own write and flush callbacks; without them, error text shares the output
-callbacks.
-`spy_std_report` reports the pending exception through `sys.excepthook`,
-which writes CPython's traceback display to `sys.stderr`; the `spy` command
-reports uncaught exceptions with it, on standard error. `print(file=...)` uses the Python object's
-`write` and `flush` methods.
-`spy_set_input` installs the line reader behind `input()`: it receives the
-context and returns an owned str, with or without its line ending, or NULL at
-the end of input. Without a reader, `input()` raises `EOFError`; the `spy` command
-reads standard input.
+- `print(file=...)` uses the Python object's `write` and `flush` methods.
+- `spy_std_report` reports the pending exception through `sys.excepthook`,
+  which writes CPython's traceback display to `sys.stderr`.
+- The `spy` command reads standard input for `input()`, and reports uncaught
+  exceptions with `spy_std_report` on standard error.
 
-`spy_set_optimize` sets the optimization level (PLS-315 B.6), as `python -O`
-and `-OO` do: at 1 `assert` statements are not evaluated and `__debug__` is
-`False`, at 2 docstrings are not kept either. `compile(optimize=-1)` uses it.
+**Modules.** `spy_new_module(ctx, name, init)` registers a module. An import
+finds it before the loader.
 
-`spy_set_limit(c, SPY_LIMIT_STEPS, n)` bounds the steps of each outermost
-`spy_eval`, `spy_eval_interactive`, `spy_exec`, `spy_exec_module`, `spy_call` or
-`spy_call_keywords`; zero means unlimited. A step is a unit of bounded work:
-one per Python call and per 8 nodes of the body it runs, one per loop pass
-and per item a native loop takes, one per 64 bytes of source parsed or of a
-large block allocated (per 8 elements of an array, so every target spends
-the same), and native work that only reads, such as comparing,
-searching or hashing, in proportion to its operands
-([metering.md](metering.md)). A host function calling back shares its
-caller's budget. `spy_steps_used` returns the steps the running or last
-outermost call spent; calls and native iteration spend only while a limit,
-an interrupt or a trace function is set.
+- The first import creates the module object, with `__name__`,
+  `__package__`, and `__builtins__` set, and calls `init(ctx, module)`.
+- `init` fills it, with `spy_set_attr`, `spy_native` values, or Python source
+  through `spy_exec_module`, and returns 0, or -1 with an error set to fail
+  the import.
+- An init that sets `__path__` makes a package, whose submodules register
+  under dotted names.
 
-`SPY_LIMIT_MEMORY` bounds the bytes the engine holds, values and their
-storage; zero means unlimited, and `spy_memory_used` returns the count. The
-limit is a level, not a budget: it is not refilled per call.
+**Files.** `spy_mount(ctx, directory, path, flags)` lets `open` reach a host
+directory at an absolute guest path, or at the directory's own resolved path
+when `path` is `NULL`. Nothing else is reachable:
 
-`spy_set_interrupt` installs a callback the engine polls at the first call,
-statement or native iteration after every 4096 steps, and inside long
-multiplication, division, integer formatting and sorting; a nonzero return
-stops the call. The
-engine reads no clock: a host bounds wall or CPU time, or offers a cancel
-button, by reading its own in the callback, which must not call into the
-engine.
+- A guest path is normalized lexically and must fall inside a mount, the
+  longest matching one. It is then resolved on the host with `realpath`, so
+  `..` and symbolic links cannot leave the mount. Files are opened with
+  `O_NOFOLLOW`.
+- Relative paths start at the first mount.
+- `SPY_MOUNT_READ_ONLY` refuses writes with `EROFS`.
+- The context owns every descriptor `open` creates, and closes those left
+  open when it is freed. Other descriptors, such as the process's standard
+  streams, are unreachable.
+- File access needs a POSIX host. Elsewhere, `spy_mount` and `open` raise
+  `OSError`.
 
-`spy_set_limit(ctx, limit, value)` sets each limit through one call, and
-`spy_get_limit` reads it back. `SPY_LIMIT_STEPS` and `SPY_LIMIT_MEMORY` are
-the two above. `SPY_LIMIT_OUTPUT` bounds the bytes each outermost call
-writes to the output and error streams; zero means unlimited.
-`SPY_LIMIT_RECURSION` and `SPY_LIMIT_INT_DIGITS` set the recursion limit and
-the int-string conversion limit (PLS-315 B.6), which a program with `sys`
-can change too. `SPY_LIMIT_STACK` sets the bytes of C stack the engine may
-use before `RecursionError`, 4 MiB by default, for a host that runs it on a
-smaller stack, such as a thread or WebAssembly. A value out of range or an
-unknown limit fails with `ValueError`.
+The `spy` command mounts its working directory at its own path.
 
-A spent budget, a refused allocation, output past its limit or an
-interrupt stops the call: every further step fails with `RuntimeError`
-(steps, output, interrupt) or `MemoryError` (memory), so no handler or
-`finally` body runs, and finalizers that become due wait for the next
-outermost call, which runs normally. `spy_stopped` returns
-`SPY_STOP_STEPS`, `SPY_STOP_MEMORY`, `SPY_STOP_OUTPUT` or
-`SPY_STOP_INTERRUPT` after such a call and zero after any other, which
-tells a stop from the same error raised by the program.
+**Command line.** `spy_set_argv(ctx, argc, argv, orig_argc, orig_argv)`
+gives the context the program's command lines.
 
-With `SPY_LIMIT_PAUSE` set to 1, a spent step budget or an interrupt
-pauses an outermost `spy_eval` or `spy_exec` instead of stopping it
-(docs/metering.md 3.8). The call returns NULL (`spy_exec` -1) with no
-error set, and `spy_paused` returns `SPY_STOP_STEPS` or
-`SPY_STOP_INTERRUPT`. `spy_resume(ctx)` runs it on from the step where it
-paused, with fresh budgets, and returns its value, or NULL with an error or
-paused again. A call pauses only at a step where its frames are all on the
-engine's machine: a pause that becomes due inside native code, such as an
-import, `exec` or a host function, waits until that code returns, and a
-further budget spent before then stops the call, except one spent parsing
-or compiling source or charging a body's length as it is entered. Code compiled while the
-limit is set gives every operator, subscript and f-string field a step of
-its own, so their special methods pause too; set it before running the
-code. Other calls may run while one is paused; freeing the context stops a
-paused call.
+- When the standard layer's `sys` is first imported, it copies them into
+  `sys.argv` (the script's) and `sys.orig_argv` (the whole command line the
+  process was started with).
+- The strings are copied and decoded as UTF-8 with `surrogateescape`, so any
+  bytes are kept. It returns 0, or -1 with `MemoryError`.
+- Until a host sets them, both lists are empty.
+- Programs that `spyc` builds set them from `main`, and the `spy` command
+  from its arguments ([2.3.1](#231-spy-interpreter)).
 
-`spy_set_policy` installs a callback asked before each sensitive action, as
-CPython's audit hooks (PEP 578) are, with an event name and a tuple of its
-arguments: `open` (file, mode) before a file is opened, `import` (name)
-before a module first loads, but not when the module cache serves it,
-`exec` (the source) before `exec`, `eval` or `compile` parses a string, and
-`input` (the prompt, if given) before `input` writes it. Imports the standard
-layer makes are events too: `sys` imports `_spy`. A zero return allows the
-action; any other refuses it with `PermissionError`, unless the callback set
-an error of its own. Hosts ask the same callback about their own actions,
-such as a network request from a host function, with
-`spy_policy_check(ctx, event, args)`, which returns 0 when no policy is set.
-The core itself has no network access.
+**Optimization.** `spy_set_optimize` sets the optimization level (PLS-315
+B.6), as `python -O` and `-OO` do. At 1, `assert` statements are not
+evaluated and `__debug__` is `False`. At 2, docstrings are not kept either.
+`compile(optimize=-1)` uses it.
 
-Budgets bound what a program can spend: steps, the bytes the engine holds
-and, through the interrupt, time; the policy bounds what it may reach. They
-do not make a context an isolation
-boundary: the program runs in the host's process, so a defect in the engine
-can reach the host. The packages' worker
+**Limits.** `spy_set_limit(ctx, limit, value)` sets each limit, and
+`spy_get_limit` reads it back. A value out of range, or an unknown limit,
+fails with `ValueError`.
+
+| Limit | Bounds |
+| --- | --- |
+| `SPY_LIMIT_STEPS` | The steps of each outermost `spy_eval`, `spy_eval_interactive`, `spy_exec`, `spy_exec_module`, `spy_call` or `spy_call_keywords`; zero means unlimited |
+| `SPY_LIMIT_MEMORY` | The bytes the engine holds, values and their storage. A level, not a budget: it is not refilled per call. Zero means unlimited; `spy_memory_used` returns the count |
+| `SPY_LIMIT_OUTPUT` | The bytes each outermost call writes to the output and error streams; zero means unlimited |
+| `SPY_LIMIT_RECURSION` | The recursion limit (PLS-315 B.6); a program with `sys` can change it too |
+| `SPY_LIMIT_INT_DIGITS` | The int-string conversion limit (PLS-315 B.6); likewise |
+| `SPY_LIMIT_STACK` | The bytes of C stack the engine may use before `RecursionError`: 4 MiB by default, for a host that runs it on a smaller stack, such as a thread or WebAssembly |
+| `SPY_LIMIT_PAUSE` | With 1, a spent step budget or an interrupt pauses instead of stopping (below) |
+| `SPY_LIMIT_COLLECTION` | When automatic collection becomes due ([3.4.7](#347-collection)) |
+
+A step is a unit of bounded work ([metering.md](metering.md)):
+
+- one per Python call, and per 8 nodes of the body it runs;
+- one per loop pass, and per item a native loop takes;
+- one per 64 bytes of source parsed, or of a large block allocated (per 8
+  elements of an array, so every target spends the same);
+- for native work that only reads, such as comparing, searching or hashing,
+  in proportion to its operands.
+
+A host function calling back shares its caller's budget. `spy_steps_used`
+returns the steps the running or last outermost call spent. Calls and native
+iteration spend only while a limit, an interrupt or a trace function is set.
+
+**Interrupts.** `spy_set_interrupt` installs a callback that the engine polls
+at the first call, statement or native iteration after every 4096 steps, and
+inside long multiplication, division, integer formatting and sorting. A
+nonzero return stops the call. The engine reads no clock: a host bounds wall
+or CPU time, or offers a cancel button, by reading its own in the callback,
+which must not call into the engine.
+
+**Stopping.** A spent budget, a refused allocation, output past its limit, or
+an interrupt stops the call:
+
+- Every further step fails, with `RuntimeError` (steps, output, interrupt)
+  or `MemoryError` (memory). No handler or `finally` body runs.
+- Finalizers that become due wait for the next outermost call, which runs
+  normally.
+- `spy_stopped` then returns `SPY_STOP_STEPS`, `SPY_STOP_MEMORY`,
+  `SPY_STOP_OUTPUT` or `SPY_STOP_INTERRUPT`, and zero after any other call.
+  This tells a stop from the same error raised by the program.
+
+**Pausing.** With `SPY_LIMIT_PAUSE` set to 1, a spent step budget or an
+interrupt pauses an outermost `spy_eval` or `spy_exec` instead of stopping it
+([metering.md](metering.md) 3.8).
+
+- The call returns `NULL` (`spy_exec` -1) with no error set, and `spy_paused`
+  returns `SPY_STOP_STEPS` or `SPY_STOP_INTERRUPT`.
+- `spy_resume(ctx)` runs it on from the step where it paused, with fresh
+  budgets. It returns the call's value, or `NULL` with an error, or `NULL`
+  paused again.
+- A call pauses only at a step where its frames are all on the engine's
+  machine. A pause that becomes due inside native code, such as an import,
+  `exec` or a host function, waits until that code returns. A further budget
+  spent before then stops the call, except one spent parsing or compiling
+  source or charging a body's length as it is entered.
+- Code compiled while the limit is set gives every operator, subscript and
+  f-string field a step of its own, so their special methods pause too. Set
+  the limit before running the code.
+- Other calls may run while one is paused. Freeing the context stops a
+  paused call.
+
+**Policy.** `spy_set_policy` installs a callback asked before each sensitive
+action, as CPython's audit hooks (PEP 578) are. It receives an event name and
+a tuple of the event's arguments:
+
+| Event | Arguments | Asked |
+| --- | --- | --- |
+| `open` | file, mode | Before a file is opened |
+| `import` | name | Before a module first loads; not when the module cache serves it |
+| `exec` | the source | Before `exec`, `eval` or `compile` parses a string |
+| `input` | the prompt, if given | Before `input` writes it |
+
+- Imports that the standard layer makes are events too: `sys` imports
+  `_spy`.
+- A zero return allows the action. Any other refuses it with
+  `PermissionError`, unless the callback set an error of its own.
+- Hosts ask the same callback about their own actions, such as a network
+  request from a host function, with `spy_policy_check(ctx, event, args)`.
+  It returns 0 when no policy is set.
+- The core itself has no network access.
+
+**What limits do not do.** Budgets bound what a program can spend: steps,
+the bytes the engine holds and, through the interrupt, time. The policy
+bounds what it may reach. Neither makes a context an isolation boundary: the
+program runs in the host's process, so a defect in the engine can reach the
+host. For untrusted programs, the packages' worker
 ([packaging/protocol.md](packaging/protocol.md)) adds a process and the
-operating system's sandbox around the context for untrusted programs.
+operating system's sandbox around the context.
 
 #### 3.4.7 Collection
 
 The engine collects cycles by itself. A collection becomes due when the
 engine takes memory for new values while two things hold since the last
-collection: the values that can form cycles (everything but small integers
-and floats) have grown by `SPY_LIMIT_COLLECTION` (2,000 by default), and the
-memory the engine holds has doubled. The next statement boundary then runs
-the cycle collector (4.4). A heap that grows only in numbers is never
-scanned, and doubling keeps the total cost of collecting linear in what a
+collection:
+
+- the values that can form cycles (everything but small integers and
+  floats) have grown by `SPY_LIMIT_COLLECTION` (2,000 by default), and
+- the memory the engine holds has doubled.
+
+The next statement boundary then runs the cycle collector
+([4.4](#44-garbage-collection)). A heap that grows only in numbers is never
+scanned, and the doubling keeps the total cost of collecting linear in what a
 program makes. `spy_set_limit(c, SPY_LIMIT_COLLECTION, 0)` turns automatic
 collection off, for a host that wants finalizers to run only when it asks.
 
 `spy_collect` runs the collector now and returns the number of values
 collected; values the host retains are roots. `spy_live_values` reports the
-current value count. Context teardown frees remaining cycles whether or not
-any collection ran.
+current value count. Context teardown frees the remaining cycles, whether or
+not any collection ran.
 
 #### 3.4.8 Stability
 
-`SPY_VERSION` is the header's version and `spy_version()` the library's.
-From 0.8.0 on, releases with the same major version are compatible, 0.8
-and later 0.x releases counting with 1.x; before 0.8 only releases with the
-same minor version were. A later compatible release only adds functions, callback types and
-enumeration constants (appended, so existing values keep their numbers),
-and never changes or removes a declaration. A declaration is removed only in
-an incompatible release, after one release that marks it deprecated in
-`spy.h`; the Changelog lists every incompatible change. `make check-api`
-enforces this against the last release tag by compiling that release's
-declarations against the current header. It also requires every
-declaration to be documented and `libspy.a` to export exactly the
-functions `spy.h` declares. 0.8.0 makes the last incompatible changes
-planned: from it to 1.0.0 the API and ABI stay compatible under these
-rules, and 1.0.0 declares them stable.
+`SPY_VERSION` is the header's version, and `spy_version()` the library's.
+
+- From 0.8.0 on, releases with the same major version are compatible, 0.8
+  and later 0.x releases counting with 1.x. Before 0.8, only releases with
+  the same minor version were.
+- A later compatible release only adds functions, callback types, and
+  enumeration constants (appended, so existing values keep their numbers).
+  It never changes or removes a declaration.
+- A declaration is removed only in an incompatible release, after one
+  release that marks it deprecated in `spy.h`. The Changelog lists every
+  incompatible change.
+- `make check-api` enforces this against the last release tag, by compiling
+  that release's declarations against the current header. It also requires
+  every declaration to be documented, and `libspy.a` to export exactly the
+  functions `spy.h` declares.
+- 0.8.0 made the last incompatible changes planned. From it to 1.0.0 the API
+  and ABI stay compatible under these rules, and 1.0.0 declares them stable.
 
 The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
 names it puts in `_spy` serve the standard layer and may change in any
@@ -1059,30 +1382,41 @@ cc -shared -fPIC -DSPY_SHARED_MODULE -I. examples/fib.c -o examples/fib.so
 ./spy examples/test_fib.py
 ```
 
-With `SPY_SHARED_MODULE` defined, every `spy.h` call goes through a table of
-function pointers that the host hands the library as it loads it. The
-library needs no symbol from the
-engine and exports only `spy_module` and its init, so it loads into the
-statically linked `spy` of the release archives and into any host that
-links the standard layer. Without `SPY_SHARED_MODULE`, the same source is an
-ordinary C module that a host links and registers with `spy_new_module`.
-`make api-reference` generates `spy-module.h` from `spy.h`. Within
-compatible releases (3.4.8) the table only grows at its end, which `make
-check-api` enforces, so a library loads into an engine of its header's
-series that is as new as the header or newer; any other is refused.
+The same source builds two ways:
 
-`spy_std_load_native(ctx, name, path)` asks the policy about `dlopen` with
-`(name, path)`, opens the library (`dlopen` with `RTLD_NOW | RTLD_LOCAL`, or
-`LoadLibrary`), finds `spy_module` and `spy_init_` followed by the last name,
-checks the version, hands over the table and registers the init with
-`spy_new_module`. Any failure raises `ImportError`, with the system's
-message or the symbol that is missing as CPython's extension loader words
-it, and closes the library. A loaded library is never closed, since values
-anywhere in the process may hold its functions; as for any registered
-module, the context runs its init on each first import, so an init that
-failed runs again on the next import without reopening the library. A
-library holds one table: one that another copy of the engine in the same
-process linked is refused.
+- **With `SPY_SHARED_MODULE` defined**, every `spy.h` call goes through a
+  table of function pointers that the host hands the library as it loads it.
+  The library needs no symbol from the engine and exports only `spy_module`
+  and its init. It therefore loads into the statically linked `spy` of the
+  release archives, and into any host that links the standard layer.
+- **Without it**, the source is an ordinary C module that a host links and
+  registers with `spy_new_module`.
+
+`make api-reference` generates `spy-module.h` from `spy.h`. Within compatible
+releases ([3.4.8](#348-stability)) the table only grows at its end, which
+`make check-api` enforces. A library therefore loads into an engine of its
+header's series that is as new as the header or newer; any other is refused.
+
+`spy_std_load_native(ctx, name, path)` loads one:
+
+1. It asks the policy about `dlopen`, with `(name, path)`.
+2. It opens the library: `dlopen` with `RTLD_NOW | RTLD_LOCAL`, or
+   `LoadLibrary`.
+3. It finds `spy_module`, and `spy_init_` followed by the last name.
+4. It checks the version, hands over the table, and registers the init with
+   `spy_new_module`.
+
+Any failure raises `ImportError`, with the system's message or the missing
+symbol, worded as CPython's extension loader words it, and closes the
+library.
+
+- A loaded library is never closed, since values anywhere in the process may
+  hold its functions.
+- As for any registered module, the context runs its init on each first
+  import. An init that failed runs again on the next import, without
+  reopening the library.
+- A library holds one table: one that another copy of the engine in the same
+  process linked is refused.
 
 The release archives' `spy` for Linux is linked statically, and glibc's
 static `dlopen` warns at link time that it needs the C library of the build
@@ -1143,37 +1477,54 @@ with small_python.Runtime(step_limit=1_000_000, memory_limit=64 << 20, timeout=5
 
 `Runtime(*, std=True, step_limit=0, memory_limit=0, timeout=None,
 output=None, loader=None, message_limit=64 << 20)` owns one context in one
-worker. `std` registers the standard layer; `memory_limit` bounds the bytes
-the engine holds (a `MemoryError` that stops the operation beyond it); `timeout` bounds the seconds
-one operation runs in the worker, after which the worker is terminated and
-`small_python.Timeout` raised; `output` receives printed text (default
-`sys.stdout.write`); `loader` maps a module name to source or `None`. Its
-methods are `eval(source, filename)` (the last expression's value), `exec`,
-`call(function_or_global_name, *args, **kwargs)`, `define(name, f)` and the
-`function` decorator, `register_module(name, members, source)` (built on
-`spy_new_module`), `mount(directory, path=None, *, read_only=False)` (no
-directory is mounted by default), `collect`, and `close`; `rt[name]` reads,
-assigns, and deletes globals. A runtime is a context manager.
+worker. A runtime is a context manager.
 
-Values cross the boundary by copy when they are `None`, `bool`, `int`
-(any size), `float`, `complex`, `str`, `bytes`, `bytearray`, `list`, `tuple`,
-`dict`, `set`, or `frozenset` (from the engine, only exact instances of those
-types). Python callables become native functions that keep a reference to the
-callable and receive keyword arguments; other engine values come back as
-`small_python.Object`, a handle the worker holds, which forwards calls,
-attributes, items, `len`, `in`, iteration, comparisons, hashing, `repr`,
-`str`, `dir`, and truth to the engine and stops working once its runtime
-closes. Other Python objects are rejected with `TypeError`.
+| Argument | Effect |
+| --- | --- |
+| `std` | Register the standard layer |
+| `memory_limit` | Bound the bytes the engine holds; beyond it, a `MemoryError` stops the operation |
+| `timeout` | Bound the seconds one operation runs in the worker; then the worker is terminated and `small_python.Timeout` raised |
+| `output` | Receives printed text (default `sys.stdout.write`) |
+| `loader` | Maps a module name to source or `None` |
 
-An engine exception reaches Python as `small_python.Error` with `type`,
-`message`, `exception` (the engine object), `filename`, and `lineno`. A Python
-exception raised by a host function becomes the engine builtin exception with
-the nearest builtin class name in its MRO (else `RuntimeError`) and the same
-`args`, and is the `__cause__` of the `Error` if nothing handles it; an `Error`
-passing back through a host function re-raises its original exception. Host
-functions cannot call `eval`, `exec`, or `close` on their own runtime; they may
-call engine functions they receive. A runtime belongs to one thread at a time;
-other threads are refused while it runs.
+| Method | Effect |
+| --- | --- |
+| `eval(source, filename)` | The last expression's value |
+| `exec` | Run source |
+| `call(function_or_global_name, *args, **kwargs)` | Call an engine function |
+| `define(name, f)`, the `function` decorator | Give the engine a host function |
+| `register_module(name, members, source)` | A module, built on `spy_new_module` |
+| `mount(directory, path=None, *, read_only=False)` | Let `open` reach a directory; none is mounted by default |
+| `collect`, `close` | Collect cycles; end the worker |
+| `rt[name]` | Read, assign, and delete globals |
+
+Values that cross the boundary:
+
+- **By copy:** `None`, `bool`, `int` (any size), `float`, `complex`, `str`,
+  `bytes`, `bytearray`, `list`, `tuple`, `dict`, `set`, and `frozenset`. From
+  the engine, only exact instances of those types are copied.
+- **Python callables** become native functions that keep a reference to the
+  callable and receive keyword arguments.
+- **Other engine values** come back as `small_python.Object`, a handle the
+  worker holds. It forwards calls, attributes, items, `len`, `in`,
+  iteration, comparisons, hashing, `repr`, `str`, `dir`, and truth to the
+  engine, and stops working once its runtime closes.
+- **Other Python objects** are rejected with `TypeError`.
+
+Errors:
+
+- An engine exception reaches Python as `small_python.Error`, with `type`,
+  `message`, `exception` (the engine object), `filename`, and `lineno`.
+- A Python exception raised by a host function becomes the engine builtin
+  exception with the nearest builtin class name in its MRO (else
+  `RuntimeError`) and the same `args`. If nothing handles it, it is the
+  `__cause__` of the `Error`.
+- An `Error` passing back through a host function re-raises its original
+  exception.
+
+Host functions cannot call `eval`, `exec`, or `close` on their own runtime;
+they may call engine functions they receive. A runtime belongs to one thread
+at a time: other threads are refused while it runs.
 
 ### 3.6 Rust crates
 
@@ -1235,57 +1586,76 @@ source unit containing their bodies so they can outlive their defining call to
 `spy_eval`.
 
 Ordinary execution walks those nodes. Generator functions compile to an
-internal instruction array so their execution can suspend. Expressions without
-yields reuse the evaluator; expressions containing yields preserve intermediate
-operands on an owned heap stack. A separate cleanup stack records loops,
-exception handlers, `finally` blocks, and context managers. Every instruction
-borrows its AST node from the retained source unit. A function body that
-holds a call and cannot suspend compiles to the same instructions; a call to
-such a function from such a body pushes a frame on the context's call stack
-and the same instruction loop continues, so these calls do not nest on the C
-stack. There is no peephole
-optimizer or stable serialized-program format.
+internal instruction array, so their execution can suspend:
+
+- Expressions without yields reuse the evaluator. Expressions containing
+  yields keep intermediate operands on an owned heap stack.
+- A separate cleanup stack records loops, exception handlers, `finally`
+  blocks, and context managers.
+- Every instruction borrows its AST node from the retained source unit.
+
+A function body that holds a call and cannot suspend compiles to the same
+instructions. A call to such a function from such a body pushes a frame on
+the context's call stack, and the same instruction loop continues, so these
+calls do not nest on the C stack.
+
+There is no peephole optimizer or stable serialized-program format.
 
 ### 4.2 Executable generation
 
-`spyc` emits source bytes as a C array and adds a small embedding entry point,
-which registers the standard modules named with `-M`; with `-c` it emits the
-arrays and the loader alone. Imported modules are bundled in a table sorted by
-the names the engine probes, behind a generated `SPYModuleLoader`
-([build.md](build.md)). The C compiler, which spyc runs unless `-e` or `-c`
-asks for the C file, links it with `spy.c` or `libspy.a`, and with
-`spy-std.c` when it names any. The program still parses source at
-startup. Source
-embedding is deliberately described separately from native Python compilation.
+`spyc` emits each module's source bytes as a C array:
+
+- Imported modules are bundled in a table sorted by the names the engine
+  probes, behind a generated `SPYModuleLoader` ([build.md](build.md)).
+- A small embedding entry point registers the standard modules named with
+  `-M`. With `-c`, spyc emits the arrays and the loader alone.
+- The C compiler, which spyc runs unless `-e` or `-c` asks for the C file,
+  links it with `spy.c` or `libspy.a`, and with `spy-std.c` when it names any
+  standard module.
+
+The program still parses source at start-up. Embedding source is not
+compiling Python to native code.
 
 ### 4.3 Runtime values
 
-Values have a type tag, reference count, owning context, and type-specific
-payload. Integers use a signed 64-bit fast path with arbitrary-precision
-32-bit limbs for larger values. Floats use C `double`, and
-complex values use C11 `double complex` with explicit component construction.
-Strings retain byte length so embedded NUL characters are representable. Lists
-and tuples use growable arrays; dictionaries and sets keep their entries in
-insertion order in one array, with a hash index once they grow past eight
-entries.
-`None`, booleans, `NotImplemented`, and `Ellipsis` are per-context singletons. Builtin type objects belong to
-their context; no process-global mutable runtime objects are used.
+Values have a type tag, a reference count, an owning context, and a
+type-specific payload:
 
-Arithmetic promotes before overflowing signed C integers. Signed division and
-modulo follow floor semantics; integer-to-float and integer division use
-round-to-nearest-even. Comparisons preserve exact integer values. Exponentiation
-supports modular inverses. Decimal conversion currently uses the default
-4,300-digit limit, which `sys.set_int_max_str_digits` changes per context.
+| Type | Representation |
+| --- | --- |
+| Integers | A signed 64-bit fast path; arbitrary-precision 32-bit limbs for larger values |
+| Floats | C `double` |
+| Complex | C11 `double complex`, with explicit component construction |
+| Strings | Keep their byte length, so embedded NUL characters are representable |
+| Lists, tuples | Growable arrays |
+| Dictionaries, sets | Entries in insertion order in one array, with a hash index once they grow past eight entries |
+| `None`, booleans, `NotImplemented`, `Ellipsis` | Per-context singletons |
 
-Recursion follows CPython's two limits. Python frames (function calls,
-generator resumption, and module execution) count against the per-context
-recursion limit, 1,000 by default, and exceeding it raises "maximum recursion
-depth exceeded". A call from one Python function to another whose body holds
-a call runs on the instruction machine without growing the C stack, so such
-recursion is bounded by the recursion limit alone. Calls that C makes (special
-methods, host callbacks, trace functions) and other recursive C paths in the
-evaluator, parser, repr, comparison, and hashing check the remaining machine stack against a 4 MiB budget and raise
-CPython's "Stack overflow" RecursionError instead of crashing.
+Builtin type objects belong to their context; no process-global mutable
+runtime objects are used.
+
+Arithmetic:
+
+- It promotes before overflowing signed C integers.
+- Signed division and modulo follow floor semantics. Integer-to-float
+  conversion and integer division round to nearest, ties to even.
+- Comparisons keep exact integer values.
+- Exponentiation supports modular inverses.
+- Decimal conversion uses the default 4,300-digit limit, which
+  `sys.set_int_max_str_digits` changes per context.
+
+Recursion follows CPython's two limits:
+
+- Python frames (function calls, generator resumption, and module execution)
+  count against the per-context recursion limit, 1,000 by default. Exceeding
+  it raises "maximum recursion depth exceeded".
+- A call from one Python function to another whose body holds a call runs
+  on the instruction machine, without growing the C stack. Such recursion is
+  bounded by the recursion limit alone.
+- Calls that C makes (special methods, host callbacks, trace functions), and
+  other recursive C paths in the evaluator, parser, repr, comparison, and
+  hashing, check the remaining machine stack against a 4 MiB budget. They
+  raise CPython's "Stack overflow" `RecursionError` instead of crashing.
 
 ### 4.4 Garbage collection
 
@@ -1299,26 +1669,36 @@ performs trial deletion:
 4. Mark values reachable from those roots.
 5. Remove dead-to-live references, then free unmarked storage.
 
-All internal value edges, including defaults, bound methods, exception roots,
-iterators, slice components, and suspended generator operands, environments,
-delegates, and cleanup records, participate.
-Dead objects remain allocated while their edges are inspected. Context teardown
-can free storage directly because it invalidates every value at once.
-An instance whose class defines `__del__` is not freed when its last reference
-is released or when the collector finds it unreachable. Instead it is queued,
-kept alive by the queue, and marked as finalized. Its `__del__` runs at the next
-statement boundary or when the top-level program finishes, before any weak
-reference callbacks. Exceptions raised by `__del__` are discarded, because there
-is no error stream. Afterwards the instance is freed unless the finalizer
-resurrected it, and `__del__` never runs twice for the same object.
-A collection collects again after running finalizers, so cyclic garbage with
-`__del__` is freed in the same collection. An automatic collection runs at
-a statement boundary, the point where queued finalizers run, and the
-finalizers it runs do not start another one. Context teardown never runs finalizers.
-A suspended generator or coroutine closes when it is released or collected,
-running its `finally` blocks and `__exit__` methods, as CPython's does. A
-suspended asynchronous generator is passed to the host's finalizer hook when
-one is installed, and is otherwise closed with `aclose()` (27.5.4).
+All internal value edges participate: defaults, bound methods, exception
+roots, iterators, slice components, and suspended generator operands,
+environments, delegates, and cleanup records. Dead objects stay allocated
+while their edges are inspected. Context teardown can free storage directly,
+because it invalidates every value at once.
+
+Finalizers (`__del__`):
+
+- An instance whose class defines `__del__` is not freed when its last
+  reference is released, or when the collector finds it unreachable. It is
+  queued, kept alive by the queue, and marked as finalized.
+- Its `__del__` runs at the next statement boundary, or when the top-level
+  program finishes, before any weak-reference callbacks.
+- Exceptions raised by `__del__` are discarded, because there is no error
+  stream.
+- Afterwards the instance is freed, unless the finalizer resurrected it.
+  `__del__` never runs twice for the same object.
+- A collection collects again after running finalizers, so cyclic garbage
+  with `__del__` is freed in the same collection.
+- An automatic collection runs at a statement boundary, where queued
+  finalizers run, and the finalizers it runs do not start another one.
+- Context teardown never runs finalizers.
+
+Suspended code:
+
+- A suspended generator or coroutine closes when it is released or
+  collected, running its `finally` blocks and `__exit__` methods, as
+  CPython's does.
+- A suspended asynchronous generator is passed to the host's finalizer hook
+  when one is installed, and is otherwise closed with `aclose()` (27.5.4).
 
 ### 4.5 Calls and scopes
 
