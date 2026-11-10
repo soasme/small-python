@@ -1,7 +1,8 @@
 --------------------------- MODULE SpyBuildOutput ---------------------------
 (***************************************************************************)
 (* What spyc writes, leaves behind and returns (docs/build.md 2.1, 5.3),   *)
-(* as spyc.c implements it. SpyBuild.tla models what the bundle holds; this *)
+(* as spyc/__main__.py implements it on the C module spyc/_spyc.c.         *)
+(* SpyBuild.tla models what the bundle holds; SpyCache.tla the cache; this *)
 (* models the files it lands in. TLC checks, for each mode, each choice of *)
 (* metafile and dependency rule, each old file, every step that fails, and *)
 (* an interruption (SIGINT or SIGTERM) at any point:                       *)
@@ -13,22 +14,25 @@
 (*  - The temporary C file never outlives the build, nor does any compiler *)
 (*    process that could still write the output; every build ends.         *)
 (*                                                                         *)
-(* The implementation, step by step (names are spyc.c's):                  *)
+(* The implementation, step by step (names are _spyc's):                   *)
 (*                                                                         *)
-(*  - write_file records a path in written once fopen succeeds, then       *)
-(*    writes; a failed write leaves a partial file. -e and -c write the C  *)
-(*    output so; the metafile and the dependency rule follow, in order.    *)
-(*  - compile records the mkstemp file and writes it. With SIGINT and      *)
-(*    SIGTERM blocked it spawns the compiler in its own process group and, *)
-(*    if that succeeded, records the output and the compiler: one step.    *)
-(*    After waitpid it unlinks the temporary file, then drops it from      *)
+(*  - write records a path in written once fopen succeeds, then writes; a  *)
+(*    failed write leaves a partial file. -e and -c write the C output so; *)
+(*    the metafile and the dependency rule follow, in order.               *)
+(*  - temp records the mkstemp file and writes it; a failed write fails    *)
+(*    the build. compile, with SIGINT and SIGTERM blocked, spawns the      *)
+(*    compiler in its own process group and, if that succeeded, records    *)
+(*    the output and the compiler: one step. After waitpid, or a failed    *)
+(*    spawn, unlink removes the temporary file, then drops it from         *)
 (*    written.                                                             *)
-(*  - A failure ends in discard, which removes every recorded path.        *)
+(*  - A failure ends in done(True), whose discard removes every recorded   *)
+(*    path.                                                                *)
 (*  - written changes so that it lists a superset of the files at every    *)
 (*    point (unlink before the count drops, copy before it shrinks), so a  *)
 (*    change to it is one step here.                                       *)
-(*  - interrupted signals the compiler's group, waits for the compiler,    *)
-(*    kills what is left of the group, discards, and dies of the signal.   *)
+(*  - interrupted, which guard installs, signals the compiler's group,     *)
+(*    waits for the compiler, kills what is left of the group, discards,   *)
+(*    and dies of the signal.                                              *)
 (*                                                                         *)
 (* The compiler is the environment. Its driver may leave a child that      *)
 (* ignores the signal, as a linker may; while any of it runs it may write  *)
@@ -85,7 +89,7 @@ Mkstemp == /\ pc = "mkstemp"
            /\ UNCHANGED <<mode, wants, init, compiler, driver, child, ok, status>>
 WriteTemp == /\ pc = "write_temp"
              /\ \/ Set("temp", "new") /\ pc' = "spawn" /\ UNCHANGED ok
-                \/ pc' = "untemp" /\ ok' = FALSE /\ UNCHANGED disk
+                \/ pc' = "fail" /\ ok' = FALSE /\ UNCHANGED disk
              /\ UNCHANGED <<mode, wants, init, written, compiler, driver, child, status, begun>>
 \* posix_spawnp with the signals blocked: the compiler starts, and the output
 \* and the compiler are recorded, or it does not start and nothing is.

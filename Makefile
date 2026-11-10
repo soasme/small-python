@@ -81,13 +81,13 @@ $(OBJDIR)/bootstrap/spyc: tools/bootstrap.sh
 
 $(OBJDIR)/spyc-main.c: $(wildcard spyc/*.py) spyc/_spyc.c $(SPYC_BOOTSTRAP)
 	mkdir -p $(dir $@)
-	$(SPYC_BOOTSTRAP) -e -M sys -x _spy -o $@ -m spyc spyc/_spyc.c
+	$(SPYC_BOOTSTRAP) -e -x _spy -o $@ -m spyc spyc/_spyc.c
 
-bin/spyc: $(OBJDIR)/spyc-main.o $(OBJDIR)/spyc/_spyc.o libspy-std.a libspy.a
+bin/spyc: $(OBJDIR)/spyc-main.o $(OBJDIR)/spyc/_spyc.o libspy.a
 	mkdir -p bin
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-$(OBJDIR)/spyc-main.o: $(OBJDIR)/spyc-main.c spy.h spy-std.h
+$(OBJDIR)/spyc-main.o: $(OBJDIR)/spyc-main.c spy.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(OBJDIR)/spyc/_spyc.o: CPPFLAGS += -DCONFIG_CC='"$(CC) $(LDFLAGS)"' -DCONFIG_PREFIX='"$(PREFIX)"'

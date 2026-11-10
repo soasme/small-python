@@ -6,11 +6,10 @@ _spyc for the host services, built into one executable by the previous
 release's spyc (docs/build.md 9).
 """
 
-import sys
-
-import _spyc
-from . import output, resolve, scan
-from .resolve import MODULE, PACKAGE, NAMESPACE, Build, Module, Origin
+import _spyc   # first: it registers _spy
+import _spy
+from . import output, scan
+from .resolve import MODULE, PACKAGE, NAMESPACE, Build, Module, Origin, stderr
 
 USAGE = """\
 usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]
@@ -31,7 +30,7 @@ class Usage(Exception):
 
 
 def error(text):
-    print(f"spyc: error: {text}", file=sys.stderr)
+    stderr(f"spyc: error: {text}")
 
 
 def home(self, installed):
@@ -150,7 +149,7 @@ def build(self, args, cached=False):
     try:
         o = Options(args, cached)
     except Usage:
-        print(USAGE, end="", file=sys.stderr)
+        _spy._write(USAGE, True)
         return 2, None, 0
     _spyc.guard()
     status, program = 1, None
@@ -247,9 +246,9 @@ def compose(self, args, o, cached):
         return 1, None
     if o.analyze:
         # The inputs, largest in the output first.
-        print(f"  {o.output}  {len(code)} bytes", file=sys.stderr)
+        stderr(f"  {o.output}  {len(code)} bytes")
         for m in sorted(inputs, key=lambda m: (-len(m.source), m.path)):
-            print(f"    {m.path}  {len(m.source)}", file=sys.stderr)
+            stderr(f"    {m.path}  {len(m.source)}")
     return 0, program
 
 
@@ -330,7 +329,7 @@ def test(self, args):
         a = args[i]
         i += 1
         if a == "-m":
-            print(USAGE, end="", file=sys.stderr)
+            _spy._write(USAGE, True)
             return 2
         if a.startswith("-") or (len(a) > 2 and a[-2:] in (".c", ".a")):
             words.append(a)
@@ -383,7 +382,7 @@ def clean():
 def main(argv):
     self, verb, args = argv[0], argv[1] if len(argv) > 1 else "", argv[2:]
     if verb in ("version", "clean") and args:
-        print(USAGE, end="", file=sys.stderr)
+        _spy._write(USAGE, True)
         return 2
     if verb == "version":
         print("spyc " + _spyc.version)
@@ -405,4 +404,4 @@ def main(argv):
     return 1
 
 
-sys.exit(main(sys.argv))
+raise SystemExit(main(list(_spy.argv)))

@@ -6,12 +6,15 @@ directory listing, whatever the file system's case rules. Imports are
 followed from the entries until no module is left to visit.
 """
 
-import sys
-
+import _spy
 import _spyc
 from . import scan
 
 MODULE, PACKAGE, NAMESPACE, EXTERNAL, REGISTERED = "module", "package", "namespace", "external", "registered"
+
+
+def stderr(text):
+    _spy._write(text + "\n", True)
 
 
 class Module:
@@ -56,9 +59,9 @@ class Build:
 
     def report(self, origin, message):
         if origin.option:
-            print(f"spyc: error: {origin.option}: {message}", file=sys.stderr)
+            stderr(f"spyc: error: {origin.option}: {message}")
         else:
-            print(f"{origin.path}:{origin.line}: error: {message}", file=sys.stderr)
+            stderr(f"{origin.path}:{origin.line}: error: {message}")
         self.errors += 1
 
     def search(self, m, locations, tail):
@@ -151,7 +154,7 @@ class Build:
         """Read, walk, and with --minify minify the source of M."""
         m.source = _spyc.read(m.path)
         if m.source is None:
-            print(f"spyc: error: cannot read {m.path}", file=sys.stderr)
+            stderr(f"spyc: error: cannot read {m.path}")
             self.errors += 1
             return
         if b"\0" in m.source:
@@ -161,7 +164,7 @@ class Build:
         try:
             compile(m.source, m.path, "exec")
         except SyntaxError as error:
-            print(f"{m.path}:{error.lineno}: error: {error.msg}", file=sys.stderr)
+            stderr(f"{m.path}:{error.lineno}: error: {error.msg}")
             self.errors += 1
             return
 
@@ -170,7 +173,7 @@ class Build:
             self.request(origin, name, required, kind)
 
         def warn(line, text):
-            print(f"{m.path}:{line}: warning: {text}", file=sys.stderr)
+            stderr(f"{m.path}:{line}: warning: {text}")
             self.warnings += 1
 
         def resolve(level, name, required, line):
@@ -183,7 +186,7 @@ class Build:
             return
         small = scan.minify(m.source, m.path)
         if small is None:
-            print(f"{m.path}: error: --minify changed the program's tokens", file=sys.stderr)
+            stderr(f"{m.path}: error: --minify changed the program's tokens")
             self.errors += 1
             return
         m.source = small

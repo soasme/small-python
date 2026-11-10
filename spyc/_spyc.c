@@ -339,10 +339,11 @@ static int set(SPYContext *c, SPYValue *module, const char *name, SPYValue *valu
     spy_release(value);
     return status;
 }
-/* spyc's diagnostics go to stderr. A program spyc 0.10 or later builds
- * sets that up in its main; the release that builds spyc may not. */
+/* spyc runs on the engine primitives, which this module registers as
+ * _spy, with no standard module; its diagnostics go to stderr. */
 SPY_MODULE int spy_init__spyc(SPYContext *c, SPYValue *module) {
     spy_set_error_output(c, to_stderr, flush_stderr, NULL);
+    if (spy_new_module(c, "_spy", spy_init_primitives)) return -1;
     static const struct { const char *name; SPYNativeKeywords function; intptr_t data; } functions[] = {
         {"read", read_native, 0}, {"listdir", listdir_native, 0}, {"kind", kind_native, 0},
         {"write", write_native, 0}, {"done", done_native, 0}, {"guard", guard_native, 0},
