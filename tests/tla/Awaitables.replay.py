@@ -63,7 +63,23 @@ def await_program(x):
     return drive(main())
 
 
+async def closing(again):
+    try:
+        await Gen()
+    except GeneratorExit:
+        if again:
+            await Gen()
+        return 3
+
+
 def object_program(op):
+    if op in ("closed", "ignored"):
+        c = closing(op == "ignored")
+        c.send(None)
+        try:
+            return repr(c.close())
+        except RuntimeError as error:
+            return type(error).__name__
     c = inner()
     try:
         if op == "iter":

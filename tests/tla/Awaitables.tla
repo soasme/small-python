@@ -10,8 +10,9 @@
 (* plain generator included, raises TypeError; a coroutine can be awaited  *)
 (* once, after which awaiting, sending to, or resuming it raises           *)
 (* RuntimeError; coroutines are not iterable; the first send must be       *)
-(* None; and throw() into a fresh coroutine raises the exception and       *)
-(* finishes it.                                                            *)
+(* None; throw() into a fresh coroutine raises the exception and finishes  *)
+(* it; and close() of a suspended one gives what it returns on             *)
+(* GeneratorExit, or raises RuntimeError if it awaits a suspension again.  *)
 (*                                                                         *)
 (* An await program drives `async def main(): return await X` with         *)
 (* send(None) until it finishes, where X is a coroutine returning 7, an    *)
@@ -20,13 +21,15 @@
 (* value plus 1, one whose __await__ returns 5, the int 5, a generator, or *)
 (* a coroutine awaited once already. An object program, on a               *)
 (* fresh coroutine, calls iter(), sends 1, closes it and sends None, or    *)
-(* throws ValueError and then sends None. The outcome is the values the    *)
+(* throws ValueError and then sends None; or, suspended in await Gen()     *)
+(* catching GeneratorExit, closes it as it returns 3 or awaits Gen()       *)
+(* again. The outcome is the values the                                    *)
 (* driver received and the result, or the exception.                       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused"}]
-            \cup [part : {"object"}, op : {"iter", "send1", "close", "throw"}]
+            \cup [part : {"object"}, op : {"iter", "send1", "close", "throw", "closed", "ignored"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -41,7 +44,8 @@ Await(p) == CASE p.x = "coroutine" -> "[] 7"
               [] OTHER -> "[] TypeError"
 
 Object(p) == CASE p.op \in {"iter", "send1"} -> "TypeError"
-               [] p.op = "close" -> "RuntimeError"
+               [] p.op \in {"close", "ignored"} -> "RuntimeError"
+               [] p.op = "closed" -> "3"
                [] p.op = "throw" -> "ValueError RuntimeError"
 
 Run(p) == IF p.part = "await" THEN Await(p) ELSE Object(p)

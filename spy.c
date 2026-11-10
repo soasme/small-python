@@ -22235,11 +22235,11 @@ static Machine *innermost(Machine *m) {
     while (m->awaiting == AWAIT_DELEGATE) m = m->delegate->as.generator.machine;
     return m;
 }
-/* Whether a generator's close, or a throw into a generator or coroutine,
- * raises at its yield on the machine (consume): one suspended there, or
- * delegating to a yield (delegating). */
-static int throws_in(SPYValue *g, int thrown) {
-    return (g->type == SPY_GENERATOR || (thrown && g->type == SPY_COROUTINE)) && suspended(g) &&
+/* Whether a close of, or a throw into, a generator or coroutine raises at
+ * its yield on the machine (consume): one suspended there, or delegating
+ * to a yield (delegating). */
+static int throws_in(SPYValue *g) {
+    return (g->type == SPY_GENERATOR || g->type == SPY_COROUTINE) && suspended(g) &&
            innermost(g->as.generator.machine)->awaiting == AWAIT_YIELD;
 }
 /* Whether generator machine m's yield from waits on a generator, or a
@@ -22322,7 +22322,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
-        return argc == (method == M_THROW) && throws_in(callee, method == M_THROW) ? method == M_THROW ? B_THROW : B_CLOSE : -1;
+        return argc == (method == M_THROW) && throws_in(callee) ? method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
@@ -22507,6 +22507,11 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
     if (UNLIKELY(top->consumer->id == B_CLOSE)) {
         if (!item && error_is(c, "GeneratorExit")) spy_clear_error(c);
         if (top->consumer->finalizing) return finalize_closed(c, m, f, item);
+        /* A coroutine that yields has its own error. */
+        if (item && top->value->type == SPY_COROUTINE) {
+            spy_release(item); item = NULL;
+            spy_error(c, "RuntimeError", "coroutine ignored GeneratorExit");
+        }
     }
     if (top->consumer->listed) {
         /* A merged mapping's keys from a generator, listed (keys_listing). */
@@ -23719,7 +23724,7 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
  * instance, the call's value on the stack (CALL_INIT), as in stack_call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
-    int plain = 0, init = 0;
+    int plain = 0, init = 0, id;
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
     else if (calls && (function = bound_function(c, callee)) && string_keys(c, keywords))
@@ -23731,6 +23736,10 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         c->entering_init = function; c->entering_kind = CALL_INIT; init = 1;
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
+    else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
+        /* As a stack call's consumer, a starred call's (stack_call). */
+        consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
+                args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);
     else if (!c->error_type[0]) result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);
@@ -26817,11 +26826,7 @@ static SPYValue *generator_method(SPYContext *c, SPYValue *g, int method, size_t
             return spy_error(c, "RuntimeError", g->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" :
                              g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" : "generator ignored GeneratorExit");
         }
-        if (error_is(c, "StopIteration")) {
-            SPYValue *value = stop_value(c);
-            if (g->type == SPY_COROUTINE) { spy_release(value); return spy_none(c); }
-            return value;
-        }
+        if (error_is(c, "StopIteration")) return stop_value(c);
         if (error_is(c, "GeneratorExit")) { spy_clear_error(c); return spy_none(c); }
         return NULL;
     }

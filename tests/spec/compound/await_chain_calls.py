@@ -4,9 +4,11 @@
 # suspends with reaches the outermost send() and what that sends goes back
 # down; the awaited coroutine's return value is the await's, its exception
 # raises at the await, and a throw() or close() of the outermost reaches the
-# innermost first. An awaited coroutine cannot be awaited again, and a
-# StopIteration escaping one is a RuntimeError, inside functions as at
-# module level.
+# innermost first; close() gives what a coroutine returns on GeneratorExit
+# and raises RuntimeError if it awaits a suspension again. An awaited
+# coroutine cannot be awaited again, and a StopIteration escaping one is a
+# RuntimeError, inside functions as at module level, also through a starred
+# send().
 from harness import *
 
 log = []
@@ -50,13 +52,33 @@ async def top():
         return ("top caught", str(e))
     return ("top", pair)
 
+async def returning():
+    try:
+        await leaf("r")
+    except GeneratorExit:
+        spin()
+        return "closed"
+
+async def stubborn():
+    try:
+        await leaf("s")
+    except GeneratorExit:
+        await Y("again")
+
+def closed(coroutine):
+    coroutine.send(None)
+    try:
+        return coroutine.close()
+    except RuntimeError as e:
+        return str(e)
+
 def drive(coroutine, sends):
     out = []
     try:
         out.append(coroutine.send(None))
         for value in sends:
             if value is KeyError: out.append(coroutine.throw(KeyError("k")))
-            else: out.append(coroutine.send(value))
+            else: out.append(coroutine.send(*[value]))
     except StopIteration as e:
         out.append(("returned", e.value))
     except Exception as e:
@@ -82,6 +104,10 @@ def results():
     c.send(None)
     c.close()
     out.append(c.cr_frame is None)
+    out += [closed(returning()), closed(stubborn())]
+    c = returning()
+    c.send(None)
+    out.append(list(map(type(c).close, [c])))
     done = leaf("d")
     out.append(drive(twice(done), ["v", "w"]))
     out.append(list(log))
@@ -91,10 +117,11 @@ expected = [["m1", "m2", ("returned", ("top", ("a", "b")))],
             ["m1", ("returned", ("top caught", "m1"))],
             ["m1", "m2", ("returned", ("top", ("recovered", "z")))],
             ["m1", ("RuntimeError", "coroutine raised StopIteration")],
-            True,
+            True, "closed", "coroutine ignored GeneratorExit", ["closed"],
             ["d", ("RuntimeError", "cannot reuse already awaited coroutine")],
             [("Y", "m1", "a"), ("Y", "m2", "b"), ("Y", "m1", "fail"), ("leaf caught", "m1"), ("Y", "m2", "z"),
-             ("Y", "m1", "stop"), ("leaf exit", "m1"), ("Y", "d", "v")]]
+             ("Y", "m1", "stop"), ("leaf exit", "m1"), ("leaf exit", "r"), ("leaf exit", "s"), ("leaf exit", "r"),
+             ("Y", "d", "v")]]
 
 def main():
     return results()
