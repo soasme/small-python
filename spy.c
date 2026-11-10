@@ -418,6 +418,7 @@ struct SPYContext {
     SPYValue *keeping; /* On a machine's stack, marks a chain link's kept right operand under it (operator_keep). */
     SPYValue *native_inits[16]; /* Beside plain: the __init__ of a class whose builtin __new__ makes its instance (plain_init). */
     SPYValue *defaulting; /* On a machine's stack, marks a getattr() call with a default under it (getattr_call). */
+    SPYValue *negating; /* On a machine's stack, marks a != whose __eq__ object's __ne__ calls (rich_entry). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -22594,7 +22595,8 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
 /* Which of an operator's special method calls one is: x's own first, y's
  * reflected one first, or the last. */
 enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
-static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, SPYValue **, SPYValue **);
+static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, SPYValue **, SPYValue **, int *);
+static SPYValue *rich_entry(SPYContext *, SPYValue *, int, int *);
 /* The key function the consumer atop m calls next, owned, with its env;
  * or NULL when its items are all taken, then its value on the stack, or
  * an error. */
@@ -22721,7 +22723,7 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         SPYValue *x = s->result, *y = s->item, *self;
         if (key == c->not_implemented) {
             spy_release(key);
-            SPYValue *function = operator_declined(c, operator_of('+'), '+', x, y, s->phase, &self, &key);
+            SPYValue *function = operator_declined(c, operator_of('+'), '+', x, y, s->phase, &self, &key, NULL);
             if (function) {
                 s->best = spy_retain(function); s->phase = OPERATOR_LAST; s->swapped = self == y;
                 return 0;
@@ -24001,7 +24003,7 @@ static SPYValue *bool_call(SPYContext *, Machine *, SPYValue *, SPYValue **);
 static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
     if (x->type == SPY_NONE || x->type == SPY_STRING || x->type == SPY_BYTES || x->type == SPY_TUPLE || x->type == SPY_LIST ||
         x->type == SPY_DICT) return 1;
-    return plain_instance(x) && class_lookup(x->as.map.parent, rich_names[rich]) == name_local(c->object, rich_names[rich]) &&
+    return plain_instance(x) && class_lookup(x->as.map.parent, rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
            (rich != R_NE || rich_declines(c, x, R_EQ));
 }
 /* The Python special method that operator step ins calls first on x and
@@ -24292,7 +24294,7 @@ static NO_INLINE Machine *lookup_returned(SPYContext *c, Machine *m, Instruction
     if (result == c->not_implemented) {
         spy_release(result);
         if (index->as.integer_data.small & 1) test = comparison_declined(c, T_EQ, left, right);
-        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test)))
+        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test, NULL)))
             function = lookup_push(c, m, storage, key, h, cursor, i, candidate, 1, function, self, left, &env);
     }
     if (function || c->error_type[0]) m = lookup_enter(c, m, ins, map, key, h, function, env, -1, pc);
@@ -24491,11 +24493,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
-    int phase = OPERATOR_FIRST;
+    int phase = OPERATOR_FIRST, negated = 0;
     if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT || (rich >= 0 && y->type == SPY_INSTANCE && rich_declines(c, x, rich))) {
         /* A number declines an operator or comparison with a plain
          * instance, whose reflected method is the last call. */
-        if (!reflected || !(function = item_function(c, y, reflected))) return NULL;
+        if (!reflected || !(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
         self = y; other = x; phase = OPERATOR_LAST;
     } else {
         if (kind == OPERATE_INDEX && x->type == SPY_INSTANCE && x->as.map.base) return based_item(c, m, x, y, env);
@@ -24525,15 +24527,16 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* An augmented assignment takes the in-place method, else the plain one's rule. */
         else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
         else if (first) {
-            if (!(function = item_function(c, y, reflected))) return NULL;
+            if (!(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
             self = y; other = x; phase = OPERATOR_REFLECTED;
-        } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_function(c, x, y, rich);
+        } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_entry(c, x, rich, &negated);
     }
     /* A builtin's operator (builtin_operator) goes with the phase. */
-    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, ins->node ? phase : phase | op << 2)) return NULL;
+    if (!function || !machine_function(c, function) || operator_push(c, m, x, y, ins->node ? phase : phase | op << 2) ||
+        (negated && machine_push(c, m, spy_retain(c->negating)))) return NULL;
     SPYValue *args[] = {spy_retain(self), spy_retain(other)};
     if ((*env = function_env(c, function, 2 - (kind == OPERATE_UNARY), args, NULL, 1))) return spy_retain(function);
-    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+    for (int i = 0; i < 3 + negated; i++) spy_release(machine_pop(m));
     return NULL;
 }
 /* Operator step ins on x and y, in C. */
@@ -24579,13 +24582,14 @@ static NO_INLINE size_t operator_finish(SPYContext *c, Machine *m, Instruction *
  * after y's first, a Python function on the machine, borrowed, its self
  * in *self; else NULL, the rest of the operation done in C into *result. */
 static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, int op, SPYValue *x, SPYValue *y, int phase,
-                                             SPYValue **self, SPYValue **result) {
+                                             SPYValue **self, SPYValue **result, int *negated) {
     int rich = rich_kind(op);
     SPYValue *other = phase == OPERATOR_FIRST ? x : y;
     *self = other == x ? y : x; *result = NULL;
     const char *name = phase == OPERATOR_LAST || (o && phase == OPERATOR_FIRST && value_class(c, x) == value_class(c, y)) ? NULL :
                        o ? (*self == y ? o->reflected : o->direct) : rich_names[*self == y ? rich_reflected[rich] : rich];
-    SPYValue *function = name ? item_function(c, *self, name) : NULL;
+    SPYValue *function = !name ? NULL : negated && !o ? rich_entry(c, *self, *self == y ? rich_reflected[rich] : rich, negated) :
+                         item_function(c, *self, name);
     if (function || c->error_type[0]) return function;
     *result = !name ? NULL : o ? try_operator(c, *self, name, other, NULL, 0) : rich_method(c, *self == y ? rich_reflected[rich] : rich, *self, other);
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
@@ -24600,6 +24604,15 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     m->pc = pc;
     if (m->stack[m->len - 1] == c->replacing) return fold_returned(c, m, result);
     if (m->stack[m->len - 1] == c->probing) return lookup_returned(c, m, ins, result, pc);
+    /* object's __ne__ inverts the truth of the __eq__ it called (rich_entry). */
+    if (m->stack[m->len - 1] == c->negating) {
+        spy_release(machine_pop(m));
+        if (result != c->not_implemented) {
+            int truth = truthy(result);
+            spy_release(result);
+            result = c->error_type[0] ? NULL : spy_bool(c, !truth);
+        }
+    }
     if (m->stack[m->len - 1] == c->unbound) {
         int op = 0;
         step_operation(ins, &op);
@@ -24709,8 +24722,9 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             /* A declined in-place method leaves the plain operator. */
             result = binary(c, o->token, x, y);
         } else {
-            SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result);
-            if (function && !operator_push(c, m, x, y, OPERATOR_LAST | called)) {
+            int negated = 0;
+            SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result, &negated);
+            if (function && !operator_push(c, m, x, y, OPERATOR_LAST | called) && !(negated && machine_push(c, m, spy_retain(c->negating)))) {
                 SPYValue *args[] = {spy_retain(self), spy_retain(self == x ? y : x)};
                 SPYValue *env = function_env(c, function, 2, args, NULL, 1);
                 Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
@@ -24719,7 +24733,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
                     call->m.outermost = CALL_OPERATOR;
                     return &call->m;
                 }
-                for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+                for (int i = 0; i < 3 + negated; i++) spy_release(machine_pop(m));
                 result = NULL;
             } else if (function) result = NULL;
         }
@@ -24755,6 +24769,16 @@ static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name
     return function && machine_function(c, function) ? function : NULL;
 }
 static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return item_function(c, object, "__setitem__"); }
+/* The comparison method rich of plain instance self to call on the machine,
+ * borrowed: its Python one, or for != by object's __ne__, which no class
+ * entry overrides, its Python __eq__, *negated set, whose truth the
+ * comparison inverts. */
+static SPYValue *rich_entry(SPYContext *c, SPYValue *self, int rich, int *negated) {
+    SPYValue *cls = self->type == SPY_INSTANCE && !self->as.map.base ? self->as.map.parent : NULL;
+    SPYValue *function = cls ? class_lookup(cls, rich_names[rich]) : NULL;
+    if ((*negated = cls && rich == R_NE && !function)) function = class_lookup(cls, "__eq__");
+    return function && machine_function(c, function) ? function : NULL;
+}
 /* Whether a store of plain instance key into exact dict map, its hash run
  * in C and kept (hash_kept), compares key with another (map_collides), or
  * the hash failed. */
@@ -34117,9 +34141,10 @@ SPYContext *spy_context_new(void) {
     c->walking = value_new(c, V_UNBOUND);
     c->keeping = value_new(c, V_UNBOUND);
     c->defaulting = value_new(c, V_UNBOUND);
+    c->negating = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

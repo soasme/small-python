@@ -132,6 +132,7 @@ Unreleased (0.8.0):
 - not x and bool(x) call an instance's Python __bool__ without the C stack
 - getattr() with a default calls a Python getter, __get__, __getattr__ or
   __getattribute__ without the C stack
+- x != y calls the Python __eq__ that object's __ne__ inverts without the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

@@ -40,7 +40,8 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "seq_order_calls", "seq_order_chain", "builtin_declines"}
+          "store_keeps_key", "seq_nested", "seq_order_calls", "seq_order_chain", "builtin_declines",
+          "ne_by_eq"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -149,6 +150,9 @@ Case(c) ==
       \* an instance of another class, whose reflected method decides
       [] c = "builtin_declines" -> <<"('a==NoneType', 'b>str', 'c==P', 'd==tuple')",
                                      <<"'a==NoneType'", "'b>str'", "'c==P'", "'d==tuple'">>>>
+      \* object's __ne__ inverts whatever __eq__ returns, also for a declining str
+      \* or int; its NotImplemented goes on with the other operand's __ne__
+      [] c = "ne_by_eq" -> <<"(True, False, False, False)", <<"'==str'", "'a==P'", "'b==int'", "'d==E'", "'c==E'">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 
