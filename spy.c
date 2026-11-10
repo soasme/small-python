@@ -26977,7 +26977,14 @@ static SPYValue *generator_send(SPYContext *c, SPYValue *g, SPYValue *sent, SPYV
     return generator_send_args(c, g, sent, thrown, thrown ? 1 : 0, &thrown);
 }
 static SPYValue *generator_next(SPYContext *c, SPYValue *g) {
-    SPYValue *value = generator_send(c, g, NULL, NULL);
+    /* A yield from of a list, tuple or range iterator gives its next item
+     * without resuming the generator, whose frame runs nothing for it,
+     * unless a trace or profile function watches the frame. */
+    Machine *m = g->as.generator.machine;
+    SPYValue *value;
+    if (m && m->awaiting == AWAIT_DELEGATE && !g->as.generator.running && !c->settings[SET_TRACE] && !c->settings[SET_PROFILE] &&
+        iterator_fast(c, m->delegate, &value) && (value || c->error_type[0])) return value;
+    value = generator_send(c, g, NULL, NULL);
     if (!value && error_is(c, "StopIteration")) spy_clear_error(c);
     return value;
 }
