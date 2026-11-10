@@ -21,7 +21,7 @@ extern "C" {
  * detect a library built from a different header. The header and library
  * are compatible when both are 0.8.0 or later with the same major version,
  * or, before 0.8, the same minor version (docs/manual.md, 3.4.8 Stability). */
-#define SPY_VERSION "0.8.0"
+#define SPY_VERSION "0.9.0"
 const char *spy_version(void);
 
 /* == Types ==

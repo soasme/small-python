@@ -29,7 +29,7 @@ another. Exceptions to these rules are stated where they occur.
 ## Versions
 
 ```c
-#define SPY_VERSION "0.8.0"
+#define SPY_VERSION "0.9.0"
 const char *spy_version(void);
 ```
 
