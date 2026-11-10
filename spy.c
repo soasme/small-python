@@ -419,6 +419,7 @@ struct SPYContext {
     SPYValue *native_inits[16]; /* Beside plain: the __init__ of a class whose builtin __new__ makes its instance (plain_init). */
     SPYValue *defaulting; /* On a machine's stack, marks a getattr() call with a default under it (getattr_call). */
     SPYValue *negating; /* On a machine's stack, marks a != whose __eq__ object's __ne__ calls (rich_entry). */
+    const void *const *steps; /* The machine's step labels by op, NULL without labels as values (run_steps). */
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -13899,7 +13900,11 @@ typedef struct { int flow; SPYValue *value; } Result;
 #define STEP_ENUM(op) op,
 enum { MACHINE_STEPS(STEP_ENUM) };
 #undef STEP_ENUM
-typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
+/* step is op's label in the machine (run_steps), which dispatches to it
+ * directly. A program's steps number fewer than UINT32_MAX (emit), which
+ * marks no step. */
+typedef struct { const void *step; int op, arg; uint32_t target, other; Node *node; } Instruction;
+#define NO_STEP UINT32_MAX
 /* calls: BODY for a function body whose calls run on the machine (expands). */
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
 /* namespace: a class body's, whose loops store their names by BC_STORE,
@@ -14117,14 +14122,12 @@ static int expands(Node *n, int calls) {
     return list_expands(n->a, calls) || list_expands(n->b, calls) || list_expands(n->c, calls) || list_expands(n->args, calls);
 }
 static size_t emit(SPYContext *c, Program *p, int op, Node *n, int arg) {
+    size_t pc = p->len;
     /* A test's operator step and its jump are one step, BC_TEST. */
-    if (op == BC_FALSE && p->len && p->items[p->len - 1].op == BC_OPERATE && p->items[p->len - 1].arg) {
-        p->items[p->len - 1].op = BC_TEST;
-        return p->len - 1;
-    }
-    if (grow(c, (void **)&p->items, &p->cap, p->len + 1, sizeof(*p->items))) return SIZE_MAX;
-    size_t pc = p->len++;
-    p->items[pc] = (Instruction){.op = op, .node = n, .arg = arg};
+    if (op == BC_FALSE && pc && p->items[pc - 1].op == BC_OPERATE && p->items[pc - 1].arg) { op = BC_TEST; pc--; }
+    else if (grow(c, (void **)&p->items, &p->cap, p->len < NO_STEP ? p->len + 1 : SIZE_MAX, sizeof(*p->items))) return SIZE_MAX;
+    else p->items[p->len++] = (Instruction){.node = n, .arg = arg};
+    p->items[pc].op = op; p->items[pc].step = c->steps ? c->steps[op] : NULL;
     return pc;
 }
 static void patch(Program *p, size_t pc, size_t target) {
@@ -14363,7 +14366,7 @@ static int compile_comprehension(SPYContext *c, Node *n) {
     return c->error_type[0] ? -1 : 0;
 }
 static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int asynchronous) {
-    size_t last = SIZE_MAX;
+    uint32_t last = NO_STEP;
     for (; item && !c->error_type[0]; item = item->next) {
         compile_expr(c, p, item->a);
         if (asynchronous) {
@@ -14378,7 +14381,7 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
         p->items[start].other = last; last = start;
     }
     compile_body(c, p, body);
-    while (last != SIZE_MAX && !c->error_type[0]) {
+    while (last != NO_STEP && !c->error_type[0]) {
         size_t start = last;
         last = p->items[start].other;
         emit(c, p, BC_LEAVE, p->items[start].node, 0); patch(p, start, p->len);
@@ -14482,7 +14485,7 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
         break;
     case N_MATCH: {
         /* The subject stays on the stack until a case is chosen. */
-        size_t exits = SIZE_MAX;
+        uint32_t exits = NO_STEP;
         compile_expr(c, p, n->a);
         for (Node *item = n->args; item && !c->error_type[0]; item = item->next) {
             size_t fail = emit(c, p, BC_PATTERN, item, 0), guard = SIZE_MAX;
@@ -14494,8 +14497,8 @@ static void compile_statement(SPYContext *c, Program *p, Node *n) {
             patch(p, fail, p->len); patch(p, guard, p->len);
         }
         emit(c, p, BC_POP, n, 0);
-        while (exits != SIZE_MAX && !c->error_type[0]) {
-            size_t next = p->items[exits].other;
+        while (exits != NO_STEP && !c->error_type[0]) {
+            uint32_t next = p->items[exits].other;
             patch(p, exits, p->len); exits = next;
         }
         break;
@@ -25735,7 +25738,7 @@ static NO_INLINE void increment_step(SPYContext *c, Frame *f, Node *n) {
 #define CASE(op) op_##op: case op:
 #define NEXT { if (code[pc].node && quiet(c, &f)) { \
         ins = &code[pc++]; n = ins->node; relocate(c, n); \
-        truth_known = known; known = 0; a = b = value = NULL; goto *dispatch[ins->op]; } } continue
+        truth_known = known; known = 0; a = b = value = NULL; goto *ins->step; } } continue
 #define NEXT_RELEASE { if (a) spy_release(a); if (b) spy_release(b); } NEXT
 #else
 #define THREADED 0
@@ -25978,6 +25981,13 @@ static NO_INLINE SPYValue *delegate_returned(SPYContext *c, Machine *m, int kind
  * calls it makes, until the outermost of them returns. */
 static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
                           size_t argc, SPYValue *const *argv) {
+#if THREADED
+    /* Without a machine, the context learns the steps' labels (emit). */
+#define STEP_LABEL(op) [op] = &&op_##op,
+    static const void *const steps[] = {MACHINE_STEPS(STEP_LABEL)};
+#undef STEP_LABEL
+    if (UNLIKELY(!m)) { c->steps = steps; return (Result){FLOW_NORMAL, NULL}; }
+#endif
     Frame f = m->frame;
     Result flow = {FLOW_NORMAL, NULL};
     if (m->awaiting >= AWAIT_DELEGATE) {
@@ -26114,10 +26124,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         int special; /* At enter_special, the kind of that call. */
         /* A step that owns no operand continues past their release. */
 #if THREADED
-#define STEP_LABEL(op) [op] = &&op_##op,
-        static const void *const dispatch[] = {MACHINE_STEPS(STEP_LABEL)};
-#undef STEP_LABEL
-        goto *dispatch[ins->op];
+        goto *ins->step;
 #endif
         switch (ins->op) {
         CASE(BC_EVAL)
@@ -34547,6 +34554,7 @@ SPYContext *spy_context_new(void) {
     SPYContext *c = calloc(1, sizeof(*c));
     if (!c) return NULL;
     c->frame_line = &c->line;
+    run_steps(c, NULL, NULL, NULL, 0, NULL);
     c->none = value_new(c, SPY_NONE);
     c->not_implemented = value_new(c, SPY_NOT_IMPLEMENTED);
     c->ellipsis = value_new(c, SPY_ELLIPSIS);

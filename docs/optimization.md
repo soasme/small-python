@@ -201,6 +201,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [Keywords and defaults bind by slot](#keywords-and-defaults-bind-by-slot) | -1.6% (fib), -1.1% (classes); keyword call -46%; M2: classes -0.8% |
 | [A keyword call keeps its arguments on the stack](#a-keyword-call-keeps-its-arguments-on-the-stack) | keyword call -59%; the programs unchanged |
 | [Calls run on the machine](#calls-run-on-the-machine) | -12.9% (fib), +1.7% (generators), +1.2% (classes); M2: fib -2.2%, classes +2.0% |
+| [Each instruction holds its step's label](#each-instruction-holds-its-steps-label) | M2: loop -2.1% instructions against the table; getprop -5.5%, sortinst -5.8%, descr -2.1%; loop +2.5% cycles |
 
 ### Releasing a number or string frees it at once
 
@@ -1705,6 +1706,30 @@ optimized build, spy's is faster on startup, loop, bigint, dicts and
 generators and 4% to 20% slower on sort, fib, classes, strings and
 nbody. Only loop, a module-level `while`, is slower with the profile
 (+2%); the specification tests do not run such a loop hot.
+
+### Each instruction holds its step's label
+
+A hot step ended by loading its successor's op, then that op's label from
+a table, and jumping there. The table's address was one more value the
+machine loop kept in a register, and growing the loop elsewhere made
+clang give that register up: it rebuilt the address with two
+instructions at every step, and loop ran 2.4% more instructions though
+none of its own steps had changed. Each instruction now holds its step's
+label, which `emit` takes from a table the context learns once, when it
+is made, from the machine itself; a step ends by jumping to its
+successor's label in one load. Jump targets and the other step an
+instruction names became 32-bit, so an instruction keeps its 32 bytes,
+and a program stops short of 2^32 steps with "allocation too large".
+What runs, and in what order, is unchanged.
+
+Instructions (M2 counters), against the table that lost its register:
+loop 2,399.6 M -> 2,349.5 M (the table in its register ran 2,343.8 M),
+setprop 262.3 M -> 258.5 M. Wall time averaged over eight code layouts
+against the table in its register: getprop -5.5%, sortinst -5.8%,
+sum_gen -6.8%, descr -2.1%, neeq -2.7%; with 8 bytes more per
+instruction, getprop and descr ran 3% to 4% slower instead. loop runs
+0.8% fewer instructions but 2% to 3% more cycles, which no change to its
+steps explains.
 
 ## Tried and left out
 
