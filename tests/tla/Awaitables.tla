@@ -16,15 +16,16 @@
 (* An await program drives `async def main(): return await X` with         *)
 (* send(None) until it finishes, where X is a coroutine returning 7, an    *)
 (* object whose __await__ returns iter([1, 2]), one whose __await__        *)
-(* yields 1 and returns 5, one whose __await__ returns 5, the int 5, a     *)
-(* generator, or a coroutine awaited once already. An object program, on a *)
+(* yields 1 and returns 5, a coroutine awaiting that one and returning its *)
+(* value plus 1, one whose __await__ returns 5, the int 5, a generator, or *)
+(* a coroutine awaited once already. An object program, on a               *)
 (* fresh coroutine, calls iter(), sends 1, closes it and sends None, or    *)
 (* throws ValueError and then sends None. The outcome is the values the    *)
 (* driver received and the result, or the exception.                       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "bad", "int", "generator", "reused"}]
+Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused"}]
             \cup [part : {"object"}, op : {"iter", "send1", "close", "throw"}]
 
 VARIABLES program, outcome
@@ -35,6 +36,7 @@ Pending == "pending"
 Await(p) == CASE p.x = "coroutine" -> "[] 7"
               [] p.x = "iter" -> "[1, 2] None"
               [] p.x = "gen" -> "[1] 5"
+              [] p.x = "chain" -> "[1] 6"   \* the inner await's value passes out
               [] p.x = "reused" -> "[] RuntimeError"
               [] OTHER -> "[] TypeError"
 

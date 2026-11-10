@@ -22195,9 +22195,10 @@ static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATO
 /* Whether generator machine m's yield from waits on a generator, or a
  * chain of them, that a step may resume in its place (resume_generator). */
 static NO_INLINE int delegating(Machine *m) {
-    while (m->awaiting == AWAIT_DELEGATE && m->generator->type == SPY_GENERATOR) {
+    while (m->awaiting == AWAIT_DELEGATE && (m->generator->type == SPY_GENERATOR || m->generator->type == SPY_COROUTINE)) {
         SPYValue *d = m->delegate;
-        if (d->type != SPY_GENERATOR || d->as.generator.running || d->as.generator.done || !d->as.generator.machine) return 0;
+        if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE) || d->as.generator.running || d->as.generator.done ||
+            !d->as.generator.machine) return 0;
         if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
     }
     return 0;
@@ -26092,7 +26093,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
                 /* A generator this yield from may resume yields or ends
                  * into this machine (generator_left). */
-                if (!ins->arg && resumable(m->delegate)) {
+                if ((!ins->arg || ins->arg == DELEGATE_AWAITABLE) && (m->delegate->type == SPY_GENERATOR || m->delegate->type == SPY_COROUTINE) &&
+                    suspended(m->delegate)) {
                     spy_release(a); a = NULL; m->drop = 0; value = m->delegate; goto resume_generator;
                 }
                 value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);

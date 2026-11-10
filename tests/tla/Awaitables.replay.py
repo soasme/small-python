@@ -32,6 +32,10 @@ class Gen:
         return 5
 
 
+async def chain():
+    return await Gen() + 1
+
+
 class Bad:
     def __await__(self):
         return 5
@@ -52,7 +56,7 @@ def awaited():
 def await_program(x):
     if x == "reused":
         return drive(awaited())
-    target = {"coroutine": inner, "iter": Iter, "gen": Gen, "bad": Bad, "int": lambda: 5, "generator": generator}[x]
+    target = {"coroutine": inner, "iter": Iter, "gen": Gen, "chain": chain, "bad": Bad, "int": lambda: 5, "generator": generator}[x]
 
     async def main():
         return await target()
