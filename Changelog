@@ -144,6 +144,8 @@ Unreleased (0.8.0):
 - close(), or throw() of GeneratorExit, into a generator in a yield from runs
   without the C stack
 - close()'s GeneratorExit has the exception its caller handles as context
+- a class body's assignments and loops call its namespace's Python
+  __setitem__, and item stores a dict subclass's, without the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

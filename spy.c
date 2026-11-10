@@ -13892,7 +13892,9 @@ enum { MACHINE_STEPS(STEP_ENUM) };
 typedef struct { int op, arg; size_t target, other; Node *node; } Instruction;
 /* calls: BODY for a function body whose calls run on the machine (expands). */
 /* display: a "single" unit's, whose expression statements display their values (BC_DISPLAY). */
-struct Program { Instruction *items; size_t len, cap; int calls, display; };
+/* namespace: a class body's, whose loops store their names by BC_STORE,
+ * which may call its namespace's __setitem__. */
+struct Program { Instruction *items; size_t len, cap; int calls, display, namespace; };
 typedef struct {
     char type[64], message[256], filename[256];
     size_t line;
@@ -14294,10 +14296,10 @@ static void compile_target(SPYContext *c, Program *p, Node *n) {
     }
 }
 /* The step taking loop n's next item into target: a name on the loop's
- * line is stored by the step itself (other 1). */
+ * line, outside a class body, is stored by the step itself (other 1). */
 static size_t compile_next(SPYContext *c, Program *p, Node *n, Node *target) {
     size_t next = emit(c, p, BC_NEXT, n, n->op);
-    if (!n->op && target->kind == N_NAME && target->line == n->line && next != SIZE_MAX) p->items[next].other = 1;
+    if (!n->op && !p->namespace && target->kind == N_NAME && target->line == n->line && next != SIZE_MAX) p->items[next].other = 1;
     else compile_store(c, p, target, n);
     return next;
 }
@@ -14405,7 +14407,10 @@ static int increment(Node *n) {
 }
 static void compile_statement(SPYContext *c, Program *p, Node *n) {
     size_t branch, end, start, loop;
-    if (!expands(n, p->calls) && !(p->display && n->kind == N_EXPR)) { emit(c, p, increment(n) ? BC_INCREMENT : BC_EXEC, n, 0); return; }
+    if (!expands(n, p->calls) && !(p->display && n->kind == N_EXPR)) {
+        emit(c, p, increment(n) && !p->namespace ? BC_INCREMENT : BC_EXEC, n, 0);
+        return;
+    }
     switch (n->kind) {
     case N_EXPR:
         /* A yield statement drops the sent value rather than popping it (arg 2). */
@@ -14633,7 +14638,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     if (n->op == 2 && check_async_return(c, n->b)) return -1;
     Program *p = allocate(c, sizeof(*p));
     if (!p) return -1;
-    p->calls = mode;
+    p->calls = mode; p->namespace = n->kind == N_CLASS;
     if (generator) n->code = p;
     else n->flat = p;
     c->code_work++;
@@ -18004,25 +18009,34 @@ static NO_INLINE int setter_called(SPYContext *c, SPYValue *object, Node *n) {
     c->entering_init = function; c->fallback = spy_retain(descriptor);
     return 1;
 }
+static SPYValue *setitem_function(SPYContext *, SPYValue *);
+/* The mapping, an instance with a Python __setitem__, through which
+ * binding name node n in env stores (name_bind), borrowed; else NULL. */
+static NO_INLINE SPYValue *name_mapping(SPYContext *c, SPYValue *env, Node *n) {
+    Name name = node_name(n);
+    if (env->type != V_ENV) return NULL;
+    env = symbol_env(c, env, name, scope_find(env->as.map.scope, name));
+    SPYValue *namespace = env->type == V_ENV && env->as.map.flags != ENV_FORWARD && env->as.map.flags != 3 ? namespace_map(env) : env;
+    return namespace != env && setitem_function(c, namespace) ? namespace : NULL;
+}
 static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int calls) {
-    /* An attribute or item of a literal or name, while tick has only the
-     * line to record, takes them as they are, held across the store. */
-    if ((n->kind == N_ATTR || n->kind == N_INDEX) && quiet(c, f)) {
+    if (n->kind == N_IMPORT || n->kind == N_FROM) return 1;
+    if (tick(c, f, n)) return -1;
+    /* An attribute or item of a literal or name takes them as they are,
+     * held across the store. */
+    if (n->kind == N_ATTR || n->kind == N_INDEX) {
         SPYValue *object = leaf_operand(f, n->a), *key = object && n->kind == N_INDEX ? leaf_operand(f, n->b) : NULL;
         if (calls && key && (object->type == SPY_INSTANCE || key->type == SPY_INSTANCE) && store_hooked(c, object, key)) return 1;
         if (object && (key || n->kind == N_ATTR)) {
-            relocate(c, n);
             spy_retain(object); spy_retain(key);
             int status = key ? set_index(c, object, key, value) : node_set_attribute(c, object, n, value);
             spy_release(object); spy_release(key);
             return status;
         }
     }
-    if (n->kind == N_IMPORT || n->kind == N_FROM) return 1;
-    if (tick(c, f, n)) return -1;
     if (n->kind == N_NAME) {
         Entry *entry = name_slot(f->env, n);
-        if (!entry) return name_bind(c, f->env, node_name(n), value);
+        if (!entry) return calls && name_mapping(c, f->env, n) ? 1 : name_bind(c, f->env, node_name(n), value);
         SPYValue *old = entry->value;
         class_changed(f->env);
         entry->value = spy_retain(value);
@@ -18320,8 +18334,10 @@ static ALWAYS_INLINE int assign(SPYContext *c, Frame *f, Node *n, Machine *m) {
             value = augmented(c, n->op, old, rhs);
     }
     if (!value) goto done;
-    if (!container) status = store_target(c, f, n->a, value);
-    else if (key) status = set_index(c, container, key, value);
+    if (!container) {
+        /* A name's store on the machine may call its namespace's __setitem__ (store_call). */
+        if ((status = store_into(c, f, n->a, value, !!m)) > 0) { status = machine_push(c, m, value) ? -1 : 1; value = NULL; }
+    } else if (key) status = set_index(c, container, key, value);
     else status = node_set_attribute(c, container, n->a, value);
 done:
     spy_release(container); spy_release(key); spy_release(old); spy_release(rhs); spy_release(value);
@@ -24852,7 +24868,13 @@ static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name
                          NULL : class_lookup(object->as.map.parent, name);
     return function && machine_function(c, function) ? function : NULL;
 }
-static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return item_function(c, object, "__setitem__"); }
+/* The Python __setitem__ or __delitem__, as name, of instance object's
+ * class, also of a builtin's subclass overriding it, borrowed, or NULL. */
+static SPYValue *store_function(SPYContext *c, SPYValue *object, const char *name) {
+    SPYValue *function = object->type != SPY_INSTANCE || builtin_base(c, object, name, NULL) ? NULL : class_lookup(object->as.map.parent, name);
+    return function && machine_function(c, function) ? function : NULL;
+}
+static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return store_function(c, object, "__setitem__"); }
 /* The comparison method rich of plain instance self to call on the machine,
  * borrowed: its Python one, or for != by object's __ne__, which no class
  * entry overrides, its Python __eq__, *negated set, whose truth the
@@ -24950,7 +24972,7 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
-        SPYValue *function = item_function(c, args[0], "__delitem__");
+        SPYValue *function = store_function(c, args[0], "__delitem__");
         if (!function && hashes_key(args[0], 0) && ((function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
                                                     (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], NULL, env))) ||
                                                     c->error_type[0])) {
@@ -24962,7 +24984,11 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         release_all(2, args);
         return NULL;
     }
-    if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
+    if (n->kind == N_NAME) {
+        /* A name bound through its namespace's Python __setitem__ (name_mapping). */
+        args[0] = spy_retain(name_mapping(c, f->env, n)); args[1] = spy_string(c, n->text, strlen(n->text));
+        args[2] = spy_retain(m->stack[m->len - 1]);
+    } else if (ins->op == BC_SAVE_TARGET) { args[2] = machine_pop(m); args[1] = machine_pop(m); args[0] = machine_pop(m); }
     else if (ins->op == BC_SET_TARGET) { args[1] = machine_pop(m); args[0] = machine_pop(m); args[2] = spy_retain(m->stack[m->len - 1]); }
     else {
         args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
