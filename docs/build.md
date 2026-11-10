@@ -99,7 +99,7 @@ spyc -o tool tool.py target/release/libjson.a   # with a module json from Rust
 spyc -I lib -x raylib -c -o game_py.c game.py   # for a host that registers raylib
 spyc -D plugins.* -o app app.py                 # plus every module of plugins
 spyc -O --minify --metafile app.json -o app app.py
-spyc run app.py --verbose input.txt             # build into .spyc, then run it
+spyc run app.py --verbose input.txt             # build into __pycache__/spyc, then run it
 spyc test tests                                 # every tests/**/test_*.py
 ```
 
@@ -197,8 +197,8 @@ tests' own output passes through as they run. spyc exits with 0 when every
 test passes and with 1 otherwise; a path with no test in it is an error,
 status 1, before any test runs.
 
-**The cache.** `run` and `test` build into `.spyc` in the working
-directory. Each executable is named by two hashes: its slot, of the
+**The cache.** `run` and `test` build into `__pycache__/spyc` in the
+working directory, beside the bytecode CPython caches there and apart from it. Each executable is named by two hashes: its slot, of the
 build's arguments up to the entry, and its stamp, of everything the
 program is made from: the generated C file, the compiler command spyc was
 built with, the C modules, `spy.h` (and `spy-std.h` with `-M`), and the
@@ -212,9 +212,9 @@ other sources removed its executable before it ran; it then fails with
 `cannot run`, and it never runs another build's program.
 `SpyCache.tla` models this ([10.1](#101-tla-model)).
 
-**clean.** `spyc clean` removes the files in `.spyc` whose names the cache
-gives, executables and the temporary files of builds that were killed,
-then the directory. A file of another name stays, and spyc reports that
+**clean.** `spyc clean` removes the files in `__pycache__/spyc` whose names
+the cache gives, executables and the temporary files of builds that were
+killed, then that directory, and `__pycache__` if nothing else is in it. A file of another name stays, and spyc reports that
 the directory could not be removed and exits with 1. Without a cache it
 does nothing.
 

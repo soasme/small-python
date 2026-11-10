@@ -1,7 +1,7 @@
 """spyc's commands: run, build, test, clean and version (docs/build.md 2.3).
 
 Each case runs spyc in a fresh directory and checks what it prints, the
-status it returns, and the cache it leaves in .spyc. A stand-in compiler,
+status it returns, and the cache it leaves in __pycache__/spyc. A stand-in compiler,
 first on PATH under the compiler's name, makes the executables of the
 failure cases; SpyCache.tla models the cache's steps.
 """
@@ -26,8 +26,11 @@ def spyc(directory, *args, status=0, env=None, spyc=SPYC):
     return result
 
 
+CACHE = Path("__pycache__") / "spyc"
+
+
 def cache(directory):
-    return sorted(path.name for path in (directory / ".spyc").iterdir()) if (directory / ".spyc").exists() else []
+    return sorted(path.name for path in (directory / CACHE).iterdir()) if (directory / CACHE).exists() else []
 
 
 def files(directory, tree):
@@ -154,9 +157,9 @@ with fresh() as temp:
     spyc(directory, "run", "app.py", status=1, env=stand_in(directory, None))
     assert cache(directory) == []
     env = stand_in(directory, "#!/nonexistent/interpreter\n")
-    assert "cannot run .spyc/" in spyc(directory, "run", "app.py", status=1, env=env).stderr
+    assert "cannot run __pycache__/spyc/" in spyc(directory, "run", "app.py", status=1, env=env).stderr
     assert len(cache(directory)) == 1
-    shutil.rmtree(directory / ".spyc")
+    shutil.rmtree(directory / "__pycache__")
     (directory / "bin" / COMPILER).write_text('#!/bin/sh\ntouch started; sleep 30\n', encoding="utf-8")
     for signal_number in (signal.SIGINT, signal.SIGTERM):
         process = subprocess.Popen([SPYC, "run", "app.py"], cwd=directory, env={**os.environ, **env})
@@ -203,8 +206,8 @@ with fresh() as temp:
     assert spyc(directory, "test", "-O", "fib.c", "fibs", status=1, env=env).stdout == "FAIL  fibs/test_fib.py (exit 137)\n0 passed, 1 failed\n"
 print("spyc test passed")
 
-# spyc clean removes the cache's files and the cache, and keeps a file it
-# did not make, failing then.
+# spyc clean removes the cache's files, the cache, and __pycache__ if that is
+# empty then; it keeps a file it did not make, failing then.
 with fresh() as temp:
     directory = Path(temp)
     spyc(directory, "clean")
@@ -212,9 +215,13 @@ with fresh() as temp:
     spyc(directory, "run", "app.py")
     assert cache(directory)
     spyc(directory, "clean")
-    assert not (directory / ".spyc").exists()
+    assert not (directory / "__pycache__").exists()
     spyc(directory, "run", "app.py")
-    (directory / ".spyc" / "mine").write_text("kept", encoding="utf-8")
-    assert "spyc: error: cannot remove .spyc" in spyc(directory, "clean", status=1).stderr
+    (directory / "__pycache__" / "app.cpython-315.pyc").write_bytes(b"CPython's")
+    spyc(directory, "clean")
+    assert [p.name for p in (directory / "__pycache__").iterdir()] == ["app.cpython-315.pyc"]
+    spyc(directory, "run", "app.py")
+    (directory / CACHE / "mine").write_text("kept", encoding="utf-8")
+    assert "spyc: error: cannot remove __pycache__/spyc" in spyc(directory, "clean", status=1).stderr
     assert cache(directory) == ["mine"]
 print("spyc clean passed")

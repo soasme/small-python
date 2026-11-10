@@ -208,7 +208,7 @@ code or bytecode for Python functions.
 | Command | Effect |
 | --- | --- |
 | `spyc` or `spyc build` | Build a program |
-| `spyc run` | Build into the cache `.spyc` of the working directory, then run the program with the arguments after the entry. It compiles again only when a source, a C module, a header, or a library changed |
+| `spyc run` | Build into the cache `__pycache__/spyc` of the working directory, then run the program with the arguments after the entry. It compiles again only when a source, a C module, a header, or a library changed |
 | `spyc test` | Run each `test_*.py` below the paths that way; count those that exit with 0 |
 | `spyc clean` | Remove the cache |
 | `spyc version` | Print the version |

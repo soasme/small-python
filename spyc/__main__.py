@@ -22,6 +22,7 @@ usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | li
 options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,
          -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror, -v
 """
+CACHE = "__pycache__/spyc"   # spyc run and spyc test build here (docs/build.md 2.3)
 TAKES = ("-o", "-m", "-M", "-I", "-x", "-D", "-N", "--alias", "--metafile", "--deps")
 
 
@@ -137,7 +138,7 @@ class Options:
             raise Usage
         self.executable = not self.bare and not self.with_main
         if self.output is None:
-            self.output = ".spyc" if cached else "a.out" if self.executable else "out.c"
+            self.output = CACHE if cached else "a.out" if self.executable else "out.c"
         if self.output in self.files or self.output in self.more[:len(self.natives)]:
             raise Usage
 
@@ -274,8 +275,8 @@ def fnv(h, data):
 
 
 def cache(self, words, code, o):
-    """spyc run and spyc test build into the cache, .spyc in the working
-    directory (docs/build.md 2.3). An executable is named by two hashes:
+    """spyc run and spyc test build into the cache, __pycache__/spyc in the
+    working directory (docs/build.md 2.3). An executable is named by two hashes:
     its slot, of the build's arguments, and its stamp, of what it is made
     from: the C file, the compiler, the C modules, spy.h and the libraries.
     A name that exists is complete: the compiler writes beside it, and the
@@ -292,19 +293,21 @@ def cache(self, words, code, o):
     made = [include + "/spy.h"] + ([include + "/spy-std.h", lib + "/libspy-std.a"] if o.registered else []) + [lib + "/libspy.a"]
     for path in made:
         stamp = fnv(stamp, _spyc.read(path))
-    name = f".spyc/{slot & 0xffffffffffffffff:016x}-{stamp & 0xffffffffffffffff:016x}"
+    name = f"{CACHE}/{slot & 0xffffffffffffffff:016x}-{stamp & 0xffffffffffffffff:016x}"
     if _spyc.executable(name):
         return name
     temp = f"{name}.{_spyc.pid()}"
-    _spyc.mkdir(".spyc")
+    _spyc.mkdir("__pycache__")
+    _spyc.mkdir(CACHE)
     if not compile_c(self, temp, code, o.more, o):
         return None
     if not _spyc.rename(temp, name):
         error(f"cannot write {name}")
         return None
-    for entry in _spyc.listdir(".spyc") or []:
-        if len(entry) == 33 and entry[:17] == name[6:23] and entry != name[6:]:
-            _spyc.unlink(".spyc/" + entry)
+    base = name[len(CACHE) + 1:]
+    for entry in _spyc.listdir(CACHE) or []:
+        if len(entry) == 33 and entry[:17] == base[:17] and entry != base:
+            _spyc.unlink(CACHE + "/" + entry)
     return name
 
 
@@ -365,17 +368,19 @@ def test(self, args):
 
 
 def clean():
-    """spyc clean: the cache's files, then the cache, if nothing else is in it."""
-    names = _spyc.listdir(".spyc")
+    """spyc clean: the cache's files, then the cache, if nothing else is in
+    it, and __pycache__, if that is empty then."""
+    names = _spyc.listdir(CACHE)
     if names is None:
         return 0
     for name in names:
         if len(name) > 16 and all(ch in "0123456789abcdef" for ch in name[:16]) and name[16] == "-":
-            _spyc.unlink(".spyc/" + name)
-    failure = _spyc.rmdir(".spyc")
+            _spyc.unlink(CACHE + "/" + name)
+    failure = _spyc.rmdir(CACHE)
     if failure:
-        error(f"cannot remove .spyc: {failure}")
+        error(f"cannot remove {CACHE}: {failure}")
         return 1
+    _spyc.rmdir("__pycache__")
     return 0
 
 

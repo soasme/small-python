@@ -1,7 +1,8 @@
 Unreleased (0.10.0):
 
 - spyc is now at bin/spyc
-- spyc run, spyc test, spyc clean and spyc version; spyc build is spyc
+- spyc run, spyc test, spyc clean and spyc version; spyc build is spyc;
+  run and test cache programs in __pycache__/spyc
 - spyc is a Python program on the engine, built by the previous release's
   spyc; make downloads it (SPYC_BOOTSTRAP names another)
 - spyc programs write sys.stderr to stderr
