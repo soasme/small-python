@@ -12,7 +12,8 @@
 (* where B may define __init_subclass__(cls, **kw), or be given by an      *)
 (* object whose __mro_entries__ returns (B,), and Meta (a subclass        *)
 (* of type) defines __new__ and __init__, and possibly __prepare__, each   *)
-(* passing flag on to type.__new__ but not to type.__init__. Every hook    *)
+(* passing flag on to type.__new__ but not to type.__init__, or __init__   *)
+(* alone, type.__new__ then receiving flag itself. Every hook              *)
 (* logs its name; the class body logs "body" when it calls, else it only   *)
 (* assigns, and may begin with an annotated assignment; C may take a type  *)
 (* parameter, class C[T](...), which adds the base Generic[T]. Neither     *)
@@ -21,7 +22,7 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Metas == {"none", "meta", "prepare"}
+Metas == {"none", "meta", "prepare", "init"}
 Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN, annotated : BOOLEAN, generic : BOOLEAN]
 
 VARIABLES program, outcome
@@ -39,7 +40,7 @@ Create(p) ==
         typeNew == SubSeq(names, 1, p.set_names)
                    \o (IF p.subclass_hook THEN <<IF p.flag THEN "init_subclass flag" ELSE "init_subclass">> ELSE <<>>)
         before == (IF p.entries THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" THEN <<"prepare">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>)
-                  \o (IF custom THEN <<"new">> ELSE <<>>) \o typeNew
+                  \o (IF p.meta \in {"meta", "prepare"} THEN <<"new">> ELSE <<>>) \o typeNew
     IN  IF fails THEN <<before, "TypeError">>
         ELSE <<before \o (IF custom THEN <<"init">> ELSE <<>>) \o (IF p.deco THEN <<"decorate">> ELSE <<>>), "ok">>
 

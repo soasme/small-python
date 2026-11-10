@@ -5,7 +5,10 @@
 # of it, the statement's value whatever __new__ returns; its exception
 # propagates, and a __class__ cell left empty or set to another object is
 # an error once the class is made. Methods that loop run in function
-# statements as at module level, with and without header keywords.
+# statements as at module level, with and without header keywords, which
+# both __new__ and __init__ receive; a __new__ that takes none rejects them.
+# A metaclass of type's __new__ and a Python __init__ initializes the class
+# made, whose __init__ must return None.
 from harness import *
 
 log = []
@@ -25,7 +28,21 @@ class Meta(type):
         return made
     def __init__(cls, name, bases, ns, **kwds):
         spin()
-        log.append(("init", name))
+        log.append(("init", name) + ((kwds,) if kwds else ()))
+
+class Strict(type):
+    def __new__(meta, name, bases, ns):
+        spin()
+        return super().__new__(meta, name, bases, ns)
+
+class Init(type):
+    def __init__(cls, name, bases, ns, **kwds):
+        spin()
+        log.append(("Init", name, cls.__mro__[1].__name__, kwds))
+        if name == "Returning": return 5
+
+class Keyed:
+    def __init_subclass__(cls, **kwds): pass
 
 class Base(metaclass=Meta): pass
 
@@ -55,20 +72,31 @@ def classes():
     def twice():
         class Twice(Base):
             def f(self): return __class__
-    out += [error(fail), error(dropped), error(twice)[0]]
+    def strict():
+        class S(metaclass=Strict, tag=2): pass
+    class I(Keyed, metaclass=Init, tag=3):
+        def f(self): return __class__
+    class J(I): pass
+    def returning():
+        class Returning(metaclass=Init): pass
+    out += [error(fail), error(dropped), error(twice)[0], error(strict), I().f() is I, type(J) is Init, error(returning)]
     out.append(list(log))
     return out
 
 expected = ["A", "Meta", True, "Entry", True, 42, ("KeyError", "'fail'"),
             ("RuntimeError", "__class__ not set defining 'Dropped' as <class 'metaclass_calls.classes.<locals>.dropped.<locals>.Dropped'>. "
              "Was __classcell__ propagated to type.__new__?"), "TypeError",
+            ("TypeError", "Strict.__new__() got an unexpected keyword argument 'tag'"), True, True,
+            ("TypeError", "__init__() should return None, not 'int'"),
             [("new", "A", ["Base"], ["who", "x"], {}), ("init", "A"),
-             ("new", "B", ["A"], [], {"tag": 1}), ("init", "B"),
+             ("new", "B", ["A"], [], {"tag": 1}), ("init", "B", {"tag": 1}),
              ("new", "C", ["Base"], [], {}), ("init", "C"),
              ("new", "Number", ["Base"], [], {}),
+             ("Init", "I", "Keyed", {"tag": 3}), ("Init", "J", "I", {}),
              ("new", "Fail", ["Base"], [], {}),
              ("new", "Dropped", ["Base"], ["f"], {}), ("init", "Dropped"),
-             ("new", "Twice", ["Base"], ["f"], {}), ("init", "Twice")]]
+             ("new", "Twice", ["Base"], ["f"], {}), ("init", "Twice"),
+             ("Init", "Returning", "object", {})]]
 
 def names(out):
     # The module's name differs by runner; compare from the class's qualname.

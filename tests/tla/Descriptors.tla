@@ -20,20 +20,21 @@
 (*     a = A()                   and, if dict, a.__dict__["x"] = "inst"    *)
 (*                                                                         *)
 (* with base object or list, and does a.x, getattr(a, "x"), getattr(a,     *)
-(* "x", "dflt"), A.x, super(A, a).x, B.__dict__["x"].__get__(a), a.x = 1,  *)
-(* del a.x, or A.x = 1. The outcome is the result (a descriptor call as    *)
+(* "x", "dflt"), hasattr(a, "x"), A.x, super(A, a).x,                      *)
+(* B.__dict__["x"].__get__(a), a.x = 1, del a.x, or A.x = 1. The outcome   *)
+(* is the result (a descriptor call as                                     *)
 (* get(instance, owner), set(instance, value), or delete(instance); the    *)
 (* descriptor itself as D) or the exception, then a's dictionary after an  *)
 (* assignment or deletion (A.__dict__["x"] after A.x = 1). When raises, a  *)
 (* read's __get__ raises AttributeError, which the read names: x, and      *)
-(* getattr with a default returns the default.                             *)
+(* getattr with a default returns the default and hasattr False.           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Names == {"get", "set", "delete"}
-Ops == {"get", "getattr", "getattrd", "classget", "superget", "direct", "set", "del", "classset"}
+Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "classset"}
 Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : BOOLEAN] :
-                p.raises => p.op \in {"get", "getattr", "getattrd"}}
+                p.raises => p.op \in {"get", "getattr", "getattrd", "hasattr"}}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -55,6 +56,7 @@ Read(p) == IF p.raises /\ Get(p) = "get(a, A)" THEN "AttributeError x" ELSE Get(
 Run(p) ==
     CASE p.op \in {"get", "getattr"} -> Read(p)
       [] p.op = "getattrd" -> IF Read(p) = "AttributeError x" THEN "'dflt'" ELSE Read(p)
+      [] p.op = "hasattr" -> IF Read(p) = "AttributeError x" THEN "False" ELSE "True"
       [] p.op = "classget" -> IF Has(p, "get") THEN "get(None, A)" ELSE "D"
       [] p.op = "superget" -> IF Has(p, "get") THEN "get(a, A)" ELSE "D"
       [] p.op = "direct" -> IF Has(p, "get") THEN "get(a, None)" ELSE "AttributeError"

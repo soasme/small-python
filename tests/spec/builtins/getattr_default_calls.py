@@ -5,7 +5,8 @@
 # value is getattr()'s, an AttributeError from any of them or from the
 # lookup gives the default, and another exception propagates, with plain
 # and computed operands, in an expression and an assignment, inside
-# functions as at module level.
+# functions as at module level. hasattr() calls them alike: a value, even
+# a false one, gives True and an AttributeError False.
 from harness import *
 
 log = []
@@ -73,10 +74,15 @@ def results():
            getattr(holder[3], "miss", 6), error(lambda: getattr(plain, "key", 0)),
            error(lambda: getattr(holder[0], "key", 0)), getattr(plain, "o", 7), getattr(plain, "o")]
     out.append(list(log))
+    del log[:]
+    out.append([hasattr(plain, "p"), hasattr(plain, "bad"), hasattr(fallback, "ab"), hasattr(holder[1], "miss"),
+                hasattr(Items(), "p"), hasattr(hooked, "h"), hasattr(holder[3], "miss"), hasattr(plain, "o"),
+                hasattr(plain, "nothing"), error(lambda: hasattr(plain, "key")), list(log)])
     return out
 
 expected = ["p", "stored", 1, 2, "abab", 3, 2, 4, 5, "H", 6, ("KeyError", "'key'"), ("KeyError", "'key'"), "own", "own",
-            ["bad", "p", "get", "ab", "miss", "bad", "miss"]]
+            ["bad", "p", "get", "ab", "miss", "bad", "miss"],
+            [True, False, True, False, True, True, False, True, False, ("KeyError", "'key'"), ["p", "bad", "ab", "miss"]]]
 
 def main():
     return results()

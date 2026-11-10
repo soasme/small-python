@@ -10204,17 +10204,20 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
                   op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
 }
 static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
+/* A builtin scalar, or a class of no metaclass, whose == with another
+ * calls no Python. */
+static int pure_operand(SPYValue *v) { return v->type <= SPY_STRING || (v->type == SPY_CLASS && !v->as.map.meta); }
 /* Whether seq, a list or tuple, holds x, searched in place as list_contains
  * does: each item is held across a comparison that may change seq; -1 on
  * an error. For the machine, 2 instead at an item whose comparison with
- * x, a builtin scalar, calls a Python __eq__ (python_item) after items
- * that are scalars too, which the machine compares again (contains_call). */
+ * x, a pure operand, calls a Python __eq__ (python_item) after items that
+ * are pure too, which the machine compares again (contains_call). */
 static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue *seq, int machine) {
-    int scalars = machine && x->type <= SPY_STRING;
+    int scalars = machine && pure_operand(x);
     for (size_t i = 0; i < seq->as.seq.len; i++) {
         SPYValue *item = seq->as.seq.items[i];
         if (item == x) return 1;
-        if (scalars && item->type > SPY_STRING) {
+        if (scalars && item->type > SPY_STRING && !pure_operand(item)) {
             if (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i) return 2;
             scalars = 0;
         }
@@ -19173,9 +19176,14 @@ done:
 static NO_INLINE SPYValue *new_method(SPYContext *, SPYValue *);
 static SPYValue *tuple_of(SPYContext *, size_t, SPYValue *const *);
 /* Whether a class statement's metaclass call enters the metaclass's Python
- * __new__ on the machine (class_new_call): one with no keywords. */
+ * __new__, or the Python __init__ after its builtin __new__, on the machine
+ * (class_new_call). */
 static int class_deferred(SPYContext *c, ClassState *s) {
-    return s->meta != c->types[SPY_CLASS] && s->meta->type == SPY_CLASS && !s->keywords->as.map.len && new_method(c, s->meta);
+    SPYValue *meta = s->meta, *outer = meta->as.map.meta, *init;
+    if (meta == c->types[SPY_CLASS] || meta->type != SPY_CLASS) return 0;
+    return new_method(c, meta) ||
+           ((!outer || class_lookup(outer, "__call__") == name_local(c->types[SPY_CLASS], "__call__")) && native_slot_new(c, meta) &&
+            (init = class_lookup(meta, "__init__")) && machine_function(c, init));
 }
 /* A class statement's class; or, for machine m with class_deferred, the
  * unbound marker with its state, a tuple of the metaclass, bases, namespace,
@@ -23121,13 +23129,14 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
-    /* getattr() of an instance and a str, and a default, as a stack call's
-     * (getattr_call). */
-    if (method < 0 && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && builtin_id(callee) == B_GETATTR) {
+    /* getattr() of an instance and a str, and a default, or hasattr() of
+     * them, as a stack call's (getattr_call). */
+    int getter = method < 0 && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING ? builtin_id(callee) : -1;
+    if (getter == B_GETATTR || (getter == B_HASATTR && argc == 2)) {
         if (grow_array(c, (void **)&m->stack, &m->cap, m->len + 4, sizeof(*m->stack))) { release_all(argc, argv); spy_release(callee); return NULL; }
         m->stack[m->len++] = callee; m->stack[m->len++] = argv[0]; m->stack[m->len++] = argv[1];
-        if (argc == 3) m->stack[m->len++] = argv[2];
-        return getattr_call(c, m, argc == 3, env);
+        if (argc == 3 || getter == B_HASATTR) m->stack[m->len++] = argc == 3 ? argv[2] : spy_retain(c->defaulting);
+        return getattr_call(c, m, argc == 3 || getter == B_HASATTR, env);
     }
     if (method < 0 && format_reached(c, callee, method, argc, argv)) {
         result = format_job(c, m, callee, method, argc, argv, NULL, env);
@@ -23444,8 +23453,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return result;
     }
     if (calls && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING && callee->type == SPY_NATIVE &&
-        callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_GETATTR)
-        return getattr_call(c, m, argc == 3, env);
+        callee->as.native.call == builtin) {
+        if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
+        if (argc == 2 && callee->as.native.data == (void *)(intptr_t)B_HASATTR)
+            return machine_push(c, m, spy_retain(c->defaulting)) ? NULL : getattr_call(c, m, 1, env);
+    }
     /* So do min() and max() of a list's or tuple's items or of the
      * arguments, comparing them by a Python __lt__ or __gt__ (fold_call). */
     if (calls && callee->type == SPY_NATIVE && callee->as.native.call == builtin &&
@@ -24496,16 +24508,20 @@ static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SP
     for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
     return NULL;
 }
+static SPYValue *class_getitem(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* x[y], x a class: its metaclass's Python __getitem__, or else its own
  * Python __class_getitem__ classmethod, which a metaclass neither defines
- * nor intercepts the lookup of, entered as an operator's last method with
- * its env, x, y and the phase pushed on m's stack; else NULL. */
+ * nor intercepts the lookup of, or the loaded intrinsic _class_getitem for
+ * type and the builtin generic classes, entered as an operator's last
+ * method with its env, x, y and the phase pushed on m's stack; else NULL. */
 static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *meta = x->as.map.meta, *function = meta ? class_lookup(meta, "__getitem__") : NULL;
     if (!function && (!meta || (!class_lookup(meta, "__class_getitem__") &&
                                 class_lookup(meta, "__getattribute__") == class_lookup(c->types[SPY_CLASS], "__getattribute__")))) {
         function = class_lookup(x, "__class_getitem__");
         function = function && function->type == SPY_CLASSMETHOD ? function->as.wrapper.function : NULL;
+        if ((function ? function->type == SPY_NATIVE && function->as.native.kwcall == class_getitem : x == c->types[SPY_CLASS]) && c->intrinsics)
+            function = name_local(c->intrinsics, "_class_getitem");
     }
     if (!function || !machine_function(c, function) || operator_push(c, m, x, y, OPERATOR_LAST)) return NULL;
     SPYValue *args[] = {spy_retain(x), spy_retain(y)};
@@ -25131,13 +25147,24 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     return NULL;
 }
 /* getattr() of an instance v and a str, and a default when defaulted, the
- * step of a call with its callee and operands on m's stack: a property's
- * Python getter, or the Python __get__, __getattribute__ or __getattr__ an
- * attribute step calls (attribute_step), is the call to enter
- * (CALL_CHECKED), the name, v and c->unbound, or the name, v, the default
- * and c->defaulting, replacing the call's slots for the result
- * (checked_returned). Else the attribute, the default after an
- * AttributeError, or NULL. */
+ * step of a call with its callee and operands on m's stack, or hasattr()
+ * of them, c->defaulting their default: a property's Python getter, or the
+ * Python __get__, __getattribute__ or __getattr__ an attribute step calls
+ * (attribute_step), is the call to enter (CALL_CHECKED), the name, v and
+ * c->unbound, or the name, v, the default and c->defaulting, replacing the
+ * call's slots for the result (getattr_returned). Else the result now, or
+ * NULL. */
+/* What getattr() with a default or hasattr() (fallback c->defaulting)
+ * gives once its attribute's lookup gave result, NULL on an error: an
+ * AttributeError, or no attribute, gives the default or False, which the
+ * attribute for hasattr() is True. A getattr() of no default gives result. */
+static SPYValue *getattr_returned(SPYContext *c, SPYValue *fallback, SPYValue *result) {
+    if (!fallback || (!result && c->error_type[0] && !error_is(c, "AttributeError"))) return result;
+    spy_clear_error(c);
+    if (fallback != c->defaulting) return result ? result : spy_retain(fallback);
+    spy_release(result);
+    return spy_bool(c, !!result);
+}
 static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted, SPYValue **env) {
     size_t n = 3 + (size_t)defaulted;
     SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, name, NULL};
@@ -25148,10 +25175,10 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
     else {
         /* An own entry, or its miss with a default, is read without an
          * AttributeError (ATTR_OWN). */
-        SPYValue *result = own || (defaulted && kind == ATTR_OWN) ? spy_retain(own ? own : slots[3]) : attribute_step(c, v, name->as.string.data);
-        if (defaulted && !result && error_is(c, "AttributeError")) { spy_clear_error(c); result = spy_retain(slots[3]); }
-        if (c->error_type[0]) return NULL;
-        if (result) {
+        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, name->as.string.data);
+        if (result || c->error_type[0] || !c->fallback) {
+            result = getattr_returned(c, defaulted ? slots[3] : NULL, result);
+            if (!result) return NULL;
             m->len -= n;
             release_all(n, slots);
             return result;
@@ -25224,15 +25251,28 @@ static NO_INLINE SPYValue *setattr_call(SPYContext *c, Machine *m, SPYValue **en
 static NO_INLINE SPYValue *class_part(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env);
 /* A deferred class statement's metaclass call (make_class), its state and
  * __class__ cell on m's stack: the metaclass, to enter its Python __new__
- * (CALL_CHECKED) with the metaclass and arguments above them, as a class
- * call does; else NULL. */
+ * (CALL_CHECKED) with the metaclass, arguments and any keywords above them,
+ * as a class call does; else NULL. */
 static SPYValue *class_new_call(SPYContext *c, Machine *m, SPYValue **env) {
-    SPYValue **items = m->stack[m->len - 2]->as.seq.items, *meta = items[0];
+    SPYValue **items = m->stack[m->len - 2]->as.seq.items, *meta = items[0], *keywords = items[5]->as.map.len ? items[5] : NULL;
     if (items[4] != c->none && name_set(c, items[3], "__orig_bases__", items[4])) return NULL;
     SPYValue *allocate = new_method(c, meta), *argv[] = {spy_retain(meta), spy_retain(items[6]), spy_retain(items[1]), spy_retain(items[2])};
-    if (machine_push(c, m, spy_retain(meta)) || machine_push(c, m, tuple_of(c, 3, argv + 1))) { release_all(4, argv); return NULL; }
+    if (!allocate) {
+        /* A builtin __new__ makes the class here, and its Python __init__
+         * is entered (CALL_INIT) as a class call's (constructed). */
+        SPYValue *args = tuple_of(c, 3, argv + 1), *cls = args ? class_allocate(c, meta, native_slot_new(c, meta), 3, argv + 1, keywords) : NULL;
+        release_all(4, argv);
+        if (!cls) { spy_release(args); return NULL; }
+        SPYValue *function = constructed(c, m, spy_retain(meta), args, keywords ? spy_retain(keywords) : NULL, cls, env);
+        if (!function) return c->error_type[0] ? NULL : machine_pop(m);
+        c->entering_init = function; c->entering_kind = CALL_INIT;
+        spy_release(function);
+        return spy_retain(meta);
+    }
+    if (machine_push(c, m, spy_retain(meta)) || machine_push(c, m, tuple_of(c, 3, argv + 1)) ||
+        (keywords && machine_push(c, m, spy_retain(keywords)))) { release_all(4, argv); return NULL; }
     c->entering_init = allocate;
-    *env = function_env(c, allocate, 4, argv, NULL, 1);
+    *env = function_env(c, allocate, 4, argv, keywords, 1);
     return *env ? spy_retain(meta) : NULL;
 }
 /* BC_CLASS but arg 2 (class_part, build_class). Arg 0 and 5 leave the
@@ -25431,9 +25471,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         return m;
     }
     if (m->len && m->stack[m->len - 1] == c->defaulting) {
-        /* getattr() with a default: an AttributeError gives the default. */
-        if (!result && error_is(c, "AttributeError")) { spy_clear_error(c); result = spy_retain(m->stack[m->len - 2]); }
-        if (!result) return m;
+        if (!(result = getattr_returned(c, m->stack[m->len - 2], result))) return m;
         for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
         machine_push(c, m, result);
         return m;

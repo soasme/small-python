@@ -1,11 +1,12 @@
-# spec: PLS-315 7.8.1, 16.4
+# spec: PLS-315 7.8.1, 16.4, 29.9.1
 # description: Subscripting a class calls its metaclass's __getitem__, else
 # its __class_getitem__, an implicit classmethod that subclasses inherit,
 # either of which may loop, inside functions as at module level; their
 # exceptions propagate. A metaclass's __getattribute__ or class attribute
 # can supply __class_getitem__, a plain function or staticmethod stored
 # later is called with the key alone, and None or a missing one raises
-# TypeError, as does a method that cannot take the key.
+# TypeError, as does a method that cannot take the key. A builtin generic
+# class, a subclass of one, and type itself make a GenericAlias.
 from harness import *
 
 log = []
@@ -62,6 +63,8 @@ class Disabled:
 
 class Plain: pass
 
+class Listed(list): pass
+
 class Arity:
     def __class_getitem__(cls): spin()
 
@@ -76,6 +79,8 @@ def results():
     out = [Generic[int], Derived[1, 2], error(lambda: Generic["bad"]), Indexed[3], Kinded[4],
            Intercepted[5], Offered[6], Late[7], Static[8], error(lambda: Disabled[9]), error(lambda: Plain[10]), error(lambda: Arity[11])]
     out.append(list(log))
+    aliases = [list[int], type[str], Listed[int, str], dict[str, list[int]]]
+    out.append([(a.__origin__, a.__args__) for a in aliases])
     return out
 
 expected = [("Generic", int), ("Derived", (1, 2)), ("KeyError", "'bad'"), ("meta", "Indexed", 3),
@@ -83,7 +88,8 @@ expected = [("Generic", int), ("Derived", (1, 2)), ("KeyError", "'bad'"), ("meta
             ("TypeError", "type 'Disabled' is not subscriptable"),
             ("TypeError", "type 'Plain' is not subscriptable"),
             ("TypeError", "Arity.__class_getitem__() takes 1 positional argument but 2 were given"),
-            [("Generic", int), ("Derived", (1, 2)), ("Generic", "bad")]]
+            [("Generic", int), ("Derived", (1, 2)), ("Generic", "bad")],
+            [(list, (int,)), (type, (str,)), (Listed, (int, str)), (dict, (str, list[int]))]]
 
 def main():
     return results()

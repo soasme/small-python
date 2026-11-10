@@ -16,6 +16,11 @@ class Meta(type):
         log.append("init")
         super().__init__(name, bases, ns)
 
+class InitOnly(type):
+    def __init__(cls, name, bases, ns, **kw):
+        log.append("init")
+        super().__init__(name, bases, ns)
+
 class Prepare(Meta):
     @classmethod
     def __prepare__(mcls, name, bases, **kw):
@@ -46,7 +51,7 @@ def source(p):
     base = "Hook" if p["subclass_hook"] else "Plain"
     arguments = ["Entries(%s)" % base if p["entries"] else base]
     if p["meta"] != "none":
-        arguments.append("metaclass=" + ("Meta" if p["meta"] == "meta" else "Prepare"))
+        arguments.append("metaclass=" + {"meta": "Meta", "prepare": "Prepare", "init": "InitOnly"}[p["meta"]])
     if p["flag"]:
         arguments.append("flag=1")
     lines = ["@deco"] if p["deco"] else []

@@ -5,8 +5,8 @@
 # the first true result stops the search, an identical item matches with
 # no call, NotImplemented falls back to the other operand, a list shrunk
 # by a comparison ends the search, and an iterator is consumed up to the
-# match. A builtin x calls the items' reflected __eq__ alike, and an if or
-# while test of in or not in searches as an expression does.
+# match. A builtin x, or a class, calls the items' reflected __eq__ alike,
+# and an if or while test of in or not in searches as an expression does.
 from harness import *
 
 log = []
@@ -78,6 +78,8 @@ def searches():
     n = 0
     while Key(n) not in keys: n += 1
     out += [tests, n, list(log)]
+    del log[:]
+    out += [int in [str, Key(1), int], str not in (Key(2),), list(log)]
     try:
         Narrow() in [Narrow()]
     except TypeError as e:
@@ -94,6 +96,7 @@ expected = [True, [(1, 2)], False, [(2, 1), (1, 2)], True, False, [(5, 1)],
             ["in", "not in", "native"], 1,
             [(1, 2), (2, 2), (1, 9), (2, 9), (9, 3), (4, 9), (1, 3), (2, 3), (1, 7), (2, 7), (4, 7),
              (1, 0), (2, 0), (0, 3), (4, 0), (1, 1)],
+            True, True, [(1, "type"), (2, "type")],
             "Narrow.__eq__() takes 1 positional argument but 2 were given", ("eq",)]
 assert_eq(searches(), expected)
 assert_eq(Key(8) in [Key(7), Key(8)], True)
