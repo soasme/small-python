@@ -54,6 +54,12 @@
 - Use reference counting for prompt reclamation and a cycle collector for
   cyclic graphs. Keep C API ownership explicit. Contexts must be independent;
   avoid process-global mutable runtime state.
+- Ordinary Python code never blocks a scheduler. A Python-to-Python call
+  pushes a heap frame on the running machine instead of recursing in C, so
+  the C stack depth does not grow with Python call depth and execution can
+  pause at any step and resume later. Do not add a C path that re-enters the
+  evaluator for a call Python code can make; move existing ones onto the
+  machine rather than working around them.
 - Suspend generator functions with heap-owned operand and cleanup stacks.
   Keep every retained stack value visible to the cycle collector. Instructions
   borrow original AST nodes from a retained source unit; never retain temporary
