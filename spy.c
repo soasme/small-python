@@ -14333,6 +14333,9 @@ static void compile_comprehension_clause(SPYContext *c, Program *p, Node *n, Nod
             compile_expr(c, p, item->a); emit(c, p, BC_EXTEND, item, 0);
         } else if (n->op == N_DICT) {
             compile_expr(c, p, item->a); compile_expr(c, p, item->b); emit(c, p, BC_MAP, item, 0);
+        } else if (n->op == N_SET) {
+            /* As a set display's element (compile_expr). */
+            compile_expr(c, p, item); emit(c, p, BC_NONE, item, 0); emit(c, p, BC_MAP, item, 0);
         } else { compile_expr(c, p, item); emit(c, p, BC_ADD, item, 0); }
         return;
     }

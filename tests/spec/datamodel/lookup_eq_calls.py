@@ -1,9 +1,9 @@
 # spec: PLS-315 26, 7.5.7
 # description: A dict subscript, store and deletion, in of a dict,
-# frozendict, set or frozenset, and dict and set displays compare an
-# instance key with each stored key of the same hash by ==, the stored
-# key's __eq__ first unless the key's class is a subclass of its class,
-# which may loop; a key itself matches without a call, NotImplemented
+# frozendict, set or frozenset, dict and set displays and set
+# comprehensions compare an instance key with each stored key of the same
+# hash by ==, the stored key's __eq__ first unless the key's class is a
+# subclass of its class, which may loop; a key itself matches without a call, NotImplemented
 # leaves the reflected method and then identity, a false result goes on
 # to the next key of that hash, a store of an equal key keeps the stored
 # key with the new value, a comparison that empties the dict ends it
@@ -85,7 +85,7 @@ def results():
     natives[Native("q")] = 2
     del natives[Native("r")]
     natives[Native("s")] = 3
-    out += [sorted(v for v in stored.values()), len(natives), len({no, Key("set")}), len({Key("d"): 1, Key("e"): 2}),
+    out += [sorted(v for v in stored.values()), len(natives), len({no, Key("set")}), len({k for k in (no, Key("comp"))}), len({Key("d"): 1, Key("e"): 2}),
             error(lambda: delete({no: 1}, Key("x", False))), error(lambda: {}[BadHash()]), error(lambda: BadHash() in {}),
             Plain() in {1: "one"}, error(lambda: {1: "one"}[Plain()])[0]]
     out.append(list(log))
@@ -96,12 +96,12 @@ def delete(d, k):
 
 expected = ['A', 'A', True, False, True, True, 'F', 'Y', ('KeyError', 'y'), 1, 1, 'A', ('KeyError', 't'), 'native', True,
             ('KeyError', "'eq'"), ('TypeError', 'Arity.__eq__() takes 1 positional argument but 2 were given'),
-            ['N'], 1, 2, 1, ('KeyError', 'x'), ('KeyError', "'hash'"), ('KeyError', "'hash'"), False, 'KeyError',
+            ['N'], 1, 2, 2, 1, ('KeyError', 'x'), ('KeyError', "'hash'"), ('KeyError', "'hash'"), False, 'KeyError',
             [('eq', 'no', 'yes'), ('eq', 'a', 'b'), ('eq', 'a', 'b'), ('eq', 'a', 'b'), ('eq', 'a', 's'),
              ('eq', 'a', 'f'), ('eq', 'a', 'b'), ('eq', 'no', 'x'), ('eq', 'yes', 'x'), ('eq', 'no', 'y'),
              ('eq', 'maybe', 'z'), ('eq', 'z', 'maybe'), ('sub', 'c'), ('eq', 'clear', 't'), ('native', 'n'),
              ('native', 'n'), ('eq', 'bad', 'w'), ('eq', 'no', 'u'), ('eq', 'no', 'v'), ('eq', 'u', 'v'), ('eq', 'no', 'w'),
-             ('eq', 'u', 'w'), ('native', 'p'), ('native', 'p'), ('eq', 'no', 'set'), ('eq', 'd', 'e'), ('eq', 'no', 'x')]]
+             ('eq', 'u', 'w'), ('native', 'p'), ('native', 'p'), ('eq', 'no', 'set'), ('eq', 'no', 'comp'), ('eq', 'd', 'e'), ('eq', 'no', 'x')]]
 
 def main():
     return results()

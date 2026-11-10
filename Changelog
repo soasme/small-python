@@ -177,6 +177,8 @@ Unreleased (0.8.0):
   raise TypeError at the yield from, as CPython's do
 - a generator's yield from of a list, tuple or range gives each item without
   resuming the generator, about a third faster to consume
+- a set comprehension calls its elements' Python __hash__ and __eq__ without
+  the C stack
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their
