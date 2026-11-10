@@ -33,8 +33,8 @@ Literal(sign, d, point, e) ==
 
 Programs == [kind : {"binary"}, op : Binary, x : Operands, y : Operands]
             \cup [kind : {"unary"}, op : Unary, x : Operands]
-            \cup UNION {{[kind |-> "literal", text |-> Literal(sign, d, point, e)] : point \in -1..Len(d)} :
-                         sign \in BOOLEAN, d \in Digits, e \in Exponents}
+            \cup (UNION {{[kind |-> "literal", text |-> Literal(sign, d, point, e)] : point \in -1..Len(d)} :
+                          sign \in BOOLEAN, d \in Digits, e \in Exponents})
             \cup [kind : {"complex"}, op : {"real", "imag", "set real", "set imag"}]
 
 VARIABLES program, outcome

@@ -45,7 +45,7 @@ Bodies == {<<1, 3, 7, 1, 3, 2, 2>>,                     \* {x:{x}}
            <<1, 3, 5, 4, 7, 1, 3, 2, 2>>,               \* {x!r:{x}}
            <<1, 3, 5, 4, 7, 2, 1, 4, 2>>,               \* {x!r:}{r}
            <<1, 4, 2, 1, 3, 5, 4, 7, 3, 2>>}            \* {r}{x!r:x}
-Programs == UNION {[1..n -> Chars] : n \in 0..5} \cup {S(b) : b \in Bodies}
+Programs == (UNION {[1..n -> Chars] : n \in 0..5}) \cup {S(b) : b \in Bodies}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

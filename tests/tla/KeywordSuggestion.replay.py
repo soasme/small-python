@@ -15,9 +15,9 @@ def outcome(p):
         text = str(error)
         marker = ". Did you mean '"
         if marker not in text:
-            return ("TypeError", "-")
+            return ("TypeError", ())
         return ("TypeError", tuple(text[text.index(marker) + len(marker):-2]))
-    return ("bound", "-")
+    return ("bound", ())
 
 
 failures = 0

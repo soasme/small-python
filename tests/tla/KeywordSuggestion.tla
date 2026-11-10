@@ -20,7 +20,7 @@ Programs == [params : {l \in Lists : Len(l) < 2 \/ l[1] # l[2]}, name : Words \c
 VARIABLES program, outcome
 vars == <<program, outcome>>
 
-None == "-"
+None == <<>>
 Pending == <<"pending", None>>
 
 Min(x, y) == IF x < y THEN x ELSE y

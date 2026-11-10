@@ -35,7 +35,7 @@ Words == {<<"i", "f">>, <<"N", "o", "n", "e">>, <<"T", "r", "u", "e">>, <<"a", "
           <<"a", "w", "a", "i", "t">>, <<"m", "a", "t", "c", "h">>, <<"c", "a", "s", "e">>, <<"t", "y", "p", "e">>,
           <<"_", "_", "d", "e", "b", "u", "g", "_", "_">>, <<"_", "_", "d", "e", "b", "u", "fw-g", "_", "_">>,
           <<"fw-i", "fw-f">>, <<"fw-T", "r", "u", "e">>, <<"fi", "x">>, <<"e", "acute">>, <<"x", "sup2">>}
-Programs == UNION {[1..n -> Alphabet] : n \in 1..3} \cup Words
+Programs == (UNION {[1..n -> Alphabet] : n \in 1..3}) \cup Words
 
 VARIABLES program, outcome
 vars == <<program, outcome>>

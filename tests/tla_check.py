@@ -160,7 +160,7 @@ def parse_state(label):
 
 def parse_graph(path):
     nodes, edges, initial = {}, {}, []
-    node = re.compile(r'^(-?\d+) \[label="(.*)"(,style = filled)?\];?$')
+    node = re.compile(r'^(-?\d+) \[label="((?:[^"\\]|\\.)*)"(.*)\];?$')
     edge = re.compile(r'^(-?\d+) -> (-?\d+)')
     for line in path.read_text(encoding="utf-8").splitlines():
         match = node.match(line)
@@ -168,7 +168,7 @@ def parse_graph(path):
             # Dot escapes each backslash and quote, and breaks lines with \n.
             label = re.sub(r"\\(.)", lambda m: "\n" if m.group(1) == "n" else m.group(1), match.group(2))
             nodes[match.group(1)] = parse_state(label)
-            if match.group(3):
+            if "style = filled" in match.group(3):
                 initial.append(match.group(1))
             continue
         match = edge.match(line)
