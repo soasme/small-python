@@ -14909,11 +14909,15 @@ static SPYValue *frozendict_construct(SPYContext *c, size_t argc, SPYValue *cons
  * file or a trace function needs attention; 1 on the machine when a Python
  * __del__ is due there first (finalizer). */
 static SPYValue *finalizer(SPYContext *);
+/* A machine's tick at a step of no node (TICK_DEFER) leaves a finalizer
+ * the machine runs (finalizer) for the next node's. */
+enum { TICK_DEFER = 2 };
 static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     if (c->error_type[0]) return -1;
     if (c->collect_due) collect(c);
-    if (machine && c->finalize_calls_len && finalizer(c)) return 1;
-    if (c->weak_calls_len || c->finalize_calls_len) weak_callbacks(c);
+    int machined = machine && c->finalize_calls_len && finalizer(c);
+    if (machined && machine != TICK_DEFER) return 1;
+    if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
     c->line = n->line;
     if (c->py_depth) {
         /* A new line is a trace function's 'line' event; the definition
@@ -17081,10 +17085,13 @@ static void weak_callbacks(SPYContext *c) {
         SPYValue *self = c->finalize_calls[0];
         memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
         size_t waiting = c->finalize_calls_len;
-        SPYValue *method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
+        /* A Python __del__ takes the instance; another binds to it first. */
+        SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, "__del__") : NULL, *method;
+        if (function && function->type == SPY_FUNCTION) method = spy_retain(function);
+        else method = self->type == SPY_INSTANCE ? special_method_maybe(c, self, "__del__") : NULL;
         const char *failure = "Exception ignored while closing generator ";
         if (method) {
-            spy_release(call(c, method, 0, NULL));
+            spy_release(method == function ? call(c, method, 1, &self) : call(c, method, 0, NULL));
             if (c->error_type[0]) report_unraisable(c, "Exception ignored while calling deallocator ", class_lookup(self->as.map.parent, "__del__"), NULL);
         } else if (self->type == SPY_MEMORYVIEW) memory_release(c, self);
         else if (self->type == SPY_ASYNC_GENERATOR && self->as.generator.origin) {
@@ -25800,10 +25807,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             } else relocate(c, n);
         } else if (!quiet(c, &f)) {
             /* An instruction of no node ticks on the definition, keeping the
-             * frame's line; while only a line would be recorded, it need not. */
+             * frame's line; while only a line would be recorded, it need not.
+             * A finalizer the machine runs waits for a node's step. */
             n = m->generator ? m->generator->as.generator.node : m->owner ? m->owner : c->calls[c->calls_len - 1]->fn->as.function.def;
             size_t line = c->py_depth ? c->frames[c->py_depth - 1].line : 0;
-            if (tick(c, &f, n)) continue;
+            if (tick_full(c, &f, n, TICK_DEFER)) continue;
             if (line) c->line = c->frames[c->py_depth - 1].line = line;
         }
         SPYValue *a = NULL, *b = NULL, *value = NULL, *x, *y; /* a and b are owned; x and y, borrowed operands */
