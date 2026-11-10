@@ -7,7 +7,8 @@
 (* instance of the class, to __init__, which must return None; extra       *)
 (* arguments are an error unless __new__ or __init__ is overridden; an     *)
 (* instance is callable when its class defines __call__ (looked up on the  *)
-(* type, so one set on the instance does not count).                       *)
+(* type, so one set on the instance does not count); a metaclass's         *)
+(* __call__ replaces all of creation.                                      *)
 (*                                                                         *)
 (* A program defines class C, of base object, list or Exception, with      *)
 (*                                                                         *)
@@ -15,6 +16,7 @@
 (*     init  none | records (self.args = args) | returns (returns 1)       *)
 (*     call  none | class (def __call__(self, *a): return a)               *)
 (*                | instance (c.__call__ = a function, after creation)     *)
+(*                | meta (a metaclass's def __call__(cls, *a): return a)   *)
 (*                                                                         *)
 (* where __new__ and __init__ take *args, then evaluates C(), C(1), or     *)
 (* C()(2). The outcome is the result (its type, and args if recorded or an *)
@@ -25,7 +27,7 @@
 EXTENDS Naturals, Sequences
 
 Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other"},
-             init : {"none", "records", "returns"}, call : {"none", "class", "instance"},
+             init : {"none", "records", "returns"}, call : {"none", "class", "instance", "meta"},
              op : {"C()", "C(1)", "C()(2)"}]
 
 VARIABLES program, outcome
@@ -42,7 +44,9 @@ Create(p, args) ==
       [] OTHER -> "C"
 
 Run(p) ==
-    CASE p.op = "C()" -> Create(p, "()")
+    CASE p.call = "meta" -> CASE p.op = "C()" -> "tuple ()" [] p.op = "C(1)" -> "tuple (1,)"
+                                 [] OTHER -> "TypeError"                         \* a tuple is not callable
+      [] p.op = "C()" -> Create(p, "()")
       [] p.op = "C(1)" -> Create(p, "(1,)")
       [] Create(p, "()") \in {"TypeError", "int 5"} -> "TypeError"               \* an int is not callable
       [] p.call = "class" -> "(2,)"

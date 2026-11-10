@@ -1,7 +1,9 @@
 # spec: PLS-315 20.2.5, 10.2.1, 13.3.4, 7.4.1
 # description: Calling a class runs its metaclass's __call__, then
 # __init__ with the new instance; a bound method passes its self first.
-# Each holds whatever form the call takes inside a function.
+# A metaclass's __call__, which may loop and call type's, receives the class
+# first, a subclass's too. Each holds whatever form the call takes inside a
+# function.
 from harness import *
 
 class Meta(type):
@@ -132,3 +134,45 @@ def instances():
 
 assert instances() == [('a', 1, 2), ('a', 3, 2), ('a', 5, 2), ('a', 1, 9), ('a', 4, 8), ('b', 7, 2), ('a', 1, 2),
                        'Callable.__call__() takes from 1 to 2 positional arguments but 3 were given', ('a', 0, 2)], instances()
+
+# A metaclass's __call__ that loops and calls type's, for a subclass too.
+log = []
+
+class Single(type):
+    def __call__(cls, *args, **kwargs):
+        for i in range(2): pass
+        log.append((cls.__name__, args, kwargs))
+        if "made" not in cls.__dict__:
+            cls.made = super().__call__(*args, **kwargs)
+        return cls.made
+
+class Once(metaclass=Single):
+    def __init__(self, x=0):
+        for i in range(1): pass
+        log.append(("init", x))
+
+class Twice(Once):
+    pass
+
+class Narrow(type):
+    def __call__(cls): return "narrow"
+
+class Strict(metaclass=Narrow):
+    pass
+
+def singles():
+    del log[:]
+    args = [3]
+    a, b, c = Once(1), Once(x=2), Twice(*args)
+    out = [a is b, c is Twice.made, type(c).__name__, list(map(Twice, [4]))[0] is c, Strict()]
+    try:
+        Strict(1)
+    except TypeError as e:
+        out.append(str(e))
+    return out + [list(log)]
+
+expected = [True, True, "Twice", True, "narrow", "Narrow.__call__() takes 1 positional argument but 2 were given",
+            [("Once", (1,), {}), ("init", 1), ("Once", (), {"x": 2}), ("Twice", (3,), {}), ("init", 3), ("Twice", (4,), {})]]
+assert singles() == expected, singles()
+del Once.made, Twice.made
+assert singles() == expected, singles()

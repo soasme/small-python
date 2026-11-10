@@ -22902,11 +22902,12 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     return c->error_type[0] ? -1 : 0;
 }
 /* The function on the machine that calling v calls with v's self first:
- * a bound method's, or a Python __call__ of an instance's class; borrowed,
- * or NULL. */
+ * a bound method's, or a Python __call__ of an instance's class or a
+ * class's metaclass; borrowed, or NULL. */
 static SPYValue *bound_function(SPYContext *c, SPYValue *v) {
     SPYValue *function = v->type == SPY_METHOD ? v->as.method.function :
-                         v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__call__") : NULL;
+                         v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__call__") :
+                         meta_class(v) ? class_lookup(v->as.map.meta, "__call__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether callee calls a function on the machine with its self
@@ -23718,7 +23719,7 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
  * instance, the call's value on the stack (CALL_INIT), as in stack_call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
-    int plain = 0;
+    int plain = 0, init = 0;
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
     else if (calls && (function = bound_function(c, callee)) && string_keys(c, keywords))
@@ -23727,7 +23728,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
              string_keys(c, keywords)) {
         self = init_instance(c, callee, plain, args->as.seq.len, args->as.seq.items, keywords);
         if (self && machine_push(c, m, spy_retain(self))) { spy_release(self); self = NULL; }
-        c->entering_init = function; c->entering_kind = CALL_INIT;
+        c->entering_init = function; c->entering_kind = CALL_INIT; init = 1;
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
     else if (!c->error_type[0]) result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
@@ -23736,7 +23737,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         int failed = !all || sequence_append(c, all, self);
         for (size_t i = 0; !failed && i < args->as.seq.len; i++) failed = sequence_append(c, all, args->as.seq.items[i]);
         if (!failed && (*env = function_env(c, function, all->as.seq.len, all->as.seq.items, keywords, 0)))
-            result = spy_retain(callee->type == SPY_CLASS ? callee : function);
+            result = spy_retain(init ? callee : function);
         spy_release(all); spy_release(self);
     }
     spy_release(keywords); spy_release(args); spy_release(callee);

@@ -8,7 +8,8 @@ NEW = {"none": "", "self": "    def __new__(cls, *args):\n        return super()
        "other": "    def __new__(cls, *args):\n        return 5\n"}
 INIT = {"none": "", "records": "    def __init__(self, *args):\n        self.args = args\n",
         "returns": "    def __init__(self, *args):\n        return 1\n"}
-CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": ""}
+CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": ""}
+META = "class M(type):\n    def __call__(cls, *a):\n        return a\n"
 
 
 def describe(r):
@@ -19,7 +20,9 @@ def describe(r):
 
 def outcome(p):
     namespace = {}
-    exec("class C(%s):\n    pass\n" % p["base"] + NEW[p["new"]] + INIT[p["init"]] + CALL[p["call"]], namespace)
+    meta = p["call"] == "meta"
+    header = (META if meta else "") + "class C(%s%s):\n    pass\n" % (p["base"], ", metaclass=M" if meta else "")
+    exec(header + NEW[p["new"]] + INIT[p["init"]] + CALL[p["call"]], namespace)
     C = namespace["C"]
     try:
         if p["op"] == "C()":
