@@ -12518,10 +12518,11 @@ static SPYValue *interpolation_field(SPYContext *c, Node *n, SPYValue *value, SP
     spy_release(expression); spy_release(conversion); spy_release(format);
     return result;
 }
-static SPYValue *join_strings(SPYContext *c, SPYValue *items) {
+/* The str of the len parts at items, each a str or a str subclass. */
+static SPYValue *join_strings(SPYContext *c, size_t len, SPYValue *const *items) {
     Buffer out = {.ctx = c};
-    for (size_t i = 0; i < items->as.seq.len && !c->error_type[0]; i++) {
-        SPYValue *text = items->as.seq.items[i];
+    for (size_t i = 0; i < len && !c->error_type[0]; i++) {
+        SPYValue *text = items[i];
         if (text->type != SPY_STRING) text = builtin_value(c, text, SPY_STRING);
         append(&out, text->as.string.data, text->as.string.len);
     }
@@ -14101,7 +14102,7 @@ static int expands(Node *n, int calls) {
         (calls >= BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
-                           n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT || n->kind == N_JOINED ||
+                           n->kind == N_COND || n->kind == N_SET || n->kind == N_DICT ||
                            n->kind == N_SLICE)) || (calls == PAUSING && (n->kind == N_FORMAT || n->kind == N_DELETE || starred(n) || (n->kind == N_ASSIGN && ((n->op >= T_ADDEQ && n->op <= T_XOREQ) ||
                                                                                                   unpacks(n->a) || unpacks(n->args)))))) return 1;
     /* A list, set or dictionary comprehension runs on the machine of the
@@ -14163,12 +14164,18 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
     }
     size_t branch, end;
     switch (n->kind) {
-    case N_TEMPLATE: case N_JOINED:
+    case N_JOINED: {
+        /* The parts stay on the stack for the join, as many as arg. */
+        int parts = 0;
+        for (Node *part = n->args; part; part = part->next, parts++) compile_expr(c, p, part);
+        emit(c, p, BC_JOIN, n, parts); break;
+    }
+    case N_TEMPLATE:
         emit(c, p, BC_NEW, n, SPY_LIST);
         for (Node *part = n->args; part; part = part->next) {
             compile_expr(c, p, part); emit(c, p, BC_ADD, part, 0);
         }
-        emit(c, p, n->kind == N_TEMPLATE ? BC_TEMPLATE : BC_JOIN, n, 0); break;
+        emit(c, p, BC_TEMPLATE, n, 0); break;
     case N_INTERPOLATION:
         compile_expr(c, p, n->a); compile_expr(c, p, n->b); emit(c, p, BC_INTERPOLATION, n, 0); break;
     case N_FORMAT:
@@ -14184,8 +14191,10 @@ static void compile_expr(SPYContext *c, Program *p, Node *n) {
             if (n->b) compile_expr(c, p, n->b);
             emit(c, p, BC_CALLN, n, 1 + !!n->b); break;
         }
-        emit(c, p, BC_CONVERT, n, n->op);
-        compile_expr(c, p, n->b); emit(c, p, BC_FORMAT, n, 0); break;
+        /* A conversion and a spec are steps only when the field has them. */
+        if (n->op) emit(c, p, BC_CONVERT, n, n->op);
+        if (n->b) compile_expr(c, p, n->b);
+        emit(c, p, BC_FORMAT, n, n->b != NULL); break;
     case N_YIELD: case N_AWAIT:
         /* A yield of a name or literal loads it in its own step (arg 1). */
         if (n->kind == N_YIELD && !n->op && n->a && (n->a->kind == N_NAME || n->a->constant)) { emit(c, p, BC_YIELD, n, 1); break; }
@@ -23442,6 +23451,13 @@ static NO_INLINE SPYValue *convert_step(SPYContext *c, Machine *m, SPYValue *val
     SPYValue *callee = arg == ('s' | CONVERT_CALL) ? c->types[SPY_STRING] : c->field_calls[arg == ('f' | CONVERT_CALL)];
     return machine_push(c, m, spy_retain(callee)) ? NULL : spy_retain(value);
 }
+/* BC_JOIN: the str of the f-string's count parts on top of m's stack,
+ * which it pops. */
+static NO_INLINE SPYValue *join_step(SPYContext *c, Machine *m, int count) {
+    SPYValue *joined = join_strings(c, (size_t)count, &m->stack[m->len - count]);
+    for (int i = 0; i < count; i++) spy_release(machine_pop(m));
+    return joined;
+}
 /* BC_LOAD_TARGET with arg 1, of target n: its object's, and a
  * subscript's key's, copies on m's stack, the last one to push, for the
  * BC_INDEX or BC_ATTR after it. */
@@ -26305,9 +26321,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_INTERPOLATION)
             b = machine_pop(m); a = machine_pop(m); machine_push(c, m, interpolation_field(c, n, a, b)); break;
         CASE(BC_FORMAT)
-            b = machine_pop(m); a = machine_pop(m); machine_push(c, m, format_field(c, a, b)); break;
+            b = ins->arg ? machine_pop(m) : NULL; a = machine_pop(m); machine_push(c, m, format_field(c, a, b ? b : c->none)); break;
         CASE(BC_JOIN)
-            a = machine_pop(m); machine_push(c, m, join_strings(c, a)); break;
+            machine_push(c, m, join_step(c, m, ins->arg)); break;
         CASE(BC_DECORATE)
             /* A Python decorator is a call taking the decorated value. b's
              * address taken here keeps run_steps' dispatch threaded. */

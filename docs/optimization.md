@@ -202,6 +202,7 @@ empty `for i in range(n)` loop at about 900 instructions an iteration.
 | [A keyword call keeps its arguments on the stack](#a-keyword-call-keeps-its-arguments-on-the-stack) | keyword call -59%; the programs unchanged |
 | [Calls run on the machine](#calls-run-on-the-machine) | -12.9% (fib), +1.7% (generators), +1.2% (classes); M2: fib -2.2%, classes +2.0% |
 | [Each instruction holds its step's label](#each-instruction-holds-its-steps-label) | M2: loop -2.1% instructions against the table; getprop -5.5%, sortinst -5.8%, descr -2.1%; loop +2.5% cycles |
+| [An f-string joins its parts on the stack](#an-f-string-joins-its-parts-on-the-stack) | f-string loop -16.5% instructions; M2: strings -1.5% against 0.8.0 |
 
 ### Releasing a number or string frees it at once
 
@@ -1730,6 +1731,21 @@ sum_gen -6.8%, descr -2.1%, neeq -2.7%; with 8 bytes more per
 instruction, getprop and descr ran 3% to 4% slower instead. loop runs
 0.8% fewer instructions but 2% to 3% more cycles, which no change to its
 steps explains.
+
+### An f-string joins its parts on the stack
+
+On the machine an f-string made a list, appended each part to it and
+joined the list, and every field took a conversion step and a spec step
+even with neither. `f"{i}:{w[i % 8]}"` in a module loop ran 18% more
+instructions than 0.8.0's walker. The parts now stay on the machine's
+stack, where the join takes them, and a field compiles a conversion or a
+spec only when it has one. In body code an f-string is split into steps
+only when one of its parts is: its fields still format in C there, so
+splitting a plain one bought nothing. What runs, and in what order, is
+unchanged.
+
+Instructions (M2 counters): that loop 1,322.9 M -> 1,105.1 M (0.8.0:
+1,116.7 M); `strings` 1,732.9 M -> 1,687.2 M (0.8.0: 1,713.5 M).
 
 ## Tried and left out
 
