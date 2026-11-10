@@ -34,7 +34,7 @@ def median_ms(command, runs, expected=None):
 
 def main():
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    spy, spyc = os.path.join(ROOT, "spy"), os.path.join(ROOT, "spyc")
+    spy, spyc = os.path.join(ROOT, "spy"), os.path.join(ROOT, "bin", "spyc")
     expected = subprocess.run([spy, PROGRAM], capture_output=True, check=True).stdout
     with tempfile.TemporaryDirectory() as temp:
         program = os.path.join(temp, "startup")

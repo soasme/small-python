@@ -1,14 +1,21 @@
 /* Bundle arbitrary programs with spyc: import discovery, the module search,
- * --minify, and the generated C, metafile, and dependency rule. The input is
- * a small tree, split at each line "#--": the entry main.py, then a.py,
+ * --minify, and the generated C, metafile, and dependency rule. spyc's
+ * main, compiled as spyc_main, runs its Python over this engine. The input
+ * is a small tree, split at each line "#--": the entry main.py, then a.py,
  * pkg/__init__.py, and pkg/b.py. The first byte picks the options. */
 #define _XOPEN_SOURCE 700
-#define main spyc_main
-#include "../spyc.c"
-#undef main
-
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
 #include <ftw.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+int spyc_main(int argc, char **argv);
 
 static const char *const files[] = {"main.py", "a.py", "pkg/__init__.py", "pkg/b.py"};
 
@@ -61,6 +68,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     argv[argc++] = "--deps"; argv[argc++] = deps;
     argv[argc++] = "-o"; argv[argc++] = output;
     argv[argc++] = entry;
+    argv[argc] = NULL;
+    /* spyc's output is the fuzzer's noise. */
+    FILE *out = freopen("/dev/null", "w", stdout);
+    (void)out;
     spyc_main(argc, argv);
     nftw(dir, remove_entry, 8, FTW_DEPTH | FTW_PHYS);
     return 0;

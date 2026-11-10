@@ -57,7 +57,7 @@ Run a script or the interactive shell:
 Compile a script into a standalone program:
 
 ```sh
-./spyc -o hello examples/hello.py
+bin/spyc -o hello examples/hello.py
 ./hello
 ```
 

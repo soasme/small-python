@@ -1,7 +1,7 @@
 *.o
 *.a
 /spy
-/spyc
+/bin/
 /spy-worker
 /tests/api
 /tests/oom

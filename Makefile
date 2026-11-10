@@ -27,7 +27,7 @@ LDLIBS += -ldl
 endif
 
 .PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
-all: spy spyc spy-worker libspy.a libspy-std.a
+all: spy bin/spyc spy-worker libspy.a libspy-std.a
 
 spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -68,13 +68,31 @@ JS_MODES ?= worker inbox thread
 test-javascript: javascript/spy-worker.wasm
 	cd javascript && for mode in $(JS_MODES); do echo "transport: $$mode"; SMALL_PYTHON_TEST_MODE=$$mode node --test test/*.test.js || exit 1; done
 
-# spyc parses with the engine itself, as qjsc compiles with quickjs.c. It
-# builds executables with this build's compiler and link flags, so a
-# sanitizer or coverage build's spyc links its own libspy.a.
-spyc: $(OBJDIR)/spyc.o
+# spyc is a Python program, spyc/, with the C module spyc/_spyc.c. The
+# previous release's spyc (tools/bootstrap.sh) writes it as C with its main,
+# never spyc itself, and this build compiles that against this tree's
+# engine, so spyc parses with the engine it ships with. It builds
+# executables with this build's compiler and link flags, so a sanitizer or
+# coverage build's spyc links its own libspy.a. SPYC_BOOTSTRAP names
+# another spyc to build it with, as on a platform with no release.
+SPYC_BOOTSTRAP ?= $(OBJDIR)/bootstrap/spyc
+$(OBJDIR)/bootstrap/spyc: tools/bootstrap.sh
+	sh tools/bootstrap.sh $(dir $@)
+
+$(OBJDIR)/spyc-main.c: $(wildcard spyc/*.py) spyc/_spyc.c $(SPYC_BOOTSTRAP)
+	mkdir -p $(dir $@)
+	$(SPYC_BOOTSTRAP) -e -M sys -x _spy -o $@ -m spyc spyc/_spyc.c
+
+bin/spyc: $(OBJDIR)/spyc-main.o $(OBJDIR)/spyc/_spyc.o libspy-std.a libspy.a
+	mkdir -p bin
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-$(OBJDIR)/spyc.o: CPPFLAGS += -DCONFIG_CC='"$(CC) $(LDFLAGS)"' -DCONFIG_PREFIX='"$(PREFIX)"'
+$(OBJDIR)/spyc-main.o: $(OBJDIR)/spyc-main.c spy.h spy-std.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/spyc/_spyc.o: CPPFLAGS += -DCONFIG_CC='"$(CC) $(LDFLAGS)"' -DCONFIG_PREFIX='"$(PREFIX)"'
+$(OBJDIR)/spyc/_spyc.o: spy-module.h
+$(OBJDIR)/spyc-main.o $(OBJDIR)/spyc/_spyc.o: CPPFLAGS += -I.
 
 libspy.a: $(OBJDIR)/spy.o
 	$(AR) rcs $@ $^
@@ -105,9 +123,9 @@ $(PGO_DATA): spy.c spy.h host.h spy-unicode.h spy-intrinsics.h tests/run-spec.c 
 	$(LLVM_PROFDATA) merge -o $@ $(OBJDIR)/pgo/*.profraw
 endif
 
-$(OBJDIR)/cli.o $(OBJDIR)/spyc.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
-$(OBJDIR)/spy.o $(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy-unicode.h spy-intrinsics.h
-$(OBJDIR)/spyc.o $(OBJDIR)/tests/oom.o: spy.c
+$(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/run-spec.o: host.h
+$(OBJDIR)/spy.o $(OBJDIR)/tests/oom.o: spy-unicode.h spy-intrinsics.h
+$(OBJDIR)/tests/oom.o: spy.c
 $(OBJDIR)/spy-std.o $(OBJDIR)/cli.o $(OBJDIR)/run-cython.o $(OBJDIR)/tests/api.o $(OBJDIR)/tests/threads.o: spy-std.h
 $(OBJDIR)/spy-std.o $(OBJDIR)/tests/oom.o: spy-std-modules.h spy-module.h
 $(OBJDIR)/tests/oom.o: spy-std.c
@@ -170,11 +188,11 @@ test-spec-oracle: tests/run-spec
 # The bundler tests (docs/build.md 10.2). The bundler is not written yet, so
 # these fail. test-build-oracle also runs each test unbundled on the pinned
 # CPython; tests/build_runner.py --oracle-only runs that phase alone.
-test-build: spyc libspy.a libspy-std.a
-	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
+test-build: bin/spyc libspy.a libspy-std.a
+	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py bin/spyc
 
-test-build-oracle: spyc libspy.a libspy-std.a
-	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/build_runner.py ./spyc --oracle $(CPYTHON)
+test-build-oracle: bin/spyc libspy.a libspy-std.a
+	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tests/build_runner.py bin/spyc --oracle $(CPYTHON)
 
 # TLA+ tools 1.7.4 (TLC 2.19), pinned by checksum; TLC needs a Java runtime.
 TLA_JAR = $(OBJDIR)/tla/tla2tools.jar
@@ -207,7 +225,7 @@ tla-coverage:
 
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
-	install -m755 spy spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
+	install -m755 spy bin/spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h spy-std.h spy-module.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
 	install -m644 docs/manual.md docs/api.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
@@ -256,7 +274,7 @@ test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cy
 	CC='$(CC)' CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/native.py ./spy
 	CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/executable.py
 	$(PYTHON) tests/commands.py
-	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py ./spyc
+	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py bin/spyc
 
 # The CPython binding (python/, the small-python package) builds with setuptools into .obj/binding.
 test-binding: spy-worker
@@ -352,9 +370,11 @@ fuzz: $(FUZZERS)
 fuzz/fuzz_eval fuzz/fuzz_compile: fuzz/%: $(OBJDIR)/fuzz/%.o $(FUZZ_OBJS)
 	$(FUZZ_CC) $^ $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
 
-# spyc and tests/oom include the engine, so their fuzzers do too.
-fuzz/fuzz_spyc: fuzz/fuzz_spyc.c spyc.c host.h spy.c spy.h spy-unicode.h spy-intrinsics.h
-	$(FUZZ_CC) $(FUZZ_CFLAGS) $< $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
+# fuzz_spyc runs spyc's main, renamed, over the fuzzer's engine.
+fuzz/fuzz_spyc: fuzz/fuzz_spyc.c $(OBJDIR)/spyc-main.c spyc/_spyc.c $(OBJDIR)/fuzz/spy.o $(OBJDIR)/fuzz/spy-std.o
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -Dmain=spyc_main $(filter %.c %.o,$^) $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
+
+# tests/oom includes the engine, so its fuzzer does too.
 
 fuzz/fuzz_oom: fuzz/fuzz_oom.c tests/oom.c spy.c spy.h spy-unicode.h spy-intrinsics.h
 	$(FUZZ_CC) $(FUZZ_CFLAGS) $< $(LIB_FUZZING_ENGINE) $(LDLIBS) -o $@
@@ -375,9 +395,10 @@ $(REPLAY_DIR)/fuzz_eval $(REPLAY_DIR)/fuzz_compile: $(REPLAY_DIR)/%: fuzz/%.c fu
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< fuzz/fuzz_common.c spy.c spy-std.c $(LDLIBS) -o $@
 
-$(REPLAY_DIR)/fuzz_spyc: fuzz/fuzz_spyc.c fuzz/replay.c spyc.c host.h spy.c spy.h spy-unicode.h spy-intrinsics.h
+$(REPLAY_DIR)/fuzz_spyc: fuzz/fuzz_spyc.c fuzz/replay.c $(OBJDIR)/spyc-main.c spyc/_spyc.c spy.c spy.h spy-std.c spy-std.h spy-unicode.h spy-intrinsics.h spy-std-modules.h spy-module.h
 	mkdir -p $(dir $@)
-	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< $(LDLIBS) -o $@
+	$(FUZZ_CC) $(REPLAY_CFLAGS) -Dmain=spyc_main -c $(OBJDIR)/spyc-main.c -o $@-main.o
+	$(FUZZ_CC) $(REPLAY_CFLAGS) fuzz/replay.c $< $@-main.o spyc/_spyc.c spy.c spy-std.c $(LDLIBS) -o $@
 
 $(REPLAY_DIR)/fuzz_oom: fuzz/fuzz_oom.c fuzz/replay.c tests/oom.c spy.c spy.h spy-unicode.h spy-intrinsics.h
 	mkdir -p $(dir $@)
@@ -391,7 +412,7 @@ $(OBJDIR)/fuzz/fuzz_common.o $(OBJDIR)/fuzz/fuzz_eval.o $(OBJDIR)/fuzz/fuzz_comp
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -c $< -o $@
 
-bench: bench/lifecycle spy spyc libspy.a examples/fib.so
+bench: bench/lifecycle spy bin/spyc libspy.a examples/fib.so
 	./bench/lifecycle
 	size spy
 	python3 bench/spyc.py
@@ -429,15 +450,15 @@ coverage:
 	SPY_TEST_TIMEOUT=600 $(MAKE) CC=clang CFLAGS='-O1 -g -std=c11 $(COVERAGE_PROFILE) -fcoverage-mapping -mllvm -runtime-counter-relocation' \
 		LDFLAGS='$(COVERAGE_PROFILE)' test test-binding
 	$(LLVM_PROFDATA) merge -o $(COVERAGE_DIR)/all.profdata $(COVERAGE_DIR)/*.profraw
-	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./spyc -object ./tests/run-spec \
-		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
+	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./bin/spyc -object ./tests/run-spec \
+		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
 	$(LLVM_COV) show -format=html -output-dir=$(COVERAGE_DIR)/html -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy \
-		-object ./spyc -object ./tests/run-spec -object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c
+		-object ./bin/spyc -object ./tests/run-spec -object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
 	@echo "Annotated sources: $(COVERAGE_DIR)/html/index.html"
-	$(LLVM_COV) export -format=lcov -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./spyc -object ./tests/run-spec \
-		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc.c spy-std.c cli.c spy-worker.c > $(COVERAGE_DIR)/all.lcov
-	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc.c spy-std.c cli.c spy-worker.c
+	$(LLVM_COV) export -format=lcov -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./bin/spyc -object ./tests/run-spec \
+		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c > $(COVERAGE_DIR)/all.lcov
+	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
 
 clean:
-	rm -f spy spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
+	rm -f spy bin/spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
 	rm -rf $(OBJDIR) examples/fib.so.dSYM java/licenses java/*/native java/*/target

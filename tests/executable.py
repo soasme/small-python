@@ -29,7 +29,7 @@ for options, extra, expected in [([], [], "standalone 45 True\n"),
         generated = directory / "hello generated.c"
         binary = directory / "hello program"
         source.write_text(PROGRAM, encoding="utf-8")
-        subprocess.run([str(ROOT / "spyc"), "-e", *options, "-o", str(generated), str(source)], check=True)
+        subprocess.run([str(ROOT / "bin" / "spyc"), "-e", *options, "-o", str(generated), str(source)], check=True)
         build(generated, *extra, binary=binary)
         source.unlink()
         generated.unlink()
@@ -46,10 +46,10 @@ for options, library, expected in [([], "libspy.a", "standalone 45 True\n"),
         directory = Path(temp)
         source = directory / "hello source.py"
         source.write_text(PROGRAM, encoding="utf-8")
-        result = subprocess.run([str(ROOT / "spyc"), "-v", *options, str(source)],
+        result = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", *options, str(source)],
                                 cwd=directory, check=True, capture_output=True, text=True)
         assert f"-I {ROOT} " in result.stdout and f" {ROOT / library} " in result.stdout, result.stdout
-        subprocess.run([str(ROOT / "spyc"), "-e", str(source)], cwd=directory, check=True)
+        subprocess.run([str(ROOT / "bin" / "spyc"), "-e", str(source)], cwd=directory, check=True)
         assert (directory / "out.c").exists()
         source.unlink()
         result = subprocess.run(["./a.out"], check=True, capture_output=True, text=True, cwd=directory)
@@ -59,7 +59,7 @@ for options, library, expected in [([], "libspy.a", "standalone 45 True\n"),
 # removes every file it began to write, keeps the files it did not reach, and
 # never leaves its temporary C file; SpyBuildOutput.tla models each step.
 # Every case starts with an old output, metafile and dependency rule.
-def contract(args, status, message, kept, removed, env={}, spyc=ROOT / "spyc", signal_number=None, fake=True):
+def contract(args, status, message, kept, removed, env={}, spyc=ROOT / "bin" / "spyc", signal_number=None, fake=True):
     with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
         directory = Path(temp)
         (directory / "tmp").mkdir()
@@ -126,23 +126,23 @@ aux = ["--metafile", "m.json", "--deps", "p.d"]
 # The compiler spyc runs, as -v prints it; the stand-in must be found on PATH.
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     (Path(temp) / "one.py").write_text("print(1)\n", encoding="utf-8")
-    COMPILER = subprocess.run([str(ROOT / "spyc"), "-v", "one.py"], cwd=temp, check=True,
+    COMPILER = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", "one.py"], cwd=temp, check=True,
                               capture_output=True, text=True).stdout.split()[0]
     assert "/" not in COMPILER, f"spyc runs {COMPILER} by path; build it with a compiler found on PATH"
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     alone = Path(temp) / "spyc"  # spy.h beside it, but no libspy.a: the link fails
-    shutil.copy(ROOT / "spyc", alone)
+    shutil.copy(ROOT / "bin" / "spyc", alone)
     shutil.copy(ROOT / "spy.h", Path(temp) / "spy.h")
     for args, status, message, kept, removed, env, spyc in [
-        ([*aux, "-o", "prog"], 0, "", [], [], {}, ROOT / "spyc"),
-        ([*aux, "-o", "prog"], 1, "cannot write", ["prog", "m.json", "p.d"], [], {"TMPDIR": "/nonexistent"}, ROOT / "spyc"),
-        ([*aux, "-o", "prog"], 1, "cannot run", ["prog", "m.json", "p.d"], [], {"PATH": "/nonexistent"}, ROOT / "spyc"),
+        ([*aux, "-o", "prog"], 0, "", [], [], {}, ROOT / "bin" / "spyc"),
+        ([*aux, "-o", "prog"], 1, "cannot write", ["prog", "m.json", "p.d"], [], {"TMPDIR": "/nonexistent"}, ROOT / "bin" / "spyc"),
+        ([*aux, "-o", "prog"], 1, "cannot run", ["prog", "m.json", "p.d"], [], {"PATH": "/nonexistent"}, ROOT / "bin" / "spyc"),
         ([*aux, "-o", "prog"], 1, "libspy.a", ["m.json", "p.d"], ["prog"], {}, alone),
-        (["-e", *aux, "-o", "missing/prog.c"], 1, "cannot write missing/prog.c", ["m.json", "p.d"], [], {}, ROOT / "spyc"),
-        (["--metafile", "missing/m.json", "--deps", "p.d", "-o", "prog"], 1, "cannot write missing/m.json", ["p.d"], ["prog"], {}, ROOT / "spyc"),
-        (["-e", "--metafile", "missing/m.json", "--deps", "p.d", "-o", "prog.c"], 1, "cannot write missing/m.json", ["p.d"], ["prog.c"], {}, ROOT / "spyc"),
-        (["--metafile", "m.json", "--deps", "missing/p.d", "-o", "prog"], 1, "cannot write missing/p.d", [], ["prog", "m.json"], {}, ROOT / "spyc"),
-        (["-e", "-c", "-o", "prog"], 2, "usage:", ["prog"], [], {}, ROOT / "spyc"),
+        (["-e", *aux, "-o", "missing/prog.c"], 1, "cannot write missing/prog.c", ["m.json", "p.d"], [], {}, ROOT / "bin" / "spyc"),
+        (["--metafile", "missing/m.json", "--deps", "p.d", "-o", "prog"], 1, "cannot write missing/m.json", ["p.d"], ["prog"], {}, ROOT / "bin" / "spyc"),
+        (["-e", "--metafile", "missing/m.json", "--deps", "p.d", "-o", "prog.c"], 1, "cannot write missing/m.json", ["p.d"], ["prog.c"], {}, ROOT / "bin" / "spyc"),
+        (["--metafile", "m.json", "--deps", "missing/p.d", "-o", "prog"], 1, "cannot write missing/p.d", [], ["prog", "m.json"], {}, ROOT / "bin" / "spyc"),
+        (["-e", "-c", "-o", "prog"], 2, "usage:", ["prog"], [], {}, ROOT / "bin" / "spyc"),
     ]:
         contract(args, status, message, kept, removed, env, spyc)
 # Interrupted: the compiler's group is stopped and nothing is left.
@@ -173,7 +173,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     (directory / "c modules/answer.c").write_text(ANSWER, encoding="utf-8")
     shutil.copy(ROOT / "examples/fib.c", directory / "c modules/fib.c")
     modules = ["c modules/answer.c", "c modules/fib.c"]
-    result = subprocess.run([str(ROOT / "spyc"), "-v", "--deps", "p.d", "-o", "prog", "app.py", *modules, "--", "-DANSWER=42"],
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", "--deps", "p.d", "-o", "prog", "app.py", *modules, "--", "-DANSWER=42"],
                             cwd=directory, check=True, capture_output=True, text=True)
     assert " c modules/answer.c c modules/fib.c -DANSWER=42 " in result.stdout, result.stdout
     assert (directory / "p.d").read_text(encoding="utf-8") == "prog: app.py c\\ modules/answer.c c\\ modules/fib.c\n"
@@ -183,21 +183,21 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     assert result.stdout == "42 55\n", result
     # -e writes the same main; the host compiles the modules with it.
     (directory / "app.py").write_text("import fib\nprint(fib.fib(20))\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-e", "-o", "prog.c", "app.py", "c modules/fib.c"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-e", "-o", "prog.c", "app.py", "c modules/fib.c"], cwd=directory, check=True)
     build(directory / "prog.c", directory / "c modules/fib.c", binary=directory / "prog")
     result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
     assert result.stdout == "6765\n", result
     # A C module that does not compile fails the build, leaving nothing.
     (directory / "broken.c").write_text("this is not C\n", encoding="utf-8")
     (directory / "prog").unlink()
-    result = subprocess.run([str(ROOT / "spyc"), "-o", "prog", "app.py", "c modules/fib.c", "broken.c"], cwd=directory, capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-o", "prog", "app.py", "c modules/fib.c", "broken.c"], cwd=directory, capture_output=True, text=True)
     assert result.returncode == 1 and "broken.c" in result.stderr and not (directory / "prog").exists(), result
     # A module name must be an identifier; -c has no main to register it in,
     # and only executable output runs a compiler for the arguments after --.
     (directory / "prog").write_text("old", encoding="utf-8")
     for args in (["app.py", "fib-2.c"], ["app.py", ".c"], ["-c", "app.py", "c modules/fib.c"], ["-e", "app.py", "--", "-lm"],
                  ["-c", "app.py", "--"], ["-o", "c modules/fib.c", "app.py", "c modules/fib.c"]):
-        result = subprocess.run([str(ROOT / "spyc"), *args], cwd=directory, capture_output=True, text=True)
+        result = subprocess.run([str(ROOT / "bin" / "spyc"), *args], cwd=directory, capture_output=True, text=True)
         assert result.returncode == 2 and result.stderr.startswith("usage:"), (args, result)
     assert (directory / "prog").read_text(encoding="utf-8") == "old"
     assert (directory / "c modules/fib.c").read_text(encoding="utf-8") == (ROOT / "examples/fib.c").read_text(encoding="utf-8")
@@ -226,7 +226,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     (directory / "app.py").write_text("import answer, fib\nprint(answer.value, fib.fib(10))\n", encoding="utf-8")
     (directory / "answer.py").write_text("value = 'source'\n", encoding="utf-8")
     modules = ["c modules/libanswer.a", "c modules/fib.c"]
-    result = subprocess.run([str(ROOT / "spyc"), "-v", "--deps", "p.d", "-o", "prog", "app.py", *modules, "--", "-lm"],
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", "--deps", "p.d", "-o", "prog", "app.py", *modules, "--", "-lm"],
                             cwd=directory, check=True, capture_output=True, text=True)
     assert " -x none c modules/libanswer.a c modules/fib.c -lm " + str(ROOT / "libspy.a") in result.stdout, result.stdout
     assert (directory / "p.d").read_text(encoding="utf-8") == "prog: app.py c\\ modules/libanswer.a c\\ modules/fib.c\n"
@@ -235,7 +235,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     assert result.stdout == "42 55\n", result
     # -e declares and registers it; the host links the archive.
     (directory / "app.py").write_text("import fib\nprint(fib.fib(20))\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-e", "-o", "prog.c", "app.py", "c modules/libfib.a"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-e", "-o", "prog.c", "app.py", "c modules/libfib.a"], cwd=directory, check=True)
     build(directory / "prog.c", directory / "c modules/libfib.a", binary=directory / "prog")
     result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
     assert result.stdout == "6765\n", result
@@ -243,7 +243,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     (directory / "other.c").write_text("int spy_init_other_name(void) { return 0; }\n", encoding="utf-8")
     archive(directory, "other", "other.c")
     (directory / "prog").unlink()
-    result = subprocess.run([str(ROOT / "spyc"), "-o", "prog", "app.py", "c modules/libfib.a", "libother.a"],
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-o", "prog", "app.py", "c modules/libfib.a", "libother.a"],
                             cwd=directory, capture_output=True, text=True)
     assert result.returncode == 1 and "spy_init_other" in result.stderr and not (directory / "prog").exists(), result
     # An archive is named libNAME.a for an identifier NAME; a name comes once,
@@ -253,7 +253,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
                  ["app.py", ".a"], ["app.py", "libfib-2.a"], ["app.py", "c modules/fib.c", "c modules/libfib.a"],
                  ["app.py", "c modules/libfib.a", "c modules/libfib.a"], ["app.py", "c modules/fib.c", "c modules/fib.c"],
                  ["-c", "app.py", "c modules/libfib.a"], ["-o", "c modules/libfib.a", "app.py", "c modules/libfib.a"]):
-        result = subprocess.run([str(ROOT / "spyc"), *args], cwd=directory, capture_output=True, text=True)
+        result = subprocess.run([str(ROOT / "bin" / "spyc"), *args], cwd=directory, capture_output=True, text=True)
         assert result.returncode == 2 and result.stderr.startswith("usage:"), (args, result)
     assert (directory / "prog").read_text(encoding="utf-8") == "old"
 print("Archive modules passed")
@@ -262,7 +262,7 @@ print("Archive modules passed")
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     directory = Path(temp)
     (directory / "app.py").write_text("import sys\nprint('ran')\nsys.exit(eval(sys.argv[1]))\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
     for code, status, stderr in (("None", 0, ""), ("3", 3, ""), ("256 + 7", 7, ""), ("-1", 255, ""), ("True", 1, ""),
                                  ("False", 0, ""), ("2 ** 70", 255, ""), ("type('I', (int,), {})(4)", 4, ""),
                                  ("'bye'", 1, "bye\n"), ("1.5", 1, "1.5\n"), ("1 / 0", 1, "<string>:1: ZeroDivisionError: division by zero\n")):
@@ -272,7 +272,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
         assert (result.returncode, result.stdout, errors) == (status, "ran\n", stderr), (code, result)
     # A code whose str() fails prints nothing and still fails.
     (directory / "app.py").write_text("class C:\n    def __str__(self): raise ValueError\nraise SystemExit(C())\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-o", "prog", "app.py"], cwd=directory, check=True)
     result = subprocess.run(["./prog"], cwd=directory, capture_output=True, text=True)
     assert result.returncode == 1 and "Error" not in result.stderr, result
 print("Built program exit statuses passed")
@@ -284,7 +284,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     (directory / "app.py").write_text("import sys\nprint(sys.argv == sys.orig_argv, sys.argv is not sys.orig_argv, sys.argv)\n"
                                       "with open(sys.argv[1]) as f:\n    print(f.read())\n", encoding="utf-8")
     (directory / "data file").write_text("contents", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
     result = subprocess.run([b"./prog", b"data file", "é".encode(), b"\xff", b""], cwd=directory, capture_output=True)
     assert result.stdout == "True True ['./prog', 'data file', 'é', '\\udcff', '']\ncontents\n".encode(), result
     # Outside the working directory nothing is reachable.
@@ -294,7 +294,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     # program still runs.
     (directory / "gone").mkdir()
     (directory / "app.py").write_text("import sys\nprint(sys.argv[1:])\nopen('x')\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
     result = subprocess.run("cd gone && rmdir ../gone && ../prog arg", shell=True, cwd=directory, capture_output=True, text=True)
     assert result.returncode == 1 and result.stdout == "['arg']\n" and "Error: " in result.stderr, result
 print("Command line and working directory passed")
@@ -322,13 +322,13 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     source, generated, host, binary = (directory / name for name in ("hello source.py", "hello generated.c", "host.c", "host program"))
     source.write_text("print('hosted', answer())\n", encoding="utf-8")
     host.write_text(HOST, encoding="utf-8")
-    subprocess.run([str(ROOT / "spyc"), "-c", "-o", str(generated), str(source)], check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-c", "-o", str(generated), str(source)], check=True)
     assert "int main" not in generated.read_text(encoding="utf-8")
     build(host, generated, binary=binary)
     source.unlink()
     result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
     assert result.stdout == "hosted 42\n", result
-    usage = subprocess.run([str(ROOT / "spyc"), "-c", "-M", "sys", "-o", str(generated), str(source)], capture_output=True, text=True)
+    usage = subprocess.run([str(ROOT / "bin" / "spyc"), "-c", "-M", "sys", "-o", str(generated), str(source)], capture_output=True, text=True)
     assert usage.returncode == 2 and usage.stderr.startswith("usage:"), usage
 print("Source-only generation for a host program passed")
 
@@ -386,7 +386,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     source, helper = Path(temp) / "main.py", Path(temp) / "helper.py"
     source.write_text("import helper\n", encoding="utf-8")
     helper.write_text("x = 1\n" * 3, encoding="utf-8")
-    result = subprocess.run([str(ROOT / "spyc"), "-e", "--analyze", "-o", str(Path(temp) / "main.c"), str(source)],
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-e", "--analyze", "-o", str(Path(temp) / "main.c"), str(source)],
                             capture_output=True, text=True, check=True)
     assert [line.rsplit(None, 1) for line in result.stderr.splitlines()[1:]] == [
         [" " * 4 + str(helper), "18"], [" " * 4 + str(source), "14"]], result.stderr

@@ -8281,6 +8281,43 @@ static SPYValue *parse(SPYContext *c, const char *source, size_t len, const char
     return unit;
 }
 
+/* _spy.tokenize(source, filename): the tokens the engine lexes from source,
+ * bytes decoded as a module's source is. The result is (text, tokens): text
+ * the decoded source, UTF-8 bytes with normalized line ends, and per token
+ * (kind, start, end, line, level), its byte offsets in text and the bracket
+ * depth after it. kind is NAME, NUMBER, STRING, NEWLINE, INDENT, DEDENT,
+ * ENDMARKER, or OP. spyc scans imports and minifies with it. */
+static SPYValue *tokenize_native(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    if (argc != 2 || argv[0]->type != SPY_BYTES || argv[1]->type != SPY_STRING)
+        return spy_error(c, "TypeError", "tokenize expects source bytes and a file name");
+    SPYValue *decoded = decode_source(c, argv[0]->as.string.data, argv[0]->as.string.len, argv[1]->as.string.data);
+    char *text = decoded ? copy_text(c, decoded->as.string.data, decoded->as.string.len) : NULL, *end = text;
+    for (const char *s = text; s && *s; s++) {
+        if (*s == '\r') { *end++ = '\n'; if (s[1] == '\n') s++; }
+        else *end++ = *s;
+    }
+    if (end) *end = 0;
+    Parser p = {.ctx = c};
+    SPYValue *tokens = text && !lex(&p, text) ? spy_list(c) : NULL, *result = NULL;
+    for (size_t i = 0; tokens && i < p.len && (!i || p.tokens[i - 1].kind != T_END); i++) {
+        const Token *t = &p.tokens[i];
+        const char *kind = t->kind == T_END ? "ENDMARKER" : t->kind == T_NAME ? "NAME" : t->kind == T_STRING ? "STRING" :
+                           t->kind == T_NL ? "NEWLINE" : t->kind == T_INDENT ? "INDENT" : t->kind == T_DEDENT ? "DEDENT" :
+                           t->kind == T_INT || t->kind == T_FLOAT || t->kind == T_IMAG ? "NUMBER" : "OP";
+        SPYValue *fields[] = {spy_string(c, kind, strlen(kind)), spy_int(c, (int64_t)(t->start - text)),
+                              spy_int(c, (int64_t)(t->start + t->len - text)), spy_int(c, (int64_t)t->line), spy_int(c, (int64_t)t->level)};
+        SPYValue *token = fields[0] && fields[1] && fields[2] && fields[3] && fields[4] ? spy_tuple(c, 5, fields) : NULL;
+        if (!token || spy_list_append(c, tokens, token)) { spy_release(tokens); tokens = NULL; }
+        spy_release(token);
+        for (size_t j = 0; j < 5; j++) spy_release(fields[j]);
+    }
+    SPYValue *bytes = tokens ? spy_bytes(c, text, (size_t)(end - text)) : NULL;
+    if (bytes) result = spy_tuple(c, 2, (SPYValue *[]){bytes, tokens});
+    spy_release(bytes); spy_release(tokens); spy_release(decoded);
+    mem_free(p.tokens); mem_free(text);
+    return result;
+}
 static size_t string_length(SPYValue *v) {
     if (v->type != SPY_STRING) return v->as.string.len;
     if (v->as.string.chars) return v->as.string.chars - 1;
@@ -17359,7 +17396,8 @@ static int sys_natives(SPYContext *c, SPYValue *module) {
     return status;
 }
 int spy_init_primitives(SPYContext *c, SPYValue *module) {
-    return sys_natives(c, module) || gc_natives(c, module) || weak_natives(c, module) || file_natives(c, module) ? -1 : 0;
+    return sys_natives(c, module) || gc_natives(c, module) || weak_natives(c, module) || file_natives(c, module) ||
+           define_native(c, module, "tokenize", tokenize_native, NULL) ? -1 : 0;
 }
 static SPYValue *import_module(SPYContext *, const char *);
 /* A module already in sys.modules; None there halts the import. */

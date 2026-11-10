@@ -67,7 +67,7 @@ print(kind(json.dumps, "\udcff"), kind(json.loads, '"\\udcff"'), kind(json.dumps
 with tempfile.TemporaryDirectory(prefix="jsonify ") as temp:
     directory = Path(temp)
     (directory / "limits.py").write_text(LIMITS, encoding="utf-8")
-    subprocess.run([str(HERE / "../../spyc"), "-o", "limits", "limits.py", str(HERE / "target/release/libjson.a"),
+    subprocess.run([str(HERE / "../../bin/spyc"), "-o", "limits", "limits.py", str(HERE / "target/release/libjson.a"),
                     "--", *sys.argv[1:]], cwd=directory, check=True)
     result = run("./limits", cwd=directory)
     assert result.stdout.splitlines() == [

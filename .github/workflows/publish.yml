@@ -408,11 +408,11 @@ jobs:
           python-version: '3.13'
 
       - name: Build
-        run: make CC=gcc LDFLAGS='${{ matrix.ldflags }}' spy spyc spy-worker libspy.a libspy-std.a
+        run: make CC=gcc LDFLAGS='${{ matrix.ldflags }}' spy bin/spyc spy-worker libspy.a libspy-std.a
         if: runner.os != 'macOS'
 
       - name: Build
-        run: make spy spyc spy-worker libspy.a libspy-std.a
+        run: make spy bin/spyc spy-worker libspy.a libspy-std.a
         if: runner.os == 'macOS'
 
       - name: Stage and check

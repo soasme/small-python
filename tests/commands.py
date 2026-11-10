@@ -15,7 +15,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
-SPYC = str(ROOT / "spyc")
+SPYC = str(ROOT / "bin" / "spyc")
 VERSION = next(line.split('"')[1] for line in (ROOT / "spy.h").read_text().splitlines() if "define SPY_VERSION" in line)
 
 
@@ -133,7 +133,8 @@ with fresh() as temp:
     directory = Path(temp)
     tree = directory / "tree"
     tree.mkdir()
-    for name in ("spyc", "spy.h", "spy-std.h", "libspy.a", "libspy-std.a"):
+    shutil.copy(SPYC, tree / "spyc")
+    for name in ("spy.h", "spy-std.h", "libspy.a", "libspy-std.a"):
         shutil.copy(ROOT / name, tree / name)
     files(directory, {"app.py": "print('ok')\n"})
     for _ in range(2):

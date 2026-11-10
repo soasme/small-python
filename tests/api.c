@@ -1549,6 +1549,23 @@ int main(int argc, char **argv) {
         spy_collect(c);
     }
     assert(spy_live_values(c) <= before + 8);
+    /* _spy.tokenize, spyc's view of the lexer: the decoded source with its
+     * line ends normalized, each token's kind, byte span, line and bracket
+     * depth after it, one ENDMARKER, and the lexer's and decoder's errors. */
+    assert(!spy_exec(c, "import _spy\n"
+                        "text, tokens = _spy.tokenize(b'# coding: latin-1\\r\\nf(\\xe9, 1)\\r', 'k.py')\n"
+                        "assert text == b'# coding: latin-1\\nf(\\xc3\\xa9, 1)\\n', text\n"
+                        "assert [(k, text[s:e], line, level) for k, s, e, line, level in tokens] == [\n"
+                        "    ('NAME', b'f', 2, 0), ('OP', b'(', 2, 1), ('NAME', b'\\xc3\\xa9', 2, 1), ('OP', b',', 2, 1),\n"
+                        "    ('NUMBER', b'1', 2, 1), ('OP', b')', 2, 0), ('NEWLINE', b'\\n', 2, 0), ('ENDMARKER', b'', 3, 0)], tokens\n"
+                        "kinds = [t[0] for t in _spy.tokenize(b'if x:\\n    y = \\'s\\'\\n', 'k.py')[1]]\n"
+                        "assert kinds == ['NAME', 'NAME', 'OP', 'NEWLINE', 'INDENT', 'NAME', 'OP', 'STRING', 'NEWLINE', 'DEDENT', 'ENDMARKER'], kinds\n"
+                        "for args, error in (((b'x',), TypeError), (('x', 'k.py'), TypeError), ((b'x', 1), TypeError),\n"
+                        "                    ((b'if x:\\n  a\\n b\\n', 'k.py'), IndentationError), ((b'\\xff', 'k.py'), SyntaxError),\n"
+                        "                    ((b'# coding: nope\\n', 'k.py'), SyntaxError)):\n"
+                        "    try: _spy.tokenize(*args)\n"
+                        "    except error: pass\n"
+                        "    else: raise AssertionError(args)\n", "tokenize.py"));
 
 
     {
