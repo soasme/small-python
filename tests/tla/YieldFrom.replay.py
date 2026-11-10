@@ -14,6 +14,8 @@ def make(log):
                     got = yield ("in", str(i), last)
                 except ValueError:
                     got = "caught"
+                except GeneratorExit:
+                    return "ignored"
                 if got == "stop":
                     return "early"
                 last, i = str(got), i + 1

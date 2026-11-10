@@ -133,11 +133,17 @@ Unreleased (0.8.0):
 - getattr() with a default calls a Python getter, __get__, __getattr__ or
   __getattribute__ without the C stack
 - x != y calls the Python __eq__ that object's __ne__ inverts without the C stack
-- A dead generator suspended inside a try or with closes without the C stack
-- A Python __del__ or generator close due at any step, not only one starting a
+- a dead generator suspended inside a try, a with or a yield from closes without
+  the C stack
+- a Python __del__ or generator close due at any step, not only one starting a
   source line, runs without the C stack
 - await of a coroutine, or of a generator from __await__, runs it without the C
   stack; such await chains are about a third faster
+- throw() into a generator in a yield from, or a coroutine in an await, runs
+  without the C stack
+- close(), or throw() of GeneratorExit, into a generator in a yield from runs
+  without the C stack
+- close()'s GeneratorExit has the exception its caller handles as context
 - complex() and bytes() call an instance's Python __complex__ or __bytes__,
   and subscripting a class its __class_getitem__, without the C stack
 - divmod() and pow() call an instance's Python __divmod__, __pow__ or their

@@ -13,6 +13,8 @@
 (*                     got = yield ('in', str(i), last)                    *)
 (*                 except ValueError:                                      *)
 (*                     got = 'caught'                                      *)
+(*                 except GeneratorExit:                                   *)
+(*                     return 'ignored'                                    *)
 (*                 if got == 'stop': return 'early'                        *)
 (*                 last, i = str(got), i + 1                               *)
 (*             return 'done'                                               *)
@@ -85,7 +87,8 @@ Throw(e) ==
          [] pc = "inner" -> Returned("keyerror")
          [] OTHER -> Finish(<<"raise", e, "-", "-">>)
 
-\* close() closes inner first, then raises GeneratorExit in outer.
+\* close() closes inner first, then raises GeneratorExit in outer, also
+\* when inner caught its own and returned: outer never yields 'ignored'.
 Close ==
     /\ op' = <<"close">>
     /\ result' = <<"return", "None", "-", "-">>

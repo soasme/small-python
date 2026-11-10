@@ -1,11 +1,11 @@
 # spec: PLS-315 27.2.4, 9.7
 # description: A suspended generator that becomes unreachable at a yield
-# inside a try, a with or an except handler is closed before the code after
-# it goes on, also in the middle of an expression: its finally clauses and
-# __exit__ calls run, an exception escaping them or a yield in them leaves
-# the program running, and catching GeneratorExit to return ends it; one
-# dropped while another is closing is closed too, inside functions as at
-# module level.
+# inside a try, a with, an except handler or a yield from is closed before
+# the code after it goes on, also in the middle of an expression: its
+# finally clauses and __exit__ calls run, an exception escaping them or a
+# yield in them leaves the program running, and catching GeneratorExit to
+# return ends it; one dropped while another is closing is closed too,
+# inside functions as at module level.
 from harness import *
 
 log = []
@@ -64,6 +64,9 @@ def stubborn():
         log.append("stubborn")
         yield 2
 
+def delegating():
+    yield from gen("delegate")
+
 def outer():
     g = gen("inner"); next(g)
     try:
@@ -91,13 +94,14 @@ def results():
     out.append("after bad")
     g = started(stubborn()); g = None
     out.append("after stubborn")
+    g = started(delegating()); g = None
     g = started(outer()); g = None
     out.append(sorted(log[-2:]))
     out.append(log[:-2])
     return out
 
 expected = [["a"], [None, ["a", "mid"], 7], "after bad", "after stubborn", ["inner", "outer"],
-            ["a", "mid", ("exit", "GeneratorExit"), "handled", "returning", "bad", "stubborn"]]
+            ["a", "mid", ("exit", "GeneratorExit"), "handled", "returning", "bad", "stubborn", "delegate"]]
 
 def main():
     return results()
