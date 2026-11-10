@@ -335,6 +335,8 @@ by the task and do not require repeated confirmation.
   changes come first, one sub-item each. `Unreleased (X.Y.Z)` names the next
   release the tree carries; a later milestone such as 1.0 is a ROADMAP
   item, not a Changelog version.
+* After a release is published, move `tools/bootstrap.sh` to it (`VERSION`
+  and each platform's sha256), so the next spyc is built by this one.
 * Before tagging and pushing a release, re-measure `docs/benchmark.md` at the
   release commit (`bench/compare.py`, `make bench`) and commit the report.
   Stop at any bench issue (a regression against the last report, a wrong or

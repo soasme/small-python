@@ -82,9 +82,12 @@ tool, and the platform C/math libraries:
 make
 ```
 
-The outputs are `spy`, `spyc`, and `libspy.a`. No Python installation is needed
-to build or run those three artifacts. Python is a development dependency for
-test adapters and documentation tools.
+The outputs are `spy`, `bin/spyc`, and `libspy.a`. No Python installation is
+needed to build or run those three artifacts. spyc is a Python program built
+by the previous release's spyc, which `make` downloads once and checks against
+its checksum (`SPYC_BOOTSTRAP=path/to/spyc` names another; [Building
+programs](build.md) 9.1). Python is a development dependency for test adapters
+and documentation tools.
 
 Build options are set at the top of the Makefile or on the command line:
 
@@ -128,7 +131,7 @@ Execute a source file or command:
 Generate and compile a standalone program:
 
 ```sh
-./spyc -o hello examples/hello.py
+bin/spyc -o hello examples/hello.py
 ./hello
 ```
 
@@ -136,7 +139,7 @@ Generate and compile a standalone program:
 with; `spyc -e -o hello.c` writes that file instead, for any compiler:
 
 ```sh
-./spyc -e -o hello.c examples/hello.py
+bin/spyc -e -o hello.c examples/hello.py
 cc -std=c11 -Os -I. hello.c spy.c -lm -o hello
 ```
 
@@ -176,9 +179,13 @@ implemented.
 #### 2.3.2 `spyc` program generator
 
 ```text
-usage: spyc [options] [-o program] (input.py | -m module) [module.c]... [-- cc-arguments]
-       spyc -e [options] [-o program.c] (input.py | -m module) [module.c]...
-       spyc -c [options] [-o modules.c] (input.py | -m module)...
+usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]
+       spyc [build] -e [options] [-o program.c] (input.py | -m module) [module.c | libmodule.a]...
+       spyc [build] -c [options] [-o modules.c] (input.py | -m module)...
+       spyc run [options] [module.c | libmodule.a]... (input.py | -m module) [argument]...
+       spyc test [options] [module.c | libmodule.a]... [test.py | directory]...
+       spyc clean
+       spyc version
 ```
 
 `spyc` bundles a program and the modules it imports into one C translation
@@ -206,7 +213,12 @@ instead (`out.c` without `-o`). With `-c` the file holds each entry's source as
 `const char spy_name[]` (`game.py` gives `spy_game`) and the loader
 `spy_name_load`, for a host with its own `main`. A failed or interrupted build
 removes the files it began to write. On Windows spyc writes C only (`-e` or
-`-c`). spyc produces no native code or bytecode for Python functions. [Building
+`-c`). `spyc run` builds the program into the cache `.spyc` of the working
+directory, compiling again only when a source, a C module, a header, or a
+library changed, and runs it with the arguments after the entry; `spyc test`
+runs each `test_*.py` below the paths that way and counts those that exit
+with 0; `spyc build` is spyc without a command; `spyc clean` removes the cache; `spyc version`
+prints the version. spyc produces no native code or bytecode for Python functions. [Building
 programs](build.md) is the full reference.
 
 ### 2.4 Local tests
@@ -720,7 +732,7 @@ the host's choice. A host registers modules with `spy_new_module`, and
 `spy_init_primitives` fills one with the engine primitives for modules written
 in Python: the module cache, frames, the recursion and integer-string limits,
 the handled exception, collection, the weak table, host output, and the
-command line. Hosts
+command line, and the tokenizer. Hosts
 register it as `_spy`; a context where none did has no such module. A standard
 layer, `spy-std.c` (`libspy-std.a`, declared in `spy-std.h`), supplies the host
 module `sys`, written on those primitives and specified, after CPython 3.15,
@@ -1019,7 +1031,9 @@ rules, and 1.0.0 declares them stable.
 The promise covers `spy.h` only. `spy_init_primitives` is part of it, but the
 names it puts in `_spy` serve the standard layer and may change in any
 release. Hosts and their Python code should reach those facilities through
-the standard layer's `sys` and the C API, not `_spy`.
+the standard layer's `sys` and the C API, not `_spy`. spyc, which ships with
+the engine and is built against it, is the one program outside the standard
+layer that uses them.
 
 #### 3.4.9 Native modules
 
@@ -1338,7 +1352,8 @@ annotation scopes (8.7, 16.6), which read a class body's names through its
 | `spy-unicode.h`, `tools/build_unicode.py` | Generated Unicode properties and development-only generator |
 | `cli.c`, `host.h` | CLI and host stream support |
 | `spy-std.c`, `spy-std.h`, `modules/` | Standard layer: the host module `sys` |
-| `spyc.c` | Standalone C program generator |
+| `spyc/` | Standalone program generator: Python sources and its C module `_spyc.c` |
+| `tools/bootstrap.sh` | Fetches the previous release's spyc, which builds `bin/spyc` |
 | `run-cython.c` | Persistent evaluation driver for upstream doctests |
 | `tests/run-spec.c` | Conformance driver: the bare core for spec tests and TLA+ replays |
 | `Makefile`, `VERSION`, `Changelog` | Build, installation, version, release history |

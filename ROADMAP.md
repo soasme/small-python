@@ -486,6 +486,8 @@ what the extra size buys.
 - [x] Values from pools in three size classes
 - [x] Java binding; TLA+ models of every package
 - [x] `spyc` writes an executable and compiles C modules in
+- [x] `spyc` is a Python program on the engine with `run`, `test` and a
+  cache, built by the previous release
 - [x] JavaScript package without `SharedArrayBuffer` or a Worker, through JSPI
 - [x] Native modules: `spy`, the in-process bindings and every worker
   package through the protocol's `NATIVE`

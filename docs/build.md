@@ -18,7 +18,13 @@
 `spyc` turns a Python program into one C translation unit and compiles it
 into an executable, unless asked for the C file. It follows the program's
 imports and embeds every module the program reaches, so the program runs
-without any Python file at run time.
+without any Python file at run time. `spyc run` builds a program and runs
+it, and `spyc test` builds and runs a directory of tests
+([2.3](#23-commands)).
+
+spyc is itself a Python program built this way: the package `spyc/` and a
+C module of host services, compiled by the previous release's spyc
+([section 9](#9-implementation)).
 
 Bundling must not change what the program does. Python modules are objects
 that a program can see in
@@ -74,9 +80,13 @@ will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 ## 2 Usage
 
 ```text
-usage: spyc [options] [-o program] (entry.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]
-       spyc -e [options] [-o program.c] (entry.py | -m module) [module.c | libmodule.a]...
-       spyc -c [options] [-o modules.c] (entry.py | -m module)...
+usage: spyc [build] [options] [-o program] (entry.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]
+       spyc [build] -e [options] [-o program.c] (entry.py | -m module) [module.c | libmodule.a]...
+       spyc [build] -c [options] [-o modules.c] (entry.py | -m module)...
+       spyc run [options] [module.c | libmodule.a]... (entry.py | -m module) [argument]...
+       spyc test [options] [module.c | libmodule.a]... [test.py | directory]...
+       spyc clean
+       spyc version
 ```
 
 ```sh
@@ -89,6 +99,8 @@ spyc -o tool tool.py target/release/libjson.a   # with a module json from Rust
 spyc -I lib -x raylib -c -o game_py.c game.py   # for a host that registers raylib
 spyc -D plugins.* -o app app.py                 # plus every module of plugins
 spyc -O --minify --metafile app.json -o app app.py
+spyc run app.py --verbose input.txt             # build into .spyc, then run it
+spyc test tests                                 # every tests/**/test_*.py
 ```
 
 ### 2.1 Options
@@ -139,6 +151,72 @@ imported first, as `python -m` imports them.
 
 The program may also import its entry by name, `import app`. That runs a
 second module, `app`, apart from `__main__`, as it does in CPython.
+
+### 2.3 Commands
+
+The first argument may name a command. Without one, spyc builds, as
+`spyc build` does; an entry cannot be named `build`, `run`, `test`,
+`clean`, or `version` without a directory, as in `./run`.
+
+| Command | Meaning |
+| --- | --- |
+| `spyc build ...` | The build of [2.1](#21-options): the same options, outputs, and statuses. |
+| `spyc run ... ENTRY [ARG]...` | Build the program into the cache and run it in place of spyc. |
+| `spyc test ... [PATH]...` | Build each test in the cache and run it, one after another. |
+| `spyc clean` | Remove the cache. |
+| `spyc version` | Print `spyc` and the engine's version. |
+
+`spyc run` and `spyc test` take the options of [2.1](#21-options) and C
+modules, except `-o`, `-e`, `-c`, and `--`; any of those is a usage error.
+
+**run.** spyc's arguments end at the entry: everything after it is the
+program's. The program gets the entry as written (the file, or the module
+named by `-m`) as `argv[0]`, then those arguments, so `sys.argv` is what
+`python app.py ARG...` gives. Its exit status is spyc's, as is any signal
+that ends it. A build that fails runs nothing and exits with 1, a usage
+error with 2.
+
+**test.** Each `PATH` is a test file, whatever its name, or a directory,
+searched at every depth for files named `test_*.py`, in name order,
+passing over names that start with `.`. Without a path, the working
+directory is searched. Each test is an entry of its own build with the
+same options, and runs with the test's path as `argv[0]`. spyc prints one
+line per test after it ends, then a summary:
+
+```text
+ok    tests/test_cart.py
+FAIL  tests/test_pricing.py (exit 1)
+FAIL  tests/test_rules.py (build)
+1 passed, 2 failed
+```
+
+A test passes when it exits with 0. It fails when its build fails, with
+the build's diagnostics on stderr, or when it exits with another status;
+a test ended by a signal fails with 128 plus the signal's number. The
+tests' own output passes through as they run. spyc exits with 0 when every
+test passes and with 1 otherwise; a path with no test in it is an error,
+status 1, before any test runs.
+
+**The cache.** `run` and `test` build into `.spyc` in the working
+directory. Each executable is named by two hashes: its slot, of the
+build's arguments up to the entry, and its stamp, of everything the
+program is made from: the generated C file, the compiler command spyc was
+built with, the C modules, `spy.h` (and `spy-std.h` with `-M`), and the
+libraries. A build whose name is present runs it without compiling. Otherwise
+the compiler writes beside the name, and the file is renamed into place,
+so a name in the cache always holds a complete program; the build then
+removes its slot's executables of other stamps. Headers that a C module
+includes are not hashed; after changing one, `spyc clean`. Builds of one
+program may run at once. A build may find that a concurrent build from
+other sources removed its executable before it ran; it then fails with
+`cannot run`, and it never runs another build's program.
+`SpyCache.tla` models this ([10.1](#101-tla-model)).
+
+**clean.** `spyc clean` removes the files in `.spyc` whose names the cache
+gives, executables and the temporary files of builds that were killed,
+then the directory. A file of another name stays, and spyc reports that
+the directory could not be removed and exits with 1. Without a cache it
+does nothing.
 
 ## 3 Module resolution
 
@@ -625,30 +703,56 @@ reason.
 
 ## 9 Implementation
 
-### 9.1 Parsing with the engine
+### 9.1 spyc on spy
 
-spyc includes `spy.c`, as `spy-worker.c` does. The build then sees the
-engine's parser, source decoding (PEP 263, BOMs, newline normalization),
-identifier normalization, and syntax errors, and spyc keeps no grammar of its
-own. The walk over parsed units looks for `N_IMPORT` and `N_FROM` nodes, for
-calls of the name `__import__`, and for the `try` statements that guard them.
-`spyc` is therefore about as large as the engine.
+spyc is a Python program, the package `spyc/`, built into one executable
+the way spyc builds any program: its Python sources are embedded, and a C
+module, `spyc/_spyc.c`, is compiled in and registered as `_spyc`. The
+package holds all of spyc's logic: the commands and options
+(`__main__.py`), module resolution and discovery (`resolve.py`), reading
+sources (`scan.py`), and the generated files (`output.py`). `_spyc` holds
+only what Python on the bare core cannot do: list a directory, read, write,
+and rename files, run the compiler and the programs spyc runs, and remove
+what a failed or interrupted build began to write. The list of those files
+is kept in C, so a signal handler can remove them ([2.1](#21-options)).
+`_spyc` also registers the engine primitives, `_spy`, which spyc runs on;
+it uses no standard module.
 
-The resolver ([3.1](#31-search-roots)) uses only C11 file operations:
-`fopen` to read a file, and one portable directory listing so that names are
-compared by exact spelling. That listing and the compiler run of
-[5.3](#53-executable-output) (`mkstemp`, `posix_spawnp`, `waitpid`, `kill`,
-`sigprocmask`) are spyc's only POSIX calls, and spyc keeps them apart from
-the engine.
+spyc never builds itself. `make` fetches the previous release's spyc
+(`tools/bootstrap.sh`, which pins its version and the checksum of each
+platform's archive), has it write spyc as C with its `main` (`-e`), and
+compiles that and `_spyc.c` against this tree's engine into `bin/spyc`.
+spyc thus parses with the engine it ships with, while the release that
+builds it only has to read spyc's own source. `SPYC_BOOTSTRAP=path` names
+another spyc to build with, as on a platform the previous release does not
+cover. Each release moves the pin to itself for the next one.
 
-### 9.2 Minification
+### 9.2 Reading sources with the engine
 
-`--minify` runs the engine's tokenizer over the decoded source and writes the
-tokens back, carrying each comment that stays from the gap before the next
-token. It then tokenizes its result and compares kind, spelling, and line of
-every token, `INDENT` and `DEDENT` included. Over the 2040 files of CPython's
-`Lib` that the engine parses, no result differs, and the specification tests
-(`tests/spec`) pass with each test file minified.
+spyc keeps no grammar of its own. It decodes and checks each source with
+the core's `compile()`, so a syntax error is the engine's. Imports are
+found from the engine's tokens: `_spy.tokenize(source, filename)` decodes
+the bytes as a module's source is decoded (PEP 263, BOMs, newline
+normalization) and returns the decoded text with every token's kind, byte
+span, line, and bracket depth. From the tokens alone `scan.py` finds the
+logical lines (a line ends at a `NEWLINE` token), the blocks
+(`INDENT` ... `DEDENT`), and each compound statement's header (up to its
+first colon outside brackets that no `lambda` claims). It reads `import`
+and `from` statements, calls of the name `__import__`, including those in
+the fields of f-strings and t-strings, the `try` statements that guard
+them, and a module's literal `__all__`.
+
+For a non-UTF-8 source with no encoding declaration, the error does not
+name the file, as `compile()` of bytes does not.
+
+### 9.3 Minification
+
+`--minify` writes the tokens of 9.2 back, carrying each comment that stays
+from the gap before the next token. It then tokenizes its result and
+compares kind, spelling, and line of every token, `INDENT` and `DEDENT`
+included. Over the 2060 files of CPython's `Lib` and the 573 files of
+`tests/spec`, its result is byte for byte that of the C minifier of spyc
+0.9.0; 5 of the `Lib` files do not lex, and neither minifies them.
 
 ## 10 Verification
 
@@ -680,7 +784,8 @@ replayed on spy. Together with this model, a bundled program imports what the
 unbundled program imports.
 
 `tests/tla/SpyBuildOutput.tla` models the files a build lands in, step by
-step as `spyc.c` writes, records, compiles, and removes them, with the
+step as spyc's `write`, `temp`, `compile`, `rename`, and `done` (in
+`spyc/_spyc.c`) write, record, compile, and remove them, with the
 compiler as an environment that writes the output while any of its
 processes runs and may leave a child that ignores the signal. For each mode,
 each choice of metafile and dependency rule, each old file, a failure at
@@ -694,6 +799,17 @@ the signal left, the process group, or recording before `posix_spawnp`, or
 unlinking the temporary file after dropping it from the list, each breaks an
 invariant. Killing only after waiting for the compiler does not, so that
 kill makes the stop prompt rather than correct.
+
+`tests/tla/SpyCache.tla` models the executable cache of
+[2.3](#23-commands). Two builds of one slot run at once, each with the same
+stamp or another, and `spyc clean` may run beside them; either build may be
+interrupted or killed at any step. TLC checks that a name in the cache holds
+the complete program of its stamp; that a build runs nothing but its own
+stamp's program, and fails to run it only when a build of another stamp or
+clean removed it, so builds of one stamp always run; that clean removes only
+the files the cache made and leaves the directory while any other is left;
+that no build but a killed one leaves a temporary file; and that every build
+and clean ends. Renaming a failed compile into place breaks the first check.
 
 `tests/tla/SpyProgram.tla` models what a program is linked from and how it
 starts. For every list of up to two module inputs, each a C file or an
@@ -766,16 +882,25 @@ stand-in compiler found first on `PATH` leaves a child that ignores the
 signal and writes the output later, so only stopping the whole process group
 passes; a second run interrupts the real compiler, which may already have
 finished, so it checks only that each file is old or gone. Removing any part
-of the cleanup from `spyc.c` fails these cases, except signalling the driver
+of the cleanup from `spyc/_spyc.c` fails these cases, except signalling the driver
 alone before the kill of the group. A failed write of the temporary file (a full
 disk) has no test; the model covers it.
+
+`tests/commands.py` checks the commands of [2.3](#23-commands): `version`
+and the usage errors; that `build` writes what spyc writes; that `run` passes
+the arguments and the exit status, compiles once, compiles again after an
+edit to a source, a C module, `spy.h`, or a library, gives other arguments a
+slot of their own, and survives runs at once; that a failing, interrupted,
+or unrunnable compile leaves no temporary file; which files `test` finds and
+how it reports a failure, a failed build, and a signal; and that `clean`
+removes the cache but keeps a file it did not make, and fails then.
 
 `tests/archive.py` runs each shipped tool from a staged release archive
 (`tools/archive.sh`): CI does so on every release platform, and
 `publish.yml` before it packs an archive.
 
-`make test-build` runs the suite against `./spyc`, and `make test` includes
-it; `make test-build-oracle` adds the oracle phase, and
-`tests/build_runner.py ./spyc --oracle-only PYTHON` runs that phase alone.
-spyc passes all 28 tests. On the pinned CPython 3.15, 27 pass the oracle
+`make test-build` runs the suite against `bin/spyc`, and `make test`
+includes it; `make test-build-oracle` adds the oracle phase, and
+`tests/build_runner.py bin/spyc --oracle-only PYTHON` runs that phase alone.
+spyc passes all 31 tests. On the pinned CPython 3.15, 30 pass the oracle
 phase and the `--alias` test is skipped.

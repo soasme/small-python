@@ -1,3 +1,12 @@
+Unreleased (0.10.0):
+
+- spyc is now at bin/spyc
+- spyc run, spyc test, spyc clean and spyc version; spyc build is spyc
+- spyc is a Python program on the engine, built by the previous release's
+  spyc; make downloads it (SPYC_BOOTSTRAP names another)
+- spyc programs write sys.stderr to stderr
+- spyc -D PKG.* adds the modules in name order
+
 2026-11-10 0.9.0:
 
 - Python code no longer runs on the C stack: calls, generators, coroutines,
