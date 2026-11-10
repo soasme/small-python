@@ -12,8 +12,8 @@ endif
 
 # -D 'game.themes.*': the themes are imported by computed name. --deps
 # rebuilds when any bundled file changes.
-flappy: flappy.py raylib.c assets/sprite.py $(ROOT)/spyc $(ROOT)/libspy.a
-	$(ROOT)/spyc -D 'game.themes.*' --minify --metafile flappy.json --deps flappy.d --analyze \
+flappy: flappy.py raylib.c assets/sprite.py $(ROOT)/bin/spyc $(ROOT)/libspy.a
+	$(ROOT)/bin/spyc -D 'game.themes.*' --minify --metafile flappy.json --deps flappy.d --analyze \
 		-o $@ flappy.py raylib.c -- $(RAYLIB) $(SYSTEM)
 -include flappy.d
 
@@ -23,8 +23,8 @@ assets/sprite.py: python.png pack.py $(ROOT)/spy
 	mkdir -p assets
 	$(ROOT)/spy pack.py > $@
 
-$(ROOT)/libspy.a $(ROOT)/spyc $(ROOT)/spy:
-	$(MAKE) -C $(ROOT) $(notdir $@)
+$(ROOT)/libspy.a $(ROOT)/bin/spyc $(ROOT)/spy:
+	$(MAKE) -C $(ROOT) $(patsubst $(ROOT)/%,%,$@)
 
 run: flappy
 	./flappy

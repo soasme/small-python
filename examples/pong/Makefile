@@ -3,11 +3,11 @@
 # raylib.c, and raylib, after --, so it needs no Python file at run time.
 ROOT = ../..
 
-pong: pong.py raylib.c $(ROOT)/spyc $(ROOT)/libspy.a
-	$(ROOT)/spyc -o $@ pong.py raylib.c -- $(shell pkg-config --cflags --libs raylib)
+pong: pong.py raylib.c $(ROOT)/bin/spyc $(ROOT)/libspy.a
+	$(ROOT)/bin/spyc -o $@ pong.py raylib.c -- $(shell pkg-config --cflags --libs raylib)
 
-$(ROOT)/libspy.a $(ROOT)/spyc:
-	$(MAKE) -C $(ROOT) $(notdir $@)
+$(ROOT)/libspy.a $(ROOT)/bin/spyc:
+	$(MAKE) -C $(ROOT) $(patsubst $(ROOT)/%,%,$@)
 
 run: pong
 	./pong
