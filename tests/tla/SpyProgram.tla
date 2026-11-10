@@ -1,15 +1,18 @@
 ----------------------------- MODULE SpyProgram -----------------------------
 (***************************************************************************)
 (* What a program spyc builds is linked from, and how it starts            *)
-(* (docs/build.md 5.3, 5.4, 5.5), as spyc.c implements it. SpyBuild.tla    *)
+(* (docs/build.md 5.3, 5.4, 5.5), as spyc implements it. SpyBuild.tla      *)
 (* models what the bundle holds and SpyBuildOutput.tla the files a build   *)
 (* writes; this models the module inputs, the link, and main. TLC checks,  *)
-(* for every list of up to two module inputs (a C file NAME.c or an        *)
-(* archive libNAME.a, either one defining its init or not, well or badly   *)
-(* named), and for each failure main may meet:                             *)
+(* for every list of up to two C modules (a C file NAME.c or an archive    *)
+(* libNAME.a, either one defining its init or not, named on the command    *)
+(* line, well or badly, or found by an import), and for each failure main  *)
+(* may meet:                                                               *)
 (*                                                                         *)
 (*  - spyc rejects a bad name, or a name given twice, as a usage error     *)
 (*    (status 2) before any link; it accepts every other list.             *)
+(*  - A found module whose init another module also defines (pkg/fib.c     *)
+(*    beside fib.c) fails the build (status 1) before any link.            *)
 (*  - A link succeeds exactly when every input defines its init; then      *)
 (*    each module's init comes from the input of that name.                *)
 (*  - The entry runs only with the command line set and every module       *)
@@ -22,7 +25,9 @@
 (* The implementation, step by step:                                       *)
 (*                                                                         *)
 (*  - spyc's argument loop takes NAME.c and libNAME.a as module NAME,      *)
-(*    which must be an identifier not taken by an earlier input.           *)
+(*    which must be an identifier not taken by an earlier input. The       *)
+(*    search finds others by import; they follow the named ones, and each  *)
+(*    init, spy_init_ and the last name, must be new.                      *)
 (*  - compile runs CC ... -x c PROGRAM -x none INPUTS... ARGS... libspy.a  *)
 (*    -lm: the generated program first, the inputs in their order, the     *)
 (*    arguments after -- (a library an archive needs), then the engine.    *)
@@ -42,12 +47,15 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-\* An input: its form, the module name its file gives ("bad" is not an
-\* identifier), whether an archive's file starts with "lib", and whether it
-\* defines spy_init_NAME.
+\* An input: its form, the last name of its module ("bad" is not an
+\* identifier), whether an archive's file starts with "lib", whether it
+\* defines spy_init_NAME, and whether an import found it. A found module's
+\* file is named for an import, so its name is good.
 Names == {"fib", "json", "bad"}
-Input == [form : {"c", "archive"}, name : Names, lib : BOOLEAN, init : BOOLEAN]
-Lists == {<<>>} \cup {<<i>> : i \in Input} \cup {<<i, j>> : i, j \in Input}
+Input == {i \in [form : {"c", "archive"}, name : Names, lib : BOOLEAN, init : BOOLEAN, found : BOOLEAN] :
+            i.found => i.name # "bad" /\ i.lib}
+\* spyc lists the named inputs first, then the found ones.
+Lists == {<<>>} \cup {<<i>> : i \in Input} \cup {p \in Input \X Input : p[1].found => p[2].found}
 
 Init(n) == "spy_init_" \o n
 \* What the line holds, each item with the symbols it defines and needs:
@@ -66,11 +74,13 @@ LinkLine(list) ==
     <<Program(list)>> \o [k \in 1..Len(list) |-> Module(list, k)]
     \o <<Item("archive", 3, {"system"}, {}), Item("archive", 4, {"engine"}, {})>>
 
-\* spyc's argument checks: an identifier, "lib" before an archive's name,
-\* and each name once.
+\* spyc's argument checks on the named inputs: an identifier, "lib" before
+\* an archive's name, and each name once.
 Valid(i) == i.name # "bad" /\ (i.form = "c" \/ i.lib)
-Accepted(list) == (\A k \in 1..Len(list) : Valid(list[k])) /\
-                  \A k, m \in 1..Len(list) : k # m => list[k].name # list[m].name
+Accepted(list) == (\A k \in 1..Len(list) : list[k].found \/ Valid(list[k])) /\
+                  \A k, m \in 1..Len(list) : k # m /\ ~list[k].found /\ ~list[m].found => list[k].name # list[m].name
+\* A found module's init is defined by another module too.
+Clash(list) == \E k, m \in 1..Len(list) : k # m /\ list[k].found /\ list[k].name = list[m].name
 
 \* How the entry ends, as <<kind, low byte>>: it finishes, raises SystemExit
 \* with code None, an int (its low byte 0, 1, or 3, a status no other outcome
@@ -93,8 +103,9 @@ Start == /\ list \in Lists
          /\ ending = <<"none", 0>> /\ reported = FALSE
 
 Spyc == /\ pc = "spyc"
-        /\ IF Accepted(list) THEN pc' = "link" /\ line' = LinkLine(list) /\ UNCHANGED status
-           ELSE pc' = "done" /\ status' = "2" /\ UNCHANGED line
+        /\ IF ~Accepted(list) THEN pc' = "done" /\ status' = "2" /\ UNCHANGED line
+           ELSE IF Clash(list) THEN pc' = "done" /\ status' = "1" /\ UNCHANGED line
+           ELSE pc' = "link" /\ line' = LinkLine(list) /\ UNCHANGED status
         /\ UNCHANGED <<list, at, origin, undefined, registered, argv, ran, ending, reported, linked>>
 
 \* Record where each newly defined symbol came from.
@@ -139,10 +150,12 @@ TypeOK == /\ list \in Lists /\ at \in 1..6 /\ undefined \subseteq {"main", "engi
           /\ ending \in Endings \cup {<<"none", 0>>} /\ reported \in BOOLEAN
 \* A bad or repeated name is a usage error, and nothing is linked.
 Usage == Finished => ((status = "2") <=> ~Accepted(list)) /\ (status = "2" => line = <<>>)
-\* An accepted list links exactly when every input defines its init, and
-\* a failed link is status 1 with nothing run.
-Complete == Finished /\ Accepted(list) => (linked <=> \A k \in 1..Len(list) : list[k].init)
-                                         /\ (~linked => status = "1" /\ ~ran)
+\* Two inits of one name fail the build before any link.
+Distinct == Finished /\ Accepted(list) /\ Clash(list) => status = "1" /\ line = <<>>
+\* An accepted list without a clash links exactly when every input defines
+\* its init, and a failed link is status 1 with nothing run.
+Complete == Finished /\ Accepted(list) /\ ~Clash(list) => (linked <=> \A k \in 1..Len(list) : list[k].init)
+                                                        /\ (~linked => status = "1" /\ ~ran)
 \* Each module's init is the one its input defines.
 Provenance == registered # {} => \A k \in 1..Len(list) : origin[Init(list[k].name)] = k
 \* The entry runs with the command line and every module registered.

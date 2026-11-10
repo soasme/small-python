@@ -46,11 +46,11 @@ flowchart LR
 
    ```sh
    spyc -D 'game.themes.*' --minify --metafile flappy.json --deps flappy.d --analyze \
-       -o flappy flappy.py raylib.c -- RAYLIB-FLAGS
+       -o flappy flappy.py -- RAYLIB-FLAGS
    ```
 
    spyc follows the imports from `flappy.py` and embeds each source,
-   compiles `raylib.c` as the module `raylib`, and links them with
+   finds `raylib.c` for `import raylib` and compiles it as that module, and links them with
    `libspy.a` and what follows `--`: raylib's headers, its static library,
    and the system libraries it needs. It also writes `flappy.json` (a
    metafile, as esbuild's), `flappy.d` (a make rule, so editing any bundled

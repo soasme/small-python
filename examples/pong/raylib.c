@@ -1,5 +1,6 @@
 /* The raylib module pong.py imports. spyc compiles it into the game and
- * registers spy_init_raylib before pong.py runs: spyc pong.py raylib.c. */
+ * registers spy_init_raylib before pong.py runs; spyc finds it for
+ * `import raylib`. */
 #include "spy-module.h"
 
 #include <raylib.h>

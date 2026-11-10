@@ -23,7 +23,7 @@ module, and calls the engine through the `spy.h` functions it declares in an
 
 ```sh
 cargo build --release
-spyc -M sys -o jsonify jsonify.py target/release/libjson.a -- $RUSTLIBS
+spyc -o jsonify jsonify.py target/release/libjson.a -- $RUSTLIBS
 ```
 
 `RUSTLIBS` is what Rust's standard library needs from the system: nothing

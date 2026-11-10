@@ -24,9 +24,15 @@
 (* missing, a module only -D reaches, and a cycle. Every choice of         *)
 (* externals, C modules and -D names is checked, in every visiting order. *)
 (*                                                                         *)
-(* A C module (NAME.c, 5.4) resolves its exact name, which the program     *)
-(* registers; the choices name a module whose source the tree also has,    *)
-(* and one only -D reaches, so the C module must win over the source.      *)
+(* A C module named on the command line (NAME.c, 5.4) resolves its exact   *)
+(* name, which the program registers; the choices name a module whose      *)
+(* source the tree also has, and one only -D reaches, so it must win over  *)
+(* the source. C files in the tree are found as the finder finds extension *)
+(* modules, before a source in the same directory (a C module beside a     *)
+(* source, one in a later root behind an earlier source, one in a package),*)
+(* and a standard module answers before any file, as a built-in does. The *)
+(* program registers both, so the engine finds them before its loader;     *)
+(* with -c the host registers them instead.                                *)
 (*                                                                         *)
 (* The engine asks its loader for NAME.__init__, NAME, NAME.__namespace__ *)
 (* in that order (spy.h), and Imports.tla models the import system over    *)
@@ -45,7 +51,12 @@ Files == {Main,
           <<"app", <<"pkg", "beyond">>>>, <<"app", <<"shadow">>>>, <<"app", <<"ns", "a">>>>,
           <<"app", <<"ext", "__init__">>>>, <<"app", <<"cyc_a">>>>, <<"app", <<"cyc_b">>>>,
           <<"lib", <<"shadow", "__init__">>>>, <<"lib", <<"ns", "b">>>>,
-          <<"lib", <<"pkg", "extra">>>>, <<"lib", <<"dyn">>>>}
+          <<"lib", <<"pkg", "extra">>>>, <<"lib", <<"dyn">>>>,
+          <<"app", <<"cmod">>>>, <<"app", <<"late">>>>, <<"app", <<"sys">>>>}
+\* C modules as <<root, path>>, the path without ".c" (or "lib" and ".a").
+CFiles == {<<"app", <<"cmod">>>>, <<"lib", <<"late">>>>, <<"app", <<"pkg", "speed">>>>}
+\* The standard layer's modules.
+Standard == {<<"sys">>}
 
 \* An import names target at a relative level; a from-import's names are
 \* "maybe" modules; a guarded import sits in a try that catches ImportError.
@@ -56,6 +67,8 @@ Imports(f) ==
                       Imp(<<"ns", "a">>, 0, FALSE, FALSE), Imp(<<"ns", "b">>, 0, FALSE, FALSE),
                       Imp(<<"shadow">>, 0, FALSE, FALSE), Imp(<<"ext">>, 0, FALSE, FALSE),
                       Imp(<<"cyc_a">>, 0, FALSE, FALSE),
+                      Imp(<<"cmod">>, 0, FALSE, FALSE), Imp(<<"late">>, 0, FALSE, FALSE),
+                      Imp(<<"pkg", "speed">>, 0, FALSE, FALSE), Imp(<<"sys">>, 0, FALSE, FALSE),
                       Imp(<<"optional">>, 0, FALSE, TRUE),                      \* try: import optional
                       Imp(<<"pkg", "extra">>, 0, FALSE, TRUE)}                  \* try: import pkg.extra
       [] f = <<"app", <<"pkg", "__init__">>>> -> {Imp(<<>>, 1, FALSE, FALSE), Imp(<<"sub">>, 1, TRUE, FALSE)}   \* from . import sub
@@ -81,12 +94,13 @@ IncludeChoices == {{}, {Dyn}, {Include(<<"pkg", "extra">>, FALSE)}, {Include(<<"
 -----------------------------------------------------------------------------
 Prefix(p, n) == Len(p) <= Len(n) /\ SubSeq(n, 1, Len(p)) = p
 Parent(n) == SubSeq(n, 1, Len(n) - 1)
-IsDir(r, d) == \E f \in Files : f[1] = r /\ Len(f[2]) > Len(d) /\ Prefix(d, f[2])
+IsDir(r, d) == \E f \in Files \cup CFiles : f[1] = r /\ Len(f[2]) > Len(d) /\ Prefix(d, f[2])
 
 None == [kind |-> "none", file |-> <<>>, locs |-> <<>>]
 Found(r) == r.kind # "none"
 
-\* FileFinder over each location in order, keeping namespace portions.
+\* FileFinder over each location in order, keeping namespace portions; an
+\* extension module (here a C module) before a source.
 RECURSIVE Search(_, _, _, _)
 Search(locs, tail, i, portions) ==
     IF i > Len(locs) THEN
@@ -95,30 +109,37 @@ Search(locs, tail, i, portions) ==
              d == Append(locs[i][2], tail)
          IN IF <<r, Append(d, "__init__")>> \in Files
                 THEN [kind |-> "package", file |-> <<r, Append(d, "__init__")>>, locs |-> <<<<r, d>>>>]
+            ELSE IF <<r, d>> \in CFiles THEN [kind |-> "native", file |-> <<r, d>>, locs |-> <<>>]
             ELSE IF <<r, d>> \in Files THEN [kind |-> "module", file |-> <<r, d>>, locs |-> <<>>]
             ELSE IF IsDir(r, d) THEN Search(locs, tail, i + 1, Append(portions, <<r, d>>))
             ELSE Search(locs, tail, i + 1, portions)
 
-\* PathFinder: top-level names search the roots, submodules their parent's locations.
+\* A built-in first, then PathFinder: top-level names search the roots,
+\* submodules their parent's locations.
 RECURSIVE FindIn(_)
 FindIn(n) ==
     LET locs == IF Len(n) = 1 THEN [i \in 1..Len(Roots) |-> <<Roots[i], <<>>>>] ELSE FindIn(Parent(n)).locs
-    IN Search(locs, n[Len(n)], 1, <<>>)
+    IN IF n \in Standard THEN [kind |-> "standard", file |-> <<>>, locs |-> <<>>]
+       ELSE Search(locs, n[Len(n)], 1, <<>>)
 
 \* Every module name the tree gives, with its parents, and every name an
 \* import or -D asks for; relative imports resolve within the first.
 FileName(f) == IF f[2][Len(f[2])] = "__init__" THEN Parent(f[2]) ELSE f[2]
-Names == UNION {{SubSeq(FileName(f), 1, k) : k \in 1..Len(FileName(f))} : f \in Files}
+Names == UNION {{SubSeq(FileName(f), 1, k) : k \in 1..Len(FileName(f))} : f \in Files \cup CFiles}
 Asked == Names \cup {i.target : i \in {j \in UNION {Imports(f) : f \in Files} : j.level = 0}}
                \cup {d.name : d \in UNION IncludeChoices}
 \* The finder's answer for every name, computed once.
 Finder == [n \in Asked |-> FindIn(n)]
 
 -----------------------------------------------------------------------------
-\* Resolution under one choice of externals and C modules: the host provides
-\* an external's whole prefix, a C module's exact name.
-Host == [ext : SUBSET ExternalChoices, native : SUBSET NativeChoices]
-IsExternal(n, host) == (\E x \in host.ext : Prefix(x, n)) \/ n \in host.native
+\* Resolution under one choice of externals, named C modules, and -c: the
+\* host provides an external's whole prefix, a named C module's exact name,
+\* and with -c (bare) every C and standard module found.
+Host == [ext : SUBSET ExternalChoices, native : SUBSET NativeChoices, bare : BOOLEAN]
+Registered(n) == Finder[n].kind \in {"native", "standard"}
+IsExternal(n, host) == (\E x \in host.ext : Prefix(x, n)) \/ n \in host.native \/ (host.bare /\ Registered(n))
+\* What spyc reads the imports of: sources, not C or standard modules.
+HasSource(n) == Finder[n].kind \in {"package", "module"}
 
 \* The package relative imports resolve against: a package itself, else its
 \* parent; the entry script and top-level modules have none (<<>>).
@@ -143,7 +164,7 @@ Scan(f, package, ext) == {n \in Asks(f, package, ext) : Found(Finder[n])}
 Includes(inc) ==
     {d.name : d \in {e \in inc : ~e.star}}
     \cup {m \in Names : \E d \in inc : d.star /\ Len(m) > Len(d.name) /\ Prefix(d.name, m)
-                                        /\ Finder[m].kind \in {"package", "module"}}
+                                        /\ Finder[m].kind \in {"package", "module", "native"}}
 IncludesFail(inc, ext) ==
     \E d \in inc : IF d.star THEN Finder[d.name].kind \notin {"package", "namespace"}
                   ELSE ~Found(Finder[d.name]) /\ ~IsExternal(d.name, ext)
@@ -164,11 +185,11 @@ Init ==
 \* Visit one found module: add it, queue its parent and what its imports found.
 Visit(n) ==
     LET parent == IF Len(n) > 1 THEN {Parent(n)} ELSE {}
-        asks == IF Source(n) = <<>> THEN {} ELSE Scan(Source(n), Package(n), externals)
+        asks == IF HasSource(n) THEN Scan(Source(n), Package(n), externals) ELSE {}
     IN /\ ~failed
        /\ table' = table \cup {n}
        /\ pending' = (pending \cup parent \cup asks) \ table'
-       /\ failed' = (Source(n) # <<>> /\ ScanFails(Source(n), Package(n), externals))
+       /\ failed' = (HasSource(n) /\ ScanFails(Source(n), Package(n), externals))
        /\ UNCHANGED <<externals, includes>>
 
 \* A build ends: each visit adds a module to the finite table. Done
@@ -180,27 +201,29 @@ Spec == Init /\ [][Next]_vars
 -----------------------------------------------------------------------------
 \* The declarative bundle (3.2): the least set closed under parents and imports.
 Edges(n, ext) ==
-    (IF Len(n) > 1 THEN {Parent(n)} ELSE {}) \cup (IF Source(n) = <<>> THEN {} ELSE Scan(Source(n), Package(n), ext))
+    (IF Len(n) > 1 THEN {Parent(n)} ELSE {}) \cup (IF HasSource(n) THEN Scan(Source(n), Package(n), ext) ELSE {})
 RECURSIVE Fix(_, _)
 Fix(S, ext) == LET T == S \cup UNION {Edges(n, ext) : n \in S} IN IF T = S THEN S ELSE Fix(T, ext)
 ClosureOf(ext, inc) == Fix(Scan(Main, <<>>, ext) \cup Included(inc, ext), ext)
 \* Every name the bundled sources ask for, guarded misses included.
 AskedOf(ext, inc) ==
-    Asks(Main, <<>>, ext) \cup UNION {IF Source(n) = <<>> THEN {} ELSE Asks(Source(n), Package(n), ext) : n \in ClosureOf(ext, inc)}
+    Asks(Main, <<>>, ext) \cup UNION {IF HasSource(n) THEN Asks(Source(n), Package(n), ext) ELSE {} : n \in ClosureOf(ext, inc)}
 FailsOf(ext, inc) ==
     \/ ScanFails(Main, <<>>, ext) \/ IncludesFail(inc, ext)
-    \/ \E n \in ClosureOf(ext, inc) : Source(n) # <<>> /\ ScanFails(Source(n), Package(n), ext)
+    \/ \E n \in ClosureOf(ext, inc) : HasSource(n) /\ ScanFails(Source(n), Package(n), ext)
 \* The expected outcome of every build, computed once.
 Expected == [c \in Host \X IncludeChoices |->
                 [closure |-> ClosureOf(c[1], c[2]), asked |-> AskedOf(c[1], c[2]), fails |-> FailsOf(c[1], c[2])]]
 Outcome == Expected[<<externals, includes>>]
 
-\* The loader's keys (5.1), and what the engine makes of probing them in
-\* order: a package, a module, a namespace package, or nothing.
+\* The loader's keys (5.1), and what the engine makes of an import: a module
+\* the program registered, found before the loader, else probing the keys in
+\* order for a package, a module, a namespace package, or nothing.
 Suffix(kind) == CASE kind = "package" -> "__init__" [] kind = "module" -> "" [] kind = "namespace" -> "__namespace__"
-Keys == {[name |-> n, suffix |-> Suffix(Finder[n].kind)] : n \in table}
+Keys == {[name |-> n, suffix |-> Suffix(Finder[n].kind)] : n \in {m \in table : ~Registered(m)}}
 Probe(n) ==
-    IF [name |-> n, suffix |-> "__init__"] \in Keys THEN [kind |-> "package", file |-> Source(n)]
+    IF n \in table /\ Registered(n) THEN [kind |-> Finder[n].kind, file |-> Source(n)]
+    ELSE IF [name |-> n, suffix |-> "__init__"] \in Keys THEN [kind |-> "package", file |-> Source(n)]
     ELSE IF [name |-> n, suffix |-> ""] \in Keys THEN [kind |-> "module", file |-> Source(n)]
     ELSE IF [name |-> n, suffix |-> "__namespace__"] \in Keys THEN [kind |-> "namespace", file |-> <<>>]
     ELSE [kind |-> "none", file |-> <<>>]

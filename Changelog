@@ -1,6 +1,10 @@
 Unreleased (0.10.0):
 
-- spyc is now at bin/spyc
+- incompatible spyc changes:
+  - spyc is now at bin/spyc
+  - -M removed: an imported standard module is registered and linked;
+    -D sys names one only a dynamic import reaches
+- spyc finds C modules, NAME.c and libNAME.a, in the search roots
 - spyc run, spyc test, spyc clean and spyc version; spyc build is spyc;
   run and test cache programs in __pycache__/spyc
 - spyc is a Python program on the engine, built by the previous release's

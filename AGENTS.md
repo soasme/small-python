@@ -36,8 +36,9 @@
   `quickjs-libc.c`) supplies the host module `sys` on them through
   the public API. Their Python
   sources are in `modules/`, embedded in `spy-std-modules.h` by
-  `tools/build_intrinsics.py`. The `spy` command links the standard layer and
-  `spyc -M` selects from it; `libspy.a` does not. Conformance runs on
+  `tools/build_intrinsics.py`. The `spy` command links the standard layer, a
+  program `spyc` builds links it when it imports one of its modules, and
+  `libspy.a` does not. Conformance runs on
   `tests/run-spec` (like `run-test262`), the bare core with only `_spy`; tests
   reach host facilities through the harness's `host`, never a library module.
 - Work on the language core, not the library. Do not add further standard

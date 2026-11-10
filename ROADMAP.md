@@ -117,8 +117,6 @@ byte-for-byte reproducible ([docs/build.md](docs/build.md)). Remaining:
 - Deterministic executables: the executable, not only the C file, is the
   same bytes for the same inputs and compiler. Fixed flags, no timestamps or
   absolute paths, and a build manifest recording the inputs' hashes.
-- Standard modules the program imports are bundled from the standard layer
-  as a local module is, instead of being registered by hand with `-M`.
 
 ### Standard library coverage
 
@@ -488,6 +486,8 @@ what the extra size buys.
 - [x] `spyc` writes an executable and compiles C modules in
 - [x] `spyc` is a Python program on the engine with `run`, `test` and a
   cache, built by the previous release
+- [x] `spyc` finds standard and C modules from the imports: no `-M`, no
+  module inputs for files in the search roots
 - [x] JavaScript package without `SharedArrayBuffer` or a Worker, through JSPI
 - [x] Native modules: `spy`, the in-process bindings and every worker
   package through the protocol's `NATIVE`

@@ -17,10 +17,11 @@ make -C examples/pong run
 `make` builds `libspy.a` and `spyc` first if they are missing, then runs
 
 ```sh
-spyc -o pong pong.py raylib.c -- $(pkg-config --cflags --libs raylib)
+spyc -o pong pong.py -- $(pkg-config --cflags --libs raylib)
 ```
 
-spyc embeds `pong.py`, compiles `raylib.c` as the module `raylib`, and
+spyc embeds `pong.py`, finds `raylib.c` beside it for `import raylib` and
+compiles it as the module `raylib`, and
 passes the arguments after `--` (raylib's headers and library) to the
 compiler. Edit either file and run `make run` again to rebuild.
 

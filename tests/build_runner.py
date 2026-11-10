@@ -47,7 +47,7 @@ def options(fields):
     """The spyc options, the entries named on the command line, and the
     module run with -m, if any."""
     words, flags, entries, module = shlex.split(fields.get("build", "")), [], [], None
-    takes = {"-m", "-M", "-I", "-x", "-D", "-N", "--alias"}
+    takes = {"-m", "-I", "-x", "-D", "-N", "--alias"}
     while words:
         word = words.pop(0)
         if word in takes:
@@ -174,7 +174,7 @@ def build_phase(path, fields, spyc, cc):
                 declarations="\n".join(f"extern const char {c_name(name)}[];" for name in names), loader=loader,
                 calls=" || ".join(f'entry({c_name(name)}, "{name}")' for name in names)), encoding="utf-8")
             sources.append(host)
-        libraries = [str(ROOT / "libspy-std.a")] if "-M" in flags else []
+        libraries = [str(ROOT / "libspy-std.a")] if b'#include "spy-std.h"' in sources[0].read_bytes() else []
         binary = Path(temp) / "program"
         code, output = run([*cc, "-std=c11", "-O0", "-I", str(ROOT), *map(str, sources), *libraries,
                             str(ROOT / "libspy.a"), "-lm", *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary)], directory)

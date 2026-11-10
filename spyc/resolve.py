@@ -10,7 +10,8 @@ import _spy
 import _spyc
 from . import scan
 
-MODULE, PACKAGE, NAMESPACE, EXTERNAL, REGISTERED = "module", "package", "namespace", "external", "registered"
+MODULE, PACKAGE, NAMESPACE, EXTERNAL, NATIVE, STANDARD = "module", "package", "namespace", "external", "native", "standard"
+STANDARD_MODULES = ("sys",)   # the standard layer's modules (modules/)
 
 
 def stderr(text):
@@ -24,7 +25,7 @@ class Module:
         self.all = []         # a literal __all__
         self.source = None    # read once queued; minified with --minify
         self.bytes = 0        # the size of the file read
-        self.array = None     # the C array of its source in the output
+        self.array = None     # the C array of its source in the output; a C module's init
         self.imports = []     # (path, original, kind, flag): flag 1 external, 2 missing
 
     def found(self):
@@ -45,17 +46,20 @@ def under(prefix, name):
     return name == prefix or name.startswith(prefix + ".")
 
 
-def entry_kind(directory, name):
-    names = _spyc.listdir(directory or ".")
-    return _spyc.kind(directory + name) if names is not None and name in names else None
-
-
 class Build:
-    def __init__(self, roots, externals, registered, natives, aliases, minify):
-        self.roots, self.externals, self.registered, self.natives = roots, externals, registered, natives
-        self.aliases, self.minify = aliases, minify
-        self.modules, self.queue, self.stars = {}, [], []
+    def __init__(self, roots, externals, natives, aliases, minify, bare):
+        """NATIVES maps the C modules named on the command line to their
+        files; BARE (-c) leaves the standard modules to the host."""
+        self.roots, self.externals, self.natives, self.aliases = roots, externals, natives, aliases
+        self.minify, self.bare = minify, bare
+        self.modules, self.queue, self.stars, self.listings = {}, [], [], {}
         self.errors = self.warnings = 0
+
+    def entry_kind(self, directory, name):
+        """"d", "f", or None for NAME in DIRECTORY, spelled exactly."""
+        if directory not in self.listings:
+            self.listings[directory] = set(_spyc.listdir(directory or ".") or ())
+        return _spyc.kind(directory + name) if name in self.listings[directory] else None
 
     def report(self, origin, message):
         if origin.option:
@@ -66,17 +70,19 @@ class Build:
 
     def search(self, m, locations, tail):
         """FileFinder over each location in turn, keeping namespace
-        portions (PathFinder)."""
+        portions (PathFinder): a package, then a C module (NAME.c, then
+        libNAME.a) before a source, as extension modules come first."""
         portions = []
         for d in locations:
             package = d + tail + "/"
-            if entry_kind(d, tail) == "d" and entry_kind(package, "__init__.py") == "f":
+            if self.entry_kind(d, tail) == "d" and self.entry_kind(package, "__init__.py") == "f":
                 m.kind, m.path, m.locations = PACKAGE, package + "__init__.py", [package]
                 return
-            if entry_kind(d, tail + ".py") == "f":
-                m.kind, m.path = MODULE, d + tail + ".py"
-                return
-            if entry_kind(d, tail) == "d":
+            for kind, name in ((NATIVE, tail + ".c"), (NATIVE, "lib" + tail + ".a"), (MODULE, tail + ".py")):
+                if self.entry_kind(d, name) == "f":
+                    m.kind, m.path = kind, d + name
+                    return
+            if self.entry_kind(d, tail) == "d":
                 portions.append(package)
         if portions:
             m.kind, m.locations = NAMESPACE, portions
@@ -88,8 +94,10 @@ class Build:
         m = self.modules[name] = Module(name)
         if any(under(prefix, name) for prefix in self.externals):
             m.kind = EXTERNAL
-        if name in self.registered or name in self.natives:
-            m.kind = REGISTERED
+        if name in self.natives:
+            m.kind, m.path = NATIVE, self.natives[name]
+        elif name in STANDARD_MODULES and not m.kind:
+            m.kind = EXTERNAL if self.bare else STANDARD
         if m.kind:
             return m
         if name in self.aliases:
@@ -104,6 +112,8 @@ class Build:
             p = self.find(parent)
             if p.kind in (PACKAGE, NAMESPACE):
                 self.search(m, p.locations, tail)
+        if self.bare and m.kind == NATIVE:
+            m.kind = EXTERNAL
         return m
 
     def enqueue(self, m):
@@ -116,7 +126,9 @@ class Build:
         build with CPython's message; a guarded one, or a from-import name
         that may be an attribute, is left out."""
         m = self.find(name)
-        if m.kind in (EXTERNAL, REGISTERED):
+        if m.kind in (EXTERNAL, NATIVE, STANDARD):
+            if m.kind != EXTERNAL:
+                self.enqueue(m)
             record(origin.owner, name, name, kind, 1)
         elif m.found():
             self.enqueue(m)
@@ -130,10 +142,10 @@ class Build:
             for n in range(1, len(parts)):
                 prefix = ".".join(parts[:n])
                 p = self.find(prefix)
+                if p.kind in (MODULE, NATIVE, STANDARD):
+                    return self.report(origin, f"No module named '{name}'; '{prefix}' is not a package")
                 if not p.found():
                     return self.report(origin, f"No module named '{prefix}'")
-                if p.kind == MODULE:
-                    return self.report(origin, f"No module named '{name}'; '{prefix}' is not a package")
             self.report(origin, f"No module named '{name}'")
 
     def absolute(self, origin, package, level, name, required):
@@ -203,7 +215,7 @@ class Build:
                 parent, dot, _ = m.name.rpartition(".")
                 if dot:
                     self.enqueue(self.find(parent))
-                if m.path:
+                if m.found() and m.path:
                     self.scan(m, m.name if m.kind == PACKAGE else parent)
             if self.errors or done == len(self.stars):
                 break
@@ -224,7 +236,7 @@ class Build:
                     continue
                 name = package.name + "." + stem
                 m = self.find(name)
-                if m.kind in (MODULE, PACKAGE):
+                if m.kind in (MODULE, PACKAGE, NATIVE):
                     self.request(origin, name, True, "include")
                 if m.kind in (PACKAGE, NAMESPACE):
                     self.include_all(origin, m)

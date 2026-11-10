@@ -58,14 +58,14 @@ with tempfile.TemporaryDirectory() as temp:
     (directory / "hello.py").write_text("import sys\nprint('hello', sys.version_info[0])\n", encoding="utf-8")
     spyc = archive / f"spyc{exe}"
     if os.name == "nt":
-        result = run(spyc, "-M", "sys", "hello.py", cwd=directory)
+        result = run(spyc, "hello.py", cwd=directory)
         assert result.returncode == 1 and "not supported on this platform" in result.stderr, result
-        result = run(spyc, "-e", "-M", "sys", "-o", "hello.c", "hello.py", cwd=directory)
+        result = run(spyc, "-e", "-o", "hello.c", "hello.py", cwd=directory)
         assert result.returncode == 0, result
         result = run("gcc", "-I", archive, "hello.c", archive / "libspy-std.a", archive / "libspy.a", "-lm",
                      "-o", "hello.exe", cwd=directory)
     else:
-        result = run(spyc, "-M", "sys", "-o", "hello", "hello.py", cwd=directory)
+        result = run(spyc, "-o", "hello", "hello.py", cwd=directory)
     assert result.returncode == 0, result
     result = run(directory / f"hello{exe}", cwd=directory)
     assert (result.returncode, result.stdout) == (0, "hello 3\n"), result

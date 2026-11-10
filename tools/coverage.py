@@ -14,12 +14,12 @@ from pathlib import Path
 
 
 def load(lcov):
-    """{file name: (sorted [(line, function)], {line: count})}"""
+    """{file path: (sorted [(line, function)], {line: count})}"""
     files, current = {}, None
     for line in Path(lcov).read_text().splitlines():
         tag, _, value = line.partition(":")
         if tag == "SF":
-            current = files.setdefault(Path(value).name, ([], {}))
+            current = files.setdefault(value, ([], {}))
         elif tag == "FN" and current:
             number, name = value.split(",", 1)
             current[0].append((int(number), name.rsplit(":", 1)[-1]))
@@ -36,11 +36,12 @@ def main():
         sys.exit(__doc__.strip())
     files, failed = load(sys.argv[1]), 0
     for name in sys.argv[2:]:
-        if name not in files:
+        found = [path for path in files if path == name or path.endswith("/" + name)]
+        if not found:
             print(f"{name}: no coverage data")
             failed += 1
             continue
-        functions, counts = files[name]
+        functions, counts = files[found[0]]
         missed = sorted(line for line, count in counts.items() if not count)
         print(f"{name}: {len(counts) - len(missed)}/{len(counts)} lines")
         starts = [start for start, _ in functions]

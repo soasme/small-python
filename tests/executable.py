@@ -1,5 +1,6 @@
 """Generated executables run without the Python source or libpython."""
 
+import json
 import os
 from pathlib import Path
 import shlex
@@ -19,17 +20,19 @@ def build(*sources, binary):
                     *shlex.split(os.environ.get("LDFLAGS", "")), "-lm", "-o", str(binary)], check=True)
 
 
-# A program runs on the bare core unless spyc -M registers standard modules.
-PROGRAM = "try:\n    import sys\nexcept ImportError:\n    sys = None\nprint('standalone', sum(range(10)), sys is None)\n"
-for options, extra, expected in [([], [], "standalone 45 True\n"),
-                                 (["-M", "sys"], [str(ROOT / "spy-std.c")], "standalone 45 False\n")]:
+# A program runs on the bare core unless it imports a standard module, which
+# spyc then registers, and the program links the standard layer.
+BARE = "print('standalone', sum(range(10)), 'sys' in globals())\n"
+STANDARD = "import sys\nprint('standalone', sum(range(10)), sys.modules['sys'] is sys)\n"
+for program, extra, expected in [(BARE, [], "standalone 45 False\n"),
+                                 (STANDARD, [str(ROOT / "spy-std.c")], "standalone 45 True\n")]:
     with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
         directory = Path(temp)
         source = directory / "hello source.py"
         generated = directory / "hello generated.c"
         binary = directory / "hello program"
-        source.write_text(PROGRAM, encoding="utf-8")
-        subprocess.run([str(ROOT / "bin" / "spyc"), "-e", *options, "-o", str(generated), str(source)], check=True)
+        source.write_text(program, encoding="utf-8")
+        subprocess.run([str(ROOT / "bin" / "spyc"), "-e", "-o", str(generated), str(source)], check=True)
         build(generated, *extra, binary=binary)
         source.unlink()
         generated.unlink()
@@ -40,13 +43,13 @@ print("Standalone C generation, compilation, and execution passed")
 # Without -e or -c, spyc builds the executable itself, as qjsc does: with its
 # build's compiler, against the spy.h and libraries beside it; -v shows the
 # command, and the name defaults to a.out (out.c with -e).
-for options, library, expected in [([], "libspy.a", "standalone 45 True\n"),
-                                   (["-M", "sys"], "libspy-std.a", "standalone 45 False\n")]:
+for program, library, expected in [(BARE, "libspy.a", "standalone 45 False\n"),
+                                   (STANDARD, "libspy-std.a", "standalone 45 True\n")]:
     with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
         directory = Path(temp)
         source = directory / "hello source.py"
-        source.write_text(PROGRAM, encoding="utf-8")
-        result = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", *options, str(source)],
+        source.write_text(program, encoding="utf-8")
+        result = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", str(source)],
                                 cwd=directory, check=True, capture_output=True, text=True)
         assert f"-I {ROOT} " in result.stdout and f" {ROOT / library} " in result.stdout, result.stdout
         subprocess.run([str(ROOT / "bin" / "spyc"), "-e", str(source)], cwd=directory, check=True)
@@ -258,11 +261,65 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     assert (directory / "prog").read_text(encoding="utf-8") == "old"
 print("Archive modules passed")
 
+# Found C modules (docs/build.md 3.1): an import that no named module answers
+# finds NAME.c, then libNAME.a, in each search location, after a package and
+# before NAME.py. A submodule's init is spy_init_ and its last name. They are
+# compiled in, listed in the dependency rule after the named ones, and, with
+# -c, left to the host.
+with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
+    directory = Path(temp)
+    for name in ("pkg", "lib", "early", "late"):
+        (directory / name).mkdir()
+    (directory / "pkg/__init__.py").write_text("", encoding="utf-8")
+    (directory / "pkg/answer.c").write_text(ANSWER, encoding="utf-8")
+    (directory / "pkg/inner.c").write_text(ANSWER.replace("spy_init_answer", "spy_init_inner"), encoding="utf-8")
+    shutil.copy(ROOT / "examples/fib.c", directory / "fib.c")
+    (directory / "fib.py").write_text("raise SystemExit('fib.py must not shadow fib.c')\n", encoding="utf-8")
+    (directory / "lib/answer.c").write_text(ANSWER, encoding="utf-8")
+    archive(directory / "lib", "answer", "answer.c", "-DANSWER=0")
+    (directory / "lib/libtwice.a").write_bytes((directory / "lib/libanswer.a").read_bytes())
+    (directory / "early/order.py").write_text("value = 'early source'\n", encoding="utf-8")
+    (directory / "late/order.c").write_text(ANSWER.replace("spy_init_answer", "spy_init_order"), encoding="utf-8")
+    (directory / "app.py").write_text("import answer, fib, order, pkg.inner\nprint(answer.value, fib.fib(10), order.value, pkg.inner.value)\n",
+                                      encoding="utf-8")
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-v", "-I", "lib", "-I", "early", "-I", "late", "--deps", "p.d", "-o", "prog",
+                             "app.py", "--", "-DANSWER=42"], cwd=directory, check=True, capture_output=True, text=True)
+    assert " -x none lib/answer.c fib.c pkg/inner.c -DANSWER=42 " in result.stdout, result.stdout
+    assert (directory / "p.d").read_text(encoding="utf-8") == "prog: app.py early/order.py pkg/__init__.py lib/answer.c fib.c pkg/inner.c\n"
+    result = subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True)
+    assert result.stdout == "42 55 early source 42\n", result
+    # Without answer.c, libanswer.a is found; a named C module wins over both.
+    (directory / "lib/answer.c").unlink()
+    (directory / "app.py").write_text("import answer, fib\nprint(answer.value, fib.fib(10))\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-I", "lib", "-o", "prog", "app.py"], cwd=directory, check=True)
+    assert subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True).stdout == "0 55\n"
+    (directory / "named").mkdir()
+    (directory / "named/answer.c").write_text(ANSWER, encoding="utf-8")
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-I", "lib", "-o", "prog", "app.py", "named/answer.c", "--", "-DANSWER=7"],
+                   cwd=directory, check=True)
+    assert subprocess.run(["./prog"], cwd=directory, check=True, capture_output=True, text=True).stdout == "7 55\n"
+    # Two C modules with one init fail before the compiler runs.
+    (directory / "app.py").write_text("import answer, pkg.answer\n", encoding="utf-8")
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-I", "lib", "-e", "-o", "x.c", "app.py"], cwd=directory, capture_output=True, text=True)
+    assert result.returncode == 1 and result.stderr == "spyc: error: lib/libanswer.a and pkg/answer.c both define spy_init_answer\n", result
+    assert not (directory / "x.c").exists()
+    # A C module is not a package.
+    (directory / "app.py").write_text("import twice.part\n", encoding="utf-8")
+    result = subprocess.run([str(ROOT / "bin" / "spyc"), "-I", "lib", "-e", "-o", "x.c", "app.py"], cwd=directory, capture_output=True, text=True)
+    assert result.stderr == "app.py:1: error: No module named 'twice.part'; 'twice' is not a package\n", result
+    # With -c the host registers what is found, and the metafile says so.
+    (directory / "app.py").write_text("import pkg.inner, sys\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-c", "--metafile", "m.json", "-o", "x.c", "app.py"], cwd=directory, check=True)
+    assert "spy_init" not in (directory / "x.c").read_text(encoding="utf-8")
+    imports = json.loads((directory / "m.json").read_text(encoding="utf-8"))["inputs"]["app.py"]["imports"]
+    assert [(i["original"], i.get("external")) for i in imports] == [("pkg.inner", True), ("sys", True)], imports
+print("Found C modules passed")
+
 # A built program exits with SystemExit's code, as spy does.
 with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     directory = Path(temp)
     (directory / "app.py").write_text("import sys\nprint('ran')\nsys.exit(eval(sys.argv[1]))\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "bin" / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-o", "prog", "app.py"], cwd=directory, check=True)
     for code, status, stderr in (("None", 0, ""), ("3", 3, ""), ("256 + 7", 7, ""), ("-1", 255, ""), ("True", 1, ""),
                                  ("False", 0, ""), ("2 ** 70", 255, ""), ("type('I', (int,), {})(4)", 4, ""),
                                  ("'bye'", 1, "bye\n"), ("1.5", 1, "1.5\n"), ("1 / 0", 1, "<string>:1: ZeroDivisionError: division by zero\n")):
@@ -284,7 +341,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     (directory / "app.py").write_text("import sys\nprint(sys.argv == sys.orig_argv, sys.argv is not sys.orig_argv, sys.argv)\n"
                                       "with open(sys.argv[1]) as f:\n    print(f.read())\n", encoding="utf-8")
     (directory / "data file").write_text("contents", encoding="utf-8")
-    subprocess.run([str(ROOT / "bin" / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-o", "prog", "app.py"], cwd=directory, check=True)
     result = subprocess.run([b"./prog", b"data file", "é".encode(), b"\xff", b""], cwd=directory, capture_output=True)
     assert result.stdout == "True True ['./prog', 'data file', 'é', '\\udcff', '']\ncontents\n".encode(), result
     # Outside the working directory nothing is reachable.
@@ -294,7 +351,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     # program still runs.
     (directory / "gone").mkdir()
     (directory / "app.py").write_text("import sys\nprint(sys.argv[1:])\nopen('x')\n", encoding="utf-8")
-    subprocess.run([str(ROOT / "bin" / "spyc"), "-M", "sys", "-o", "prog", "app.py"], cwd=directory, check=True)
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-o", "prog", "app.py"], cwd=directory, check=True)
     result = subprocess.run("cd gone && rmdir ../gone && ../prog arg", shell=True, cwd=directory, capture_output=True, text=True)
     assert result.returncode == 1 and result.stdout == "['arg']\n" and "Error: " in result.stderr, result
 print("Command line and working directory passed")
@@ -328,8 +385,10 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
     source.unlink()
     result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, cwd=directory)
     assert result.stdout == "hosted 42\n", result
-    usage = subprocess.run([str(ROOT / "bin" / "spyc"), "-c", "-M", "sys", "-o", str(generated), str(source)], capture_output=True, text=True)
-    assert usage.returncode == 2 and usage.stderr.startswith("usage:"), usage
+    # The host registers what the program imports of the standard layer.
+    source.write_text("import sys\n", encoding="utf-8")
+    subprocess.run([str(ROOT / "bin" / "spyc"), "-c", "-o", str(generated), str(source)], check=True)
+    assert "spy_std" not in generated.read_text(encoding="utf-8")
 print("Source-only generation for a host program passed")
 
 repl = subprocess.run(

@@ -35,12 +35,20 @@ The import system is the same one that runs unbundled programs: modules are
 cached, run once, imported parent first, and initialized lazily. A bundled
 program only gets its sources from the C file instead of from disk.
 
-Three options shape what is bundled: imports are followed from the entry,
-`-D` adds modules that only a dynamic import reaches, and `-M` registers
-standard modules the program links instead of bundling. A C module,
-`NAME.c`, is compiled into the program as module `NAME`, and an archive,
-`libNAME.a` (from C, Rust, or any language that exports a C function), is
-linked into it as module `NAME`. The other options
+spyc finds what a program is made of by itself. It follows the imports from
+the entry, and an import may be answered by three kinds of module:
+
+- a source, `NAME.py`, which is embedded;
+- a standard module (`sys`), which is registered and linked from the
+  standard layer, never bundled;
+- a C module, `NAME.c`, compiled into the program, or an archive,
+  `libNAME.a` (from C, Rust, or any language that exports a C function),
+  linked into it.
+
+Only what imports cannot show is named on the command line: `-D` adds
+modules that only a dynamic import reaches, `-x` leaves modules to the host,
+a `.c` or `.a` input names a C module outside the search roots, and the
+arguments after `--` reach the compiler. The other options
 ([2.1](#21-options)) control output and transforms; readers who know esbuild
 will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 
@@ -48,7 +56,7 @@ will find them mapped to its options in [section 8](#8-esbuild-feature-map).
 
 - One `.c` file for a program and all its modules, compiled into an
   executable by default. It needs only `libspy.a`, plus `libspy-std.a` when
-  `-M` names a standard module.
+  the program imports a standard module.
 - Import semantics identical to the unbundled program run by the pinned
   CPython 3.15 with the same search path: the same modules found, the same
   failures, the same `__name__` and `__package__`, and `__path__` on the same
@@ -111,10 +119,9 @@ spyc test tests                                 # every tests/**/test_*.py
 | `-e` | Write the C file with its `main` instead of compiling it ([5.3](#53-executable-output)). |
 | `-c` | Write only the embedded sources and the loader, for a host's own `main` ([5.2](#52-library-output--c)). Several entries are allowed. |
 | `-m MODULE` | Run `MODULE` as `__main__`, as `python -m` does. |
-| `-M MODULE` | Register a standard module (`spy-std.c`), as today. Imports of it are not bundled. |
 | `-I DIR` | Add a search root after the entry's. May be repeated. |
 | `-x MODULE` | External: leave `MODULE` and its submodules out of the bundle. The host provides them at run time. |
-| `-D MODULE` | Include `MODULE` even if no import names it. `-D PKG.*` includes every module under package `PKG`. |
+| `-D MODULE` | Include `MODULE` even if no import names it: a source, a C module, or a standard module. `-D PKG.*` includes every module under package `PKG`. |
 | `-N NAME` | Name the `-c` loader `NAME_load`. The default `NAME` is `spy_` followed by the first entry's name. |
 | `--alias NAME=TARGET` | Resolve module `NAME`, and `NAME.sub`, to `TARGET`'s files. |
 | `-O`, `-OO` | Python's optimization levels: remove `assert` and set `__debug__` false, and with `-OO` remove docstrings ([6.1](#61-optimization-levels--o-and--oo)). |
@@ -124,8 +131,8 @@ spyc test tests                                 # every tests/**/test_*.py
 | `--analyze` | Print each bundled module's size to stderr. |
 | `-Werror` | Treat warnings as errors. |
 | `-v` | Print the compiler command ([5.3](#53-executable-output)). |
-| `NAME.c` | A C module: compile it into the program and register it as `NAME` ([5.4](#54-native-modules)). Not with `-c`. |
-| `libNAME.a` | An archive module: link it into the program and register it as `NAME` ([5.4](#54-native-modules)). Not with `-c`. |
+| `NAME.c` | A C module: compile it into the program and register it as `NAME`, wherever the file is ([5.4](#54-native-modules)). Not with `-c`. |
+| `libNAME.a` | An archive module: link it into the program and register it as `NAME`, wherever the file is ([5.4](#54-native-modules)). Not with `-c`. |
 | `-- ARGS` | Pass the remaining arguments to the compiler, after the C modules ([5.3](#53-executable-output)). Not with `-e` or `-c`. |
 
 spyc exits with 0 on success, 1 when the build or the C compiler fails, and
@@ -201,8 +208,8 @@ status 1, before any test runs.
 working directory, beside the bytecode CPython caches there and apart from it. Each executable is named by two hashes: its slot, of the
 build's arguments up to the entry, and its stamp, of everything the
 program is made from: the generated C file, the compiler command spyc was
-built with, the C modules, `spy.h` (and `spy-std.h` with `-M`), and the
-libraries. A build whose name is present runs it without compiling. Otherwise
+built with, the C modules, `spy.h` (and `spy-std.h` when the program
+imports a standard module), and the libraries. A build whose name is present runs it without compiling. Otherwise
 the compiler writes beside the name, and the file is renamed into place,
 so a name in the cache always holds a complete program; the build then
 removes its slot's executables of other stamps. Headers that a C module
@@ -231,8 +238,10 @@ FindModule(*name*) for a dotted name *name* = *parent*.*tail*, or a top-level
 *tail*:
 
 1. If *name* is under an external prefix (`-x`), return External.
-2. If *name* was registered with `-M`, return Registered. A registered module
-   shadows files of the same name, as CPython's built-in modules do.
+2. If *name* is a C module named on the command line, return Native(its
+   file). Otherwise, if *name* is a standard module (`sys`), return Standard,
+   or External with `-c`, whose host registers it. Either shadows files of
+   the same name, as CPython's built-in modules do.
 3. If *name* is top-level, let *locations* be the roots. Otherwise let *p* be
    FindModule(*parent*). If *p* is not a package, return NotFound. Let
    *locations* be *p*'s locations.
@@ -240,10 +249,17 @@ FindModule(*name*) for a dotted name *name* = *parent*.*tail*, or a top-level
    order:
    1. If *d* has a directory entry *tail* and *d*/*tail*/`__init__.py` is a
       file, return Package(*d*/*tail*/`__init__.py`, locations « *d*/*tail* »).
-   2. If *d*/*tail*`.py` is a file, return Module(*d*/*tail*`.py`).
-   3. If *d*/*tail* is a directory, append it to *portions*.
+   2. If *d*/*tail*`.c` is a file, return Native(*d*/*tail*`.c`); otherwise,
+      if *d*/`lib`*tail*`.a` is a file, return Native(*d*/`lib`*tail*`.a`).
+      With `-c`, return External instead: the host provides it.
+   3. If *d*/*tail*`.py` is a file, return Module(*d*/*tail*`.py`).
+   4. If *d*/*tail* is a directory, append it to *portions*.
 5. If *portions* is not empty, return Namespace(locations *portions*).
 6. Return NotFound.
+
+A C module comes before a source in each directory, as CPython's finder
+tries extension modules before source files; a source in an earlier root
+still wins over a C module in a later one.
 
 Three consequences matter in practice. First, a regular package's submodules
 are found only in its own directory. A `pkg/extra.py` under a later root is
@@ -272,8 +288,9 @@ The bundle is the smallest set of modules that contains:
 4. for each source module in the set, every module its imports name
    ([3.3](#33-imports-a-module-names)).
 
-Registered and external modules are never in the set, and spyc does not read
-their files. Every import counts, including those in function bodies and in
+Standard, C, and external modules are never in the module table, and spyc
+does not read their files; the C modules the set reaches are compiled in
+([5.4](#54-native-modules)). Every import counts, including those in function bodies and in
 blocks that never run. On a library as interconnected as CPython's `Lib/`,
 that bundles hundreds of modules for a single import. A planned refinement
 (not implemented) skips dead `__main__` and `TYPE_CHECKING` blocks and moves
@@ -392,7 +409,7 @@ static const struct { const char *name, *source; size_t size; } modules[] = {
 };
 static SPYValue *load(SPYContext *c, void *data, const char *name) { /* binary search, spy_bytes */ }
 int main(int argc, char **argv) {
-    /* spy_context_new, the mount, the -M and C modules, output callbacks */
+    /* spy_context_new, the mount, the standard and C modules, output callbacks */
     spy_set_module_loader(c, load, NULL);
     /* spy_set_argv(c, argc, argv, argc, argv); __file__ = "app.py"; spy_exec(c, m0, "app.py"); report errors */
 }
@@ -439,8 +456,9 @@ and removes the file. `CONFIG_CC` is the compiler and link flags spyc was
 built with (`$(CC) $(LDFLAGS)`), so a sanitizer or coverage build links its
 own `libspy.a`. `INCLUDE` and `LIB` are the directory of the `spyc` that ran
 when `spy.h` is there (a build tree), and otherwise `PREFIX/include` and
-`PREFIX/lib` of `make install`. `libspy-std.a` is linked when `-M` names a
-standard module. The C and archive modules, in their order, and the
+`PREFIX/lib` of `make install`. `libspy-std.a` is linked when the program
+imports a standard module. The C and archive modules, those named in their
+order and then those found by module name, and the
 arguments after `--` come before the engine's libraries, so a library they name (`-lraylib`, a `.a` file,
 or `-framework Cocoa`) links after the code that uses it, and `-I` and `-D`
 reach the C modules. `-v` prints the command. The build fails with the
@@ -489,13 +507,21 @@ A host that does want plugins installs its own loader, which calls
 `spy_std_load_native(c, name, path)` for the names it chooses and otherwise
 calls `spy_game_load`. It links `libspy-std.a`, and on Linux `-ldl`.
 
-A program spyc writes `main` for takes the same file as an input instead:
+A program spyc writes `main` for compiles the same file in. An import finds
+it in the search roots as it finds a source ([3.1](#31-search-roots)), so a
+`fib.c` or `libfib.a` beside the entry needs no option; a file elsewhere is
+named as an input:
 
 ```sh
-spyc -o app app.py fib.c
-spyc -o app app.py libfib.a
-spyc -o game game.py raylib.c -- $(pkg-config --cflags --libs raylib)
+spyc -o app app.py                                  # finds fib.c or libfib.a
+spyc -o app app.py vendor/libfib.a                  # named: anywhere
+spyc -o game game.py -- $(pkg-config --cflags --libs raylib)
 ```
+
+A C module in a package, `pkg/fast.c`, is module `pkg.fast` and exports
+`spy_init_fast`: its init is named after its last name, as an extension
+module's is. Two C modules whose inits share a name fail the build before
+the compiler runs, since the linker would take one init for both.
 
 An input ending in `.c` is a C module named after its file: `fib.c` is
 module `fib` and exports `spy_init_fib`, and its name must be an identifier.
@@ -516,12 +542,13 @@ otherwise the linker would take the first input's init and silently leave
 the other unread, and spyc rejects it as a usage error.
 spyc compiles it with the program ([5.3](#53-executable-output)), and the
 generated `main` registers it with `spy_new_module` before the entry runs.
-An import of `fib` is resolved, as `-M` resolves a standard module, so a C
-module wins over a `fib.py` beside the entry, as a native module wins in
-`spy`'s search. The dependency rule ([7.2](#72-dependency-file)) names the
-C and archive files after the sources. With `-e`, the C file declares and
+A named C module answers an import of `fib` before any search, so it wins
+over a `fib.py` beside the entry, as a native module wins in `spy`'s search.
+The dependency rule ([7.2](#72-dependency-file)) names the C and archive
+files after the sources. With `-e`, the C file declares and
 registers the module, and the host compiles `fib.c` or links `libfib.a` with
-it; `-c` writes no `main` and takes no C or archive module.
+it; `-c` writes no `main`, takes no C or archive module, and leaves the C
+modules it finds to the host.
 
 ### 5.5 The program's start
 
@@ -529,7 +556,8 @@ The generated `main` starts the program as the `spy` command does. It
 mounts the working directory at its own path (`spy_mount`), so `open`
 reaches the files under it and nothing else; when the mount fails (a
 working directory that was removed) the program runs with nothing mounted.
-It registers the `-M`, C and archive modules, installs the output callbacks
+It registers the standard modules the program imports and the C and archive
+modules, installs the output callbacks
 and the loader, and gives the engine its command line with `spy_set_argv`.
 `sys.argv` and `sys.orig_argv` are then both the program's arguments, the
 program's name first, as the shell passed them and decoded as UTF-8 with
@@ -670,7 +698,7 @@ reason.
 | entry points | `entry.py` or `-m MODULE`; several entries with `-c` | Ported |
 | stdin, sourcefile | Not ported. Every module needs a path for `__file__` and its search root. | Not ported |
 | loader (js, ts, json, text, file, binary, ...) | `.py` only. Embedded data files would need an in-memory `spy_mount`, a core change kept for later. | Not ported |
-| platform | `-M` registers the standard modules a program may import without bundling them, as `--platform=node` treats Node's built-in modules. | Adapted |
+| platform | the standard modules a program imports are registered and linked, never bundled, as `--platform=node` treats Node's built-in modules. | Adapted |
 | format (iife, cjs, esm) | standalone program, or `-c` for a host | Adapted |
 | global name | `-N NAME` | Adapted |
 | splitting | several `-c` entries share one module table | Adapted |
@@ -763,9 +791,11 @@ two roots. The tree has a regular package, a subpackage, relative imports, a
 namespace package split across both roots, a package shadowed by an earlier
 root's module, a submodule that sits in the wrong root, a guarded missing
 import, an external whose own import is missing, a module reachable only
-through `-D`, and an import cycle. For every choice of externals, C modules
-(one shadowing a source, one that only `-D` names), and `-D` names, and
-every order in which spyc may visit modules, TLC checks that:
+through `-D`, an import cycle, C files beside a source, behind an earlier
+root's source, and in a package, and a standard module with a file of its
+name. For every choice of externals, named C modules (one shadowing a
+source, one that only `-D` names), `-D` names, and `-c`, and every order in
+which spyc may visit modules, TLC checks that:
 
 - the build finishes, and fails exactly when an unguarded import, a relative
   import, or a `-D` name does not resolve;
@@ -773,8 +803,9 @@ every order in which spyc may visit modules, TLC checks that:
   visiting order;
 - every bundled module's parent is bundled, and nothing under an external
   prefix, nor a C module, is;
-- for every module name, the bundled loader either answers exactly as
-  CPython's path finder does or does not answer at all. It never gives a
+- for every module name, the program (its registered standard and C modules,
+  then its loader) either answers exactly as CPython's finders do, a C
+  module standing for an extension module, or does not answer at all. It never gives a
   different file, kind, or package. It does not answer only for names the
   build never reached (a computed import) and for externals, which it leaves
   to the host.
@@ -813,18 +844,20 @@ and clean ends. Renaming a failed compile into place breaks the first check.
 
 `tests/tla/SpyProgram.tla` models what a program is linked from and how it
 starts. For every list of up to two module inputs, each a C file or an
-archive, well or badly named, defining its init or not, it follows spyc's
-checks, the command line of [5.3](#53-executable-output), a static linker
+archive, named well or badly or found by an import, defining its init or
+not, it follows spyc's checks, the command line of [5.3](#53-executable-output), a static linker
 that reads each archive once and takes only the members it needs, and the
 generated `main`. TLC checks that a bad or repeated name is a usage error
-before any link; that a link succeeds exactly when every input defines its
+before any link; that a found module whose init another module defines
+fails the build before any link; that a link succeeds exactly when every input defines its
 init, and then each module's init comes from the input of that name; and
 that the entry runs only with the command line set and every module
 registered, a failed mount not stopping it. Seeded faults show what each
 check holds: without the duplicate-name check two C files of one name fail
 the link and a C file and an archive of one name link the C file's init
 for both; with the engine before the inputs an archive's calls into it stay
-undefined.
+undefined; without the init check two found modules of one init fail the
+link.
 
 ### 10.2 Build tests
 
@@ -856,13 +889,14 @@ TEXT` marks a build that must fail with an error containing `TEXT`.
    be identical. The metafile's
    inputs must be exactly the `# bundles:` list, and the `--deps` rule must
    name the same files.
-3. **Run.** The C file is compiled against `libspy.a` (and `libspy-std.a` for
-   `-M`). For `-c`, a generated host installs the loader and runs each entry.
+3. **Run.** The C file is compiled against `libspy.a` (and `libspy-std.a`
+   when it registers a standard module). For `-c`, a generated host installs the loader and runs each entry.
    The program runs in an empty directory, so no source file is available.
    It must pass.
 
 `tests/executable.py` checks the executable output of
-[5.3](#53-executable-output) (the default name, `-M`, `-v`) and the rule of
+[5.3](#53-executable-output) (the default name, the standard layer linked
+only for a program that imports it, `-v`) and the rule of
 [2.1](#21-options) at each step the model has: an unwritable `TMPDIR`, a
 compiler that cannot run, one that fails, an unwritable output, metafile, or
 dependency rule after the files before it, and `SIGINT` and `SIGTERM` during
@@ -874,7 +908,11 @@ program, and that a bad module name, a C module with `-c`, and `--` with
 them with `-v`, `--deps` and `-e`, checks their place on the command line,
 that one without its init fails the link and leaves no program, and that a
 misnamed archive, a name given twice, and an archive with `-c` are usage
-errors. A built program prints its `sys.argv` (spaces, non-ASCII, and a
+errors. It finds C modules ([3.1](#31-search-roots)): `NAME.c` before
+`libNAME.a` before `NAME.py` in one root, a source of an earlier root before
+a C module of a later one, a submodule's init named after its last name, a
+named module before a found one, two inits of one name as an error, a C
+module as no package, and, with `-c`, what is found left to the host. A built program prints its `sys.argv` (spaces, non-ASCII, and a
 byte that is not UTF-8), reads a file of the working directory, cannot
 open one above it, and runs from a removed working directory. Each case starts with old files and checks which remain, which
 are gone, and that no temporary file is left. For the interruptions, a

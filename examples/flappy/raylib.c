@@ -1,6 +1,6 @@
 /* The raylib module flappy.py imports. spyc compiles it into the game with
  * raylib's static library, so Python, the game's modules, its sprite, and
- * raylib all end up in one executable: spyc flappy.py raylib.c. */
+ * raylib all end up in one executable; spyc finds it for `import raylib`. */
 #include "spy-module.h"
 
 #include <raylib.h>

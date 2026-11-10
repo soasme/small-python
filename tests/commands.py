@@ -88,22 +88,22 @@ with fresh() as temp:
     files(directory, {"app.py": "import sys\nprint(sys.argv)\nraise SystemExit(len(sys.argv))\n",
                       "pkg/__init__.py": "", "pkg/__main__.py": "from . import tool\nprint(__name__, tool.x)\n",
                       "pkg/tool.py": "x = 'tool'\n"})
-    first = spyc(directory, "run", "-v", "-M", "sys", "app.py", "a", "app.py", "-v", "x.c", status=5)
+    first = spyc(directory, "run", "-v", "app.py", "a", "app.py", "-v", "x.c", status=5)
     assert first.stdout.splitlines()[-1] == "['app.py', 'a', 'app.py', '-v', 'x.c']", first.stdout
     assert COMPILER in first.stdout, first.stdout
     [built] = cache(directory)
-    again = spyc(directory, "run", "-v", "-M", "sys", "app.py", "a", "app.py", "-v", "x.c", status=5)
+    again = spyc(directory, "run", "-v", "app.py", "a", "app.py", "-v", "x.c", status=5)
     assert again.stdout == "['app.py', 'a', 'app.py', '-v', 'x.c']\n" and cache(directory) == [built], again
     (directory / "app.py").write_text("import sys\nprint('edited', sys.argv[1:])\n", encoding="utf-8")
-    assert spyc(directory, "run", "-v", "-M", "sys", "app.py", "b").stdout.endswith("edited ['b']\n")
+    assert spyc(directory, "run", "-v", "app.py", "b").stdout.endswith("edited ['b']\n")
     [edited] = cache(directory)
     assert edited != built and edited[:17] == built[:17], (built, edited)
-    assert spyc(directory, "run", "-O", "-M", "sys", "app.py").stdout == "edited []\n"
+    assert spyc(directory, "run", "-O", "app.py").stdout == "edited []\n"
     assert len(cache(directory)) == 2
     # -m runs a package's __main__ with its package set.
     assert spyc(directory, "run", "-m", "pkg", "arg").stdout == "__main__ tool\n"
     # Several runs at once share the cache.
-    runs = [subprocess.Popen([SPYC, "run", "-M", "sys", "app.py", str(i)], cwd=directory, stdout=subprocess.PIPE, text=True)
+    runs = [subprocess.Popen([SPYC, "run", "app.py", str(i)], cwd=directory, stdout=subprocess.PIPE, text=True)
             for i in range(4)]
     assert [run.communicate()[0] for run in runs] == [f"edited ['{i}']\n" for i in range(4)]
     assert all(run.returncode == 0 for run in runs)
@@ -129,6 +129,14 @@ with fresh() as temp:
         f.write("/* edited */\n")
     assert spyc(directory, "run", "fib.c", "app.py").stdout == "55\n"
     assert cache(directory) != [built] and len(cache(directory)) == 1
+    # Found beside the entry, it needs no name, and its edits count too.
+    [built] = cache(directory)
+    assert spyc(directory, "run", "app.py").stdout == "55\n"
+    [found] = [name for name in cache(directory) if name != built]
+    with open(directory / "fib.c", "a", encoding="utf-8") as f:
+        f.write("/* edited again */\n")
+    assert spyc(directory, "run", "app.py").stdout == "55\n"
+    assert found not in cache(directory) and len(cache(directory)) == 2
 print("spyc run with a C module passed")
 
 # The stamp covers spy.h and the libraries: a changed header compiles again.
@@ -139,13 +147,13 @@ with fresh() as temp:
     shutil.copy(SPYC, tree / "spyc")
     for name in ("spy.h", "spy-std.h", "libspy.a", "libspy-std.a"):
         shutil.copy(ROOT / name, tree / name)
-    files(directory, {"app.py": "print('ok')\n"})
+    files(directory, {"app.py": "import sys\nprint('ok')\n"})
     for _ in range(2):
-        assert spyc(directory, "run", "-M", "sys", "app.py", spyc=str(tree / "spyc")).stdout == "ok\n"
+        assert spyc(directory, "run", "app.py", spyc=str(tree / "spyc")).stdout == "ok\n"
     [built] = cache(directory)
     with open(tree / "spy-std.h", "a", encoding="utf-8") as f:
         f.write("/* edited */\n")
-    assert spyc(directory, "run", "-M", "sys", "app.py", spyc=str(tree / "spyc")).stdout == "ok\n"
+    assert spyc(directory, "run", "app.py", spyc=str(tree / "spyc")).stdout == "ok\n"
     assert cache(directory) != [built]
 print("spyc run's stamp passed")
 
@@ -187,10 +195,11 @@ with fresh() as temp:
     assert result.stdout == ("FAIL  tests/sub/test_b.py (exit 1)\nok    tests/test_a.py\n"
                              "FAIL  tests/test_c.py (build)\n1 passed, 2 failed\n"), result
     assert "AssertionError: no" in result.stderr and "No module named 'missing'" in result.stderr, result.stderr
-    result = spyc(directory, "test", "-M", "sys", "check.py", "test_top.py", "tests/test_a.py")
+    result = spyc(directory, "test", "check.py", "test_top.py", "tests/test_a.py")
     assert result.stdout == "named\nok    check.py\n['test_top.py']\nok    test_top.py\nok    tests/test_a.py\n3 passed, 0 failed\n", result
     result = spyc(directory, "test", status=1)
-    assert result.stdout.startswith("FAIL  test_top.py (build)\nFAIL  tests/sub/test_b.py") and "1 passed, 3 failed\n" in result.stdout, result
+    assert result.stdout == ("['test_top.py']\nok    test_top.py\nFAIL  tests/sub/test_b.py (exit 1)\nok    tests/test_a.py\n"
+                             "FAIL  tests/test_c.py (build)\n2 passed, 2 failed\n"), result
     assert "spyc: error: no tests in nothing" in spyc(directory, "test", "tests", "nothing", status=1).stderr
     (directory / "empty").mkdir()
     assert "spyc: error: no tests in empty" in spyc(directory, "test", "empty", status=1).stderr

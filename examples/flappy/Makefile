@@ -14,7 +14,7 @@ endif
 # rebuilds when any bundled file changes.
 flappy: flappy.py raylib.c assets/sprite.py $(ROOT)/bin/spyc $(ROOT)/libspy.a
 	$(ROOT)/bin/spyc -D 'game.themes.*' --minify --metafile flappy.json --deps flappy.d --analyze \
-		-o $@ flappy.py raylib.c -- $(RAYLIB) $(SYSTEM)
+		-o $@ flappy.py -- $(RAYLIB) $(SYSTEM)
 -include flappy.d
 
 # The sprite becomes a module (assets is a namespace package: no

@@ -9,7 +9,7 @@ release's spyc (docs/build.md 9).
 import _spyc   # first: it registers _spy
 import _spy
 from . import output, scan
-from .resolve import MODULE, PACKAGE, NAMESPACE, Build, Module, Origin, stderr
+from .resolve import MODULE, PACKAGE, NAMESPACE, NATIVE, STANDARD, Build, Module, Origin, stderr
 
 USAGE = """\
 usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | libmodule.a]... [-- cc-arguments]
@@ -19,11 +19,11 @@ usage: spyc [build] [options] [-o program] (input.py | -m module) [module.c | li
        spyc test [options] [module.c | libmodule.a]... [test.py | directory]...
        spyc clean
        spyc version
-options: -M module, -I dir, -x module, -D module[.*], -N name, --alias name=target,
+options: -I dir, -x module, -D module[.*], -N name, --alias name=target,
          -O, -OO, --minify, --metafile file, --deps file, --analyze, -Werror, -v
 """
 CACHE = "__pycache__/spyc"   # spyc run and spyc test build here (docs/build.md 2.3)
-TAKES = ("-o", "-m", "-M", "-I", "-x", "-D", "-N", "--alias", "--metafile", "--deps")
+TAKES = ("-o", "-m", "-I", "-x", "-D", "-N", "--alias", "--metafile", "--deps")
 
 
 class Usage(Exception):
@@ -32,6 +32,11 @@ class Usage(Exception):
 
 def error(text):
     stderr(f"spyc: error: {text}")
+
+
+def command(words):
+    """A command line for _spyc: each word, as the system's bytes, ended by NUL."""
+    return b"".join(word.encode("utf-8", "surrogateescape") + b"\0" for word in words)
 
 
 def home(self, installed):
@@ -56,8 +61,8 @@ class Entry:
 
 class Options:
     def __init__(self, args, cached):
-        self.files, self.mains, self.includes, self.more = [], [], [], []   # more: the C modules, then cc's arguments
-        self.roots, self.externals, self.registered, self.natives, self.aliases = [], [], [], [], {}
+        self.files, self.mains, self.includes, self.more = [], [], [], []   # more: cc's arguments
+        self.roots, self.externals, self.natives, self.aliases = [], [], {}, {}   # natives: name to file
         self.output = self.metafile = self.deps = self.loader = None
         self.bare = self.with_main = self.verbose = self.analyze = self.werror = self.minify = False
         self.optimize, self.passed, self.rest = 0, False, len(args)
@@ -78,8 +83,7 @@ class Options:
                 name = base[skip:-2]
                 if not base.startswith("lib"[:skip]) or not scan.identifier(name) or name in self.natives:
                     raise Usage
-                self.natives.append(name)
-                self.more.append(a)
+                self.natives[name] = a
                 continue
             takes = a in TAKES
             if takes and value is None:
@@ -122,7 +126,7 @@ class Options:
                 name = value[:-2] if star else value
                 if not scan.dotted(name):
                     raise Usage
-                {"-m": self.mains, "-M": self.registered, "-x": self.externals, "-D": self.includes}[a].append(value)
+                {"-m": self.mains, "-x": self.externals, "-D": self.includes}[a].append(value)
             elif a.startswith("-"):
                 raise Usage
             else:
@@ -132,14 +136,14 @@ class Options:
                 break
         entries = len(self.files) + len(self.mains)
         if not entries or (self.bare and self.with_main) or (not self.bare and entries > 1) or \
-                (self.bare and (self.registered or self.natives or self.optimize)) or \
+                (self.bare and (self.natives or self.optimize)) or \
                 ((self.bare or self.with_main) and self.passed) or \
                 (cached and (self.bare or self.with_main or self.passed or self.output)):
             raise Usage
         self.executable = not self.bare and not self.with_main
         if self.output is None:
             self.output = CACHE if cached else "a.out" if self.executable else "out.c"
-        if self.output in self.files or self.output in self.more[:len(self.natives)]:
+        if self.output in self.files or self.output in self.natives.values():
             raise Usage
 
 
@@ -165,7 +169,7 @@ def build(self, args, cached=False):
 def compose(self, args, o, cached):
     # The first root is the entry's directory, or the working directory for -m.
     first = o.files[0].rpartition("/")[0] + "/" if o.files and "/" in o.files[0] else ""
-    b = Build([first] + o.roots, o.externals, o.registered, o.natives, o.aliases, o.minify)
+    b = Build([first] + o.roots, o.externals, o.natives, o.aliases, o.minify, o.bare)
     entries = []
     for path in o.files:
         e = Entry(path, path.rpartition("/")[2], None, output.c_name(path, False))
@@ -207,6 +211,21 @@ def compose(self, args, o, cached):
     if b.errors:
         return 1, None
 
+    # The modules the program registers: the standard ones it imports, and
+    # the C modules, those named first, then those found, by name. Each C
+    # module's init is spy_init_ and its last name.
+    reached = sorted((m for m in b.modules.values() if m.queued), key=lambda m: m.name)
+    o.standard = [m.name for m in reached if m.kind == STANDARD]
+    natives = [b.find(name) for name in o.natives] + [m for m in reached if m.kind == NATIVE and m.name not in o.natives]
+    inits = {}
+    for m in natives:
+        m.array = "spy_init_" + m.name.rpartition(".")[2]
+        if m.array in inits:
+            error(f"{inits[m.array].path} and {m.path} both define {m.array}")
+            return 1, None
+        inits[m.array] = m
+    o.natives = natives
+
     # The table, sorted by the keys the loader answers; the inputs, the
     # entries and then the table's other files, each with the C array
     # holding its source. A module that is also an entry shares its array.
@@ -225,7 +244,7 @@ def compose(self, args, o, cached):
             m.array = f"module_{i}"
             inputs.append(m)
     loader = (o.loader or entries[0].symbol) + "_load"
-    code = output.generate(entries, table, inputs, loader, o.bare, o.registered, o.natives, o.optimize)
+    code = output.generate(entries, table, inputs, loader, o.bare, o.standard, o.natives, o.optimize)
 
     program = None
     if cached:
@@ -234,7 +253,7 @@ def compose(self, args, o, cached):
             return 1, None
         o.output = program
     elif o.executable:
-        if not compile_c(self, o.output, code, o.more, o):
+        if not compile_c(self, o.output, code, o):
             return 1, None
     elif not _spyc.write(o.output, code):
         error(f"cannot write {o.output}")
@@ -242,7 +261,7 @@ def compose(self, args, o, cached):
     if o.metafile and not _spyc.write(o.metafile, output.metafile(inputs, o.output, len(code), entries[0].module.path)):
         error(f"cannot write {o.metafile}")
         return 1, None
-    if o.deps and not _spyc.write(o.deps, output.rule(o.output, inputs, o.more[:len(o.natives)]).encode("utf-8")):
+    if o.deps and not _spyc.write(o.deps, output.rule(o.output, inputs, [m.path for m in o.natives]).encode("utf-8")):
         error(f"cannot write {o.deps}")
         return 1, None
     if o.analyze:
@@ -253,18 +272,18 @@ def compose(self, args, o, cached):
     return 0, program
 
 
-def compile_c(self, target, code, more, o):
+def compile_c(self, target, code, o):
     """The executable: the C compiler of spyc's build compiles the C file,
-    written to a temporary file, and MORE (the C modules and the arguments
-    after --) against spy.h and the libraries."""
+    written to a temporary file, the C modules, and the arguments after --,
+    against spy.h and the libraries."""
     source = _spyc.temp(code)
     include, lib = home(self, "/include"), home(self, "/lib")
-    args = _spyc.cc.split() + ["-O2", "-I", include, "-o", target, "-x", "c", source, "-x", "none"] + more
-    args += ([lib + "/libspy-std.a"] if o.registered else []) + [lib + "/libspy.a", "-lm"]
+    args = _spyc.cc.split() + ["-O2", "-I", include, "-o", target, "-x", "c", source, "-x", "none"] + [m.path for m in o.natives] + o.more
+    args += ([lib + "/libspy-std.a"] if o.standard else []) + [lib + "/libspy.a", "-lm"]
     if o.verbose:
         print(" ".join(args))
     try:
-        ok = _spyc.compile(target, args)
+        ok = _spyc.compile(target, command(args))
     finally:
         _spyc.unlink(source)
     return ok
@@ -287,10 +306,10 @@ def cache(self, words, code, o):
     for word in words:
         slot = fnv(slot, (word + "\0").encode("utf-8"))
     stamp = fnv(stamp, code)
-    for path in o.more:
-        stamp = fnv(stamp, _spyc.read(path))
+    for m in o.natives:
+        stamp = fnv(stamp, _spyc.read(m.path))
     include, lib = home(self, "/include"), home(self, "/lib")
-    made = [include + "/spy.h"] + ([include + "/spy-std.h", lib + "/libspy-std.a"] if o.registered else []) + [lib + "/libspy.a"]
+    made = [include + "/spy.h"] + ([include + "/spy-std.h", lib + "/libspy-std.a"] if o.standard else []) + [lib + "/libspy.a"]
     for path in made:
         stamp = fnv(stamp, _spyc.read(path))
     name = f"{CACHE}/{slot & 0xffffffffffffffff:016x}-{stamp & 0xffffffffffffffff:016x}"
@@ -299,7 +318,7 @@ def cache(self, words, code, o):
     temp = f"{name}.{_spyc.pid()}"
     _spyc.mkdir("__pycache__")
     _spyc.mkdir(CACHE)
-    if not compile_c(self, temp, code, o.more, o):
+    if not compile_c(self, temp, code, o):
         return None
     if not _spyc.rename(temp, name):
         error(f"cannot write {name}")
@@ -354,7 +373,7 @@ def test(self, args):
             return 2
         if not status:
             try:
-                status = _spyc.spawn(program, [path])
+                status = _spyc.spawn(program, command([path]))
             except OSError as e:
                 error(e)
                 status = 1
@@ -403,7 +422,7 @@ def main(argv):
         return status
     # The program's arguments: the entry as given, then the rest.
     try:
-        _spyc.exec(program, args[rest - 1:])
+        _spyc.exec(program, command(args[rest - 1:]))
     except OSError as e:
         error(e)
     return 1

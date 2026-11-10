@@ -228,18 +228,28 @@ command. The program mounts its working directory and has its command line
 as `sys.argv`. On Windows spyc writes C only (`-e` or `-c`). A failed or
 interrupted build removes the files it began to write.
 
-What goes into the program:
+What goes into the program is found from its imports. In each search root,
+`import NAME` takes, in order:
+
+| Found | Becomes |
+| --- | --- |
+| `NAME/__init__.py` | A package, embedded |
+| `NAME.c` | A C module exporting `spy_init_NAME`, compiled in and registered as `NAME` |
+| `libNAME.a` | An archive with a member exporting `spy_init_NAME`, linked in and registered as `NAME`, whatever language built it |
+| `NAME.py` | A module, embedded |
+
+A standard module (`sys`) is registered and links the standard layer
+(`spy-std.c`). Only what imports cannot show is named:
 
 | Input | Effect |
 | --- | --- |
 | `-x MODULE` | Leave the module to the host |
 | `-D MODULE` | Add a module that only dynamic imports name |
-| `-M MODULE` | Register a module of the standard layer, which the program then links (`spy-std.c`) |
-| `NAME.c` | A C module exporting `spy_init_NAME`, compiled in and registered as `NAME` |
-| `libNAME.a` | An archive with a member exporting `spy_init_NAME`, linked in and registered as `NAME`, whatever language built it |
+| `-I DIR` | Search another root after the entry's directory |
+| `NAME.c`, `libNAME.a` | A C module outside the roots |
 | `-- ARGS` | Arguments for the compiler |
 
-So `spyc -o pong pong.py raylib.c -- -lraylib` builds
+So `spyc -o pong pong.py -- -lraylib` builds
 [`examples/pong`](../examples/pong) in one step, and
 [`examples/jsonify`](../examples/jsonify) writes its `json` module in Rust.
 `-O`, `-OO`, `--minify`, `--metafile`, `--deps`, `--analyze`, and `-v`
@@ -994,7 +1004,7 @@ loader, and parses each only on first use.
 Who registers what:
 
 - The `spy` command calls `spy_std_init`.
-- `spyc -M` names the modules a generated program registers.
+- A program `spyc` builds registers the standard modules it imports.
 - The conformance driver `tests/run-spec` registers only `_spy`.
 
 #### 3.3.2 `sys`
@@ -1607,11 +1617,12 @@ There is no peephole optimizer or stable serialized-program format.
 
 - Imported modules are bundled in a table sorted by the names the engine
   probes, behind a generated `SPYModuleLoader` ([build.md](build.md)).
-- A small embedding entry point registers the standard modules named with
-  `-M`. With `-c`, spyc emits the arrays and the loader alone.
+- A small embedding entry point registers the standard modules and the C
+  modules the program imports. With `-c`, spyc emits the arrays and the
+  loader alone.
 - The C compiler, which spyc runs unless `-e` or `-c` asks for the C file,
-  links it with `spy.c` or `libspy.a`, and with `spy-std.c` when it names any
-  standard module.
+  links it with `spy.c` or `libspy.a`, and with `spy-std.c` when it imports
+  any standard module.
 
 The program still parses source at start-up. Embedding source is not
 compiling Python to native code.

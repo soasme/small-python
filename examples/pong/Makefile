@@ -4,7 +4,7 @@
 ROOT = ../..
 
 pong: pong.py raylib.c $(ROOT)/bin/spyc $(ROOT)/libspy.a
-	$(ROOT)/bin/spyc -o $@ pong.py raylib.c -- $(shell pkg-config --cflags --libs raylib)
+	$(ROOT)/bin/spyc -o $@ pong.py -- $(shell pkg-config --cflags --libs raylib)
 
 $(ROOT)/libspy.a $(ROOT)/bin/spyc:
 	$(MAKE) -C $(ROOT) $(patsubst $(ROOT)/%,%,$@)

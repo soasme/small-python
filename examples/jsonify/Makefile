@@ -8,7 +8,7 @@ RUSTLIBS = $(if $(filter Linux,$(shell uname -s)),-lgcc_s -lutil -lrt -lpthread 
 SPYC = $(ROOT)/bin/spyc $(ROOT)/libspy.a $(ROOT)/libspy-std.a
 
 jsonify: jsonify.py $(ARCHIVE) $(SPYC)
-	$(ROOT)/bin/spyc -M sys -o $@ jsonify.py $(ARCHIVE) -- $(RUSTLIBS)
+	$(ROOT)/bin/spyc -o $@ jsonify.py $(ARCHIVE) -- $(RUSTLIBS)
 
 # probe.py prints what json does with many values, to compare with CPython.
 probe: probe.py $(ARCHIVE) $(SPYC)
