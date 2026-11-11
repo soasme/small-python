@@ -76,11 +76,6 @@ static void drop(const char *path) {
 
 static const char *text(SPYContext *c, SPYValue *v) { return spy_as_string(c, v, NULL); }
 static SPYValue *string(SPYContext *c, const char *s) { return spy_string(c, s, strlen(s)); }
-static SPYValue *os_error(SPYContext *c, const char *what, const char *path, int error) {
-    char message[4200];
-    snprintf(message, sizeof message, "cannot %s %s: %s", what, path, strerror(error));
-    return spy_error(c, "OSError", message);
-}
 /* Each function's parameters, of which it reads ARGV: spyc passes the
  * arguments each names, and no keywords. */
 #define PARAMETERS SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *kw, void *data
@@ -190,6 +185,11 @@ static SPYValue *unsupported(PARAMETERS) {
 #define executable_native unsupported
 #define pid_native unsupported
 #else
+static SPYValue *os_error(SPYContext *c, const char *what, const char *path, int error) {
+    char message[4200];
+    snprintf(message, sizeof message, "cannot %s %s: %s", what, path, strerror(error));
+    return spy_error(c, "OSError", message);
+}
 /* A command, given as its words each ended by NUL, as a NULL-terminated
  * array in one allocation that free releases, or NULL with an error set. */
 static char **command(SPYContext *c, SPYValue *words) {

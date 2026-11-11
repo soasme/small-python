@@ -32,7 +32,10 @@ if [ "${actual%% *}" != "$sum" ]; then
     rm -f "$DIR/$name.$archive"
     exit 1
 fi
-tar -xf "$DIR/$name.$archive" -C "$DIR"
+case $archive in
+    zip) unzip -q "$DIR/$name.$archive" -d "$DIR" ;;
+    *) tar -xf "$DIR/$name.$archive" -C "$DIR" ;;
+esac
 for file in "$DIR/$name"/spyc*; do cp "$file" "$DIR/"; done
 rm -rf "$DIR/$name" "$DIR/$name.$archive"
 echo "$VERSION" > "$DIR/VERSION"
