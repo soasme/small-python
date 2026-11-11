@@ -579,7 +579,15 @@ int main(int argc, char **argv) {
     execute(c, "assert not ended\n");
     assert(spy_collect(c) >= 100000);
     assert(!spy_set_limit(c, SPY_LIMIT_COLLECTION, 2000));
-    execute(c, "del Node, Mortal, ended, i\n");
+    /* A collection due inside a __del__ waits for it to return, then runs
+     * the finalizers it finds and frees what they leave: the garbage cycle
+     * holding leaf lets go of it before leaf's last name does. */
+    execute(c, "class Holder(Node):\n    def __del__(self): ended.append('holder')\n"
+               "class Leaf:\n    def __del__(self): ended.append('leaf')\n"
+               "class Busy:\n    def __del__(self):\n        junk = [Node() for i in range(100000)]\n        ended.append('busy')\n"
+               "ended = []\nleaf = Leaf()\nh = Holder()\nh.leaf = leaf\ndel h\nBusy()\ndel leaf\n"
+               "assert ended == ['busy', 'holder', 'leaf'], ended\n");
+    execute(c, "del Node, Mortal, Holder, Leaf, Busy, ended, i\n");
     spy_collect(c);
     assert(spy_live_values(c) == baseline);
 

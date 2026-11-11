@@ -118,7 +118,7 @@ Contents | - navigation
 9 Executable Code and Execution Contexts > 9.4 Suspension and resumption | Generators, Awaitables
 9 Executable Code and Execution Contexts > 9.5 The handled exception | Exceptions, Raise
 9 Executable Code and Execution Contexts > 9.6 Recursion limit | Exceptions, BuiltinsText, SpyCalls
-9 Executable Code and Execution Contexts > 9.7 Object lifetime and finalization | GC, SpyGC
+9 Executable Code and Execution Contexts > 9.7 Object lifetime and finalization | GC, GCGenerators, SpyGC, SpyGCGenerators
 9 Executable Code and Execution Contexts > 9.8 Program execution | CompileModes
 10 Object Behaviours | = sections
 10 Object Behaviours > 10.1 Instances | = sections
@@ -489,7 +489,7 @@ Contents | - navigation
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.1 GeneratorResume ( *g*, *mode*, *value* ) | Generators
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.2 Methods | Generators, DelegateThrowArguments
 27 Control Abstraction Objects > 27.2 Generator objects > 27.2.3 Attributes | Generators, Frames
-27 Control Abstraction Objects > 27.2 Generator objects > 27.2.4 Finalization | GC, Generators
+27 Control Abstraction Objects > 27.2 Generator objects > 27.2.4 Finalization | GCGenerators, SpyGCGenerators, Generators
 27 Control Abstraction Objects > 27.3 Awaitables | Awaitables
 27 Control Abstraction Objects > 27.4 Coroutine objects | = sections
 27 Control Abstraction Objects > 27.4 Coroutine objects > 27.4.1 Coroutines | Awaitables

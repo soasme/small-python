@@ -115,8 +115,10 @@ agree on their distinct-state counts), in about half TLC's time.
 | `OSErrors.tla` | the subclass OSError picks for each errno shared by Linux and macOS, for one to five arguments and for subclass calls, with the fields and str() each gets | yes |
 | `ExceptionGroups.tla` | split and subgroup by type and by predicate over every group of up to three leaves and nested groups, keeping nesting and dropping emptied groups; construction checks, derive, copied metadata, and str | yes |
 | `IntrinsicTypes.tla` | every name of the standard interpreter types against the type of a sample object; constructors of methods, modules, cells, functions, and mapping proxies; singleton types; method, class-method, getset, and member descriptors; tracebacks and frames | yes |
-| `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles | yes |
-| `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `weak_callbacks`, `collect_once`, `spy_collect`), run in lockstep with `GC.tla` | no; checked against `GC.tla` |
+| `GC.tla` | reference-count destruction, `__del__` at most once (PEP 442), resurrection, and `gc.collect()` of cycles; the replay also checks every object's lifetime through a weak reference | yes |
+| `GCGenerators.tla` | `GC.tla` with a suspended generator and its frame in place of the phoenix: closed when it dies, its frame outliving it without keeping it (27.2.4) | yes (`GC.replay.py`) |
+| `SpyGC.tla` | spy's own memory manager (`spy_release`, `finalize_later`, `frame_take`, `weak_callbacks`, the machine's `finalizer_call`, `collect_once`, `spy_collect`, `tick_full`), run in lockstep with `GC.tla`: finalizers in C or on the machine, allocations inside them, automatic collection, failed collection passes, and weak references | no; checked against `GC.tla` |
+| `SpyGCGenerators.tla` | `SpyGC.tla` with the generator and frame of `GCGenerators.tla` | no; checked against `GCGenerators.tla` |
 | `SpyPause.tla` | pausing a call (docs/metering.md 3.8): with pausing set, the first spent budget makes a pause due, taken at the call's next machine step and never inside a native call; a budget spent while it is due stops the call; `spy_resume` runs on from the paused step with a fresh budget, and freeing the context stops a paused call; no step is lost or run twice, and an outermost call or a resume spends at most two budgets | no; TLC rejects a pause inside a native call and a resume that reruns the paused step |
 | `SpyPolicy.tla` | the host policy and output limit (manual 3.4.6): each outermost call prints at most the limit in force, even one a host function lowered mid-call; a stop sticks until the call returns; files, source, input, and modules are reached only with the policy's leave; a refusal raises the policy's error or PermissionError; a refused import is asked again, a loaded one never | no; TLC rejects an output check that wraps below `output_used` (the bug it found), an `errorf` that replaces the policy's error, a policy error ignored on a 0 return, and a cached refusal |
 | `SpyNative.tla` | native modules as the `spy` command imports them, as the in-process bindings' `LoadNative` loads them, and as the worker's `NATIVE` loads them before it seals itself (manual 3.4.9, protocol.md 7.1): a library is opened only with the policy's leave (`import` and `dlopen` for an import, `dlopen` for a host load), never in a sealed worker, at most once per context by imports, and closed when it fails to load; the engine's table goes only to a library no other engine linked; a package comes before `NAME.so`, which comes before `NAME.py`, and after a host load every import runs the library's init; only a module whose init succeeded is cached, and a failed init runs again without reopening | no; TLC rejects a plain store in place of the compare-and-swap (another engine's table replaced), a failed library left open, a core that ignores the loader's registration (not found while `NAME.so` exists), an open before the policy is asked, a host load that skips the policy, an import that looks for a package before the registered init, and a worker that opens a library after sealing |
@@ -174,23 +176,41 @@ that spy.c is correct: the C code is not verified against the models, and
 behavior outside them is covered by the other test suites.
 
 `SpyGC.tla` goes one level lower. It models the algorithm spy.c implements,
-reference counts, the pending stack, the finalization queue, and trial
-deletion included, and TLC checks that after every step it has the same
-heap and makes the same `__del__` calls as the language model, that it never
-touches freed memory or frees a referenced object, and that its counts are
-exact between statements. That this model matches spy.c is established by
-reading the code; the function names in the spec point at it.
+reference counts, the pending stack, the finalization queue, trial
+deletion, a generator handed to its frame, and weak references included,
+and TLC checks that after every step it has the same heap and makes the
+same `__del__` and close calls as the language model, that a weak reference
+answers exactly while its object is alive to Python, that a frame always
+reaches its generator, that it never touches freed memory or frees a
+referenced object, and that its counts are exact between statements. Each
+step chooses whether finalizers run in C or on the machine, whether the
+first one allocates a new pool (making a collection due inside it), and,
+where a collection runs, whether a pass fails to allocate its work arrays.
+A collection with a failed pass may leave finalized garbage the language
+model does not describe; from there spy alone is checked, and an explicit
+collection that does not fail must leave only what Python can reach. That
+this model matches spy.c is established by reading the code; the function
+names in the spec point at it. The weak-reference check is also made on
+spy itself, by `GC.replay.py`.
 
-`SpyGC.cfg` checks two objects so `make test-tla` stays quick; setting
-`Obj = {"a", "b", "p"}` checks three (about 4.75 million states). With three
-objects, TLC rejects each of these deliberate breakages of the algorithm: the
-earlier `spy_collect` that did not run finalizers before collecting again; a
-collector that freed what a waiting finalizer could reach; finalizing an
-object twice; releasing an assignment's old value before retaining the new
-one; miscounting references from garbage into live objects; and freeing an
-object's slots in the other order. Depth-first finalization order (a
-grandchild's `__del__` before its parent's sibling's) takes four objects and
-is outside these bounds.
+`SpyGC.cfg` checks two instances and `SpyGCGenerators.cfg` an instance and
+the generator, so `make test-tla` stays quick. TLC rejects each of these
+deliberate breakages: `frame_take` leaving the generator's weak references
+alive (the bug it found), or miscounting its references; a generator freed
+under its frame by the collector or by release; and a collection run at a
+boundary inside a finalizer (the earlier behaviour, which left finalized
+garbage holding live objects). It also reaches a collection between two
+machine finalizers and a failed pass with finalizers queued. Earlier, with
+`Obj = {"a", "b", "p"}` (4.75 million states for that model), TLC rejected:
+the earlier `spy_collect` that did not run finalizers before collecting
+again; a collector that freed what a waiting finalizer could reach;
+finalizing an object twice; releasing an assignment's old value before
+retaining the new one; miscounting references from garbage into live
+objects; and freeing an object's slots in the other order. Depth-first
+finalization order (a grandchild's `__del__` before its parent's sibling's)
+takes four objects and is outside these bounds. Asynchronous generators,
+coroutines, memoryviews, and weak-reference callbacks share these queues
+but are not modelled.
 
 The models found these bugs in spy, since fixed: the lexer reported an
 error on a later line before a syntax error on an earlier one (CPython's
@@ -271,7 +291,10 @@ Earlier, comprehensions reported an
 unbound local of their function as a free variable, finalizers queued while
 freeing an object ran after objects that were already waiting, and `str`
 length, slicing, and `find()` rescanned the whole string on every call
-(which made the replays themselves time out). They also found a mistake in a
+(which made the replays themselves time out); a weak reference to a
+generator that died while its frame lived on still reached it, and a
+collection due inside a `__del__` ran there, leaving finalized garbage that
+kept live objects from their own `__del__`. They also found a mistake in a
 first draft of `Generators.tla`: CPython raises RuntimeError when throwing
 into a finished coroutine, which the oracle replay caught. Oracle replays
 likewise corrected `Evaluation.tla` (`*args` in a call are evaluated before

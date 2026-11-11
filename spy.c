@@ -327,11 +327,12 @@ struct SPYContext {
     size_t weak_len, weak_cap;
     SPYValue **weak_calls;
     size_t weak_calls_len, weak_calls_cap;
-    /* Instances whose last reference died while their class defines __del__.
-     * The queue owns each one until its finalizer runs at the next statement
-     * boundary, after which an unresurrected instance is freed. */
-    SPYValue **finalize_calls;
-    size_t finalize_calls_len, finalize_calls_cap;
+    /* Values whose last reference died while they await a finalizer, linked
+     * through pending (finalize_push). The queue owns each one until its
+     * finalizer runs at a statement boundary, after which an unresurrected
+     * value is freed. */
+    SPYValue *finalize_first, *finalize_last;
+    size_t finalize_calls_len;
     /* The live cells of variables, borrowed: each variable has one cell,
      * shared by every closure over it (9.1); a cell leaves when freed. */
     SPYValue **cells;
@@ -1359,6 +1360,20 @@ static void release_edge(SPYValue *v, void *data) {
     if (--v->refs == 0) { v->pending = *pending; *pending = v; }
 }
 static void memory_unexport(SPYValue *);
+/* The finalize queue needs no storage of its own: a value on it has a
+ * reference, the queue's, so it is on no pending stack (release_dead). */
+static void finalize_push(SPYContext *c, SPYValue *v) {
+    v->pending = NULL;
+    if (c->finalize_last) c->finalize_last->pending = v;
+    else c->finalize_first = v;
+    c->finalize_last = v; c->finalize_calls_len++;
+}
+static SPYValue *finalize_pop(SPYContext *c) {
+    SPYValue *v = c->finalize_first;
+    if (!(c->finalize_first = v->pending)) c->finalize_last = NULL;
+    c->finalize_calls_len--;
+    return v;
+}
 /* Keep a dying instance alive for its __del__, a suspended generator or
  * coroutine for its close(), or an exporter's memoryview for its
  * __release_buffer__, once per object: 1. 2 for a generator past that whose
@@ -1381,15 +1396,17 @@ static int finalize_later(SPYValue *v) {
         if (!(hit->cls == cls && hit->epoch == c->classes_changed && hit->init ? hit->del : class_lookup(cls, "__del__"))) return 0;
     }
     SPYContext *c = v->ctx;
-    if (weak_push(c, &c->finalize_calls, &c->finalize_calls_len, &c->finalize_calls_cap, v)) return 0;
+    finalize_push(c, v);
     attend(c);
     v->finalized = 1;
     return 1;
 }
 /* Generator v, its last reference gone while its frame lives on, finished
- * and the frame's own: the frame then holds it, not it the frame. */
-static NO_INLINE void frame_take(SPYValue *v) {
+ * and the frame's own: the frame then holds it, not it the frame, and to
+ * Python it is gone (27.2.4), its weak references dead. */
+static NO_INLINE void frame_take(SPYValue *v, int collecting) {
     SPYValue *frame = v->as.generator.frame;
+    if (v->weak) weak_dead(v->ctx, v, collecting);
     if (!frame->as.frame.env) frame->as.frame.env = spy_retain(v->as.generator.env);
     v->refs++; v->as.generator.done = 1; v->as.generator.frame = NULL;
     frame->as.frame.owner = v; frame->as.frame.generator = NULL; frame->refs--;
@@ -1409,7 +1426,7 @@ static NO_INLINE void release_dead(SPYValue *v) {
         int later = finalize_later(v);
         if (later) {
             if (later == 1) v->refs = 1;
-            else frame_take(v);
+            else frame_take(v, 0);
             continue;
         }
         if (v->type == SPY_MEMORYVIEW) memory_unexport(v);
@@ -1461,7 +1478,7 @@ static size_t collect_once(SPYContext *c) {
             SPYValue *v = *at;
             if (!v->marked && (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) &&
                 v->as.generator.frame && v->as.generator.frame->marked) {
-                frame_take(v); v->marked = 1; kept.items[kept.len++] = v;
+                frame_take(v, 1); v->marked = 1; kept.items[kept.len++] = v;
             }
         }
         for (size_t i = start; i < kept.len; i++) edges(kept.items[i], mark_edge, &kept);
@@ -14982,7 +14999,9 @@ static SPYValue *finalizer(SPYContext *);
 enum { TICK_DEFER = 2 };
 static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     if (c->error_type[0]) return -1;
-    if (c->collect_due) collect(c);
+    /* A collection waits for the finalizers that wait (a boundary inside
+     * __del__), so that it can run its own and free what they leave. */
+    if (c->collect_due && !finalizers_wait(c)) collect(c);
     int machined = machine && c->finalize_calls_len && finalizer(c);
     if (machined && machine != TICK_DEFER) return 1;
     if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
@@ -15010,7 +15029,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     }
     if (c->stopped) return halt(c, c->stopped);
     if (due(c)) return -1;
-    if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len && !c->pause_due) c->quiet_unit = f->unit;
+    if (c->filename_from == f->unit && !c->weak_calls_len && !c->finalize_calls_len && !c->pause_due && !c->collect_due) c->quiet_unit = f->unit;
     return 0;
 }
 /* Whether tick has nothing to do but record the line. */
@@ -17132,14 +17151,12 @@ static void report_unraisable(SPYContext *c, const char *text, SPYValue *subject
  * depth first: what was queued since the last waiting entries goes ahead of
  * them. */
 static void finalize_ahead(SPYContext *c, size_t waiting) {
-    size_t queued = c->finalize_calls_len - waiting;
-    if (!queued || !waiting) return;
-    SPYValue **rotated = mem_malloc(c, c->finalize_calls_len * sizeof(*rotated));
-    if (!rotated) return;
-    memcpy(rotated, c->finalize_calls + waiting, queued * sizeof(*rotated));
-    memcpy(rotated + queued, c->finalize_calls, waiting * sizeof(*rotated));
-    memcpy(c->finalize_calls, rotated, c->finalize_calls_len * sizeof(*rotated));
-    mem_free(rotated);
+    if (!waiting || waiting == c->finalize_calls_len) return;
+    SPYValue *last = c->finalize_first;
+    while (--waiting) last = last->pending;
+    c->finalize_last->pending = c->finalize_first;
+    c->finalize_first = last->pending;
+    last->pending = NULL; c->finalize_last = last;
 }
 /* Run __del__ of dead instances and close dead suspended generators and
  * asynchronous generators, then
@@ -17150,8 +17167,7 @@ static void weak_callbacks(SPYContext *c) {
     if (finalizers_wait(c)) return;
     c->weak_running = 1;
     while (c->finalize_calls_len) {
-        SPYValue *self = c->finalize_calls[0];
-        memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+        SPYValue *self = finalize_pop(c);
         size_t waiting = c->finalize_calls_len;
         /* A Python __del__ takes the instance; another binds to it first. */
         SPYValue *function = self->type == SPY_INSTANCE ? class_lookup(self->as.map.parent, "__del__") : NULL, *method;
@@ -22277,12 +22293,12 @@ static void finish_delegate(SPYContext *c, Machine *m) {
  * when a dead generator's close began on m (finalize_close). */
 static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
-    SPYValue *self = c->finalize_calls[0], *method = finalizer(c);
+    SPYValue *self = c->finalize_first, *method = finalizer(c);
     if (self->type == SPY_GENERATOR) {
         finalize_close(c, m);
         return c->error_type[0] ? NULL : c->unbound;
     }
-    memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+    finalize_pop(c);
     if (machine_push(c, m, self) || machine_push(c, m, spy_int(c, (int64_t)c->finalize_calls_len))) return NULL;
     c->finalizing = c->calls_len + 1;
     spy_retain(self);
@@ -22571,7 +22587,7 @@ static SPYValue *key_best(SPYContext *c, Consumer *s) {
  * there. */
 static int close_quietly(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *finalizer(SPYContext *c) {
-    SPYValue *self = c->finalize_calls[0];
+    SPYValue *self = c->finalize_first;
     if (finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->py_depth >= c->recursion_limit)
         return NULL;
     if (self->type == SPY_GENERATOR)
@@ -22585,8 +22601,7 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
  * meanwhile waiting, and the step that was due run again after it
  * (finalize_closed). */
 static void finalize_close(SPYContext *c, Machine *m) {
-    SPYValue *g = c->finalize_calls[0];
-    memmove(c->finalize_calls, c->finalize_calls + 1, --c->finalize_calls_len * sizeof(*c->finalize_calls));
+    SPYValue *g = finalize_pop(c);
     size_t depth = m->block_len;
     consume(c, m, B_CLOSE, g, M_CLOSE, NULL, NULL, NULL);
     if (m->block_len > depth) { m->blocks[depth].consumer->finalizing = c->finalize_calls_len + 1; c->weak_running = 1; }
@@ -35112,7 +35127,7 @@ void spy_context_free(SPYContext *c) {
     c->frames_cap = 0;
     while (c->values) free_value(c->values);
     while (c->sealed) free_value(c->sealed);
-    mem_free(c->weak); mem_free(c->weak_calls); mem_free(c->finalize_calls); mem_free(c->cells); mem_free(c->frames); mem_free(c->repr_stack);
+    mem_free(c->weak); mem_free(c->weak_calls); mem_free(c->cells); mem_free(c->frames); mem_free(c->repr_stack);
     for (size_t i = 0; i < c->host_modules_len; i++) mem_free(c->host_modules[i].name);
     mem_free(c->host_modules);
     for (size_t i = 0; i < c->mounts_len; i++) { mem_free(c->mounts[i].host); mem_free(c->mounts[i].path); }

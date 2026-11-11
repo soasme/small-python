@@ -321,8 +321,8 @@ replays them on the oracle too.
   access, pattern matching, evaluation order, class creation, `yield from`,
   async generators, `except*`, the iteration protocol, `super()`, dict
   order, and object finalization and cycle collection.
-- `SpyGC.tla` also checks spy's own memory-management algorithm against the
-  language model, step for step.
+- `SpyGC.tla` and `SpyGCGenerators.tla` also check spy's own
+  memory-management algorithm against the language model, step for step.
 - The [README](../tests/tla/README.md) states what these checks do and do
   not establish.
 
@@ -1690,7 +1690,8 @@ Finalizers (`__del__`):
 
 - An instance whose class defines `__del__` is not freed when its last
   reference is released, or when the collector finds it unreachable. It is
-  queued, kept alive by the queue, and marked as finalized.
+  queued, kept alive by the queue, and marked as finalized. The queue is
+  linked through the values themselves, so queueing never allocates.
 - Its `__del__` runs at the next statement boundary, or when the top-level
   program finishes, before any weak-reference callbacks.
 - Exceptions raised by `__del__` are discarded, because there is no error
@@ -1700,14 +1701,20 @@ Finalizers (`__del__`):
 - A collection collects again after running finalizers, so cyclic garbage
   with `__del__` is freed in the same collection.
 - An automatic collection runs at a statement boundary, where queued
-  finalizers run, and the finalizers it runs do not start another one.
+  finalizers run, and the finalizers it runs do not start another one. One
+  that becomes due while a finalizer runs waits for it to return, so that it
+  can run the finalizers it finds and free what they leave.
+- A collection whose working memory cannot be allocated does nothing; the
+  next one reclaims what it left.
 - Context teardown never runs finalizers.
 
 Suspended code:
 
 - A suspended generator or coroutine closes when it is released or
   collected, running its `finally` blocks and `__exit__` methods, as
-  CPython's does.
+  CPython's does. If its frame object lives on, the frame keeps the
+  generator's storage for its code and line, but to Python the generator is
+  gone: its weak references are dead (27.2.4).
 - A suspended asynchronous generator is passed to the host's finalizer hook
   when one is installed, and is otherwise closed with `aclose()` (27.5.4).
 
