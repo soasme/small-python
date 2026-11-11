@@ -16,7 +16,8 @@ says where the engine stands today, so the first step is clear.
   replay, Pi codemode
 - [Platforms](#platforms): WebAssembly and the edge, Android and iOS, bare
   metal
-- [Development](#development): hot module reload
+- [Development](#development): `spyc` as the one project tool, hot
+  module reload
 - [Long-term maintenance](#long-term-maintenance): memory safety,
   refactoring, performance, tracking CPython
 - [Performance](#performance)
@@ -369,6 +370,74 @@ an operating system: build without a POSIX host (file access already raises
 budget, and measure the smallest usable configuration in flash and RAM.
 
 ## Development
+
+### `spyc` as the one project tool
+
+Today `spyc` builds, runs and tests a program from its imports, with a
+cache, and nothing else: no project file, no dependencies, no lint or
+format. Make it the single command a project needs, as `go` is, while
+reading and writing the Python ecosystem's own formats, so a project
+stays usable by pip, uv and editors:
+
+| Command | Does | Built on |
+| --- | --- | --- |
+| `spyc init` | write `pyproject.toml`, `main.py`, `tests/` | PEP 621 |
+| `spyc add PKG`, `spyc remove PKG` | change `[project] dependencies` or a `[dependency-groups]` group, then lock | PEP 508, PEP 735 |
+| `spyc lock`, `spyc sync` | resolve to `pylock.toml`; fetch what it names into the cache | PEP 751, PEP 691 |
+| `spyc build`, `run`, `test` | the commands of today, reading the entry, search roots and C modules from the project when none are given | `[project.scripts]`, `[tool.spyc]` |
+| `spyc vet` | report what the engine and the resolver already know: syntax errors, unresolved imports, undefined and unused names | engine tokens and symbol tables |
+| `spyc fmt` | one fixed layout, no options | engine tokens |
+| `spyc install` | build every `[project.scripts]` entry into one executable each, in `~/.local/bin` | PEP 621 |
+
+Design:
+
+- No virtual environment. A locked package is unpacked once into a
+  content-addressed cache (`~/.cache/spyc`, keyed by its sha256 in
+  `pylock.toml`) and added as a search root. Nothing is installed into the
+  project. A build is still reproducible, because the lock fixes every
+  input's hash.
+- Single files too: `spyc run script.py` reads PEP 723 inline metadata
+  (`# /// script`) and fetches what it declares, as `go run` does.
+- Only packages spy can run are accepted: pure-Python wheels
+  (`py3-none-any`), and sdists that need no build backend beyond copying
+  sources. `spyc add` scans the package's imports with the build's own
+  resolver and refuses it before locking, naming each import that cannot
+  be satisfied (a standard module spy lacks, a CPython extension). It never
+  locks a package that would fail at run time.
+- Fetching shells out to `curl` and verifies sha256 in `_spyc`, so the tool
+  needs no TLS of its own. Wheels are unpacked by a small inflate in `_spyc`.
+  The index is configurable (`--index`, `SPYC_INDEX`), a `file://` index
+  works offline, and `--offline` fails rather than fetch.
+- `spyc test` keeps exit-status tests and also runs each `test_*` function
+  of a file, as pytest does with plain `assert`, with `-k PATTERN` and
+  `-j N`.
+- `spyc fmt` and `spyc vet` read the engine's own tokens (`_spy.tokenize`)
+  and symbol tables, so they check what spy runs and do not need `ast`.
+  `fmt` keeps every comment and leaves the program's tokens unchanged, and a
+  test checks both over the specification suite.
+
+The resolver follows the import graph: what can run on spy is limited by
+what spy can import. Most of PyPI imports standard modules spy does not
+have (`re`, `json`, `dataclasses`, `typing`), so measure this first. Scan
+the most-downloaded pure-Python wheels with `spyc`'s scanner and report how
+many resolve on the core and `sys` alone, and which missing modules block
+the rest. That report decides between three answers for the standard
+library: keep it out, as the note under
+[Standard library coverage](#standard-library-coverage) prefers; offer
+CPython's pure-Python `Lib/` modules as an ordinary locked dependency,
+pinned to the oracle's tag and kept out of this tree; or leave packages to
+the bindings' host languages.
+
+Like every shipped tool, each command gets tests of its outputs and failure
+paths (a broken download, a hash mismatch, an interrupted `sync`), a TLA+
+model of what `lock`, `sync` and the cache leave behind on each failure,
+and a measurement in [docs/benchmark.md](docs/benchmark.md): cold and warm
+`spyc run` of a project with dependencies.
+
+Order: the project file for `build`, `run` and `test`; `spyc test`
+functions; `vet`; the PyPI scan above; `lock`, `sync` and `add`; PEP 723;
+`fmt`; `install`. Non-goals: workspaces, build backends (`spyc` does not
+build sdists or wheels of CPython extensions), and plugins.
 
 ### Hot module reload
 
