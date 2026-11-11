@@ -36,3 +36,4 @@ slow-unit-*
 /examples/flappy/flappy.d
 /examples/flappy/flappy.json
 /examples/flappy/assets/
+.DS_Store
