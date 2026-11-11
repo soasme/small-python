@@ -56,7 +56,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     snprintf(output, sizeof output, "%s/out.c", dir);
     snprintf(meta, sizeof meta, "%s/meta.json", dir);
     snprintf(deps, sizeof deps, "%s/out.d", dir);
-    char *argv[16] = {"spyc"};
+    char *argv[17] = {"spyc"};
     int argc = 1;
     if (options & 1) argv[argc++] = "--minify";
     argv[argc++] = options & 2 ? "-c" : "-e";
