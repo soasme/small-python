@@ -72,6 +72,7 @@ SOURCES = {
     "encode": "result = ('\xe9'.encode(), '\xe9'.encode('latin-1'), '\xe9'.encode('ascii', 'replace'), '\xe9'.encode('ascii', 'ignore'))",
     "encode_error": "result = '\xe9'.encode('ascii')",
     "encode_unknown": "result = 'a'.encode('nosuch')",
+    "encode_unicode_escape": "result = 'a\\t\\\\\\'\\xe9\\u20ac\\U0001f600'.encode('unicode_escape')",
     "count_range": "result = ('aaaa'.count('a', 1, 3), 'aaaa'.count('', 1, 3), 'abab'.count('ab', -2), 'a'.count('', 5))",
     "find_range": "result = ('abcabc'.find('c', 3), 'abcabc'.find('c', 3, 5), 'abc'.find('', 4), 'abc'.find('', 3), 'abc'.rfind('', 1, 2))",
     "find_in_operator": "result = ('Py' in 'Python', '' in 'abc')",

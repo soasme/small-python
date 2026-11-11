@@ -134,7 +134,8 @@ Cases == {"capitalize", "casefold", "lower_upper", "final_sigma", "swapcase", "t
           "rsplit_maxsplit", "split_bad_sep", "join", "join_nonstr", "join_bytes", "maketrans_dict",
           "maketrans_three", "maketrans_unequal", "maketrans_bad_key", "translate",
           "translate_lookup_error", "translate_bad_value", "translate_ord_value", "encode", "encode_error",
-          "encode_unknown", "count_range", "find_range", "find_in_operator", "index_error", "rindex_error",
+          "encode_unknown", "encode_unicode_escape", "count_range", "find_range", "find_in_operator",
+          "index_error", "rindex_error",
           "startswith_tuple", "startswith_bad", "startswith_tuple_bad", "strip_examples",
           "lstrip_vs_removeprefix", "strip_none", "strip_bad", "replace_count_keyword", "zfill_examples",
           "center_bad_fill", "ljust_bad_fill", "center_index_width", "center_float_width",
@@ -196,6 +197,7 @@ Case(c) ==
       [] c = "encode" -> "(b'\\xc3\\xa9', b'\\xe9', b'?', b'')"
       [] c = "encode_error" -> "UnicodeEncodeError: 'ascii' codec can't encode character '\\xe9' in position 0: ordinal not in range(128)"
       [] c = "encode_unknown" -> "LookupError: unknown encoding: nosuch"
+      [] c = "encode_unicode_escape" -> "b\"a\\\\t\\\\\\\\'\\\\xe9\\\\u20ac\\\\U0001f600\""
       [] c = "count_range" -> "(2, 3, 1, 0)"
       [] c = "find_range" -> "(5, -1, -1, 3, 2)"
       [] c = "find_in_operator" -> "(True, True)"

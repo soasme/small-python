@@ -802,8 +802,8 @@ Frozen dictionaries:
 - Byte sources, CLI files, and imports honor encoding comments on the first
   or second line, and UTF-8 BOMs. Unicode string sources ignore encoding
   comments.
-- UTF-8, ASCII, Latin-1, and ISO-8859-15 decoding is native. Other source
-  encodings are left to the host.
+- UTF-8, ASCII, Latin-1, ISO-8859-15, and unicode_escape decoding is
+  native. Other source encodings are left to the host.
 - The lexer rejects invalid UTF-8.
 - CR and CRLF become LF before parsing, including inside string literals.
 - Indentation uses eight-column tab stops and rejects inconsistent mixing of

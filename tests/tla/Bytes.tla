@@ -137,7 +137,8 @@ Cases == {"literal_forms", "literal_non_ascii", "ctor_forms", "ctor_str_encoding
           "hash", "hash_bytearray", "count_int", "count_range", "search_str", "case_ascii_only",
           "predicates", "expandtabs", "splitlines", "split_maxsplit", "split_str_sep", "join", "join_str",
           "maketrans_translate", "maketrans_unequal", "translate_bad_table", "zfill", "replace_count",
-          "decode", "decode_error", "removeprefix_types", "strip_bytes_arg", "bytearray_mutations",
+          "decode", "decode_error", "decode_unicode_escape", "decode_unicode_escape_error",
+          "removeprefix_types", "strip_bytes_arg", "bytearray_mutations",
           "bytearray_methods", "bytearray_inplace", "bytearray_setitem_range", "bytearray_append_bad",
           "bytearray_remove_missing", "bytearray_pop_empty", "bytearray_slice_assign_int",
           "bytearray_slice_assign_str", "bytearray_extended_slice", "bytearray_extended_slice_size",
@@ -201,6 +202,8 @@ Case(c) ==
       [] c = "replace_count" -> "(b'bba', b'-a-b-c-')"
       [] c = "decode" -> "('caf\\xe9', '\\xe9', '\\ufffd', '')"
       [] c = "decode_error" -> "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+      [] c = "decode_unicode_escape" -> "('\\xc3\\xa9', 'a\\nAA\\xe9\\u2022\\\\q', '\\\\x5c\\\\x78\\\\x34')"
+      [] c = "decode_unicode_escape_error" -> "UnicodeDecodeError: 'unicodeescape' codec can't decode bytes in position 2-4: truncated \\xXX escape"
       [] c = "removeprefix_types" -> "(b'bc', bytearray(b'ab'))"
       [] c = "strip_bytes_arg" -> "(b'a', b'a', bytearray(b'b'))"
       [] c = "bytearray_mutations" -> "(bytearray(b'xYYc!'), 63)"

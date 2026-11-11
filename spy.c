@@ -29262,9 +29262,9 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
 static SPYValue *bytearray_join(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     return exported(c, bytes_join, argc, argv, keywords, data);
 }
-/* Codecs: UTF-8, ASCII, Latin-1 and Latin-9 with common error handlers. */
+/* Codecs: UTF-8, ASCII, Latin-1, Latin-9 and unicode_escape with common error handlers. */
 static SPYValue *text_encode(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
-enum { CODEC_UTF8, CODEC_ASCII, CODEC_LATIN1, CODEC_LATIN9 };
+enum { CODEC_UTF8, CODEC_ASCII, CODEC_LATIN1, CODEC_LATIN9, CODEC_UNICODE_ESCAPE };
 static int codec_lookup(SPYContext *c, SPYValue *encoding, int *codec) {
     *codec = CODEC_UTF8;
     if (!encoding) return 0;
@@ -29284,10 +29284,11 @@ static int codec_lookup(SPYContext *c, SPYValue *encoding, int *codec) {
     if (!strcmp(name, "iso-8859-15") || !strcmp(name, "iso8859-15") || !strcmp(name, "latin9") || !strcmp(name, "l9")) {
         *codec = CODEC_LATIN9; return 0;
     }
+    if (!strcmp(name, "unicode-escape")) { *codec = CODEC_UNICODE_ESCAPE; return 0; }
     errorf(c, "LookupError", "unknown encoding: %s", encoding->as.string.data);
     return -1;
 }
-static const char *const codec_names[] = {"utf-8", "ascii", "latin-1", "charmap"};
+static const char *const codec_names[] = {"utf-8", "ascii", "latin-1", "charmap", "unicodeescape"};
 /* The eight replacements in CPython Lib/encodings/iso8859_15.py. */
 static const unsigned latin9_bytes[] = {0xa4, 0xa6, 0xa8, 0xb4, 0xb8, 0xbc, 0xbd, 0xbe};
 static const unsigned latin9_codes[] = {0x20ac, 0x160, 0x161, 0x17d, 0x17e, 0x152, 0x153, 0x178};
@@ -29371,6 +29372,14 @@ static SPYValue *text_encode(SPYContext *c, SPYValue *self, SPYValue *encoding, 
     for (size_t i = 0; i < self->as.string.len && !c->error_type[0]; position++) {
         size_t width;
         unsigned code = utf8_decode(self->as.string.data + i, self->as.string.len - i, &width);
+        if (codec == CODEC_UNICODE_ESCAPE) {
+            /* Every character encodes: printable ASCII as itself, others escaped. */
+            char ch = code == '\t' ? 't' : code == '\n' ? 'n' : code == '\r' ? 'r' : code == '\\' ? '\\' : 0;
+            if (ch) { append(&out, "\\", 1); append(&out, &ch, 1); }
+            else if (code >= 0x20 && code < 0x7f) append(&out, self->as.string.data + i, 1);
+            else unicode_escape(&out, code);
+            i += width; continue;
+        }
         int surrogate = code >= 0xd800 && code <= 0xdfff;
         unsigned limit = codec == CODEC_ASCII ? 128 : codec == CODEC_LATIN1 || codec == CODEC_LATIN9 ? 256 : 0x110000;
         unsigned encoded = codec == CODEC_LATIN9 ? latin9_encode(code) : code;
@@ -29438,6 +29447,48 @@ static size_t utf8_valid(const unsigned char *text, size_t len, const char **rea
     }
     return width;
 }
+/* One byte or escape sequence (12.5.3) of unicode_escape at text, appended
+ * to out; 0 for a faulty escape, with its length and the reason. Any other
+ * byte stands for the code point of its value. */
+static size_t escape_decode(Buffer *out, const unsigned char *text, size_t len, const char **reason, size_t *bad) {
+    static const char simple[] = "\\\\''\"\"a\ab\bf\fn\nr\rt\tv\v";
+    if (text[0] != '\\') { append_codepoint(out, text[0]); return 1; }
+    if (len < 2) { *reason = "\\ at end of string"; return 0; }
+    unsigned char ch = text[1];
+    if (ch == '\n') return 2;
+    for (const char *s = simple; *s; s += 2) if (ch == (unsigned char)*s) { append_codepoint(out, (unsigned char)s[1]); return 2; }
+    if (ch >= '0' && ch <= '7') {
+        unsigned code = (unsigned)(ch - '0');
+        size_t n = 2;
+        for (; n < 4 && n < len && text[n] >= '0' && text[n] <= '7'; n++) code = code * 8 + (unsigned)(text[n] - '0');
+        append_codepoint(out, code);
+        return n;
+    }
+    if (ch == 'x' || ch == 'u' || ch == 'U') {
+        size_t n = 2, stop = ch == 'x' ? 4 : ch == 'u' ? 6 : 10;
+        unsigned code = 0;
+        for (int digit; n < stop && n < len && (digit = hex_digit(text[n])) >= 0; n++) code = code * 16 + (unsigned)digit;
+        *bad = n;
+        if (n < stop) *reason = ch == 'x' ? "truncated \\xXX escape" : ch == 'u' ? "truncated \\uXXXX escape" : "truncated \\UXXXXXXXX escape";
+        else if (code > 0x10ffff) *reason = "illegal Unicode character";
+        else { append_codepoint(out, code); return n; }
+        return 0;
+    }
+    if (ch == 'N') {
+        const unsigned char *close = len > 2 && text[2] == '{' ? memchr(text + 3, '}', len - 3) : NULL;
+        unsigned code;
+        *reason = "malformed \\N character escape";
+        if (!close) *bad = len > 2 && text[2] == '{' ? len : 2;
+        else if (close == text + 3) *bad = 3;
+        else if (!unicode_lookup((const char *)text + 3, (size_t)(close - text - 3), &code)) {
+            *reason = "unknown Unicode character name"; *bad = (size_t)(close - text) + 1;
+        } else { append_codepoint(out, code); return (size_t)(close - text) + 1; }
+        return 0;
+    }
+    /* An unknown escape is kept (the DeprecationWarning goes to HostWarn). */
+    append(out, "\\", 1); append_codepoint(out, ch);
+    return 2;
+}
 static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYValue *encoding, SPYValue *errors) {
     int codec, handler;
     if (codec_lookup(c, encoding, &codec) || errors_lookup(c, errors, &handler)) return NULL;
@@ -29449,19 +29500,24 @@ static SPYValue *bytes_decode(SPYContext *c, const char *data, size_t len, SPYVa
         if (codec == CODEC_LATIN1 || codec == CODEC_LATIN9) {
             append_codepoint(&out, codec == CODEC_LATIN9 ? latin9_decode(text[i]) : text[i]); i++; continue;
         }
-        if (codec == CODEC_ASCII ? text[i] < 128 : (width = utf8_valid(text + i, len - i, &reason, &bad)) != 0) {
+        if (codec == CODEC_UNICODE_ESCAPE) {
+            if ((width = escape_decode(&out, text + i, len - i, &reason, &bad))) { i += width; continue; }
+        } else if (codec == CODEC_ASCII ? text[i] < 128 : (width = utf8_valid(text + i, len - i, &reason, &bad)) != 0) {
             append(&out, data + i, width); i += width; continue;
         }
         if (handler == ERRORS_SURROGATEPASS && codec == CODEC_UTF8 && len - i >= 3 && text[i] == 0xed &&
             text[i + 1] >= 0xa0 && text[i + 1] <= 0xbf && (text[i + 2] & 0xc0) == 0x80) {
             append(&out, data + i, 3); i += 3; continue;
         }
+        /* surrogateescape cannot stand for bytes below 0x80. */
+        int escapable = handler == ERRORS_SURROGATEESCAPE;
+        for (size_t j = 0; j < bad; j++) if (text[i + j] < 128) escapable = 0;
         if (handler == ERRORS_IGNORE) {}
         else if (handler == ERRORS_REPLACE) append_codepoint(&out, 0xfffd);
         else if (handler == ERRORS_BACKSLASH) {
             for (size_t j = 0; j < bad; j++) { char hex[5]; snprintf(hex, sizeof(hex), "\\x%02x", text[i + j]); append(&out, hex, 4); }
-        } else if (handler == ERRORS_SURROGATEESCAPE) {
-            for (size_t j = 0; j < bad; j++) if (text[i + j] >= 128) append_codepoint(&out, 0xdc00 + text[i + j]);
+        } else if (escapable) {
+            for (size_t j = 0; j < bad; j++) append_codepoint(&out, 0xdc00 + text[i + j]);
         } else if (handler == ERRORS_UNKNOWN) {
             unknown_handler(c, errors);
         } else if (handler == ERRORS_XMLCHARREF || handler == ERRORS_NAMEREPLACE) {

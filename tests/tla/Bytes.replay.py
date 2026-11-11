@@ -78,6 +78,8 @@ SOURCES = {
     "replace_count": "result = (b'aaa'.replace(b'a', b'b', 2), b'abc'.replace(b'', b'-'))",
     "decode": "result = (b'caf\\xc3\\xa9'.decode(), b'\\xe9'.decode('latin-1'), b'\\xff'.decode('utf-8', 'replace'), b'\\xff'.decode('ascii', 'ignore'))",
     "decode_error": "result = b'\\xff'.decode()",
+    "decode_unicode_escape": "result = (b'\\xc3\\xa9'.decode('unicode_escape'), b'a\\\\n\\\\x41\\\\101\\\\u00e9\\\\N{BULLET}\\\\q'.decode('unicode-escape'), b'\\\\x4'.decode('unicode_escape', 'backslashreplace'))",
+    "decode_unicode_escape_error": "result = b'ab\\\\x4'.decode('unicode_escape')",
     "removeprefix_types": "result = (b'abc'.removeprefix(bytearray(b'a')), bytearray(b'abc').removesuffix(b'c'))",
     "strip_bytes_arg": "result = (b'xxaxx'.strip(b'x'), b'  a  '.strip(), bytearray(b'ab').lstrip(b'a'))",
     "bytearray_mutations": "a = bytearray(b'abc')\na[0] = 120\na[1:2] = b'YY'\na.append(33)\na.extend(b'!?')\na.insert(0, 62)\nx = a.pop()\na.remove(33)\ndel a[0]\nresult = (a, x)",

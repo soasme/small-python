@@ -11,6 +11,7 @@ Unreleased (0.10.0):
   spyc; make downloads it (SPYC_BOOTSTRAP names another)
 - spyc programs write sys.stderr to stderr
 - spyc -D PKG.* adds the modules in name order
+- the unicode_escape codec
 
 2026-11-10 0.9.0:
 
