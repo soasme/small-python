@@ -2,7 +2,7 @@
  * program (manual 3.2).
  *
  *     cc -shared -fPIC -DSPY_SHARED_MODULE -I. examples/fib.c -o examples/fib.so
- *     ./spy examples/test_fib.py
+ *     bin/spy examples/test_fib.py
  *
  * On Windows the library is fib.dll. Without SPY_SHARED_MODULE the same file
  * is a C module that a host links and registers with spy_new_module. */

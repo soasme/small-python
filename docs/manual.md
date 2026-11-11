@@ -84,7 +84,7 @@ tool, and the platform C/math libraries:
 make
 ```
 
-The outputs are `spy`, `bin/spyc`, and `libspy.a`. No Python installation is
+The outputs are `bin/spy`, `bin/spyc`, and `libspy.a`. No Python installation is
 needed to build or run those three artifacts. spyc is a Python program built
 by the previous release's spyc, which `make` downloads once and checks against
 its checksum (`SPYC_BOOTSTRAP=path/to/spyc` names another; [Building
@@ -126,8 +126,8 @@ the engine from its build directory.
 Execute a source file or command:
 
 ```sh
-./spy examples/hello.py
-./spy -c 'print(sum(range(10)))'
+bin/spy examples/hello.py
+bin/spy -c 'print(sum(range(10)))'
 ```
 
 Generate and compile a standalone program:
@@ -1389,7 +1389,7 @@ SPY_MODULE int spy_init_fib(SPYContext *c, SPYValue *module) {
 
 ```sh
 cc -shared -fPIC -DSPY_SHARED_MODULE -I. examples/fib.c -o examples/fib.so
-./spy examples/test_fib.py
+bin/spy examples/test_fib.py
 ```
 
 The same source builds two ways:

@@ -1,7 +1,7 @@
 """Write fuzz/fuzz.dict, the libFuzzer dictionary, as QuickJS's generate_dict.js.
 
 Keywords and operators are listed here; builtin names and the attributes of
-builtin types come from ./spy itself, so the dictionary follows the engine.
+builtin types come from bin/spy itself, so the dictionary follows the engine.
 Run it after `make spy`: python3 fuzz/generate_dict.py
 """
 
@@ -38,7 +38,7 @@ def entry(token):
 
 
 def main():
-    spy = ROOT / "spy"
+    spy = ROOT / "bin" / "spy"
     names = subprocess.run([str(spy), "-c", ENUMERATE], check=True,
                            capture_output=True, text=True).stdout.split()
     tokens = KEYWORDS + [t for line in TOKENS for t in line.split()] + TOKENS[-1:]

@@ -32,7 +32,7 @@ deterministic result.
 
 ```sh
 python3 bench/compare.py "CPython 3.15=tests/upstream/cpython-build/python.exe" \
-    "spy=./spy" "MicroPython=micropython -X heapsize=512M" ...
+    "spy=bin/spy" "MicroPython=micropython -X heapsize=512M" ...
 ```
 
 `bench/compare.py` runs each program as a fresh process: `startup` 30 times,

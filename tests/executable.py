@@ -392,7 +392,7 @@ with tempfile.TemporaryDirectory(prefix="spy executable ") as temp:
 print("Source-only generation for a host program passed")
 
 repl = subprocess.run(
-    [str(ROOT / "spy"), "-i"],
+    [str(ROOT / "bin" / "spy"), "-i"],
     input="x = 40\nx + 2\ndef double(n):\n    return n * 2\n\ndouble(x)\n",
     capture_output=True, text=True, check=True, timeout=10,
 )
@@ -426,17 +426,17 @@ for args, stdin, status, stdout, stderr in [
      "['--mount', '.', '-OO', '-c', 'import sys; print(sys.orig_argv[1:])', 'a']\n", ""),
     (["-", "q"], "import sys; print(sys.orig_argv[1:])", 0, "['-', 'q']\n", ""),
 ]:
-    result = subprocess.run([str(ROOT / "spy"), *args], input=stdin, capture_output=True, text=True, timeout=60)
+    result = subprocess.run([str(ROOT / "bin" / "spy"), *args], input=stdin, capture_output=True, text=True, timeout=60)
     assert (result.returncode, result.stdout) == (status, stdout) and result.stderr.startswith(stderr), (args, result)
 with tempfile.TemporaryDirectory(prefix="spy argv ") as temp:
     script = Path(temp) / "args.py"
     script.write_text("import sys; print(sys.argv, sys.orig_argv[1:])\n", encoding="utf-8")
-    result = subprocess.run([str(ROOT / "spy"), "-O", str(script), "-i", b"caf\xc3\xa9", b"\xff"],
+    result = subprocess.run([str(ROOT / "bin" / "spy"), "-O", str(script), "-i", b"caf\xc3\xa9", b"\xff"],
                             capture_output=True, text=True, check=True)
     assert result.stdout == f"[{str(script)!r}, '-i', 'café', '\\udcff'] ['-O', {str(script)!r}, '-i', 'café', '\\udcff']\n", result
-    shell = subprocess.run([str(ROOT / "spy"), "-i"], input="import sys\nsys.orig_argv[1:]\n", capture_output=True, text=True, check=True)
+    shell = subprocess.run([str(ROOT / "bin" / "spy"), "-i"], input="import sys\nsys.orig_argv[1:]\n", capture_output=True, text=True, check=True)
     assert ">>> ['-i']\n" in shell.stdout, shell
-    shell = subprocess.run([str(ROOT / "spy"), "-i"], input="import sys\nsys.argv\n", capture_output=True, text=True, check=True)
+    shell = subprocess.run([str(ROOT / "bin" / "spy"), "-i"], input="import sys\nsys.argv\n", capture_output=True, text=True, check=True)
     assert ">>> ['']\n" in shell.stdout, shell
 print("spy exit statuses, error reports, input, arguments, and usage passed")
 

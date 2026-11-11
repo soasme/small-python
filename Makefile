@@ -27,9 +27,10 @@ LDLIBS += -ldl
 endif
 
 .PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
-all: spy bin/spyc spy-worker libspy.a libspy-std.a
+all: bin/spy bin/spyc spy-worker libspy.a libspy-std.a
 
-spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
+bin/spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
+	mkdir -p bin
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # The packages' worker (docs/packaging/protocol.md): spy-worker.c compiled
@@ -225,7 +226,7 @@ tla-coverage:
 
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/include" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/standards" "$(DESTDIR)$(PREFIX)/share/doc/smallpython/testing"
-	install -m755 spy bin/spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
+	install -m755 bin/spy bin/spyc spy-worker "$(DESTDIR)$(PREFIX)/bin"
 	install -m644 spy.h spy-std.h spy-module.h "$(DESTDIR)$(PREFIX)/include"
 	install -m644 libspy.a libspy-std.a "$(DESTDIR)$(PREFIX)/lib"
 	install -m644 docs/manual.md docs/api.md "$(DESTDIR)$(PREFIX)/share/doc/smallpython"
@@ -259,8 +260,8 @@ unicode-data:
 check-unicode:
 	$(if $(CPYTHON),$(CPYTHON),$(error Missing pinned CPython oracle; run make oracle)) tools/build_unicode.py --check
 
-test-unicode: spy check-unicode
-	$(CPYTHON) tests/unicode.py ./spy
+test-unicode: bin/spy check-unicode
+	$(CPYTHON) tests/unicode.py ./bin/spy
 
 test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cython examples/fib.so check-intrinsics check-api
 	./tests/api examples/fib.so
@@ -269,9 +270,9 @@ test: all tests/api tests/oom tests/threads tests/metering tests/run-spec run-cy
 	./tests/threads examples/fib.so
 	python3 tests/spec_coverage.py
 	python3 tests/spec_runner.py tests/run-spec --strict
-	$(PYTHON) tests/files.py ./spy
-	$(PYTHON) tests/std.py ./spy
-	CC='$(CC)' CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/native.py ./spy
+	$(PYTHON) tests/files.py ./bin/spy
+	$(PYTHON) tests/std.py ./bin/spy
+	CC='$(CC)' CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/native.py ./bin/spy
 	CFLAGS='$(CFLAGS)' LDFLAGS='$(LDFLAGS)' $(PYTHON) tests/executable.py
 	$(PYTHON) tests/commands.py
 	LDFLAGS='$(LDFLAGS)' python3 tests/build_runner.py bin/spyc
@@ -412,9 +413,9 @@ $(OBJDIR)/fuzz/fuzz_common.o $(OBJDIR)/fuzz/fuzz_eval.o $(OBJDIR)/fuzz/fuzz_comp
 	mkdir -p $(dir $@)
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -c $< -o $@
 
-bench: bench/lifecycle spy bin/spyc libspy.a examples/fib.so
+bench: bench/lifecycle bin/spy bin/spyc libspy.a examples/fib.so
 	./bench/lifecycle
-	size spy
+	size bin/spy
 	python3 bench/spyc.py
 	python3 bench/native.py
 
@@ -450,15 +451,15 @@ coverage:
 	SPY_TEST_TIMEOUT=600 $(MAKE) CC=clang CFLAGS='-O1 -g -std=c11 $(COVERAGE_PROFILE) -fcoverage-mapping -mllvm -runtime-counter-relocation' \
 		LDFLAGS='$(COVERAGE_PROFILE)' test test-binding
 	$(LLVM_PROFDATA) merge -o $(COVERAGE_DIR)/all.profdata $(COVERAGE_DIR)/*.profraw
-	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./bin/spyc -object ./tests/run-spec \
+	$(LLVM_COV) report -instr-profile=$(COVERAGE_DIR)/all.profdata ./bin/spy -object ./bin/spyc -object ./tests/run-spec \
 		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
-	$(LLVM_COV) show -format=html -output-dir=$(COVERAGE_DIR)/html -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy \
+	$(LLVM_COV) show -format=html -output-dir=$(COVERAGE_DIR)/html -instr-profile=$(COVERAGE_DIR)/all.profdata ./bin/spy \
 		-object ./bin/spyc -object ./tests/run-spec -object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
 	@echo "Annotated sources: $(COVERAGE_DIR)/html/index.html"
-	$(LLVM_COV) export -format=lcov -instr-profile=$(COVERAGE_DIR)/all.profdata ./spy -object ./bin/spyc -object ./tests/run-spec \
+	$(LLVM_COV) export -format=lcov -instr-profile=$(COVERAGE_DIR)/all.profdata ./bin/spy -object ./bin/spyc -object ./tests/run-spec \
 		-object ./tests/api -object ./tests/oom -object ./spy-worker spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c > $(COVERAGE_DIR)/all.lcov
 	python3 tools/coverage.py $(COVERAGE_DIR)/all.lcov spy.c spyc/_spyc.c spy-std.c cli.c spy-worker.c
 
 clean:
-	rm -f spy bin/spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
+	rm -f bin/spy bin/spyc spy-worker run-cython *.o *.a tests/*.o tests/api tests/oom tests/threads tests/metering tests/run-spec bench/*.o bench/lifecycle examples/fib.so $(FUZZERS)
 	rm -rf $(OBJDIR) examples/fib.so.dSYM java/licenses java/*/native java/*/target

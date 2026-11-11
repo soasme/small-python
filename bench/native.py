@@ -43,7 +43,7 @@ def median_ms(command, cwd, runs, expected):
 def main():
     baseline = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else None
     rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    spy = os.path.join(ROOT, "spy")
+    spy = os.path.join(ROOT, "bin", "spy")
     with tempfile.TemporaryDirectory() as temp:
         native, source, many = (os.path.join(temp, name) for name in ("native", "source", "many"))
         for directory in (native, source, many):

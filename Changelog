@@ -1,7 +1,7 @@
 Unreleased (0.10.0):
 
-- incompatible spyc changes:
-  - spyc is now at bin/spyc
+- incompatible changes:
+  - spy and spyc are now at bin/spy and bin/spyc
   - -M removed: an imported standard module is registered and linked;
     -D sys names one only a dynamic import reaches
 - spyc finds C modules, NAME.c and libNAME.a, in the search roots

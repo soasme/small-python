@@ -8,7 +8,7 @@ Makefile. CPython is not needed to build or run it.
 
 ```sh
 $ make
-$ ./spy -c 'print(sum(range(10)))'
+$ bin/spy -c 'print(sum(range(10)))'
 45
 ```
 
@@ -50,8 +50,8 @@ make
 Run a script or the interactive shell:
 
 ```sh
-./spy examples/hello.py
-./spy -i
+bin/spy examples/hello.py
+bin/spy -i
 ```
 
 Compile a script into a standalone program:
