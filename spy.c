@@ -1287,6 +1287,19 @@ static void weak_dead(SPYContext *c, SPYValue *v, int collecting) {
         if (drop) { memmove(e, e + 1, (c->weak_len - i - 1) * sizeof(*e)); c->weak_len--; }
     }
 }
+/* Garbage v, found by a collection, loses its references with a callback
+ * before any finalizer runs, as in CPython, so no callback meets an object
+ * its __del__ resurrected; the others answer until v is freed. */
+static void weak_doomed(SPYContext *c, SPYValue *v) {
+    for (size_t i = c->weak_len; i--;) {
+        struct WeakEntry *e = &c->weak[i];
+        SPYValue *callback = e->target == v ? name_local(e->ref, "__callback__") : NULL;
+        if (!callback || callback->type == SPY_NONE) continue;
+        e->target = NULL;
+        if (e->ref->marked) { if (!weak_push(c, &c->weak_calls, &c->weak_calls_len, &c->weak_calls_cap, e->ref)) { spy_retain(e->ref); attend(c); } }
+        else { memmove(e, e + 1, (c->weak_len - i - 1) * sizeof(*e)); c->weak_len--; }
+    }
+}
 /* The allocation holding a map's entries, which start front entries in. */
 static Entry *map_storage(SPYValue *map) { return map->as.map.items ? map->as.map.items - map->as.map.front : NULL; }
 /* Take v out of its context's values. */
@@ -1461,6 +1474,7 @@ static size_t collect_once(SPYContext *c) {
     for (size_t i = 0; i < work.len; i++) edges(work.items[i], mark_edge, &work);
     SPYValue **end = work.items + c->live, **dead = end - (listed - work.len), **at = dead;
     for (SPYValue *v = c->values; at < end; v = v->next) if (!v->marked) *at++ = v;
+    for (at = dead; at < end; at++) if ((*at)->weak) weak_doomed(c, *at);
     /* Unreachable values awaiting a finalizer (__del__, or close() of a
      * suspended generator) survive with everything they reach; a later
      * collection frees them unless the finalizer resurrected them. The rest
