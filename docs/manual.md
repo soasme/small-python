@@ -361,6 +361,13 @@ establish complete Unicode or unittest compatibility.
   hung during its own initialization; `make SANITIZERS=undefined sanitize`
   passed there.
 
+`make test-gc-stress` runs the specification suite with an automatic
+collection at the first statement boundary after every `GC_STRESS` new values
+that can form cycles (1024 by default; `GC_STRESS=1` collects at every
+boundary it can). A value the collector fails to trace then fails a test
+instead of waiting for an unlucky schedule. The suite takes about five
+minutes at the default on an M2.
+
 #### 2.4.5 Fuzzing and coverage
 
 `make fuzz` runs the libFuzzer targets ([fuzz/README](../fuzz/README)) for

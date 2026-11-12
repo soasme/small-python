@@ -26,7 +26,7 @@ ifeq ($(shell uname -s),Linux)
 LDLIBS += -ldl
 endif
 
-.PHONY: all test sanitize bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
+.PHONY: all test sanitize test-gc-stress bench clean upstream test-cython cython-report cython-dynamic-report install docs oracle test-binding test-javascript wasm test-spec test-spec-oracle test-build test-build-oracle tla-tools test-tla test-tla-oracle tla-coverage libfuzzer fuzz fuzz-replay coverage test-rust rust-vendor test-go go-vendor test-java java-native
 all: bin/spy bin/spyc spy-worker libspy.a libspy-std.a
 
 bin/spy: $(OBJDIR)/cli.o $(OBJDIR)/spy-std.o $(OBJDIR)/spy.o
@@ -433,6 +433,17 @@ sanitize:
 	$(CC) $(SANITIZE_CFLAGS) -DREPORT='"$(SANITIZE_DIR)/report"' -c tests/sanitize.c -o $(SANITIZE_DIR)/sanitize.o
 	SPY_TEST_TIMEOUT=600 $(MAKE) CFLAGS='$(SANITIZE_CFLAGS)' LDFLAGS='-fsanitize=$(SANITIZERS) $(SANITIZE_DIR)/sanitize.o' test test-binding; \
 	status=$$?; if grep -qv 'Sanitizer failed to allocate 0x' $(SANITIZE_DIR)/report; then cat $(SANITIZE_DIR)/report; exit 1; fi; exit $$status
+
+# The specification suite with an automatic collection at the first point one
+# may happen (a statement boundary) after GC_STRESS new values that can form
+# cycles: a value missing from the collector's trace then fails a test instead
+# of waiting for an unlucky schedule. GC_STRESS=1 collects as often as possible.
+GC_STRESS = 1024
+GC_STRESS_DIR = $(OBJDIR)/gc-stress
+test-gc-stress:
+	mkdir -p $(GC_STRESS_DIR)
+	$(CC) $(CFLAGS) -DSPY_GC_STRESS=$(GC_STRESS) tests/run-spec.c spy.c $(LDLIBS) -o $(GC_STRESS_DIR)/run-spec
+	SPY_TEST_TIMEOUT=600 python3 tests/spec_runner.py $(GC_STRESS_DIR)/run-spec --strict
 
 # Line and branch coverage of make test and the package tests, with clang:
 # code no test executes is code no sanitizer run has checked, so every line of

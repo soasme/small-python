@@ -1530,6 +1530,21 @@ static void schedule_collection(SPYContext *c) {
     c->collect_due = 0;
     c->collect_listed = !c->collection_limit || c->collection_limit > SIZE_MAX - c->listed ? SIZE_MAX : c->listed + c->collection_limit;
     c->collect_memory = c->memory > SIZE_MAX / 2 ? SIZE_MAX : 2 * c->memory;
+#ifdef SPY_GC_STRESS
+    /* make test-gc-stress: a collection at the first point where one may
+     * happen after SPY_GC_STRESS new values that can form cycles
+     * (stress_waits). */
+    c->collect_due = c->collection_limit != 0;
+    c->collect_listed = c->listed + SPY_GC_STRESS;
+#endif
+}
+static ALWAYS_INLINE int stress_waits(SPYContext *c) {
+#ifdef SPY_GC_STRESS
+    return c->listed < c->collect_listed;
+#else
+    (void)c;
+    return 0;
+#endif
 }
 /* A pass that finds garbage awaiting finalizers only finalizes it; collect
  * again to free what the finalizers left unreachable. The finalizers run
@@ -15052,7 +15067,7 @@ static NO_INLINE int tick_full(SPYContext *c, Frame *f, Node *n, int machine) {
     if (c->error_type[0]) return -1;
     /* A collection waits for the finalizers that wait (a boundary inside
      * __del__), so that it can run its own and free what they leave. */
-    if (c->collect_due && !finalizers_wait(c)) collect(c);
+    if (c->collect_due && !finalizers_wait(c) && !stress_waits(c)) collect(c);
     int machined = machine && c->finalize_calls_len && finalizer(c);
     if (machined && machine != TICK_DEFER) return 1;
     if (!machined && (c->weak_calls_len || c->finalize_calls_len)) weak_callbacks(c);
