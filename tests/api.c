@@ -1088,6 +1088,11 @@ int main(int argc, char **argv) {
     execute(c, "class Slow:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([7])");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "next(iter(Slow()))", "iter.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 1);
+    /* So does list()'s length hint, a __len__ and then a __length_hint__. */
+    execute(c, "class Sized(Slow):\n    def __len__(self):\n        for i in range(3000): pass\n        raise TypeError\n"
+               "    def __length_hint__(self):\n        for i in range(3000): pass\n        return 1");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "list(Sized())[0]", "hint.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */

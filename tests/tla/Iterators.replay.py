@@ -139,6 +139,24 @@ SOURCES = {
                                  "    for _ in it: pass\n    result.append('exhausted')",
     "adapters_ask_again": "result = []\nfor make in (lambda r: map(abs, r), lambda r: filter(None, r), enumerate, zip):\n"
                           "    it = make(Revival())\n    result.append((list(it), next(it)))",
+    "hint_after_iter": "result = []\nclass S:\n    def __iter__(self): result.append('iter'); return iter((1, 2))\n"
+                       "    def __len__(self): result.append('len'); return 2\n"
+                       "l = list(S()); l.extend(S()); l += S(); [*S()]; sorted(S()); bytes(S())",
+    "hint_fallback": "log = []\nclass S:\n    def __iter__(self): log.append('iter'); return iter((1, 2))\n"
+                     "    def __len__(self): log.append('len'); raise TypeError\n"
+                     "    def __length_hint__(self): log.append('hint'); return 5\nresult = (list(S()), log)",
+    "hint_none": "class A:\n    def __iter__(self): return iter((1, 2))\n    def __length_hint__(self): return NotImplemented\n"
+                 "class B(A):\n    def __length_hint__(self): raise TypeError\nresult = [list(A()), list(B())]",
+    "hint_error": "class S:\n    def __iter__(self): return iter(())\n    def __length_hint__(self): raise ValueError('v')\n"
+                  "result = list(S())",
+    "hint_not_int": "class Hint:\n    def __iter__(self): return iter(())\n    def __length_hint__(self): return 'a'\n"
+                    "result = list(Hint())",
+    "hint_negative": "class Hint:\n    def __iter__(self): return iter(())\n    def __length_hint__(self): return -1\n"
+                     "result = [*Hint()]",
+    "len_error": "class S:\n    def __iter__(self): return iter(())\n    def __len__(self): return -1\nresult = bytes(S())",
+    "no_hint_consumers": "result = []\nclass S:\n    def __iter__(self): result.append('iter'); return iter((1, 2))\n"
+                         "    def __len__(self): result.append('len'); return 2\n"
+                         "tuple(S()); set(S()); sum(S()); bytearray(S()); a, b = S()",
 }
 
 

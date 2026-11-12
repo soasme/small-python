@@ -94,8 +94,9 @@ typedef struct Program Program;
 typedef struct Machine Machine;
 /* callk's continuation (as Lua's lua_KFunction): given its context and
  * what the call callk asked for returned (NULL with an error), both
- * owned, the value of the work that called, else NULL, an error, or no
- * error after callk again. */
+ * owned, the value of the work that called, else NULL: an error, no error
+ * after callk again, or none for the consumer under way (consume) to go
+ * on. */
 typedef SPYValue *(*Continuation)(SPYContext *, Machine *, SPYValue *ctx, SPYValue *result);
 typedef struct Call Call;
 typedef struct Pool Pool;
@@ -8905,33 +8906,63 @@ static SPYValue *iterator_length_hint_call(SPYContext *c, size_t argc, SPYValue 
     if (argc != 1) return errorf(c, "TypeError", "%s.__length_hint__() takes no arguments (%zu given)", owner_name, argc - 1);
     return iterator_length_hint(c, argv[0]);
 }
-/* PyObject_LengthHint's errors for a user iterable: __len__, then
- * __length_hint__; a TypeError or NotImplemented falls back silently. */
-static int length_hint_check(SPYContext *c, SPYValue *v) {
-    if (v->type != SPY_INSTANCE) return 0;
-    SPYValue *method = special_method(c, v, "__len__");
-    if (method) {
-        spy_release(method);
-        if (sequence_size(c, v) >= 0) return 0;
-        if (!error_is(c, "TypeError")) return -1;
-        spy_clear_error(c);
-    } else if (c->error_type[0]) return -1;
-    method = special_method(c, v, "__length_hint__");
-    if (!method) return c->error_type[0] ? -1 : 0;
-    SPYValue *hint = call(c, method, 0, NULL);
-    spy_release(method);
-    if (!hint) {
-        if (!error_is(c, "TypeError")) return -1;
-        spy_clear_error(c); return 0;
-    }
-    int status = 0;
-    if (hint != c->not_implemented) {
-        SPYValue *integer = builtin_value(c, hint, SPY_INT);
-        if (!integer) { errorf(c, "TypeError", "__length_hint__ must be an integer, not %s", type_name(hint)); status = -1; }
-        else if (integer_sign(integer) < 0) { spy_error(c, "ValueError", "__length_hint__() should return >= 0"); status = -1; }
-    }
-    spy_release(hint); return status;
+/* LengthHint (7.7.7) of o, which it takes: its __len__, else, when that
+ * is absent or raises TypeError, its __length_hint__, each called on
+ * machine m (callk), or here without one. NULL, with an error when the
+ * hint fails or is no usable length, else with none: a consumer goes on
+ * (consume), the hint itself unused. */
+static SPYValue *length_hint(SPYContext *, Machine *, SPYValue *);
+/* What o's __length_hint__ returned, hint (LengthHint, 7.7.7). */
+static SPYValue *length_hinted(SPYContext *c, Machine *m, SPYValue *o, SPYValue *hint) {
+    (void)m;
+    SPYValue *integer = hint ? builtin_value(c, hint, SPY_INT) : NULL;
+    char fq[256];
+    if (!hint) { if (error_is(c, "TypeError")) spy_clear_error(c); }
+    else if (hint == c->not_implemented);
+    else if (!integer) errorf(c, "TypeError", "%s.__length_hint__() must return an int, not %s", type_fqname(o, fq, sizeof(fq)), type_name(hint));
+    else if (integer->as.integer_data.big) spy_error(c, "OverflowError", "Python int too large to convert to C ssize_t");
+    else if (integer_sign(integer) < 0) errorf(c, "ValueError", "%s.__length_hint__() must return a non-negative int", type_fqname(o, fq, sizeof(fq)));
+    spy_release(hint); spy_release(o);
+    return NULL;
 }
+/* o's __length_hint__ called, for its LengthHint (7.7.7). */
+static SPYValue *length_hint_method(SPYContext *c, Machine *m, SPYValue *o) {
+    SPYValue *method = special_method(c, o, "__length_hint__");
+    if (!method) { spy_release(o); return NULL; }
+    SPYValue *result = callk(c, m, method, 0, NULL, length_hinted, o);
+    spy_release(method);
+    return result;
+}
+/* What o's __len__ returned, length (LengthHint, 7.7.7). */
+static SPYValue *length_measured(SPYContext *c, Machine *m, SPYValue *o, SPYValue *length) {
+    int64_t n;
+    if (length) length_result(c, length, &n);
+    spy_release(length);
+    if (!error_is(c, "TypeError")) { spy_release(o); return NULL; }
+    spy_clear_error(c);
+    return length_hint_method(c, m, o);
+}
+static SPYValue *length_hint(SPYContext *c, Machine *m, SPYValue *o) {
+    SPYValue *method = special_method(c, o, "__len__");
+    if (!method) {
+        if (c->error_type[0]) { spy_release(o); return NULL; }
+        return length_hint_method(c, m, o);
+    }
+    SPYValue *result = callk(c, m, method, 0, NULL, length_measured, o);
+    spy_release(method);
+    return result;
+}
+/* iterator, iterable's, which it takes, once iterable's LengthHint is
+ * asked for a list or bytes of its items (ListExtend, 7.7.6); NULL on an
+ * error. */
+static SPYValue *hinted(SPYContext *c, SPYValue *iterator, SPYValue *iterable) {
+    if (iterator && iterable->type == SPY_INSTANCE && (length_hint(c, NULL, spy_retain(iterable)), c->error_type[0])) {
+        spy_release(iterator);
+        return NULL;
+    }
+    return iterator;
+}
+static SPYValue *list_iterator(SPYContext *c, SPYValue *iterable) { return hinted(c, get_iterator(c, iterable), iterable); }
 static SPYValue *slice_new(SPYContext *c, SPYValue *start, SPYValue *stop, SPYValue *step) {
     SPYValue *v = value_new(c, SPY_SLICE);
     if (v) {
@@ -14057,7 +14088,8 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * of a mapping on the machine (method_function) calls its keys() first
  * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
  * gives, then is fed those keys, looking each up in the mapping
- * (KEY_ITEMS). */
+ * (KEY_ITEMS). One that makes a list of its items (hints) asks its
+ * instance source's length hint once it has the iterator (ListExtend). */
 enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
@@ -14074,7 +14106,7 @@ struct Sorter {
     SortItem items[];
 };
 typedef struct {
-    int id, compensating, method, keyed, descending, adds, phase, swapped, stage, fed;
+    int id, compensating, method, keyed, descending, adds, phase, swapped, stage, fed, hints;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14911,7 +14943,7 @@ static SPYValue *keys_iterator(SPYContext *c, SPYValue *source, SPYValue *keys) 
     }
     return iterator;
 }
-static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, SPYValue *callable) {
+static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, SPYValue *callable, int hints) {
     if (is_dict(result)) {
         if (!is_dict(source)) {
             SPYValue *method = attribute(c, source, "keys");
@@ -14976,6 +15008,7 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
         spy_clear_error(c);
         errorf(c, "TypeError", "Value after * must be an iterable, not %s", type_name(source));
     }
+    if (hints) iterator = hinted(c, iterator, source);
     if (!iterator) return -1;
     for (;;) {
         if (pass(c)) break;
@@ -14989,12 +15022,16 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
     return c->error_type[0] ? -1 : 0;
 }
 static int extend_display(SPYContext *c, SPYValue *result, SPYValue *source) {
-    return extend_container(c, result, source, NULL);
+    return extend_container(c, result, source, NULL, 0);
+}
+/* A list or tuple display gains its starred source's items (ListExtend, 7.7.6). */
+static int extend_list(SPYContext *c, SPYValue *result, SPYValue *source) {
+    return extend_container(c, result, source, NULL, 1);
 }
 /* sorted()'s list gains iterable's items, raising as iter() does. */
 static int sorted_items(SPYContext *c, SPYValue *list, SPYValue *iterable) {
     if (iterable->type == SPY_LIST || iterable->type == SPY_TUPLE) return extend_display(c, list, iterable);
-    SPYValue *iterator = get_iterator(c, iterable);
+    SPYValue *iterator = list_iterator(c, iterable);
     int status = iterator ? extend_display(c, list, iterator) : -1;
     spy_release(iterator);
     return status;
@@ -15540,7 +15577,7 @@ static int eval_arguments(SPYContext *c, Frame *f, Node *arguments, SPYValue *ca
             if (keyword != pass) continue;
             SPYValue *value = eval(c, f, keyword || arg->kind == N_STAR ? arg->a : arg);
             if (!value) break;
-            if (arg->kind == N_MAPPING) extend_container(c, keywords, value, callable);
+            if (arg->kind == N_MAPPING) extend_container(c, keywords, value, callable, 0);
             else if (arg->kind == N_KEYWORD) {
                 SPYValue *key = spy_string(c, arg->text, strlen(arg->text));
                 if (key) merge_keyword(c, keywords, key, value, callable);
@@ -15769,7 +15806,7 @@ static SPYValue *eval_inner(SPYContext *c, Frame *f, Node *n) {
             if (item->kind == N_STAR || item->kind == N_MAPPING) {
                 a = eval(c, f, item->a);
                 if (!a) goto container_fail;
-                if (extend_display(c, result, a)) goto container_fail;
+                if ((n->kind == N_LIST || n->kind == N_TUPLE ? extend_list : extend_display)(c, result, a)) goto container_fail;
                 spy_release(a); a = NULL;
                 continue;
             }
@@ -18472,7 +18509,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
         if (rhs == old || rhs->type == SPY_LIST || rhs->type == SPY_TUPLE) {
             if (spend(c, rhs->as.seq.len) || sequence_extend(c, old, rhs, 0, 1, rhs->as.seq.len)) return NULL;
         } else {
-            SPYValue *iterator = length_hint_check(c, rhs) ? NULL : get_iterator(c, rhs);
+            SPYValue *iterator = list_iterator(c, rhs);
             if (!iterator) return NULL;
             SPYValue *item;
             while ((item = iterator_next(c, iterator))) {
@@ -22547,11 +22584,10 @@ static int generator_function(SPYContext *c, SPYValue *fn) {
     return def && def->kind == N_DEF && !def->op && def->code && !def->flat;
 }
 /* The Python __iter__ of plain instance v's class, borrowed: one on the
- * machine, or a generator function (generator_function); else NULL, also
- * for a class with a length or length hint, which list() asks first. */
+ * machine, or a generator function (generator_function); else NULL. */
 static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
     SPYValue *cls = v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__iter__", NULL) ? NULL : v->as.map.parent;
-    SPYValue *function = cls && !class_lookup(cls, "__len__") && !class_lookup(cls, "__length_hint__") ? class_lookup(cls, "__iter__") : NULL;
+    SPYValue *function = cls ? class_lookup(cls, "__iter__") : NULL;
     return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
 }
 /* The Python __getitem__ on the machine of plain instance v's class,
@@ -22571,10 +22607,10 @@ static SPYValue *method_function(SPYContext *c, SPYValue *v, const char *name) {
     return function && function->type == SPY_FUNCTION && function->ctx == c ? function : NULL;
 }
 /* Whether instance v iterates by a getitem_function, its class having no
- * __iter__ and, as for iter_function, no length. */
+ * __iter__. */
 static int getitem_iterated(SPYContext *c, SPYValue *v) {
     SPYValue *cls = v->type == SPY_INSTANCE ? v->as.map.parent : NULL;
-    return cls && !class_lookup(cls, "__iter__") && !class_lookup(cls, "__len__") && !class_lookup(cls, "__length_hint__") && getitem_function(c, v);
+    return cls && !class_lookup(cls, "__iter__") && getitem_function(c, v);
 }
 /* Whether a call gives iterator v's next items (next_call_of): a map's,
  * a filter's, or a __getitem__ or reversed one's over an instance. */
@@ -22655,12 +22691,17 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
                                  id == B_DICT ? SPY_DICT : SPY_LIST) : NULL;
     /* dict() and dict.update() of an instance merge it as a mapping (consumer_id). */
     int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE;
+    int hints = id == B_LIST || id == B_SORTED || (id == B_EXTEND && callee->type == SPY_LIST);
+    SPYValue *source = hints && generator && generator->type == SPY_INSTANCE ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); return; }
+    if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); spy_release(source); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
-                           .sent = sent, .keyed = keyed, .adds = id == B_SUM};
+                           .sent = sent, .keyed = keyed, .adds = id == B_SUM, .hints = hints};
     block->value = generator; block->consumer = consumer;
+    /* An __iter__ the machine calls asks the hint as it returns (key_took). */
+    if (source && keyed == KEY_ITER) spy_release(source);
+    else if (source) length_hint(c, m, source);
     if (id == B_CLOSE || id == B_THROW) {
         /* A close or throw raises its exception in at the yield (resumed_with),
          * whose drop returns if it never resumes (pop_block). */
@@ -22693,23 +22734,26 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
 }
 /* BC_EXTEND's or a call's BC_ARG's starred item a, which it takes, into
  * display, a display or the call's arguments on m's stack, sealing a
- * tuple at the last (arg): 1 when a, a generator the machine can resume or
- * an instance with a Python __iter__, gives its items on the machine
- * (BLOCK_CONSUME, EXTEND_ITEMS); else 0, a extended into the display and
- * released. */
-static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg) {
+ * tuple at the last (arg), a list or tuple display asking a's length hint
+ * (hints): 1 when a, a generator the machine can resume or an instance
+ * with a Python __iter__, gives its items on the machine (BLOCK_CONSUME,
+ * EXTEND_ITEMS); else 0, a extended into the display and released. */
+static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
     if ((!resumable(a) && !iter_function(c, a)) || is_dict(display)) {
-        extend_display(c, display, a);
+        (hints ? extend_list : extend_display)(c, display, a);
         if (arg) seal_tuple(c, display);
         spy_release(a);
         return 0;
     }
     Consumer *s = allocate(c, sizeof(*s));
+    SPYValue *source = s && hints && a->type == SPY_INSTANCE ? spy_retain(a) : NULL;
     int keyed = s ? consumer_source(c, &a) : 0;
     Block *block = s && a ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(s); spy_release(a); return 0; }
-    *s = (Consumer){.id = EXTEND_ITEMS, .result = spy_retain(display), .count = (size_t)arg, .keyed = keyed};
+    if (!block) { mem_free(s); spy_release(a); spy_release(source); return 0; }
+    *s = (Consumer){.id = EXTEND_ITEMS, .result = spy_retain(display), .count = (size_t)arg, .keyed = keyed, .hints = hints};
     block->value = a; block->consumer = s;
+    if (source && keyed == KEY_ITER) spy_release(source);
+    else if (source) length_hint(c, m, source);
     return 1;
 }
 /* Whether the consumer atop m, given its generator's next item (NULL at
@@ -23118,12 +23162,14 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         return key ? 0 : -1;
     }
     if (s->keyed == KEY_ITER) {
-        /* The iterator the instance's __iter__ returned is the source. */
-        SPYValue *iterator = iterator_returned(c, top->value, key, "__iter__");
+        /* The iterator the instance's __iter__ returned is the source,
+         * whose length hint a list's items then ask (ListExtend). */
+        SPYValue *iterator = iterator_returned(c, top->value, key, "__iter__"), *source = top->value;
         if (!iterator) return -1;
-        spy_release(top->value);
         top->value = iterator; s->keyed = 0;
-        return 0;
+        if (!s->hints) { spy_release(source); return 0; }
+        length_hint(c, m, source);
+        return c->error_type[0] ? -1 : 0;
     }
     if (s->keyed == KEY_KEYS) return keys_listing(c, top, key);
     if (s->keyed == KEY_ITEMS) {
@@ -26266,7 +26312,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         m = call_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
                         if ((result = k(c, m, k_ctx, result))) machine_push(c, m, result);
-                        else if (c->k_fn) goto enter_k;
+                        /* consume_generator enters a further callk first. */
+                        else if (c->k_fn || !c->error_type[0]) goto consume_generator;
                         continue;
                     }
                     m = call_leave(c, (Call *)m, result);
@@ -26450,7 +26497,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_ADD) CASE(BC_EXTEND)
             a = machine_pop(m);
             if (ins->op == BC_EXTEND) {
-                if (extend_step(c, m, m->stack[m->len - 1], a, ins->arg)) { a = NULL; goto consume_generator; }
+                if (extend_step(c, m, m->stack[m->len - 1], a, ins->arg, m->stack[m->len - 1]->type != SPY_SET)) { a = NULL; goto consume_generator; }
                 a = NULL;
                 break;
             }
@@ -26466,12 +26513,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_ARG) {
             a = machine_pop(m);
             SPYValue *keywords = m->stack[m->len - 1], *args = m->stack[m->len - 2], *fn = m->stack[m->len - 3];
-            if (ins->arg == N_MAPPING) extend_container(c, keywords, a, fn);
+            if (ins->arg == N_MAPPING) extend_container(c, keywords, a, fn, 0);
             else if (ins->arg == N_KEYWORD) {
                 b = spy_string(c, n->text, strlen(n->text));
                 if (b) merge_keyword(c, keywords, b, a, fn);
             } else if (ins->arg == N_STAR) {
-                if (extend_step(c, m, args, a, 0)) { a = NULL; goto consume_generator; }
+                if (extend_step(c, m, args, a, 0, 0)) { a = NULL; goto consume_generator; }
                 a = NULL;
             } else sequence_append(c, args, a);
             break;
@@ -30159,6 +30206,8 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
         spy_clear_error(c);
         return errorf(c, "TypeError", "cannot convert '%s' object to %s", type_name(a), target);
     }
+    /* bytes(), not bytearray(), asks the length hint (7.7.7). */
+    if (!target[5] && !(iterator = hinted(c, iterator, a))) return NULL;
     Buffer out = {.ctx = c};
     for (;;) {
         SPYValue *item = native_next(c, iterator);
@@ -31511,8 +31560,9 @@ static int byte_value(SPYContext *c, SPYValue *value, unsigned char *out) {
     spy_release(index); return -bad;
 }
 /* Collect bytes from a bytes-like object or an iterable of integers; refusal
- * formats the TypeError for a value that is neither. */
-static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out, const char *refusal) {
+ * formats the TypeError for a value that is neither. An iterable's length
+ * hint is asked after its iterator when it hints (bytearray.extend). */
+static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out, const char *refusal, int hints) {
     SPYValue *copy, *actual = buffer_bytes(c, source, &copy);
     if (actual) { int status = append(out, actual->as.string.data, actual->as.string.len); spy_release(copy); return status; }
     if (c->error_type[0]) return -1;
@@ -31522,6 +31572,7 @@ static int collect_bytes(SPYContext *c, SPYValue *source, Buffer *out, const cha
         if (error_is(c, "TypeError")) { spy_clear_error(c); errorf(c, "TypeError", refusal, type_name(source)); }
         return -1;
     }
+    if (hints && !(iterator = hinted(c, iterator, source))) return -1;
     while (!c->error_type[0] && (item = native_next(c, iterator))) {
         unsigned char byte;
         if (!byte_value(c, item, &byte)) append(out, (char *)&byte, 1);
@@ -31554,7 +31605,7 @@ static SPYValue *bytearray_method(SPYContext *c, size_t argc, SPYValue *const *a
         size_t at = self->as.string.len;
         SPYValue *copy, *actual = buffer_bytes(c, args[0], &copy);
         int status = actual ? append(&out, actual->as.string.data, actual->as.string.len) : c->error_type[0] ||
-            length_hint_check(c, args[0]) || collect_bytes(c, args[0], &out, "can't extend bytearray with %s");
+            collect_bytes(c, args[0], &out, "can't extend bytearray with %s", 1);
         spy_release(copy);
         if (status) { mem_free(out.data); return NULL; }
         len = self->as.string.len;
@@ -31685,7 +31736,7 @@ static int bytearray_set(SPYContext *c, SPYValue *array, SPYValue *key, SPYValue
             spy_error(c, "TypeError", "can assign only bytes, buffers, or iterables of ints in range(0, 256)"); return -1;
         }
         Buffer bytes = {.ctx = c};
-        int status = collect_bytes(c, item, &bytes, "cannot convert '%s' object to bytearray");
+        int status = collect_bytes(c, item, &bytes, "cannot convert '%s' object to bytearray", 0);
         SPYValue *copy = status ? NULL : bytearray_new(c, bytes.data, bytes.len);
         mem_free(bytes.data);
         status = copy ? bytearray_set(c, array, key, copy) : -1;
@@ -32684,7 +32735,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (spend(c, a->as.seq.len) || sequence_extend(c, v, a, 0, 1, a->as.seq.len)) { spy_release(v); return NULL; }
             return v;
         }
-        SPYValue *iterator = argc && (id == B_TUPLE || !length_hint_check(c, a)) ? get_iterator(c, a) : NULL;
+        SPYValue *iterator = !argc ? NULL : id == B_LIST ? list_iterator(c, a) : get_iterator(c, a);
         Consumer consumer = {.id = id, .result = v};
         if (iterator) for (;;) {
             if (pass(c)) break;

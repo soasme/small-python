@@ -13,7 +13,11 @@
 (* protocol, its StopIteration becoming RuntimeError; dicts and sets      *)
 (* refuse to change size during iteration; an exhausted iterator releases  *)
 (* its source, a dict subclass reached through a view included; and        *)
-(* enumerate, filter, map and zip ask their iterables again on each next.  *)
+(* enumerate, filter, map and zip ask their iterables again on each next; *)
+(* a list made of an iterable's items, and bytes(), ask its length hint   *)
+(* after __iter__ (__len__, then __length_hint__ when that is absent or   *)
+(* raises TypeError), its errors propagating and a hint's TypeError or    *)
+(* NotImplemented meaning none; other consumers ask none.                 *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -60,7 +64,8 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "list_iterator_mutation", "dict_changed_size", "set_changed_size", "dict_keys_replaced_ok",
           "iterator_type_names", "length_hint", "next_dunder_direct", "zip_strict", "map_multi",
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
-          "adapters_ask_again"}
+          "adapters_ask_again", "hint_after_iter", "hint_fallback", "hint_none", "hint_error",
+          "hint_not_int", "hint_negative", "len_error", "no_hint_consumers"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -107,6 +112,14 @@ Case(c) ==
       [] c = "reversed_dunder" -> "['z', 'y']"
       [] c = "exhausted_releases_source" -> "['made', 'freed', 'exhausted', 'made', 'freed', 'exhausted']"
       [] c = "adapters_ask_again" -> "[([1], 3), ([1], 3), ([(0, 1)], (1, 3)), ([(1,)], (3,))]"
+      [] c = "hint_after_iter" -> "['iter', 'len', 'iter', 'len', 'iter', 'len', 'iter', 'len', 'iter', 'len', 'iter', 'len']"
+      [] c = "hint_fallback" -> "([1, 2], ['iter', 'len', 'hint'])"
+      [] c = "hint_none" -> "[[1, 2], [1, 2]]"
+      [] c = "hint_error" -> "ValueError: v"
+      [] c = "hint_not_int" -> "TypeError: Hint.__length_hint__() must return an int, not str"
+      [] c = "hint_negative" -> "ValueError: Hint.__length_hint__() must return a non-negative int"
+      [] c = "len_error" -> "ValueError: __len__() should return >= 0"
+      [] c = "no_hint_consumers" -> "['iter', 'iter', 'iter', 'iter', 'iter']"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

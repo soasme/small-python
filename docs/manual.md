@@ -1623,7 +1623,9 @@ C code that a step calls reaches Python the same way, as Lua's `lua_callk`
 lets a C function call Lua. It hands the call to the machine together with
 a continuation, a C function and its context, and returns; the machine runs
 the call as another frame, then the continuation, which finishes the C
-code's work or calls again. `iter()` calls a class's Python `__iter__` so.
+code's work or calls again. `iter()` calls a class's Python `__iter__` so,
+and a list made of an instance's items calls its `__len__` and
+`__length_hint__`.
 Called from C with no machine running, the call is made directly and the
 continuation runs after it.
 
