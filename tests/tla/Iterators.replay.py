@@ -157,6 +157,13 @@ SOURCES = {
     "no_hint_consumers": "result = []\nclass S:\n    def __iter__(self): result.append('iter'); return iter((1, 2))\n"
                          "    def __len__(self): result.append('len'); return 2\n"
                          "tuple(S()); set(S()); sum(S()); bytearray(S()); a, b = S()",
+    "join_lists_iterator": "log = []\nclass It:\n    def __init__(self): self.items = ['a', 'b']\n"
+                           "    def __iter__(self): log.append('iter'); return self\n"
+                           "    def __next__(self):\n        if not self.items: raise StopIteration\n        return self.items.pop(0)\n"
+                           "    def __len__(self): log.append('len'); return 2\nresult = ('-'.join(It()), log)",
+    "join_bare_iterator": "class Bare:\n    def __next__(self): raise StopIteration\n"
+                          "class Handing:\n    def __iter__(self): return Bare()\nresult = ''.join(Handing())",
+    "pair_iterates_once": "log = []\nclass P:\n    def __iter__(self): log.append('iter'); return iter('ab')\nresult = (dict([P()]), log)",
 }
 
 

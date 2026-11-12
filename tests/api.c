@@ -1093,6 +1093,15 @@ int main(int argc, char **argv) {
                "    def __length_hint__(self):\n        for i in range(3000): pass\n        return 1");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "list(Sized())[0]", "hint.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* str.join lists its iterator so: its __iter__ again and its __len__. */
+    execute(c, "calls = []\nclass Own:\n    items = ['a']\n    def __iter__(self):\n        for i in range(3000): pass\n"
+               "        calls.append('iter')\n        return self\n"
+               "    def __next__(self):\n        if not self.items: raise StopIteration\n        return self.items.pop()\n"
+               "    def __len__(self):\n        for i in range(3000): pass\n        calls.append('len')\n        return 1");
+    pauses = 0;
+    SPYValue *joined = run_paused(c, spy_eval(c, "''.join(Own()) + ' '.join(calls)", "join.py"), SPY_STOP_STEPS, &pauses);
+    assert(joined && !strcmp(spy_as_string(c, joined, NULL), "aiter iter len") && pauses > 2);
+    spy_release(joined);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */

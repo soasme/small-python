@@ -17,7 +17,9 @@
 (* a list made of an iterable's items, and bytes(), ask its length hint   *)
 (* after __iter__ (__len__, then __length_hint__ when that is absent or   *)
 (* raises TypeError), its errors propagating and a hint's TypeError or    *)
-(* NotImplemented meaning none; other consumers ask none.                 *)
+(* NotImplemented meaning none; other consumers ask none. str.join,      *)
+(* bytes.join and dict pairs take the iterator once and list it as list() *)
+(* would: its own __iter__ again, then its length hint.                  *)
 (*                                                                         *)
 (* A program takes an iterator of KIND over n items (10, 20, or a kind's   *)
 (* own items), checks that iter() of it is itself, calls next n + 2 times, *)
@@ -65,7 +67,8 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "iterator_type_names", "length_hint", "next_dunder_direct", "zip_strict", "map_multi",
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
           "adapters_ask_again", "hint_after_iter", "hint_fallback", "hint_none", "hint_error",
-          "hint_not_int", "hint_negative", "len_error", "no_hint_consumers"}
+          "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
+          "join_lists_iterator", "join_bare_iterator", "pair_iterates_once"}
 Programs == [kind : Kinds, n : 0..2]
             \cup [case : Cases]
 
@@ -120,6 +123,9 @@ Case(c) ==
       [] c = "hint_negative" -> "ValueError: Hint.__length_hint__() must return a non-negative int"
       [] c = "len_error" -> "ValueError: __len__() should return >= 0"
       [] c = "no_hint_consumers" -> "['iter', 'iter', 'iter', 'iter', 'iter']"
+      [] c = "join_lists_iterator" -> "('a-b', ['iter', 'iter', 'len'])"
+      [] c = "join_bare_iterator" -> "TypeError: 'Bare' object is not iterable"
+      [] c = "pair_iterates_once" -> "({'a': 'b'}, ['iter'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

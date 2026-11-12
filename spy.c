@@ -8963,6 +8963,31 @@ static SPYValue *hinted(SPYContext *c, SPYValue *iterator, SPYValue *iterable) {
     return iterator;
 }
 static SPYValue *list_iterator(SPYContext *c, SPYValue *iterable) { return hinted(c, get_iterator(c, iterable), iterable); }
+/* ListExtend (7.7.6): list gains iterable's items, asking its length hint
+ * after its iterator. */
+static int list_extend(SPYContext *c, SPYValue *list, SPYValue *iterable) {
+    if (iterable->type == SPY_LIST || iterable->type == SPY_TUPLE)
+        return spend(c, iterable->as.seq.len) || sequence_extend(c, list, iterable, 0, 1, iterable->as.seq.len) ? -1 : 0;
+    SPYValue *iterator = list_iterator(c, iterable), *item;
+    while (iterator && !pass(c) && (item = iterator_next(c, iterator))) {
+        int failed = sequence_append(c, list, item);
+        spy_release(item);
+        if (failed) break;
+    }
+    spy_release(iterator);
+    return c->error_type[0] ? -1 : 0;
+}
+/* SequenceFast (7.7.8) of v: v itself, an exact list or tuple, else a new
+ * list extended by its iterator (ListExtend); NULL with an error, a
+ * TypeError(message) when v is not iterable. */
+static SPYValue *sequence_fast(SPYContext *c, SPYValue *v, const char *message) {
+    if (v->type == SPY_LIST || v->type == SPY_TUPLE) return spy_retain(v);
+    SPYValue *iterator = get_iterator(c, v), *list = iterator ? spy_list(c) : NULL;
+    if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); spy_error(c, "TypeError", message); }
+    if (list && list_extend(c, list, iterator)) { spy_release(list); list = NULL; }
+    spy_release(iterator);
+    return list;
+}
 static SPYValue *slice_new(SPYContext *c, SPYValue *start, SPYValue *stop, SPYValue *step) {
     SPYValue *v = value_new(c, SPY_SLICE);
     if (v) {
@@ -13418,21 +13443,15 @@ static SPYValue *method_call(SPYContext *c, SPYValue *self, int method, SPYValue
         return generator_method(c, self->type == SPY_COROUTINE_ITERATOR ? self->as.iterator.source : self, method, argc, argv);
     case M_JOIN: {
         if (argc != 1) break;
-        SPYValue *iterator = get_iterator(c, argv[0]);
-        /* PySequence_Fast(iterable, "can only join an iterable") */
-        if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
-        if (!iterator) return NULL;
+        SPYValue *seq = sequence_fast(c, argv[0], "can only join an iterable");
+        if (!seq) return NULL;
         Buffer out = {.ctx = c};
-        for (size_t i = 0; !c->error_type[0]; i++) {
-            if (pass(c)) break;
-            SPYValue *item = iterator_next(c, iterator);
-            if (!item) break;
-            SPYValue *text = builtin_value(c, item, SPY_STRING);
+        for (size_t i = 0; !c->error_type[0] && i < seq->as.seq.len; i++) {
+            SPYValue *item = seq->as.seq.items[i], *text = builtin_value(c, item, SPY_STRING);
             if (!text) errorf(c, "TypeError", "sequence item %zu: expected str instance, %s found", i, type_name(item));
             else if ((!i || !append(&out, self->as.string.data, self->as.string.len))) append(&out, text->as.string.data, text->as.string.len);
-            spy_release(item);
         }
-        spy_release(iterator);
+        spy_release(seq);
         return buffer_text(&out, SPY_STRING, c->error_type[0] != 0);
     }
     case M_ISPRINTABLE: case M_ISIDENTIFIER:
@@ -15028,21 +15047,10 @@ static int extend_display(SPYContext *c, SPYValue *result, SPYValue *source) {
 static int extend_list(SPYContext *c, SPYValue *result, SPYValue *source) {
     return extend_container(c, result, source, NULL, 1);
 }
-/* sorted()'s list gains iterable's items, raising as iter() does. */
-static int sorted_items(SPYContext *c, SPYValue *list, SPYValue *iterable) {
-    if (iterable->type == SPY_LIST || iterable->type == SPY_TUPLE) return extend_display(c, list, iterable);
-    SPYValue *iterator = list_iterator(c, iterable);
-    int status = iterator ? extend_display(c, list, iterator) : -1;
-    spy_release(iterator);
-    return status;
-}
 /* dict gains the key and value of pair, element index of an update
  * sequence, which PyDict_MergeFromSeq2 takes with PySequence_Fast. */
 static int dict_pair(SPYContext *c, SPYValue *dict, SPYValue *pair, size_t index) {
-    SPYValue *items = spy_list(c), *probe = items ? get_iterator(c, pair) : NULL;
-    if (!probe && error_is(c, "TypeError")) { spy_clear_error(c); spy_error(c, "TypeError", "object is not iterable"); }
-    spy_release(probe);
-    if (items && !c->error_type[0]) extend_display(c, items, pair);
+    SPYValue *items = sequence_fast(c, pair, "object is not iterable");
     if (error_is(c, "TypeError")) {
         char note[96];
         snprintf(note, sizeof(note), "Cannot convert dictionary update sequence element #%zu to a sequence", index);
@@ -18508,19 +18516,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     if (op == T_ADDEQ && old->type == SPY_LIST) {
         if (rhs == old || rhs->type == SPY_LIST || rhs->type == SPY_TUPLE) {
             if (spend(c, rhs->as.seq.len) || sequence_extend(c, old, rhs, 0, 1, rhs->as.seq.len)) return NULL;
-        } else {
-            SPYValue *iterator = list_iterator(c, rhs);
-            if (!iterator) return NULL;
-            SPYValue *item;
-            while ((item = iterator_next(c, iterator))) {
-                int status;
-                status = pass(c) ? -1 : sequence_append(c, old, item);
-                spy_release(item);
-                if (status) break;
-            }
-            spy_release(iterator);
-            if (c->error_type[0]) return NULL;
-        }
+        } else if (list_extend(c, old, rhs)) return NULL;
         return spy_retain(old);
     }
     if (op == T_MULEQ && old->type == SPY_LIST) return list_repeat(c, old, rhs);
@@ -22674,6 +22670,25 @@ static int consumer_source(SPYContext *c, SPYValue **v) {
     *v = iterator;
     return 0;
 }
+/* What a join's iterator it asked again returned (join_listed). */
+static SPYValue *join_iterated(SPYContext *c, Machine *m, SPYValue *it, SPYValue *again) {
+    if (again) again = iterator_returned(c, it, again, "__iter__");
+    if (!again) { spy_release(it); return NULL; }
+    Block *top = &m->blocks[m->block_len - 1];
+    spy_release(top->value);
+    top->value = again;
+    return length_hint(c, m, it);
+}
+/* str.join's consumer atop m, its source's iterator it an instance,
+ * which it takes, lists it (SequenceFast, 7.7.8): it's own __iter__, on
+ * m (callk), and its length hint. */
+static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
+    SPYValue *method = NULL, *again = iterator_of(c, it, &method);
+    if (!method) return join_iterated(c, m, it, again);
+    SPYValue *result = callk(c, m, method, 0, NULL, join_iterated, it);
+    spy_release(method);
+    return result;
+}
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
  * owned. */
@@ -22702,6 +22717,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
     if (source && keyed == KEY_ITER) spy_release(source);
     else if (source) length_hint(c, m, source);
+    else if (id == B_JOIN && !keyed && generator->type == SPY_INSTANCE) join_listed(c, m, spy_retain(generator));
     if (id == B_CLOSE || id == B_THROW) {
         /* A close or throw raises its exception in at the yield (resumed_with),
          * whose drop returns if it never resumes (pop_block). */
@@ -23002,7 +23018,7 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
         SPYValue *all = positional == 1 ? spy_retain(argv[0]) : spy_tuple(c, positional, argv);
         ready = all && (items = get_iterator(c, all));
         spy_release(all);
-    } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !sorted_items(c, items, argv[0])))) {
+    } else if ((keys = spy_list(c)) && (method || ((items = spy_list(c)) && !list_extend(c, items, argv[0])))) {
         descending = reverse ? truthy(reverse) : 0;
         ready = !c->error_type[0] && (!method || !sort_detach_into(c, callee, &items)) &&
                 !sequence_reserve(c, keys, items->as.seq.len);
@@ -23167,8 +23183,11 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         SPYValue *iterator = iterator_returned(c, top->value, key, "__iter__"), *source = top->value;
         if (!iterator) return -1;
         top->value = iterator; s->keyed = 0;
-        if (!s->hints) { spy_release(source); return 0; }
-        length_hint(c, m, source);
+        if (s->hints) length_hint(c, m, source);
+        else {
+            spy_release(source);
+            if (s->id == B_JOIN && iterator->type == SPY_INSTANCE) join_listed(c, m, spy_retain(iterator));
+        }
         return c->error_type[0] ? -1 : 0;
     }
     if (s->keyed == KEY_KEYS) return keys_listing(c, top, key);
@@ -29541,14 +29560,7 @@ static SPYValue *bytes_join(SPYContext *c, size_t argc, SPYValue *const *argv, S
     SPYValue *self = method_self(c, argc, argv, type, "join"), *args[1];
     if (!self || parse_arguments(c, "join", argc - 1, argv + 1, keywords, NULL, 1, 1, 0, args)) return NULL;
     SPYValue *seq = args[0];
-    if (seq->type == SPY_LIST || seq->type == SPY_TUPLE) spy_retain(seq);
-    else {
-        SPYValue *iterator = get_iterator(c, seq);
-        if (!iterator && error_is(c, "TypeError")) { spy_clear_error(c); return spy_error(c, "TypeError", "can only join an iterable"); }
-        if (!iterator || !(seq = value_new(c, SPY_LIST)) || extend_display(c, seq, iterator)) seq = (spy_release(seq), NULL);
-        spy_release(iterator);
-        if (!seq) return NULL;
-    }
+    if (!(seq = sequence_fast(c, seq, "can only join an iterable"))) return NULL;
     Buffer out = {.ctx = c};
     for (size_t i = 0, n = seq->as.seq.len; !c->error_type[0] && i < n; i++) {
         SPYValue *item = spy_retain(seq->as.seq.items[i]), *copy, *actual = buffer_bytes(c, item, &copy);
@@ -33689,7 +33701,7 @@ static SPYValue *builtin_keywords(SPYContext *c, size_t argc, SPYValue *const *a
         if (argc != 1) return errorf(c, "TypeError", "sorted expected 1 argument, got %zu", argc);
         SPYValue *list = value_new(c, SPY_LIST);
         if (!list) return NULL;
-        if (sorted_items(c, list, argv[0])) { spy_release(list); return NULL; }
+        if (list_extend(c, list, argv[0])) { spy_release(list); return NULL; }
         SPYValue *result = sort_method(c, list, 0, NULL, keywords);
         if (!result) { spy_release(list); return NULL; }
         spy_release(result);

@@ -89,6 +89,7 @@ Contents | - navigation
 7 Abstract Operations > 7.7 Iteration > 7.7.5 GetAwaitable ( *o* ) | Awaitables
 7 Abstract Operations > 7.7 Iteration > 7.7.6 ListExtend ( *l*, *o* ) | Iterators
 7 Abstract Operations > 7.7 Iteration > 7.7.7 LengthHint ( *o* ) | Iterators
+7 Abstract Operations > 7.7 Iteration > 7.7.8 SequenceFast ( *o*, *message* ) | Iterators
 7 Abstract Operations > 7.8 Container operations | = sections
 7 Abstract Operations > 7.8 Container operations > 7.8.1 GetItem ( *o*, *key* ) | Subscripts, ClassGetitem
 7 Abstract Operations > 7.8 Container operations > 7.8.2 SetItem ( *o*, *key*, *value* ) and DeleteItem ( *o*, *key* ) | Subscripts, Containers
