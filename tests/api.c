@@ -1184,6 +1184,13 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "any([Falsy(), 1]) + all((Empty(),)) + any(x for x in [Falsy()])", "truth.py"),
                                  SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
+    /* map() of str and filter() of None call a Python __str__ and
+     * __bool__ on the machine. */
+    execute(c, "class Shown:\n    def __str__(self):\n        for i in range(3000): pass\n        return 'x'\n"
+               "    def __bool__(self):\n        for i in range(3000): pass\n        return True");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(list(map(str, [Shown(), Shown()]))) + len(list(filter(None, (Shown(),))))", "mapped.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* A host function's spy_callk runs a Python callee on the machine,
      * where it pauses, then the continuation, which may call again; a
      * call_back's spy_call could not pause. Every call form reaches it. */

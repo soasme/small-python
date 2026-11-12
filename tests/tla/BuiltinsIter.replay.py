@@ -70,6 +70,13 @@ SOURCES = {
     "map_none": 'result = list(map(None, [1]))',
     "map_bound": "class K:\n    def __init__(s, k): s.k = k\n    def add(s, v): return s.k + v\n    def __call__(s, v, w): return s.k * v + w\n"
                  "result = (list(map(K(2).add, [1, 3])), list(map(K(10), [1, 2], [2])))",
+    "map_convert": "log = []\nclass K:\n    def __init__(s, v): s.v = v\n    def __str__(s):\n        for _ in (): pass\n"
+                   "        log.append('s%d' % s.v)\n        return 'k%d' % s.v\n"
+                   "    def __repr__(s):\n        for _ in (): pass\n        log.append('r%d' % s.v)\n        return 'K%d' % s.v\n"
+                   "    def __format__(s, spec):\n        for _ in (): pass\n        log.append('f')\n        return 'F' + spec\n"
+                   "a, b = K(1), K(2)\n"
+                   "result = (list(map(str, [a, b])), list(map(repr, (a, 7))), ','.join(map(str, iter([a, b]))), list(map(format, [a])), log)",
+    "map_convert_bad": "class W:\n    def __str__(s):\n        for _ in (): pass\n        return 1\nresult = list(map(str, [W()]))",
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
                           "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"
                           "result = (sorted([1, 3, 2], key=R), sorted([1, 2, 3, 4], key=W().m), max([1, 3, 2], key=W()))",
@@ -80,6 +87,12 @@ SOURCES = {
                        "class L(G):\n    def __len__(s): return 3\n"
                        "result = (list(G()), sum(G()), sorted(G()), [x for x in G()], tuple(iter(G())), list(reversed(L())))",
     "filter_none": "result = list(filter(None, [0, 1, '', 'a', None, []]))",
+    "filter_truth": "log = []\nclass T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n"
+                    "        log.append('b%d' % s.v)\n        return s.v > 0\n"
+                    "class L:\n    def __init__(s, v): s.v = v\n    def __len__(s):\n        for _ in (): pass\n"
+                    "        log.append('l%d' % s.v)\n        return s.v\n"
+                    "result = ([x.v for x in filter(None, [T(1), T(0), 0, L(3)])], [x.v for x in filter(bool, (T(0), T(1)))], log)",
+    "filter_truth_bad": "class Bad:\n    def __bool__(s):\n        for _ in (): pass\n        return 1\nresult = list(filter(None, [Bad()]))",
     "enumerate_kw": "result = (list(enumerate('ab', start=-1)), list(enumerate(iterable='a')))",
     "enumerate_bad_start": "result = enumerate('a', 1.5)",
     "all_any_empty": "result = (all([]), any([]), all([0, 1/1]), any(iter([0, '', 2])))",

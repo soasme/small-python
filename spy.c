@@ -442,6 +442,9 @@ struct SPYContext {
     Machine *k_machine;
     size_t k_entries;
     SPYContinuation k_host;
+    /* On a machine's stack, marks an iterator's item, and its conversion's
+     * name under it, whose Python method a next call runs (item_converted). */
+    SPYValue *converting;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -26025,6 +26028,30 @@ static void short_or_false(Machine *m, Instruction *ins, int truth, size_t *pc, 
     else if ((ins->arg == O_OR) == truth) { *pc = ins->target; *known = truth + 1; }
     else spy_release(machine_pop(m));
 }
+/* What v's method name (conversion_method, check_method) returned in
+ * result makes the call's value, owned, or NULL with an error: len(),
+ * hash(), int(), float(), complex() and bytes() check their results as
+ * natively, bool() takes a truth (False names its __len__), abs(), round()
+ * and reversed() return theirs, isinstance() and issubclass() take the
+ * result's truth, and the others' text is a str. */
+static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue *name, SPYValue *result) {
+    SPYValue *whole = NULL;
+    Buffer b = { .ctx = c, .whole = &whole };
+    int64_t length;
+    const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
+    if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
+    if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
+    if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
+    if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
+    if (!strcmp(method, "__bool__"))
+        return truth_result(c, v, name != c->booleans[0], spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
+    if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__")) return spy_retain(result);
+    if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
+        int truth = truthy(result);
+        return c->error_type[0] ? NULL : spy_bool(c, truth);
+    }
+    return whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
+}
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
@@ -26092,27 +26119,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         return &call->m;
     }
     if (ins->op != BC_FALSE && ins->op != BC_SHORT && ins->op != BC_UNARY) {
-        SPYValue *name = machine_pop(m), *whole = NULL, *string;
-        Buffer b = { .ctx = c, .whole = &whole };
-        int64_t length;
-        /* len(), hash(), int(), float(), complex() and bytes() check their
-         * results as natively; abs(), round() and reversed() return theirs;
-         * the others' text is a str. */
-        const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
-        if (!strcmp(method, "__len__")) string = length_result(c, result, &length) ? NULL : spy_int(c, length);
-        else if (!strcmp(method, "__hash__")) string = hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
-        else if (!strcmp(method, "__int__") || !strcmp(method, "__float__"))
-            string = number_result(c, v, method[2] == 'f', spy_retain(result));
-        else if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) string = converted_result(c, v, method, result);
-        else if (!strcmp(method, "__bool__")) string = truth_result(c, v, name != c->booleans[0], spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
-        else if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__"))
-            string = spy_retain(result);
-        else if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
-            /* isinstance() and issubclass() take the result's truth. */
-            int truth = truthy(result);
-            string = c->error_type[0] ? NULL : spy_bool(c, truth);
-        }
-        else string = whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
+        SPYValue *name = machine_pop(m), *string = conversion_value(c, v, name, result);
         spy_release(result); spy_release(v); spy_release(name);
         if (m->len && m->stack[m->len - 1] == c->replacing && (string || m->stack[m->len - 2]->type == SPY_LIST))
             return text_returned(c, m, (size_t)ins->arg, string);
@@ -26287,14 +26294,41 @@ static NO_INLINE int zip_fill(SPYContext *c, SPYValue *v, SPYValue **g) {
     }
     return 0;
 }
+static int convert_call(SPYContext *, Machine *, SPYValue *, SPYValue *, SPYValue *, SPYValue *, SPYValue **, SPYValue **);
+/* For filter v of None or bool: the next item of its iterator that is
+ * true, in *fn, 3; or at an instance whose truth is a Python __bool__ or
+ * __len__, that call (convert_call), the item waiting in v's counter for
+ * filter_returned, 1; -1 when the iterator ended or raised. */
+static NO_INLINE int filter_truth(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *item;
+    while ((item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) {
+        int length = 0;
+        SPYValue *function = item->type == SPY_INSTANCE ? truth_function(c, item, &length) : NULL, *name;
+        if (function) {
+            v->as.iterator.counter = item;
+            name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8);
+            int status = name ? convert_call(c, m, function, item, name, NULL, fn, env) : -1;
+            if (status < 0) { v->as.iterator.counter = NULL; spy_release(item); }
+            return status;
+        }
+        int keep = truthy(item);
+        if (keep && !c->error_type[0]) { *fn = item; return 3; }
+        spy_release(item);
+        if (c->error_type[0]) break;
+    }
+    return -1;
+}
 /* For filter v whose function is on the machine: that function, owned,
  * with its env, given the next item of v's iterator, which waits in v's
  * counter for filter_returned; 1 then; -1 when the iterator ended or
  * raised; 0 for iterator_next when the function is not on the machine or
- * an item already waits. */
-static NO_INLINE int filter_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+ * an item already waits. A filter of None or bool tests truth
+ * (filter_truth). */
+static NO_INLINE int filter_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function = v->as.iterator.source->as.seq.items[0], *item;
-    if (v->as.iterator.counter || !machine_function(c, function)) return 0;
+    if (v->as.iterator.counter) return 0;
+    if (function->type == SPY_NONE || function == c->types[SPY_BOOL]) return filter_truth(c, m, v, fn, env);
+    if (!machine_function(c, function)) return 0;
     if (!(item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) return -1;
     v->as.iterator.counter = item;
     if (!(*env = function_env(c, function, 1, &item, NULL, 0))) {
@@ -26350,16 +26384,62 @@ static NO_INLINE int next_ended(SPYContext *c, SPYValue *v) {
     if (kind == I_GETITEM) v->as.iterator.done = 1;
     return 1;
 }
-static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+/* An iterator's next item, item, whose conversion name a Python method
+ * function makes (conversion_method, truth_function): the call, owned,
+ * with *env, item and name on m's stack under c->converting; 1, or -1 on
+ * an error. */
+static int convert_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue *item, SPYValue *name, SPYValue *spec, SPYValue **fn, SPYValue **env) {
+    SPYValue *args[] = {spy_retain(item), spec};
+    if (machine_push(c, m, spy_retain(item)) || machine_push(c, m, name) || machine_push(c, m, spy_retain(c->converting))) {
+        spy_release(args[0]); spy_release(spec);
+        return -1;
+    }
+    if (!(*env = function_env(c, function, 1 + (spec != NULL), args, NULL, 1))) return -1;
+    *fn = spy_retain(function);
+    return 1;
+}
+/* What a next call that convert_call made returned in result, which it
+ * takes: the item's conversion, owned (conversion_value), or NULL with an
+ * error; the item and name leave m's stack. */
+static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *result) {
+    spy_release(machine_pop(m));
+    SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = result ? conversion_value(c, item, name, result) : NULL;
+    spy_release(result); spy_release(name); spy_release(item);
+    return value;
+}
+/* For map v of a builtin function or a class: its next item, the call of
+ * its iterables' next items (zip_items); for one item, an instance whose
+ * conversion is a Python method, that call (convert_call); else the
+ * function called here, the item in *fn, 3. -1 when the iterables ended
+ * or raised. */
+static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *callee = v->as.iterator.source->as.seq.items[0], *items = zip_items(c, v), *found[2], *function;
+    if (!items) return -1;
+    if (items->as.seq.len == 1 && items->as.seq.items[0]->type == SPY_INSTANCE &&
+        (function = conversion_method(c, callee, 1, items->as.seq.items, found))) {
+        int status = convert_call(c, m, function, items->as.seq.items[0], found[0], found[1], fn, env);
+        spy_release(items);
+        return status;
+    }
+    SPYValue *mapped = c->error_type[0] ? NULL : call(c, callee, items->as.seq.len, items->as.seq.items);
+    spy_release(items);
+    /* As iterator_next: a StopIteration from the function ends the map. */
+    if (!mapped && error_is(c, "StopIteration")) spy_clear_error(c);
+    if (!(*fn = mapped)) return -1;
+    return 3;
+}
+static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function, *args;
     if ((*fn = adapted_generator(c, v))) return 2;
     if (v->type == SPY_ITERATOR) {
         int status = v->as.iterator.removed && zip_of_generator(v) ? zip_fill(c, v, fn) : 0;
         if (status) return status < 0 ? -1 : 2;
-        if (v->as.iterator.kind == I_FILTER) return filter_call(c, v, fn, env);
+        if (v->as.iterator.kind == I_FILTER) return filter_call(c, m, v, fn, env);
         if (v->as.iterator.kind == I_GETITEM || v->as.iterator.kind == I_REVERSED) return getitem_call(c, v, fn, env);
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
-        if (!callee || !(function = machine_function(c, callee) ? callee : bound_function(c, callee))) return 0;
+        if (!callee) return 0;
+        if (!(function = machine_function(c, callee) ? callee : bound_function(c, callee)))
+            return (callee->type == SPY_NATIVE && callee->as.native.call == builtin) || callee->type == SPY_CLASS ? map_convert(c, m, v, fn, env) : 0;
         if (!(args = zip_items(c, v))) return -1;
         /* A bound method or callable instance's self goes first. */
         if (function != callee) {
@@ -26381,8 +26461,8 @@ static NO_INLINE int next_call_of(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
     *fn = spy_retain(function);
     return 1;
 }
-static ALWAYS_INLINE int next_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
-    return v->type == SPY_ITERATOR || v->type == SPY_INSTANCE ? next_call_of(c, v, fn, env) : 0;
+static ALWAYS_INLINE int next_call(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    return v->type == SPY_ITERATOR || v->type == SPY_INSTANCE ? next_call_of(c, m, v, fn, env) : 0;
 }
 /* The next step of generator machine m's yield from of a delegate it
  * does not resume as a generator, resumed by m's resumer or not: a call
@@ -26516,6 +26596,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);
                     } else if (kind == CALL_ITEM) {
                         SPYValue *source = m->blocks[m->block_len - 1].value;
+                        if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result);
                         if (filtering(source)) {
                             int again = 0;
                             result = filter_returned(c, source, result, &again);
@@ -26534,6 +26615,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         /* CALL_NEXT: a filter's test tries the next item when false. */
                         SPYValue *iterator = m->blocks[m->block_len - 1].value;
                         int again = 0;
+                        if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result);
                         if (filtering(iterator)) result = filter_returned(c, iterator, result, &again);
                         if (again) pc--;
                         else if (result) loop_item(c, m, &f, &code[pc - 1], result);
@@ -26928,10 +27010,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     /* A Python __next__, or a map's function, is a call that
                      * returns into this step. */
                     SPYValue *next;
-                    int calling = next_call(c, iterator, &next, &callee_env);
-                    if (calling > 1) { value = next; goto resume_generator; }
-                    if (calling > 0) { value = next; special = CALL_NEXT; goto enter_special; }
-                    a = calling ? NULL : iterator_next(c, iterator);
+                    int calling = next_call(c, m, iterator, &next, &callee_env);
+                    if (calling == 2) { value = next; goto resume_generator; }
+                    if (calling == 1) { value = next; special = CALL_NEXT; goto enter_special; }
+                    a = calling > 2 ? next : calling ? NULL : iterator_next(c, iterator);
                 }
                 if (!a) pc = ins->target;
                 else if (ins->other) {
@@ -27123,10 +27205,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             }
             /* A map's function is a call returning its item (CALL_ITEM). */
             SPYValue *next;
-            int calling = next_call(c, value, &next, &callee_env);
-            if (calling > 1) { value = next; goto resume_generator; }
-            if (calling > 0) { value = next; special = CALL_ITEM; goto enter_special; }
-            a = calling ? NULL : iterator_next(c, value);
+            int calling = next_call(c, m, value, &next, &callee_env);
+            if (calling == 2) { value = next; goto resume_generator; }
+            if (calling == 1) { value = next; special = CALL_ITEM; goto enter_special; }
+            a = calling > 2 ? next : calling ? NULL : iterator_next(c, value);
             goto consume_item;
         }
     resume_generator:
@@ -35170,9 +35252,10 @@ SPYContext *spy_context_new(void) {
     c->keeping = value_new(c, V_UNBOUND);
     c->defaulting = value_new(c, V_UNBOUND);
     c->negating = value_new(c, V_UNBOUND);
+    c->converting = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

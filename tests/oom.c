@@ -225,6 +225,18 @@ static const char *const programs[] = {
     "e[K()] = 2\n"
     "print(look(d), fmt(F()), len(e), len({K(), K()}))\n",
 
+    /* Conversions map() and filter() call on the machine, deeper and deeper. */
+    "class S:\n"
+    "    def __str__(s):\n"
+    "        for i in range(1): pass\n"
+    "        return 's'\n"
+    "    def __bool__(s):\n"
+    "        for i in range(1): pass\n"
+    "        return True\n"
+    "def conv(s): return [list(map(str, [s])), [list(filter(None, [s])), [list(map(str, [s])), [list(filter(None, [s])), "
+    "[list(map(str, [s])), [list(filter(None, [s])), [list(map(str, [s])), [len(list(filter(None, [s])))]]]]]]]][1:]\n"
+    "print(conv(S()))\n",
+
     "def gen(n):\n"
     "    try:\n"
     "        for i in range(n):\n"

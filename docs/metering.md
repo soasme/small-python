@@ -328,7 +328,10 @@ These run as machines on the heap, in one native activation of
   `__float__`, `__bool__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
   `__round__` and `__reversed__` that `str`, `repr`, `format`, `len`,
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
-  `round` and `reversed` call, the `__bool__` that `not` calls, and, in code compiled while pausing, the
+  `round` and `reversed` call, and the same methods of the items that a
+  `map` of one of those functions takes, the `__bool__` or `__len__`
+  that `filter` of `None` or `bool`, `any` and `all` test their items
+  by, the `__bool__` that `not` calls, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list or
@@ -338,7 +341,9 @@ These run as machines on the heap, in one native activation of
   `__setattr__`, property setter or `__set__` that `setattr` calls;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`
-  and `pop` and `set.add`, `discard` and `remove`; the `__index__` of an
+  and `pop` and `set.add`, `discard` and `remove`, and the items'
+  `__hash__` that `set` and `frozenset` of a list or tuple, and a set
+  display's starred list or tuple, call; the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or
   `range`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
   `isinstance` and `issubclass`; the metaclass `__getitem__` or
