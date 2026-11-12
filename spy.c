@@ -483,6 +483,7 @@ static SPYValue *closure_names(SPYContext *, Node *, int);
 static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
+static SPYValue *hash_function(SPYContext *, SPYValue *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
@@ -527,6 +528,7 @@ static int hash_result(SPYContext *, SPYValue *, int64_t *);
 static SPYValue *number_result(SPYContext *, SPYValue *, int, SPYValue *);
 static int decimal_value(uint32_t);
 static int set_add(SPYContext *, SPYValue *, SPYValue *);
+static int set_add_hash(SPYContext *, SPYValue *, SPYValue *, int64_t);
 static void error_note(SPYContext *, const char *);
 enum { SET_UNION, SET_INTERSECTION, SET_DIFFERENCE, SET_SYMMETRIC };
 static int set_combine(SPYContext *, SPYValue *, int, SPYValue *);
@@ -14111,8 +14113,10 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
  * gives, then is fed those keys, looking each up in the mapping
  * (KEY_ITEMS). One that makes a list of its items (hints) asks its
- * instance source's length hint once it has the iterator (ListExtend). */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS };
+ * instance source's length hint once it has the iterator (ListExtend).
+ * A set's item whose __hash__ is Python waits in item for that call
+ * (KEY_HASH). */
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
@@ -22618,6 +22622,14 @@ static int called_iterator(SPYValue *v) {
     int kind = v->as.iterator.kind;
     return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE);
 }
+/* Whether a set takes v's items on the machine, a list or tuple holding
+ * one whose __hash__ is Python (KEY_HASH). */
+static int hashed_items(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
+    for (size_t i = 0; i < v->as.seq.len; i++)
+        if (hash_function(c, v->as.seq.items[i])) return 1;
+    return 0;
+}
 /* Whether a consumer takes v's items on the machine: a generator it can
  * resume, an iterator whose items are calls, a zip or map of generators,
  * an enumerate or filter of one, or an instance iterating in Python. */
@@ -22638,7 +22650,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
      * machine when its keys() is Python (method_function). */
     int mapping = argc && argv[0]->type == SPY_INSTANCE &&
                   (callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT));
-    if (!argc || (mapping ? !method_function(c, argv[0], "keys") : !machine_source(c, argv[0]))) return -1;
+    int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET];
+    if (!argc || (mapping ? !method_function(c, argv[0], "keys") : !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
@@ -22656,16 +22669,18 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     return id;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
-    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE)) ||
+    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE ||
+                     ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) &&
+                      (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET])))) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* A consumer's source *v, owned (iter_function): an instance whose
  * __iter__ is on the machine stays, its call the consumer's first
  * (KEY_ITER); one whose __iter__ is a generator function gives its
- * generator, and one of __getitem__ alone its iterator. The consumer's
- * keyed. */
+ * generator, and one of __getitem__ alone its iterator, as a set's list
+ * or tuple (hashed_items). The consumer's keyed. */
 static int consumer_source(SPYContext *c, SPYValue **v) {
-    if ((*v)->type != SPY_INSTANCE) return 0;
+    if ((*v)->type != SPY_INSTANCE && (*v)->type != SPY_LIST && (*v)->type != SPY_TUPLE) return 0;
     SPYValue *iter = iter_function(c, *v);
     if (iter && machine_function(c, iter)) return KEY_ITER;
     SPYValue *iterator = get_iterator(c, *v);
@@ -22758,7 +22773,7 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
  * with a Python __iter__, gives its items on the machine (BLOCK_CONSUME,
  * EXTEND_ITEMS); else 0, a extended into the display and released. */
 static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
-    if ((!resumable(a) && !iter_function(c, a)) || is_dict(display)) {
+    if ((!resumable(a) && !iter_function(c, a) && !(is_set(display) && hashed_items(c, a))) || is_dict(display)) {
         (hints ? extend_list : extend_display)(c, display, a);
         if (arg) seal_tuple(c, display);
         spy_release(a);
@@ -23058,6 +23073,13 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(function);
         return NULL;
     }
+    if (s->keyed == KEY_HASH) {
+        SPYValue *function = hash_function(c, s->item);
+        item = spy_retain(s->item);
+        if ((*env = function_env(c, function, 1, &item, NULL, 1))) return spy_retain(function);
+        hash_failed(c, s->result, s->item);
+        return NULL;
+    }
     if (s->keyed == KEY_ITER || s->keyed == KEY_KEYS) {
         SPYValue *function = s->keyed == KEY_ITER ? iter_function(c, items) : method_function(c, items, "keys");
         if (!machine_function(c, function)) {
@@ -23158,6 +23180,19 @@ static NO_INLINE int keys_listing(SPYContext *c, Block *top, SPYValue *keys) {
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
+    if (s->keyed == KEY_HASH) {
+        /* The set's item with the hash its __hash__ returned, else that
+         * call's error as a set's (hash_failed). */
+        SPYValue *item = s->item;
+        int64_t hash;
+        s->item = NULL; s->keyed = 0;
+        int failed = !key || hash_result(c, key, &hash);
+        if (failed) hash_failed(c, s->result, item);
+        else failed = set_add_hash(c, s->result, item, hash);
+        spy_release(item);
+        return failed ? -1 : 0;
+    }
+    if (!key) return -1;
     if (s->made) {
         /* A class key's __init__ returned: its new instance is the key. */
         if (key->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(key));
@@ -26390,7 +26425,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         flow.value = result;
                         goto item_returned;
                     } else if (kind == CALL_KEY) {
-                        if (result && !key_took(c, m, result)) goto consume_generator;
+                        if (!key_took(c, m, result)) goto consume_generator;
                     } else if (kind >= CALL_EXEC) {
                         /* An import's statement runs again, finding the module. */
                         if (kind == CALL_IMPORT) pc -= import_returned(c, m, result);
@@ -30515,7 +30550,9 @@ static SPYValue *frozendict_method(SPYContext *c, size_t argc, SPYValue *const *
 /* Sets and frozensets share the hashed map; values are unused. */
 static int set_add(SPYContext *c, SPYValue *set, SPYValue *item) {
     int64_t hash;
-    if (map_hash(c, set, item, &hash)) return -1;
+    return map_hash(c, set, item, &hash) ? -1 : set_add_hash(c, set, item, hash);
+}
+static int set_add_hash(SPYContext *c, SPYValue *set, SPYValue *item, int64_t hash) {
     ptrdiff_t found = map_find_hash(set, item, hash);
     if (c->error_type[0]) return -1;
     return found >= 0 ? 0 : map_append(c, set, item, c->none, hash);
@@ -30721,7 +30758,6 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
 enum { SET_ADD, SET_DISCARD, SET_REMOVE, SET_POP, SET_CLEAR, SET_COPY, SET_REDUCE };
 static const char *const set_item_names[] = {"add", "discard", "remove", "pop", "clear", "copy", "__reduce__"};
 static SPYValue *set_item_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
-static SPYValue *hash_function(SPYContext *, SPYValue *);
 /* The dict or set a call of callee, method number method of it or -1,
  * with argc arguments argv looks argv[*at] up in: a dict's get,
  * setdefault or pop, or a set's add, discard or remove, bound or given
@@ -32022,6 +32058,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         return status;
     }
     if (s->id == B_SET || s->id == B_FROZENSET || s->id == EXTEND_ITEMS) {
+        if (is_set(s->result) && hash_function(c, item)) { s->item = item; s->keyed = KEY_HASH; return 0; }
         int status = s->id != EXTEND_ITEMS ? set_add(c, s->result, item) : display_add(c, s->result, item);
         spy_release(item);
         return status;

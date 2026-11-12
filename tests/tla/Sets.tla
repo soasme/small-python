@@ -17,10 +17,16 @@
 (*     hash(a), a.add([]),                                                 *)
 (*     where with eq each element is an object hashing as its value whose  *)
 (*     Python __eq__ compares values, which changes no outcome; or         *)
-(*   - set(<items>) of up to three of 1, 1.0, True, 2.                     *)
+(*   - set(<items>) of up to three of 1, 1.0, True, 2; or                  *)
+(*   - set(src), frozenset(src) or {*src} of a list or a generator of two  *)
+(*     objects whose Python __hash__ (which loops) logs "h" and its value, *)
+(*     the second's returning, raising TypeError or raising ValueError; a  *)
+(*     generator logs "y" and the value before each item.                  *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
-(* an operator), the bool, or the exception.                               *)
+(* an operator), the bool, or the exception; for the hashed builds, the    *)
+(* log of calls, each item hashed before the next is taken, and a          *)
+(* TypeError of __hash__ named as a set element's.                         *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -31,6 +37,8 @@ Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list
 Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
+            \cup [op : {"hashed"}, form : {"set", "frozenset", "star"}, source : {"list", "generator"},
+                  fails : {"no", "TypeError", "ValueError"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -49,8 +57,18 @@ Keep(s, seen) ==
     ELSE LET v == IF Head(s) = "2" THEN 2 ELSE 1
          IN  (IF v \in seen THEN {} ELSE {Head(s)}) \cup Keep(Tail(s), seen \cup {v})
 
+\* A list's items exist before the set hashes them; a generator gives each
+\* as the set takes it.
+RunHashed(p) ==
+    <<CASE p.fails = "TypeError" -> "TypeError: cannot use 'K' as a set element (t)"
+        [] p.fails = "ValueError" -> "ValueError"
+        [] OTHER -> IF p.form = "frozenset" THEN "frozenset" ELSE "set",
+      IF p.source = "list" THEN "h1 h2" ELSE "y1 h1 y2 h2",
+      IF p.fails = "no" THEN {1, 2} ELSE {}>>
+
 Run(p) ==
     IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
+    ELSE IF p.op = "hashed" THEN RunHashed(p)
     ELSE LET a == p.a  b == p.b
          IN  CASE p.op \in {"|", "&", "-", "^"} -> <<p.ka, "", Combine(p.op, a, b)>>
                [] p.op = "<=" -> Bool(a \subseteq b)

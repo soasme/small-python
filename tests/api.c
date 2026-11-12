@@ -1109,6 +1109,12 @@ int main(int argc, char **argv) {
                "def shorted():\n    if Slow() and 1: return 0\n    return 7 + len(tested)");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shorted()", "short.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 1);
+    /* set() and frozenset() of a list, and a set display's starred list,
+     * call a Python __hash__ on the machine. */
+    execute(c, "class Hashed:\n    def __hash__(self):\n        for i in range(3000): pass\n        return 7");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(set([Hashed(), 1])) + len(frozenset((Hashed(),))) + len({*[Hashed()]})", "hashed.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */
