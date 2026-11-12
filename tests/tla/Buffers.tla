@@ -8,6 +8,10 @@
 (* by bytes() once it has copied) __release_buffer__ receives the view;    *)
 (* an object that exports no buffer is refused with TypeError; and while   *)
 (* a view of a bytearray is unreleased the bytearray cannot be resized.    *)
+(* A view released by Python code it runs is not touched after: an index  *)
+(* or an item converted after the release fails with ValueError, and       *)
+(* hash(m), while it hashes the exporter, and m.hex(sep), while it         *)
+(* converts sep, keep m exported, so its release fails with BufferError.   *)
 (*                                                                         *)
 (* An export program defines class B whose __buffer__ logs "buffer" and    *)
 (* returns memoryview(b"abc") or b"abc", with or without a                 *)
@@ -15,14 +19,18 @@
 (* m = memoryview(B()) and reads bytes(m) inside `with m:`, before         *)
 (* m.release(), or before del m. A resize program appends to a bytearray   *)
 (* with a view that is unreleased or released; a plain program takes       *)
-(* memoryview(object()). The outcome is the log and the result or the      *)
-(* exception.                                                              *)
+(* memoryview(object()). A reenter program releases a view of a bytearray, *)
+(* and empties the bytearray, from the __index__ of the key of m[k] or of  *)
+(* the item of m[0] = v, from the exporter's __hash__ during hash(m), or   *)
+(* from the __len__ of sep during m.hex(sep). The outcome is the log and   *)
+(* the result or the exception.                                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"export"}, ret : {"view", "bytes"}, release : BOOLEAN, how : {"bytes", "with", "release", "del"}]
             \cup [part : {"resize"}, released : BOOLEAN]
             \cup [part : {"plain"}]
+            \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -36,6 +44,7 @@ Export(p) ==
 Run(p) == CASE p.part = "export" -> Export(p)
             [] p.part = "resize" -> IF p.released THEN "3" ELSE "BufferError"
             [] p.part = "plain" -> "TypeError"
+            [] p.part = "reenter" -> IF p.during \in {"index", "store"} THEN "ValueError" ELSE "BufferError"
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -47,4 +56,7 @@ Done == outcome # Pending
 \* A buffer obtained is released exactly once, however it is let go.
 ReleasedOnce == Done /\ program.part = "export" /\ program.ret = "view" /\ program.release =>
     outcome = "buffer release b'abc'"
+
+\* A view released by the code it runs is neither read nor written after.
+ReleasedUntouched == Done /\ program.part = "reenter" => outcome \in {"ValueError", "BufferError"}
 =============================================================================

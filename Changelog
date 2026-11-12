@@ -16,6 +16,12 @@ Unreleased (0.10.0):
 - a collection due inside __del__ waits for it, so it frees what it finds
 - a collection clears weak references with a callback before it runs
   finalizers, so no callback sees a resurrected object
+- reversed() of a memoryview, or of a class whose metaclass defines
+  __getitem__, reads its items through __getitem__
+- memoryview: a view released by an index or item conversion is no longer
+  read or written; hash() and hex() keep the view exported while they call
+  back; a computed hash survives release; '?' items of any nonzero byte are
+  true; memoryviews are weakly referenceable
 
 2026-11-10 0.9.0:
 

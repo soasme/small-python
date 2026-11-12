@@ -1065,7 +1065,7 @@ hosts:
 - Weakly referenceable, as in CPython: instances of classes without
   `__slots__` (or with `__weakref__` in them), classes, functions, bound
   methods, builtin functions, sets, frozensets, generators, coroutines, code
-  objects, and modules.
+  objects, memoryviews, and modules.
 - Releasing a referent, or collecting it in a cycle, clears its references
   and queues their callbacks. They run at the next statement boundary. A
   collection clears the references with a callback before it runs the
