@@ -1139,6 +1139,33 @@ return `NULL`. Callback user data belongs to the host. `spy_call` invokes a
 language or native callable. The example in `examples/embed.c` shows argument
 validation, checked arithmetic, registration, evaluation, and cleanup.
 
+A callback that calls Python with `spy_call` holds that call under its own C
+frame: the call cannot pause, and a recursion through the callback uses C
+stack. `spy_callk` makes the call as Lua's `lua_callk` does, handing it to
+the engine together with a continuation; the callback returns what
+`spy_callk` returns:
+
+```c
+static SPYValue *done(SPYContext *ctx, SPYValue *result, SPYValue *state) {
+    spy_release(state);
+    return result;   /* or NULL with the error, or another spy_callk */
+}
+static SPYValue *apply(SPYContext *ctx, size_t argc,
+                       SPYValue *const *argv, void *data) {
+    return spy_callk(ctx, argv[0], argc - 1, argv + 1, done, NULL);
+}
+```
+
+When a Python call invoked the callback, a Python callee runs on the engine's
+machine after the callback returns, so it can pause and recurse to the
+recursion limit, and the continuation then gives the callback's value. The
+continuation receives the call's value, or `NULL` with its error set, and the
+state given to `spy_callk`, both owned; it does not see the callback's
+arguments. A call that a limit, an interrupt or `spy_context_free` stops
+ends without running it. Called anywhere else, `spy_callk` calls at once and
+returns what the continuation does. A callback that returns a value after
+`spy_callk`, or calls it twice, fails with `RuntimeError`.
+
 #### 3.4.4 Errors
 
 API failures use `NULL` or `-1`, with details available through
@@ -1293,7 +1320,8 @@ interrupt pauses an outermost `spy_eval` or `spy_exec` instead of stopping it
   paused again.
 - A call pauses only at a step where its frames are all on the engine's
   machine. A pause that becomes due inside native code, such as an import,
-  `exec` or a host function, waits until that code returns. A further budget
+  `exec` or a host function's `spy_call`, waits until that code returns;
+  a host function's `spy_callk` call pauses. A further budget
   spent before then stops the call, except one spent parsing or compiling
   source or charging a body's length as it is entered.
 - Code compiled while the limit is set gives every operator, subscript and
@@ -1625,7 +1653,8 @@ a continuation, a C function and its context, and returns; the machine runs
 the call as another frame, then the continuation, which finishes the C
 code's work or calls again. `iter()` calls a class's Python `__iter__` so,
 and a list made of an instance's items calls its `__len__` and
-`__length_hint__`.
+`__length_hint__`; a host function does so through `spy_callk`, whose
+continuation the engine wraps (`host_continued`).
 Called from C with no machine running, the call is made directly and the
 continuation runs after it.
 

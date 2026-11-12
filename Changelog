@@ -36,6 +36,8 @@ Unreleased (0.10.0):
 - and and or call a Python __bool__ or __len__ without nesting on the C stack, so they can pause
 - set(), frozenset() and {*x} call a Python __hash__ without nesting on the C stack, so they can pause
 - any() and all() call a Python __bool__ or __len__ without nesting on the C stack, so they can pause
+- added spy_callk(): a host function calls Python as Lua's lua_callk does,
+  with a continuation, so the call can pause and does not nest on the C stack
 - make test-gc-stress runs the specification suite with frequent automatic collections
 
 2026-11-10 0.9.0:

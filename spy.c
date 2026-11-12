@@ -199,7 +199,8 @@ struct SPYValue {
         /* signature: the parameters of a replace()d __code__, owned by it; else def->args. */
         struct { SPYValue *unit, *env, *attributes, *metadata; Node *def, *signature; } function;
         /* static_method: a builtin static method such as str.maketrans, unbound (__self__ None). */
-        struct { SPYNative call; void *data; int method, static_method; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+        /* host: made by spy_define or spy_native (host_call). */
+        struct { SPYNative call; void *data; int method, static_method, host; SPYValue *(*kwcall)(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
                  SPYValue *name, *owner; /* Owner: the builtin class of a method descriptor. */
                  SPYValue *module; /* An assigned __module__, or NULL for the default. */
                  void (*release)(void *); /* Host cleanup for data, run when the value is freed. */ } native;
@@ -434,6 +435,13 @@ struct SPYContext {
     /* The truth an and/or's Python __bool__ gave, plus one, for the test
      * its jump lands on (checked_returned), or 0. */
     int short_truth;
+    /* The machine of the call step that called a host native function, or
+     * of its continuation, and the host calls running in it, where
+     * spy_callk leaves its call on the machine (host_call); the
+     * continuation that call returns to. */
+    Machine *k_machine;
+    size_t k_entries;
+    SPYContinuation k_host;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -3262,7 +3270,7 @@ int spy_define(SPYContext *c, const char *name, SPYNative call, void *data) {
     SPYValue *v = value_new(c, SPY_NATIVE);
     if (!v) return -1;
     v->as.native.call = call;
-    v->as.native.data = data;
+    v->as.native.data = data; v->as.native.host = 1;
     v->as.native.name = spy_string(c, name, strlen(name));
     int status = v->as.native.name ? name_set(c, c->globals, name, v) : -1;
     spy_release(v);
@@ -14186,7 +14194,8 @@ enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, 
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
-               Continuation k; SPYValue *k_ctx; /* A CALL_K's, its context owned. */ };
+               Continuation k; SPYValue *k_ctx; /* A CALL_K's, its context owned. */
+               SPYContinuation host; /* A spy_callk's continuation. */ };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
     return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->delegate) : spy_none(c);
@@ -17015,7 +17024,7 @@ static NO_INLINE SPYValue *call_with_self(SPYContext *c, SPYValue *function, SPY
 static SPYValue *call_result(SPYContext *c, SPYValue *result) {
     c->depth--;
     if (c->error_type[0]) { spy_release(result); result = NULL; }
-    if (!result && !c->error_type[0]) spy_error(c, "RuntimeError", "native function returned NULL without an error");
+    if (!result && !c->error_type[0] && !c->k_fn) spy_error(c, "RuntimeError", "native function returned NULL without an error");
     return result;
 }
 static SPYValue *call_keywords(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
@@ -17272,6 +17281,67 @@ static SPYValue *leave(SPYContext *, SPYValue *);
 SPYValue *spy_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv) {
     if (!same_contexts(c, argc, argv)) return NULL;
     enter(c); return leave(c, call(c, fn, argc, argv));
+}
+/* Host native function fn, called by a call step on m with argc arguments
+ * argv and keywords: in it, or in a continuation, spy_callk leaves its call
+ * for the step to enter (callk); the step's value, or NULL with no error
+ * then. */
+static NO_INLINE SPYValue *host_call(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    Machine *machine = c->k_machine;
+    size_t entries = c->k_entries;
+    c->k_machine = m; c->k_entries = c->entries;
+    SPYValue *result = call_keywords(c, fn, argc, argv, keywords);
+    c->k_machine = machine; c->k_entries = entries;
+    if (c->k_fn && (result || c->error_type[0])) {
+        /* A value or an error returned over the call spy_callk left: the
+         * call is dropped. */
+        spy_release(c->k_fn); spy_release(c->k_env); spy_release(c->k_ctx);
+        c->k_fn = c->k_env = c->k_ctx = NULL;
+        if (result) spy_error(c, "RuntimeError", "native function returned a value over its spy_callk");
+        spy_release(result); result = NULL;
+    }
+    return result;
+}
+/* call_plain from a call step on m, of a host native function by
+ * host_call. */
+static ALWAYS_INLINE SPYValue *step_call(SPYContext *c, Machine *m, SPYValue *fn, int method, Node *n, size_t argc, SPYValue *const *argv) {
+    return UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host) ? host_call(c, m, fn, argc, argv, NULL) : call_plain(c, fn, method, n, argc, argv);
+}
+static ALWAYS_INLINE SPYValue *step_keywords(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    return UNLIKELY(fn->type == SPY_NATIVE && fn->as.native.host) ? host_call(c, m, fn, argc, argv, keywords) : call_keywords(c, fn, argc, argv, keywords);
+}
+/* A spy_callk's call returned result on m: its continuation, in
+ * c->k_host, gives the native function's value (callk), and may call
+ * spy_callk again; a stopped call skips it. */
+static SPYValue *host_continued(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYContinuation k = c->k_host;
+    Machine *machine = c->k_machine;
+    size_t entries = c->k_entries;
+    c->k_host = NULL;
+    /* A stopped call, which no handler sees, ends with no continuation. */
+    if (c->stopped) { spy_release(result); spy_release(state); return NULL; }
+    c->k_machine = m; c->k_entries = c->entries;
+    result = k(c, result, state);
+    c->k_machine = machine; c->k_entries = entries;
+    return result;
+}
+SPYValue *spy_callk(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYContinuation k, SPYValue *state) {
+    if (!same_context(c, callee) || !same_contexts(c, argc, argv) || (state && !same_context(c, state))) { spy_release(state); return NULL; }
+    if (c->k_fn) {
+        spy_release(state);
+        return spy_error(c, "RuntimeError", "spy_callk called again before its native function returned");
+    }
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    if (c->k_machine && c->k_entries == c->entries && machine_function(c, function) && argc < 8) {
+        /* The call is the call step's to enter. */
+        SPYValue *args[8];
+        for (size_t i = 0; i < argc; i++) args[i] = spy_retain(argv[i]);
+        c->k_host = k;
+        return callk(c, c->k_machine, callee, argc, args, host_continued, state);
+    }
+    enter(c);
+    SPYValue *result = leave(c, call(c, callee, argc, argv));
+    return k(c, result, state);
 }
 /* Weak references, the engine primitives _weak_bind and _weak_get: a
  * reference object is any instance registered here with a borrowed target,
@@ -23621,7 +23691,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     int id = consumer_of(c, callee, method, argc, argv);
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL, argc > 1 ? spy_retain(argv[1]) : NULL);
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) :
-             c->error_type[0] ? NULL : call_plain(c, callee, method, n, argc, argv);
+             c->error_type[0] ? NULL : step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -23764,7 +23834,7 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
         spy_release(callee);
         return result;
     }
-    SPYValue *result = call_plain(c, callee, method, n, argc, argv);
+    SPYValue *result = step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -23962,7 +24032,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     int id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
-    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : call_plain(c, callee, -1, n, argc, argv);
+    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) { consume(c, m, id, callee, -1, NULL, generator, start); spy_release(callee); }
@@ -24040,7 +24110,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         release_all(argc + 1, held); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    if (callee && id < 0) result = call_plain(c, callee, method, n, argc + !skip, argv + skip);
+    if (callee && id < 0) result = step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start);
     spy_release(callee);
@@ -24152,7 +24222,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         if (c->error_type[0]) { spy_release(result); result = NULL; }
     } else {
         SPYValue *keywords = entries_dict(c, kw, kwc);
-        if (keywords) result = call_keywords(c, callee, positional, argv, keywords);
+        if (keywords) result = step_keywords(c, m, callee, positional, argv, keywords);
         spy_release(keywords);
     }
 done:
@@ -24189,7 +24259,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         /* As a stack call's consumer, a starred call's (stack_call). */
         consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
                 args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);
-    else if (!c->error_type[0]) result = call_keywords(c, callee, args->as.seq.len, args->as.seq.items, keywords);
+    else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);
         int failed = !all || sequence_append(c, all, self);
@@ -26403,6 +26473,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         /* The C code that called goes on (callk). */
                         Continuation k = ((Call *)m)->k;
                         SPYValue *k_ctx = ((Call *)m)->k_ctx;
+                        c->k_host = ((Call *)m)->host;
                         m = call_leave(c, (Call *)m, result);
                         f = m->frame; code = m->code->items; pc = m->pc;
                         if ((result = k(c, m, k_ctx, result))) machine_push(c, m, result);
@@ -27208,7 +27279,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         {
             Call *call = call_enter(c, c->k_fn, c->k_env, m);
             c->k_fn = c->k_env = NULL;
-            if (call) { call->k = c->k; call->k_ctx = c->k_ctx; }
+            if (call) { call->k = c->k; call->k_ctx = c->k_ctx; call->host = c->k_host; }
             else spy_release(c->k_ctx);
             c->k_ctx = NULL;
             if (!call) continue;
@@ -35713,7 +35784,7 @@ int spy_exec(SPYContext *c, const char *source, const char *filename) {
 SPYValue *spy_native(SPYContext *c, const char *name, SPYNativeKeywords call, void *data, void (*release)(void *)) {
     SPYValue *v = value_new(c, SPY_NATIVE);
     if (!v) { if (release) release(data); return NULL; }
-    v->as.native.kwcall = call; v->as.native.data = data; v->as.native.release = release;
+    v->as.native.kwcall = call; v->as.native.data = data; v->as.native.release = release; v->as.native.host = 1;
     v->as.native.name = spy_string(c, name, strlen(name));
     if (!v->as.native.name) { spy_release(v); return NULL; }
     return v;

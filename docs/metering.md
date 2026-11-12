@@ -404,7 +404,8 @@ subscript assignment's or a target list's `__setitem__` and a deletion's
 `__iter__`, a property of a class with `__getattr__`), the items a
 `filter` by a Python function takes from a generator, and a strict
 `zip` or `map` or one taking from another iterator beside it, the
-comparisons of the items an `in` searches, a host function,
+comparisons of the items an `in` searches, a host function's `spy_call`
+(its `spy_callk` call runs on the machine and pauses),
 the metaclass call that makes a class, an import, `exec` and `eval`, and
 a call from what the walker evaluates whole. Without pausing compiled
 in, the walker runs a function whose body holds no call or loop, which
@@ -427,7 +428,9 @@ calls, a class body inside its loop, and code compiled while pausing
 inside operator, subscript, augmented assignment and f-string special
 methods, that a pause
 due inside a host function's call back waits for it,
-within one further budget, and that an interrupt pauses
+within one further budget, that a host function's `spy_callk` call
+pauses, in every call form and through a chained continuation, and that
+an interrupt pauses
 too; and frees a context with a call paused. `tests/tla/SpyPause.tla`
 models the contract.
 

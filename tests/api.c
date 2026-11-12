@@ -59,6 +59,68 @@ static SPYValue *call_back(SPYContext *c, size_t argc, SPYValue *const *argv, vo
     if (argc != 1) return spy_error(c, "TypeError", "call_back expects one argument");
     return spy_call(c, argv[0], 0, NULL);
 }
+/* Host functions calling back by spy_callk. returned_k gives the call's
+ * value as the host function's, counting its runs. */
+static int k_runs;
+static SPYValue *returned_k(SPYContext *c, SPYValue *result, SPYValue *state) {
+    (void)c;
+    k_runs++;
+    spy_release(state);
+    return result;
+}
+/* call_k(f, *args): f(*args). */
+static SPYValue *call_k(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    if (!argc) return spy_error(c, "TypeError", "call_k expects a callable");
+    return spy_callk(c, argv[0], argc - 1, argv + 1, returned_k, NULL);
+}
+/* twice_k(f, x): f(f(x)), the continuation making the second call with f,
+ * its state. */
+static SPYValue *again_k(SPYContext *c, SPYValue *result, SPYValue *f) {
+    SPYValue *v = result ? spy_callk(c, f, 1, &result, returned_k, NULL) : NULL;
+    spy_release(result); spy_release(f);
+    return v;
+}
+static SPYValue *twice_k(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    if (argc != 2) return spy_error(c, "TypeError", "twice_k expects two arguments");
+    return spy_callk(c, argv[0], 1, argv + 1, again_k, spy_retain(argv[0]));
+}
+/* caught(f): f(), or the name of the exception it raised, which the
+ * continuation clears. */
+static SPYValue *caught_k(SPYContext *c, SPYValue *result, SPYValue *state) {
+    (void)state;
+    if (result) return result;
+    char name[64];
+    snprintf(name, sizeof(name), "%s", spy_error_type(c));
+    spy_clear_error(c);
+    return spy_string(c, name, strlen(name));
+}
+static SPYValue *caught(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    return argc == 1 ? spy_callk(c, argv[0], 0, NULL, caught_k, NULL) : spy_error(c, "TypeError", "caught expects one argument");
+}
+/* keyword_k(f, x=v): f(v). */
+static SPYValue *keyword_k(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
+    (void)data;
+    SPYValue *x = spy_string(c, "x", 1), *v = argc == 1 && keywords && x ? spy_get_item(c, keywords, x) : NULL;
+    spy_release(x);
+    if (!v) return spy_error(c, "TypeError", "keyword_k expects f and x=");
+    SPYValue *result = spy_callk(c, argv[0], 1, &v, returned_k, NULL);
+    spy_release(v);
+    return result;
+}
+/* Misuses: a value returned over a spy_callk, and a second spy_callk. */
+static SPYValue *over_k(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    SPYValue *left = spy_callk(c, argv[0], argc - 1, argv + 1, returned_k, NULL);
+    return left ? left : spy_int(c, 1);
+}
+static SPYValue *double_k(SPYContext *c, size_t argc, SPYValue *const *argv, void *data) {
+    (void)data;
+    SPYValue *left = spy_callk(c, argv[0], argc - 1, argv + 1, returned_k, NULL);
+    return left ? left : spy_callk(c, argv[0], argc - 1, argv + 1, returned_k, spy_int(c, 2));
+}
 static int fill_registered(SPYContext *c, SPYValue *module) {
     SPYValue *value = spy_int(c, 7);
     int status = value ? spy_set_attr(c, module, "value", value) : -1;
@@ -1122,6 +1184,56 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "any([Falsy(), 1]) + all((Empty(),)) + any(x for x in [Falsy()])", "truth.py"),
                                  SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
+    /* A host function's spy_callk runs a Python callee on the machine,
+     * where it pauses, then the continuation, which may call again; a
+     * call_back's spy_call could not pause. Every call form reaches it. */
+    assert(!spy_define(c, "call_k", call_k, NULL) && !spy_define(c, "twice_k", twice_k, NULL) && !spy_define(c, "caught", caught, NULL) &&
+           !spy_define(c, "over_k", over_k, NULL) && !spy_define(c, "double_k", double_k, NULL));
+    SPYValue *keyword = spy_native(c, "keyword_k", keyword_k, NULL, NULL);
+    assert(keyword && !spy_set_global(c, "keyword_k", keyword));
+    spy_release(keyword);
+    execute(c, "def slower(x):\n    for i in range(3000): pass\n    return x + 1\n"
+               "def raising():\n    for i in range(3000): pass\n    raise ValueError\n"
+               "def quick(x): return int(x) + 1");
+    static const struct { const char *source; int64_t value; int pauses; } calls_k[] = {
+        {"call_k(slower, 1)", 2, 1}, {"call_k(slower, len([1]))", 2, 1}, {"call_k(*[slower, 3])", 4, 1},
+        {"keyword_k(slower, x=4)", 5, 1}, {"keyword_k(slower, x=len([1, 2]))", 3, 1}, {"twice_k(slower, 5)", 7, 2},
+        {"len(caught(raising))", 10, 1}, {"call_k(len, [1, 2])", 2, 0}, {"call_k(call_back, lambda: call_k(quick, 6))", 7, 0}};
+    for (size_t i = 0; i < sizeof(calls_k) / sizeof(*calls_k); i++) {
+        pauses = 0; k_runs = 0;
+        assert(integer(c, run_paused(c, spy_eval(c, calls_k[i].source, "callk.py"), SPY_STOP_STEPS, &pauses)) == calls_k[i].value);
+        assert(calls_k[i].pauses ? pauses >= calls_k[i].pauses : pauses == 0);
+    }
+    assert(!spy_eval(c, "call_back(lambda: slower(slower(0)))", "back.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
+    spy_clear_error(c);
+    /* The continuation's state lives through a pause and a collection. */
+    pauses = 0;
+    v = spy_eval(c, "def made():\n    def f(x):\n        for i in range(3000): pass\n        return x * 2\n    return f\ntwice_k(made(), 3)", "kept.py");
+    while (!v && spy_paused(c)) { spy_collect(c); pauses++; v = spy_resume(c); }
+    assert(integer(c, v) == 12 && pauses > 1);
+    /* A value or a second spy_callk over a call left drops the call. */
+    k_runs = 0;
+    assert(!spy_eval(c, "over_k(slower, 1)", "over.py") && !strcmp(spy_error_message(c), "native function returned a value over its spy_callk"));
+    spy_clear_error(c);
+    assert(!spy_eval(c, "double_k(slower, 1)", "double.py") &&
+           !strcmp(spy_error_message(c), "spy_callk called again before its native function returned") && !k_runs);
+    spy_clear_error(c);
+    /* Off the machine, spy_callk calls at once. */
+    SPYValue *quick = spy_get_global(c, "quick"), *one = spy_int(c, 1);
+    k_runs = 0;
+    assert(integer(c, spy_callk(c, quick, 1, &one, returned_k, spy_int(c, 9))) == 2 && k_runs == 1);
+    assert(integer(c, spy_eval(c, "over_k(len, [1])", "over.py")) == 1);
+    /* A value of another context fails; nine arguments are called at once. */
+    SPYContext *elsewhere = spy_context_new();
+    SPYValue *alien = spy_list(elsewhere);
+    assert(!spy_callk(c, quick, 1, &alien, returned_k, NULL) && !strcmp(spy_error_message(c), "value belongs to another context"));
+    spy_clear_error(c);
+    assert(!spy_callk(c, quick, 1, &one, returned_k, alien) && !strcmp(spy_error_message(c), "value belongs to another context"));
+    spy_clear_error(c);
+    spy_context_free(elsewhere);
+    execute(c, "def count(*items): return int(len(items))");
+    assert(integer(c, spy_eval(c, "call_k(count, 1, 2, 3, 4, 5, 6, 7, 8, 9)", "nine.py")) == 9);
+    spy_release(quick); spy_release(one);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */
@@ -1418,6 +1530,18 @@ int main(int argc, char **argv) {
     spy_set_limit(dropped, SPY_LIMIT_PAUSE, 1);
     assert(!spy_eval(dropped, "def f():\n    try:\n        while True: pass\n    finally:\n        print('never')\nf()", "dropped.py") && spy_paused(dropped));
     spy_context_free(dropped);
+    /* A spy_callk's call stopped by a limit, or paused and then freed,
+     * ends with no continuation. */
+    dropped = spy_context_new();
+    spy_set_limit(dropped, SPY_LIMIT_STEPS, 100);
+    assert(!spy_define(dropped, "call_k", call_k, NULL));
+    k_runs = 0;
+    assert(spy_exec(dropped, "def f():\n    while True: pass", "dropped.py") == 0);
+    assert(!spy_eval(dropped, "call_k(f)", "dropped.py") && spy_stopped(dropped) == SPY_STOP_STEPS && !spy_paused(dropped));
+    spy_set_limit(dropped, SPY_LIMIT_PAUSE, 1);
+    assert(!spy_eval(dropped, "call_k(f)", "dropped.py") && spy_paused(dropped));
+    spy_context_free(dropped);
+    assert(!k_runs);
     spy_set_limit(c, SPY_LIMIT_PAUSE, 0);
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     /* The engine counts the bytes it holds; a memory limit stops the call
@@ -1467,6 +1591,10 @@ int main(int argc, char **argv) {
      * a recursion through an operator's method, which C calls, does. */
     execute(c, "def depth(n): return depth(n - 1) + 1 if n else 0\nassert depth(50000) == 50000");
     assert(spy_exec(c, "class Down:\n def __add__(self, n): return self + n\nDown() + 1", "stack.py") == -1 &&
+           !strcmp(spy_error_type(c), "RecursionError") && !strncmp(spy_error_message(c), "Stack overflow", 14));
+    /* So does one through a host function's spy_call, but not its spy_callk. */
+    execute(c, "def down_k(n): return call_k(down_k, n - 1) + 1 if n else 0\nassert down_k(20000) == 20000");
+    assert(spy_exec(c, "def down_back(n): return call_back(lambda: down_back(n - 1)) + 1 if n else 0\ndown_back(20000)", "stack.py") == -1 &&
            !strcmp(spy_error_type(c), "RecursionError") && !strncmp(spy_error_message(c), "Stack overflow", 14));
     assert(!spy_set_limit(c, SPY_LIMIT_STACK, stack) && !spy_set_limit(c, SPY_LIMIT_RECURSION, 1000));
     spy_clear_error(c);

@@ -97,6 +97,7 @@ typedef struct SPYModuleAPI {
     int (*spy_set_argv)(SPYContext *, size_t argc, const char *const *argv, size_t orig_argc, const char *const *orig_argv);
     int (*spy_paused)(const SPYContext *);
     SPYValue *(*spy_resume)(SPYContext *);
+    SPYValue *(*spy_callk)(SPYContext *, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYContinuation k, SPYValue *state);
 } SPYModuleAPI;
 /* The table's functions in its order, for the host that fills it. */
 #define SPY_MODULE_FUNCTIONS(X) \
@@ -170,7 +171,8 @@ typedef struct SPYModuleAPI {
     X(spy_live_values) \
     X(spy_set_argv) \
     X(spy_paused) \
-    X(spy_resume)
+    X(spy_resume) \
+    X(spy_callk)
 
 /* What a shared module exports beside its init: the version of the header it
  * was built with, and the table its host sets before calling the init. */
@@ -257,6 +259,7 @@ extern SPY_EXPORT SPYModuleLink spy_module;
 #define spy_set_argv (spy_module.api->spy_set_argv)
 #define spy_paused (spy_module.api->spy_paused)
 #define spy_resume (spy_module.api->spy_resume)
+#define spy_callk (spy_module.api->spy_callk)
 #else
 #define SPY_MODULE
 #endif

@@ -6,7 +6,10 @@
 (* spends Cost steps one at a time with no point at which the call can    *)
 (* pause, as a host function calling back into the engine does, and code  *)
 (* work, parsing or compiling source or charging a body's length, spends  *)
-(* CodeCost so, more than a budget.                                       *)
+(* CodeCost so, more than a budget. A host function calling spy_callk     *)
+(* (callk) is native work that leaves its call to the machine: the call's *)
+(* steps follow it as machine steps, and then its continuation (cont),    *)
+(* native work again.                                                      *)
 (*                                                                         *)
 (* With pausing set, the first spent budget of an outermost call makes a  *)
 (* pause due and refills the budget; the call pauses at its next machine  *)
@@ -24,6 +27,8 @@
 (*  - An outermost call, or a resume, spends at most two budgets besides *)
 (*    code work, and code work never stops the call.                      *)
 (*  - A paused call stays paused until it is resumed or freed.            *)
+(*  - A continuation runs once, after every step of its call, and never   *)
+(*    once the call is stopped or freed before it.                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -31,8 +36,14 @@ CONSTANTS Budget,   \* the largest step budget an outermost call gets
           Cost,     \* the steps of a native call
           CodeCost  \* the steps of code work
 
-\* The program: its steps and native calls, back to back and apart.
-Program == <<"code", "step", "native", "step", "code", "step", "native", "native", "step">>
+\* The program: its steps and native calls, back to back and apart, and a
+\* host function's spy_callk, its call's steps and its continuation.
+Program == <<"code", "step", "native", "step", "code", "step", "native", "native", "step",
+             "callk", "step", "step", "cont", "step">>
+\* Work in native code, with no pause point inside.
+NativeWork == {"native", "callk", "cont"}
+Cont == 13
+CallSteps == {11, 12}
 
 VARIABLES state,    \* "idle", "running", "paused", "stopped", "done" or "freed"
           pc,       \* the next instruction of the call
@@ -71,8 +82,9 @@ Step == /\ state = "running" /\ inside = 0 /\ pc <= Len(Program) /\ Program[pc] 
                    ELSE UNCHANGED <<ran, pc>>
         /\ UNCHANGED <<inside, limit>>
 
-\* A native call: its pause point is before it; inside, it only spends.
-Native == /\ state = "running" /\ pc <= Len(Program) /\ Program[pc] = "native"
+\* A native call, a spy_callk or a continuation: its pause point is before
+\* it; inside, it only spends.
+Native == /\ state = "running" /\ pc <= Len(Program) /\ Program[pc] \in NativeWork
           /\ UNCHANGED limit
           /\ IF inside = 0 /\ due THEN /\ state' = "paused" /\ UNCHANGED <<pc, inside, fuel, due, ran, spent>>
              ELSE /\ Spend
@@ -121,4 +133,11 @@ EachStepOnce == /\ \A i \in 1..Len(Program) : ran[i] <= 1
 \* work, which never stops the call.
 Bounded == /\ spent <= 2 * limit
            /\ state = "stopped" => Program[pc] # "code"
+\* The continuation runs once, after its call's steps; a call stopped or
+\* freed before it never runs it.
+ContinuesAfter == /\ ran[Cont] = 1 => \A i \in CallSteps : ran[i] = 1
+                  /\ state \in {"stopped", "freed"} /\ pc <= Cont => ran[Cont] = 0
+\* A pause can come inside a spy_callk's call, between the host function
+\* and its continuation (a reachable state, checked by its negation).
+NoPauseInCallk == ~(state = "paused" /\ pc \in CallSteps)
 =============================================================================

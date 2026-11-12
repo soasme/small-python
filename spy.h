@@ -88,6 +88,22 @@ SPYValue *spy_native(SPYContext *, const char *, SPYNativeKeywords, void *, void
  * spy_call_keywords, a dict of str keys or NULL. */
 SPYValue *spy_call(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 SPYValue *spy_call_keywords(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+/* What a native function does after a call it made with spy_callk: result is
+ * the call's value, owned, or NULL with its error set, and state the value
+ * given to spy_callk, owned. Return as the native function would, which may
+ * be another spy_callk. */
+typedef SPYValue *(*SPYContinuation)(SPYContext *, SPYValue *result, SPYValue *state);
+/* Call callee with borrowed positional arguments, then k, as Lua's
+ * lua_callk; a native function returns what spy_callk returns. Called by a
+ * native function that a Python call invoked, or by its continuation, a
+ * Python callee runs on the engine's machine, not under the native
+ * function's C frame, so it can pause (SPY_LIMIT_PAUSE) and recurse to the
+ * recursion limit; k runs when it returns or raises, but not when a limit,
+ * an interrupt or spy_context_free stops it. Called anywhere else,
+ * spy_callk calls at once and returns what k does. It takes state, which
+ * may be NULL: k does not see the native function's arguments, so state
+ * keeps what k needs of them. */
+SPYValue *spy_callk(SPYContext *, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYContinuation k, SPYValue *state);
 
 /* == Values == */
 

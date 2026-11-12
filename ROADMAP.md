@@ -242,7 +242,9 @@ frame under a C frame:
   iterable);
 - calls that C makes: special methods (`__eq__`, `__hash__`, operators,
   `__init__` and other class-call steps, iteration protocols), sort keys,
-  builtins that call Python, and host and trace callbacks.
+  builtins that call Python, trace callbacks, and host functions that
+  call back with `spy_call` (with `spy_callk` their calls run on the
+  machine).
 
 Each moves onto the machine as a continuation, one measured commit at a
 time, with no benchmark slower than before. Until the last one has moved, a
