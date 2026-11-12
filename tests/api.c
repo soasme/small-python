@@ -1102,6 +1102,13 @@ int main(int argc, char **argv) {
     SPYValue *joined = run_paused(c, spy_eval(c, "''.join(Own()) + ' '.join(calls)", "join.py"), SPY_STOP_STEPS, &pauses);
     assert(joined && !strcmp(spy_as_string(c, joined, NULL), "aiter iter len") && pauses > 2);
     spy_release(joined);
+    /* and and or call a Python __bool__ on the machine too; the if that
+     * the jump lands on takes the same truth, calling it once. */
+    execute(c, "tested = []\nclass Slow:\n    def __bool__(self):\n        for i in range(3000): pass\n"
+               "        tested.append(1)\n        return False\n"
+               "def shorted():\n    if Slow() and 1: return 0\n    return 7 + len(tested)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "shorted()", "short.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 1);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */

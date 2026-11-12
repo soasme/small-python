@@ -431,6 +431,9 @@ struct SPYContext {
      * the function, its environment, the continuation and its context. */
     SPYValue *k_fn, *k_env, *k_ctx;
     Continuation k;
+    /* The truth an and/or's Python __bool__ gave, plus one, for the test
+     * its jump lands on (checked_returned), or 0. */
+    int short_truth;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -25880,6 +25883,14 @@ static SPYValue *converted_result(SPYContext *c, SPYValue *v, const char *method
     return errorf(c, "TypeError", "%s.%s() must return %s, not %s", type_fqname(v, fq, sizeof(fq)), method,
                   number ? "a complex" : "a bytes", type_name(result));
 }
+/* BC_FALSE, or BC_SHORT, on m given the truth of the value it tests: the
+ * test jumps when false; the and/or jumps keeping the value atop m, its
+ * truth plus one in *known for the test it lands on, or pops it. */
+static void short_or_false(Machine *m, Instruction *ins, int truth, size_t *pc, int *known) {
+    if (ins->op == BC_FALSE) { if (!truth) *pc = ins->target; }
+    else if ((ins->arg == O_OR) == truth) { *pc = ins->target; *known = truth + 1; }
+    else spy_release(machine_pop(m));
+}
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
@@ -25946,7 +25957,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         call->m.outermost = CALL_INIT;
         return &call->m;
     }
-    if (ins->op != BC_FALSE && ins->op != BC_UNARY) {
+    if (ins->op != BC_FALSE && ins->op != BC_SHORT && ins->op != BC_UNARY) {
         SPYValue *name = machine_pop(m), *whole = NULL, *string;
         Buffer b = { .ctx = c, .whole = &whole };
         int64_t length;
@@ -25978,9 +25989,9 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
     int boolean = v != c->booleans[0];
     if (!boolean) { spy_release(v); v = machine_pop(m); }
     int truth = truth_result(c, v, boolean, result);
-    spy_release(v);
     if (ins->op == BC_UNARY) { if (!c->error_type[0]) machine_push(c, m, spy_bool(c, !truth)); }
-    else if (!truth) m->pc = ins->target;
+    else if (!c->error_type[0]) short_or_false(m, ins, truth, &m->pc, &c->short_truth);
+    spy_release(v);
     return m;
 }
 /* BC_OPERATE's or BC_TEST's operator on its operands x and y: its value;
@@ -26360,6 +26371,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_CHECKED) {
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
+                        known = c->short_truth; c->short_truth = 0;
                     } else if (kind == CALL_OPERATOR) {
                         if (result) {
                             m = operator_returned(c, m, &code[pc - 1], result, pc);
@@ -26683,6 +26695,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a))) pc = ins->target;
             NEXT_RELEASE;
         CASE(BC_SHORT) {
+            if (m->stack[m->len - 1]->type == SPY_INSTANCE && !truth_known) { a = spy_retain(m->stack[m->len - 1]); goto bool_step; }
             int truth = truth_known ? truth_known - 1 : !!truthy(m->stack[m->len - 1]);
             if ((ins->arg == O_OR) == truth) { pc = ins->target; known = truth + 1; }
             else spy_release(machine_pop(m));
@@ -27108,10 +27121,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         if ((value = store_call(c, m, &f, ins, &callee_env))) { special = c->entering_kind; goto enter_special; }
         continue;
     bool_step:
-        /* BC_FALSE on instance a: a Python __bool__ is a call (CALL_CHECKED). */
+        /* BC_FALSE or BC_SHORT on instance a: a Python __bool__ is a call
+         * (CALL_CHECKED). */
         callee_env = NULL;
         if ((value = bool_call(c, m, a, &callee_env))) { spy_release(a); special = CALL_CHECKED; goto enter_special; }
-        if (!c->error_type[0] && !truthy(a)) pc = ins->target;
+        int truth = truthy(a);
+        if (!c->error_type[0]) short_or_false(m, ins, truth, &pc, &known);
         spy_release(a);
         continue;
     enter_getter:

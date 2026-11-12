@@ -1,7 +1,7 @@
 # Replays Truth.tla: each case builds the spec's classes, applies the
-# spec's operation to their instances (or bool() to a built-in value), and
-# compares the result and the logged __bool__ and __len__ calls with the
-# model's.
+# spec's operation to their instances (an if over and or or among them, or
+# bool() to a built-in value), and compares the result and the logged
+# __bool__ and __len__ calls with the model's.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -37,6 +37,18 @@ def instance(kind, side, log):
     return type(kind, (), namespace)()
 
 
+def tested_and(left, right):
+    if left and right:
+        return "then"
+    return "else"
+
+
+def tested_or(left, right):
+    if left or right:
+        return "then"
+    return "else"
+
+
 def outcome(p):
     log = []
     try:
@@ -48,6 +60,10 @@ def outcome(p):
             result = str(bool(left))
         elif op == "not":
             result = str(not left)
+        elif op == "if_and":
+            result = tested_and(left, right)
+        elif op == "if_or":
+            result = tested_or(left, right)
         else:
             value = (left and right) if op == "and" else (left or right)
             result = "left" if value is left else "right" if value is right else repr(value)
