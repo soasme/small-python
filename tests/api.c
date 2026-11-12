@@ -1084,6 +1084,10 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "call_back(lambda: sorted(range(15), key=slow))[-1]", "sorted.py"), SPY_STOP_STEPS, &pauses)) == 14 && pauses == 1);
     assert(!spy_eval(c, "call_back(lambda: sorted(range(30), key=slow))", "sorted.py") && !spy_paused(c) && spy_stopped(c) == SPY_STOP_STEPS);
     spy_clear_error(c);
+    /* iter() calls a Python __iter__ on the machine (callk), where it pauses. */
+    execute(c, "class Slow:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([7])");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "next(iter(Slow()))", "iter.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 1);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */

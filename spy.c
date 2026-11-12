@@ -92,6 +92,11 @@ enum { LAYOUT_EXCEPTION = SPY_LAST_TYPE + 1, LAYOUT_TYPE, LAYOUT_MODULE };
 typedef struct Node Node;
 typedef struct Program Program;
 typedef struct Machine Machine;
+/* callk's continuation (as Lua's lua_KFunction): given its context and
+ * what the call callk asked for returned (NULL with an error), both
+ * owned, the value of the work that called, else NULL, an error, or no
+ * error after callk again. */
+typedef SPYValue *(*Continuation)(SPYContext *, Machine *, SPYValue *ctx, SPYValue *result);
 typedef struct Call Call;
 typedef struct Pool Pool;
 typedef struct Scope Scope;
@@ -421,6 +426,10 @@ struct SPYContext {
     SPYValue *defaulting; /* On a machine's stack, marks a getattr() call with a default under it (getattr_call). */
     SPYValue *negating; /* On a machine's stack, marks a != whose __eq__ object's __ne__ calls (rich_entry). */
     const void *const *steps; /* The machine's step labels by op, NULL without labels as values (run_steps). */
+    /* A call callk left for the step that called it to enter (CALL_K):
+     * the function, its environment, the continuation and its context. */
+    SPYValue *k_fn, *k_env, *k_ctx;
+    Continuation k;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -469,6 +478,8 @@ static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYVal
 static SPYValue *closure_names(SPYContext *, Node *, int);
 static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
+static SPYValue *get_iterator(SPYContext *, SPYValue *);
+static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
@@ -8444,7 +8455,9 @@ static SPYValue *iterator_returned(SPYContext *c, SPYValue *source, SPYValue *it
     spy_release(method);
     return iterator;
 }
-static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
+/* The iterator of source; or, with python, NULL with no error and
+ * *python the Python __iter__ method to call for it, owned. */
+static ALWAYS_INLINE SPYValue *iterator_of(SPYContext *c, SPYValue *source, SPYValue **python) {
     if (source->type == SPY_LIST || source->type == SPY_TUPLE || source->type == SPY_RANGE) {
         SPYValue *v = value_new(c, SPY_ITERATOR);
         if (v) v->as.iterator.source = spy_retain(source);
@@ -8477,6 +8490,7 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         if (method && method->type == SPY_NONE) {
             spy_release(method); return errorf(c, "TypeError", "'%s' object is not iterable", type_name(source));
         }
+        if (method && python && method->type == SPY_METHOD && method->as.method.function->type == SPY_FUNCTION) { *python = method; return NULL; }
         if (method) {
             SPYValue *iterator = call(c, method, 0, NULL);
             spy_release(method);
@@ -8496,6 +8510,22 @@ static SPYValue *get_iterator(SPYContext *c, SPYValue *source) {
         if (is_dict(map) || is_set(map)) { v->as.iterator.size = map->as.map.len; v->as.iterator.removed = map->as.map.removed; }
     }
     return v;
+}
+static SPYValue *get_iterator(SPYContext *c, SPYValue *source) { return iterator_of(c, source, NULL); }
+/* What source's Python __iter__ returned for iter() (callk). */
+static SPYValue *iterated(SPYContext *c, Machine *m, SPYValue *source, SPYValue *result) {
+    (void)m;
+    if (result) result = iterator_returned(c, source, result, "__iter__");
+    spy_release(source);
+    return result;
+}
+/* iter() of source on machine m, whose Python __iter__ is m's call (callk). */
+static SPYValue *iter_builtin(SPYContext *c, Machine *m, SPYValue *source) {
+    SPYValue *method = NULL, *iterator = iterator_of(c, source, &method);
+    if (!method) return iterator;
+    iterator = callk(c, m, method, 0, NULL, iterated, spy_retain(source));
+    spy_release(method);
+    return iterator;
 }
 static SPYValue *iterator_next(SPYContext *, SPYValue *);
 /* The width in bytes of the character at byte offset at of str s. */
@@ -14077,10 +14107,11 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__ or a key's
  * __hash__ (hash_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
-struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */ };
+struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
+               Continuation k; SPYValue *k_ctx; /* A CALL_K's, its context owned. */ };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
     return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->delegate) : spy_none(c);
@@ -16834,6 +16865,27 @@ static int string_keys(SPYContext *c, SPYValue *keywords) {
 /* A function of this context whose body is on the machine. */
 static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
     return fn->type == SPY_FUNCTION && fn->ctx == c && fn->as.function.def && fn->as.function.def->flat;
+}
+/* Call fn on argc arguments argv, which it takes, then continuation k
+ * with ctx, which it takes, as Lua's lua_callk. On machine m, a function
+ * of the machine (or a method of one) is m's call: callk leaves it in
+ * c->k_fn and returns NULL with no error, and the step that called enters
+ * it (CALL_K), calling k when it returns, so that no Python code runs on
+ * the C stack. Otherwise fn runs here and callk returns what k does. */
+static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
+    SPYValue *function = fn->type == SPY_METHOD ? fn->as.method.function : fn;
+    if (m && machine_function(c, function) && argc < 8) {
+        SPYValue *args[9];
+        size_t n = fn != function;
+        if (n) args[0] = spy_retain(fn->as.method.self);
+        memcpy(args + n, argv, argc * sizeof(*argv));
+        if (!(c->k_env = function_env(c, function, n + argc, args, NULL, 1))) return k(c, m, ctx, NULL);
+        c->k_fn = spy_retain(function); c->k = k; c->k_ctx = ctx;
+        return NULL;
+    }
+    SPYValue *result = call(c, fn, argc, argv);
+    release_all(argc, argv);
+    return k(c, m, ctx, result);
 }
 /* Run fn, whose body is on the machine, in env, called from C; it takes env. */
 static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *env) {
@@ -23315,6 +23367,11 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
     return function;
 }
 static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
+static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
+/* Whether callee is builtin function id. */
+static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
+    return callee->type == SPY_NATIVE && callee->as.native.data == (void *)(intptr_t)id && callee->as.native.call == builtin;
+}
 /* A call of callee, method number method of it or -1, on argc arguments
  * argv, an instance or a class among the first two, that enters a Python
  * method, taking callee and the arguments: a placeholder for the method's
@@ -23406,6 +23463,12 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         if ((*env = function_env(c, allocate, argc + 1, argv, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
+    }
+    if (method < 0 && argc == 1 && is_builtin(callee, B_ITER) && argv[0]->type == SPY_INSTANCE) {
+        /* iter() calls a Python __iter__ on m (callk). */
+        result = iter_builtin(c, m, argv[0]);
+        spy_release(argv[0]); spy_release(callee);
+        return result;
     }
     if (argc && (argv[0]->type == SPY_INSTANCE || (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
@@ -23694,6 +23757,14 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
         if (argc == 2 && callee->as.native.data == (void *)(intptr_t)B_HASATTR)
             return machine_push(c, m, spy_retain(c->defaulting)) ? NULL : getattr_call(c, m, 1, env);
+    }
+    if (calls && argc == 1 && is_builtin(callee, B_ITER) && argv[0]->type == SPY_INSTANCE) {
+        /* iter() calls a Python __iter__ on m (callk). */
+        SPYValue *source = argv[0];
+        m->len -= 2;
+        result = iter_builtin(c, m, source);
+        spy_release(source); spy_release(callee);
+        return result;
     }
     /* So do min() and max() of a list's or tuple's items or of the
      * arguments, comparing them by a Python __lt__ or __gt__ (fold_call). */
@@ -26173,6 +26244,16 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         m->owner = NULL;
                         if (kind != CALL_EVAL && result) { spy_release(result); result = spy_none(c); }
                     }
+                    if (kind == CALL_K) {
+                        /* The C code that called goes on (callk). */
+                        Continuation k = ((Call *)m)->k;
+                        SPYValue *k_ctx = ((Call *)m)->k_ctx;
+                        m = call_leave(c, (Call *)m, result);
+                        f = m->frame; code = m->code->items; pc = m->pc;
+                        if ((result = k(c, m, k_ctx, result))) machine_push(c, m, result);
+                        else if (c->k_fn) goto enter_k;
+                        continue;
+                    }
                     m = call_leave(c, (Call *)m, result);
                     f = m->frame; code = m->code->items; pc = m->pc;
                     if (kind == CALL_INIT) {
@@ -26796,6 +26877,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         continue;
     }
     consume_generator:
+        /* C code a step called left a call for its continuation (callk). */
+        if (c->k_fn) goto enter_k;
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
         value = m->blocks[m->block_len - 1].value;
@@ -26958,6 +27041,21 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     enter_init:
         /* A class call enters its __init__ (class_init). */
         spy_release(value); value = spy_retain(c->entering_init); special = c->entering_kind;
+        goto enter_special;
+    enter_k:
+        /* The call callk left, its continuation's (CALL_K). */
+        m->pc = pc;
+        {
+            Call *call = call_enter(c, c->k_fn, c->k_env, m);
+            c->k_fn = c->k_env = NULL;
+            if (call) { call->k = c->k; call->k_ctx = c->k_ctx; }
+            else spy_release(c->k_ctx);
+            c->k_ctx = NULL;
+            if (!call) continue;
+            call->m.outermost = CALL_K;
+            m = &call->m;
+            goto switch_call;
+        }
     enter_special:
         m->pc = pc;
         {

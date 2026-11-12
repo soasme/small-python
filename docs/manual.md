@@ -1612,6 +1612,14 @@ instructions. A call to such a function from such a body pushes a frame on
 the context's call stack, and the same instruction loop continues, so these
 calls do not nest on the C stack.
 
+C code that a step calls reaches Python the same way, as Lua's `lua_callk`
+lets a C function call Lua. It hands the call to the machine together with
+a continuation, a C function and its context, and returns; the machine runs
+the call as another frame, then the continuation, which finishes the C
+code's work or calls again. `iter()` calls a class's Python `__iter__` so.
+Called from C with no machine running, the call is made directly and the
+continuation runs after it.
+
 There is no peephole optimizer or stable serialized-program format.
 
 ### 4.2 Executable generation
