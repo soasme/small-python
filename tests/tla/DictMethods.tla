@@ -11,7 +11,8 @@
 (* right operand's values, and append its new keys in its order; equality  *)
 (* ignores order and dicts are unordered and unhashable; get, setdefault,  *)
 (* pop (hashing its key once, but not in an empty dict), popitem (last in, *)
-(* first out), fromkeys, copy (shallow), clear,                            *)
+(* first out), fromkeys (hashing and setting each key before taking the   *)
+(* next), copy (shallow), clear,                                           *)
 (* reversed(), and __missing__ in subclasses behave as documented, a       *)
 (* missing key raising KeyError; and keys(), values(), and items() are     *)
 (* live views, keys and items set-like (their operators accept any         *)
@@ -64,7 +65,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
-          "fromkeys_shared", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
+          "fromkeys_shared", "fromkeys_hashed", "fromkeys_hash_fails", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
@@ -103,6 +104,8 @@ Case(c) ==
       [] c = "ctor_two_positional" -> "TypeError: dict expected at most 1 argument, got 2"
       [] c = "fromkeys" -> "({'a': None, 'b': None}, {1: 0, 2: 0}, 'Missing')"
       [] c = "fromkeys_shared" -> "{'a': [1], 'b': [1]}"
+      [] c = "fromkeys_hashed" -> "([1, 2, 3], [0, 0, 0], [1, 3, 1])"
+      [] c = "fromkeys_hash_fails" -> "(\"cannot use 'Unhashed' as a dict key (no)\", [1])"
       [] c = "missing_hook" -> "(1, 'zzzz', False, None)"
       [] c = "keyerror" -> "KeyError: 'k'"
       [] c = "keyerror_tuple" -> "KeyError: (1,)"

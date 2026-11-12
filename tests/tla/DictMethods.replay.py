@@ -8,6 +8,17 @@ class Missing(dict):
 class KeysOnly:
     def keys(self): return ['a', 'b']
     def __getitem__(self, k): return k.upper()
+class H:
+    log = []
+    def __init__(self, v): self.v = v
+    def __hash__(self):
+        for _ in range(2): pass
+        H.log.append(self.v); return self.v
+    def __eq__(self, other): return isinstance(other, H) and other.v == self.v
+class Unhashed:
+    def __hash__(self):
+        for _ in range(2): pass
+        raise TypeError('no')
 KEYS = [1, 2, 3]
 VALS = [10, 20]
 MAPS = [()] + [((k, v),) for k in KEYS for v in VALS] + [((k1, v1), (k2, v2)) for k1 in KEYS for k2 in KEYS if k1 != k2 for v1 in VALS for v2 in VALS]
@@ -41,6 +52,8 @@ SOURCES = {
     "ctor_two_positional": 'result = dict({}, {})',
     "fromkeys": "result = (dict.fromkeys('ab'), dict.fromkeys([1, 2], 0), type(Missing.fromkeys('a')).__name__)",
     "fromkeys_shared": "d = dict.fromkeys('ab', [])\nd['a'].append(1)\nresult = d",
+    "fromkeys_hashed": "H.log.clear()\nd = dict.fromkeys([H(1), 2, H(3), H(1)], 0)\nresult = ([getattr(k, 'v', k) for k in d], list(d.values()), H.log)",
+    "fromkeys_hash_fails": "H.log.clear()\ntry: dict.fromkeys((H(1), Unhashed(), H(2)))\nexcept TypeError as e: result = (str(e), H.log)",
     "missing_hook": "d = Missing(a=1)\nresult = (d['a'], d['zz' * 1], 'zz' in d, d.get('q'))",
     "keyerror": "result = {}['k']",
     "keyerror_tuple": 'result = {}[(1,)]',

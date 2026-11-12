@@ -238,7 +238,10 @@ static const char *const programs[] = {
     "print(conv(S()))\n"
     "def pct(s): return ['%s' % s, ['%r|%s' % (s, 1), ['%(k)a' % {'k': s}, ['%5s' % (s,), ['%s%s' % (s, s), ['%-3r' % s]]]]]][1:]\n"
     "S.__repr__ = S.__str__\n"
-    "print(pct(S()))\n",
+    "print(pct(S()))\n"
+    "S.__hash__ = lambda s: [i for i in range(1)][0]\n"
+    "def keys(s): return [dict.fromkeys([s]), [dict.fromkeys((1, s), 0), [len(dict.fromkeys([s, s])), [dict.fromkeys([s, 2])[s]]]]][1:]\n"
+    "print(keys(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"
