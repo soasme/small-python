@@ -25,6 +25,19 @@ assert_eq(stores.__code__.co_names,
           ("h", "g", "d", "a", "b", "c", "v", "u", "w", "print", "z", "E", "e", "s", "P", "y",
            "dec", "default", "f", "m", "n", "o", "p", "a.b.c"))
 
+# A with's managers and targets, as and mapping patterns, a dict display,
+# a type alias and an inlined comprehension's clauses, in order.
+def more():
+    global q, r, rest, t, T
+    with cm as q, other: pass
+    match s:
+        case [K() as r]: pass
+        case {"k": V(), **rest}: pass
+    t = {a: b, **c}
+    type T = int | Alias
+    return [x.attr for x in xs for y in x.ys if y]
+assert_eq(more.__code__.co_names, ("cm", "q", "other", "s", "K", "r", "V", "rest", "a", "b", "c", "t", "T", "xs", "ys", "attr"))
+
 # Module code names what it binds; an inlined comprehension's variable is local.
 module = compile("import a.b.c as d\nx = [i for i in y if i]\nk = x if t else q\n"
                  "class K: pass\ndef f(): pass\ndel k\n*s, r = __debug__", "<m>", "exec")

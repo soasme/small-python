@@ -351,6 +351,18 @@ static const char *const programs[] = {
     "c = co()\n"
     "print(c.cr_origin is not None)\n"
     "c.close()\n",
+    /* iter() of an instance enters its Python __iter__ from C (callk);
+     * co_names walks a comprehension's later clauses. */
+    "class I:\n"
+    "    def __iter__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return iter([1])\n"
+    "def f():\n"
+    "    for i in range(1): pass\n"
+    "    return next(iter(I()))\n"
+    "print(f())\n"
+    "def g(): return [x for x in a for y in x.b if y.c]\n"
+    "print(g.__code__.co_names)\n",
 };
 
 static char *read_file(const char *path) {

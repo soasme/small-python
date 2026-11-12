@@ -73,7 +73,7 @@ class Raising:
     def __hash__(self): spin(); raise self.error
     def __repr__(self): return "R"
 class Arity:
-    def __hash__(self, extra): return 1
+    def __hash__(self, extra): spin(); return 1
 makers = [lambda x: set([k1, x]), lambda x: frozenset((x,)), lambda x: set(gen(x)), lambda x: {*[x]}, lambda x: {*gen(x)}]
 for make in makers:
     assert_raises(TypeError, make, Wrong(), message="cannot use 'Wrong' as a set element (__hash__ method should return an integer)")
