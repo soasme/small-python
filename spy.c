@@ -33833,6 +33833,7 @@ enum { SLOT_REPR, SLOT_STR, SLOT_FORMAT, SLOT_ITER, SLOT_CONTAINS, SLOT_GETITEM,
 #define T_DICTS (T(SPY_DICT) | T(SPY_FROZENDICT))
 #define T_COMPARED (T_NUMBERS | T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T(SPY_SLICE))
 #define T_VIEWS (T(SPY_DICT_KEYS) | T(SPY_DICT_VALUES) | T(SPY_DICT_ITEMS))
+#define T_AWAITABLES (T(SPY_ASYNC_GENERATOR_ASEND) | T(SPY_ASYNC_GENERATOR_ATHROW) | T(SPY_ANEXT_AWAITABLE))
 static const struct { const char *name; int kind, op; uint64_t types; } slots[] = {
     {"__add__", SLOT_BINARY, '+', T_NUMBERS | T_SEQUENCES | T(SPY_TEMPLATE)}, {"__radd__", SLOT_RBINARY, '+', T_NUMBERS},
     {"__sub__", SLOT_BINARY, '-', T_NUMBERS | T_SETS}, {"__rsub__", SLOT_RBINARY, '-', T_NUMBERS | T_SETS},
@@ -33859,8 +33860,9 @@ static const struct { const char *name; int kind, op; uint64_t types; } slots[] 
     {"__complex__", SLOT_OTHER, SLOT_COMPLEX, T(SPY_COMPLEX)}, {"__trunc__", SLOT_OTHER, SLOT_TRUNC, T(SPY_INT) | T(SPY_FLOAT)},
     {"__floor__", SLOT_OTHER, SLOT_FLOOR, T(SPY_INT) | T(SPY_FLOAT)}, {"__ceil__", SLOT_OTHER, SLOT_CEIL, T(SPY_INT) | T(SPY_FLOAT)},
     {"__len__", SLOT_BUILTIN, B_LEN, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
-    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR)},
-    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR)},
+    {"__iter__", SLOT_OTHER, SLOT_ITER, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS | T(SPY_TEMPLATE) | T(SPY_TEMPLATE_ITERATOR) | T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR)
+        | T_AWAITABLES},
+    {"__next__", SLOT_OTHER, SLOT_NEXT, T(SPY_ITERATOR) | T(SPY_GENERATOR) | T(SPY_COROUTINE_ITERATOR) | T_AWAITABLES},
     {"__contains__", SLOT_OTHER, SLOT_CONTAINS, T_SEQUENCES | T_DICTS | T_SETS | T(SPY_RANGE) | T_VIEWS},
     {"__getitem__", SLOT_OTHER, SLOT_GETITEM, T_SEQUENCES | T_DICTS | T(SPY_RANGE)},
     {"__setitem__", SLOT_OTHER, SLOT_SETITEM, T(SPY_LIST) | T(SPY_DICT) | T(SPY_BYTEARRAY)},
@@ -34051,6 +34053,7 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     case SLOT_ITER: return type == SPY_ITERATOR ? spy_retain(self) : get_iterator(c, value);
     case SLOT_NEXT: {
         if (value->type == SPY_GENERATOR) return generator_send(c, value, NULL, NULL);
+        if (awaitable_iterator(value)) return awaitable_method(c, value, M_NEXT, 0, NULL);
         SPYValue *result = iterator_next(c, value);
         return result || c->error_type[0] ? result : spy_error(c, "StopIteration", "");
     }
@@ -34102,8 +34105,9 @@ static SPYValue *builtin_descriptor(SPYContext *c, SPYValue *cls, const char *na
     /* Generators have no sample value to probe; their methods are known. */
     static const char *const generator_methods[][2] = {
         {"send", " throw close "}, {"send", " throw close __await__ "}, {"asend", " athrow aclose __aiter__ __anext__ "}};
-    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE_ITERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR)) {
-        const char *const *known = generator_methods[type == SPY_COROUTINE ? 1 : type == SPY_ASYNC_GENERATOR ? 2 : 0];
+    int awaitable = type == SPY_ASYNC_GENERATOR_ASEND || type == SPY_ASYNC_GENERATOR_ATHROW || type == SPY_ANEXT_AWAITABLE;
+    if (!exists && (type == SPY_GENERATOR || type == SPY_COROUTINE_ITERATOR || type == SPY_COROUTINE || type == SPY_ASYNC_GENERATOR || awaitable)) {
+        const char *const *known = generator_methods[type == SPY_COROUTINE || awaitable ? 1 : type == SPY_ASYNC_GENERATOR ? 2 : 0];
         char padded[136];
         snprintf(padded, sizeof(padded), " %s ", name);
         exists = !strcmp(known[0], name) || strstr(known[1], padded);

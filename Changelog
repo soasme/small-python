@@ -13,6 +13,10 @@ Unreleased (0.10.0):
 - spyc -D PKG.* adds the modules in name order
 - the unicode_escape codec
 - a generator that dies while its frame lives on is gone to weak references
+- the asend, athrow and anext awaitable types define their methods, so
+  they are awaitable to type-based checks
+- a union keeps unhashable members apart: they are compared by equality
+  only with each other, and make the union unhashable
 - a collection due inside __del__ waits for it, so it frees what it finds
 - co_names of module and class code lists their names, all in first-use order
 
