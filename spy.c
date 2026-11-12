@@ -468,7 +468,7 @@ static SPYValue *forward_env(SPYContext *, Node *, SPYValue *, SPYValue *);
 static SPYValue *compile_builtin(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static SPYValue *closure_names(SPYContext *, Node *, int);
 static int callable_value(SPYContext *, SPYValue *);
-static SPYValue *code_names(SPYContext *, Node *);
+static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
@@ -11395,8 +11395,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
             spy_release(doc);
             return consts;
         }
-        if (!strcmp(name, "co_names"))
-            return def && (def->kind == N_DEF || def->kind == N_LAMBDA) ? code_names(c, def) : value_new(c, SPY_TUPLE);
+        if (!strcmp(name, "co_names")) return code_names(c, unit, def);
         if (!strcmp(name, "co_filename")) return spy_string(c, unit->as.unit.filename, strlen(unit->as.unit.filename));
         if (!strcmp(name, "co_name") || (!strcmp(name, "co_qualname") && !def)) {
             const char *text = !def ? "<module>" : def->kind == N_COMPREHENSION ?
@@ -15159,62 +15158,121 @@ static int closure_walk(ClosureNames *w, Node *n, int depth) {
     }
     return 0;
 }
-/* co_names: global and attribute names a function's body uses, in source
- * order, leaving out nested scopes (inlined comprehensions are the body's). */
+/* co_names: the global, builtin, and attribute names code uses, in the
+ * order it first uses them; module and class code also name what they bind
+ * (28.2). A nested scope's code is its own, except an inlined comprehension. */
 static int code_name_add(ClosureNames *w, const char *name) {
     for (size_t i = 0; i < w->names->as.seq.len; i++) if (!strcmp(w->names->as.seq.items[i]->as.string.data, name)) return 0;
     SPYValue *text = spy_string(w->c, name, strlen(name));
     int status = !text || sequence_append(w->c, w->names, text);
     spy_release(text); return status ? -1 : 0;
 }
-static int code_names_walk(ClosureNames *w, Scope *scope, Node *n, int depth) {
-    for (; n && depth < 1000; n = n->next) {
-        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA || (n->kind == N_COMPREHENSION && n->op == N_TUPLE)) {
-            /* Decorators, defaults, a plain class's bases and a generator
-             * expression's first iterable are evaluated here. */
-            Node *first = n->kind == N_COMPREHENSION && n->a ? n->a->a : NULL;
-            if (code_names_walk(w, scope, n->decorators, depth + 1) || (first && code_names_walk(w, scope, first, depth + 1))) return -1;
-            for (Node *param = n->kind == N_DEF || n->kind == N_LAMBDA ? n->args : NULL; param; param = param->next)
-                if (code_names_walk(w, scope, param->a, depth + 1)) return -1;
-            if (n->kind == N_CLASS && !n->params && code_names_walk(w, scope, n->args, depth + 1)) return -1;
-            continue;
+/* A name used in scope: not a function's or comprehension's local, a
+ * nonlocal, or a free name. */
+static int code_name_use(ClosureNames *w, Scope *scope, const char *name) {
+    Symbol *symbol = NULL;
+    Scope *at = scope;
+    while (!(symbol = scope_symbol(at, name)) && at != w->self) at = at->parent;
+    if (symbol && (symbol->flags & S_NONLOCAL)) return 0;
+    if (symbol && !(symbol->flags & S_GLOBAL) && (symbol->flags & (S_LOCAL | S_PARAM)))
+        return at->kind == S_FUNCTION || at->kind == S_COMPREHENSION ? 0 : code_name_add(w, name);
+    return free_binding(w->self, name) ? 0 : code_name_add(w, name);
+}
+static int code_names_walk(ClosureNames *, Scope *, Node *, int);
+static int code_names_clauses(ClosureNames *, Node *, int);
+static int code_names_node(ClosureNames *w, Scope *scope, Node *n, int depth) {
+#define WALK(x) code_names_walk(w, scope, (x), depth + 1)
+#define NODE(x) code_names_walk(w, scope, (x), depth + 1)
+    if (!n || depth >= 1000) return 0;
+    switch (n->kind) {
+    case N_NAME: return n->text && strcmp(n->text, "__debug__") ? code_name_use(w, scope, n->text) : 0; /* __debug__ is a constant */
+    case N_ATTR: return NODE(n->a) || (n->b && n->b->text && code_name_add(w, n->b->text)) ? -1 : 0;
+    case N_GLOBAL: case N_NONLOCAL: return 0;
+    case N_ASSIGN:
+        /* An augmented target is read first; otherwise the value comes first. */
+        if (n->op != '=') return NODE(n->a) || NODE(n->b) ? -1 : 0;
+        return NODE(n->b) || NODE(n->a) || WALK(n->args) ? -1 : 0;
+    case N_ANNASSIGN: return NODE(n->c) || (n->c || !(n->flags & F_SIMPLE) ? NODE(n->a) : 0) ? -1 : 0;
+    case N_NAMED: return NODE(n->b) || NODE(n->a) ? -1 : 0;
+    case N_FOR: return NODE(n->a) || NODE(n->args) || WALK(n->b) || WALK(n->c) ? -1 : 0;
+    case N_WITH:
+        for (Node *item = n->args; item; item = item->next) if (NODE(item->a) || NODE(item->b)) return -1;
+        return WALK(n->b);
+    case N_EXCEPT: return NODE(n->a) || NODE(n->c) || WALK(n->b) ? -1 : 0;
+    case N_TRY: return WALK(n->a) || WALK(n->args) || WALK(n->b) || WALK(n->c) ? -1 : 0;
+    case N_COND: return NODE(n->b) || NODE(n->a) || NODE(n->c) ? -1 : 0;
+    case N_MATCH:
+        if (NODE(n->a)) return -1;
+        for (Node *item = n->args; item; item = item->next) if (NODE(item->a) || NODE(item->b) || WALK(item->c)) return -1;
+        return 0;
+    case N_PATTERN:
+        switch (n->op) {
+        case PT_AS: return NODE(n->a) || NODE(n->b) ? -1 : 0;
+        case PT_MAPPING:
+            for (Node *entry = n->args; entry; entry = entry->next) if (NODE(entry->a) || NODE(entry->b)) return -1;
+            return NODE(n->c);
+        case PT_CLASS:
+            if (NODE(n->a) || WALK(n->args)) return -1;
+            for (Node *entry = n->c; entry; entry = entry->next) if (NODE(entry->b)) return -1;
+            return 0;
+        case PT_CAPTURE: case PT_STAR: case PT_VALUE: case PT_LITERAL: return NODE(n->a);
+        default: return WALK(n->args);
         }
-        if (n->kind == N_IMPORT || n->kind == N_FROM) {
-            /* The module imported, then a renamed dotted import's later parts. */
-            if (n->kind == N_FROM && code_name_add(w, n->a ? source_name(n->a) : "")) return -1;
-            for (Node *item = n->args; item; item = item->next) {
-                const char *text = item->a && (item->a->text || item->a->original) ? source_name(item->a) : NULL;
-                if (text && code_name_add(w, text)) return -1;
-                for (const char *dot = n->kind == N_IMPORT && item->b && text ? strchr(text, '.') : NULL; dot; dot = strchr(dot + 1, '.')) {
-                    const char *end = strchr(dot + 1, '.');
-                    size_t len = end ? (size_t)(end - dot - 1) : strlen(dot + 1);
-                    char *part = mem_malloc(w->c, len + 1);
-                    if (!part) { spy_error(w->c, "MemoryError", "allocation failed"); return -1; }
-                    memcpy(part, dot + 1, len); part[len] = 0;
-                    int status = code_name_add(w, part);
-                    mem_free(part);
-                    if (status) return -1;
-                }
+    case N_DICT:
+        for (Node *item = n->args; item; item = item->next) if (NODE(item->a) || NODE(item->b)) return -1;
+        return 0;
+    case N_IMPORT: case N_FROM:
+        /* The module, each name imported, then the name bound. */
+        if (n->kind == N_FROM && code_name_add(w, n->a ? source_name(n->a) : "")) return -1;
+        for (Node *item = n->args; item && item->kind != N_STAR; item = item->next) {
+            const char *text = source_name(item->a);
+            if (code_name_add(w, text)) return -1;
+            for (const char *dot = n->kind == N_IMPORT && item->b ? strchr(text, '.') : NULL; dot; dot = strchr(dot + 1, '.')) {
+                const char *end = strchr(dot + 1, '.');
+                size_t len = end ? (size_t)(end - dot - 1) : strlen(dot + 1);
+                char *part = mem_malloc(w->c, len + 1);
+                if (!part) { spy_error(w->c, "MemoryError", "allocation failed"); return -1; }
+                memcpy(part, dot + 1, len); part[len] = 0;
+                int status = code_name_add(w, part);
+                mem_free(part);
+                if (status) return -1;
             }
-            continue;
+            Node *binding = item->b ? item->b : item->a->a ? item->a->a : item->a;
+            if (code_name_use(w, scope, source_name(binding))) return -1;
         }
-        if (n->kind == N_ATTR) {
-            if (code_names_walk(w, scope, n->a, depth + 1) || (n->b && n->b->text && code_name_add(w, n->b->text))) return -1;
-            continue;
-        }
-        Scope *inner = n->kind == N_COMPREHENSION && n->scope ? n->scope : scope;
-        if (n->kind == N_NAME && n->text) {
-            Symbol *symbol = NULL;
-            for (Scope *at = scope; at && !symbol; at = at == w->self ? NULL : at->parent) symbol = scope_symbol(at, n->text);
-            int local = symbol && !(symbol->flags & (S_GLOBAL | S_NONLOCAL)) && (symbol->flags & (S_LOCAL | S_PARAM));
-            if (!local && !(symbol && (symbol->flags & S_NONLOCAL)) && !free_binding(w->self, n->text) && code_name_add(w, n->text)) return -1;
-        }
-        if (code_names_walk(w, inner, n->a, depth + 1) || code_names_walk(w, inner, n->b, depth + 1) ||
-            code_names_walk(w, inner, n->c, depth + 1) || code_names_walk(w, inner, n->args, depth + 1) ||
-            code_names_walk(w, inner, n->decorators, depth + 1))
-            return -1;
+        return 0;
+    case N_TYPEALIAS: return NODE(n->a);
+    case N_DEF: case N_LAMBDA: case N_CLASS:
+        /* Decorators, defaults and a plain class's bases are evaluated here,
+         * then the definition is bound. */
+        if (WALK(n->decorators)) return -1;
+        for (Node *param = n->kind != N_CLASS ? n->args : NULL; param; param = param->next) if (NODE(param->a)) return -1;
+        if (n->kind == N_CLASS && !n->params && WALK(n->args)) return -1;
+        return n->kind == N_LAMBDA ? 0 : NODE(n->a);
+    case N_COMPREHENSION:
+        /* The first iterable is evaluated here; an inlined comprehension's
+         * clauses and element run here too. */
+        if (NODE(n->a->a)) return -1;
+        return n->op == N_TUPLE ? 0 : code_names_clauses(w, n, depth);
+    default:
+        return WALK(n->a) || WALK(n->b) || WALK(n->c) || WALK(n->args) || WALK(n->decorators) ? -1 : 0;
     }
+#undef WALK
+#undef NODE
+}
+static int code_names_walk(ClosureNames *w, Scope *scope, Node *n, int depth) {
+    for (; n; n = n->next) if (code_names_node(w, scope, n, depth)) return -1;
     return 0;
+}
+/* A comprehension's clauses after its first iterable, then its element. */
+static int code_names_clauses(ClosureNames *w, Node *n, int depth) {
+    for (Node *clause = n->a; clause; clause = clause->b)
+        if ((clause != n->a && code_names_walk(w, n->scope, clause->a, depth + 1)) ||
+            (clause->kind == N_FOR && code_names_walk(w, n->scope, clause->args, depth + 1)))
+            return -1;
+    Node *element = n->args;
+    if (n->op == N_DICT) return code_names_walk(w, n->scope, element->a, depth + 1) || code_names_walk(w, n->scope, element->b, depth + 1) ? -1 : 0;
+    return code_names_walk(w, n->scope, element, depth + 1);
 }
 /* Whether a class body has a scope that can see the class namespace (a
  * def, an annotation, a type alias, or type parameters), so its code has a
@@ -15258,9 +15316,10 @@ static SPYValue *closure_names(SPYContext *c, Node *def, int cells) {
         }
     return w.names;
 }
-static SPYValue *code_names(SPYContext *c, Node *def) {
-    ClosureNames w = {c, def->scope, value_new(c, SPY_TUPLE), 0};
-    if (w.names && w.self && code_names_walk(&w, w.self, def->b, 0)) { spy_release(w.names); return NULL; }
+static SPYValue *code_names(SPYContext *c, SPYValue *unit, Node *def) {
+    ClosureNames w = {c, def ? def->scope : unit->as.unit.scope, value_new(c, SPY_TUPLE), 0};
+    if (w.names && w.self && (def && def->kind == N_COMPREHENSION ? code_names_clauses(&w, def, 0) : code_names_walk(&w, w.self, def ? def->b : unit->as.unit.body, 0)))
+        { spy_release(w.names); return NULL; }
     return w.names;
 }
 static SPYValue *cell_new(SPYContext *c, SPYValue *env, const char *name, SPYValue *value) {

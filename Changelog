@@ -14,6 +14,7 @@ Unreleased (0.10.0):
 - the unicode_escape codec
 - a generator that dies while its frame lives on is gone to weak references
 - a collection due inside __del__ waits for it, so it frees what it finds
+- co_names of module and class code lists their names, all in first-use order
 
 2026-11-10 0.9.0:
 
