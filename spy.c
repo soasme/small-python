@@ -14106,9 +14106,11 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * items of a keyed sort keeps its keywords in pending (key_consumer). next(), __next__ and
  * send (B_NEXT) keep their default in result, the value to send and then
  * the value the generator returned in sent, and the item it gave in best.
- * A sum on the machine (adds) adds result and item by a Python method
- * (KEY_ADD): the one to call in best, the operator's method of phase
- * (operator_call), with item first when swapped. dict() or dict.update()
+ * One on the machine (calls) calls its items' Python methods there: a
+ * sum adds result and item by one (KEY_ADD), the one to call in best, the
+ * operator's method of phase (operator_call), with item first when
+ * swapped; any() and all() call item's __bool__, or __len__ when phase is
+ * set, in best (KEY_BOOL). dict() or dict.update()
  * of a mapping on the machine (method_function) calls its keys() first
  * (KEY_KEYS), keeps the mapping, lists in listed the keys a generator
  * gives, then is fed those keys, looking each up in the mapping
@@ -14116,7 +14118,7 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * instance source's length hint once it has the iterator (ListExtend).
  * A set's item whose __hash__ is Python waits in item for that call
  * (KEY_HASH). */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH };
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
@@ -14132,7 +14134,7 @@ struct Sorter {
     SortItem items[];
 };
 typedef struct {
-    int id, compensating, method, keyed, descending, adds, phase, swapped, stage, fed, hints;
+    int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -22735,7 +22737,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); spy_release(result); spy_release(generator); spy_release(sent); spy_release(source); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name,
-                           .sent = sent, .keyed = keyed, .adds = id == B_SUM, .hints = hints};
+                           .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints};
     block->value = generator; block->consumer = consumer;
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
     if (source && keyed == KEY_ITER) spy_release(source);
@@ -23078,6 +23080,14 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(function);
         return NULL;
     }
+    if (s->keyed == KEY_BOOL) {
+        SPYValue *function = s->best;
+        s->best = NULL;
+        item = spy_retain(s->item);
+        if ((*env = function_env(c, function, 1, &item, NULL, 1))) return function;
+        spy_release(function);
+        return NULL;
+    }
     if (s->keyed == KEY_HASH) {
         SPYValue *function = hash_function(c, s->item);
         item = spy_retain(s->item);
@@ -23198,6 +23208,19 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         return failed ? -1 : 0;
     }
     if (!key) return -1;
+    if (s->keyed == KEY_BOOL) {
+        /* The item's truth goes on to the next item, or decides any() or
+         * all(), which ends (consumer_took). */
+        SPYValue *item = s->item;
+        s->item = NULL; s->keyed = 0;
+        int truth = truth_result(c, item, !s->phase, key);
+        spy_release(item);
+        if (c->error_type[0]) return -1;
+        if (truth == (s->id == B_ALL)) return 0;
+        s->result = spy_bool(c, truth);
+        consumer_took(c, m, &m->frame, NULL);
+        return 1;
+    }
     if (s->made) {
         /* A class key's __init__ returned: its new instance is the key. */
         if (key->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(key));
@@ -23606,14 +23629,14 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
-/* Whether callee is exec(), eval(), divmod(), pow() or sum(), whose call
- * may run on the machine (builtin_call). */
+/* Whether callee is exec(), eval(), divmod(), pow(), sum(), any() or
+ * all(), whose call may run on the machine (builtin_call). */
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
-    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64, "builtin mask");
+    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
     return callee->type == SPY_NATIVE && callee->as.native.call == builtin && id < 64 &&
            (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
-                                 UINT64_C(1) << B_SUM));
+                                 UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL));
 }
 /* Prepare unit, a module body with statements, to run in env on the
  * machine: its docstring stored and its body compiled; -1 on an error. */
@@ -23647,11 +23670,11 @@ static NO_INLINE SPYValue *source_call(SPYContext *c, SPYValue *callee, size_t a
     return spy_retain(c->types[SPY_STRING]);
 }
 static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
-/* sum() of argc arguments argv, an iterable and its start, which it
- * takes: the total, or NULL with no error when the sum of the items so
- * far and the next, one of them an instance, goes on on m (KEY_ADD). */
-static NO_INLINE SPYValue *sum_call(SPYContext *c, Machine *m, size_t argc, SPYValue **argv) {
-    Consumer s = {.id = B_SUM, .adds = 1, .result = argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)};
+/* sum(), any() or all(), id, of argc arguments argv, an iterable and a
+ * sum's start, which it takes: its value, or NULL with no error when it
+ * goes on on m at a Python method of an item (KEY_ADD, KEY_BOOL). */
+static NO_INLINE SPYValue *reduce_call(SPYContext *c, Machine *m, int id, size_t argc, SPYValue **argv) {
+    Consumer s = {.id = id, .calls = 1, .result = id != B_SUM ? NULL : argc == 2 ? spy_retain(argv[1]) : spy_int(c, 0)};
     SPYValue *iterator = get_iterator(c, argv[0]);
     while (iterator && !c->error_type[0] && !pass(c)) {
         SPYValue *item = iterator_next(c, iterator);
@@ -23665,7 +23688,7 @@ static NO_INLINE SPYValue *sum_call(SPYContext *c, Machine *m, size_t argc, SPYV
         block->value = iterator; block->consumer = consumer;
         return NULL;
     }
-    mem_free(consumer); spy_release(s.item); spy_release(iterator);
+    mem_free(consumer); spy_release(s.best); spy_release(s.item); spy_release(iterator);
     return consumer_end(c, &s);
 }
 /* A call of call node n of callee (machine_builtin) with argc arguments
@@ -23673,8 +23696,9 @@ static NO_INLINE SPYValue *sum_call(SPYContext *c, Machine *m, size_t argc, SPYV
  * Python method divmod() or pow() of two (and a None modulus) calls
  * first, entered as an operator's (operator_call) with its env and
  * c->entering_init the method, CALL_OPERATOR, its operator pushed with the
- * phase, str's class then; sum() adds on m (consume, sum_call), NULL
- * with no error, when the total or an item is an instance; else
+ * phase, str's class then; sum(), any() and all() go on on m (consume,
+ * reduce_call), NULL with no error, when the total or an item is an
+ * instance; else
  * the call's value. */
 static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv,
                                         SPYValue **env) {
@@ -23686,11 +23710,11 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
         return result;
     }
     relocate(c, n);
-    if (id == B_SUM) {
+    if (id == B_SUM || id == B_ANY || id == B_ALL) {
         int consumer = consumer_of(c, callee, -1, argc, argv);
         if (consumer >= 0) consume(c, m, consumer, callee, -1, NULL, argv[0], argc > 1 ? argv[1] : NULL);
-        else if (argc && argc <= 2 && (argc == 1 || (!builtin_value(c, argv[1], SPY_STRING) && !builtin_value(c, argv[1], SPY_BYTES) &&
-                                !builtin_value(c, argv[1], SPY_BYTEARRAY)))) result = sum_call(c, m, argc, argv);
+        else if (argc == 1 || (argc == 2 && id == B_SUM && !builtin_value(c, argv[1], SPY_STRING) && !builtin_value(c, argv[1], SPY_BYTES) &&
+                               !builtin_value(c, argv[1], SPY_BYTEARRAY))) result = reduce_call(c, m, id, argc, argv);
         else {
             result = call_plain(c, callee, -1, n, argc, argv);
             release_all(argc, argv);
@@ -32093,13 +32117,16 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     }
     consumer_settle(c, s);
     if (s->id == B_ALL || s->id == B_ANY) {
+        int length = 0;
+        SPYValue *function = s->calls && item->type == SPY_INSTANCE ? truth_function(c, item, &length) : NULL;
+        if (function) { s->best = spy_retain(function); s->item = item; s->keyed = KEY_BOOL; s->phase = length; return 0; }
         int truth = truthy(item);
         spy_release(item);
         if (c->error_type[0]) return -1;
         if (truth != (s->id == B_ALL)) { s->result = spy_bool(c, truth); return 1; }
         return 0;
     }
-    SPYValue *function = s->adds && s->result && (s->result->type == SPY_INSTANCE || item->type == SPY_INSTANCE) ?
+    SPYValue *function = s->calls && s->result && (s->result->type == SPY_INSTANCE || item->type == SPY_INSTANCE) ?
                          add_function(c, s->result, item, &s->phase) : NULL;
     if (function) {
         s->best = spy_retain(function); s->item = item; s->keyed = KEY_ADD; s->swapped = s->phase != OPERATOR_FIRST;

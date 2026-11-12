@@ -13,10 +13,12 @@
 (* built-in constants and empty containers and zero numbers are false; not *)
 (* yields a bool, while x and y and x or y test only x and yield x itself  *)
 (* or y, never testing y; an if over x and y or x or y tests each once,   *)
-(* the operator's test of x being the if's.                               *)
+(* the operator's test of x being the if's. any() and all() of x and y,  *)
+(* from a list or a generator, test x and then y only when x does not     *)
+(* decide.                                                                 *)
 (*                                                                         *)
-(* A program applies OP (bool, not, and, or) to instances of classes of    *)
-(* KIND (the right one only for and and or), each logging its __bool__ or  *)
+(* A program applies OP (bool, not, and, or, any, all) to instances of     *)
+(* classes of KIND (the right one only for two), each logging its __bool__ or  *)
 (* __len__ call, or calls bool() on one of the built-in VALUES. A class    *)
 (* has no method (plain), a __bool__ returning True, False, or 1, or None  *)
 (* as __bool__, a __len__ returning 0, 3, -1, "3", 2**64, or an object     *)
@@ -32,7 +34,7 @@ Values == {"0", "0.0", "-0.0", "0j", "''", "b''", "[]", "()", "{}", "set()", "fr
            "None", "...", "NotImplemented", "float('nan')", "' '", "[0]", "frozendict()", "bytearray()",
            "memoryview(b'')", "type", "object()", "1e-300 * 1e-300"}
 Programs == [op : {"bool", "not"}, left : Kinds, right : {"plain"}]
-            \cup [op : {"and", "or", "if_and", "if_or"}, left : Kinds, right : Kinds]
+            \cup [op : {"and", "or", "if_and", "if_or", "any", "all", "any_gen", "all_gen"}, left : Kinds, right : Kinds]
             \cup [value : Values]
 
 VARIABLES program, outcome
@@ -57,6 +59,8 @@ Truth(k, side) ==
           [] k = "len_big" -> <<"OverflowError: cannot fit 'int' into an index-sized integer", called("len")>>
 
 Show(b) == IF b = "true" THEN "True" ELSE "False"
+\* The truth that decides any() or all() at its item.
+Deciding(op) == IF op \in {"any", "any_gen"} THEN "true" ELSE "false"
 Not(b) == IF b = "true" THEN "false" ELSE "true"
 
 False == {"0", "0.0", "-0.0", "0j", "''", "b''", "[]", "()", "{}", "set()", "frozenset()", "range(0)", "range(1, 1)",
@@ -77,6 +81,10 @@ Run(p) ==
                          IF (p.op = "if_and") # (t[1] = "true") THEN <<IF t[1] = "true" THEN "then" ELSE "else", t[2]>>
                          ELSE LET r == Truth(p.right, "R")
                               IN  <<CASE r[1] = "true" -> "then" [] r[1] = "false" -> "else" [] OTHER -> r[1], t[2] \o r[2]>>
+                    [] p.op \in {"any", "all", "any_gen", "all_gen"} ->
+                         IF t[1] = Deciding(p.op) THEN <<Show(t[1]), t[2]>>
+                         ELSE LET r == Truth(p.right, "R")
+                              IN  <<IF r[1] \in {"true", "false"} THEN Show(r[1]) ELSE r[1], t[2] \o r[2]>>
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program
@@ -88,6 +96,10 @@ Done == outcome # Pending
 \* and and or never test the truth of their right operand.
 ShortCircuit == Done /\ "op" \in DOMAIN program /\ program.op \in {"and", "or"} =>
                     \A i \in DOMAIN outcome[2] : outcome[2][i] \in {"L.bool", "L.len"}
+
+\* any() and all() request no item after the deciding one.
+NoItemAfter == Done /\ "op" \in DOMAIN program /\ program.op \in {"any", "all", "any_gen", "all_gen"} /\
+               Truth(program.left, "L")[1] = Deciding(program.op) => \A i \in DOMAIN outcome[2] : outcome[2][i] \in {"L.bool", "L.len"}
 
 \* Each operand's truth is tested at most once, by one of __bool__ and
 \* __len__, the left operand's first.

@@ -1115,6 +1115,13 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(set([Hashed(), 1])) + len(frozenset((Hashed(),))) + len({*[Hashed()]})", "hashed.py"),
                                  SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* any() and all() of a list, a tuple or a generator call a Python
+     * __bool__ or __len__ on the machine. */
+    execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"
+               "class Empty:\n    def __len__(self):\n        for i in range(3000): pass\n        return 0");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "any([Falsy(), 1]) + all((Empty(),)) + any(x for x in [Falsy()])", "truth.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
     /* Parsing and compiling source, and charging a body's length on entry,
      * is work bounded by the source: it pauses after, over as many budgets
      * as it takes, in a long program, function, module and exec. */

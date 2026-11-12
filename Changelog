@@ -35,6 +35,7 @@ Unreleased (0.10.0):
   calling its __iter__ again and asking its length hint; dict() pairs call __iter__ once
 - and and or call a Python __bool__ or __len__ without nesting on the C stack, so they can pause
 - set(), frozenset() and {*x} call a Python __hash__ without nesting on the C stack, so they can pause
+- any() and all() call a Python __bool__ or __len__ without nesting on the C stack, so they can pause
 - make test-gc-stress runs the specification suite with frequent automatic collections
 
 2026-11-10 0.9.0:
