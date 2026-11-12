@@ -241,22 +241,35 @@ def _unionable(obj):
 
 
 def _union_from_tuple(args):
-    items = []
+    # Hashable members are compared through a set, the others by equality
+    # with the earlier unhashable ones; the union keeps which were which.
+    items, hashable, unhashable = [], set(), []
     for arg in args:
         if arg is None:
             arg = type(None)
         members = arg.__args__ if isinstance(arg, Union) else (arg,)
         for member in members:
-            for seen in items:
-                if seen is member or seen == member:
-                    break
+            try:
+                hash(member)
+            except Exception:
+                if member in unhashable:
+                    continue
+                unhashable.append(member)
             else:
-                items.append(member)
+                if member in hashable:
+                    continue
+                hashable.add(member)
+            items.append(member)
     if len(items) == 1:
         return items[0]
     union = object.__new__(Union)
     object.__setattr__(union, '__args__', tuple(items))
+    object.__setattr__(union, '_unhashable', tuple(unhashable))
     return union
+
+
+def _union_hashable(union):
+    return frozenset(a for a in union.__args__ if not any(a is u for u in union._unhashable))
 
 
 def _union(a, b):
@@ -447,14 +460,18 @@ class Union:
     def __eq__(self, other):
         if not isinstance(other, Union):
             return NotImplemented
-        try:
-            return frozenset(self.__args__) == frozenset(other.__args__)
-        except TypeError:
-            a, b = list(self.__args__), list(other.__args__)
-            return len(a) == len(b) and all(x in b for x in a)
+        if _union_hashable(self) != _union_hashable(other):
+            return False
+        a, b = self._unhashable, other._unhashable
+        return len(a) == len(b) and all(x in b for x in a) and all(y in a for y in b)
 
     def __hash__(self):
-        return hash(frozenset(self.__args__))
+        # A union with unhashable members is unhashable, even once they hash.
+        for arg in self._unhashable:
+            hash(arg)
+        if self._unhashable:
+            raise TypeError(f"union contains {len(self._unhashable)} unhashable elements")
+        return hash(_union_hashable(self))
 
     def __getitem__(self, item):
         return _union_from_tuple(_subs_parameters(self, self.__args__, self.__parameters__, item))
