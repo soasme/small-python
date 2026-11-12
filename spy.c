@@ -15065,7 +15065,12 @@ static int dict_pair(SPYContext *c, SPYValue *dict, SPYValue *pair, size_t index
     } else if (items && !c->error_type[0]) {
         if (items->as.seq.len != 2)
             errorf(c, "ValueError", "dictionary update sequence element #%zu has length %zu; 2 is required", index, items->as.seq.len);
-        else map_set(c, dict, items->as.seq.items[0], items->as.seq.items[1]);
+        else {
+            /* The key's __hash__ or __eq__ may change the pair's list. */
+            SPYValue *key = spy_retain(items->as.seq.items[0]), *value = spy_retain(items->as.seq.items[1]);
+            map_set(c, dict, key, value);
+            spy_release(key); spy_release(value);
+        }
     }
     spy_release(items);
     return c->error_type[0] ? -1 : 0;
@@ -16945,7 +16950,7 @@ static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t
         SPYValue *args[9];
         size_t n = fn != function;
         if (n) args[0] = spy_retain(fn->as.method.self);
-        memcpy(args + n, argv, argc * sizeof(*argv));
+        if (argc) memcpy(args + n, argv, argc * sizeof(*argv));
         if (!(c->k_env = function_env(c, function, n + argc, args, NULL, 1))) return k(c, m, ctx, NULL);
         c->k_fn = spy_retain(function); c->k = k; c->k_ctx = ctx;
         return NULL;

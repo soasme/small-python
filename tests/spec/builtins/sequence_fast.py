@@ -76,3 +76,15 @@ class Unsized(Own):
     def __len__(self): spin(); raise ValueError("size")
 for name, join, items, result in JOINS:
     assert_raises(ValueError, join, Unsized(items), message="size")
+
+# A pair that is a list is used as it is: its key's __hash__ may empty it,
+# and the key and value it held are still the ones stored.
+class Clearing:
+    def __hash__(self):
+        pair.clear()
+        return 1
+pair = []
+pair.extend([Clearing(), "value " + str(len(pair))])
+d = dict([pair])
+assert_eq(list(d.values()), ["value 0"])
+assert_eq(pair, [])
