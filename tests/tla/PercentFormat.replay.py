@@ -12,6 +12,17 @@ class I:
     def __index__(self): return 7
 class F:
     def __float__(self): return 1.5
+def spin():
+    for _ in range(2): pass
+class L:
+    log = []
+    def __init__(self, tag): self.tag = tag
+    def __str__(self): spin(); L.log.append('s' + self.tag); return self.tag
+    def __repr__(self): spin(); L.log.append('r' + self.tag); return self.tag.upper() + '\xe9'
+class Bad:
+    def __repr__(self): spin(); raise KeyError('k')
+class NotStr:
+    def __str__(self): spin(); return 1
 
 SOURCES = {
     "s_r_a": "result = '%s %r %a' % ('\xe9', '\xe9', '\xe9')",
@@ -60,7 +71,12 @@ SOURCES = {
     "bytearray_result": "result = bytearray(b'%d') % 5",
     "bytes_not_all": "result = b'%d' % (1, 2)",
     "bytes_unsupported": "result = b'%y' % 1",
-    "bytes_float": "result = b'%.1e' % 12345.0"
+    "bytes_float": "result = b'%.1e' % 12345.0",
+    "method_order": "L.log.clear(); result = ('%s-%r-%-3s|%a' % (L('a'), L('b'), L('c'), L('d')), L.log)",
+    "method_mapping": "L.log.clear(); result = ('%(y)r/%(x)s/%(y)s' % {'x': L('a'), 'y': L('b')}, L.log)",
+    "method_raises": "L.log.clear()\ntry: '%r %s' % (Bad(), L('c'))\nexcept KeyError: result = L.log",
+    "method_not_str": "result = '%s' % NotStr()",
+    "method_too_few": "L.log.clear()\ntry: '%s %s' % (L('a'),)\nexcept TypeError as e: result = (str(e), L.log)"
 }
 
 

@@ -331,7 +331,9 @@ These run as machines on the heap, in one native activation of
   `round` and `reversed` call, and the same methods of the items that a
   `map` of one of those functions takes, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items
-  by, the `__bool__` that `not` calls, and, in code compiled while pausing, the
+  by, the `__str__` and `__repr__` that `str` `%` calls on the arguments
+  of `%s`, `%r` and `%a`, each after the conversions before it, the
+  `__bool__` that `not` calls, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list or

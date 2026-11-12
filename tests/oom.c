@@ -235,7 +235,10 @@ static const char *const programs[] = {
     "        return True\n"
     "def conv(s): return [list(map(str, [s])), [list(filter(None, [s])), [list(map(str, [s])), [list(filter(None, [s])), "
     "[list(map(str, [s])), [list(filter(None, [s])), [list(map(str, [s])), [len(list(filter(None, [s])))]]]]]]]][1:]\n"
-    "print(conv(S()))\n",
+    "print(conv(S()))\n"
+    "def pct(s): return ['%s' % s, ['%r|%s' % (s, 1), ['%(k)a' % {'k': s}, ['%5s' % (s,), ['%s%s' % (s, s), ['%-3r' % s]]]]]][1:]\n"
+    "S.__repr__ = S.__str__\n"
+    "print(pct(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

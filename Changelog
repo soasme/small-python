@@ -38,6 +38,7 @@ Unreleased (0.10.0):
 - any() and all() call a Python __bool__ or __len__ without nesting on the C stack, so they can pause
 - map() of str, repr and the other conversions, and filter() of None or bool, call
   an item's Python method without nesting on the C stack, so they can pause
+- str % values calls a Python __str__ or __repr__ without nesting on the C stack, so it can pause
 - added spy_callk(): a host function calls Python as Lua's lua_callk does,
   with a continuation, so the call can pause and does not nest on the C stack
 - make test-gc-stress runs the specification suite with frequent automatic collections

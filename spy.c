@@ -10181,6 +10181,16 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
     return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
 static int class_union(int, SPYValue *, SPYValue *);
+/* Whether str % y may convert an instance by a Python method on the
+ * machine (percent_call): y is one, not a str's, or a tuple or dict holding one. */
+static int percent_reaches(SPYContext *c, SPYValue *y) {
+    if (y->type == SPY_INSTANCE) return !subclass(y->as.map.parent, c->types[SPY_STRING]);
+    if (y->type == SPY_TUPLE) {
+        for (size_t i = 0; i < y->as.seq.len; i++) if (y->as.seq.items[i]->type == SPY_INSTANCE) return 1;
+    } else if (y->type == SPY_DICT)
+        for (size_t i = 0; i < map_used(y); i++) if (map_items(y)[i].key && map_items(y)[i].value->type == SPY_INSTANCE) return 1;
+    return 0;
+}
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -10189,7 +10199,8 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b) ? NULL : binary(c, op, a, b);
+    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b) ||
+           (op == '%' && a->type == SPY_STRING && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -12187,20 +12198,8 @@ static SPYValue *attribute_lookup(SPYContext *c, SPYValue *v, const char *name) 
     spy_release(method); spy_release(key); spy_release(fallback);
     return result;
 }
-/* PyObject_ASCII: PyObject_Repr's result itself when it is ASCII, so a str
- * subclass returned by __repr__ survives; otherwise an escaped str. */
-static SPYValue *ascii_repr(SPYContext *c, SPYValue *value) {
-    SPYValue *repr = NULL, *text;
-    if (value->type == SPY_INSTANCE && !builtin_base(c, value, "__repr__", NULL)) {
-        SPYValue *method = special_method_maybe(c, value, "__repr__");
-        if (method) { repr = call(c, method, 0, NULL); spy_release(method); if (!repr) return NULL; }
-        else if (c->error_type[0]) return NULL;
-    }
-    if (!repr && !(repr = spy_repr(c, value))) return NULL;
-    if (!(text = builtin_value(c, repr, SPY_STRING))) {
-        errorf(c, "TypeError", "%s.__repr__() must return a str, not %s", type_name(value), type_name(repr));
-        spy_release(repr); return NULL;
-    }
+/* repr, which it takes, or its str text escaped to ASCII. */
+static SPYValue *ascii_text(SPYContext *c, SPYValue *repr, SPYValue *text) {
     size_t n = 0;
     while (n < text->as.string.len && !(text->as.string.data[n] & 0x80)) n++;
     if (n == text->as.string.len) return repr;
@@ -12215,6 +12214,22 @@ static SPYValue *ascii_repr(SPYContext *c, SPYValue *value) {
     spy_release(repr);
     SPYValue *result = c->error_type[0] ? NULL : spy_string(c, out.data ? out.data : "", out.len);
     mem_free(out.data); return result;
+}
+/* PyObject_ASCII: PyObject_Repr's result itself when it is ASCII, so a str
+ * subclass returned by __repr__ survives; otherwise an escaped str. */
+static SPYValue *ascii_repr(SPYContext *c, SPYValue *value) {
+    SPYValue *repr = NULL, *text;
+    if (value->type == SPY_INSTANCE && !builtin_base(c, value, "__repr__", NULL)) {
+        SPYValue *method = special_method_maybe(c, value, "__repr__");
+        if (method) { repr = call(c, method, 0, NULL); spy_release(method); if (!repr) return NULL; }
+        else if (c->error_type[0]) return NULL;
+    }
+    if (!repr && !(repr = spy_repr(c, value))) return NULL;
+    if (!(text = builtin_value(c, repr, SPY_STRING))) {
+        errorf(c, "TypeError", "%s.__repr__() must return a str, not %s", type_name(value), type_name(repr));
+        spy_release(repr); return NULL;
+    }
+    return ascii_text(c, repr, text);
 }
 /* Format-spec mini-language, ported from CPython's Objects/unicode_formatter.c
  * and the short float repr in Python/pystrtod.c. */
@@ -21644,16 +21659,30 @@ static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
     if (v->type == SPY_INSTANCE && v->as.map.base && percent_mapping(c, v->as.map.base, bytes)) return 1;
     return special_dispatch(v) && percent_has(c, v, "__getitem__");
 }
-static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) {
-    int bytes = format->type != SPY_STRING;
+static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+static SPYValue *conversion_value(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
+static SPYValue *percent_converted(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* format % args. On machine m, a str's %s or %r of an instance whose
+ * class's Python method converts it (conversion_method) is m's call
+ * (callk), the job's state a tuple of format, args, the text so far, the
+ * spec's position and count of characters, the arguments' length and
+ * index there, the instance and the method's name; the job goes on from
+ * that spec, given its state and the instance's text converted
+ * (percent_converted). */
+static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYValue *args, SPYValue *state, SPYValue *converted) {
+    int bytes = format->type != SPY_STRING, deferred = 0;
     const char *s = format->as.string.data;
     size_t n = format->as.string.len;
-    SPYValue *tuple = builtin_value(c, args, SPY_TUPLE);
+    SPYValue *tuple = builtin_value(c, args, SPY_TUPLE), **saved = state ? state->as.seq.items : NULL;
     PercentArgs p = {.args = tuple ? tuple : args, .arglen = tuple ? (ptrdiff_t)tuple->as.seq.len : -1, .argidx = tuple ? 0 : -2, .bytes = bytes};
     SPYValue *dict = percent_mapping(c, args, bytes) ? args : NULL;
-    if (c->error_type[0]) return NULL;
     Buffer out = {.ctx = c};
     size_t i = 0, chars = 0;
+    if (saved) {
+        i = (size_t)saved[3]->as.integer_data.small; chars = (size_t)saved[4]->as.integer_data.small;
+        p.arglen = saved[5]->as.integer_data.small; p.argidx = saved[6]->as.integer_data.small;
+        if (!c->error_type[0]) append(&out, saved[2]->as.string.data, saved[2]->as.string.len);
+    }
     while (i < n && !c->error_type[0]) {
         if (s[i] != '%') {
             size_t start = i;
@@ -21662,7 +21691,8 @@ static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) 
             if (append(&out, s + start, i - start)) break;
             continue;
         }
-        size_t fmtstart = chars++, at = ++i, atc = chars;
+        size_t start = i, startc = chars, fmtstart = chars++, at = ++i, atc = chars;
+        ptrdiff_t startlen = p.arglen, startidx = p.argidx;
         if (at < n && s[at] == '%') { i = at + 1; chars++; if (append(&out, "%", 1)) break; continue; }
         /* read() consumes one format character; end records a failed read. */
         unsigned ch = 0;
@@ -21683,7 +21713,7 @@ static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) 
             }
             if (depth) { errorf(c, "ValueError", "stray %% or incomplete format key at position %zu", fmtstart); break; }
             key = bytes ? spy_bytes(c, s + keystart, at - keystart - 1) : spy_string(c, s + keystart, at - keystart - 1);
-            SPYValue *value = key ? get_index(c, dict, key) : NULL;
+            SPYValue *value = !key ? NULL : converted ? spy_retain(saved[7]) : get_index(c, dict, key);
             if (!value) { spy_release(key); break; }
             spy_release(p.owned); p.owned = value; p.args = value;
             p.arglen = -3; p.argidx = -4;
@@ -21749,13 +21779,26 @@ static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) 
 #undef PERCENT_READ
         if (!failed && end) { errorf(c, "ValueError", "stray %% at position %zu", fmtstart); failed = 1; }
         i = at; chars = atc;
-        SPYValue *v = failed ? NULL : percent_next(c, &p, 1), *piece = NULL;
+        SPYValue *v = failed ? NULL : percent_next(c, &p, 1), *piece = NULL, *function, *found[2];
         int sign = 0;
         if (v) switch (ch) {
         case 's': case 'r': case 'a': case 'b':
             if (bytes && (ch == 's' || ch == 'b')) piece = percent_bytes(c, &p, key, v);
             else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
+            else if (converted) { piece = ch == 'a' ? ascii_text(c, converted, converted) : converted; converted = NULL; }
+            else if (m && v->type == SPY_INSTANCE &&
+                     (function = conversion_method(c, ch == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &v, found))) {
+                SPYValue *parts[] = {spy_retain(format), spy_retain(args), spy_string(c, out.data ? out.data : "", out.len),
+                                     int_value(c, (int64_t)start), int_value(c, (int64_t)startc), int_value(c, startlen),
+                                     int_value(c, startidx), spy_retain(v), found[0]}, *job = NULL;
+                int whole = 1;
+                for (int k = 0; k < 9; k++) whole = whole && parts[k];
+                if (whole) job = spy_tuple(c, 9, parts);
+                release_all(9, parts);
+                if (job) callk(c, m, function, 1, (SPYValue *[]){spy_retain(v)}, percent_converted, job);
+                deferred = 1;
+            }
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
             break;
         case 'i': case 'd': case 'u': case 'o': case 'x': case 'X':
@@ -21786,22 +21829,37 @@ static SPYValue *percent_build(SPYContext *c, SPYValue *format, SPYValue *args) 
         spy_release(piece); spy_release(key);
         if (status) break;
     }
-    if (!c->error_type[0] && p.argidx < p.arglen && !dict)
+    if (!c->error_type[0] && !deferred && p.argidx < p.arglen && !dict)
         errorf(c, "TypeError", "not all arguments converted during %s formatting (required %td, got %td)", bytes ? "bytes" : "string",
                p.arglen < 0 ? 0 : p.argidx, p.arglen < 0 ? 1 : p.arglen);
-    spy_release(p.owned);
+    spy_release(p.owned); spy_release(converted);
     SPYValue *result = NULL;
-    if (!c->error_type[0]) result = format->type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
+    if (!c->error_type[0] && !deferred) result = format->type == SPY_BYTEARRAY ? bytearray_new(c, out.data ? out.data : "", out.len) :
         bytes ? spy_bytes(c, out.data ? out.data : "", out.len) : spy_string(c, out.data ? out.data : "", out.len);
     mem_free(out.data); return result;
 }
 /* A bytearray format stays exported while the values run Python code. */
 static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args) {
-    if (format->type != SPY_BYTEARRAY) return percent_build(c, format, args);
+    if (format->type != SPY_BYTEARRAY) return percent_build(c, NULL, format, args, NULL, NULL);
     format->as.string.exports++;
-    SPYValue *result = percent_build(c, format, args);
+    SPYValue *result = percent_build(c, NULL, format, args, NULL, NULL);
     format->as.string.exports--;
     return result;
+}
+/* What the method of a % job's instance (percent_build) returned. */
+static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **saved = state->as.seq.items, *text = result ? conversion_value(c, saved[7], saved[8], result) : NULL;
+    SPYValue *value = text ? percent_build(c, m, saved[0], saved[1], state, text) : NULL;
+    spy_release(result); spy_release(state);
+    return value;
+}
+/* str x % y on machine m, y reaching an instance (percent_reaches): its
+ * job's first call (percent_build), c->unbound; else NULL, the text in
+ * c->looked or an error. */
+static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y) {
+    SPYValue *text = percent_build(c, m, x, y, NULL, NULL);
+    if (text) c->looked = text;
+    return c->k_fn ? c->unbound : NULL;
 }
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
@@ -25150,6 +25208,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return bool_call(c, m, x, env);
     }
     if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
+    if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' && x->type == SPY_STRING &&
+        percent_reaches(c, y)) return percent_call(c, m, x, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
