@@ -49,7 +49,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `ModuleObjects.tla` | module attributes and namespace, read-only `__dict__`, annotations, and attributes of modules made by the module type | yes |
 | `ClassObjects.tla` | class special attributes (bases, layout base, MRO, docs not inherited, annotations, type parameters, static attributes), the read-only namespace view, and class versus instance assignment | yes |
 | `CodeObjects.tla` | code attributes (names, parameter counts, local, cell, free, and global names, flags, docstring constant), immutability, `co_lines()`, `co_positions()`, and `replace()` | yes |
-| `Frames.tla` | frame attributes of running, finished, and generator frames, the writable trace attributes, and `clear()` | yes |
+| `Frames.tla` | frame attributes of running, finished, and generator frames, the writable trace attributes and those that cannot be deleted, the keys of `f_locals`, and `clear()` | yes |
 | `Tracebacks.tla` | traceback chains as handlers unwind (through `finally`, re-raise, and `raise from`), line numbers, writable `tb_next`, and made tracebacks | yes |
 | `Slices.tla` | slice attributes, `indices()` against CPython's clamping, subscripts, a zero step or bad bound, equality and hashing, and `slice[float]` | yes |
 | `MethodDescriptors.tla` | static and class method objects over functions, builtins, and non-callables: retrieval through classes, instances, and subclasses, calling, and attributes | yes |
@@ -63,7 +63,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `Containers.tla` | `in` through `__contains__`, `__iter__`, or `__getitem__`; iteration and `__iter__ = None`; `reversed()` through `__reversed__` or `__len__` and `__getitem__`; `__missing__`; and storing without `__setitem__` | yes |
 | `NumericProtocol.tla` | binary operator dispatch with reflected methods (a subclass's override first), `NotImplemented`, in-place fallback, and `__index__` against `__int__` | yes |
 | `With.tla` | `__enter__` and `__exit__` lookup, a raising `__enter__`, `__exit__` arguments and suppression after a normal end, an exception, or a return, an exception from `__exit__`, and nested managers | yes |
-| `Buffers.tla` | `__buffer__` exporters through `memoryview()` and `bytes()`, `__release_buffer__` on release, `with`, and destruction, a non-memoryview result, and resizing an exported bytearray | yes |
+| `Buffers.tla` | `__buffer__` exporters through `memoryview()` and `bytes()`, `__release_buffer__` on release, `with`, and destruction, a non-memoryview result, resizing an exported bytearray, and a view released by the conversions and hooks it runs | yes |
 | `Annotations.tla` | lazy evaluation of function, class, and local annotations, `__annotate__` formats, unbound and string annotations, annotation scopes, evaluation at most once, and replacing `__annotations__` and `__annotate__` | yes |
 | `Generics.tla` | type parameter kinds, bounds, constraints, defaults, and variance; lazy evaluation; visibility through annotation scopes; parameter list syntax errors; and generic classes | yes |
 | `TypeAliases.tla` | the `type` statement: lazy, single evaluation of `__value__` (forward and self references), alias attributes, subscription, and read-only attributes | yes |

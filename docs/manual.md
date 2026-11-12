@@ -1065,9 +1065,12 @@ hosts:
 - Weakly referenceable, as in CPython: instances of classes without
   `__slots__` (or with `__weakref__` in them), classes, functions, bound
   methods, builtin functions, sets, frozensets, generators, coroutines, code
-  objects, and modules.
+  objects, memoryviews, and modules.
 - Releasing a referent, or collecting it in a cycle, clears its references
-  and queues their callbacks. They run at the next statement boundary.
+  and queues their callbacks. They run at the next statement boundary. A
+  collection clears the references with a callback before it runs the
+  finalizers of the garbage it found, so no callback sees a resurrected
+  object; the others answer until the object is freed.
   Callback exceptions are discarded, because there is no error stream.
 - Closures keep their whole defining environment alive, so a closure can
   keep a local that CPython would have released.

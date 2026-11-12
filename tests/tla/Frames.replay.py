@@ -21,6 +21,14 @@ def gen(a):
 """
 
 
+class Impostor:
+    def __hash__(self):
+        return hash("b")
+
+    def __eq__(self, other):
+        return other == "b"
+
+
 def act(p, namespace, fr, g):
     op = p["op"]
     try:
@@ -61,6 +69,16 @@ def act(p, namespace, fr, g):
         if op == "setcode":
             fr.f_code = None
             return "set"
+        if op in ("dellineno", "dellines", "delopcodes"):
+            delattr(fr, {"dellineno": "f_lineno", "dellines": "f_trace_lines", "delopcodes": "f_trace_opcodes"}[op])
+            return "deleted"
+        if op == "impostor":
+            fr.f_locals[Impostor()] = 5
+            return repr(fr.f_locals["b"])
+        if op == "unhashable":
+            return repr(fr.f_locals[[]])
+        if op == "reversed":
+            return type(reversed(fr.f_locals)).__name__
         fr.clear()
         return repr(dict(fr.f_locals)) + ("" if g is None else " " + repr(g.gi_frame))
     except (TypeError, AttributeError, ValueError, RuntimeError) as error:

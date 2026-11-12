@@ -299,9 +299,11 @@ class Host:
         error = self.exception()
         return (type(error), error, error.__traceback__) if error is not None else (None, None, None)
 
-    def weak_reference(self, obj):
-        """A host weak reference to obj: calling it gives obj until obj is reclaimed."""
-        return __import__("weakref").ref(obj)
+    def weak_reference(self, obj, callback=None):
+        """A host weak reference to obj: calling it gives obj until obj is
+        reclaimed. A reference with a callback is cleared, and the callback
+        called with it, when obj becomes unreachable, before its finalizer."""
+        return __import__("weakref").ref(obj, callback)
 
     def int_max_str_digits(self):
         """The int string limit (22.1.8, B.6)."""
@@ -350,14 +352,14 @@ class EngineHost(Host):
     def disable_automatic_collection(self):
         self.primitives._collection_limit(0)
 
-    def weak_reference(self, obj):
-        return _WeakReference(self.primitives, obj)
+    def weak_reference(self, obj, callback=None):
+        return _WeakReference(self.primitives, obj, callback)
 
 
 class _WeakReference:
-    def __init__(self, primitives, obj):
+    def __init__(self, primitives, obj, callback):
         self.primitives = primitives
-        primitives._weak_bind(obj, self, None)
+        primitives._weak_bind(obj, self, callback)
 
     def __call__(self):
         return self.primitives._weak_get(self)

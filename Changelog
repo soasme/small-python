@@ -19,6 +19,15 @@ Unreleased (0.10.0):
   only with each other, and make the union unhashable
 - a collection due inside __del__ waits for it, so it frees what it finds
 - co_names of module and class code lists their names, all in first-use order
+- a collection clears weak references with a callback before it runs
+  finalizers, so no callback sees a resurrected object
+- reversed() of a memoryview, or of a class whose metaclass defines
+  __getitem__, reads its items through __getitem__
+- memoryview: a view released by a callback is never read or written again;
+  '?' items of any nonzero byte are true; memoryviews are weakly referenceable
+- FrameLocalsProxy follows CPython for non-str keys, reversed(), construction
+  and mapping patterns; locals() includes the keys stored through it
+- deleting f_lineno or f_trace_opcodes raises AttributeError
 
 2026-11-10 0.9.0:
 

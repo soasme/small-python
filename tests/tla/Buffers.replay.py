@@ -38,6 +38,40 @@ def resize(p):
     return repr(len(ba))
 
 
+def reenter(p):
+    during = p["during"]
+
+    def release():
+        m.release()
+        ba.clear()
+
+    class Exporter(bytearray):
+        def __hash__(self):
+            release()
+            return 1
+
+    class Index:
+        def __index__(self):
+            release()
+            return 0
+
+    class Sep(bytes):
+        def __len__(self):
+            release()
+            return 1
+
+    ba = Exporter(b"ab") if during == "hash" else bytearray(b"ab")
+    m = memoryview(ba).toreadonly() if during == "hash" else memoryview(ba)
+    if during == "index":
+        return repr(m[Index()])
+    if during == "store":
+        m[0] = Index()
+        return repr(bytes(ba))
+    if during == "hash":
+        return repr(hash(m))
+    return m.hex(Sep(b":"))
+
+
 def outcome(p):
     log = []
     try:
@@ -45,9 +79,11 @@ def outcome(p):
             result = export(p, log)
         elif p["part"] == "resize":
             result = resize(p)
+        elif p["part"] == "reenter":
+            result = reenter(p)
         else:
             result = repr(memoryview(object()))
-    except (TypeError, BufferError) as error:
+    except (TypeError, BufferError, ValueError) as error:
         result = type(error).__name__
     return " ".join(log + [result])
 
