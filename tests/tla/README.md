@@ -49,7 +49,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `ModuleObjects.tla` | module attributes and namespace, read-only `__dict__`, annotations, and attributes of modules made by the module type | yes |
 | `ClassObjects.tla` | class special attributes (bases, layout base, MRO, docs not inherited, annotations, type parameters, static attributes), the read-only namespace view, and class versus instance assignment | yes |
 | `CodeObjects.tla` | code attributes (names, parameter counts, local, cell, free, and global names, flags, docstring constant), immutability, `co_lines()`, `co_positions()`, and `replace()` | yes |
-| `Frames.tla` | frame attributes of running, finished, and generator frames, the writable trace attributes, and `clear()` | yes |
+| `Frames.tla` | frame attributes of running, finished, and generator frames, the writable trace attributes and those that cannot be deleted, the keys of `f_locals`, and `clear()` | yes |
 | `Tracebacks.tla` | traceback chains as handlers unwind (through `finally`, re-raise, and `raise from`), line numbers, writable `tb_next`, and made tracebacks | yes |
 | `Slices.tla` | slice attributes, `indices()` against CPython's clamping, subscripts, a zero step or bad bound, equality and hashing, and `slice[float]` | yes |
 | `MethodDescriptors.tla` | static and class method objects over functions, builtins, and non-callables: retrieval through classes, instances, and subclasses, calling, and attributes | yes |

@@ -7,7 +7,10 @@
 (* index, owning generator (None once it finishes or for a function), and  *)
 (* line, which with its code's name ends its repr; f_trace, f_trace_lines, *)
 (* and f_trace_opcodes can be set (the latter two only to bools), f_lineno *)
-(* only by a trace function, the rest not at all; clear() drops the locals *)
+(* only by a trace function, the rest not at all, and f_lineno,          *)
+(* f_trace_lines and f_trace_opcodes not deleted; f_locals hashes its keys *)
+(* first, takes a key equal to a variable's name for that variable, and    *)
+(* reverses to a list; clear() drops the locals                            *)
 (* (of a generator's frame, once the generator finishes), finalizes a      *)
 (* generator that has not started, and raises RuntimeError for an          *)
 (* executing or suspended frame.                                           *)
@@ -34,7 +37,8 @@ EXTENDS Naturals, Sequences
 
 Sources == {"running", "finished", "gennew", "gensusp", "gendone", "gendropped", "genself"}
 Ops == {"f_code", "repr", "f_back", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator", "f_lineno", "f_trace",
-        "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear"}
+        "settrace", "setlines", "setbadlines", "setlineno", "setcode", "clear",
+        "dellineno", "dellines", "delopcodes", "impostor", "unhashable", "reversed"}
 Programs == [source : Sources, op : Ops]
 
 VARIABLES program, outcome
@@ -64,6 +68,12 @@ Run(p) ==
       [] p.op = "setbadlines" -> "TypeError"
       [] p.op = "setlineno" -> "ValueError"
       [] p.op = "setcode" -> "AttributeError"
+      [] p.op \in {"dellineno", "delopcodes"} -> "AttributeError"
+      [] p.op = "dellines" -> "TypeError"
+      \* An object equal to "b", with its hash, writes the variable b.
+      [] p.op = "impostor" -> "5"
+      [] p.op = "unhashable" -> "TypeError"
+      [] p.op = "reversed" -> "list"
       [] p.op = "clear" -> CASE s \in {"running", "gensusp"} -> "RuntimeError"
                              \* A generator that has not started is finalized; its frame stays its own.
                              [] s = "gennew" -> "{'a': 1} None"
@@ -82,6 +92,9 @@ ClearRefused == Done /\ program.op = "clear" /\ program.source \in {"running", "
 
 \* A generator's frame has no caller while it is not running.
 GeneratorUnlinked == Done /\ program.op = "f_back" /\ Generator(program.source) => outcome = "None"
+
+\* A locals proxy hashes every key before it looks for the variable.
+KeysHashed == Done /\ program.op = "unhashable" => outcome = "TypeError"
 
 \* A frame that outlives its generator names no generator.
 OutlivesGenerator == Done /\ program.op = "f_generator" /\ program.source \in {"gendropped", "genself"} => outcome = "None"

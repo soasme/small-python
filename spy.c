@@ -505,6 +505,7 @@ static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
 static int set_subset(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
 static SPYValue *memory_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *frame_locals_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
 static int subscript_index(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static int length_result(SPYContext *, SPYValue *, int64_t *);
 static int hash_result(SPYContext *, SPYValue *, int64_t *);
@@ -13640,6 +13641,10 @@ static int frame_set(SPYContext *c, SPYValue *frame, const char *name, SPYValue 
         SPYValue *trace = value && value->type != SPY_NONE ? spy_retain(value) : NULL;
         spy_release(frame->as.frame.trace); frame->as.frame.trace = trace; return 0;
     }
+    /* f_trace_lines is a member, f_lineno and f_trace_opcodes are getsets. */
+    if (!value && (!strcmp(name, "f_lineno") || !strcmp(name, "f_trace_opcodes"))) {
+        errorf(c, "AttributeError", "attribute '%s' of 'frame' objects cannot be deleted", name); return -1;
+    }
     if (!strcmp(name, "f_trace_lines") || !strcmp(name, "f_trace_opcodes")) {
         if (!value) { spy_error(c, "TypeError", "can't delete numeric/char attribute"); return -1; }
         if (value->type != SPY_BOOL) { spy_error(c, "TypeError", "attribute value type must be bool"); return -1; }
@@ -13648,7 +13653,9 @@ static int frame_set(SPYContext *c, SPYValue *frame, const char *name, SPYValue 
         return 0;
     }
     /* spy has no trace functions, so no frame may jump. */
-    if (!strcmp(name, "f_lineno")) { spy_error(c, "ValueError", "f_lineno can only be set in a trace function"); return -1; }
+    if (!strcmp(name, "f_lineno")) {
+        spy_error(c, "ValueError", value->type == SPY_INT ? "f_lineno can only be set in a trace function" : "lineno must be an integer"); return -1;
+    }
     static const char *const fixed[] = {"f_back", "f_code", "f_locals", "f_globals", "f_builtins", "f_lasti", "f_generator"};
     for (size_t i = 0; i < sizeof(fixed) / sizeof(*fixed); i++)
         if (!strcmp(name, fixed[i])) { errorf(c, "AttributeError", "attribute '%s' of 'frame' objects is not writable", name); return -1; }
@@ -17026,6 +17033,7 @@ static SPYValue *type_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *c
     if (fn->as.map.flags == 2) {
         if (fn == c->types[SPY_MAPPINGPROXY]) return mappingproxy_construct(c, argc, argv, keywords);
         if (fn == c->types[SPY_MEMORYVIEW]) return memory_construct(c, argc, argv, keywords);
+        if (fn == c->types[SPY_FRAME_LOCALS]) return frame_locals_construct(c, argc, argv, keywords);
         if (fn == c->types[SPY_SENTINEL]) return sentinel_construct(c, argc, argv, keywords);
         if (fn == c->types[SPY_CELL]) return cell_construct(c, argc, argv, keywords);
         if (fn == c->types[SPY_TRACEBACK]) return traceback_construct(c, argc, argv, keywords);
@@ -21568,9 +21576,9 @@ static int match_sequence_subject(SPYContext *c, SPYValue *subject) {
     if (subject->type != SPY_INSTANCE) return 0;
     return subclass(subject->as.map.parent, c->types[SPY_LIST]) || subclass(subject->as.map.parent, c->types[SPY_TUPLE]);
 }
-/* 26.5: dict, frozendict, mappingproxy, and their subclasses. */
+/* 26.5: dict, frozendict, mappingproxy, FrameLocalsProxy, and their subclasses. */
 static int match_mapping_subject(SPYContext *c, SPYValue *subject) {
-    if (is_dict(subject) || subject->type == SPY_MAPPINGPROXY) return 1;
+    if (is_dict(subject) || subject->type == SPY_MAPPINGPROXY || subject->type == SPY_FRAME_LOCALS) return 1;
     return subject->type == SPY_INSTANCE && (subclass(subject->as.map.parent, c->types[SPY_DICT]) ||
         subclass(subject->as.map.parent, c->types[SPY_FROZENDICT]));
 }
@@ -27957,6 +27965,15 @@ static SPYValue *frame_contents(SPYContext *c, SPYValue *frame, int what) {
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result;
 }
+/* locals() and exec()'s default locals in a function: the snapshot of
+ * env, and the extra locals its running frame took through f_locals. */
+static SPYValue *frame_snapshot(SPYContext *c, SPYValue *env) {
+    struct ActiveFrame *entry = c->py_depth ? &c->frames[c->py_depth - 1] : NULL;
+    SPYValue *extra = entry && entry->env == env && entry->object ? entry->object->as.frame.extra : NULL;
+    SPYValue *result = local_snapshot(c, env);
+    if (result && extra && dict_update(c, result, extra)) { spy_release(result); return NULL; }
+    return result;
+}
 /* FrameLocalsProxy reads; NULL without an error when key is unbound. */
 static SPYValue *frame_local_get(SPYContext *c, SPYValue *frame, SPYValue *key) {
     SPYValue *holder = frame_local_env(c, frame, key);
@@ -27991,12 +28008,8 @@ static SPYValue *frame_attribute(SPYContext *c, SPYValue *frame, const char *nam
         if (!builtins || (builtins->type != SPY_MODULE && !is_dict(builtins))) builtins = c->builtins;
         return spy_retain(builtins->type == SPY_MODULE ? namespace_map(builtins) : builtins);
     }
-    if (!strcmp(name, "f_locals")) {
-        if (!function_frame(frame)) return spy_retain(namespace_map(env));
-        SPYValue *proxy = value_new(c, SPY_FRAME_LOCALS);
-        if (proxy) proxy->as.bound.self = spy_retain(frame);
-        return proxy;
-    }
+    if (!strcmp(name, "f_locals"))
+        return function_frame(frame) ? frame_locals_construct(c, 1, &frame, NULL) : spy_retain(namespace_map(env));
     if (!strcmp(name, "f_lineno")) return spy_int(c, (int64_t)frame_line(c, frame));
     if (!strcmp(name, "f_back")) {
         if (frame->as.frame.index > 1) return frame_object(c, frame->as.frame.index - 2);
@@ -28053,6 +28066,14 @@ static const char *const frame_locals_methods[] = {
 };
 enum { FL_GETITEM, FL_SETITEM, FL_DELITEM, FL_CONTAINS, FL_ITER, FL_LEN, FL_REVERSED, FL_EQ, FL_NE,
        FL_OR, FL_ROR, FL_IOR, FL_REPR, FL_UPDATE, FL_COPY, FL_KEYS, FL_VALUES, FL_ITEMS, FL_GET, FL_POP, FL_SETDEFAULT };
+static SPYValue *frame_locals_construct(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (argc != 1) return errorf(c, "TypeError", "FrameLocalsProxy expected 1 argument, got %zu", argc);
+    if (argv[0]->type != SPY_FRAME) return errorf(c, "TypeError", "expect frame, not %s", type_name(argv[0]));
+    if (keywords && keywords->as.map.len) return spy_error(c, "TypeError", "FrameLocalsProxy takes no keyword arguments");
+    SPYValue *proxy = value_new(c, SPY_FRAME_LOCALS);
+    if (proxy) proxy->as.bound.self = spy_retain(argv[0]);
+    return proxy;
+}
 static int frame_locals_mapping(SPYValue *v) { return v->type == SPY_DICT || v->type == SPY_FRAME_LOCALS; }
 /* framelocalsproxy_merge: set each key of a dict or FrameLocalsProxy. */
 static int frame_locals_merge(SPYContext *c, SPYValue *frame, SPYValue *other) {
@@ -28070,6 +28091,23 @@ static int frame_locals_merge(SPYContext *c, SPYValue *frame, SPYValue *other) {
     spy_release(keys);
     return 0;
 }
+/* The key a FrameLocalsProxy operation uses, after hashing it: a key that
+ * equals a local variable's name, without being an exact str, stands for
+ * that name. NULL on error. */
+static SPYValue *frame_local_key(SPYContext *c, SPYValue *frame, SPYValue *key) {
+    int64_t hash, own;
+    if (hash_value(c, key, &hash)) return NULL;
+    Scope *scope = key->type != SPY_STRING && function_frame(frame) ? frame_env(frame)->as.map.scope : NULL;
+    for (size_t i = 0; scope && i < scope->len; i++) {
+        SPYValue *name = spy_string(c, scope->symbols[i].name, strlen(scope->symbols[i].name));
+        int same = name && !hash_value(c, name, &own) && own == hash && equal(name, key);
+        if (same && !c->error_type[0] && frame_local_env(c, frame, name)) return name;
+        spy_release(name);
+        if (c->error_type[0]) return NULL;
+    }
+    return spy_retain(key);
+}
+static SPYValue *frame_locals_apply(SPYContext *, int, SPYValue *, SPYValue *const *);
 static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int op = (int)(intptr_t)data;
     const char *name = frame_locals_methods[op];
@@ -28084,6 +28122,17 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
     if (op == FL_POP && (n < 1 || n > 2))
         return errorf(c, "TypeError", n < 1 ? "pop expected at least 1 argument, got %zu" : "pop expected at most 2 arguments, got %zu", n);
     if (parse_arguments(c, name, n, argv + 1, keywords, NULL, count, required, 0, args)) return NULL;
+    SPYValue *key = NULL;
+    if (op <= FL_CONTAINS || op >= FL_GET) {
+        if (!(key = frame_local_key(c, frame, args[0]))) return NULL;
+        args[0] = key;
+    }
+    SPYValue *result = frame_locals_apply(c, op, proxy, args);
+    spy_release(key);
+    return result;
+}
+static SPYValue *frame_locals_apply(SPYContext *c, int op, SPYValue *proxy, SPYValue *const *args) {
+    SPYValue *frame = proxy->as.bound.self;
     switch (op) {
     case FL_GETITEM: case FL_GET: case FL_SETDEFAULT: {
         SPYValue *value = frame_local_get(c, frame, args[0]);
@@ -28115,8 +28164,15 @@ static SPYValue *frame_locals_method(SPYContext *c, size_t argc, SPYValue *const
     case FL_ITER: case FL_REVERSED: case FL_KEYS: case FL_VALUES: case FL_ITEMS: case FL_LEN: {
         SPYValue *list = frame_contents(c, frame, op == FL_VALUES ? FRAME_VALUES : op == FL_ITEMS ? FRAME_ITEMS : FRAME_KEYS);
         if (!list || op == FL_KEYS || op == FL_VALUES || op == FL_ITEMS) return list;
-        SPYValue *result = op == FL_LEN ? spy_int(c, (int64_t)list->as.seq.len) :
-            builtin(c, 1, &list, (void *)(intptr_t)(op == FL_ITER ? B_ITER : B_REVERSED));
+        /* __reversed__ returns the keys as a reversed list. */
+        if (op == FL_REVERSED) {
+            for (size_t i = 0, j = list->as.seq.len; i + 1 < j; i++, j--) {
+                SPYValue *item = list->as.seq.items[i];
+                list->as.seq.items[i] = list->as.seq.items[j - 1]; list->as.seq.items[j - 1] = item;
+            }
+            return list;
+        }
+        SPYValue *result = op == FL_LEN ? spy_int(c, (int64_t)list->as.seq.len) : builtin(c, 1, &list, (void *)(intptr_t)B_ITER);
         spy_release(list); return result;
     }
     case FL_COPY: return frame_contents(c, frame, FRAME_DICT);
@@ -28163,7 +28219,7 @@ static SPYValue *execution_env(SPYContext *c, size_t argc, SPYValue *const *argv
     if (argc > 2 && argv[2]->type != SPY_NONE) locals = spy_retain(argv[2]);
     else if (explicit_globals) locals = spy_retain(globals);
     else if (current->type == SPY_DICT || current->as.map.namespace) locals = spy_retain(namespace_map(current));
-    else locals = local_snapshot(c, current);
+    else locals = frame_snapshot(c, current);
     if (!locals) return NULL;
     if (!mapping_type(c, locals)) {
         spy_release(locals);
@@ -32396,7 +32452,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *env = c->eval_env ? c->eval_env : c->globals;
         if (id == B_GLOBALS) return spy_retain(namespace_map(module_env(c, env)));
         if (env->type == SPY_DICT || env->as.map.namespace) return spy_retain(namespace_map(env));
-        return local_snapshot(c, env);
+        return frame_snapshot(c, env);
     }
     case B_COMPLEX: {
         if (argc > 2) goto arity;
