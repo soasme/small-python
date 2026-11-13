@@ -1215,6 +1215,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "keyed[(Alike(), 1)] + keyed.get((Alike(), 1)) + keyed[seen] + ((Alike(),) in {(Alike(),)})",
                                              "pairs.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 3);
+    /* So does a set or dict.fromkeys of equal tuples. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(set([(Alike(),), (Alike(),)])) + len(dict.fromkeys([(1, (Alike(),)), (1, (Alike(),))]))",
+                                             "built.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
     /* any() and all() of a list, a tuple or a generator call a Python
      * __bool__ or __len__ on the machine. */
     execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"

@@ -256,7 +256,9 @@ static const char *const programs[] = {
     "def built(s): return [set([(s,)]), [frozenset([(1, (s,))]), [dict.fromkeys([(s, 2)]), [len({*[(s,), (2, s)]})]]]][1:]\n"
     "print(built(S()))\n"
     "def paired(s): d = {(s, 1): 2}; return [d[(S(), 1)], [(S(), 1) in d, [d.get((S(), 1)), [{(S(),), (s,)}, [{(s,)} == {(S(),)}]]]]][1:]\n"
-    "print(paired(S()))\n",
+    "print(paired(S()))\n"
+    "def gathered(s): return [set([(s,), (S(),)]), [dict.fromkeys([(1, (s,)), (1, (S(),))]), [len({*[(S(), 2), (s, 2)]})]]][1:]\n"
+    "print(gathered(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

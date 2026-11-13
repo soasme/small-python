@@ -349,7 +349,8 @@ These run as machines on the heap, in one native activation of
   `dict.fromkeys` and a set's `update` of a list or tuple, and a set
   display's starred list or tuple, call, a tuple element's items' too,
   and the `__eq__` they then call on a present key of the same hash,
-  the present key's first and then, on `NotImplemented`, the element's;
+  the present key's first and then, on `NotImplemented`, the element's,
+  or on the items of a tuple element and a present tuple, in order;
   the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or
   `range`; a metaclass's `__instancecheck__` and `__subclasscheck__` in

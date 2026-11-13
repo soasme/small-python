@@ -23382,26 +23382,93 @@ static int consumer_store(SPYContext *c, Consumer *s, SPYValue *item, int64_t ha
     return 0;
 }
 static SPYValue *consumer_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *pairs_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static int sequence_pair(SPYValue *, SPYValue *);
+static size_t python_pair(SPYContext *, SPYValue *, SPYValue *, size_t, size_t *);
+static int sequence_equal_from(SPYContext *, SPYValue *, SPYValue *, size_t, int);
+/* A tuple of n parts, which it takes; NULL when one is. */
+static SPYValue *parts_tuple(SPYContext *c, size_t n, SPYValue **parts) {
+    int whole = 1;
+    for (size_t k = 0; k < n; k++) whole = whole && parts[k];
+    SPYValue *t = whole ? spy_tuple(c, n, parts) : NULL;
+    release_all(n, parts);
+    return t;
+}
+/* The comparison of x and y, two tuples, from pair at, which python_pair
+ * found, for the consumer's lookup state, owned: the pair's Python __eq__
+ * a call on m (callk), a pair of tuples compared by a walk of its own
+ * first; each walk's state (lookup, x, y, the next pair's index, the walk
+ * it is inside or None, and the pair's operands in the order of the call)
+ * the context (pairs_compared). */
+static void pairs_walk(SPYContext *c, Machine *m, SPYValue *lookup, SPYValue *x, SPYValue *y, size_t at, SPYValue *outer) {
+    SPYValue *a = x->as.seq.items[at], *b = y->as.seq.items[at], *function, *walk;
+    size_t end;
+    spy_retain(x); spy_retain(y);
+    while (a->type != SPY_INSTANCE && b->type != SPY_INSTANCE) {
+        walk = parts_tuple(c, 5, (SPYValue *[]){spy_retain(lookup), x, y, int_value(c, (int64_t)at + 1), outer});
+        if (!walk) { spy_release(lookup); return; }
+        outer = walk; x = spy_retain(a); y = spy_retain(b); at = python_pair(c, x, y, 0, &end);
+        a = x->as.seq.items[at]; b = y->as.seq.items[at];
+    }
+    SPYValue *left = (function = rich_function(c, a, b, R_EQ)) ? a : b, *right = left == a ? b : a;
+    if (!function) function = rich_function(c, b, a, R_EQ);
+    walk = parts_tuple(c, 7, (SPYValue *[]){lookup, x, y, int_value(c, (int64_t)at + 1), outer, spy_retain(left), spy_retain(right)});
+    if (walk) callk(c, m, function, 2, (SPYValue *[]){spy_retain(left), spy_retain(right)}, pairs_compared, walk);
+}
+/* A pair's __eq__ of the walk (pairs_walk) returned result: the pair
+ * unequal, or the next pair's comparison, or the native comparison of the
+ * rest; at a walk's end whether its tuples are equal goes to the walk it
+ * is inside, or, at the outermost, to the lookup (consumer_compared). */
+static SPYValue *pairs_compared(SPYContext *c, Machine *m, SPYValue *walk, SPYValue *result) {
+    SPYValue *test = result ? compared(c, T_EQ, walk->as.seq.items[5], walk->as.seq.items[6], result) : NULL;
+    int found = test && truthy(test);
+    spy_release(test);
+    for (;;) {
+        SPYValue **parts = walk->as.seq.items, *x = parts[1], *y = parts[2], *outer = parts[4];
+        size_t at = (size_t)parts[3]->as.integer_data.small, end = at,
+               next = found && !c->error_type[0] ? python_pair(c, x, y, at, &end) : SIZE_MAX;
+        if (next != SIZE_MAX) {
+            pairs_walk(c, m, spy_retain(parts[0]), x, y, next, spy_retain(outer));
+            break;
+        }
+        /* An unequal pair the comparison left past an end compares the lengths. */
+        int same = c->error_type[0] ? -1 : found ? sequence_equal_from(c, x, y, end, 0) :
+                   at > x->as.seq.len || at > y->as.seq.len ? x->as.seq.len == y->as.seq.len : 0;
+        if (outer == c->none) {
+            consumer_compared(c, m, spy_retain(parts[0]), same < 0 ? NULL : spy_bool(c, same));
+            break;
+        }
+        found = same > 0;
+        spy_retain(outer); spy_release(walk); walk = outer;
+    }
+    spy_release(walk);
+    return NULL;
+}
+/* The state of the consumer's lookup of item at entry i, holding
+ * candidate, the cursor yielding it, compared by left and right. */
+static SPYValue *consumer_state(SPYContext *c, SPYValue *item, int64_t hash, MapCursor cursor, ptrdiff_t i, int reflected,
+                                SPYValue *candidate, SPYValue *left, SPYValue *right) {
+    return parts_tuple(c, 8, (SPYValue *[]){spy_retain(item), int_value(c, hash), int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed)),
+                                            int_value(c, (int64_t)cursor.changes), int_value(c, i * 2 + reflected), spy_retain(candidate),
+                                            spy_retain(left), spy_retain(right)});
+}
 /* The Python __eq__ function of left and right, comparing item with the
  * candidate key at entry i, reflected or not, of the consumer atop m: a
  * call on m (callk), the lookup's state its context (consumer_compared);
- * 1, or -1 on an error. */
+ * with function NULL, left and right two tuples, their items' comparison
+ * (pairs_walk). 1, or -1 on an error. */
 static int consumer_compare(SPYContext *c, Machine *m, SPYValue *item, int64_t hash, MapCursor cursor, ptrdiff_t i, int reflected,
                             SPYValue *candidate, SPYValue *function, SPYValue *left, SPYValue *right) {
-    SPYValue *parts[] = {spy_retain(item), int_value(c, hash), int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed)),
-                         int_value(c, (int64_t)cursor.changes), int_value(c, i * 2 + reflected), spy_retain(candidate),
-                         spy_retain(left), spy_retain(right)}, *state = NULL;
-    int whole = 1;
-    for (int k = 0; k < 8; k++) whole = whole && parts[k];
-    if (whole) state = spy_tuple(c, 8, parts);
-    release_all(8, parts);
-    if (state) callk(c, m, function, 2, (SPYValue *[]){spy_retain(left), spy_retain(right)}, consumer_compared, state);
+    SPYValue *state = consumer_state(c, item, hash, cursor, i, reflected, candidate, left, right);
+    size_t end;
+    if (state && function) callk(c, m, function, 2, (SPYValue *[]){spy_retain(left), spy_retain(right)}, consumer_compared, state);
+    else if (state) pairs_walk(c, m, state, left, right, python_pair(c, left, right, 0, &end), spy_retain(c->none));
     return c->error_type[0] ? -1 : 1;
 }
 /* The lookup of item, of hash, in the result of the set's or
  * dict.fromkeys's consumer s atop m, from the entries cursor yields on: a
- * candidate's Python __eq__ (rich_function), or item's, is a call
- * (consumer_compare), 1; else the entries compared natively, the item
+ * candidate's Python __eq__ (rich_function), or item's, or their items'
+ * when both are tuples (python_pair), is a call (consumer_compare), 1; else the entries compared natively, the item
  * stored (consumer_store), 0, or -1 on an error. A comparison that changes
  * the map starts the lookup again. */
 static int consumer_lookup(SPYContext *c, Machine *m, Consumer *s, SPYValue *item, int64_t hash, MapCursor cursor) {
@@ -23409,8 +23476,10 @@ static int consumer_lookup(SPYContext *c, Machine *m, Consumer *s, SPYValue *ite
     for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
         SPYValue *candidate = map->as.map.items[i].key, *left = candidate, *function;
         if (candidate == item) return consumer_store(c, s, item, hash, i);
+        size_t end;
         if (!(function = rich_function(c, candidate, item, R_EQ)) && (function = rich_function(c, item, candidate, R_EQ))) left = item;
-        if (function) return consumer_compare(c, m, item, hash, cursor, i, 0, candidate, function, left, left == item ? candidate : item);
+        if (function || (sequence_pair(candidate, item) && python_pair(c, candidate, item, 0, &end) != SIZE_MAX))
+            return consumer_compare(c, m, item, hash, cursor, i, 0, candidate, function, left, left == item ? candidate : item);
         spy_retain(candidate);
         int matches = equal(candidate, item), unchanged = entry_unchanged(map, i, candidate, cursor);
         spy_release(candidate);
