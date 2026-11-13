@@ -48,6 +48,9 @@ def main():
         if x == 3: raise StopIteration
         return x
     check(lambda: (list(zip(map(stop, [1, 3, 4]), "abc")), list(enumerate(map(stop, [3])))), ([(1, "a")], []), [])
+    # A map whose items call no Python, or a host's function, gives them too.
+    check(lambda: (list(zip(map(str, [1, 2]), "ab")), list(zip(map("-".join, ["ab"]), "x"))),
+          ([("1", "a"), ("2", "b")], [("a-b", "x")]), [])
 main()
 
 def fail(x):

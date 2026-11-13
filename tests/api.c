@@ -1267,6 +1267,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(repr({1: [Shown()] * 4})) + len(str({Shown()})) + len('%s' % (frozendict({2: Shown()}),))", "mapped.py"),
                                  SPY_STOP_STEPS, &pauses)) == 17 + 3 + 18 && pauses > 1);
+    /* A container whose item's native __repr__ removes the rest ends its
+     * job at once, nested or a % argument. */
+    execute(c, "class Popper(dict):\n    def __repr__(self): inner.pop(); return 'p'");
+    assert(integer(c, run_paused(c, spy_eval(c, "len(repr([1, inner := [Popper(), Shown()]])) + len('%s' % ((inner := [Popper(), Shown()]),))",
+                                             "popped.py"), SPY_STOP_STEPS, &pauses)) == 8 + 3);
     /* A host function's spy_callk runs a Python callee on the machine,
      * where it pauses, then the continuation, which may call again; a
      * call_back's spy_call could not pause. Every call form reaches it. */
@@ -1460,6 +1465,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "found.index(Tied(19)) + found.count(Tied(3)) + len(found.remove(Tied(5)) or found)", "found.py"),
                                  SPY_STOP_STEPS, &pauses)) == 39 && pauses > 2);
+    /* A tuple key's item whose __eq__ takes no other raises at its lookup. */
+    execute(c, "class Lone:\n    def __hash__(self): return 1\n    def __eq__(self): return True");
+    assert(!run_paused(c, spy_eval(c, "{(Lone(),): 1}[(Lone(),)]", "lone.py"), SPY_STOP_STEPS, &pauses) &&
+           !strcmp(spy_error_type(c), "TypeError"));
+    spy_clear_error(c);
     /* So does == of two dicts whose values compare by them. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "({i: Tied(i) for i in range(60)} == {i: Tied(i) for i in range(60)}) + "

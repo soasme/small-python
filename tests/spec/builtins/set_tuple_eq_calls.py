@@ -38,6 +38,8 @@ def main():
         return tags(s)
     check(update, ["g", "i"], ["gh"])
     check(lambda: tags({*[(K(1, "j"), 2), (K(1, "k"), 2)]}), ["j"], ["jk"])
+    # Each pair of items calling Python compares in turn.
+    check(lambda: tags(set([(K(1, "r"), K(2, "s")), (K(1, "t"), K(2, "u"))])), ["r"], ["rt", "su"])
     # Unequal items keep both tuples.
     check(lambda: len(set([(K(1, "l"), 1), (K(1, "m"), 2)])), 2, [])
     def gen():
