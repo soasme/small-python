@@ -519,7 +519,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_EXEC_CLOSURE /* exec() with its closure keyword as a fourth argument */,
        B_JOIN /* str.join consuming a generator (consume) */, B_CLOSE /* a generator's close resuming it (consume) */,
        B_THROW /* a generator's throw resuming it (consume) */,
-       B_EXTEND /* list.extend or dict.update consuming a generator into its object (consume) */,
+       B_EXTEND /* list.extend, dict.update or set.update consuming a generator into its object (consume) */,
        B_FROMKEYS /* dict.fromkeys consuming its keys (consume) */ };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
@@ -22776,6 +22776,7 @@ static int machine_source(SPYContext *c, SPYValue *v) {
     return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(c, v) || iter_function(c, v) || getitem_iterated(c, v);
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
@@ -22791,16 +22792,20 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     int mapping = argc && argv[0]->type == SPY_INSTANCE &&
                   (callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT));
     /* dict.fromkeys, as a set, hashes its keys on the machine. */
-    int fromkeys = callee->type == SPY_METHOD && callee->as.method.self == c->types[SPY_DICT] &&
-                   callee->as.method.function->type == SPY_NATIVE && callee->as.method.function->as.native.kwcall == dict_fromkeys;
-    int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys;
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
+    int fromkeys = function && callee->as.method.self == c->types[SPY_DICT] && function->type == SPY_NATIVE &&
+                   function->as.native.kwcall == dict_fromkeys;
+    /* So does a set's update of one source. */
+    int updates = function && callee->as.method.self->type == SPY_SET && function->type == SPY_NATIVE &&
+                  function->as.native.kwcall == set_method && function->as.native.data == (void *)(((intptr_t)SPY_SET << 8) | 4);
+    int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates;
     if (!argc || (mapping ? !method_function(c, argv[0], "keys") : !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
-             callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS :
+             callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates ? B_EXTEND :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS &&
@@ -22855,6 +22860,8 @@ static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
  * owned. */
 static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
     if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
+    /* A set's update extends its set. */
+    if (id == B_EXTEND && callee->type == SPY_METHOD) callee = callee->as.method.self;
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
     if (id == B_THROW) { sent = thrown_exception(c, 1, &generator); spy_release(generator); }
@@ -32306,7 +32313,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         return status;
     }
-    if (s->id == B_SET || s->id == B_FROZENSET || s->id == EXTEND_ITEMS || s->id == B_FROMKEYS) {
+    if (s->id == B_SET || s->id == B_FROZENSET || s->id == EXTEND_ITEMS || s->id == B_FROMKEYS || (s->id == B_EXTEND && is_set(s->result))) {
         if ((is_set(s->result) || s->id == B_FROMKEYS) && hash_function(c, item)) { s->item = item; s->keyed = KEY_HASH; return 0; }
         int status = s->id == B_FROMKEYS ? map_set(c, s->result, item, s->best) : s->id != EXTEND_ITEMS ? set_add(c, s->result, item) :
                      display_add(c, s->result, item);

@@ -18,10 +18,11 @@
 (*     where with eq each element is an object hashing as its value whose  *)
 (*     Python __eq__ compares values, which changes no outcome; or         *)
 (*   - set(<items>) of up to three of 1, 1.0, True, 2; or                  *)
-(*   - set(src), frozenset(src) or {*src} of a list or a generator of two  *)
-(*     objects whose Python __hash__ (which loops) logs "h" and its value, *)
-(*     the second's returning, raising TypeError or raising ValueError; a  *)
-(*     generator logs "y" and the value before each item.                  *)
+(*   - set(src), frozenset(src), {*src} or {0}.update(src) of a list or a  *)
+(*     generator of two objects whose Python __hash__ (which loops) logs   *)
+(*     "h" and its value, the second's returning, raising TypeError or     *)
+(*     raising ValueError; a generator logs "y" and the value before each  *)
+(*     item.                                                               *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -37,7 +38,7 @@ Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list
 Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
-            \cup [op : {"hashed"}, form : {"set", "frozenset", "star"}, source : {"list", "generator"},
+            \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update"}, source : {"list", "generator"},
                   fails : {"no", "TypeError", "ValueError"}]
 
 VARIABLES program, outcome
@@ -64,7 +65,7 @@ RunHashed(p) ==
         [] p.fails = "ValueError" -> "ValueError"
         [] OTHER -> IF p.form = "frozenset" THEN "frozenset" ELSE "set",
       IF p.source = "list" THEN "h1 h2" ELSE "y1 h1 y2 h2",
-      IF p.fails = "no" THEN {1, 2} ELSE {}>>
+      IF p.fails # "no" THEN {} ELSE IF p.form = "update" THEN {0, 1, 2} ELSE {1, 2}>>
 
 Run(p) ==
     IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>

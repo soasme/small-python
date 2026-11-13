@@ -344,8 +344,9 @@ These run as machines on the heap, in one native activation of
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`
   and `pop` and `set.add`, `discard` and `remove`, and the items'
-  `__hash__` that `set`, `frozenset` and `dict.fromkeys` of a list or
-  tuple, and a set display's starred list or tuple, call; the `__index__` of an
+  `__hash__` that `set`, `frozenset`, `dict.fromkeys` and a set's
+  `update` of a list or tuple, and a set display's starred list or tuple,
+  call; the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or
   `range`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
   `isinstance` and `issubclass`; the metaclass `__getitem__` or

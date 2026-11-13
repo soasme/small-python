@@ -40,12 +40,16 @@ def hashed(p):
             yield K(v, log, p["fails"])
     source = generator() if p["source"] == "generator" else [K(v, log, p["fails"]) for v in (1, 2)]
     try:
-        r = set(source) if p["form"] == "set" else frozenset(source) if p["form"] == "frozenset" else {*source}
+        if p["form"] == "update":
+            r = {0}
+            r.update(source)
+        else:
+            r = set(source) if p["form"] == "set" else frozenset(source) if p["form"] == "frozenset" else {*source}
     except TypeError as error:
         return ("TypeError: " + str(error), " ".join(log), frozenset())
     except ValueError:
         return ("ValueError", " ".join(log), frozenset())
-    return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
+    return (type(r).__name__, " ".join(log), frozenset(getattr(v, "v", v) for v in r))
 
 
 def outcome(p):

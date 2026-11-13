@@ -40,6 +40,7 @@ Unreleased (0.10.0):
   an item's Python method without nesting on the C stack, so they can pause
 - str % values calls a Python __str__ or __repr__ without nesting on the C stack, so it can pause
 - dict.fromkeys() calls a key's Python __hash__ without nesting on the C stack, so it can pause
+- set.update() calls an element's Python __hash__ without nesting on the C stack, so it can pause
 - added spy_callk(): a host function calls Python as Lua's lua_callk does,
   with a continuation, so the call can pause and does not nest on the C stack
 - make test-gc-stress runs the specification suite with frequent automatic collections

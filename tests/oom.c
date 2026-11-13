@@ -241,7 +241,9 @@ static const char *const programs[] = {
     "print(pct(S()))\n"
     "S.__hash__ = lambda s: [i for i in range(1)][0]\n"
     "def keys(s): return [dict.fromkeys([s]), [dict.fromkeys((1, s), 0), [len(dict.fromkeys([s, s])), [dict.fromkeys([s, 2])[s]]]]][1:]\n"
-    "print(keys(S()))\n",
+    "print(keys(S()))\n"
+    "def grow(s): t = {0}; return [t.update([s]), [t.update((1, s)), [t.update([s, 2]), [len(t)]]]][1:]\n"
+    "print(grow(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"
