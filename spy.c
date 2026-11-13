@@ -12163,10 +12163,11 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
          * __delete__ (PyObject_GenericGetAttr). */
         SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
         SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
-        if (get && machine_function(c, get) && !name_local(v, name)) {
+        int data = 0;
+        if (get && machine_function(c, get) && ((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name))) {
             /* The search may compare keys, which may delete the descriptor. */
             spy_retain(descriptor);
-            SPYValue *own = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__") ? NULL : instance_dict_search(c, v, name);
+            SPYValue *own = data ? NULL : instance_dict_search(c, v, name);
             if (own || c->error_type[0]) { spy_release(descriptor); return own; }
             c->fallback = descriptor;
             return NULL;

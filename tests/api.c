@@ -1536,6 +1536,11 @@ int main(int argc, char **argv) {
                "    return total");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "got()", "got.py"), SPY_STOP_STEPS, &pauses)) == 30 * 19 + 400 && pauses > 3);
+    /* So does reading a data descriptor that an instance's own entry shadows. */
+    execute(c, "class Shadow:\n    def __get__(self, o, t):\n        for i in range(3000): pass\n        return i\n    def __set__(self, o, v): pass\n"
+               "class Shadowed:\n    d = Shadow()\nshadowed = Shadowed()\nshadowed.__dict__['d'] = 0\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "shadowed.d + getattr(shadowed, 'd')", "shadow.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 1);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

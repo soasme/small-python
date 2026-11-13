@@ -30,6 +30,8 @@ def outcome(p):
         return names.get(id(v), repr(v))
 
     def __get__(self, instance, owner=None):
+        # A loop puts __get__ on the machine, as a pausing read runs it.
+        for _ in (): pass
         if p["raises"]:
             raise AttributeError("get")
         return "get(%s, %s)" % (label(instance), label(owner))

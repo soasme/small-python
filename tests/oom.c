@@ -135,7 +135,12 @@ static const char *const programs[] = {
     "class A:\n"
     "    d = D()\n"
     "def f(): return A().d\n"
-    "print(f())\n",
+    "print(f())\n"
+    "D.__set__ = lambda self, obj, value: None\n"
+    "a = A()\n"
+    "a.__dict__['d'] = 0\n"
+    "def g(): return [a.d, getattr(a, 'd'), getattr(a, 'd', 1)]\n"
+    "print(g())\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"
