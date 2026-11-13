@@ -1464,6 +1464,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "({i: Tied(i) for i in range(60)} == {i: Tied(i) for i in range(60)}) + "
                                              "({1: Tied(1)} != {1: Tied(2)}) * 2", "dicteq.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* And such dicts inside lists, or lists inside dicts. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "([{i: Tied(i)} for i in range(30)] == [{i: Tied(i)} for i in range(30)]) + "
+                                             "({1: [Tied(i) for i in range(30)]} != {1: [Tied(i) for i in range(30)]}) * 2", "nesteq.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
     /* So does sorted() of a set, a dict or an iterator of them. */
     execute(c, "class Ranked(Tied):\n    def __hash__(self): return self.v\n");
     pauses = 0;

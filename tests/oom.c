@@ -280,6 +280,8 @@ static const char *const programs[] = {
     "def sought(s): l = [1, s]; return [l.index(S()), [l.count(S()), [(s,).index(S()), [l.remove(S())]]]][1:]\n"
     "print(sought(S()))\n"
     "def matched(s): return [{1: s} == {1: S()}, [{1: S(), 2: s} != {1: S(), 2: S()}, [{'k': [s]} == {'k': [S()]}]]][1:]\n"
+    "def inside(s): return [[{1: s}] == [{1: S()}], [({2: [s]},) != ({2: [S()]},), [[{1: {2: s}}] < [{1: {2: S()}}, 1]]]][1:]\n"
+    "print(inside(S()))\n"
     "print(matched(S()))\n",
 
     "def gen(n):\n"

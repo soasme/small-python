@@ -69,7 +69,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
-          "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "fromkeys_hash_fails", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
+          "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
@@ -111,6 +111,7 @@ Case(c) ==
       [] c = "fromkeys_hashed" -> "([1, 2, 3], [0, 0, 0], [1, 3, 1])"
       [] c = "pairs_hashed" -> "([1, 2, 3], ['d', 'b', 'c'], [1, 3, 1])"
       [] c = "values_equal" -> "(True, False, False, ['ab', 'cd'])"
+      [] c = "values_nested_equal" -> "(True, False, ['ab', 'cd'])"
       [] c = "fromkeys_hash_fails" -> "(\"cannot use 'Unhashed' as a dict key (no)\", [1])"
       [] c = "missing_hook" -> "(1, 'zzzz', False, None)"
       [] c = "keyerror" -> "KeyError: 'k'"
