@@ -15,8 +15,9 @@
 (* like objects or __bytes__ for s and b and treats r as a; and the        *)
 (* arguments must match the conversions, a mapping only with keys, or a    *)
 (* TypeError or ValueError reports the mismatch. A Python __str__ or       *)
-(* __repr__ runs as its conversion is reached, in order, and its error or  *)
-(* a result that is not a str stops the formatting there.                  *)
+(* __repr__, also of a list's or tuple's items, runs as its conversion is  *)
+(* reached, in order, and its error or a result that is not a str stops    *)
+(* the formatting there.                                                   *)
 (*                                                                         *)
 (* A program formats an int (0, 5, -42, or 255) with every flag            *)
 (* combination among -, +, space, 0, #, -0, +0, #0, and - space, width 7   *)
@@ -87,7 +88,7 @@ Cases == {"s_r_a", "s_object", "percent_literal", "mapping", "mapping_missing", 
           "bytes_basic", "bytes_b_alias", "bytes_dunder", "bytes_str_rejected", "bytes_r_is_a", "bytes_c",
           "bytes_c_bad", "bytes_mapping", "bytes_percent", "bytearray_result", "bytes_not_all",
           "bytes_unsupported", "bytes_float", "method_order", "method_mapping", "method_raises", "method_not_str",
-          "method_too_few"}
+          "method_too_few", "method_items"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 255}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
              type : {"d", "i", "o", "x", "X", "u"}, target : {"str", "bytes"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
@@ -156,6 +157,7 @@ Case(c) ==
       [] c = "method_raises" -> "[]"
       [] c = "method_not_str" -> "TypeError: NotStr.__str__() must return a str, not int"
       [] c = "method_too_few" -> "('not enough arguments for format string (got 1)', ['sa'])"
+      [] c = "method_items" -> "('[A\\xe9, 1]|(B\\xe9,)|[C\\\\xe9]', ['ra', 'rb', 'rc'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

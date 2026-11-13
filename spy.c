@@ -10206,14 +10206,24 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
     return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
 static int class_union(int, SPYValue *, SPYValue *);
-/* Whether str % y may convert an instance by a Python method on the
- * machine (percent_call): y is one, not a str's, or a tuple or dict holding one. */
+static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
+/* Whether str % y may convert an argument by a Python method on the
+ * machine (percent_call): an instance, not a str's, or a list or tuple
+ * of a repr job (repr_items), y or an item of a tuple or value of a dict y. */
+static NO_INLINE int percent_items(SPYContext *c, SPYValue *v) {
+    for (size_t i = 0; i < v->as.seq.len; i++) if (v->as.seq.items[i]->type == SPY_INSTANCE) return repr_items(c, c->types[SPY_STRING], v);
+    return 0;
+}
+static ALWAYS_INLINE int percent_arg(SPYContext *c, SPYValue *v) {
+    return v->type == SPY_INSTANCE || ((v->type == SPY_LIST || v->type == SPY_TUPLE) && percent_items(c, v));
+}
 static int percent_reaches(SPYContext *c, SPYValue *y) {
     if (y->type == SPY_INSTANCE) return !subclass(y->as.map.parent, c->types[SPY_STRING]);
     if (y->type == SPY_TUPLE) {
-        for (size_t i = 0; i < y->as.seq.len; i++) if (y->as.seq.items[i]->type == SPY_INSTANCE) return 1;
-    } else if (y->type == SPY_DICT)
-        for (size_t i = 0; i < map_used(y); i++) if (map_items(y)[i].key && map_items(y)[i].value->type == SPY_INSTANCE) return 1;
+        for (size_t i = 0; i < y->as.seq.len; i++) if (percent_arg(c, y->as.seq.items[i])) return 1;
+    } else if (y->type == SPY_DICT) {
+        for (size_t i = 0; i < map_used(y); i++) if (map_items(y)[i].key && percent_arg(c, map_items(y)[i].value)) return 1;
+    } else if (y->type == SPY_LIST) return percent_items(c, y);
     return 0;
 }
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -17015,6 +17025,18 @@ static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t
     release_all(argc, argv);
     return k(c, m, ctx, result);
 }
+/* The call callk left on m, its continuation's (CALL_K), or a repr job's
+ * first left with none (CALL_CHECKED): the machine to run on. */
+static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
+    Call *call = call_enter(c, c->k_fn, c->k_env, m);
+    c->k_fn = c->k_env = NULL;
+    if (call) {
+        call->k = c->k; call->k_ctx = c->k_ctx; call->host = c->k_host;
+        call->m.outermost = c->k ? CALL_K : CALL_CHECKED;
+    } else spy_release(c->k_ctx);
+    c->k_ctx = NULL;
+    return call ? &call->m : m;
+}
 /* Run fn, whose body is on the machine, in env, called from C; it takes env. */
 static NO_INLINE SPYValue *call_machine(SPYContext *c, SPYValue *fn, SPYValue *env) {
     Call *call = call_enter(c, spy_retain(fn), env, NULL);
@@ -18462,6 +18484,7 @@ static int store_slow(SPYContext *c, Frame *f, Node *n, SPYValue *value, int cal
     return store_items(c, f, n, value);
 }
 static int machine_push(SPYContext *, Machine *, SPYValue *);
+static SPYValue *machine_pop(Machine *);
 static Result run_machine(SPYContext *, Machine *, SPYValue *, SPYValue *, size_t, SPYValue *const *);
 /* Whether comprehension n runs to its value when it is evaluated: a list,
  * set or dictionary comprehension that does not await. */
@@ -21222,7 +21245,6 @@ static NO_INLINE Result execute_try(SPYContext *c, Frame *f, Node *n) {
 static int print_text(SPYContext *, SPYValue *, SPYValue *);
 static int print_instances(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static int print_call_step(SPYContext *, Machine *, size_t, size_t, SPYValue *, SPYValue **, SPYValue **);
-static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
 static ALWAYS_INLINE int repr_job(SPYContext *c, SPYValue *callee, SPYValue *v) {
     return (v->type == SPY_LIST || v->type == SPY_TUPLE) && repr_items(c, callee, v);
 }
@@ -21230,6 +21252,7 @@ static SPYValue *repr_call(SPYContext *, Machine *, SPYValue **);
 static void repr_drop(SPYContext *, SPYValue *);
 static Machine *text_returned(SPYContext *, Machine *, size_t, SPYValue *);
 static Machine *print_returned(SPYContext *, Machine *, size_t, SPYValue *);
+static Machine *percent_returned(SPYContext *, Machine *, SPYValue *);
 /* The imported sys module, whose stdout then receives print and display output. */
 static SPYValue *sys_module(SPYContext *c) {
     SPYValue *sys = name_local(c->modules, "sys");
@@ -21689,13 +21712,44 @@ static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
 static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *conversion_value(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *percent_converted(SPYContext *, Machine *, SPYValue *, SPYValue *);
-/* format % args. On machine m, a str's %s or %r of an instance whose
+/* Of percent_build's spec ch at its arguments' value v, on m: 1 when
+ * the job defers its conversion, as percent_build says, its state built
+ * of the format and args in held, the text so far in out and the spec's
+ * position and count of characters and the arguments' length and index
+ * in at; 2, the text in *piece, when a repr job ended at once; else 0. */
+static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYValue *v, SPYValue *const *held, Buffer *out, const int64_t *at, SPYValue **piece) {
+    SPYValue *callee = ch == 's' ? c->types[SPY_STRING] : c->field_calls[0], *found[2], *function = NULL, *job = NULL, *env = NULL;
+    if (v->type == SPY_INSTANCE ? !(function = conversion_method(c, callee, 1, &v, found)) : !repr_job(c, callee, v)) return 0;
+    SPYValue *parts[] = {spy_retain(held[0]), spy_retain(held[1]), spy_string(c, out->data ? out->data : "", out->len),
+                         int_value(c, at[0]), int_value(c, at[1]), int_value(c, at[2]), int_value(c, at[3]),
+                         spy_retain(v), function ? found[0] : spy_none(c)};
+    int whole = 1;
+    for (int k = 0; k < 9; k++) whole = whole && parts[k];
+    if (whole) job = spy_tuple(c, 9, parts);
+    release_all(9, parts);
+    if (job && function) callk(c, m, function, 1, (SPYValue *[]){spy_retain(v)}, percent_converted, job);
+    else if (!machine_push(c, m, job) && !machine_push(c, m, spy_retain(c->replacing)) && !machine_push(c, m, spy_retain(callee)) &&
+             !machine_push(c, m, spy_retain(v)) && (*piece = repr_call(c, m, &env))) {
+        if (!env) {
+            /* The job ended at once. */
+            spy_release(machine_pop(m)); spy_release(machine_pop(m));
+            if (ch == 'a') *piece = ascii_text(c, *piece, *piece);
+            return 2;
+        }
+        spy_release(*piece); *piece = NULL;
+        c->k_fn = spy_retain(c->entering_init); c->k_env = env; c->k = NULL; c->k_ctx = NULL;
+    }
+    return 1;
+}
+/* format % args. On machine m, a str's %s, %r or %a of an instance whose
  * class's Python method converts it (conversion_method) is m's call
  * (callk), the job's state a tuple of format, args, the text so far, the
  * spec's position and count of characters, the arguments' length and
- * index there, the instance and the method's name; the job goes on from
- * that spec, given its state and the instance's text converted
- * (percent_converted). */
+ * index there, the instance and the method's name; of a list or tuple of
+ * a repr job (repr_job), the job, its name None, and c->replacing are on
+ * m's stack under the repr job, whose first call is left in c->k_fn with
+ * no continuation (CALL_CHECKED); the job goes on from that spec, given
+ * its state and the argument's text converted (percent_converted). */
 static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYValue *args, SPYValue *state, SPYValue *converted) {
     int bytes = format->type != SPY_STRING, deferred = 0;
     const char *s = format->as.string.data;
@@ -21806,26 +21860,17 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
 #undef PERCENT_READ
         if (!failed && end) { errorf(c, "ValueError", "stray %% at position %zu", fmtstart); failed = 1; }
         i = at; chars = atc;
-        SPYValue *v = failed ? NULL : percent_next(c, &p, 1), *piece = NULL, *function, *found[2];
-        int sign = 0;
+        SPYValue *v = failed ? NULL : percent_next(c, &p, 1), *piece = NULL;
+        int sign = 0, defer;
         if (v) switch (ch) {
         case 's': case 'r': case 'a': case 'b':
             if (bytes && (ch == 's' || ch == 'b')) piece = percent_bytes(c, &p, key, v);
             else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
             else if (converted) { piece = ch == 'a' ? ascii_text(c, converted, converted) : converted; converted = NULL; }
-            else if (m && v->type == SPY_INSTANCE &&
-                     (function = conversion_method(c, ch == 's' ? c->types[SPY_STRING] : c->field_calls[0], 1, &v, found))) {
-                SPYValue *parts[] = {spy_retain(format), spy_retain(args), spy_string(c, out.data ? out.data : "", out.len),
-                                     int_value(c, (int64_t)start), int_value(c, (int64_t)startc), int_value(c, startlen),
-                                     int_value(c, startidx), spy_retain(v), found[0]}, *job = NULL;
-                int whole = 1;
-                for (int k = 0; k < 9; k++) whole = whole && parts[k];
-                if (whole) job = spy_tuple(c, 9, parts);
-                release_all(9, parts);
-                if (job) callk(c, m, function, 1, (SPYValue *[]){spy_retain(v)}, percent_converted, job);
-                deferred = 1;
-            }
+            else if (m && (v->type == SPY_INSTANCE || v->type == SPY_LIST || v->type == SPY_TUPLE) &&
+                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
+                deferred = defer == 1;
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
             break;
         case 'i': case 'd': case 'u': case 'o': case 'x': case 'X':
@@ -21875,7 +21920,8 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
 }
 /* What the method of a % job's instance (percent_build) returned. */
 static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
-    SPYValue **saved = state->as.seq.items, *text = result ? conversion_value(c, saved[7], saved[8], result) : NULL;
+    SPYValue **saved = state->as.seq.items;
+    SPYValue *text = !result ? NULL : saved[8] == c->none ? spy_retain(result) : conversion_value(c, saved[7], saved[8], result);
     SPYValue *value = text ? percent_build(c, m, saved[0], saved[1], state, text) : NULL;
     spy_release(result); spy_release(state);
     return value;
@@ -21887,6 +21933,14 @@ static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, 
     SPYValue *text = percent_build(c, m, x, y, NULL, NULL);
     if (text) c->looked = text;
     return c->k_fn ? c->unbound : NULL;
+}
+/* The text of a list or tuple that a % job's repr job returned on m, or
+ * NULL: the job goes on (percent_converted), the machine to run on. */
+static Machine *percent_returned(SPYContext *c, Machine *m, SPYValue *text) {
+    spy_release(machine_pop(m));
+    SPYValue *job = machine_pop(m), *value = text ? percent_converted(c, m, job, text) : (spy_release(job), NULL);
+    if (value) machine_push(c, m, value);
+    return c->k_fn ? k_enter(c, m) : m;
 }
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
@@ -27896,17 +27950,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         spy_release(value); value = spy_retain(c->entering_init); special = c->entering_kind;
         goto enter_special;
     enter_k:
-        /* The call callk left, its continuation's (CALL_K). */
         m->pc = pc;
         {
-            Call *call = call_enter(c, c->k_fn, c->k_env, m);
-            c->k_fn = c->k_env = NULL;
-            if (call) { call->k = c->k; call->k_ctx = c->k_ctx; call->host = c->k_host; }
-            else spy_release(c->k_ctx);
-            c->k_ctx = NULL;
-            if (!call) continue;
-            call->m.outermost = CALL_K;
-            m = &call->m;
+            Machine *entered = k_enter(c, m);
+            if (entered == m) continue;
+            m = entered;
             goto switch_call;
         }
     enter_special:
@@ -33996,6 +34044,7 @@ static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) 
  * from a job's call): its job or print goes on (repr_from, print_from),
  * the machine to run on. */
 static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, size_t argc, SPYValue *text) {
+    if (m->stack[m->len - 2]->type == SPY_TUPLE) return percent_returned(c, m, text);
     if (m->stack[m->len - 2]->type != SPY_LIST) return print_returned(c, m, argc, text);
     spy_release(machine_pop(m));
     SPYValue *state = machine_pop(m), *function, *env, **items = state->as.seq.items;

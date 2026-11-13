@@ -76,7 +76,8 @@ SOURCES = {
     "method_mapping": "L.log.clear(); result = ('%(y)r/%(x)s/%(y)s' % {'x': L('a'), 'y': L('b')}, L.log)",
     "method_raises": "L.log.clear()\ntry: '%r %s' % (Bad(), L('c'))\nexcept KeyError: result = L.log",
     "method_not_str": "result = '%s' % NotStr()",
-    "method_too_few": "L.log.clear()\ntry: '%s %s' % (L('a'),)\nexcept TypeError as e: result = (str(e), L.log)"
+    "method_too_few": "L.log.clear()\ntry: '%s %s' % (L('a'),)\nexcept TypeError as e: result = (str(e), L.log)",
+    "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)"
 }
 
 

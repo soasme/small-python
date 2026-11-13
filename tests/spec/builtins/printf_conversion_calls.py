@@ -2,9 +2,10 @@
 # description: str % values converts each %s, %r and %a argument by its
 # class's Python __str__ or __repr__, which may loop, in the order of the
 # conversions, from a single value, a tuple or a mapping's keys, also in
-# an augmented assignment; widths, precisions and * arguments apply to the
-# text, %a escapes it, a result that is not a str raises TypeError, and an
-# error stops the formatting before the conversions after it.
+# an augmented assignment, and a list or tuple argument by its items'
+# Python __repr__ in order; widths, precisions and * arguments apply to
+# the text, %a escapes it, a result that is not a str raises TypeError,
+# and an error stops the formatting before the conversions after it.
 from harness import *
 
 log = []
@@ -55,6 +56,22 @@ def main():
         yield "%s" % a
         yield "%r" % (b,)
     check(lambda: list(gen()), ["k1", "K2"], ["s1", "r2"])
+    # A list's or tuple's items convert by their __repr__.
+    check(lambda: "%s" % [a, "x", b], "[K1, 'x', K2]", ["r1", "r2"])
+    check(lambda: "%s|%r|%s" % ([b], (a,), a), "[K2]|(K1,)|k1", ["r2", "r1", "s1"])
+    check(lambda: "%a|%-8s|%.3r" % ([Accent()], (a, 1), [b]), "[\\xe9]|(K1, 1) |[K2", ["a", "r1", "r2"])
+    check(lambda: "%(x)s" % {"x": [a]}, "[K1]", ["r1"])
+    def listed():
+        text = "<%s>"
+        text %= [b]
+        return text
+    check(listed, "<[K2]>", ["r2"])
+    def gen_list():
+        yield "%s" % ([a],)
+    check(lambda: list(gen_list()), ["[K1]"], ["r1"])
+    nested = [a]
+    nested.append(nested)
+    check(lambda: "%s" % [nested], "[[K1, [...]]]", ["r1"])
 main()
 
 # A method's error, or a result that is not a str, stops at its conversion;
@@ -68,6 +85,10 @@ class Raising:
 assert_raises(TypeError, lambda: "%s" % Wrong(), message="Wrong.__str__() must return a str, not int")
 assert_raises(TypeError, lambda: "%r" % (WrongRepr(),), message="WrongRepr.__repr__() must return a str, not bytes")
 assert_raises(TypeError, lambda: "%a" % WrongRepr(), message="WrongRepr.__repr__() must return a str, not bytes")
+assert_raises(TypeError, lambda: "%s" % [WrongRepr()], message="WrongRepr.__repr__() must return a str, not bytes")
+log.clear()
+assert_raises(KeyError, lambda: "%s %s" % ([a, Raising(), b], a), message="'k'")
+assert_eq(log, ["r1", "raise"])
 log.clear()
 assert_raises(KeyError, lambda: "%r %s" % (Raising(), a), message="'k'")
 assert_eq(log, ["raise"])

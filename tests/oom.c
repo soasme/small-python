@@ -262,7 +262,9 @@ static const char *const programs[] = {
     "def held(s): t = (s,); hash(t); return [{(S(),): 1}.get(t), [set([(S(),), t]), [{(S(),)}.add(t)]]][1:]\n"
     "print(held(S()))\n"
     "def mapped(s): return [list(map(hash, [(s,)])), [[h for h in map(hash, [(1, (s,))])], [sum(map(hash, [(s, 2)]))]]][1:]\n"
-    "print(mapped(S()))\n",
+    "print(mapped(S()))\n"
+    "def listed(s): return ['%s' % [s], ['%r|%s' % ((s, 1), [2, s]), ['%(k)a' % {'k': [s]}]]][1:]\n"
+    "print(listed(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"
