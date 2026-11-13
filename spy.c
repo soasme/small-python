@@ -457,6 +457,10 @@ struct SPYContext {
     /* On a machine's stack, marks the zip, map or enumerate, under it,
      * that the next item of a map it takes from goes to (adapted_call). */
     SPYValue *adapting;
+    /* On a machine's stack, marks the default, under it, that next() gives
+     * when the Python __next__ it called raises StopIteration
+     * (checked_returned). */
+    SPYValue *stopping;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -23852,9 +23856,9 @@ static SPYValue *truth_function(SPYContext *c, SPYValue *v, int *length) {
     return function && machine_function(c, function) ? function : NULL;
 }
 /* The Python __str__, __repr__, __format__, __len__, __int__, __float__,
- * __complex__, __bytes__, __hash__, __abs__, __round__ or __reversed__ that
- * callee, str, repr, format, len, int, float, complex, bytes, hash, abs,
- * round or reversed, calls on its first
+ * __complex__, __bytes__, __hash__, __abs__, __round__, __reversed__ or
+ * __next__ that callee, str, repr, format, len, int, float, complex,
+ * bytes, hash, abs, round, reversed or next, calls on its first
  * argument, an instance, found[0] its name and found[1] the spec format or
  * the ndigits round passes it, or NULL; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
@@ -23864,9 +23868,9 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
-    if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND) && argc == 2) ||
+    if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
-         id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && callee != c->types[SPY_STRING])) return NULL;
+         id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && callee != c->types[SPY_STRING])) return NULL;
     SPYValue *cls = argv[0]->as.map.parent, *function;
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
@@ -23891,12 +23895,12 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     /* With no __str__ above object's, str() calls the instance's __repr__. */
     const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
         id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
-        id == B_REVERSED ? "__reversed__" : repr ? "__repr__" : "__str__";
+        id == B_REVERSED ? "__reversed__" : id == B_NEXT ? "__next__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
-    /* round() passes ndigits but None. */
-    *spec = argc == 2 && argv[1]->type != SPY_NONE ? spy_retain(argv[1]) : NULL;
+    /* round() passes ndigits but None; next() keeps its default. */
+    *spec = argc == 2 && id == B_ROUND && argv[1]->type != SPY_NONE ? spy_retain(argv[1]) : NULL;
     c->entering_kind = CALL_CHECKED;
     return function;
 }
@@ -24038,10 +24042,13 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         /* str(), repr(), format() and the others of an instance enter
          * its Python method (conversion_method) (CALL_CHECKED), the name
          * and instance on the stack. */
+        int defaults = is_builtin(callee, B_NEXT) && argc == 2;
         spy_release(callee);
-        if (argc == 2) spy_release(argv[1]);
-        if (machine_push(c, m, found[0])) { spy_release(argv[0]); spy_release(found[1]); return NULL; }
-        if (machine_push(c, m, argv[0])) { spy_release(found[1]); return NULL; }
+        if (argc == 2 && !defaults) spy_release(argv[1]);
+        if (machine_push(c, m, found[0])) { spy_release(argv[0]); if (defaults) spy_release(argv[1]); spy_release(found[1]); return NULL; }
+        if (machine_push(c, m, argv[0])) { if (defaults) spy_release(argv[1]); spy_release(found[1]); return NULL; }
+        /* next()'s default, marked, waits for a StopIteration. */
+        if (defaults && (machine_push(c, m, argv[1]) || machine_push(c, m, spy_retain(c->stopping)))) return NULL;
         found[0] = spy_retain(argv[0]);
         if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
@@ -24056,9 +24063,27 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
     release_all(argc, argv); spy_release(callee);
     return function ? spy_retain(c->types[SPY_STRING]) : result;
 }
+/* next() of instance argv[0], and a default, from call node n, taking
+ * callee and the arguments: a Python __next__ of its class on the machine
+ * enters it (instance_call), a plain function's is called here, as the
+ * builtin calls it; else the builtin's value. */
+static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
+    SPYValue *next = argv[0]->as.map.base ? NULL : class_lookup(argv[0]->as.map.parent, "__next__"), *result;
+    if (next && machine_function(c, next) && (result = instance_call(c, m, n, callee, -1, argc, argv, env)) != c->unbound) return result;
+    if (next && next->type == SPY_FUNCTION) {
+        if (!(result = call_plain(c, next, -1, n, 1, argv)) && argc == 2 && error_is(c, "StopIteration")) {
+            spy_clear_error(c);
+            result = spy_retain(argv[1]);
+        }
+    } else result = step_call(c, m, callee, -1, n, argc, argv);
+    release_all(argc, argv);
+    spy_release(callee);
+    return result;
+}
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_INSTANCE && is_builtin(callee, B_NEXT)) return next_builtin_call(c, m, n, callee, argc, argv, env);
     /* getattr() of an instance and a str, and a default, or hasattr() of
      * them, as a stack call's (getattr_call). */
     int getter = method < 0 && (argc == 2 || argc == 3) && argv[0]->type == SPY_INSTANCE && argv[1]->type == SPY_STRING ? builtin_id(callee) : -1;
@@ -24253,18 +24278,21 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
                                                        (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
-                                                       (argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE))) ||
+                                                       (argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE) ||
+                                                       /* next() with a default (next_builtin_call) */
+                                                       (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
                                         (argc == 3 && argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE) ||
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
                                          (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
     if (method < 0 && machine_builtin(callee)) return builtin_call(c, m, n, callee, argc, argv, env);
+    SPYValue *result;
     if (method == M_FORMAT && format_reached(c, callee, method, argc, argv)) {
-        SPYValue *result = format_job(c, m, callee, method, argc, argv, NULL, env);
+        result = format_job(c, m, callee, method, argc, argv, NULL, env);
         spy_release(callee);
         return result;
     }
-    SPYValue *result = step_call(c, m, callee, method, n, argc, argv);
+    result = step_call(c, m, callee, method, n, argc, argv);
     release_all(argc, argv);
     spy_release(callee);
     return result;
@@ -24437,9 +24465,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     if (convert) {
         /* The method's name takes the callee's place (CALL_CHECKED); a
          * spec leaves the stack. */
+        int defaults = is_builtin(callee, B_NEXT) && argc == 2;
         spy_release(callee);
         argv[-1] = found[0];
-        if (argc == 2) spy_release(machine_pop(m));
+        if (argc == 2 && !defaults) spy_release(machine_pop(m));
+        if (defaults && machine_push(c, m, spy_retain(c->stopping))) return NULL;
         found[0] = spy_retain(argv[0]);
         if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
@@ -26744,7 +26774,8 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
     if (!strcmp(method, "__bool__"))
         return truth_result(c, v, name != c->booleans[0], spy_retain(result)) ? spy_bool(c, 1) : c->error_type[0] ? NULL : spy_bool(c, 0);
-    if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__")) return spy_retain(result);
+    if (!strcmp(method, "__abs__") || !strcmp(method, "__round__") || !strcmp(method, "__reversed__") || !strcmp(method, "__next__"))
+        return spy_retain(result);
     if (!strcmp(method, "__instancecheck__") || !strcmp(method, "__subclasscheck__")) {
         int truth = truthy(result);
         return c->error_type[0] ? NULL : spy_bool(c, truth);
@@ -26782,6 +26813,13 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
             call->m.outermost = CALL_CHECKED;
             return &call->m;
         }
+    }
+    if (m->len && m->stack[m->len - 1] == c->stopping) {
+        /* next()'s default replaces a StopIteration. */
+        spy_release(machine_pop(m));
+        SPYValue *fallback = machine_pop(m);
+        if (!result && error_is(c, "StopIteration")) { spy_clear_error(c); result = fallback; }
+        else spy_release(fallback);
     }
     if (m->len && m->stack[m->len - 1] == c->defaulting) {
         if (!(result = getattr_returned(c, m->stack[m->len - 2], result))) return m;
@@ -36131,9 +36169,10 @@ SPYContext *spy_context_new(void) {
     c->tupling = value_new(c, V_UNBOUND);
     c->pairing = value_new(c, V_UNBOUND);
     c->adapting = value_new(c, V_UNBOUND);
+    c->stopping = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

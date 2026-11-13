@@ -1541,6 +1541,13 @@ int main(int argc, char **argv) {
                "class Shadowed:\n    d = Shadow()\nshadowed = Shadowed()\nshadowed.__dict__['d'] = 0\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shadowed.d + getattr(shadowed, 'd')", "shadow.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 1);
+    /* So does next() in a Python __next__, also giving its default for a StopIteration. */
+    execute(c, "class Stepper:\n    def __init__(self, n): self.n = n\n"
+               "    def __next__(self):\n        for i in range(3000): pass\n        if not self.n: raise StopIteration\n        self.n -= 1\n        return i\n"
+               "stepper = Stepper(1)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "next(stepper) + next(stepper, 1) + next(Stepper(0), 2)", "next.py"), SPY_STOP_STEPS, &pauses)) == 3002 &&
+           pauses > 2);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

@@ -328,9 +328,9 @@ These run as machines on the heap, in one native activation of
   comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,
   `__float__`, `__bool__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
-  `__round__` and `__reversed__` that `str`, `repr`, `format`, `len`,
+  `__round__`, `__reversed__` and `__next__` that `str`, `repr`, `format`, `len`,
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
-  `round` and `reversed` call, and the same methods of the items that a
+  `round`, `reversed` and `next`, also with a default, call, and the same methods of the items that a
   `map` of one of those functions takes, a tuple item's items'
   `__hash__` too, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items

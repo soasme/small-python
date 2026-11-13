@@ -140,7 +140,13 @@ static const char *const programs[] = {
     "a = A()\n"
     "a.__dict__['d'] = 0\n"
     "def g(): return [a.d, getattr(a, 'd'), getattr(a, 'd', 1)]\n"
-    "print(g())\n",
+    "print(g())\n"
+    "class N:\n"
+    "    def __next__(self):\n"
+    "        for i in range(1): pass\n"
+    "        raise StopIteration\n"
+    "def h(n): return [next(n, 1), [next(N(), 2), list(map(next, [iter([3])]))]]\n"
+    "print(h(N()))\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"

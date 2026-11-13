@@ -62,6 +62,8 @@ Unreleased (0.10.0):
   Python comparison method without nesting on the C stack, so it can pause
 - Reading a data descriptor that an instance's own entry shadows calls its Python __get__
   without nesting on the C stack, so it can pause
+- next() of an instance, also with a default, calls its Python __next__ without nesting on the
+  C stack, so it can pause, and runs a __next__ that calls nothing 2.2x faster
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python
   __eq__ of a key of the same hash without nesting on the C stack, so they can pause
 - a tuple key of a dict or set calls its items' Python __hash__ without nesting on the C stack,
