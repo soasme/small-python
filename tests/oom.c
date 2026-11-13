@@ -266,7 +266,10 @@ static const char *const programs[] = {
     "def listed(s): return ['%s' % [s], ['%r|%s' % ((s, 1), [2, s]), ['%(k)a' % {'k': [s]}]]][1:]\n"
     "print(listed(S()))\n"
     "def nested(s): return [repr([1, [s]]), [str(([s], (s,))), ['%s' % [[s]]]]][1:]\n"
-    "print(nested(S()))\n",
+    "print(nested(S()))\n"
+    "class Keyed:\n    def __init__(self, k): self.k = k\n    def keys(self): return self.k\n    def __getitem__(self, k): return 1\n"
+    "def pairs(s): d = {}; return [dict([(s, 1)]), [d.update(zip([s], [2])), [set(zip([1], [s])), [dict(x for x in [[s, 3]]), [dict(Keyed([s]))]]]]][1:]\n"
+    "print(pairs(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

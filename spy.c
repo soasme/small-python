@@ -22850,12 +22850,44 @@ static int called_iterator(SPYValue *v) {
 static ALWAYS_INLINE int hashed_item(SPYContext *c, SPYValue *item) {
     return item->type == SPY_TUPLE ? key_reaches(c, item) : hash_function(c, item) != NULL;
 }
+/* Whether a dict takes pair on the machine: a list or tuple of a
+ * hashed_item key and a value. */
+static ALWAYS_INLINE int hashed_pair(SPYContext *c, SPYValue *pair) {
+    SPYValue *key;
+    return (pair->type == SPY_LIST || pair->type == SPY_TUPLE) && pair->as.seq.len == 2 &&
+           ((key = pair->as.seq.items[0])->type == SPY_INSTANCE || key->type == SPY_TUPLE) && hashed_item(c, key);
+}
 /* Whether a set takes v's items on the machine, a list or tuple holding
  * a hashed_item. */
 static int hashed_items(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
     for (size_t i = 0; i < v->as.seq.len; i++)
         if (hashed_item(c, v->as.seq.items[i])) return 1;
+    return 0;
+}
+/* Whether a dict takes v's items on the machine, a list or tuple holding
+ * a hashed_pair. */
+static NO_INLINE int hashed_pairs(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
+    /* The scan changes no list. */
+    SPYValue *const *items = v->as.seq.items;
+    for (size_t i = 0, len = v->as.seq.len; i < len; i++)
+        if (hashed_pair(c, items[i])) return 1;
+    return 0;
+}
+/* Whether a set or dict takes zip v's items on the machine: a list or
+ * tuple it zips holds a hashed_item among those left. */
+static NO_INLINE int zip_hashed(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_ITERATOR || v->as.iterator.kind != I_ZIP || v->as.iterator.done) return 0;
+    SPYValue *sources = v->as.iterator.source;
+    for (size_t i = 0; i < sources->as.seq.len; i++) {
+        SPYValue *it = sources->as.seq.items[i], *seq = it->type == SPY_ITERATOR && it->as.iterator.kind == I_SEQUENCE ? it->as.iterator.source : NULL;
+        if (seq && (seq->type == SPY_LIST || seq->type == SPY_TUPLE))
+            for (size_t k = it->as.iterator.index, len = seq->as.seq.len; k < len; k++) {
+                SPYValue *item = seq->as.seq.items[k];
+                if ((item->type == SPY_INSTANCE || item->type == SPY_TUPLE) && hashed_item(c, item)) return 1;
+            }
+    }
     return 0;
 }
 /* Whether a consumer takes v's items on the machine: a generator it can
@@ -22888,7 +22920,11 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     int updates = function && callee->as.method.self->type == SPY_SET && function->type == SPY_NATIVE &&
                   function->as.native.kwcall == set_method && function->as.native.data == (void *)(((intptr_t)SPY_SET << 8) | 4);
     int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates;
-    if (!argc || (mapping ? !method_function(c, argv[0], "keys") : !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])))) return -1;
+    /* As do dict() and dict.update() of pairs. */
+    int pairs = callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT);
+    if (!argc || (mapping ? !method_function(c, argv[0], "keys") :
+                  !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
+                  !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
@@ -22908,7 +22944,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) &&
-                      (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee->type == SPY_METHOD)))) ||
+                      (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
+                       callee->type == SPY_METHOD)))) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* A consumer's source *v, owned (iter_function): an instance whose
@@ -23326,7 +23363,7 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         /* A tuple hashed in C is looked up on the machine (consumer_lookup). */
         int64_t hash;
         item = s->item;
-        s->item = NULL; s->keyed = 0;
+        s->item = NULL; s->keyed = s->mapping ? KEY_ITEMS : 0;
         if (!map_hash(c, s->result, item, &hash)) consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash));
         spy_release(item);
         return NULL;
@@ -23440,19 +23477,23 @@ static NO_INLINE int keys_listing(SPYContext *c, Block *top, SPYValue *keys) {
     if (failed) { spy_release(list); return -1; }
     return keys_merge(c, top, list);
 }
-/* A set's or dict.fromkeys's consumer s, its key item of hash found in its
- * result at entry found, or -1: an absent item is added, a found key keeps
- * its spelling and takes the value; 0, or -1 on an error. */
+/* A set's, dict.fromkeys's or dict pair's consumer s, its key item of
+ * hash found in its result at entry found, or -1: an absent item is
+ * added, a found key keeps its spelling and takes the value, a pair's
+ * (consumer_add) given up; 0, or -1 on an error. */
 static int consumer_store(SPYContext *c, Consumer *s, SPYValue *item, int64_t hash, ptrdiff_t found) {
-    if (found < 0) return map_append(c, s->result, item, s->id == B_FROMKEYS ? s->best : c->none, hash);
-    if (s->id == B_FROMKEYS) {
+    int pairs = s->id != B_FROMKEYS && s->result->type == SPY_DICT, status = 0;
+    SPYValue *value = s->id == B_FROMKEYS || pairs ? s->best : c->none;
+    if (found < 0) status = map_append(c, s->result, item, value, hash);
+    else if (s->id == B_FROMKEYS || pairs) {
         Entry *entry = &s->result->as.map.items[found];
         SPYValue *old = entry->value;
         class_changed(s->result);
-        entry->value = spy_retain(s->best);
+        entry->value = spy_retain(value);
         spy_release(old);
     }
-    return 0;
+    if (pairs) { spy_release(s->best); s->best = NULL; }
+    return status;
 }
 static SPYValue *consumer_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
 static SPYValue *pairs_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
@@ -23598,7 +23639,8 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
          * set's (hash_failed). */
         SPYValue *item = s->item;
         int64_t hash;
-        s->item = NULL; s->keyed = 0;
+        /* A merged mapping's next key is looked up next. */
+        s->item = NULL; s->keyed = s->mapping ? KEY_ITEMS : 0;
         int failed = !key || hash_result(c, key, &hash);
         if (failed) hash_failed(c, s->result, item);
         else failed = consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash)) < 0;
@@ -23656,7 +23698,10 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     }
     if (s->keyed == KEY_KEYS) return keys_listing(c, top, key);
     if (s->keyed == KEY_ITEMS) {
-        /* The mapping's value of the key it was fed is merged. */
+        /* The mapping's value of the key it was fed is merged, the key's
+         * Python __hash__ waiting for its call (KEY_HASH), the value in
+         * best. */
+        if ((s->item->type == SPY_INSTANCE || s->item->type == SPY_TUPLE) && hashed_item(c, s->item)) { s->best = key; s->keyed = KEY_HASH; return 0; }
         SPYValue *fed = s->item;
         s->item = NULL;
         int failed = map_set(c, s->result, fed, key);
@@ -32827,6 +32872,14 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         return found;
     }
     if (s->id == B_DICT || (s->id == B_EXTEND && s->result->type == SPY_DICT)) {
+        /* A list or tuple pair's hashed_item key waits for its hash, its
+         * value in best (KEY_HASH). */
+        if (hashed_pair(c, item)) {
+            s->item = spy_retain(item->as.seq.items[0]); s->best = spy_retain(item->as.seq.items[1]); s->keyed = KEY_HASH;
+            s->count++;
+            spy_release(item);
+            return 0;
+        }
         int status = dict_pair(c, s->result, item, s->count++);
         spy_release(item);
         return status;

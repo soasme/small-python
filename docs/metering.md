@@ -350,6 +350,10 @@ These run as machines on the heap, in one native activation of
   of a tuple, and the items' `__hash__` that `set`, `frozenset`,
   `dict.fromkeys` and a set's `update` of a list or tuple, and a set
   display's starred list or tuple, call, a tuple element's items' too,
+  and those `dict` and a dict's `update` call on the keys of the pairs
+  of a list or tuple, or that a zip of lists or tuples gives to them or
+  to those sets, of the pairs a consumed generator gives, and of a
+  mapping's keys they merge,
   and the `__eq__` they then call on a present key of the same hash,
   the present key's first and then, on `NotImplemented`, the element's,
   or on the items of a tuple element and a present tuple, in order;

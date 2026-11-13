@@ -1224,6 +1224,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "{(Alike(),): 1}.get(held) + len(set([(Alike(),), held]))", "held.py"), SPY_STOP_STEPS,
                                  &pauses)) == 2 && pauses > 1);
+    /* So do dict() and dict.update() of pairs, and set() of a zip. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(dict([(Spun(), 1), (2, 3)])) + len({}.update(zip([Spun()], [4])) or 'a') + len(set(zip([Spun()])))", "pairs.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* So does map(hash) of tuples. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "list(map(hash, [(Spun(),), (1, (Spun(),))])) == [hash((4,)), hash((1, (4,)))]", "maphash.py"),
