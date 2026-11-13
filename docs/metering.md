@@ -391,7 +391,9 @@ These run as machines on the heap, in one native activation of
   frozendict's subscript, `in` of a dict, frozendict, set or
   frozenset, or `dict.get`, `setdefault` and `pop` and `set.add`,
   `discard` and `remove` of a key with a Python `__hash__`, call on an instance key and each stored key of its hash,
-  the stored key's first and then, on `NotImplemented`, the key's, the
+  the stored key's first and then, on `NotImplemented`, the key's, and
+  on the items of a tuple key and a stored tuple of its hash, in order,
+  a nested tuple's first, the
   same `__eq__` that `|`, `&`, `-` or `^` of two sets or frozensets,
   their augmented assignment, or their comparison, also in a comparison
   chain, calls when one of their elements is such an instance, and

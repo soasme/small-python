@@ -1209,6 +1209,12 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(set([(Spun(),), (1, Spun())])) + len(dict.fromkeys([(Spun(), 2)]))", "tuples.py"),
                                  SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* A tuple key equal to a stored one compares their items there, its
+     * hash just computed or kept. */
+    execute(c, "keyed = {(Alike(), 1): 2}\nseen = (Alike(), 1)\nhash(seen)");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed[(Alike(), 1)] + keyed.get((Alike(), 1)) + keyed[seen] + ((Alike(),) in {(Alike(),)})",
+                                             "pairs.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 3);
     /* any() and all() of a list, a tuple or a generator call a Python
      * __bool__ or __len__ on the machine. */
     execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"

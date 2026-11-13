@@ -50,6 +50,8 @@ Unreleased (0.10.0):
 - hash() of a tuple calls its items' Python __hash__ without nesting on the C stack, so it can pause
 - set(), frozenset(), set.update() and dict.fromkeys() of tuples call their items' Python __hash__
   without nesting on the C stack, so they can pause
+- a dict or set lookup of a tuple key calls the Python __eq__ of its items and a stored tuple's
+  without nesting on the C stack, so it can pause
 - added spy_callk(): a host function calls Python as Lua's lua_callk does,
   with a continuation, so the call can pause and does not nest on the C stack
 - make test-gc-stress runs the specification suite with frequent automatic collections

@@ -190,8 +190,9 @@ struct SPYValue {
         struct { char *data; size_t len; union { size_t exports; int64_t hash; }; size_t chars, cursor[2]; } string;
         /* within: a tuple's items kept in the value, up to TUPLE_SHORT in a
          * short tuple, else as many as the largest member leaves room for;
-         * a tuple that grows past them moves its items out. */
-        struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed; SPYValue *within[TUPLE_WITHIN]; } seq;
+         * a tuple that grows past them moves its items out. plain: a tuple
+         * found to hold no instance, itself or in a tuple it holds. */
+        struct { SPYValue **items; size_t len, cap; int64_t hash; int hashed, plain; SPYValue *within[TUPLE_WITHIN]; } seq;
         /* keyed: an environment whose entries are its scope's symbols in
          * order, as open_locals made them; a removal clears it. */
         struct { Entry *items; size_t len, holes, cap, front; uint32_t *index, index_cap, index_dead; uint32_t changes, removed; int odd_keys, keyed; int64_t hash; SPYValue *parent, *unit, *namespace, *class_cell, *bases, *mro, *base, *meta; Scope *scope; int flags, native; } map;
@@ -450,6 +451,9 @@ struct SPYContext {
     SPYValue *found_map, *found_key; ptrdiff_t found_index;
     /* On a machine's stack, marks a level of a tuple's hash walk (tuple_next). */
     SPYValue *tupling;
+    /* On a machine's stack, marks the pair a sequence comparison's walk
+     * compares (equal_call). */
+    SPYValue *pairing;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -500,7 +504,8 @@ static int callable_value(SPYContext *, SPYValue *);
 static SPYValue *code_names(SPYContext *, SPYValue *, Node *);
 static SPYValue *get_iterator(SPYContext *, SPYValue *);
 static SPYValue *hash_function(SPYContext *, SPYValue *);
-static int hash_reaches(SPYContext *, SPYValue *);
+static int hash_reaches(SPYContext *, SPYValue *, int);
+static int key_reaches(SPYContext *, SPYValue *);
 static int hashes_key(SPYValue *, int);
 static SPYValue *hash_entered(SPYContext *, SPYValue *);
 static int hash_calls(SPYContext *, SPYValue *);
@@ -10217,7 +10222,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
         return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ||
-               (a->type == SPY_TUPLE && hashes_key(b, 1) && hash_reaches(c, a)) ? NULL :
+               (a->type == SPY_TUPLE && hashes_key(b, 1) && key_reaches(c, a)) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b) ||
@@ -24706,7 +24711,8 @@ static int sequence_equal_from(SPYContext *c, SPYValue *a, SPYValue *b, size_t a
 /* For x == y or x != y, x and y two lists or two tuples: the Python
  * __eq__ that comparing their items at a pair python_pair found calls
  * first, owned, with its env; x, y, the next pair's index, the two
- * operands in the order of the call and c->unbound pushed on m's stack. */
+ * operands in the order of the call and c->pairing pushed on m's stack
+ * (pair_returned). */
 static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, size_t at, SPYValue **env) {
     SPYValue *a = x->as.seq.items[at], *b = y->as.seq.items[at], *function;
     size_t len = m->len, end;
@@ -24723,7 +24729,7 @@ static NO_INLINE SPYValue *equal_call(SPYContext *c, Machine *m, SPYValue *x, SP
     if (!function) function = rich_function(c, b, a, R_EQ);
     SPYValue *args[] = {spy_retain(left), spy_retain(right)};
     if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
-        machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound))) {
+        machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->pairing))) {
         release_all(2, args); goto fail;
     }
     if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
@@ -24931,16 +24937,48 @@ static NO_INLINE Machine *tuple_returned(SPYContext *c, Machine *m, int kind, SP
     *result = c->error_type[0] ? NULL : int_value(c, hash);
     return m;
 }
-/* Whether tuple key, not hashed yet, holds an item with a Python __hash__
- * (hash_entered), which an instance or tuple item may be. */
-static NO_INLINE int hash_reaches(SPYContext *c, SPYValue *key) {
-    for (size_t i = 0; !key->as.seq.hashed && i < key->as.seq.len; i++)
-        if (key->as.seq.items[i]->type == SPY_INSTANCE || key->as.seq.items[i]->type == SPY_TUPLE) return hash_entered(c, key) != NULL;
+/* Whether tuple key, not plain, holds a plain instance with a Python
+ * __eq__ (python_eq), itself or in a tuple it holds; past depth, whether
+ * it may. One that holds no instance is marked plain. */
+static NO_INLINE int pair_reaches(SPYValue *key, int depth) {
+    int instances = 0;
+    for (size_t i = 0; i < key->as.seq.len; i++) {
+        SPYValue *item = key->as.seq.items[i];
+        if (item->type == SPY_INSTANCE) {
+            if (python_eq(item)) return 1;
+            instances = 1;
+        } else if (item->type == SPY_TUPLE && item->listed && !item->as.seq.plain) {
+            if (depth == 64 || pair_reaches(item, depth + 1)) return 1;
+            instances |= !item->as.seq.plain;
+        }
+    }
+    key->as.seq.plain = !instances;
     return 0;
+}
+/* Whether hashing tuple key, unless it is hashed, calls a Python __hash__
+ * (hash_entered), or, with pairs, it holds an item with a Python __eq__
+ * (pair_reaches). */
+static NO_INLINE int items_reach(SPYContext *c, SPYValue *key, int pairs) {
+    return (!key->as.seq.hashed && hash_entered(c, key)) || (pairs && pair_reaches(key, 0));
+}
+/* Whether tuple key, not plain, may (items_reach): one not hashed that
+ * holds neither an instance nor a tuple is plain at once. The scan is
+ * kept apart from items_reach, which only such items reach. */
+static NO_INLINE int hash_reaches(SPYContext *c, SPYValue *key, int pairs) {
+    for (size_t i = 0; !key->as.seq.hashed && i < key->as.seq.len; i++)
+        if (key->as.seq.items[i]->type == SPY_INSTANCE || key->as.seq.items[i]->type == SPY_TUPLE) return items_reach(c, key, pairs);
+    if (key->as.seq.hashed) return items_reach(c, key, pairs);
+    key->as.seq.plain = 1;
+    return 0;
+}
+/* Whether a tuple key's lookup may call Python on the machine: its items'
+ * __hash__ or __eq__ (hash_reaches). */
+static ALWAYS_INLINE int key_reaches(SPYContext *c, SPYValue *key) {
+    return key->listed && !key->as.seq.plain && hash_reaches(c, key, 1);
 }
 /* Whether hashing key enters a Python __hash__ (hash_entered). */
 static ALWAYS_INLINE int hash_calls(SPYContext *c, SPYValue *key) {
-    return key->type == SPY_TUPLE ? key->listed && hash_reaches(c, key) : hash_function(c, key) != NULL;
+    return key->type == SPY_TUPLE ? key->listed && !key->as.seq.plain && hash_reaches(c, key, 0) : hash_function(c, key) != NULL;
 }
 /* The Python __hash__ that hashing key enters first (hash_entered),
  * owned, with its env, to enter on m (CALL_HASH) with the key on the
@@ -24980,12 +25018,17 @@ static int hashes_key(SPYValue *container, int lookup) {
     return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
            (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
 }
+/* Whether a lookup of key may compare it by a Python __eq__ on the machine
+ * (lookup_call): a plain instance, or a tuple whose items may. */
+static ALWAYS_INLINE int lookup_key(SPYValue *key) {
+    return key->type == SPY_INSTANCE ? !key->as.map.base : key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0);
+}
 /* Whether a subscript or in of key in map, by operator step ins, looks
  * it up on the machine (lookup_call): an exact dict's or frozendict's
  * subscript, or in of an exact dict, frozendict, set or frozenset, with a
- * plain instance key. */
+ * lookup_key. */
 static int machine_lookup(SPYValue *map, SPYValue *key, int contains) {
-    return key->type == SPY_INSTANCE && !key->as.map.base && hashes_key(map, contains);
+    return lookup_key(key) && hashes_key(map, contains);
 }
 /* Whether step ins's lookup of key, of hash, in map compares key with a
  * stored key; else, when key itself is the first entry of hash or, for
@@ -25008,28 +25051,34 @@ static SPYValue *looked(SPYContext *c) {
  * of key, of hash, in map at entry i, holding candidate, the cursor yielding
  * it: function owned, with *env; map, key, hash, the cursor, i (twice,
  * one more for the reflected call), the candidate, left, right and
- * c->probing pushed on m's stack (lookup_returned). Else NULL, m's stack
- * as it was. */
+ * c->probing pushed on m's stack (lookup_returned). With function NULL,
+ * left and right two tuples, the first Python __eq__ of their comparison,
+ * pushed above (equal_call). Else NULL, m's stack as it was. */
 static SPYValue *lookup_push(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, ptrdiff_t i,
                              SPYValue *candidate, int reflected, SPYValue *function, SPYValue *left, SPYValue *right, SPYValue **env) {
-    SPYValue *args[] = {spy_retain(left), spy_retain(right)};
-    size_t len = m->len;
+    size_t len = m->len, at = 0, end;
+    /* Two tuples compare their items' pairs above the lookup (equal_call). */
+    if (!function) at = python_pair(c, left, right, 0, &end);
     if (machine_push(c, m, spy_retain(map)) || machine_push(c, m, spy_retain(key)) || machine_push(c, m, int_value(c, hash)) ||
         machine_push(c, m, int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed))) ||
         machine_push(c, m, int_value(c, (int64_t)cursor.changes)) || machine_push(c, m, int_value(c, i * 2 + reflected)) ||
         machine_push(c, m, spy_retain(candidate)) || machine_push(c, m, spy_retain(left)) ||
-        machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->probing)) ||
-        !(*env = function_env(c, function, 2, args, NULL, 1))) {
-        if (m->len - len < 10) release_all(2, args);
-        while (m->len > len) spy_release(machine_pop(m));
-        return NULL;
+        machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->probing))) goto fail;
+    if (!function) {
+        if ((function = equal_call(c, m, left, right, at, env))) return function;
+        goto fail;
     }
-    return spy_retain(function);
+    SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+    if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+fail:
+    while (m->len > len) spy_release(machine_pop(m));
+    return NULL;
 }
 /* The lookup of key in map (machine_lookup), of hash, from the entries
  * cursor yields on: the Python __eq__ that comparing the next entry's key
- * with key calls first (rich_function), the entry key's or key's, owned,
- * with its env, pushed (lookup_push), the entries before it compared
+ * with key calls first (rich_function), the entry key's or key's, or
+ * their items' when both are tuples (python_pair), owned, with its env,
+ * pushed (lookup_push), the entries before it compared
  * natively unequal. Else NULL, the entry found in *found, or -1, or an
  * error; a comparison that changes map starts the lookup again. */
 static NO_INLINE SPYValue *lookup_call(SPYContext *c, Machine *m, SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor,
@@ -25039,8 +25088,10 @@ static NO_INLINE SPYValue *lookup_call(SPYContext *c, Machine *m, SPYValue *map,
     for (ptrdiff_t i; (i = map_next(storage, hash, &cursor)) >= 0;) {
         SPYValue *candidate = storage->as.map.items[i].key, *left = candidate, *function;
         if (candidate == key) { *found = i; return NULL; }
+        size_t end;
         if (!(function = rich_function(c, candidate, key, R_EQ)) && (function = rich_function(c, key, candidate, R_EQ))) left = key;
-        if (function) return lookup_push(c, m, storage, key, hash, cursor, i, candidate, 0, function, left, left == key ? candidate : key, env);
+        if (function || (sequence_pair(candidate, key) && python_pair(c, candidate, key, 0, &end) != SIZE_MAX))
+            return lookup_push(c, m, storage, key, hash, cursor, i, candidate, 0, function, left, left == key ? candidate : key, env);
         spy_retain(candidate);
         int matches = equal(candidate, key), unchanged = entry_unchanged(storage, i, candidate, cursor);
         spy_release(candidate);
@@ -25057,9 +25108,9 @@ static int lookup_stores(Instruction *ins) {
 }
 /* Whether a store or deletion of key in map looks it up on the machine
  * (lookup_call): an exact dict's, or a display's into a set too, with a
- * plain instance key. */
-static int store_lookup(SPYValue *map, SPYValue *key, int display) {
-    return key->type == SPY_INSTANCE && !key->as.map.base && (map->type == SPY_DICT || (display && map->type == SPY_SET));
+ * lookup_key. */
+static ALWAYS_INLINE int store_lookup(SPYValue *map, SPYValue *key, int display) {
+    return lookup_key(key) && (map->type == SPY_DICT || (display && map->type == SPY_SET));
 }
 /* Lookup step ins of key, of hash, in map ends on m with entry found, or
  * -1, or the error pending: a subscript with the entry's value or a
@@ -25147,15 +25198,18 @@ static Machine *lookup_step(SPYContext *c, Machine *m, Instruction *ins, SPYValu
 }
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
- * instance with one, and their lengths do not decide the comparison. */
+ * instance with one, or a tuple holding one (pair_reaches), and their
+ * lengths do not decide the comparison. */
 static int set_walks(int op, SPYValue *x, SPYValue *y) {
     int rich = rich_kind(op);
     if ((rich < 0 && op != '|' && op != '&' && op != '-' && op != '^') || !is_set(x) || !is_set(y)) return 0;
     size_t a = x->as.map.len, b = y->as.map.len;
     if (rich == R_EQ || rich == R_NE ? a != b : rich == R_LT ? a >= b : rich == R_LE ? a > b : rich == R_GT ? b >= a : rich == R_GE && b > a)
         return 0;
-    for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++)
-        if (python_eq(i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key)) return 1;
+    for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++) {
+        SPYValue *key = i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key;
+        if (python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0))) return 1;
+    }
     return 0;
 }
 /* The walk atop m (set_walk) decides an entry, key of hash, found at
@@ -25572,6 +25626,62 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
 }
+/* The __eq__ equal_call entered for step ins returned result: the pair
+ * unequal, or the next pair's comparison, or the native comparison of the
+ * rest; an ordering's then decides at the first unequal pair
+ * (order_decide), a lookup's goes on with whether its keys are equal. The
+ * machine to run on, at its pc. */
+static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    int op = 0;
+    step_operation(ins, &op);
+    spy_release(machine_pop(m));
+    SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
+    int found = test ? truthy(test) : 0;
+    spy_release(test); spy_release(left); spy_release(right);
+    for (;;) {
+        SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
+        size_t at = (size_t)index->as.integer_data.small, end = at,
+               next = found && !c->error_type[0] ? python_pair(c, x, y, at, &end) : SIZE_MAX;
+        spy_release(index);
+        size_t len = m->len;
+        Call *call = next != SIZE_MAX && (function = equal_call(c, m, x, y, next, &env)) ? call_enter(c, function, env, m) : NULL;
+        if (call) {
+            spy_release(x); spy_release(y);
+            call->m.outermost = CALL_OPERATOR;
+            return &call->m;
+        }
+        while (m->len > len) spy_release(machine_pop(m));
+        int nested = m->len && m->stack[m->len - 1] == c->nesting, probing = !nested && m->len && m->stack[m->len - 1] == c->probing,
+            ordered = !nested && !probing && op != T_EQ && op != T_NE;
+        /* An unequal pair the comparison left past an end compares the lengths. */
+        int same = c->error_type[0] ? -1 : ordered ? 0 : found ? sequence_equal_from(c, x, y, end, 0) :
+                   at > x->as.seq.len || at > y->as.seq.len ? x->as.seq.len == y->as.seq.len : 0;
+        /* An enclosing sequence's pair is equal when these are. */
+        if (nested) {
+            spy_release(machine_pop(m)); spy_release(x); spy_release(y);
+            found = same > 0;
+            continue;
+        }
+        /* A lookup's key is equal to its entry's when these are (lookup_call). */
+        if (probing) {
+            spy_release(x); spy_release(y);
+            return lookup_returned(c, m, ins, same < 0 ? NULL : spy_bool(c, same), pc);
+        }
+        if (ordered && same >= 0) {
+            function = order_decide(c, m, ins, x, y, found ? end : at - 1, !found, &env, &value);
+            call = function ? call_enter(c, function, env, m) : NULL;
+            if (call) {
+                spy_release(x); spy_release(y);
+                call->m.outermost = CALL_OPERATOR;
+                return &call->m;
+            }
+            while (m->len > len) spy_release(machine_pop(m));
+        } else if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
+        m->pc = operator_finish(c, m, ins, y, value, pc);
+        spy_release(x); spy_release(y);
+        return m;
+    }
+}
 /* A special method operator_call entered returned result into operator
  * step ins, its operands and phase on m's stack; NotImplemented from a
  * binary operator or comparison goes on with the other operand's method,
@@ -25581,6 +25691,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     m->pc = pc;
     if (m->stack[m->len - 1] == c->replacing) return fold_returned(c, m, result);
     if (m->stack[m->len - 1] == c->probing) return lookup_returned(c, m, ins, result, pc);
+    if (m->stack[m->len - 1] == c->pairing) return pair_returned(c, m, ins, result, pc);
     /* object's __ne__ inverts the truth of the __eq__ it called (rich_entry). */
     if (m->stack[m->len - 1] == c->negating) {
         spy_release(machine_pop(m));
@@ -25615,48 +25726,6 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             if (function) for (int i = 0; i < 8; i++) spy_release(machine_pop(m));
             machine_push(c, m, value);
             return m;
-        }
-        if (op != O_IN && op != O_NOTIN) {
-            /* A pair's comparison for == (equal_call): unequal, or the next
-             * pair's, or the native comparison of the rest; an ordering's
-             * then decides at the first unequal pair (order_decide). */
-            for (;;) {
-                SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL, *value = NULL;
-                size_t at = (size_t)index->as.integer_data.small, end = at,
-                       next = found && !c->error_type[0] ? python_pair(c, x, y, at, &end) : SIZE_MAX;
-                spy_release(index);
-                size_t len = m->len;
-                Call *call = next != SIZE_MAX && (function = equal_call(c, m, x, y, next, &env)) ? call_enter(c, function, env, m) : NULL;
-                if (call) {
-                    spy_release(x); spy_release(y);
-                    call->m.outermost = CALL_OPERATOR;
-                    return &call->m;
-                }
-                while (m->len > len) spy_release(machine_pop(m));
-                int nested = m->len && m->stack[m->len - 1] == c->nesting, ordered = !nested && op != T_EQ && op != T_NE;
-                /* An unequal pair the comparison left past an end compares the lengths. */
-                int same = c->error_type[0] ? -1 : ordered ? 0 : found ? sequence_equal_from(c, x, y, end, 0) :
-                           at > x->as.seq.len || at > y->as.seq.len ? x->as.seq.len == y->as.seq.len : 0;
-                /* An enclosing sequence's pair is equal when these are. */
-                if (nested) {
-                    spy_release(machine_pop(m)); spy_release(x); spy_release(y);
-                    found = same > 0;
-                    continue;
-                }
-                if (ordered && same >= 0) {
-                    function = order_decide(c, m, ins, x, y, found ? end : at - 1, !found, &env, &value);
-                    call = function ? call_enter(c, function, env, m) : NULL;
-                    if (call) {
-                        spy_release(x); spy_release(y);
-                        call->m.outermost = CALL_OPERATOR;
-                        return &call->m;
-                    }
-                    while (m->len > len) spy_release(machine_pop(m));
-                } else if (same >= 0) value = spy_bool(c, (op == T_EQ) == same);
-                m->pc = operator_finish(c, m, ins, y, value, pc);
-                spy_release(x); spy_release(y);
-                return m;
-            }
         }
         /* An item's comparison for in (contains_call): found, or the next
          * item's, or the native search of the rest, from the iterator. */
@@ -27044,7 +27113,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE || (b->type == SPY_TUPLE && b->listed && hash_reaches(c, b))) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE || (b->type == SPY_TUPLE && key_reaches(c, b))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);
@@ -27075,7 +27144,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (ins->arg) seal_tuple(c, m->stack[m->len - 1]); /* The display's last item. */
             break;
         CASE(BC_MAP)
-            if (m->stack[m->len - 2]->type == SPY_INSTANCE || (m->stack[m->len - 2]->type == SPY_TUPLE && m->stack[m->len - 2]->listed && hash_reaches(c, m->stack[m->len - 2]))) {
+            if (m->stack[m->len - 2]->type == SPY_INSTANCE || (m->stack[m->len - 2]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 2]))) {
                 a = spy_retain(m->stack[m->len - 2]); goto display_hash;
             }
             b = machine_pop(m); a = machine_pop(m); map_set(c, m->stack[m->len - 1], a, b); break;
@@ -27147,7 +27216,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             break;
         CASE(BC_LOAD_TARGET)
             if (n->kind == N_INDEX && !ins->arg && (m->stack[m->len - 1]->type == SPY_INSTANCE ||
-                                                     (m->stack[m->len - 1]->type == SPY_TUPLE && m->stack[m->len - 1]->listed && hash_reaches(c, m->stack[m->len - 1])))) {
+                                                     (m->stack[m->len - 1]->type == SPY_TUPLE && key_reaches(c, m->stack[m->len - 1])))) {
                 a = spy_retain(m->stack[m->len - 1]); goto display_hash;
             }
             value = ins->arg ? target_copies(c, m, n) : n->kind == N_INDEX ? get_index(c, m->stack[m->len - 2], m->stack[m->len - 1]) :
@@ -35582,9 +35651,10 @@ SPYContext *spy_context_new(void) {
     c->negating = value_new(c, V_UNBOUND);
     c->converting = value_new(c, V_UNBOUND);
     c->tupling = value_new(c, V_UNBOUND);
+    c->pairing = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;
