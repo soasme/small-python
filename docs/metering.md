@@ -322,7 +322,8 @@ These run as machines on the heap, in one native activation of
   bound methods, callable instances' `__call__` and classes' `__init__`,
   and the items those with keywords take from generators and the other
   sources above,
-  the Python `__lt__` comparisons of `sorted` and `list.sort`, also the
+  the Python `__lt__` comparisons of `sorted` and `list.sort`, `sorted`'s
+  of a set, a dict, its keys or a list iterator too, also the
   `__eq__` and `__lt__` of the items of tuples they sort, and the Python
   comparisons of `min`'s and `max`'s instance keys;
 - the `__str__`, `__repr__`, `__format__`, `__len__`, `__int__`,

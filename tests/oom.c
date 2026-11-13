@@ -271,7 +271,10 @@ static const char *const programs[] = {
     "def pairs(s): d = {}; return [dict([(s, 1)]), [d.update(zip([s], [2])), [set(zip([1], [s])), [dict(x for x in [[s, 3]]), [dict(Keyed([s]))]]]]][1:]\n"
     "print(pairs(S()))\n"
     "def adapted(s): return [list(zip(map(str, [s]), 'a')), [list(enumerate(map(str, [s]))), [[x for x in zip([1], map(str, [s]))]]]][1:]\n"
-    "print(adapted(S()))\n",
+    "print(adapted(S()))\n"
+    "S.__lt__ = lambda a, b: [i for i in range(1)][0] == 1\n"
+    "def ranked(s): return [sorted({s, S()}), [sorted({s: 1, S(): 2}.keys()), [sorted(iter([s, S()]))]]][1:]\n"
+    "print(ranked(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

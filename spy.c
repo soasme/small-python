@@ -23209,12 +23209,32 @@ static SPYValue *compared(SPYContext *c, int op, SPYValue *x, SPYValue *y, SPYVa
     result = rich_method(c, rich_reflected[rich_kind(op)], y, x);
     return result || c->error_type[0] ? result : comparison_declined(c, op, x, y);
 }
-/* Whether a sort of source, a list or tuple, compares its first items by a
- * Python rich comparison (sort_calls), to call on the machine. */
+/* Whether a sort of source compares its first items by a Python rich
+ * comparison (sort_calls), to call on the machine: a list's or tuple's,
+ * or a set's, dict's or dict keys view's keys, or those a list or tuple
+ * iterator gives next (keys_sort). */
 static int sort_calls(SPYContext *, SPYValue *, SPYValue *);
+static NO_INLINE int keys_sort(SPYContext *c, SPYValue *source) {
+    size_t at = 0;
+    if (source->type == SPY_ITERATOR) {
+        if (source->as.iterator.kind != I_SEQUENCE || source->as.iterator.done) return 0;
+        at = source->as.iterator.index; source = source->as.iterator.source;
+    }
+    if (source->type == SPY_DICT_KEYS) source = source->as.bound.self;
+    SPYValue *a, *b;
+    if (source->type == SPY_LIST || source->type == SPY_TUPLE) {
+        if (source->as.seq.len <= at + 1) return 0;
+        a = source->as.seq.items[at + 1]; b = source->as.seq.items[at];
+    } else if (source->type == SPY_SET || source->type == SPY_FROZENSET || source->type == SPY_DICT || source->type == SPY_FROZENDICT) {
+        if (source->as.map.len <= at + 1) return 0;
+        Entry *keys = map_items(source);
+        a = keys[at + 1].key; b = keys[at].key;
+    } else return 0;
+    return (a->type == SPY_INSTANCE || a->type == SPY_TUPLE) && sort_calls(c, a, b);
+}
 static int instance_sort(SPYContext *c, SPYValue *source) {
-    return (source->type == SPY_LIST || source->type == SPY_TUPLE) && source->as.seq.len > 1 &&
-           sort_calls(c, source->as.seq.items[1], source->as.seq.items[0]);
+    if (source->type != SPY_LIST && source->type != SPY_TUPLE) return keys_sort(c, source);
+    return source->as.seq.len > 1 && sort_calls(c, source->as.seq.items[1], source->as.seq.items[0]);
 }
 /* A call node's sort, min or max by a key function on the machine, keyword
  * call stack_keyword_call's with positional arguments argv and keywords

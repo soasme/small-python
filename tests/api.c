@@ -1451,6 +1451,11 @@ int main(int argc, char **argv) {
                "def tied():\n    ts = sorted([(0, Tied(i % 3)) for i in range(12)])\n    return sum(k * t[1].v for k, t in enumerate(ts))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "tied()", "tied.py"), SPY_STOP_STEPS, &pauses)) == 98 && pauses > 1);
+    /* So does sorted() of a set, a dict or an iterator of them. */
+    execute(c, "class Ranked(Tied):\n    def __hash__(self): return self.v\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "sorted({Ranked(i) for i in range(40)})[-1].v + sorted(dict.fromkeys(Ranked(i) for i in range(6)))[0].v + "
+                                             "sorted(iter([Ranked(2), Ranked(1)]))[0].v", "ranked.py"), SPY_STOP_STEPS, &pauses)) == 40 && pauses > 2);
     /* So does ordering tuples whose items compare by them. */
     execute(c, "def ordered():\n    a = tuple(Tied(0) for i in range(12)) + (Tied(1),)\n    b = tuple(Tied(0) for i in range(12)) + (Tied(2),)\n"
                "    return (a < b) + (list(a) > list(b)) * 2 + ((a,) < (b,)) * 4");
