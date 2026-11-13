@@ -43,6 +43,8 @@ Unreleased (0.10.0):
 - repr(), str(), print() and f-strings call the Python __repr__ of items in a list or tuple
   nested in a list or tuple without nesting on the C stack, so they can pause
 - dict.fromkeys() calls a key's Python __hash__ without nesting on the C stack, so it can pause
+- zip(), enumerate() and map() of a map take its items without nesting on the C stack, so a
+  Python function or conversion it calls can pause
 - dict() and dict.update() of pairs, also from zip() or a generator, and set() of zip() call a
   key's Python __hash__ and __eq__ without nesting on the C stack, so they can pause
 - set.update() calls an element's Python __hash__ without nesting on the C stack, so it can pause

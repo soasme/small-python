@@ -1247,6 +1247,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(list(map(str, [Shown(), Shown()]))) + len(list(filter(None, (Shown(),))))", "mapped.py"),
                                  SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So do zip() and enumerate() of such a map. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(list(zip(map(str, [Shown()] * 3), 'abc'))) + len(dict(enumerate(map(str, [Shown()] * 2))))", "adapted.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
     /* str % values calls a Python __str__ or __repr__ on the machine. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len('%s' % Shown()) + len('%r%a' % (Shown(), 1)) + len('%(k)s' % {'k': Shown()})", "printf.py"),

@@ -59,7 +59,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_dict", "next_default", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_hash_tuple", "filter_none", "filter_truth",
+          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_hash_tuple", "map_adapted", "filter_none", "filter_truth",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
@@ -117,6 +117,7 @@ Case(c) ==
       [] c = "map_convert_bad" -> "TypeError: W.__str__() must return a str, not int"
       \* map() of hash hashes a tuple's items in order, nested tuples first
       [] c = "map_hash_tuple" -> "(True, [1, 3, 4])"
+      [] c = "map_adapted" -> "([('a', '1'), ('b', '2')], [(0, '3')], [1, 2, 3])"
       [] c = "consume_getitem" -> "([0, 1, 2], 3, [0, 1, 2], [0, 1, 2], (0, 1, 2), [2, 1, 0])"
       [] c = "filter_none" -> "[1, 'a']"
       \* filter() of None or bool takes each item's truth by __bool__ or __len__

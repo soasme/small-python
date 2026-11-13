@@ -269,7 +269,9 @@ static const char *const programs[] = {
     "print(nested(S()))\n"
     "class Keyed:\n    def __init__(self, k): self.k = k\n    def keys(self): return self.k\n    def __getitem__(self, k): return 1\n"
     "def pairs(s): d = {}; return [dict([(s, 1)]), [d.update(zip([s], [2])), [set(zip([1], [s])), [dict(x for x in [[s, 3]]), [dict(Keyed([s]))]]]]][1:]\n"
-    "print(pairs(S()))\n",
+    "print(pairs(S()))\n"
+    "def adapted(s): return [list(zip(map(str, [s]), 'a')), [list(enumerate(map(str, [s]))), [[x for x in zip([1], map(str, [s]))]]]][1:]\n"
+    "print(adapted(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"
