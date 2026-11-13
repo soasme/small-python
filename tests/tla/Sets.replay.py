@@ -30,15 +30,19 @@ class K:
         if self.v == 2 and self.fails == "TypeError": raise TypeError("t")
         if self.v == 2 and self.fails == "ValueError": raise ValueError("v")
         return self.v
+    def __eq__(self, other):
+        for _ in range(2): pass
+        self.log.append("e%d" % self.v)
+        return self.v == other.v
 
 
 def hashed(p):
-    log = []
+    log, values = [], (1, 1) if p["fails"] == "equal" else (1, 2)
     def generator():
-        for v in (1, 2):
+        for v in values:
             log.append("y%d" % v)
             yield K(v, log, p["fails"])
-    source = generator() if p["source"] == "generator" else [K(v, log, p["fails"]) for v in (1, 2)]
+    source = generator() if p["source"] == "generator" else [K(v, log, p["fails"]) for v in values]
     try:
         if p["form"] == "update":
             r = {0}

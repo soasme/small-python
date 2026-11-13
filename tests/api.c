@@ -1185,6 +1185,12 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "updated.update([Hashed()]) or len(updated)", "update.py"), SPY_STOP_STEPS, &pauses)) == 2 &&
            pauses > 0);
+    /* Their lookups call a Python __eq__ of a key of the same hash there too. */
+    execute(c, "class Alike:\n    def __hash__(self): return 3\n"
+               "    def __eq__(self, other):\n        for i in range(3000): pass\n        return True");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(set([Alike(), Alike()])) + len(dict.fromkeys((Alike(), Alike())))", "alike.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
     /* any() and all() of a list, a tuple or a generator call a Python
      * __bool__ or __len__ on the machine. */
     execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"

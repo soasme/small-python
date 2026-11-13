@@ -243,7 +243,10 @@ static const char *const programs[] = {
     "def keys(s): return [dict.fromkeys([s]), [dict.fromkeys((1, s), 0), [len(dict.fromkeys([s, s])), [dict.fromkeys([s, 2])[s]]]]][1:]\n"
     "print(keys(S()))\n"
     "def grow(s): t = {0}; return [t.update([s]), [t.update((1, s)), [t.update([s, 2]), [len(t)]]]][1:]\n"
-    "print(grow(S()))\n",
+    "print(grow(S()))\n"
+    "S.__eq__ = lambda s, o: [i for i in range(1)][0] == 0\n"
+    "def same(s): return [set([s, S()]), [dict.fromkeys((S(), s), 1), [frozenset([S(), S(), S()]), [len({*[s, S()]})]]]][1:]\n"
+    "print(same(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

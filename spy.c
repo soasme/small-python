@@ -23335,20 +23335,99 @@ static NO_INLINE int keys_listing(SPYContext *c, Block *top, SPYValue *keys) {
     if (failed) { spy_release(list); return -1; }
     return keys_merge(c, top, list);
 }
+/* A set's or dict.fromkeys's consumer s, its key item of hash found in its
+ * result at entry found, or -1: an absent item is added, a found key keeps
+ * its spelling and takes the value; 0, or -1 on an error. */
+static int consumer_store(SPYContext *c, Consumer *s, SPYValue *item, int64_t hash, ptrdiff_t found) {
+    if (found < 0) return map_append(c, s->result, item, s->id == B_FROMKEYS ? s->best : c->none, hash);
+    if (s->id == B_FROMKEYS) {
+        Entry *entry = &s->result->as.map.items[found];
+        SPYValue *old = entry->value;
+        class_changed(s->result);
+        entry->value = spy_retain(s->best);
+        spy_release(old);
+    }
+    return 0;
+}
+static SPYValue *consumer_compared(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* The Python __eq__ function of left and right, comparing item with the
+ * candidate key at entry i, reflected or not, of the consumer atop m: a
+ * call on m (callk), the lookup's state its context (consumer_compared);
+ * 1, or -1 on an error. */
+static int consumer_compare(SPYContext *c, Machine *m, SPYValue *item, int64_t hash, MapCursor cursor, ptrdiff_t i, int reflected,
+                            SPYValue *candidate, SPYValue *function, SPYValue *left, SPYValue *right) {
+    SPYValue *parts[] = {spy_retain(item), int_value(c, hash), int_value(c, (int64_t)(cursor.at * 2 + (size_t)cursor.indexed)),
+                         int_value(c, (int64_t)cursor.changes), int_value(c, i * 2 + reflected), spy_retain(candidate),
+                         spy_retain(left), spy_retain(right)}, *state = NULL;
+    int whole = 1;
+    for (int k = 0; k < 8; k++) whole = whole && parts[k];
+    if (whole) state = spy_tuple(c, 8, parts);
+    release_all(8, parts);
+    if (state) callk(c, m, function, 2, (SPYValue *[]){spy_retain(left), spy_retain(right)}, consumer_compared, state);
+    return c->error_type[0] ? -1 : 1;
+}
+/* The lookup of item, of hash, in the result of the set's or
+ * dict.fromkeys's consumer s atop m, from the entries cursor yields on: a
+ * candidate's Python __eq__ (rich_function), or item's, is a call
+ * (consumer_compare), 1; else the entries compared natively, the item
+ * stored (consumer_store), 0, or -1 on an error. A comparison that changes
+ * the map starts the lookup again. */
+static int consumer_lookup(SPYContext *c, Machine *m, Consumer *s, SPYValue *item, int64_t hash, MapCursor cursor) {
+    SPYValue *map = s->result;
+    for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
+        SPYValue *candidate = map->as.map.items[i].key, *left = candidate, *function;
+        if (candidate == item) return consumer_store(c, s, item, hash, i);
+        if (!(function = rich_function(c, candidate, item, R_EQ)) && (function = rich_function(c, item, candidate, R_EQ))) left = item;
+        if (function) return consumer_compare(c, m, item, hash, cursor, i, 0, candidate, function, left, left == item ? candidate : item);
+        spy_retain(candidate);
+        int matches = equal(candidate, item), unchanged = entry_unchanged(map, i, candidate, cursor);
+        spy_release(candidate);
+        if (c->error_type[0]) return -1;
+        if (!unchanged) cursor = map_cursor(map, hash);
+        else if (matches) return consumer_store(c, s, item, hash, i);
+    }
+    return consumer_store(c, s, item, hash, -1);
+}
+/* What a consumer's lookup's __eq__ (consumer_compare) returned: on
+ * NotImplemented from the first call, the reflected Python __eq__
+ * (operator_declined); else the entry found, or the lookup going on. */
+static SPYValue *consumer_compared(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    SPYValue **items = state->as.seq.items, *item = items[0], *candidate = items[5], *left = items[6], *right = items[7];
+    SPYValue *test = result, *self = NULL, *function = NULL;
+    int64_t hash = items[1]->as.integer_data.small, at = items[2]->as.integer_data.small, index = items[4]->as.integer_data.small;
+    ptrdiff_t i = (ptrdiff_t)(index / 2);
+    MapCursor cursor = {(size_t)at / 2, (size_t)items[3]->as.integer_data.small, (int)(at & 1)};
+    if (result == c->not_implemented) {
+        spy_release(result);
+        if (index & 1) test = comparison_declined(c, T_EQ, left, right);
+        else if ((function = operator_declined(c, NULL, T_EQ, left, right, OPERATOR_FIRST, &self, &test, NULL)))
+            consumer_compare(c, m, item, hash, cursor, i, 1, candidate, function, self, left);
+    }
+    if (!function && test) {
+        int matches = truthy(test), unchanged = entry_unchanged(s->result, i, candidate, cursor);
+        if (c->error_type[0]) ;
+        else if (unchanged && matches) consumer_store(c, s, item, hash, i);
+        else consumer_lookup(c, m, s, item, hash, unchanged ? cursor : map_cursor(s->result, hash));
+    }
+    spy_release(test); spy_release(state);
+    return NULL;
+}
 /* The consumer atop m takes key, its item's key: a sort keeps it, and min
  * or max keeps the item while it is the best; 0, or -1 on an error. */
 static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
     Block *top = &m->blocks[m->block_len - 1];
     Consumer *s = top->consumer;
     if (s->keyed == KEY_HASH) {
-        /* The set's item with the hash its __hash__ returned, else that
-         * call's error as a set's (hash_failed). */
+        /* The set's item with the hash its __hash__ returned, looked up
+         * on the machine (consumer_lookup), else that call's error as a
+         * set's (hash_failed). */
         SPYValue *item = s->item;
         int64_t hash;
         s->item = NULL; s->keyed = 0;
         int failed = !key || hash_result(c, key, &hash);
         if (failed) hash_failed(c, s->result, item);
-        else failed = s->id == B_FROMKEYS ? map_set_hash(c, s->result, item, s->best, hash) : set_add_hash(c, s->result, item, hash);
+        else failed = consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash)) < 0;
         spy_release(item);
         return failed ? -1 : 0;
     }
