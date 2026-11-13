@@ -2072,6 +2072,12 @@ static int is_int(SPYValue *v) { return v->type == SPY_INT || v->type == SPY_BOO
 static int is_number(SPYValue *v) { return is_int(v) || v->type == SPY_FLOAT; }
 static int is_set(SPYValue *v) { return v->type == SPY_SET || v->type == SPY_FROZENSET; }
 static int is_dict(SPYValue *v) { return v->type == SPY_DICT || v->type == SPY_FROZENDICT; }
+/* Whether v is a list, tuple, dict, frozendict, set or frozenset, whose
+ * repr may be a job (repr_items). */
+static ALWAYS_INLINE int repr_container(SPYValue *v) {
+    return UINT64_C(1) << v->type & (UINT64_C(1) << SPY_LIST | UINT64_C(1) << SPY_TUPLE | UINT64_C(1) << SPY_DICT |
+                                     UINT64_C(1) << SPY_FROZENDICT | UINT64_C(1) << SPY_SET | UINT64_C(1) << SPY_FROZENSET) ? 1 : 0;
+}
 static int is_view(SPYValue *v) { return v->type == SPY_DICT_KEYS || v->type == SPY_DICT_VALUES || v->type == SPY_DICT_ITEMS; }
 /* The builtin value a builtin method or view works on: a builtin
  * subclass instance's storage, or the value itself. */
@@ -10218,16 +10224,16 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
 static int class_union(int, SPYValue *, SPYValue *);
 static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
 /* Whether str % y may convert an argument by a Python method on the
- * machine (percent_call): an instance, not a str's, or a list or tuple
- * of a repr job (repr_items), y or an item of a tuple or value of a dict y. */
+ * machine (percent_call): an instance, not a str's, or a container of a
+ * repr job (repr_items), y or an item of a tuple or value of a dict y. */
 static NO_INLINE int percent_items(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE) return repr_items(c, c->types[SPY_STRING], v);
     for (size_t i = 0; i < v->as.seq.len; i++)
-        if (v->as.seq.items[i]->type == SPY_INSTANCE || v->as.seq.items[i]->type == SPY_LIST || v->as.seq.items[i]->type == SPY_TUPLE)
-            return repr_items(c, c->types[SPY_STRING], v);
+        if (v->as.seq.items[i]->type == SPY_INSTANCE || repr_container(v->as.seq.items[i])) return repr_items(c, c->types[SPY_STRING], v);
     return 0;
 }
 static ALWAYS_INLINE int percent_arg(SPYContext *c, SPYValue *v) {
-    return v->type == SPY_INSTANCE || ((v->type == SPY_LIST || v->type == SPY_TUPLE) && percent_items(c, v));
+    return v->type == SPY_INSTANCE || (repr_container(v) && percent_items(c, v));
 }
 static int percent_reaches(SPYContext *c, SPYValue *y) {
     if (y->type == SPY_INSTANCE) return !subclass(y->as.map.parent, c->types[SPY_STRING]);
@@ -21258,7 +21264,7 @@ static int print_text(SPYContext *, SPYValue *, SPYValue *);
 static int print_instances(SPYContext *, SPYValue *, size_t, SPYValue *const *);
 static int print_call_step(SPYContext *, Machine *, size_t, size_t, SPYValue *, SPYValue **, SPYValue **);
 static ALWAYS_INLINE int repr_job(SPYContext *c, SPYValue *callee, SPYValue *v) {
-    return (v->type == SPY_LIST || v->type == SPY_TUPLE) && repr_items(c, callee, v);
+    return repr_container(v) && repr_items(c, callee, v);
 }
 static SPYValue *repr_call(SPYContext *, Machine *, SPYValue **);
 static void repr_drop(SPYContext *, SPYValue *);
@@ -21881,7 +21887,7 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             else if (ch == 'b') goto unsupported;
             else if (ch == 's' && v->type == SPY_STRING) piece = spy_retain(v);
             else if (converted) { piece = ch == 'a' ? ascii_text(c, converted, converted) : converted; converted = NULL; }
-            else if (m && (v->type == SPY_INSTANCE || v->type == SPY_LIST || v->type == SPY_TUPLE) &&
+            else if (m && (v->type == SPY_INSTANCE || repr_container(v)) &&
                      (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece)))
                 deferred = defer == 1;
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
@@ -21947,7 +21953,7 @@ static NO_INLINE SPYValue *percent_call(SPYContext *c, Machine *m, SPYValue *x, 
     if (text) c->looked = text;
     return c->k_fn ? c->unbound : NULL;
 }
-/* The text of a list or tuple that a % job's repr job returned on m, or
+/* The text of a container that a % job's repr job returned on m, or
  * NULL: the job goes on (percent_converted), the machine to run on. */
 static Machine *percent_returned(SPYContext *c, Machine *m, SPYValue *text) {
     spy_release(machine_pop(m));
@@ -24376,7 +24382,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         int status = print_call_step(c, m, argc, argc, NULL, &convert, env);
         return status > 0 ? spy_retain(c->types[SPY_STRING]) : status ? NULL : spy_none(c);
     }
-    /* So do str() and repr() of a list or tuple with such an item's
+    /* So do str() and repr() of a container with such an item's
      * Python __repr__ (repr_call), and str.format of an instance with a
      * Python __format__ (format_job). */
     if (calls && argc == 1 && repr_job(c, callee, argv[0])) return repr_call(c, m, env);
@@ -34044,7 +34050,7 @@ static int print_end(SPYContext *c, SPYValue *state) {
     return c->error_type[0] ? -1 : 0;
 }
 /* Whether some of print's positional arguments argv, print being callee,
- * is an instance or a list or tuple of a repr job (repr_job). */
+ * is an instance or a container of a repr job (repr_job). */
 static int print_instances(SPYContext *c, SPYValue *callee, size_t positional, SPYValue *const *argv) {
     if (callee->type != SPY_NATIVE || callee->as.native.call != builtin || (intptr_t)callee->as.native.data != B_PRINT) return 0;
     for (size_t i = 0; i < positional; i++) if (argv[i]->type == SPY_INSTANCE || repr_job(c, c->types[SPY_STRING], argv[i])) return 1;
@@ -34070,7 +34076,7 @@ static int print_from(SPYContext *c, Machine *m, size_t argc, size_t i, SPYValue
         }
         if (c->error_type[0]) return -1;
         if (repr_job(c, c->types[SPY_STRING], arg)) {
-            /* A list or tuple's repr job (repr_call) above the state, i and
+            /* A container's repr job (repr_call) above the state, i and
              * c->replacing. */
             SPYValue *call_env = NULL;
             if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, int_value(c, (int64_t)i)) ||
@@ -34120,32 +34126,41 @@ static NO_INLINE Machine *print_returned(SPYContext *c, Machine *m, size_t argc,
     machine_push(c, m, spy_none(c));
     return m;
 }
-/* A repr job builds the repr of a list or tuple while an item's Python
- * __repr__ runs on the machine. Its state is a list: the container, the
- * next item's index, then the items' texts. The container stays in the
- * repr stack (repr_enter) until the job ends. */
+/* A repr job builds the repr of a list, tuple, dict, frozendict, set or
+ * frozenset while an item's Python __repr__ runs on the machine. Its
+ * state is a list: the container, the next item's index, a dict's value
+ * whose key it is at (else None), then the items' texts. A dict's items
+ * are its keys and values in turn, the value read with its key. The
+ * container stays in the repr stack (repr_enter) until the job ends. */
 /* The Python __repr__ of item a repr job calls on the machine, borrowed;
  * else NULL. */
 static SPYValue *repr_method(SPYContext *c, SPYValue *item) {
     SPYValue *function = item->type == SPY_INSTANCE && !item->as.map.base ? class_lookup(item->as.map.parent, "__repr__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
-/* Whether list or tuple v, not in the repr stack, holds an item with
- * such a method or such a list or tuple, among the containers left in
- * *budget. */
+static int repr_reaches(SPYContext *, SPYValue *, int *);
+/* Whether item has such a method or is a container that reaches one. */
+static int repr_item_reaches(SPYContext *c, SPYValue *item, int *budget) {
+    return repr_method(c, item) || (repr_container(item) && repr_reaches(c, item, budget));
+}
+/* Whether container v, not in the repr stack, holds an item, a dict's
+ * key or value, with such a method or such a container, among the
+ * containers left in *budget. */
 static int repr_reaches(SPYContext *c, SPYValue *v, int *budget) {
     if (*budget <= 0) return 0;
     --*budget;
     for (size_t i = 0; i < c->repr_len; i++) if (c->repr_stack[i] == v) return 0;
-    for (size_t i = 0; i < v->as.seq.len; i++) {
-        SPYValue *item = v->as.seq.items[i];
-        if (repr_method(c, item) || ((item->type == SPY_LIST || item->type == SPY_TUPLE) && repr_reaches(c, item, budget))) return 1;
+    if (v->type == SPY_LIST || v->type == SPY_TUPLE) {
+        for (size_t i = 0; i < v->as.seq.len; i++) if (repr_item_reaches(c, v->as.seq.items[i], budget)) return 1;
+        return 0;
     }
+    for (size_t i = 0; i < v->as.map.len; i++)
+        if (repr_item_reaches(c, map_items(v)[i].key, budget) || (is_dict(v) && repr_item_reaches(c, map_items(v)[i].value, budget))) return 1;
     return 0;
 }
 /* Whether callee, str, repr or format without a spec, takes v's repr as a
- * job: a list or tuple that reaches a Python __repr__ (repr_reaches)
- * among its first 64 containers. */
+ * job: a container that reaches a Python __repr__ (repr_reaches) among
+ * its first 64 containers. */
 static NO_INLINE int repr_items(SPYContext *c, SPYValue *callee, SPYValue *v) {
     if (callee != c->types[SPY_STRING] && callee != c->field_calls[0] && callee != c->field_calls[1]) return 0;
     int budget = 64;
@@ -34175,9 +34190,18 @@ static void repr_drop(SPYContext *c, SPYValue *v) {
  * the job's text, or NULL on an error, its container left the repr stack.
  * The container's length is read again after each item. */
 static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue **function, SPYValue **env) {
-    SPYValue *v = state->as.seq.items[0], *text = NULL, *index;
-    for (size_t i = (size_t)state->as.seq.items[1]->as.integer_data.small; i < v->as.seq.len; i++) {
-        SPYValue *item = v->as.seq.items[i];
+    SPYValue *v = state->as.seq.items[0], *text = NULL, *index, **held = &state->as.seq.items[2];
+    int seq = v->type == SPY_LIST || v->type == SPY_TUPLE, dict = is_dict(v);
+    for (size_t i = (size_t)state->as.seq.items[1]->as.integer_data.small;; i++) {
+        SPYValue *item;
+        if (dict && i % 2) item = *held;
+        else if (i >> dict >= (seq ? v->as.seq.len : v->as.map.len)) break;
+        else if (seq) item = v->as.seq.items[i];
+        else {
+            Entry *entry = &map_items(v)[i >> dict];
+            item = entry->key;
+            if (dict) { spy_release(*held); *held = spy_retain(entry->value); }
+        }
         int nested = !(*function = repr_method(c, item)) && repr_job(c, c->field_calls[0], item);
         if (*function || nested) {
             if (!(index = int_value(c, (int64_t)i + 1))) break;
@@ -34209,13 +34233,15 @@ static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue 
     *function = NULL;
     if (c->error_type[0]) { spy_release(text); repr_drop(c, v); return NULL; }
     Buffer b = { .ctx = c };
-    int tuple = v->type == SPY_TUPLE, status = puts_buffer(&b, tuple ? "(" : "[");
-    for (size_t k = 2; !status && k < state->as.seq.len; k++) {
+    int tuple = v->type == SPY_TUPLE, frozen = v->type == SPY_FROZENDICT || v->type == SPY_FROZENSET;
+    int status = puts_buffer(&b, v->type == SPY_FROZENDICT ? "frozendict({" : v->type == SPY_FROZENSET ? "frozenset({" :
+                             !seq ? "{" : tuple ? "(" : "[");
+    for (size_t k = 3; !status && k < state->as.seq.len; k++) {
         SPYValue *part = builtin_value(c, state->as.seq.items[k], SPY_STRING);
-        status = (k > 2 && puts_buffer(&b, ", ")) || append(&b, part->as.string.data, part->as.string.len);
+        status = (k > 3 && puts_buffer(&b, dict && k % 2 == 0 ? ": " : ", ")) || append(&b, part->as.string.data, part->as.string.len);
     }
     if (!status && tuple && v->as.seq.len == 1) status = puts_buffer(&b, ",");
-    status = status || puts_buffer(&b, tuple ? ")" : "]");
+    status = status || puts_buffer(&b, frozen ? "})" : !seq ? "}" : tuple ? ")" : "]");
     repr_drop(c, v);
     return buffer_text(&b, SPY_STRING, status);
 }
@@ -34311,7 +34337,7 @@ static NO_INLINE SPYValue *format_job(SPYContext *c, Machine *m, SPYValue *calle
     spy_release(state);
     return result;
 }
-/* str() or repr() of the list or tuple atop m's stack, under its callee,
+/* str() or repr() of the container atop m's stack, under its callee,
  * that repr_job takes: the call to enter, str's class with *env set, its
  * state and c->replacing in place of callee and argument (repr_from); else
  * the text, or NULL on an error, both popped. */
@@ -34320,7 +34346,8 @@ static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) 
     size_t len = m->len;
     /* repr_job found v outside the repr stack. */
     int entered = repr_enter(c, v);
-    if (!entered && (!state || !zero || sequence_append(c, state, v) || sequence_append(c, state, zero))) repr_drop(c, v);
+    if (!entered && (!state || !zero || sequence_append(c, state, v) || sequence_append(c, state, zero) ||
+                     sequence_append(c, state, c->none))) repr_drop(c, v);
     else if (!entered && (result = repr_from(c, m, state, &function, env)) && function) {
         /* What the job pushed takes the callee's and argument's places. */
         spy_release(m->stack[len - 2]); spy_release(m->stack[len - 1]);

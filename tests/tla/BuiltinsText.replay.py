@@ -64,6 +64,8 @@ SOURCES = {
     "print_unknown_kw": 'print(1, x=1)',
     "repr_nested_items": "log = []\nclass Q:\n    def __init__(self, t): self.t = t\n    def __repr__(self):\n        for _ in range(2): pass\n        log.append(self.t); return self.t\n"
                          "result = (repr([Q('a'), [Q('b'), (Q('c'),)]]), str(([Q('d')],)), log)",
+    "repr_map_items": "log = []\nclass Q:\n    def __init__(self, t): self.t = t\n    def __repr__(self):\n        for _ in range(2): pass\n        log.append(self.t); return self.t\n"
+                      "result = (repr({Q('a'): Q('b'), 1: [Q('c')]}), str({Q('d')}), repr(frozenset([Q('e')])), log)",
     "print_str_calls": "w = W()\nclass S:\n    def __str__(self): return 'S!'\nprint(S(), file=w)\nresult = w.parts",
     "str_bytes_warns_not": "result = str(b'ab')",
     "repr_str_quotes": 'result = (repr("it\'s"), repr(\'say "hi"\'), repr(\'both \\\' "\'))',

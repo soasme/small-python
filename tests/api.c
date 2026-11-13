@@ -1263,6 +1263,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(str([1, [Shown()] * 4])) + len(repr(([Shown()] * 4,)))", "nested.py"),
                                  SPY_STOP_STEPS, &pauses)) == 17 + 15 && pauses > 1);
+    /* And those of a dict's keys and values or a set's items. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(repr({1: [Shown()] * 4})) + len(str({Shown()})) + len('%s' % (frozendict({2: Shown()}),))", "mapped.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 17 + 3 + 18 && pauses > 1);
     /* A host function's spy_callk runs a Python callee on the machine,
      * where it pauses, then the continuation, which may call again; a
      * call_back's spy_call could not pause. Every call form reaches it. */
