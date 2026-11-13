@@ -382,7 +382,9 @@ These run as machines on the heap, in one native activation of
   tuples, also in a comparison chain, calls on their items, of an instance
   after identical items, equal `None`, `bool`, `int`, `float` or `str`
   ones, or pairs of such lists or tuples found equal so, pair after pair
-  and inside such pairs, the `__eq__` and then the ordering method, or
+  and inside such pairs, the `__eq__` that `==` or `!=` of two dicts
+  calls on the values of their keys that are neither instances nor
+  tuples, the `__eq__` and then the ordering method, or
   its reflection, that `<`, `<=`, `>` or `>=` of two lists or two tuples,
   also in a comparison chain, calls on such items, the `__eq__` that `index`, `count` or `remove` of
   one item in a list or tuple, called as its method with that item alone,

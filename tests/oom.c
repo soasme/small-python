@@ -276,7 +276,9 @@ static const char *const programs[] = {
     "def ranked(s): return [sorted({s, S()}), [sorted({s: 1, S(): 2}.keys()), [sorted(iter([s, S()]))]]][1:]\n"
     "print(ranked(S()))\n"
     "def sought(s): l = [1, s]; return [l.index(S()), [l.count(S()), [(s,).index(S()), [l.remove(S())]]]][1:]\n"
-    "print(sought(S()))\n",
+    "print(sought(S()))\n"
+    "def matched(s): return [{1: s} == {1: S()}, [{1: S(), 2: s} != {1: S(), 2: S()}, [{'k': [s]} == {'k': [S()]}]]][1:]\n"
+    "print(matched(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

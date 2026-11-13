@@ -457,6 +457,9 @@ struct SPYContext {
     /* On a machine's stack, marks the zip, map or enumerate, under it,
      * that the next item of a map it takes from goes to (adapted_call). */
     SPYValue *adapting;
+    /* On a machine's stack, marks the values a dict comparison's walk
+     * compares (dict_call). */
+    SPYValue *matching;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -2206,23 +2209,25 @@ static int view_equal(SPYContext *, SPYValue *, SPYValue *);
 static int same_bytes(SPYContext *c, const char *a, const char *b, size_t n) {
     return (n < 4096 || !spend(c, n / 64)) && !memcmp(a, b, n);
 }
+/* Whether dicts or sets a and b of one length hold equal items from entry
+ * i of a on. */
+static int map_equal_from(SPYValue *a, SPYValue *b, int type, size_t i) {
+    for (; i < a->as.map.len; i++) {
+        if ((i & 15) == 15 && spend(a->ctx, 1)) return 0;
+        SPYValue *key = spy_retain(map_items(a)[i].key);
+        SPYValue *left = spy_retain(map_items(a)[i].value);
+        ptrdiff_t j = map_find_hash(b, key, map_items(a)[i].hash);
+        SPYValue *right = j >= 0 ? spy_retain(b->as.map.items[j].value) : NULL;
+        int matches = j >= 0 && (type == SPY_SET || left == right || equal(left, right));
+        spy_release(key); spy_release(left); spy_release(right);
+        if (!matches || a->ctx->error_type[0]) return 0;
+    }
+    /* As dict_equal: a callback that empties a only ends the loop early. */
+    return 1;
+}
 /* Whether two dicts, sets, lists, tuples or slices of one kind hold equal items. */
 static ALWAYS_INLINE int items_equal(SPYValue *a, SPYValue *b, int type) {
-    if (type == SPY_DICT || type == SPY_SET) {
-        if (a->as.map.len != b->as.map.len) return 0;
-        for (size_t i = 0; i < a->as.map.len; i++) {
-            if ((i & 15) == 15 && spend(a->ctx, 1)) return 0;
-            SPYValue *key = spy_retain(map_items(a)[i].key);
-            SPYValue *left = spy_retain(map_items(a)[i].value);
-            ptrdiff_t j = map_find_hash(b, key, map_items(a)[i].hash);
-            SPYValue *right = j >= 0 ? spy_retain(b->as.map.items[j].value) : NULL;
-            int matches = j >= 0 && (type == SPY_SET || left == right || equal(left, right));
-            spy_release(key); spy_release(left); spy_release(right);
-            if (!matches || a->ctx->error_type[0]) return 0;
-        }
-        /* As dict_equal: a callback that empties a only ends the loop early. */
-        return 1;
-    }
+    if (type == SPY_DICT || type == SPY_SET) return a->as.map.len == b->as.map.len && map_equal_from(a, b, type, 0);
     /* Lists of different lengths are unequal at once; tuples compare items first. */
     if (type == SPY_LIST && a->as.seq.len != b->as.seq.len) return 0;
     for (size_t i = 0; i < comparison_length(a) && i < comparison_length(b); i++) {
@@ -10206,6 +10211,8 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
             return equal < 0 || equal == 2 ? NULL : spy_bool(c, equal == (op == T_EQ));
         }
     }
+    /* Two dicts compare their values on the machine (dict_call). */
+    if (a->type == SPY_DICT && b->type == SPY_DICT && (op == T_EQ || op == T_NE)) return NULL;
     return is_set(a) ? set_compared(c, op, a, b) : comparison(c, op, a, b);
 }
 static int class_union(int, SPYValue *, SPYValue *);
@@ -24971,6 +24978,49 @@ fail:
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
+/* For x == y or x != y, x and y two dicts of one length, from entry at
+ * of x on, while x has more: the Python __eq__ that comparing its value
+ * with the value of the same key in y calls first, owned, with its env,
+ * the values before it compared natively; x, y, the next entry's index,
+ * the two operands in the order of the call and c->matching pushed on m's
+ * stack (dict_returned). Else NULL, *same whether they are equal, -1 on
+ * an error; from a key whose lookup may call Python on, natively. */
+static NO_INLINE SPYValue *dict_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, size_t at, int *same, SPYValue **env) {
+    for (*same = 1; at < x->as.map.len; at++) {
+        if ((at & 15) == 15 && spend(c, 1)) { *same = -1; return NULL; }
+        Entry *e = &map_items(x)[at];
+        if (e->key->type == SPY_INSTANCE || e->key->type == SPY_TUPLE) {
+            *same = map_equal_from(x, y, SPY_DICT, at);
+            if (c->error_type[0]) *same = -1;
+            break;
+        }
+        ptrdiff_t j = map_find_hash(y, e->key, e->hash);
+        if (j < 0) { *same = 0; break; }
+        SPYValue *left = e->value, *right = y->as.map.items[j].value, *function = NULL;
+        if (left == right) continue;
+        if ((left->type == SPY_INSTANCE || right->type == SPY_INSTANCE) &&
+            ((function = rich_function(c, left, right, R_EQ)) || (function = rich_function(c, right, left, R_EQ)))) {
+            if (!rich_function(c, left, right, R_EQ)) { SPYValue *swap = left; left = right; right = swap; }
+            SPYValue *args[] = {spy_retain(left), spy_retain(right)};
+            size_t len = m->len;
+            if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, (int64_t)at + 1)) ||
+                machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->matching))) {
+                release_all(2, args);
+                while (m->len > len) spy_release(machine_pop(m));
+                *same = -1; return NULL;
+            }
+            if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
+            while (m->len > len) spy_release(machine_pop(m));
+            *same = -1; return NULL;
+        }
+        spy_retain(left); spy_retain(right);
+        int equal_values = equal(left, right);
+        spy_release(left); spy_release(right);
+        if (c->error_type[0]) { *same = -1; break; }
+        if (!equal_values) { *same = 0; break; }
+    }
+    return NULL;
+}
 static SPYValue *operator_call(SPYContext *, Machine *, Instruction *, SPYValue *, SPYValue *, SPYValue **);
 /* For an ordering step ins of x and y, two lists or two tuples whose items
  * before at are equal, at itself unequal when known: the Python method
@@ -25739,6 +25789,14 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             return set_walk(c, m, token, x, y, kind == OPERATE_INPLACE, env);
         }
     }
+    /* Two dicts' == or !=, by their values' Python __eq__ (dict_call),
+     * else natively, the result in c->looked. */
+    if ((rich == R_EQ || rich == R_NE) && x->type == SPY_DICT && y->type == SPY_DICT) {
+        int same = 0;
+        if (x->as.map.len == y->as.map.len && (function = dict_call(c, m, x, y, 0, &same, env))) return function;
+        if (same >= 0 && !c->error_type[0]) c->looked = spy_bool(c, (rich == R_EQ) == same);
+        return NULL;
+    }
     /* A dict's item, or a dict's or set's member: its key's __hash__ first,
      * the operands on the stack under the key for the operation. */
     if ((kind == OPERATE_INDEX || contains) && ((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
@@ -25939,6 +25997,35 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
         return m;
     }
 }
+/* The __eq__ dict_call entered for step ins returned result: the values
+ * unequal, or the walk goes on with the next entry. The machine to run
+ * on, at its pc. */
+static NO_INLINE Machine *dict_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
+    int op = 0, same = -1;
+    step_operation(ins, &op);
+    spy_release(machine_pop(m));
+    SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
+    int found = test ? truthy(test) : 0;
+    spy_release(test); spy_release(left); spy_release(right);
+    SPYValue *index = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = NULL;
+    size_t at = (size_t)index->as.integer_data.small;
+    spy_release(index);
+    size_t len = m->len;
+    if (!c->error_type[0] && !found) same = 0;
+    else if (!c->error_type[0] && (function = dict_call(c, m, x, y, at, &same, &env))) {
+        Call *call = call_enter(c, function, env, m);
+        if (call) {
+            spy_release(x); spy_release(y);
+            call->m.outermost = CALL_OPERATOR;
+            return &call->m;
+        }
+        while (m->len > len) spy_release(machine_pop(m));
+        same = -1;
+    }
+    m->pc = operator_finish(c, m, ins, y, same < 0 ? NULL : spy_bool(c, (op == T_EQ) == same), pc);
+    spy_release(x); spy_release(y);
+    return m;
+}
 /* A special method operator_call entered returned result into operator
  * step ins, its operands and phase on m's stack; NotImplemented from a
  * binary operator or comparison goes on with the other operand's method,
@@ -25949,6 +26036,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     if (m->stack[m->len - 1] == c->replacing) return fold_returned(c, m, result);
     if (m->stack[m->len - 1] == c->probing) return lookup_returned(c, m, ins, result, pc);
     if (m->stack[m->len - 1] == c->pairing) return pair_returned(c, m, ins, result, pc);
+    if (m->stack[m->len - 1] == c->matching) return dict_returned(c, m, ins, result, pc);
     /* object's __ne__ inverts the truth of the __eq__ it called (rich_entry). */
     if (m->stack[m->len - 1] == c->negating) {
         spy_release(machine_pop(m));
@@ -26802,7 +26890,8 @@ static NO_INLINE SPYValue *operate_step(SPYContext *c, Machine *m, Instruction *
     /* Builtin operands call no Python method on the machine but the items'
      * an in searches in a list or tuple (sequence_test) or an iterator. */
     if (x->type != SPY_INSTANCE && y->type != SPY_INSTANCE && y->type != SPY_ITERATOR) {
-        SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) : NULL;
+        SPYValue *value = y->type == SPY_LIST || y->type == SPY_TUPLE ? sequence_test(c, ins, x, y) :
+                          y->type == SPY_DICT && x->type == SPY_DICT ? c->unbound : NULL;
         if (value != c->unbound) return value || c->error_type[0] ? value : operate(c, ins->node, x, y);
     }
     SPYValue *function = operator_call(c, m, ins, x, y, env);
@@ -36053,9 +36142,10 @@ SPYContext *spy_context_new(void) {
     c->tupling = value_new(c, V_UNBOUND);
     c->pairing = value_new(c, V_UNBOUND);
     c->adapting = value_new(c, V_UNBOUND);
+    c->matching = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->matching || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

@@ -1456,6 +1456,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "found.index(Tied(19)) + found.count(Tied(3)) + len(found.remove(Tied(5)) or found)", "found.py"),
                                  SPY_STOP_STEPS, &pauses)) == 39 && pauses > 2);
+    /* So does == of two dicts whose values compare by them. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "({i: Tied(i) for i in range(60)} == {i: Tied(i) for i in range(60)}) + "
+                                             "({1: Tied(1)} != {1: Tied(2)}) * 2", "dicteq.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So does sorted() of a set, a dict or an iterator of them. */
     execute(c, "class Ranked(Tied):\n    def __hash__(self): return self.v\n");
     pauses = 0;

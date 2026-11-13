@@ -43,6 +43,8 @@ Unreleased (0.10.0):
 - repr(), str(), print() and f-strings call the Python __repr__ of items in a list or tuple
   nested in a list or tuple without nesting on the C stack, so they can pause
 - dict.fromkeys() calls a key's Python __hash__ without nesting on the C stack, so it can pause
+- == and != of two dicts call their values' Python __eq__ without nesting on the C stack, so
+  they can pause
 - list.index(), count() and remove() and tuple.index() and count() of an item a call gives call
   a Python __eq__ without nesting on the C stack, so they can pause
 - sorted() of a set, a dict, its keys or a list iterator calls a Python __lt__ without nesting
