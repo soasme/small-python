@@ -23382,6 +23382,7 @@ static NO_INLINE int key_consumer(SPYContext *c, Machine *m, SPYValue *callee, s
 enum { OPERATOR_FIRST, OPERATOR_REFLECTED, OPERATOR_LAST, OPERATOR_INDEX };
 static SPYValue *operator_declined(SPYContext *, const Operator *, int, SPYValue *, SPYValue *, int, SPYValue **, SPYValue **, int *);
 static SPYValue *rich_entry(SPYContext *, SPYValue *, int, int *);
+static int rich_default(SPYContext *, SPYValue *, int);
 /* The key function the consumer atop m calls next, owned, with its env;
  * or NULL when its items are all taken, then its value on the stack, or
  * an error. */
@@ -25858,8 +25859,11 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* An augmented assignment takes the in-place method, else the plain one's rule. */
         else if (kind == OPERATE_INPLACE && (function = class_lookup(cls, o->inplace))) ;
         else if (first) {
-            if (!(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
-            self = y; other = x; phase = OPERATOR_REFLECTED;
+            if ((function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) {
+                self = y; other = x; phase = OPERATOR_REFLECTED;
+            } else if (o || !rich_default(c, y, rich_reflected[rich]) || !(function = rich_entry(c, x, rich, &negated))) return NULL;
+            /* object's reflected method declines: x's own is the last. */
+            else phase = OPERATOR_LAST;
         } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_entry(c, x, rich, &negated);
     }
     /* A builtin's operator (builtin_operator) goes with the phase. */
@@ -26142,6 +26146,14 @@ static SPYValue *rich_entry(SPYContext *c, SPYValue *self, int rich, int *negate
     SPYValue *function = cls ? class_lookup(cls, rich_names[rich]) : NULL;
     if ((*negated = cls && rich == R_NE && !function)) function = class_lookup(cls, "__eq__");
     return function && machine_function(c, function) ? function : NULL;
+}
+/* Whether plain instance self's comparison method rich is object's, which
+ * declines a comparison with another object: no class overrides it, nor
+ * __eq__ for !=. */
+static int rich_default(SPYContext *c, SPYValue *self, int rich) {
+    SPYValue *cls = self->as.map.parent;
+    return class_lookup(cls, rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
+           (rich != R_NE || class_lookup(cls, "__eq__") == class_lookup(c->object, "__eq__"));
 }
 /* Whether a store of plain instance key into exact dict map, its hash run
  * in C and kept (hash_kept), compares key with another (map_collides), or

@@ -1489,6 +1489,10 @@ int main(int argc, char **argv) {
                "    return (a < b) + (list(a) > list(b)) * 2 + ((a,) < (b,)) * 4");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "ordered()", "ordered.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
+    /* So does x < y when y's class subclasses x's and inherits object's __gt__. */
+    execute(c, "class Over:\n    def __lt__(self, o):\n        for i in range(3000): pass\n        return i\nclass Under(Over): pass\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "Over() < Under()", "under.py"), SPY_STOP_STEPS, &pauses)) == 2999 && pauses > 1);
     /* So do set operations, their augmented assignments and comparisons
      * whose elements compare by a Python __eq__. */
     execute(c, "class Keyed:\n    def __init__(self, v): self.v = v\n    def __hash__(self): return self.v % 2\n"

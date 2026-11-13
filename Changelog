@@ -58,6 +58,8 @@ Unreleased (0.10.0):
 - set.update() calls an element's Python __hash__ without nesting on the C stack, so it can pause
 - set(), frozenset(), set.update() and dict.fromkeys() call the Python __eq__ of a key
   of the same hash without nesting on the C stack, so they can pause
+- x < y, where y's class subclasses x's and inherits object's reflected method, calls x's
+  Python comparison method without nesting on the C stack, so it can pause
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python
   __eq__ of a key of the same hash without nesting on the C stack, so they can pause
 - a tuple key of a dict or set calls its items' Python __hash__ without nesting on the C stack,

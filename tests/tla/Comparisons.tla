@@ -41,7 +41,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
           "store_keeps_key", "seq_nested", "seq_order_calls", "seq_order_chain", "builtin_declines",
-          "ne_by_eq"}
+          "ne_by_eq", "sub_object_reflected"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
 VARIABLES program, outcome
@@ -153,6 +153,10 @@ Case(c) ==
       \* object's __ne__ inverts whatever __eq__ returns, also for a declining str
       \* or int; its NotImplemented goes on with the other operand's __ne__
       [] c = "ne_by_eq" -> <<"(True, False, False, False)", <<"'==str'", "'a==P'", "'b==int'", "'d==E'", "'c==E'">>>>
+      \* a subclass instance on the right whose reflected method is object's:
+      \* the left operand's method decides, and when it declines too, TypeError
+      [] c = "sub_object_reflected" -> <<"TypeError: '>=' not supported between instances of 'E' and 'F'",
+                                         <<"'a<b'", "'c<d'", "'e>=f'">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Compare(p)
 

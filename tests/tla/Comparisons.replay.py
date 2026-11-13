@@ -79,6 +79,11 @@ SOURCES = {
                 "    def __eq__(s, o): t(s.n + '==' + type(o).__name__); return NotImplemented if s.n == 'd' else s.n\n"
                 "class P: pass\n"
                 "result = ('x' != E(''), E('a') != P(), 1 != E('b'), E('d') != E('c'))",
+    "sub_object_reflected": "class E:\n    def __init__(s, n): s.n = n\n"
+                            "    def __lt__(s, o): return t(s.n + '<' + o.n)\n"
+                            "    def __ge__(s, o): t(s.n + '>=' + o.n); return NotImplemented\n"
+                            "class F(E): pass\n"
+                            "result = (E('a') < F('b'), F('c') < E('d'), E('e') >= F('f'))",
 }
 
 
