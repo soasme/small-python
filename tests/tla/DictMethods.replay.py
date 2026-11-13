@@ -64,6 +64,7 @@ SOURCES = {
     "hashed_key_methods": "class K:\n    def __init__(s, n): s.n = n\n    def __hash__(s): log.append(s.n); return s.n\n"
                           "    def __eq__(s, o): return s.n == o.n\nlog = []\nd = {}\nd.setdefault(K(1), 'x')\ns = set()\ns.add(K(2))\n"
                           "result = (d.get(K(1)), d.pop(K(1)), {}.pop(K(3), 0), len(s), log)",
+    "equal_key_methods": "class E:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n    def __eq__(s, o):\n        for _ in range(2): pass\n        log.append(s.n + o.n)\n        return s.n[0] == o.n[0]\nlog = []\nd = {E('a1'): 1}\ns = {E('b1')}\ns.add(E('b2'))\ns.discard(E('c1'))\nresult = (d.get(E('a2')), d.setdefault(E('a3'), 2), d.pop(E('x1'), 0), d.pop(E('a4')), d, len(s), s.remove(E('b3')), s, log)",
     "popitem_lifo": 'd = {1: 1, 2: 2, 3: 3}\nresult = (d.popitem(), d.popitem(), d)',
     "popitem_empty": 'result = {}.popitem()',
     "setdefault": "d = {}\nresult = (d.setdefault('a'), d.setdefault('b', 1), d.setdefault('b', 2), d)",

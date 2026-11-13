@@ -1191,6 +1191,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(set([Alike(), Alike()])) + len(dict.fromkeys((Alike(), Alike())))", "alike.py"),
                                  SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
+    /* So do a dict's get and pop and a set's discard. */
+    execute(c, "kept = {Alike()}");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "{Alike(): 2}.get(Alike()) + {Alike(): 3}.pop(Alike()) + (kept.discard(Alike()) or len(kept))",
+                                             "alike.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
     /* any() and all() of a list, a tuple or a generator call a Python
      * __bool__ or __len__ on the machine. */
     execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"

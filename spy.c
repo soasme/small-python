@@ -445,6 +445,9 @@ struct SPYContext {
     /* On a machine's stack, marks an iterator's item, and its conversion's
      * name under it, whose Python method a next call runs (item_converted). */
     SPYValue *converting;
+    /* A key, borrowed, whose next search in map found_map ends at entry
+     * found_index, or -1, found on the machine (call_hashed). */
+    SPYValue *found_map, *found_key; ptrdiff_t found_index;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -2617,6 +2620,8 @@ static int entry_unchanged(SPYValue *map, ptrdiff_t i, SPYValue *candidate, MapC
 /* The rest of a search from candidate i on, comparing through callbacks that
  * may change the map. */
 static NO_INLINE ptrdiff_t map_find_compare(SPYValue *map, SPYValue *key, int64_t hash, MapCursor cursor, ptrdiff_t i) {
+    SPYContext *c = map->ctx;
+    if (c->found_key == key && c->found_map == map) { c->found_key = NULL; return c->found_index; }
     int pending_error = map->ctx->error_type[0] != 0;
     do {
         SPYValue *candidate = spy_retain(map->as.map.items[i].key);
@@ -24932,9 +24937,35 @@ static int store_lookup(SPYValue *map, SPYValue *key, int display) {
  * under the lookup's state in the entry, or a new one, a deletion with the
  * entry removed, or a KeyError, as set_index and delete_index do. */
 static Machine *walk_found(SPYContext *, Machine *, Instruction *, SPYValue *, int64_t, ptrdiff_t, size_t);
+/* A call of a dict's get, setdefault or pop, or a set's add, discard or
+ * remove (hashed_map), its callee, arguments, method number and their
+ * count on m's stack (hash_call_step), runs with key's hash, taking key,
+ * unless it was not hashed; its value pushed. */
+static Machine *call_hashed(SPYContext *c, Machine *m, Instruction *ins, SPYValue *key, int hashed, int64_t hash) {
+    SPYValue *count = machine_pop(m), *number = machine_pop(m), *args[3];
+    size_t argc = (size_t)count->as.integer_data.small;
+    int method = (int)number->as.integer_data.small;
+    spy_release(count); spy_release(number);
+    for (size_t i = argc; i; i--) args[i - 1] = machine_pop(m);
+    SPYValue *callee = machine_pop(m);
+    if (hash_kept(c, key, hashed, hash)) {
+        relocate(c, ins->node);
+        SPYValue *result = call_plain(c, callee, method, ins->node, argc, args);
+        if (result) machine_push(c, m, result);
+    }
+    c->found_key = NULL;
+    release_all(argc, args); spy_release(callee);
+    return m;
+}
 static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYValue *map, SPYValue *key, int64_t hash, ptrdiff_t found,
                               size_t pc) {
     if (m->len && m->stack[m->len - 1] == c->walking) return walk_found(c, m, ins, key, hash, found, pc);
+    if (ins->op == BC_CALLF || ins->op == BC_CALLN) {
+        /* The call's search ends at entry found. */
+        m->pc = pc;
+        c->found_map = map; c->found_key = key; c->found_index = found;
+        return call_hashed(c, m, ins, spy_retain(key), !c->error_type[0], hash);
+    }
     if (lookup_stores(ins)) {
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *storage = namespace_map(map);
@@ -25118,21 +25149,17 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     }
     if (ins->op == BC_CALLF || ins->op == BC_CALLN) {
         /* A call's callee, arguments, method number and their count (hash_call_step). */
-        SPYValue *count = machine_pop(m), *number = machine_pop(m), *args[3];
-        size_t argc = (size_t)count->as.integer_data.small;
-        int method = (int)number->as.integer_data.small;
-        spy_release(count); spy_release(number);
-        for (size_t i = argc; i; i--) args[i - 1] = machine_pop(m);
-        SPYValue *callee = machine_pop(m);
-        size_t at;
-        if (!hashed) hash_failed(c, hashed_map(callee, method, argc, args, &at), key);
-        if (hash_kept(c, key, hashed, hash)) {
-            relocate(c, ins->node);
-            SPYValue *result = call_plain(c, callee, method, ins->node, argc, args);
-            if (result) machine_push(c, m, result);
+        size_t argc = (size_t)m->stack[m->len - 1]->as.integer_data.small, at;
+        SPYValue **operands = &m->stack[m->len - 3 - argc];
+        SPYValue *map = hashed_map(operands[0], (int)operands[argc + 1]->as.integer_data.small, argc, operands + 1, &at);
+        if (!hashed) hash_failed(c, map, key);
+        else if (store_lookup(map, key, 1) && map_collides(map, key, hash)) {
+            /* The call runs under the lookup's state (call_hashed). */
+            m = lookup_step(c, m, ins, map, key, hash, map_cursor(map, hash), pc);
+            spy_release(key);
+            return m;
         }
-        release_all(argc, args); spy_release(callee);
-        return m;
+        return call_hashed(c, m, ins, key, hashed, hash);
     }
     if (ins->op == BC_STORE || ins->op == BC_EXEC || ins->op == BC_SET_TARGET || ins->op == BC_SAVE_TARGET) {
         /* A store's object, key and value, or a deletion's object and key. */

@@ -386,8 +386,9 @@ These run as machines on the heap, in one native activation of
   `pow` with no modulus or a `None` one, the `__add__` or `__radd__`
   that `sum` calls on a total or item that is an instance, the `__eq__`
   that a dict or set display, a dict's subscript, store or deletion, a
-  frozendict's subscript, or `in` of a dict, frozendict, set or
-  frozenset, calls on an instance key and each stored key of its hash,
+  frozendict's subscript, `in` of a dict, frozendict, set or
+  frozenset, or `dict.get`, `setdefault` and `pop` and `set.add`,
+  `discard` and `remove` of a key with a Python `__hash__`, call on an instance key and each stored key of its hash,
   the stored key's first and then, on `NotImplemented`, the key's, the
   same `__eq__` that `|`, `&`, `-` or `^` of two sets or frozensets,
   their augmented assignment, or their comparison, also in a comparison

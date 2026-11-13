@@ -246,7 +246,9 @@ static const char *const programs[] = {
     "print(grow(S()))\n"
     "S.__eq__ = lambda s, o: [i for i in range(1)][0] == 0\n"
     "def same(s): return [set([s, S()]), [dict.fromkeys((S(), s), 1), [frozenset([S(), S(), S()]), [len({*[s, S()]})]]]][1:]\n"
-    "print(same(S()))\n",
+    "print(same(S()))\n"
+    "def find(s): d, t = {s: 1}, {s}; return [d.get(S()), [d.setdefault(S()), [t.add(S()), [t.discard(S()), [d.pop(S()), [t.add(s), [t.remove(S())]]]]]]][1:]\n"
+    "print(find(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"
