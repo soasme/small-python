@@ -74,7 +74,7 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
           "print_str_calls", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
-          "repr_own_slot"}
+          "repr_own_slot", "repr_nested_items"}
 Programs == [op : {"ascii", "repr_len", "ord"}, s : Strings]
             \cup [case : Cases]
 
@@ -100,6 +100,7 @@ Case(c) ==
       [] c = "repr_bad" -> "TypeError: BadRepr.__repr__() must return a str, not int"
       [] c = "str_bad" -> "TypeError: BadStr.__str__() must return a str, not bytes"
       [] c = "repr_recursive" -> "'[1, [...]]'"
+      [] c = "repr_nested_items" -> "('[a, [b, (c,)]]', '([d],)', ['a', 'b', 'c', 'd'])"
       [] c = "repr_bytes_quotes" -> "('b\"\\'\"', 'b\\'\"\\'', 'b\\'\\\\\\'\"\\'')"
       [] c = "format_hook" -> "('F<x>', 'F<>', 'F<yz>')"
       \* str.format formats a nested spec's field first, and objects reached by

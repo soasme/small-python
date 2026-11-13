@@ -334,12 +334,12 @@ These run as machines on the heap, in one native activation of
   that `filter` of `None` or `bool`, `any` and `all` test their items
   by, the `__str__` and `__repr__` that `str` `%` calls on the arguments
   of `%s`, `%r` and `%a`, and the items' `__repr__` of a list or tuple
-  argument, each after the conversions before it, the
+  argument and of those inside it, each after the conversions before it, the
   `__bool__` that `not` calls, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list or
-  tuple, the property getter, `__get__`, `__getattribute__` or
+  tuple, also of a list or tuple inside one, the property getter, `__get__`, `__getattribute__` or
   `__getattr__` that `getattr` of two arguments, or of three when an
   `AttributeError` gives the default, calls, and the
   `__setattr__`, property setter or `__set__` that `setattr` calls;

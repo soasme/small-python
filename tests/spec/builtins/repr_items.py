@@ -1,7 +1,7 @@
 # spec: PLS-315 25.1.2, 25.2, 19.3.31, 19.3.32
 # description: repr(), str(), format() and an f-string field of a list or
-# tuple call each item's __repr__ in order, which may loop, and join the
-# texts; a list or tuple being represented shows as [...] or (...) inside an
+# tuple call each item's __repr__ in order, which may loop, also the items
+# of a list or tuple item, and join the texts; a list or tuple being represented shows as [...] or (...) inside an
 # item's __repr__ and again normally once it is done, also after an item's
 # exception propagated. Items added or removed meanwhile, also by a native
 # __repr__ before them, are seen as the items are read by index; a __repr__
@@ -85,6 +85,13 @@ def results():
     out.append(repr(shown))
     shown = [Item("shrink"), Item("s2"), Item("gone")]
     out.append(repr(shown))
+    # A nested list's or tuple's items, whose error ends the outer repr too.
+    shown = [Item("o"), [Item("bad")]]
+    out.append(error(lambda: repr(shown)))
+    shown[1].clear()
+    out.append(repr(shown))
+    shown = [[Item("m1"), Item("grow")], (Item("m2"), [Item("m3")])]
+    out.append(repr(shown))
     out.append(error(lambda: repr([Wrong()])))
     out.append(repr([Sub(), Sub()]))
     text = repr([Plain()])
@@ -105,6 +112,8 @@ expected = ["[<a>, 1, 's', <b>]", "[<a>, 1, 's', <b>]", "[<a>, 1, 's', <b>]", "[
             ("ZeroDivisionError", "division by zero"), "['r', <z>]", "[removed]",
             "[<grow>, <g2>, <added>]",
             "[<shrink>, <s2>]",
+            ("KeyError", "'bad'"), "[<o>, []]",
+            "[[<m1>, <grow>], (<m2>, [<m3>]), <added>]",
             ("TypeError", "Wrong.__repr__() must return a str, not int"),
             "[sub, sub]",
             ("[<", True, ">]"),
@@ -112,6 +121,7 @@ expected = ["[<a>, 1, 's', <b>]", "[<a>, 1, 's', <b>]", "[<a>, 1, 's', <b>]", "[
             ["a", "b", "a", "b", "a", "b", "a", "b", "a", "b", "t",
              "x", "nested", "y",
              "self", "p", "p", "self", "bad", "never", "z", "grow", "g2", "added", "shrink", "s2",
+             "o", "bad", "o", "m1", "grow", "m2", "m3", "added",
              "p1", "p2"]]
 
 def main():

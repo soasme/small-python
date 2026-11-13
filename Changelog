@@ -40,6 +40,8 @@ Unreleased (0.10.0):
   an item's Python method without nesting on the C stack, so they can pause
 - str % values calls a Python __str__ or __repr__, also of a list's or tuple's items, without
   nesting on the C stack, so it can pause
+- repr(), str(), print() and f-strings call the Python __repr__ of items in a list or tuple
+  nested in a list or tuple without nesting on the C stack, so they can pause
 - dict.fromkeys() calls a key's Python __hash__ without nesting on the C stack, so it can pause
 - set.update() calls an element's Python __hash__ without nesting on the C stack, so it can pause
 - set(), frozenset(), set.update() and dict.fromkeys() call the Python __eq__ of a key

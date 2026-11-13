@@ -10211,7 +10211,9 @@ static NO_INLINE int repr_items(SPYContext *, SPYValue *, SPYValue *);
  * machine (percent_call): an instance, not a str's, or a list or tuple
  * of a repr job (repr_items), y or an item of a tuple or value of a dict y. */
 static NO_INLINE int percent_items(SPYContext *c, SPYValue *v) {
-    for (size_t i = 0; i < v->as.seq.len; i++) if (v->as.seq.items[i]->type == SPY_INSTANCE) return repr_items(c, c->types[SPY_STRING], v);
+    for (size_t i = 0; i < v->as.seq.len; i++)
+        if (v->as.seq.items[i]->type == SPY_INSTANCE || v->as.seq.items[i]->type == SPY_LIST || v->as.seq.items[i]->type == SPY_TUPLE)
+            return repr_items(c, c->types[SPY_STRING], v);
     return 0;
 }
 static ALWAYS_INLINE int percent_arg(SPYContext *c, SPYValue *v) {
@@ -21250,6 +21252,7 @@ static ALWAYS_INLINE int repr_job(SPYContext *c, SPYValue *callee, SPYValue *v) 
 }
 static SPYValue *repr_call(SPYContext *, Machine *, SPYValue **);
 static void repr_drop(SPYContext *, SPYValue *);
+static void repr_failed(SPYContext *, Machine *, size_t);
 static Machine *text_returned(SPYContext *, Machine *, size_t, SPYValue *);
 static Machine *print_returned(SPYContext *, Machine *, size_t, SPYValue *);
 static Machine *percent_returned(SPYContext *, Machine *, SPYValue *);
@@ -26650,8 +26653,7 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         /* So does getattr() (getattr_call). */
         else if (m->stack[m->len - 1] == c->unbound) attribute_failed(c, m->stack[m->len - 2], m->stack[m->len - 3]->as.string.data);
         /* A repr job's item failed: the job ends. */
-        else if (m->len > 3 && m->stack[m->len - 3] == c->replacing && m->stack[m->len - 4]->type == SPY_LIST)
-            repr_drop(c, m->stack[m->len - 4]->as.seq.items[0]);
+        else if (m->len > 3) repr_failed(c, m, m->len - 3);
         return m;
     }
     SPYValue *v = machine_pop(m), *function, *env;
@@ -33870,13 +33872,35 @@ static SPYValue *repr_method(SPYContext *c, SPYValue *item) {
     SPYValue *function = item->type == SPY_INSTANCE && !item->as.map.base ? class_lookup(item->as.map.parent, "__repr__") : NULL;
     return function && machine_function(c, function) ? function : NULL;
 }
+/* Whether list or tuple v, not in the repr stack, holds an item with
+ * such a method or such a list or tuple, among the containers left in
+ * *budget. */
+static int repr_reaches(SPYContext *c, SPYValue *v, int *budget) {
+    if (*budget <= 0) return 0;
+    --*budget;
+    for (size_t i = 0; i < c->repr_len; i++) if (c->repr_stack[i] == v) return 0;
+    for (size_t i = 0; i < v->as.seq.len; i++) {
+        SPYValue *item = v->as.seq.items[i];
+        if (repr_method(c, item) || ((item->type == SPY_LIST || item->type == SPY_TUPLE) && repr_reaches(c, item, budget))) return 1;
+    }
+    return 0;
+}
 /* Whether callee, str, repr or format without a spec, takes v's repr as a
- * job: a list or tuple not already in the repr stack with such an item. */
+ * job: a list or tuple that reaches a Python __repr__ (repr_reaches)
+ * among its first 64 containers. */
 static NO_INLINE int repr_items(SPYContext *c, SPYValue *callee, SPYValue *v) {
     if (callee != c->types[SPY_STRING] && callee != c->field_calls[0] && callee != c->field_calls[1]) return 0;
-    for (size_t i = 0; i < c->repr_len; i++) if (c->repr_stack[i] == v) return 0;
-    for (size_t i = 0; i < v->as.seq.len; i++) if (repr_method(c, v->as.seq.items[i])) return 1;
-    return 0;
+    int budget = 64;
+    return repr_reaches(c, v, &budget);
+}
+/* The repr job whose state and c->replacing are at index at of m's
+ * stack, and those it is nested in, end on an error in it. */
+static void repr_failed(SPYContext *c, Machine *m, size_t at) {
+    for (; at && at < m->len && m->stack[at] == c->replacing && m->stack[at - 1]->type == SPY_LIST; at -= 2) {
+        SPYValue *v = m->stack[at - 1]->as.seq.items[0];
+        if (v->type == SPY_STRING) return;
+        repr_drop(c, v);
+    }
 }
 /* Remove v, its job ended, from the repr stack. */
 static void repr_drop(SPYContext *c, SPYValue *v) {
@@ -33888,18 +33912,31 @@ static void repr_drop(SPYContext *c, SPYValue *v) {
 }
 /* Job state from its next item on: 1 at an item's __repr__, the call
  * *function with *env to enter (CALL_CHECKED), the state, c->replacing,
- * the method's name and the item on m's stack; else the job's text, or
- * NULL on an error, its container left the repr stack. The container's
- * length is read again after each item. */
+ * the method's name and the item on m's stack, or at a list or tuple
+ * item's own job (repr_call), the state and c->replacing under it; else
+ * the job's text, or NULL on an error, its container left the repr stack.
+ * The container's length is read again after each item. */
 static SPYValue *repr_from(SPYContext *c, Machine *m, SPYValue *state, SPYValue **function, SPYValue **env) {
     SPYValue *v = state->as.seq.items[0], *text = NULL, *index;
     for (size_t i = (size_t)state->as.seq.items[1]->as.integer_data.small; i < v->as.seq.len; i++) {
         SPYValue *item = v->as.seq.items[i];
-        if ((*function = repr_method(c, item))) {
+        int nested = !(*function = repr_method(c, item)) && repr_job(c, c->field_calls[0], item);
+        if (*function || nested) {
             if (!(index = int_value(c, (int64_t)i + 1))) break;
             spy_release(state->as.seq.items[1]); state->as.seq.items[1] = index;
-            if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, spy_retain(c->replacing)) ||
-                machine_push(c, m, spy_string(c, "__repr__", 8)) || machine_push(c, m, spy_retain(item)) ||
+            if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, spy_retain(c->replacing))) break;
+            if (nested) {
+                *env = NULL;
+                if (machine_push(c, m, spy_retain(c->field_calls[0])) || machine_push(c, m, spy_retain(item)) ||
+                    !(text = repr_call(c, m, env))) break;
+                if (*env) { *function = c->entering_init; return text; }
+                /* The item's job ended at once. */
+                spy_release(machine_pop(m)); spy_release(machine_pop(m));
+                if (sequence_append(c, state, text)) break;
+                spy_release(text); text = NULL;
+                continue;
+            }
+            if (machine_push(c, m, spy_string(c, "__repr__", 8)) || machine_push(c, m, spy_retain(item)) ||
                 !(*env = function_env(c, *function, 1, (SPYValue *[]){spy_retain(item)}, NULL, 1))) break;
             c->entering_init = *function; c->entering_kind = CALL_CHECKED;
             return spy_retain(c->types[SPY_STRING]);
@@ -34027,11 +34064,9 @@ static NO_INLINE SPYValue *repr_call(SPYContext *c, Machine *m, SPYValue **env) 
     int entered = repr_enter(c, v);
     if (!entered && (!state || !zero || sequence_append(c, state, v) || sequence_append(c, state, zero))) repr_drop(c, v);
     else if (!entered && (result = repr_from(c, m, state, &function, env)) && function) {
-        /* The state and marker take the callee's and argument's places. */
-        size_t at = m->len - 6;
-        spy_release(m->stack[at]); spy_release(m->stack[at + 1]);
-        m->stack[at] = m->stack[at + 2]; m->stack[at + 1] = m->stack[at + 3];
-        m->stack[at + 2] = m->stack[at + 4]; m->stack[at + 3] = m->stack[at + 5];
+        /* What the job pushed takes the callee's and argument's places. */
+        spy_release(m->stack[len - 2]); spy_release(m->stack[len - 1]);
+        memmove(&m->stack[len - 2], &m->stack[len], (m->len - len) * sizeof(*m->stack));
         m->len -= 2;
         spy_release(state); spy_release(zero);
         return result;
@@ -34062,6 +34097,7 @@ static NO_INLINE Machine *text_returned(SPYContext *c, Machine *m, size_t argc, 
     if (!text || (format ? !joined : sequence_append(c, state, text))) {
         if (!format) repr_drop(c, items[0]);
         spy_release(state); spy_release(text);
+        repr_failed(c, m, m->len - 1);
         return m;
     }
     spy_release(text);

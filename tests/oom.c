@@ -264,7 +264,9 @@ static const char *const programs[] = {
     "def mapped(s): return [list(map(hash, [(s,)])), [[h for h in map(hash, [(1, (s,))])], [sum(map(hash, [(s, 2)]))]]][1:]\n"
     "print(mapped(S()))\n"
     "def listed(s): return ['%s' % [s], ['%r|%s' % ((s, 1), [2, s]), ['%(k)a' % {'k': [s]}]]][1:]\n"
-    "print(listed(S()))\n",
+    "print(listed(S()))\n"
+    "def nested(s): return [repr([1, [s]]), [str(([s], (s,))), ['%s' % [[s]]]]][1:]\n"
+    "print(nested(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"
