@@ -343,7 +343,8 @@ These run as machines on the heap, in one native activation of
   `__setattr__`, property setter or `__set__` that `setattr` calls;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`
-  and `pop` and `set.add`, `discard` and `remove`, and the items'
+  and `pop` and `set.add`, `discard` and `remove`, and there the items'
+  `__hash__` of a tuple key, in order, a nested tuple's first, and the items'
   `__hash__` that `set`, `frozenset`, `dict.fromkeys` and a set's
   `update` of a list or tuple, and a set display's starred list or tuple,
   call, and the `__eq__` they then call on a present key of the same hash,

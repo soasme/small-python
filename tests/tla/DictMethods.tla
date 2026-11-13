@@ -16,9 +16,11 @@
 (* reversed(), and __missing__ in subclasses behave as documented, a       *)
 (* missing key raising KeyError, a present key of the same hash compared   *)
 (* by its Python __eq__ (which loops) in get, setdefault, pop and a set's  *)
-(* add, discard and remove; and keys(), values(), and items() are          *)
-(* live views, keys and items set-like (their operators accept any         *)
-(* iterable and return sets) with a mapping attribute, values not.         *)
+(* add, discard and remove, a tuple key hashing its items in order, depth  *)
+(* first, and keeping its hash unless an item fails; and keys(), values(), *)
+(* and items() are live views, keys and items set-like (their operators    *)
+(* accept any iterable and return sets) with a mapping attribute, values   *)
+(* not.                                                                    *)
 (*                                                                         *)
 (* A program builds dicts d1 and d2 from two maps of at most two entries   *)
 (* over keys 1, 2, 3 and values 10, 20 and applies one of OPS: d1 | d2,    *)
@@ -68,7 +70,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "fromkeys_hash_fails", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
-          "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
+          "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
@@ -118,6 +120,9 @@ Case(c) ==
       [] c = "hashed_key_methods" -> "('x', 'x', 0, 1, [1, 2, 1, 1])"
       \* An equal key of the same hash is found by its Python __eq__.
       [] c = "equal_key_methods" -> "(1, 1, 0, 1, {}, 1, None, set(), ['b1b2', 'b1c1', 'a1a2', 'a1a3', 'a1x1', 'a1a4', 'b1b3'])"
+      \* A tuple key hashes its items in order, depth first, once.
+      [] c = "tuple_key_hashed" -> "(1, 1, 0, [1, 3, 1, 3, 4, 4])"
+      [] c = "tuple_key_hash_fails" -> "(\"cannot use 'tuple' as a dict key (no)\", \"cannot use 'tuple' as a dict key (no)\", [1, 1])"
       [] c = "ctor_keys_attribute" -> "[{'a': 'aa'}, {'p': 1}, {'o': 'oo'}]"
       \* A mapping's keys are listed before the first is looked up (13.2.3 DictMerge).
       [] c = "ctor_keys_listed" -> "({'a': 'A', 'b': 'B'}, None, ['ka', 'kb', 'ga', 'gb', 'ka', 'kb', 'ga', 'gb'])"
