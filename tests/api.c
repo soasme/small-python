@@ -1451,6 +1451,11 @@ int main(int argc, char **argv) {
                "def tied():\n    ts = sorted([(0, Tied(i % 3)) for i in range(12)])\n    return sum(k * t[1].v for k, t in enumerate(ts))");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "tied()", "tied.py"), SPY_STOP_STEPS, &pauses)) == 98 && pauses > 1);
+    /* So do index, count and remove of an item a call gives. */
+    execute(c, "found = [Tied(i) for i in range(20)]");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "found.index(Tied(19)) + found.count(Tied(3)) + len(found.remove(Tied(5)) or found)", "found.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 39 && pauses > 2);
     /* So does sorted() of a set, a dict or an iterator of them. */
     execute(c, "class Ranked(Tied):\n    def __hash__(self): return self.v\n");
     pauses = 0;

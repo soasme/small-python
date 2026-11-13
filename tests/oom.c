@@ -274,7 +274,9 @@ static const char *const programs[] = {
     "print(adapted(S()))\n"
     "S.__lt__ = lambda a, b: [i for i in range(1)][0] == 1\n"
     "def ranked(s): return [sorted({s, S()}), [sorted({s: 1, S(): 2}.keys()), [sorted(iter([s, S()]))]]][1:]\n"
-    "print(ranked(S()))\n",
+    "print(ranked(S()))\n"
+    "def sought(s): l = [1, s]; return [l.index(S()), [l.count(S()), [(s,).index(S()), [l.remove(S())]]]][1:]\n"
+    "print(sought(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

@@ -24305,6 +24305,8 @@ static NO_INLINE SPYValue *fold_begin(SPYContext *c, Machine *m, size_t argc, SP
     return function ? spy_retain(c->types[SPY_STRING]) : value;
 }
 static SPYValue *setattr_call(SPYContext *, Machine *, SPYValue **);
+static ALWAYS_INLINE SPYValue *searched(SPYValue *, int, size_t, int *);
+static SPYValue *search_call(SPYContext *, Machine *, int, SPYValue *, SPYValue *, size_t, int64_t, SPYValue **, SPYValue **);
 static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc], *callee = argv[-1], *result;
     if (n->a->kind == N_ATTR && (!(n->flags & F_CALLEE_FIRST) || callee == c->unbound)) {
@@ -24440,7 +24442,19 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         release_all(argc, held); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    int id = consumer_of(c, callee, -1, argc, argv);
+    int id;
+    SPYValue *seq = calls ? searched(callee, -1, argc, &id) : NULL;
+    if (seq) {
+        /* So does a bound index, count or remove of a list or tuple
+         * evaluated before its argument (search_call). */
+        SPYValue *x = spy_retain(argv[0]);
+        spy_retain(callee);
+        for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
+        SPYValue *function = search_call(c, m, id, x, seq, 0, 0, env, &result);
+        spy_release(x); spy_release(callee);
+        return function ? spy_retain(c->types[SPY_STRING]) : result;
+    }
+    id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);

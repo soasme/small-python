@@ -6,7 +6,8 @@
 # stop at the first match, count compares every item, and a missing item
 # raises ValueError. Exceptions from __eq__ propagate, items the comparisons
 # add or remove are seen as they are read, and remove deletes nothing past
-# the end, inside functions as at module level and for any call form.
+# the end, inside functions as at module level and for any call form,
+# the item sought a call's result too.
 from harness import *
 
 log = []
@@ -83,3 +84,14 @@ def main():
 
 assert_eq(main(), expected)
 assert_eq(results(), expected)
+
+def called():
+    del log[:]
+    xs = [1, Item("e", 2), 3]
+    out = [xs.index(Item("n", 3)), xs.count(Item("m", 2)), (1, Item("f", 2)).index(Item("o", 2))]
+    xs.remove(Item("r", 3))
+    out.append(len(xs))
+    return out, list(log)
+
+assert_eq(called(), ([2, 1, 1, 2], [("n", 1), ("e", "n"), ("n", 3), ("m", 1), ("e", "m"), ("m", 3), ("o", 1), ("f", "o"),
+                                    ("r", 1), ("e", "r"), ("r", 3)]))

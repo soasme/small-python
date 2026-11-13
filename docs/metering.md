@@ -385,8 +385,8 @@ These run as machines on the heap, in one native activation of
   and inside such pairs, the `__eq__` and then the ordering method, or
   its reflection, that `<`, `<=`, `>` or `>=` of two lists or two tuples,
   also in a comparison chain, calls on such items, the `__eq__` that `index`, `count` or `remove` of
-  one item in a list or tuple calls on its items, in a call whose object
-  holds a call or in code compiled while pausing, the `__lt__` or `__gt__`
+  one item in a list or tuple, called as its method with that item alone,
+  calls on its items, the `__lt__` or `__gt__`
   that `min` or `max` of a list's or tuple's items or of the arguments
   calls on them, in such calls, and the reflected
   operator or comparison method of an
