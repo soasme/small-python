@@ -123,8 +123,9 @@ Case(c) ==
       \* A tuple key hashes its items in order, depth first, once.
       [] c = "tuple_key_hashed" -> "(1, 1, 0, [1, 3, 1, 3, 4, 4])"
       [] c = "tuple_key_hash_fails" -> "(\"cannot use 'tuple' as a dict key (no)\", \"cannot use 'tuple' as a dict key (no)\", [1, 1])"
-      \* A tuple key equal to a stored one is found by its items' Python __eq__.
-      [] c = "tuple_key_equal" -> "(1, 2, False, 1, ['a1a2', 'b1b2', 'x1c1'])"
+      \* A tuple key equal to a stored one is found by its items' Python __eq__,
+      \* its hash just computed or kept.
+      [] c = "tuple_key_equal" -> "(1, 2, False, 1, 1, 1, ['a1a2', 'b1b2', 'x1c1', 'a1a3', 'a1a3'])"
       [] c = "ctor_keys_attribute" -> "[{'a': 'aa'}, {'p': 1}, {'o': 'oo'}]"
       \* A mapping's keys are listed before the first is looked up (13.2.3 DictMerge).
       [] c = "ctor_keys_listed" -> "({'a': 'A', 'b': 'B'}, None, ['ka', 'kb', 'ga', 'gb', 'ka', 'kb', 'ga', 'gb'])"

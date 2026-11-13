@@ -3,9 +3,9 @@
 # the same hash by RichCompare of the stored key with it, which compares
 # their items in order, nested tuples depth first, by Python __eq__
 # methods that may loop, the stored item's first; a display, subscript,
-# store, deletion, in test, get or add, and a set's comparison and union,
-# do so whether or not the key's hash was just computed, and an error
-# propagates.
+# store, deletion, in test, get, setdefault, pop, add, discard or remove,
+# and a set's comparison and union, do so whether or not the key's hash
+# was just computed, and an error propagates.
 from harness import *
 
 log = []
@@ -54,6 +54,19 @@ def main():
     def gen():
         yield (K(1, "h"),) in s
     check(lambda: list(gen()), [True], ["ah"])
+    # A kept hash leaves the items' comparison to get, setdefault, pop,
+    # add, discard and remove.
+    kept = (K(1, "j"), 1)
+    hash(kept)
+    e = {(a, 1): "x"}
+    check(lambda: (e.get(kept), e.setdefault(kept, 0), e.pop(kept), e), ("x", "x", "x", {}), ["aj", "aj", "aj"])
+    one = (K(1, "o"),)
+    hash(one)
+    def methods():
+        t = {(a,)}
+        t.add(one); t.discard(one); t.add(one); t.remove(one)
+        return len(t)
+    check(methods, 0, ["ao", "ao"])
 main()
 
 class Raising:

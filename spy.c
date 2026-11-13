@@ -14193,6 +14193,7 @@ typedef struct {
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
     struct Sorter *sorter;
 } Consumer;
+static int consumer_lookup(SPYContext *, Machine *, Consumer *, SPYValue *, int64_t, MapCursor);
 /* An assignment's unpacking, collecting in result the items for a target
  * list of count targets with a star at index star (unpack_step); a
  * display's starred item, adding them to result, the display, which it
@@ -22786,12 +22787,18 @@ static int called_iterator(SPYValue *v) {
     int kind = v->as.iterator.kind;
     return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE);
 }
+/* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
+ * Python, or it is a tuple whose items' __hash__ or __eq__ may be
+ * (key_reaches). */
+static ALWAYS_INLINE int hashed_item(SPYContext *c, SPYValue *item) {
+    return item->type == SPY_TUPLE ? key_reaches(c, item) : hash_function(c, item) != NULL;
+}
 /* Whether a set takes v's items on the machine, a list or tuple holding
- * one whose __hash__ is Python (KEY_HASH). */
+ * a hashed_item. */
 static int hashed_items(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
     for (size_t i = 0; i < v->as.seq.len; i++)
-        if (hash_calls(c, v->as.seq.items[i])) return 1;
+        if (hashed_item(c, v->as.seq.items[i])) return 1;
     return 0;
 }
 /* Whether a consumer takes v's items on the machine: a generator it can
@@ -23256,6 +23263,15 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         item = spy_retain(s->item);
         if ((*env = function_env(c, function, 1, &item, NULL, 1))) return function;
         spy_release(function);
+        return NULL;
+    }
+    if (s->keyed == KEY_HASH && s->item->type == SPY_TUPLE && !hash_calls(c, s->item)) {
+        /* A tuple hashed in C is looked up on the machine (consumer_lookup). */
+        int64_t hash;
+        item = s->item;
+        s->item = NULL; s->keyed = 0;
+        if (!map_hash(c, s->result, item, &hash)) consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash));
+        spy_release(item);
         return NULL;
     }
     if (s->keyed == KEY_HASH && s->item->type == SPY_TUPLE) {
@@ -23827,15 +23843,21 @@ static SPYValue *hash_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue
  * argv, which hashes key first (hashing_call): its Python __hash__,
  * entered (CALL_HASH) as c->entering_init with *env, callee, the
  * arguments, method and argc kept on m's stack for the call
- * (hash_returned); else NULL. */
+ * (hash_returned); or, the hash computed in C, the first Python __eq__ of
+ * its lookup in its map (compare_call), entered as an operator's; else
+ * NULL. */
+static SPYValue *compare_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue *const *, SPYValue *, SPYValue **);
 static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *callee, int method, size_t argc, SPYValue *const *argv,
                                           SPYValue *key, SPYValue **env) {
-    SPYValue *operands[11] = {callee}, *function;
+    SPYValue *operands[11] = {callee}, *function, *map;
+    size_t at = 0;
     memcpy(operands + 1, argv, argc * sizeof(*argv));
     operands[argc + 1] = int_value(c, method); operands[argc + 2] = int_value(c, (int64_t)argc);
-    function = hash_call(c, m, key, argc + 3, operands, env);
+    if ((function = hash_call(c, m, key, argc + 3, operands, env))) { c->entering_init = function; c->entering_kind = CALL_HASH; }
+    else if (!c->error_type[0] && (map = hashed_map(callee, method, argc, argv, &at)) &&
+             (function = compare_call(c, m, map, argc + 3, operands, key, env))) { c->entering_init = function; c->entering_kind = CALL_OPERATOR; }
     spy_release(operands[argc + 1]); spy_release(operands[argc + 2]);
-    if (function) { c->entering_init = function; c->entering_kind = CALL_HASH; spy_release(function); }
+    spy_release(function);
     return function;
 }
 static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
@@ -25087,6 +25109,11 @@ static int hashes_key(SPYValue *container, int lookup) {
     return container->type == SPY_DICT || container->type == SPY_FROZENDICT ||
            (lookup && (container->type == SPY_SET || container->type == SPY_FROZENSET));
 }
+/* Whether comparing key calls a Python __eq__: it is an instance with one
+ * (python_eq), or a tuple holding one (pair_reaches). */
+static int eq_reaches(SPYValue *key) {
+    return python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0));
+}
 /* Whether a lookup of key may compare it by a Python __eq__ on the machine
  * (lookup_call): a plain instance, or a tuple whose items may. */
 static ALWAYS_INLINE int lookup_key(SPYValue *key) {
@@ -25181,6 +25208,24 @@ static int lookup_stores(Instruction *ins) {
 static ALWAYS_INLINE int store_lookup(SPYValue *map, SPYValue *key, int display) {
     return lookup_key(key) && (map->type == SPY_DICT || (display && map->type == SPY_SET));
 }
+/* For a call whose key, hashed in C, may be compared by a Python __eq__
+ * in map (store_lookup): the lookup's first Python __eq__ (lookup_call),
+ * owned, with *env, the count operands for the call (call_hashed) under
+ * the lookup's state on m's stack; else NULL, m's stack as it was, the
+ * call to run in C, or an error. */
+static NO_INLINE SPYValue *compare_call(SPYContext *c, Machine *m, SPYValue *map, size_t count, SPYValue *const *operands, SPYValue *key,
+                                        SPYValue **env) {
+    int64_t hash;
+    ptrdiff_t found;
+    size_t len = m->len;
+    if (!store_lookup(map, key, 1) || map_hash(c, map, key, &hash) || !map_collides(map, key, hash)) return NULL;
+    for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) goto fail;
+    SPYValue *function = lookup_call(c, m, map, key, hash, map_cursor(namespace_map(map), hash), &found, env);
+    if (function) return function;
+fail:
+    while (m->len > len) spy_release(machine_pop(m));
+    return NULL;
+}
 /* Lookup step ins of key, of hash, in map ends on m with entry found, or
  * -1, or the error pending: a subscript with the entry's value or a
  * KeyError, in with its truth (operator_finish); a store with the value
@@ -25267,7 +25312,7 @@ static Machine *lookup_step(SPYContext *c, Machine *m, Instruction *ins, SPYValu
 }
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
- * instance with one, or a tuple holding one (pair_reaches), and their
+ * instance with one, or a tuple holding one (eq_reaches), and their
  * lengths do not decide the comparison. */
 static int set_walks(int op, SPYValue *x, SPYValue *y) {
     int rich = rich_kind(op);
@@ -25277,7 +25322,7 @@ static int set_walks(int op, SPYValue *x, SPYValue *y) {
         return 0;
     for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++) {
         SPYValue *key = i < x->as.map.len ? map_items(x)[i].key : map_items(y)[i - x->as.map.len].key;
-        if (python_eq(key) || (key->type == SPY_TUPLE && key->listed && !key->as.seq.plain && pair_reaches(key, 0))) return 1;
+        if (eq_reaches(key)) return 1;
     }
     return 0;
 }
@@ -31421,12 +31466,14 @@ static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue 
 }
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv hashes a key that enters a Python __hash__ (hash_calls)
- * first, *key then: in its dict or set (hashed_map), though pop of an
- * empty dict hashes none, or a tuple hash() takes. */
+ * first, or compares it by a Python __eq__ (eq_reaches), *key then: in its
+ * dict or set (hashed_map), though pop of an empty dict hashes none, or a
+ * tuple hash() takes. */
 static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **key) {
     size_t at = 0;
     SPYValue *map = hashed_map(callee, method, argc, argv, &at);
-    if ((!map && (method >= 0 || argc != 1 || argv[0]->type != SPY_TUPLE || !is_builtin(callee, B_HASH))) || !hash_calls(c, argv[at])) return 0;
+    if ((!map && (method >= 0 || argc != 1 || argv[0]->type != SPY_TUPLE || !is_builtin(callee, B_HASH))) ||
+        !(hash_calls(c, argv[at]) || (map && eq_reaches(argv[at])))) return 0;
     *key = argv[at];
     return !map || (method != M_DICT_POP && (callee->type != SPY_BOUND_METHOD || callee->as.bound.method != M_DICT_POP)) || map->as.map.len;
 }
@@ -32705,7 +32752,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         return status;
     }
     if (s->id == B_SET || s->id == B_FROZENSET || s->id == EXTEND_ITEMS || s->id == B_FROMKEYS || (s->id == B_EXTEND && is_set(s->result))) {
-        if ((is_set(s->result) || s->id == B_FROMKEYS) && hash_calls(c, item)) { s->item = item; s->keyed = KEY_HASH; return 0; }
+        if ((is_set(s->result) || s->id == B_FROMKEYS) && hashed_item(c, item)) { s->item = item; s->keyed = KEY_HASH; return 0; }
         int status = s->id == B_FROMKEYS ? map_set(c, s->result, item, s->best) : s->id != EXTEND_ITEMS ? set_add(c, s->result, item) :
                      display_add(c, s->result, item);
         spy_release(item);

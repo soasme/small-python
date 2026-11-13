@@ -3,8 +3,9 @@
 # list and dict.fromkeys find a tuple element equal to a stored tuple of
 # the same hash by RichCompare of the stored tuple with it, comparing
 # their items in order, nested tuples depth first, by Python __eq__
-# methods that may loop, the stored item's first; the stored tuple is
-# kept, and an error stops the build.
+# methods that may loop, the stored item's first, whether or not their
+# hashes were just computed; the stored tuple is kept, and an error stops
+# the build.
 from harness import *
 
 log = []
@@ -42,6 +43,10 @@ def main():
     def gen():
         yield len(set([(K(6, "n"),), (K(6, "o"),)]))
     check(lambda: list(gen()), [1], ["no"])
+    # Tuples whose hashes are kept are compared all the same.
+    p, q = (K(7, "p"), 1), (K(7, "q"), 1)
+    hash(p); hash(q)
+    check(lambda: (len(set([p, q])), len(dict.fromkeys((q, p))), len({*[p, q]})), (1, 1, 1), ["pq", "qp", "pq"])
 main()
 
 class Raising:
