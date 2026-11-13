@@ -2214,7 +2214,7 @@ static int same_bytes(SPYContext *c, const char *a, const char *b, size_t n) {
 }
 /* Whether dicts or sets a and b of one length hold equal items from entry
  * i of a on. */
-static int map_equal_from(SPYValue *a, SPYValue *b, int type, size_t i) {
+static ALWAYS_INLINE int map_equal_from(SPYValue *a, SPYValue *b, int type, size_t i) {
     for (; i < a->as.map.len; i++) {
         if ((i & 15) == 15 && spend(a->ctx, 1)) return 0;
         SPYValue *key = spy_retain(map_items(a)[i].key);
