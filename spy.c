@@ -26907,17 +26907,38 @@ static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *r
     spy_release(result); spy_release(name); spy_release(item);
     return value;
 }
+/* hash() of tuple t, a map's next item, whose items' __hash__ is Python
+ * (hash_calls): t and its name on m's stack under c->converting, the
+ * tuple's walk over them (tuple_push), its first Python __hash__, owned,
+ * in *fn with *env (tuple_next), 1; else the hash in *fn, 3, or -1 on an
+ * error. */
+static int hash_convert(SPYContext *c, Machine *m, SPYValue *t, SPYValue **fn, SPYValue **env) {
+    int64_t hash;
+    SPYValue *name = spy_string(c, "__hash__", 8);
+    if (!name || machine_push(c, m, spy_retain(t)) || machine_push(c, m, name) || machine_push(c, m, spy_retain(c->converting))) return -1;
+    if (!tuple_push(c, m, t, 0, HASH_SEED) && (*fn = tuple_next(c, m, env, &hash))) return 1;
+    for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+    /* A walk that called no Python gives the hash at once. */
+    return c->error_type[0] || !(*fn = int_value(c, hash)) ? -1 : 3;
+}
+/* callee of a map's one item, an instance or a tuple not hashed: an
+ * instance's conversion by a Python method (convert_call), or a tuple's
+ * hash by its items' Python __hash__ (hash_convert); else 0. */
+static NO_INLINE int item_convert(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *item, SPYValue **fn, SPYValue **env) {
+    SPYValue *found[2], *function;
+    if (item->type == SPY_TUPLE) return hash_calls(c, item) ? hash_convert(c, m, item, fn, env) : 0;
+    return (function = conversion_method(c, callee, 1, &item, found)) ? convert_call(c, m, function, item, found[0], found[1], fn, env) : 0;
+}
 /* For map v of a builtin function or a class: its next item, the call of
- * its iterables' next items (zip_items); for one item, an instance whose
- * conversion is a Python method, that call (convert_call); else the
- * function called here, the item in *fn, 3. -1 when the iterables ended
- * or raised. */
+ * its iterables' next items (zip_items); for one item that callee may
+ * convert by Python (item_convert), that conversion; else the function
+ * called here, the item in *fn, 3. -1 when the iterables ended or raised. */
 static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
-    SPYValue *callee = v->as.iterator.source->as.seq.items[0], *items = zip_items(c, v), *found[2], *function;
+    SPYValue *callee = v->as.iterator.source->as.seq.items[0], *items = zip_items(c, v), *item;
     if (!items) return -1;
-    if (items->as.seq.len == 1 && items->as.seq.items[0]->type == SPY_INSTANCE &&
-        (function = conversion_method(c, callee, 1, items->as.seq.items, found))) {
-        int status = convert_call(c, m, function, items->as.seq.items[0], found[0], found[1], fn, env);
+    int status;
+    if (items->as.seq.len == 1 && ((item = items->as.seq.items[0])->type == SPY_INSTANCE || (item->type == SPY_TUPLE && item->listed && !item->as.seq.hashed && is_builtin(callee, B_HASH))) &&
+        (status = item_convert(c, m, callee, item, fn, env))) {
         spy_release(items);
         return status;
     }
@@ -27096,6 +27117,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         if (result) with_entered(c, m, &code[pc - 1], machine_pop(m), result);
                     } else if (kind == CALL_ITEM) {
                         SPYValue *source = m->blocks[m->block_len - 1].value;
+                        /* hash() of a tuple goes on with its next item's __hash__ (hash_convert). */
+                        if (m->len && m->stack[m->len - 1] == c->tupling) {
+                            Machine *walk = tuple_returned(c, m, CALL_ITEM, &result);
+                            if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
+                        }
                         if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result);
                         if (filtering(source)) {
                             int again = 0;
@@ -27120,6 +27146,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         /* CALL_NEXT: a filter's test tries the next item when false. */
                         SPYValue *iterator = m->blocks[m->block_len - 1].value;
                         int again = 0;
+                        if (m->len && m->stack[m->len - 1] == c->tupling) {
+                            Machine *walk = tuple_returned(c, m, CALL_NEXT, &result);
+                            if (walk != m) { m = walk; f = m->frame; code = m->code->items; pc = m->pc; continue; }
+                        }
                         if (m->len && m->stack[m->len - 1] == c->converting) result = item_converted(c, m, result);
                         if (filtering(iterator)) result = filter_returned(c, iterator, result, &again);
                         if (again) pc--;

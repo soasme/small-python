@@ -260,7 +260,9 @@ static const char *const programs[] = {
     "def gathered(s): return [set([(s,), (S(),)]), [dict.fromkeys([(1, (s,)), (1, (S(),))]), [len({*[(S(), 2), (s, 2)]})]]][1:]\n"
     "print(gathered(S()))\n"
     "def held(s): t = (s,); hash(t); return [{(S(),): 1}.get(t), [set([(S(),), t]), [{(S(),)}.add(t)]]][1:]\n"
-    "print(held(S()))\n",
+    "print(held(S()))\n"
+    "def mapped(s): return [list(map(hash, [(s,)])), [[h for h in map(hash, [(1, (s,))])], [sum(map(hash, [(s, 2)]))]]][1:]\n"
+    "print(mapped(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

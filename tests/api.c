@@ -1224,6 +1224,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "{(Alike(),): 1}.get(held) + len(set([(Alike(),), held]))", "held.py"), SPY_STOP_STEPS,
                                  &pauses)) == 2 && pauses > 1);
+    /* So does map(hash) of tuples. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "list(map(hash, [(Spun(),), (1, (Spun(),))])) == [hash((4,)), hash((1, (4,)))]", "maphash.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
     /* any() and all() of a list, a tuple or a generator call a Python
      * __bool__ or __len__ on the machine. */
     execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"

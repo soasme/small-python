@@ -76,6 +76,7 @@ SOURCES = {
                    "    def __format__(s, spec):\n        for _ in (): pass\n        log.append('f')\n        return 'F' + spec\n"
                    "a, b = K(1), K(2)\n"
                    "result = (list(map(str, [a, b])), list(map(repr, (a, 7))), ','.join(map(str, iter([a, b]))), list(map(format, [a])), log)",
+    "map_hash_tuple": "log = []\nclass H:\n    def __init__(s, v): s.v = v\n    def __hash__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v\nresult = (list(map(hash, [(H(1),), (2, (H(3), H(4)))])) == [hash((1,)), hash((2, (3, 4)))], log)",
     "map_convert_bad": "class W:\n    def __str__(s):\n        for _ in (): pass\n        return 1\nresult = list(map(str, [W()]))",
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
                           "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"

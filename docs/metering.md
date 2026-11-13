@@ -329,7 +329,8 @@ These run as machines on the heap, in one native activation of
   `__round__` and `__reversed__` that `str`, `repr`, `format`, `len`,
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
   `round` and `reversed` call, and the same methods of the items that a
-  `map` of one of those functions takes, the `__bool__` or `__len__`
+  `map` of one of those functions takes, a tuple item's items'
+  `__hash__` too, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items
   by, the `__str__` and `__repr__` that `str` `%` calls on the arguments
   of `%s`, `%r` and `%a`, each after the conversions before it, the
