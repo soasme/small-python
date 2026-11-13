@@ -38,11 +38,13 @@ class K:
 
 def hashed(p):
     log, values = [], (1, 1) if p["fails"] == "equal" else (1, 2)
+    def item(v):
+        return (K(v, log, p["fails"]), 0) if p["tuple"] else K(v, log, p["fails"])
     def generator():
         for v in values:
             log.append("y%d" % v)
-            yield K(v, log, p["fails"])
-    source = generator() if p["source"] == "generator" else [K(v, log, p["fails"]) for v in values]
+            yield item(v)
+    source = generator() if p["source"] == "generator" else [item(v) for v in values]
     try:
         if p["form"] == "update":
             r = {0}
@@ -53,7 +55,7 @@ def hashed(p):
         return ("TypeError: " + str(error), " ".join(log), frozenset())
     except ValueError:
         return ("ValueError", " ".join(log), frozenset())
-    return (type(r).__name__, " ".join(log), frozenset(getattr(v, "v", v) for v in r))
+    return (type(r).__name__, " ".join(log), frozenset(getattr(v[0] if type(v) is tuple else v, "v", v) for v in r))
 
 
 def outcome(p):

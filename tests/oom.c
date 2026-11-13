@@ -252,7 +252,9 @@ static const char *const programs[] = {
     "def keyed(s): t = (1, (s,)); return [{t: 1}, [{(s, 2): 0}[s, 2], [{}.get((s,)), [(s, s) in {1}, [{(s,), (2, s)}]]]]][1:]\n"
     "print(keyed(S()))\n"
     "def hashed(s): return [hash((s,)), [hash((1, (s, 2))), [hash(((s,), s))]]][1:]\n"
-    "print(hashed(S()))\n",
+    "print(hashed(S()))\n"
+    "def built(s): return [set([(s,)]), [frozenset([(1, (s,))]), [dict.fromkeys([(s, 2)]), [len({*[(s,), (2, s)]})]]]][1:]\n"
+    "print(built(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

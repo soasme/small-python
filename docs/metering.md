@@ -345,10 +345,10 @@ These run as machines on the heap, in one native activation of
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`
   and `pop` and `set.add`, `discard` and `remove`, and there the items'
   `__hash__` of a tuple key, in order, a nested tuple's first, as in `hash`
-  of a tuple, and the items'
-  `__hash__` that `set`, `frozenset`, `dict.fromkeys` and a set's
-  `update` of a list or tuple, and a set display's starred list or tuple,
-  call, and the `__eq__` they then call on a present key of the same hash,
+  of a tuple, and the items' `__hash__` that `set`, `frozenset`,
+  `dict.fromkeys` and a set's `update` of a list or tuple, and a set
+  display's starred list or tuple, call, a tuple element's items' too,
+  and the `__eq__` they then call on a present key of the same hash,
   the present key's first and then, on `NotImplemented`, the element's;
   the `__index__` of an
   instance indexing a `list`, `tuple`, `str`, `bytes`, `bytearray` or

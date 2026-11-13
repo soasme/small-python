@@ -1205,6 +1205,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hash((Spun(), (1, Spun()))) == hash((4, (1, 4)))", "hash.py"), SPY_STOP_STEPS, &pauses)) == 1 &&
            pauses > 1);
+    /* And a set or dict.fromkeys of tuples. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(set([(Spun(),), (1, Spun())])) + len(dict.fromkeys([(Spun(), 2)]))", "tuples.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* any() and all() of a list, a tuple or a generator call a Python
      * __bool__ or __len__ on the machine. */
     execute(c, "class Falsy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"

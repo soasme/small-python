@@ -23,7 +23,8 @@
 (*     "h" and its value, the second's returning, raising TypeError or     *)
 (*     raising ValueError, or both of value 1, the second found equal by   *)
 (*     the first's Python __eq__ (which loops), logging "e" and its value; *)
-(*     a generator logs "y" and the value before each item.                *)
+(*     a generator logs "y" and the value before each item; with tuple,    *)
+(*     each object is the first item of a pair (object, 0).                *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -40,7 +41,7 @@ Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
             \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update"}, source : {"list", "generator"},
-                  fails : {"no", "TypeError", "ValueError", "equal"}]
+                  fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -62,7 +63,7 @@ Keep(s, seen) ==
 \* A list's items exist before the set hashes them; a generator gives each
 \* as the set takes it.
 RunHashed(p) ==
-    <<CASE p.fails = "TypeError" -> "TypeError: cannot use 'K' as a set element (t)"
+    <<CASE p.fails = "TypeError" -> "TypeError: cannot use '" \o (IF p.tuple THEN "tuple" ELSE "K") \o "' as a set element (t)"
         [] p.fails = "ValueError" -> "ValueError"
         [] OTHER -> IF p.form = "frozenset" THEN "frozenset" ELSE "set",
       CASE p.fails = "equal" -> IF p.source = "list" THEN "h1 h1 e1" ELSE "y1 h1 y1 h1 e1"
