@@ -297,8 +297,9 @@ These run as machines on the heap, in one native activation of
   instance's `__call__` too, the generator that an `enumerate`, or a
   `filter` whose function is `None` or native, takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
-  beside list, tuple and range iterators, and the calls of the maps that
-  they and an `enumerate` take items from, for a loop or a consumer below;
+  beside list, tuple and range iterators, and the calls of the maps, and
+  the Python `__next__` of the instances, that they and an `enumerate`
+  take items from, for a loop, a consumer below or `next`;
 - the generator a `yield from` delegates to, and those it delegates to
   in turn, when a step above resumes the delegating generator;
 - generators, maps, and instances whose class has a Python `__iter__`,

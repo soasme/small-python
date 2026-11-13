@@ -59,6 +59,9 @@ SOURCES = {
     "next_python": "class C:\n    def __init__(s, n): s.n = n\n    def __next__(s):\n        for _ in (): pass\n"
                    "        if not s.n: raise StopIteration\n        s.n -= 1\n        return s.n\n"
                    "c = C(1)\nresult = (next(c), next(c, 'end'), next(C(0), None))",
+    "adapt_python": "class C:\n    def __init__(s, n): s.n = n\n    def __iter__(s): return s\n    def __next__(s):\n        for _ in (): pass\n"
+                    "        if not s.n: raise StopIteration\n        s.n -= 1\n        return s.n\n"
+                    "result = (list(enumerate(C(2))), list(zip('ab', C(3))), list(map(abs, C(1))), next(zip(C(1), C(0)), 'end'))",
     "next_stop": 'result = next(iter([]))',
     "next_non_iterator": 'result = next([1])',
     "iter_sentinel_noncallable": 'result = iter(1, 2)',

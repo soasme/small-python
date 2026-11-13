@@ -1548,6 +1548,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "next(stepper) + next(stepper, 1) + next(Stepper(0), 2)", "next.py"), SPY_STOP_STEPS, &pauses)) == 3002 &&
            pauses > 2);
+    /* So do enumerate(), zip() and map() taking items from one, and next() of them. */
+    execute(c, "class Steps(Stepper):\n    def __iter__(self): return self\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(list(enumerate(Steps(2)))) + sum(map(abs, Steps(1))) + next(zip(Steps(1), Steps(1)))[1]", "adapt.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 2 + 2999 + 2999 && pauses > 4);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

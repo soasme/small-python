@@ -22814,6 +22814,11 @@ static NO_INLINE int delegating(Machine *m) {
     }
     return 0;
 }
+/* Whether an adapter's iterable s may give its next item by a call
+ * (adapts): a map, or an instance whose __next__ is on the machine now. */
+static int adapted_source(SPYContext *c, SPYValue *s) {
+    return (s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) || next_function(c, s);
+}
 /* Whether v is a zip or map, not strict, of a generator the machine
  * resumes (zip_fill), one made with a generator (its removed count's
  * first bit). */
@@ -22964,7 +22969,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS &&
-        (id != B_NEXT || !resumable(argv[0]))) return -1;
+        (id != B_NEXT || !(resumable(argv[0]) || (argv[0]->type == SPY_ITERATOR && adapts(argv[0]))))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -27187,9 +27192,9 @@ static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValu
     return 3;
 }
 static int next_call_of(SPYContext *, Machine *, SPYValue *, SPYValue **, SPYValue **);
-/* Whether iterator v takes items from a map: an enumerate of one, or a
- * zip or map, not strict, with one among its iterables (its removed
- * count's second bit). */
+/* Whether iterator v takes items from a map or an instance, whose next
+ * item may be a call: an enumerate of one, or a zip or map, not strict,
+ * with one among its iterables (its removed count's second bit). */
 static ALWAYS_INLINE int adapts(SPYValue *v) {
     int kind = v->as.iterator.kind;
     return (kind == I_ZIP || kind == I_MAP || kind == I_ENUMERATE) && (v->as.iterator.removed & 2) && !v->as.iterator.size;
@@ -27209,7 +27214,7 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
             inner = NULL;
             for (size_t i = (v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); !inner && i < source->as.seq.len; i++) {
                 SPYValue *s = source->as.seq.items[i];
-                if (s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) inner = s;
+                if ((s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) || next_function(c, s)) inner = s;
                 else if (!iterator_fast(c, s, &item)) return 0;
                 else if (!item) break;
                 else if (!adapted_item(c, v, item) && c->error_type[0]) break;
@@ -33755,14 +33760,14 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         v->as.iterator.source = source;
         v->as.iterator.kind = id == B_MAP ? I_MAP : id == B_ZIP ? I_ZIP : id == B_ENUMERATE ? I_ENUMERATE : I_REVERSED;
         /* A zip's or map's removed count marks a generator among its
-         * iterables (zip_of_generator), and its second bit a map, as an
-         * enumerate's of a map (adapts). */
+         * iterables (zip_of_generator), and its second bit a map or an
+         * instance, as an enumerate's of one (adapts). */
         if (id == B_ZIP || id == B_MAP)
             for (size_t i = id == B_MAP; i < source->as.seq.len; i++) {
                 SPYValue *s = source->as.seq.items[i];
-                v->as.iterator.removed |= (s->type == SPY_GENERATOR) | (s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) << 1;
+                v->as.iterator.removed |= (s->type == SPY_GENERATOR) | adapted_source(c, s) << 1;
             }
-        if (id == B_ENUMERATE && source->type == SPY_ITERATOR && source->as.iterator.kind == I_MAP) v->as.iterator.removed = 2;
+        if (id == B_ENUMERATE && adapted_source(c, source)) v->as.iterator.removed = 2;
         v->as.iterator.counter = owner ? spy_retain(owner) : counter;
         if (id == B_REVERSED && (is_dict(a) || is_view(a))) {
             SPYValue *map = is_dict(a) ? a : view_map(a);

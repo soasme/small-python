@@ -146,7 +146,17 @@ static const char *const programs[] = {
     "        for i in range(1): pass\n"
     "        raise StopIteration\n"
     "def h(n): return [next(n, 1), [next(N(), 2), list(map(next, [iter([3])]))]]\n"
-    "print(h(N()))\n",
+    "print(h(N()))\n"
+    "class M(N):\n"
+    "    def __init__(self): self.n = 2\n"
+    "    def __iter__(self): return self\n"
+    "    def __next__(self):\n"
+    "        for i in range(1): pass\n"
+    "        if not self.n: raise StopIteration\n"
+    "        self.n -= 1\n"
+    "        return self.n\n"
+    "def k(): return [list(enumerate(M())), [list(zip(M(), [1, 2])), [list(map(abs, M())), next(enumerate(M()), 0)]]]\n"
+    "print(k())\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"
