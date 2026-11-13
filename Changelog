@@ -47,6 +47,7 @@ Unreleased (0.10.0):
   __eq__ of a key of the same hash without nesting on the C stack, so they can pause
 - a tuple key of a dict or set calls its items' Python __hash__ without nesting on the C stack,
   so it can pause
+- hash() of a tuple calls its items' Python __hash__ without nesting on the C stack, so it can pause
 - added spy_callk(): a host function calls Python as Lua's lua_callk does,
   with a continuation, so the call can pause and does not nest on the C stack
 - make test-gc-stress runs the specification suite with frequent automatic collections

@@ -9,8 +9,9 @@
 (* or __getattr__, refusing objects without a __dict__ and read-only       *)
 (* attributes; vars(), dir() (sorted, or __dir__ listed), callable(),      *)
 (* id(), hash() (truncating big __hash__ results, refusing non-int ones    *)
-(* and classes that set __eq__ alone), object(), and type() with one or    *)
-(* three arguments.                                                        *)
+(* and classes that set __eq__ alone; a tuple's of its items' in order,    *)
+(* kept unless an item fails), object(), and type() with one or three      *)
+(* arguments.                                                              *)
 (*                                                                         *)
 (* A program takes an instance o of class A (with class attribute x), of   *)
 (* B(A) (setting y in __init__), of C (whose __getattr__ supplies names    *)
@@ -54,7 +55,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
 Cases == {"getattr_nonstr", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook",
           "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only",
-          "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
+          "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
           "type_bad_dict", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
           "issubclass_bad_first", "issubclass_bad_second", "object_no_attrs", "object_args",
           "object_dir_has", "delattr_class", "setattr_builtin_type", "getattr_type_default",
@@ -93,6 +94,10 @@ Case(c) ==
       [] c = "hash_bad" -> "TypeError: __hash__ method should return an integer"
       [] c = "hash_eq_only" -> "TypeError: unhashable type: 'Eq'"
       [] c = "hash_numeric" -> "(True, -2, -2)"
+      \* A tuple hashes its items in order, depth first, and keeps its hash;
+      \* an item's error keeps none.
+      [] c = "hash_tuple" -> "(True, True, [1, 2])"
+      [] c = "hash_tuple_fails" -> "[0, 0]"
       [] c = "type_one_arg" -> "(<class 'int'>, <class 'type'>, 'P')"
       [] c = "type_three_args" -> "('T', (<class '__main__.P'>,), 1, 'm')"
       [] c = "type_two_args" -> "TypeError: type() takes 1 or 3 arguments"

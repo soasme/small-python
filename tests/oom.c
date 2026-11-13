@@ -250,7 +250,9 @@ static const char *const programs[] = {
     "def find(s): d, t = {s: 1}, {s}; return [d.get(S()), [d.setdefault(S()), [t.add(S()), [t.discard(S()), [d.pop(S()), [t.add(s), [t.remove(S())]]]]]]][1:]\n"
     "print(find(S()))\n"
     "def keyed(s): t = (1, (s,)); return [{t: 1}, [{(s, 2): 0}[s, 2], [{}.get((s,)), [(s, s) in {1}, [{(s,), (2, s)}]]]]][1:]\n"
-    "print(keyed(S()))\n",
+    "print(keyed(S()))\n"
+    "def hashed(s): return [hash((s,)), [hash((1, (s, 2))), [hash(((s,), s))]]][1:]\n"
+    "print(hashed(S()))\n",
 
     "def gen(n):\n"
     "    try:\n"

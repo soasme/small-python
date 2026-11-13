@@ -23790,8 +23790,8 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
-    /* A dict or set method hashing an instance key enters its __hash__
-     * (hash_call_step). */
+    /* A dict or set method hashing an instance or tuple key, or hash() of
+     * a tuple, enters its first Python __hash__ (hash_call_step). */
     SPYValue *key;
     if (!may_hash(callee, method, argc, argv) || !hashing_call(c, callee, method, argc, argv, &key)) return c->unbound;
     SPYValue *function = hash_call_step(c, m, callee, method, argc, argv, key, env);
@@ -23856,7 +23856,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(argv[0]); spy_release(callee);
         return result;
     }
-    if (argc && (argv[0]->type == SPY_INSTANCE || (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
+    if (argc && (argv[0]->type == SPY_INSTANCE || (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
+                 (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     int id = consumer_of(c, callee, method, argc, argv);
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc ? spy_retain(argv[0]) : NULL, argc > 1 ? spy_retain(argv[1]) : NULL);
@@ -23991,7 +23992,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || (argc && argv[0]->type == SPY_INSTANCE)) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
-        (callee->type == SPY_NATIVE && ((argc == 1 && argv[0]->type == SPY_INSTANCE) ||
+        (callee->type == SPY_NATIVE && ((argc == 1 && (argv[0]->type == SPY_INSTANCE ||
+                                                       /* hash() of a tuple that may hold an instance (hashing_call) */
+                                                       (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
                                                        (argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE))) ||
                                         (argc == 3 && argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE) ||
@@ -25262,7 +25265,9 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         size_t argc = (size_t)m->stack[m->len - 1]->as.integer_data.small, at;
         SPYValue **operands = &m->stack[m->len - 3 - argc];
         SPYValue *map = hashed_map(operands[0], (int)operands[argc + 1]->as.integer_data.small, argc, operands + 1, &at);
-        if (!hashed) hash_failed(c, map, key);
+        /* hash() of a tuple has no map. */
+        if (!map) {
+        } else if (!hashed) hash_failed(c, map, key);
         else if (store_lookup(map, key, 1) && map_collides(map, key, hash)) {
             /* The call runs under the lookup's state (call_hashed). */
             m = lookup_step(c, m, ins, map, key, hash, map_cursor(map, hash), pc);
@@ -31251,15 +31256,15 @@ static SPYValue *hashed_map(SPYValue *callee, int method, size_t argc, SPYValue 
            ((intptr_t)function->as.native.data & 255) <= SET_REMOVE ? self : NULL;
 }
 /* Whether a call of callee, method number method of it or -1, with argc
- * arguments argv hashes a key whose class has a Python __hash__
- * (hash_function) first, in its dict or set (hashed_map), *key then; pop
- * of an empty dict hashes none. */
+ * arguments argv hashes a key that enters a Python __hash__ (hash_calls)
+ * first, *key then: in its dict or set (hashed_map), though pop of an
+ * empty dict hashes none, or a tuple hash() takes. */
 static NO_INLINE int hashing_call(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv, SPYValue **key) {
-    size_t at;
+    size_t at = 0;
     SPYValue *map = hashed_map(callee, method, argc, argv, &at);
-    if (!map || !hash_calls(c, argv[at])) return 0;
+    if ((!map && (method >= 0 || argc != 1 || argv[0]->type != SPY_TUPLE || !is_builtin(callee, B_HASH))) || !hash_calls(c, argv[at])) return 0;
     *key = argv[at];
-    return (method != M_DICT_POP && (callee->type != SPY_BOUND_METHOD || callee->as.bound.method != M_DICT_POP)) || map->as.map.len;
+    return !map || (method != M_DICT_POP && (callee->type != SPY_BOUND_METHOD || callee->as.bound.method != M_DICT_POP)) || map->as.map.len;
 }
 static SPYValue *set_item_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     int type = (int)((intptr_t)data >> 8), which = (int)((intptr_t)data & 255);
