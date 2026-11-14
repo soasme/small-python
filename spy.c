@@ -24218,6 +24218,7 @@ static NO_INLINE SPYValue *sequence_next(SPYContext *c, SPYValue *v, SPYValue **
  * bytes, hash, abs, round, reversed or next, calls on its first
  * argument, an instance, found[0] its name and found[1] the spec format or
  * the ndigits round passes it, or NULL; else NULL. */
+static SPYValue *index_function(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
     if (argv[0]->type == SPY_ITERATOR)
@@ -24230,10 +24231,20 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
-         id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && callee != c->types[SPY_STRING])) return NULL;
+         id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && id != B_HEX && id != B_OCT && id != B_BIN &&
+         id != B_CHR && callee != c->types[SPY_STRING])) return NULL;
     /* A class's methods are its metaclass's. */
     int class = argv[0]->type == SPY_CLASS;
     SPYValue *cls = class ? argv[0]->as.map.meta : argv[0]->as.map.parent, *function, *base = class ? NULL : argv[0]->as.map.base;
+    if (id == B_HEX || id == B_OCT || id == B_BIN || id == B_CHR) {
+        /* hex(), oct(), bin() and chr() of the int an instance's __index__
+         * returns, named by the builtin. */
+        const char *builtin = id == B_HEX ? "hex" : id == B_OCT ? "oct" : id == B_BIN ? "bin" : "chr";
+        *spec = NULL;
+        if (!(function = index_function(c, argv[0])) || !machine_function(c, function) || !(*name = spy_string(c, builtin, 3))) return NULL;
+        c->entering_kind = CALL_CHECKED;
+        return function;
+    }
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
         /* A builtin subclass's instance formats as its base unless a
@@ -25604,7 +25615,6 @@ static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *
     return 1;
 }
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
-static SPYValue *index_function(SPYContext *, SPYValue *);
 static SPYValue *slice_part(SPYContext *, SPYValue *);
 /* An operator's call pushes its operands x and y and its phase. */
 static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
@@ -27471,7 +27481,8 @@ static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
  * hash(), int(), float(), complex() and bytes() check their results as
  * natively, bool() takes a truth (False names its __len__), abs(), round()
  * and reversed() return theirs, or reversed() a sequence's ("reversed" its
- * __len__), isinstance() and issubclass() take the
+ * __len__), hex(), oct(), bin() and chr() ("hex" and so on their
+ * __index__) the int's, isinstance() and issubclass() take the
  * result's truth, and the others' text is a str. */
 static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue *name, SPYValue *result) {
     SPYValue *whole = NULL;
@@ -27481,6 +27492,12 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "reversed")) return length_result(c, result, &length) ? NULL : reversed_iterator(c, v, length);
     if (!strcmp(method, "next")) return spy_retain(result);
+    int number = !strcmp(method, "hex") ? B_HEX : !strcmp(method, "oct") ? B_OCT : !strcmp(method, "bin") ? B_BIN : !strcmp(method, "chr") ? B_CHR : -1;
+    if (number >= 0) {
+        SPYValue *index = index_result(c, v, spy_retain(result)), *value = index ? builtin(c, 1, &index, (void *)(intptr_t)number) : NULL;
+        spy_release(index);
+        return value;
+    }
     if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);

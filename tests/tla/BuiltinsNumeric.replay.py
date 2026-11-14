@@ -8,6 +8,13 @@ class R:
     def __abs__(self): return "abs"
 class I:
     def __index__(self): return 10
+class J:
+    calls = 0
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        J.calls += 1
+        return 65
 class Int(int): pass
 class F(float): pass
 class Z:
@@ -74,6 +81,7 @@ SOURCES = {
     "min_first_of_equal": "result = (min([(1, 'a'), (1, 'b')], key=lambda t: t[0]), max([(1, 'a'), (1, 'b')], key=lambda t: t[0]))",
     "max_mixed": "result = max(1, 'a')",
     "bin_index": 'result = (bin(I()), oct(I()), hex(I()), hex(-255))',
+    "index_calls": 'result = (bin(J()), oct(J()), hex(J()), chr(J()), J.calls)',
     "bin_float": 'result = bin(3.0)',
     "hex_float_method": 'result = (1.5).hex()',
     "complex_forms": "result = (complex(), complex(1), complex(1, 2), complex('1+2j'), complex(' 3j '), complex(1j, 1j))",

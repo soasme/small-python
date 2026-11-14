@@ -5,9 +5,10 @@
 (* as (a // b, a % b) with the floor convention; pow() with an optional    *)
 (* modulus, a negative exponent then taking the modular inverse; round()   *)
 (* to the nearest multiple of 10 ** -ndigits, ties to even, returning an   *)
-(* int without ndigits (or __round__); bin(), oct(), and hex() of          *)
-(* __index__ values; min() and max() over an iterable or several arguments *)
-(* with key and default; sum() from start, refusing str and bytes starts,  *)
+(* int without ndigits (or __round__); bin(), oct(), hex() and chr() of    *)
+(* __index__ values, calling each __index__ once; min() and max() over an  *)
+(* iterable or several arguments with key and default; sum() from start,   *)
+(* refusing str and bytes starts,                                          *)
 (* compensating its float and complex stages, each left for good at an     *)
 (* item it adds by +, as it adds an instance;                              *)
 (* and the int(), float(), complex(), and bool() constructors with their   *)
@@ -56,7 +57,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_hook", "
           "divmod_complex", "divmod_zero_float", "pow_float", "pow_mod_float", "pow_keywords",
           "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
-          "min_first_of_equal", "max_mixed", "bin_index", "bin_float", "hex_float_method", "complex_forms",
+          "min_first_of_equal", "max_mixed", "bin_index", "index_calls", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "int_forms",
           "int_bad_base", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
 Programs == [op : Ops, a : {-25, -15, -7, -1, 0, 3, 8, 25, 35}, b : {-3, -1, 0, 2, 5}]
@@ -119,6 +120,7 @@ Case(c) ==
       [] c = "min_first_of_equal" -> "((1, 'a'), (1, 'a'))"
       [] c = "max_mixed" -> "TypeError: '>' not supported between instances of 'str' and 'int'"
       [] c = "bin_index" -> "('0b1010', '0o12', '0xa', '-0xff')"
+      [] c = "index_calls" -> "('0b1000001', '0o101', '0x41', 'A', 4)"
       [] c = "bin_float" -> "TypeError: 'float' object cannot be interpreted as an integer"
       [] c = "hex_float_method" -> "'0x1.8000000000000p+0'"
       [] c = "complex_forms" -> "(0j, (1+0j), (1+2j), (1+2j), 3j, (-1+1j))"
