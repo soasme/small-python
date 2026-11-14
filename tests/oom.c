@@ -283,6 +283,20 @@ static const char *const programs[] = {
     "    return [s, (0,) * LX(2), LX(1) * 'ab', hex(LX(255)), oct(LX(8)), bin(LX(3)), chr(LX(65)), range(LX(1), LX(5), LX(2)), bytes(LX(2)), bytearray(LX(1))]\n"
     "print(lx())\n",
 
+    "class SK:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __hash__(self): return 0\n"
+    "    def __eq__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return self.v == o.v\n"
+    "def sk():\n"
+    "    s = {SK(1), SK(2)}\n"
+    "    t = set(s)\n"
+    "    t.intersection_update([SK(2)])\n"
+    "    s.difference_update(SK(v) for v in (1, 3))\n"
+    "    return [len(s.union([SK(4)])), len(s.intersection([SK(2), SK(5)])), s.isdisjoint([SK(2)]), s.issuperset([SK(9)]), len(t)]\n"
+    "print(sk())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

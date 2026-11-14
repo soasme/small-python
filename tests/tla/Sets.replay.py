@@ -3,7 +3,7 @@
 # bool, or the exception, with the model's. With eq, the elements are
 # objects whose Python __eq__, which loops, compares their values. A hashed
 # build logs its objects' Python __hash__ calls, which loop, and its
-# generator's items.
+# generator's items, as does an iterable method of one.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -81,7 +81,24 @@ def merged(p):
     return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
 
 
+def iterable(p):
+    log = []
+    a = {K(1, log, "no")}
+    def generator():
+        for v in (1, 2):
+            log.append("y%d" % v)
+            yield K(v, log, "no")
+    source = generator() if p["source"] == "generator" else [K(1, log, "no"), K(2, log, "no")]
+    del log[:]
+    r = getattr(a, p["method"])(source)
+    if type(r) is bool:
+        return ("bool", " ".join(log), frozenset())
+    return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
+
+
 def outcome(p):
+    if p["op"] == "iterable":
+        return iterable(p)
     if p["op"] == "hashed":
         return hashed(p)
     if p["op"] == "merge":

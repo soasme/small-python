@@ -548,7 +548,9 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_JOIN /* str.join consuming a generator (consume) */, B_CLOSE /* a generator's close resuming it (consume) */,
        B_THROW /* a generator's throw resuming it (consume) */,
        B_EXTEND /* list.extend, dict.update or set.update consuming a generator into its object (consume) */,
-       B_FROMKEYS /* dict.fromkeys consuming its keys (consume) */ };
+       B_FROMKEYS /* dict.fromkeys consuming its keys (consume) */,
+       /* A set's methods of another iterable (set_items). */
+       B_SET_UNION, B_SET_DISCARD, B_SET_KEEP, B_SET_DISJOINT, B_SET_SUPERSET };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
     return dict ? dict : builtin_value(c, value, SPY_FROZENDICT);
@@ -14338,7 +14340,7 @@ enum { BLOCK_LOOP, BLOCK_EXCEPT, BLOCK_HANDLER, BLOCK_FINALLY, BLOCK_CLEANUP, BL
  * instance source's length hint once it has the iterator (ListExtend).
  * A set's item, or dict.fromkeys's key, whose __hash__ is Python waits in
  * item for that call (KEY_HASH), the key's value in best. */
-enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL };
+enum { KEY_SORT = 1, KEY_MIN, KEY_MAX, KEY_ITER, KEY_ADD, KEY_KEYS, KEY_ITEMS, KEY_HASH, KEY_BOOL, KEY_DONE };
 /* A sum's stages (sum_compensated). */
 enum { SUM_INT, SUM_FLOAT, SUM_COMPLEX, SUM_PLAIN };
 typedef struct { SPYValue *value, *key; } SortItem;
@@ -14355,7 +14357,8 @@ struct Sorter {
 };
 typedef struct {
     int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
-    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed;
+    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched;
+    int updating;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
@@ -14368,6 +14371,18 @@ static int consumer_lookup(SPYContext *, Machine *, Consumer *, SPYValue *, int6
  * seals as a tuple when count is set (extend_step); an in, or a not in
  * when count is set, seeking best among them (contains_step). */
 enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3, CONTAINS_ITEMS = -4 };
+/* A set's method of one other iterable (set_items), its items each
+ * looked up on the machine (consumer_lookup): union adds them to a copy;
+ * difference and difference_update discard them from a copy or the set;
+ * intersection and intersection_update add to a new set those found in
+ * searched, the set, looked up in the result next (phase 1), which the
+ * update swaps into the set; isdisjoint and issuperset decide at the first
+ * found or missing one in searched, and an intersection once its result
+ * is as large as the set, which ends the consumer (KEY_DONE).
+ * An update's value is None (updating). */
+static ALWAYS_INLINE int set_items(int id) { return id >= B_SET_UNION && id <= B_SET_SUPERSET; }
+/* The set consumer s looks its next item up in. */
+static ALWAYS_INLINE SPYValue *consumer_map(Consumer *s) { return s->searched && !s->phase ? s->searched : s->result; }
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
 static SPYValue *consumer_end(SPYContext *, Consumer *);
 /* A BLOCK_CONSUME's value is the generator its consumer takes the items of. */
@@ -14440,6 +14455,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->consumer && b->consumer->empty) visit(b->consumer->empty, data);
         if (b->consumer && b->consumer->mapping) visit(b->consumer->mapping, data);
         if (b->consumer && b->consumer->listed) visit(b->consumer->listed, data);
+        if (b->consumer && b->consumer->searched) visit(b->consumer->searched, data);
     }
 }
 /* Release m, whose values were released, keeping it as the spare when there is none. */
@@ -22677,7 +22693,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
         spy_release(b.consumer->result); spy_release(b.consumer->callee);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty);
-        spy_release(b.consumer->mapping); spy_release(b.consumer->listed);
+        spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
         mem_free(b.consumer->sorter); mem_free(b.consumer);
     }
 }
@@ -23229,6 +23245,15 @@ static NO_INLINE int zip_hashed(SPYContext *c, SPYValue *v) {
 /* Whether a consumer takes v's items on the machine: a generator it can
  * resume, an iterator whose items are calls, a zip or map of generators,
  * an enumerate or filter of one, or an instance iterating in Python. */
+static int eq_reaches(SPYValue *);
+/* Whether a set method's list or tuple v, or set's own entries, may be
+ * compared by a Python __eq__ (eq_reaches). */
+static int compared_items(SPYValue *set, SPYValue *v) {
+    if (v->type != SPY_LIST && v->type != SPY_TUPLE) return 0;
+    for (size_t i = 0; i < v->as.seq.len; i++) if (eq_reaches(v->as.seq.items[i])) return 1;
+    for (size_t i = 0; i < set->as.map.len; i++) if (eq_reaches(map_items(set)[i].key)) return 1;
+    return 0;
+}
 static int machine_source(SPYContext *c, SPYValue *v) {
     return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(c, v) || iter_function(c, v) || getitem_iterated(c, v);
 }
@@ -23262,24 +23287,28 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
     int fromkeys = function && callee->as.method.self == c->types[SPY_DICT] && function->type == SPY_NATIVE &&
                    function->as.native.kwcall == dict_fromkeys;
-    /* So does a set's update of one source. */
-    int updates = function && callee->as.method.self->type == SPY_SET && function->type == SPY_NATIVE &&
-                  function->as.native.kwcall == set_method && function->as.native.data == (void *)(((intptr_t)SPY_SET << 8) | 4);
-    int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates;
+    /* So does a set's update of one source, and its other methods but
+     * the symmetric ones and issubset of one that is not a set (set_items). */
+    static const int set_ids[] = {B_SET_UNION, B_SET_KEEP, B_SET_DISCARD, -1, B_EXTEND, B_SET_KEEP, B_SET_DISCARD, -1, -1, B_SET_SUPERSET, B_SET_DISJOINT};
+    int updates = function && is_set(callee->as.method.self) && function->type == SPY_NATIVE && function->as.native.kwcall == set_method &&
+                  argc == 1 && !(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && (is_set(argv[0]->as.map.base) || is_dict(argv[0]->as.map.base))) ?
+                  set_ids[(intptr_t)function->as.native.data & 255] : -1;
+    int sets = callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || fromkeys || updates != -1;
     /* As do dict() and dict.update() of pairs. */
     int pairs = callee == c->types[SPY_DICT] || (method == M_UPDATE && callee->type == SPY_DICT);
     if (!argc || (mapping ? !method_function(c, argv[0], "keys") :
                   !machine_source(c, argv[0]) && !(sets && hashed_items(c, argv[0])) &&
+                  !(updates != -1 && compared_items(callee->as.method.self, argv[0])) &&
                   !(pairs && hashed_pairs(c, argv[0])) && !((sets || pairs) && zip_hashed(c, argv[0])))) return -1;
     int id = method >= 0 ? method == M_JOIN && callee->type == SPY_STRING ? B_JOIN :
                            (method == M_EXTEND && callee->type == SPY_LIST) ||
                            (method == M_UPDATE && callee->type == SPY_DICT) ? B_EXTEND : -1 :
              callee == c->types[SPY_LIST] ? B_LIST : callee == c->types[SPY_TUPLE] ? B_TUPLE :
              callee == c->types[SPY_SET] ? B_SET : callee == c->types[SPY_FROZENSET] ? B_FROZENSET :
-             callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates ? B_EXTEND :
+             callee == c->types[SPY_DICT] ? B_DICT : fromkeys ? B_FROMKEYS : updates != -1 ? updates :
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
-        id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS &&
+        id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS && !set_items(id) &&
         (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0])))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
@@ -23386,8 +23415,9 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
         SPYValue *source = spy_retain(generator->as.iterator.source);
         spy_release(generator); generator = source;
     }
-    /* A set's update extends its set. */
-    if (id == B_EXTEND && callee->type == SPY_METHOD) callee = callee->as.method.self;
+    /* A set's update extends its set; its other methods start from it (set_items). */
+    int which = set_items(id) ? (int)((intptr_t)callee->as.method.function->as.native.data & 255) : -1;
+    if ((id == B_EXTEND || which >= 0) && callee->type == SPY_METHOD) callee = callee->as.method.self;
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
     if (id == B_THROW) {
@@ -23401,6 +23431,10 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
                                  id == B_DICT || id == B_FROMKEYS ? SPY_DICT : SPY_LIST) : NULL;
+    SPYValue *searched = id == B_SET_KEEP || id == B_SET_DISJOINT || id == B_SET_SUPERSET ? spy_retain(callee) : NULL;
+    if (which >= 0)
+        result = id == B_SET_KEEP ? value_new(c, callee->type) : id == B_SET_DISJOINT || id == B_SET_SUPERSET ? spy_bool(c, 1) :
+                 which == 6 ? spy_retain(callee) : set_copy_type(c, callee, callee->type);
     /* dict.fromkeys's keys take its value, None by default. */
     SPYValue *value = id != B_FROMKEYS ? NULL : start ? start : spy_none(c);
     /* dict() and dict.update() of an instance merge it as a mapping (consumer_id). */
@@ -23409,9 +23443,10 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); release_all(5, (SPYValue *[]){result, generator, sent, source, value}); return; }
+    if (!block) { mem_free(consumer); release_all(6, (SPYValue *[]){result, generator, sent, source, value, searched}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
-                           .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints};
+                           .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
+                           .searched = searched, .updating = which == 5 || which == 6};
     block->value = generator; block->consumer = consumer;
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
     if (source && keyed == KEY_ITER) spy_release(source);
@@ -23797,12 +23832,17 @@ static NO_INLINE SPYValue *key_call(SPYContext *c, Machine *m, Frame *f, SPYValu
         spy_release(function);
         return NULL;
     }
-    if (s->keyed == KEY_HASH && s->item->type == SPY_TUPLE && !hash_calls(c, s->item)) {
-        /* A tuple hashed in C is looked up on the machine (consumer_lookup). */
+    /* A set method's decided consumer ends (set_items). */
+    if (s->keyed == KEY_DONE) { s->keyed = 0; consumer_took(c, m, f, NULL); return NULL; }
+    if (s->keyed == KEY_HASH && (s->item->type == SPY_TUPLE ? !hash_calls(c, s->item) : !hash_function(c, s->item))) {
+        /* A tuple, or a set method's item, hashed in C is looked up on the
+         * machine (consumer_lookup). */
         int64_t hash;
         item = s->item;
         s->item = NULL; s->keyed = s->mapping ? KEY_ITEMS : 0;
-        if (!map_hash(c, s->result, item, &hash)) consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash));
+        /* An intersection hashes its items as they are (set_intersect_iterable). */
+        if (!(s->id == B_SET_KEEP ? hash_value(c, item, &hash) : map_hash(c, consumer_map(s), item, &hash)))
+            consumer_lookup(c, m, s, item, hash, map_cursor(consumer_map(s), hash));
         spy_release(item);
         return NULL;
     }
@@ -23919,7 +23959,30 @@ static NO_INLINE int keys_listing(SPYContext *c, Block *top, SPYValue *keys) {
  * hash found in its result at entry found, or -1: an absent item is
  * added, a found key keeps its spelling and takes the value, a pair's
  * (consumer_add) given up; 0, or -1 on an error. */
-static int consumer_store(SPYContext *c, Consumer *s, SPYValue *item, int64_t hash, ptrdiff_t found) {
+static int consumer_store(SPYContext *c, Machine *m, Consumer *s, SPYValue *item, int64_t hash, ptrdiff_t found) {
+    /* A set method's item (set_items): discarded; deciding isdisjoint or
+     * issuperset; or found in the set, then looked up in the result, as
+     * any set's item. */
+    if (s->id == B_SET_DISCARD) {
+        if (found >= 0) set_remove_at(s->result, (size_t)found);
+        return 0;
+    }
+    if (s->id == B_SET_DISJOINT || s->id == B_SET_SUPERSET) {
+        if ((found >= 0) == (s->id == B_SET_DISJOINT)) { spy_release(s->result); s->result = spy_bool(c, 0); s->keyed = KEY_DONE; }
+        return 0;
+    }
+    if (s->id == B_SET_KEEP && !s->phase) {
+        if (found < 0) return 0;
+        s->phase = 1;
+        return consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash));
+    }
+    /* An intersection ends once its result is as large as the set. */
+    if (s->id == B_SET_KEEP) {
+        s->phase = 0;
+        int status = found < 0 ? map_append(c, s->result, item, c->none, hash) : 0;
+        if (!status && s->result->as.map.len >= s->searched->as.map.len) s->keyed = KEY_DONE;
+        return status;
+    }
     int pairs = s->id != B_FROMKEYS && s->result->type == SPY_DICT, status = 0;
     SPYValue *value = s->id == B_FROMKEYS || pairs ? s->best : c->none;
     if (found < 0) status = map_append(c, s->result, item, value, hash);
@@ -24024,10 +24087,10 @@ static int consumer_compare(SPYContext *c, Machine *m, SPYValue *item, int64_t h
  * stored (consumer_store), 0, or -1 on an error. A comparison that changes
  * the map starts the lookup again. */
 static int consumer_lookup(SPYContext *c, Machine *m, Consumer *s, SPYValue *item, int64_t hash, MapCursor cursor) {
-    SPYValue *map = s->result;
+    SPYValue *map = consumer_map(s);
     for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
         SPYValue *candidate = map->as.map.items[i].key, *left = candidate, *function;
-        if (candidate == item) return consumer_store(c, s, item, hash, i);
+        if (candidate == item) return consumer_store(c, m, s, item, hash, i);
         size_t end;
         if (!(function = rich_function(c, candidate, item, R_EQ)) && (function = rich_function(c, item, candidate, R_EQ))) left = item;
         if (function || (sequence_pair(candidate, item) && python_pair(c, candidate, item, 0, &end) != SIZE_MAX))
@@ -24037,9 +24100,9 @@ static int consumer_lookup(SPYContext *c, Machine *m, Consumer *s, SPYValue *ite
         spy_release(candidate);
         if (c->error_type[0]) return -1;
         if (!unchanged) cursor = map_cursor(map, hash);
-        else if (matches) return consumer_store(c, s, item, hash, i);
+        else if (matches) return consumer_store(c, m, s, item, hash, i);
     }
-    return consumer_store(c, s, item, hash, -1);
+    return consumer_store(c, m, s, item, hash, -1);
 }
 /* What a consumer's lookup's __eq__ (consumer_compare) returned: on
  * NotImplemented from the first call, the reflected Python __eq__
@@ -24058,10 +24121,10 @@ static SPYValue *consumer_compared(SPYContext *c, Machine *m, SPYValue *state, S
             consumer_compare(c, m, item, hash, cursor, i, 1, candidate, function, self, left);
     }
     if (!function && test) {
-        int matches = truthy(test), unchanged = entry_unchanged(s->result, i, candidate, cursor);
+        int matches = truthy(test), unchanged = entry_unchanged(consumer_map(s), i, candidate, cursor);
         if (c->error_type[0]) ;
-        else if (unchanged && matches) consumer_store(c, s, item, hash, i);
-        else consumer_lookup(c, m, s, item, hash, unchanged ? cursor : map_cursor(s->result, hash));
+        else if (unchanged && matches) consumer_store(c, m, s, item, hash, i);
+        else consumer_lookup(c, m, s, item, hash, unchanged ? cursor : map_cursor(consumer_map(s), hash));
     }
     spy_release(test); spy_release(state);
     return NULL;
@@ -24080,8 +24143,8 @@ static NO_INLINE int key_took(SPYContext *c, Machine *m, SPYValue *key) {
         /* A merged mapping's next key is looked up next. */
         s->item = NULL; s->keyed = s->mapping ? KEY_ITEMS : 0;
         int failed = !key || hash_result(c, key, &hash);
-        if (failed) hash_failed(c, s->result, item);
-        else failed = consumer_lookup(c, m, s, item, hash, map_cursor(s->result, hash)) < 0;
+        if (failed && s->id != B_SET_KEEP) hash_failed(c, consumer_map(s), item);
+        else failed = consumer_lookup(c, m, s, item, hash, map_cursor(consumer_map(s), hash)) < 0;
         spy_release(item);
         return failed ? -1 : 0;
     }
@@ -32708,10 +32771,28 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
         SPYValue *borrowed = (which & 3) == SET_INTERSECTION ? set_operand(c, argv[i], 0) : NULL;
         spy_release(borrowed);
         if ((which & 3) == SET_INTERSECTION && !borrowed) {
+            /* The items found are the result, compared no further. */
             SPYValue *common = set_intersect_iterable(c, result, argv[i]);
             if (!common) { spy_release(result); result = NULL; break; }
-            if (set_combine(c, result, SET_INTERSECTION, common)) { spy_release(result); result = NULL; }
+            swap_contents(result, common);
             spy_release(common);
+            continue;
+        }
+        /* Another iterable's items are added or discarded in turn, as on
+         * the machine (set_items). */
+        if (((which & 3) == SET_UNION || (which & 3) == SET_DIFFERENCE) && !builtin_value(c, argv[i], SPY_SET) &&
+            !builtin_value(c, argv[i], SPY_FROZENSET) && !dictionary_value(c, argv[i])) {
+            SPYValue *iterator = get_iterator(c, argv[i]), *item;
+            while (iterator && (item = native_next(c, iterator))) {
+                int64_t hash;
+                ptrdiff_t found;
+                if ((which & 3) == SET_UNION) set_add(c, result, item);
+                else if (!map_hash(c, result, item, &hash) && (found = map_find_hash(result, item, hash)) >= 0) set_remove_at(result, (size_t)found);
+                spy_release(item);
+                if (c->error_type[0]) break;
+            }
+            spy_release(iterator);
+            if (c->error_type[0]) { spy_release(result); result = NULL; }
             continue;
         }
         SPYValue *other = set_operand(c, argv[i], 1);
@@ -34034,6 +34115,8 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
         spy_release(item);
         return status;
     }
+    /* A set method's item is looked up on the machine (key_call). */
+    if (set_items(s->id)) { s->item = item; s->keyed = KEY_HASH; return 0; }
     if (s->id == B_SET || s->id == B_FROZENSET || s->id == EXTEND_ITEMS || s->id == B_FROMKEYS || (s->id == B_EXTEND && is_set(s->result))) {
         if ((is_set(s->result) || s->id == B_FROMKEYS) && hashed_item(c, item)) { s->item = item; s->keyed = KEY_HASH; return 0; }
         int status = s->id == B_FROMKEYS ? map_set(c, s->result, item, s->best) : s->id != EXTEND_ITEMS ? set_add(c, s->result, item) :
@@ -34106,8 +34189,10 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         return NULL;
     }
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
-    /* list.extend and dict.update return None. */
-    if (s->id == B_EXTEND) {
+    /* intersection_update swaps its result into the set. */
+    if (s->id == B_SET_KEEP && s->updating && !c->error_type[0]) swap_contents(s->searched, s->result);
+    /* list.extend, dict.update and a set's updates return None. */
+    if (s->id == B_EXTEND || s->updating) {
         spy_release(s->result);
         s->result = c->error_type[0] ? NULL : spy_none(c);
     }

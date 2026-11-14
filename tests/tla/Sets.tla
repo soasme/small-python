@@ -32,7 +32,11 @@
 (*   - set(src), frozenset(src), {*src}, set().union(src), an empty set's  *)
 (*     update(src) or |= src, of a set src of three objects of one hash    *)
 (*     whose Python __eq__ logs "e": merged into an empty set, the         *)
-(*     distinct elements are compared with none (Annex D).                 *)
+(*     distinct elements are compared with none (Annex D); or              *)
+(*   - {K(1)}'s union, difference, intersection, isdisjoint or issuperset  *)
+(*     of a list or a generator of K(1) and K(2): each item is hashed and  *)
+(*     compared with the set's K(1) before the next is taken, and          *)
+(*     intersection and isdisjoint stop at the first, which decides.       *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -53,6 +57,8 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
             \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update"}, source : {"list", "generator"},
                   fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
             \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|="}]
+            \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset"},
+                  source : {"list", "generator"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -87,8 +93,20 @@ RunHashed(p) ==
         [] p.form = "update" -> {0, 1, 2}
         [] OTHER -> {1, 2}>>
 
+\* The items an iterable method takes, each hashed and compared with K(1)
+\* in turn: a generator gives each as it is taken.
+RunIterable(p) ==
+    LET y(v) == IF p.source = "generator" THEN "y" \o v \o " " ELSE ""
+        first == y("1") \o "h1 e1"
+        log == IF p.method \in {"intersection", "isdisjoint"} THEN first ELSE first \o " " \o y("2") \o "h2"
+    IN  CASE p.method = "union" -> <<"set", log, {1, 2}>>
+          [] p.method = "difference" -> <<"set", log, {}>>
+          [] p.method = "intersection" -> <<"set", log, {1}>>
+          [] OTHER -> <<"bool", log, {}>>
+
 Run(p) ==
     IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
+    ELSE IF p.op = "iterable" THEN RunIterable(p)
     ELSE IF p.op = "hashed" THEN RunHashed(p)
     ELSE IF p.op = "merge" THEN <<IF p.form = "frozenset" THEN "frozenset" ELSE "set", "", {0, 1, 2}>>
     ELSE LET a == p.a  b == p.b
@@ -120,6 +138,10 @@ Done == outcome # Pending
 \* a <= b and a >= b together are a == b.
 Antisymmetric == Done /\ program.op = "<=" /\ outcome = Bool(TRUE) /\ Run([program EXCEPT !.op = ">="]) = Bool(TRUE)
                  => Run([program EXCEPT !.op = "=="]) = Bool(TRUE)
+
+\* intersection and isdisjoint take no item past the one that decides.
+Decided == Done /\ program.op = "iterable" /\ program.method \in {"intersection", "isdisjoint"} =>
+           outcome[2] \in {"h1 e1", "y1 h1 e1"}
 
 \* Numbers equal as numbers are one element.
 Unique == Done /\ program.op = "build" => Cardinality(outcome[3]) <= 2

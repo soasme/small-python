@@ -1620,6 +1620,12 @@ int main(int argc, char **argv) {
     /* So do bytes()'s and bytearray()'s. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(bytes(Mark(3)) + bytearray(Mark(2)))", "sized.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
+    /* So do a set method's item comparisons by a Python __eq__. */
+    execute(c, "class Slow:\n    def __hash__(self): return 0\n"
+               "    def __eq__(self, o):\n        for i in range(3000): pass\n        return False\n"
+               "def unioned():\n    s = {Slow()}\n    return len(s.union([Slow(), Slow()]))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "unioned()", "unioned.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */
     execute(c, "class Declines:\n    def __iadd__(self, o): return NotImplemented\n"
                "    def __add__(self, o):\n        for i in range(3000): pass\n        return i + o\n"
