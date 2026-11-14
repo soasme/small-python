@@ -212,6 +212,14 @@ static const char *const programs[] = {
     "    try: raise RE from RC\n"
     "    except RE as e: return [e.x, e.__cause__.y]\n"
     "print(re())\n",
+
+    "def tg():\n"
+    "    try: yield 0\n"
+    "    except RE as e: yield e.x\n"
+    "g = tg(); next(g)\n"
+    "h = tg(); next(h)\n"
+    "print(g.throw(RE), h.throw(RE, None))\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"

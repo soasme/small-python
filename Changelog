@@ -98,6 +98,8 @@ Unreleased (0.10.0):
 - set(s), frozenset(s), {*s} and the like of a set s into an empty set no longer call __eq__
 - raise of an exception class, or from a cause class, calls its Python __init__ without nesting
   on the C stack, so it can pause
+- a generator's throw() of an exception class, also with a value, calls its Python __init__
+  without nesting on the C stack
 - a class with a Python __new__ called with * or ** arguments runs __new__ and __init__ without
   nesting on the C stack, so it can pause
 - str(), repr(), format(), len(), hash(), int(), round() and the like call the Python method of a

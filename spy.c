@@ -20032,13 +20032,14 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
 static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with_cause(c, value, NULL); }
 static SPYValue *class_init(SPYContext *, SPYValue *, int *);
 static SPYValue *init_instance(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue *);
-/* The instance a raise of exception class cls makes when its call runs a
- * Python __init__ on the machine (class_init), *init that; else NULL. */
-static SPYValue *raised_instance(SPYContext *c, SPYValue *cls, SPYValue **init) {
+/* The instance a raise of exception class cls, or a throw of it with
+ * argc arguments argv, makes when its call runs a Python __init__ on the
+ * machine (class_init), *init that; else NULL. */
+static SPYValue *raised_instance(SPYContext *c, SPYValue *cls, size_t argc, SPYValue *const *argv, SPYValue **init) {
     int plain;
     if (cls->type != SPY_CLASS || !subclass(cls, c->exceptions[X_BASE_EXCEPTION])) return NULL;
     *init = class_init(c, cls, &plain);
-    return *init && machine_function(c, *init) ? init_instance(c, cls, plain, 0, NULL, NULL) : NULL;
+    return *init && machine_function(c, *init) ? init_instance(c, cls, plain, argc, argv, NULL) : NULL;
 }
 static SPYValue *raise_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* raise of value, an exception class or instance, from cause, or NULL
@@ -20047,9 +20048,9 @@ static SPYValue *raise_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
  * going on with the instance when it returns (raise_inited); else the
  * raise (raise_with_cause). */
 static void raise_step(SPYContext *c, Machine *m, SPYValue *value, SPYValue *cause) {
-    SPYValue *init = NULL, *made = raised_instance(c, value, &init), *exception = NULL;
+    SPYValue *init = NULL, *made = raised_instance(c, value, 0, NULL, &init), *exception = NULL;
     /* The exception is made before the cause. */
-    if (!made && !c->error_type[0] && cause && (exception = normalize_exception(c, value, 0))) made = raised_instance(c, cause, &init);
+    if (!made && !c->error_type[0] && cause && (exception = normalize_exception(c, value, 0))) made = raised_instance(c, cause, 0, NULL, &init);
     if (!made) {
         if (!c->error_type[0]) raise_with_cause(c, exception ? exception : value, cause);
         spy_release(exception);
@@ -23192,7 +23193,10 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
-        return argc == (method == M_THROW) && throws_in(c, callee, argc ? argv[0] : NULL) ? method == M_THROW ? B_THROW : B_CLOSE : -1;
+        /* A throw of a class and its value into a yield, too. */
+        return (argc == (method == M_THROW) || (argc == 2 && method == M_THROW && argv[0]->type == SPY_CLASS)) &&
+               throws_in(c, callee, argc ? argv[0] : NULL) && (argc < 2 || callee->as.generator.machine->awaiting == AWAIT_YIELD) ?
+               method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
                (method == M_SEND || (method == M_NEXT && (callee->type == SPY_GENERATOR || wrapped))) &&
@@ -23271,10 +23275,57 @@ static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
     spy_release(method);
     return result;
 }
+static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
+/* The __init__ that a throw of an exception class called (consume)
+ * returned result: the throw goes on with state's instance, or with the
+ * error the call raised, as thrown_exception's. */
+static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *exception = NULL;
+    if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+    else if (result) exception = spy_retain(items[3]);
+    spy_release(result);
+    if (!exception && !c->stopped) {
+        if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+        ErrorState error = take_error(c);
+        if (!(exception = error.value)) restore_error(c, &error);
+    }
+    if (exception) consume(c, m, B_THROW, items[0], (int)items[1]->as.integer_data.small, items[2] == c->none ? NULL : items[2], exception, NULL);
+    spy_release(state);
+    return NULL;
+}
 /* Consumer id, of callee, its native method method of name, takes
  * generator's items on machine m (BLOCK_CONSUME), sum's from start; both
- * owned. */
+ * owned. A throw of an exception class, with start its value if given,
+ * whose call runs a Python __init__ calls it first, on m (callk), and goes
+ * on with the instance (throw_inited). */
 static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
+    SPYValue *init = NULL, *made = NULL;
+    if (id == B_THROW && generator->type == SPY_CLASS) {
+        /* The value is the instance, the tuple of arguments, none, or the
+         * one argument (thrown_exception). */
+        size_t argc = start && start->type == SPY_TUPLE ? start->as.seq.len : start && start->type != SPY_NONE;
+        SPYValue *const *argv = start && start->type == SPY_TUPLE ? start->as.seq.items : &start;
+        int given = start && start->type == SPY_INSTANCE && subclass(start->as.map.parent, generator);
+        made = given || argc > 6 ? NULL : raised_instance(c, generator, argc, argv, &init);
+        if (made) {
+            SPYValue *parts[] = {spy_retain(callee), int_value(c, method), spy_retain(name ? name : c->none), made}, *args[8];
+            SPYValue *state = spy_tuple(c, 4, parts);
+            release_all(4, parts);
+            args[0] = spy_retain(made);
+            for (size_t i = 0; i < argc; i++) args[i + 1] = spy_retain(argv[i]);
+            if (state) callk(c, m, init, argc + 1, args, throw_inited, state);
+            else release_all(argc + 1, args);
+            spy_release(generator); spy_release(start);
+            return;
+        }
+    }
+    if (id == B_THROW && c->error_type[0] && !c->stopped) {
+        /* The class's own error is thrown (thrown_exception). */
+        if (c->py_depth) c->traceback_frame = c->frames[c->py_depth - 1].serial;
+        ErrorState error = take_error(c);
+        if (error.value) { spy_release(generator); generator = error.value; }
+        else restore_error(c, &error);
+    }
     if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
     /* A coroutine wrapper's coroutine is resumed (consumer_id). */
     if (callee->type == SPY_COROUTINE_ITERATOR && method >= 0) callee = callee->as.iterator.source;
@@ -23286,7 +23337,10 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     if (id == B_EXTEND && callee->type == SPY_METHOD) callee = callee->as.method.self;
     /* A generator's send takes its argument first, and __next__ none. */
     SPYValue *sent = id == B_NEXT && method >= 0 ? generator : NULL;
-    if (id == B_THROW) { sent = thrown_exception(c, 1, &generator); spy_release(generator); }
+    if (id == B_THROW) {
+        sent = thrown_exception(c, start ? 2 : 1, (SPYValue *[]){generator, start});
+        spy_release(generator); spy_release(start); start = NULL;
+    }
     if ((id == B_NEXT || id == B_CLOSE || id == B_THROW) && method >= 0) generator = spy_retain(callee);
     if (id == B_CLOSE) sent = close_exception(c);
     int collects = id == B_SORTED || id == B_JOIN;

@@ -9,6 +9,14 @@ K = 2
 log = []
 
 
+class PyValueError(ValueError):
+    def __init__(self):
+        for _ in range(2): pass
+
+
+THROWN = {"ValueError": ValueError, "KeyError": KeyError, "PyValueError": PyValueError}
+
+
 class Y:
     """An awaitable that suspends its coroutine once, yielding value."""
     def __init__(self, value):
@@ -102,9 +110,9 @@ def perform(kind, target, op):
             try:
                 raise IndexError
             except IndexError:
-                value = target.throw({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
+                value = target.throw(THROWN[op[1]])
         elif op[0] == "throw":
-            value = target.throw({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
+            value = target.throw(THROWN[op[1]])
         else:
             return ("return", text(target.close()))
         return ("yield", value[0], text(value[1]))
