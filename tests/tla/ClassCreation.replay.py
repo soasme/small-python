@@ -49,6 +49,13 @@ def deco(cls):
 
 def source(p):
     base = "Hook" if p["subclass_hook"] else "Plain"
+    if p["call"]:
+        meta = {"none": "type", "meta": "Meta", "prepare": "Prepare", "init": "InitOnly"}[p["meta"]]
+        lines = ["def body():", "    log.append('body')" if p["calls"] else "    pass",
+                 "    return {'n': 1%s}" % "".join(", %r: D()" % name for name in "ab"[:p["set_names"]])]
+        made = "%s('C', (%s,), body()%s)" % (meta, base, ", flag=1" if p["flag"] else "")
+        lines.append("C = %s" % ("deco(%s)" % made if p["deco"] else made))
+        return "\n".join(lines) + "\n"
     arguments = ["Entries(%s)" % base if p["entries"] else base]
     if p["meta"] != "none":
         arguments.append("metaclass=" + {"meta": "Meta", "prepare": "Prepare", "init": "InitOnly"}[p["meta"]])

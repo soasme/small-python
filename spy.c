@@ -20832,6 +20832,45 @@ enter:
     c->entering_init = function; c->entering_kind = CALL_CHECKED;
     return spy_retain(function);
 }
+static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+/* Whether callee of argc arguments argv makes a class class_make makes:
+ * type() of a name, bases of no metaclass and a namespace, or
+ * type.__new__. */
+static int class_maker(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    if (callee->type == SPY_NATIVE) return argc == 4 && callee->as.native.kwcall == type_method && !callee->as.native.data;
+    if (callee != c->types[SPY_CLASS] || argc != 3 || argv[1]->type != SPY_TUPLE) return 0;
+    for (size_t i = 0; i < argv[1]->as.seq.len; i++)
+        if (argv[1]->as.seq.items[i]->type != SPY_CLASS || argv[1]->as.seq.items[i]->as.map.meta) return 0;
+    return 1;
+}
+/* The class of state, its first item, once its callbacks ran, each Python
+ * one the calling step's (callk), whose return class_made_k goes on from;
+ * state taken. */
+static SPYValue *class_made_k(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *class_next(SPYContext *c, SPYValue *state) {
+    SPYValue *cls = state->as.seq.items[0], *env = NULL, *function = class_callback(c, cls, state, &env);
+    if (function) { c->k_fn = function; c->k_env = env; c->k = class_made_k; c->k_ctx = state; return NULL; }
+    cls = c->error_type[0] ? NULL : spy_retain(cls);
+    spy_release(state);
+    return cls;
+}
+static SPYValue *class_made_k(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    class_called(c, state->as.seq.items[0], state, result);
+    return class_next(c, state);
+}
+/* A call (class_maker) of argc arguments argv and keywords: the class,
+ * each Python callback of which is the calling step's call (class_next). */
+static SPYValue *class_make(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    SPYValue *meta = c->types[SPY_CLASS], *state = NULL;
+    if (argc == 4 && new_check(c, meta, argc, argv)) return NULL;
+    if (argc == 4) meta = *argv++;
+    SPYValue *cls = create_class(c, meta, argv[0], argv[1], argv[2], keywords, &state);
+    if (!cls) { spy_release(state); return NULL; }
+    spy_release(state->as.seq.items[0]);
+    state->as.seq.items[0] = cls;
+    return class_next(c, state);
+}
 static int valid_exception_types(SPYContext *, SPYValue *);
 /* An exception class, or a tuple of them, all checked before matching. */
 static int exception_matches(SPYContext *c, SPYValue *exception, SPYValue *type) {
@@ -24676,6 +24715,12 @@ static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && class_maker(c, callee, argc, argv)) {
+        /* type() or type.__new__ runs its class's callbacks on m. */
+        result = class_make(c, argc, argv, NULL);
+        release_all(argc, argv); spy_release(callee);
+        return result;
+    }
     if (method < 0 && checks_call(c, m, builtin_id(callee), argc, argv, &result)) {
         release_all(argc, argv); spy_release(callee);
         return result;
@@ -25174,6 +25219,8 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
                                         (argc == 3 && argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
+                                        /* type.__new__ (class_make) */
+                                        (argc == 4 && callee->as.native.kwcall == type_method) ||
                                         /* a set method given its set and others (set_chain_call) */
                                         (argc > 2 && set_like(argv[argc - 1]) && callee->as.native.kwcall == set_method) ||
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
@@ -25434,7 +25481,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
-    result = id >= 0 ? NULL : init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
+    result = id >= 0 ? NULL : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
+             init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) { consume(c, m, id, callee, -1, NULL, generator, start); spy_release(callee); }
@@ -25533,7 +25581,9 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         release_all(argc + 1, held); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    if (callee && id < 0) result = step_call(c, m, callee, method, n, argc + !skip, argv + skip);
+    if (callee && id < 0)
+        result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, argc + !skip, argv + skip, NULL) :
+                 step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     if (id >= 0) consume(c, m, id, callee, method, method >= 0 ? n->a->b->global_key : NULL, generator, start);
     spy_release(callee);
@@ -25645,7 +25695,8 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         if (c->error_type[0]) { spy_release(result); result = NULL; }
     } else {
         SPYValue *keywords = entries_dict(c, kw, kwc);
-        if (keywords) result = step_keywords(c, m, callee, positional, argv, keywords);
+        if (keywords) result = calls && class_maker(c, callee, positional, argv) ? class_make(c, positional, argv, keywords) :
+                               step_keywords(c, m, callee, positional, argv, keywords);
         spy_release(keywords);
     }
 done:
@@ -25713,7 +25764,9 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         SPYValue *argv[9];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
         result = operand_dispatch(c, m, n, spy_retain(callee), -1, args->as.seq.len, argv, env);
-    } else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
+    } else if (calls && class_maker(c, callee, args->as.seq.len, args->as.seq.items) && string_keys(c, keywords) && !c->error_type[0])
+        result = class_make(c, args->as.seq.len, args->as.seq.items, keywords);
+    else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);
         int failed = !all || sequence_append(c, all, self);

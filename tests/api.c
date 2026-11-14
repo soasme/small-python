@@ -1679,6 +1679,13 @@ int main(int argc, char **argv) {
                "def starred():\n    a = [Truthy()]\n    return int(any(*[a])) + int(all(*(a,))) + len(str(*a)) + len(format(*[Truthy(), '']))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "starred()", "starred.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 3);
+    /* So do the __set_name__ and __init_subclass__ calls of type() and type.__new__. */
+    execute(c, "class Named:\n    def __set_name__(self, owner, name):\n        for i in range(3000): pass\n        owner.seen = owner.__dict__.get('seen', 0) + 1\n"
+               "class Hooked:\n    def __init_subclass__(cls, **kw):\n        for i in range(3000): pass\n        cls.seen = cls.__dict__.get('seen', 0) + kw['k']\n"
+               "class Made(type):\n    def __new__(mcls, name, bases, ns):\n        return super().__new__(mcls, name, bases, ns, k=4)\n"
+               "def made():\n    A = type('A', (Hooked,), {'a': Named(), 'b': Named()}, k=1)\n    B = Made('B', (Hooked,), {'a': Named()})\n    return A.seen + B.seen\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "made()", "made.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 4);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

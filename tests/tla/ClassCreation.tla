@@ -18,12 +18,14 @@
 (* assigns, and may begin with an annotated assignment; C may take a type  *)
 (* parameter, class C[T](...), which adds the base Generic[T]. Neither     *)
 (* changes an outcome. The outcome is the log and whether the statement   *)
-(* raised.                                                                 *)
+(* raised. The class may instead be a call, C = deco(Meta("C", (B,), ns,  *)
+(* flag=1)), Meta type when none, of a namespace the body's statements   *)
+(* fill, with no __mro_entries__, __prepare__ or type parameter.          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Metas == {"none", "meta", "prepare", "init"}
-Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN, annotated : BOOLEAN, generic : BOOLEAN]
+Programs == [meta : Metas, subclass_hook : BOOLEAN, set_names : 0..2, deco : BOOLEAN, flag : BOOLEAN, calls : BOOLEAN, entries : BOOLEAN, annotated : BOOLEAN, generic : BOOLEAN, call : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -39,7 +41,7 @@ Create(p) ==
         fails == p.flag /\ ~p.subclass_hook
         typeNew == SubSeq(names, 1, p.set_names)
                    \o (IF p.subclass_hook THEN <<IF p.flag THEN "init_subclass flag" ELSE "init_subclass">> ELSE <<>>)
-        before == (IF p.entries THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" THEN <<"prepare">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>)
+        before == (IF p.entries /\ ~p.call THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" /\ ~p.call THEN <<"prepare">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>)
                   \o (IF p.meta \in {"meta", "prepare"} THEN <<"new">> ELSE <<>>) \o typeNew
     IN  IF fails THEN <<before, "TypeError">>
         ELSE <<before \o (IF custom THEN <<"init">> ELSE <<>>) \o (IF p.deco THEN <<"decorate">> ELSE <<>>), "ok">>

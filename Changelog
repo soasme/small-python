@@ -97,6 +97,7 @@ Unreleased (0.10.0):
 - x in a list or tuple, x a tuple, list or dict whose items have a Python __eq__, does not nest on
   the C stack
 - any(), all(), str(), repr() and format() called with starred arguments do not nest on the C stack
+- type() and type.__new__() call a Python __set_name__ and __init_subclass__ without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

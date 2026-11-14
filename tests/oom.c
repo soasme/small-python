@@ -402,6 +402,16 @@ static const char *const programs[] = {
     "a = [TB(), TB()]\n"
     "print(any(*[a]), all(*(a,)), str(*a[:1]), repr(*[1]), format(*[TB(), 'x']))\n",
 
+    "class TN:\n"
+    "    def __set_name__(self, owner, name): owner.n = name\n"
+    "class TH:\n"
+    "    def __init_subclass__(cls, **kw): cls.kw = kw\n"
+    "class TM(type):\n"
+    "    def __new__(mcls, name, bases, ns, **kw): return super().__new__(mcls, name, bases, ns, **kw)\n"
+    "A = type('A', (TH,), {'x': TN()}, k=1)\n"
+    "B = TM('B', (TH,), {'y': TN()}, j=2)\n"
+    "print(A.n, A.kw, B.n, B.kw, type.__new__(TM, 'C', (), {'z': TN()}).n)\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"
