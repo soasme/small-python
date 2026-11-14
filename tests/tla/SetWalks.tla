@@ -13,12 +13,15 @@
 (* them; the comparisons look the subset side's entries up in the other,   *)
 (* isdisjoint the smaller's, the right's when as large, until one decides. *)
 (*                                                                         *)
-(* A program takes a set or frozenset a and a set b of at most two of the  *)
+(* A program takes a set, frozenset or set subclass's instance a and a set *)
+(* or set subclass's instance b of at most two of the                      *)
 (* values 1, 2, 3, each element an object of one hash whose Python __eq__  *)
 (* logs its side and value, and applies an operator, an augmented          *)
 (* assignment, or a method; an operator's special method called by name    *)
 (* gives the operator's outcome. The outcome is the result's values, a's   *)
-(* after an update, or the bool, then the log.                             *)
+(* after an update, or the bool, then the log. An instance is operated on  *)
+(* as its set, but a set's comparison with one is the instance's reflected *)
+(* comparison (RichCompare, 7.2.4).                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -27,8 +30,8 @@ Small == {s \in SUBSET {1, 2, 3} : Cardinality(s) <= 2}
 Operators == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "|=", "&=", "-=", "^="}
 Methods == {"union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"}
 Updates == {"update", "intersection_update", "difference_update", "symmetric_difference_update"}
-Programs == [ka : {"set", "frozenset"}, a : Small, op : Operators \cup Methods, b : Small]
-            \cup [ka : {"set"}, a : Small, op : Updates, b : Small]
+Programs == [ka : {"set", "frozenset", "subset"}, a : Small, op : Operators \cup Methods, kb : {"set", "subset"}, b : Small]
+            \cup [ka : {"set", "subset"}, a : Small, op : Updates, kb : {"set", "subset"}, b : Small]
 
 \* A set built in the order of the values: its elements <<side, value>>.
 Build(side, s) == LET RECURSIVE From(_) From(i) == IF i > 3 THEN <<>>
@@ -77,10 +80,15 @@ Toggle(A, B) == Walk("toggle", B, 1, A, <<>>, <<>>)
 Subset(A, B) == IF Len(A) > Len(B) THEN [r |-> <<>>, log |-> <<>>, bool |-> "False"] ELSE Walk("subset", A, 1, <<>>, B, <<>>)
 False == [r |-> <<>>, log |-> <<>>, bool |-> "False"]
 
+Reflected == [o \in {"<=", "<", ">=", ">", "=="} |-> CASE o = "<=" -> ">=" [] o = "<" -> ">" [] o = ">=" -> "<="
+                                                       [] o = ">" -> "<" [] o = "==" -> "=="]
 \* What a program gives; a frozenset's augmented assignment is its operator.
+\* A set's comparison with a subclass's instance is the instance's reflected one.
 Apply(p) ==
-    LET A == Build("a", p.a)  B == Build("b", p.b)
-        op == IF p.ka = "frozenset" /\ p.op \in {"|=", "&=", "-=", "^="} THEN SubSeq(p.op, 1, 1) ELSE p.op
+    LET swap == p.ka = "set" /\ p.kb = "subset" /\ p.op \in DOMAIN Reflected
+        A == IF swap THEN Build("b", p.b) ELSE Build("a", p.a)
+        B == IF swap THEN Build("a", p.a) ELSE Build("b", p.b)
+        op == IF swap THEN Reflected[p.op] ELSE IF p.ka = "frozenset" /\ p.op \in {"|=", "&=", "-=", "^="} THEN SubSeq(p.op, 1, 1) ELSE p.op
     IN CASE op \in {"|", "|=", "union", "update"} -> Union(A, B)
          [] op \in {"&", "&=", "intersection", "intersection_update"} -> Inter(A, B)
          [] op \in {"-", "difference"} -> Diff(A, B)
@@ -92,7 +100,9 @@ Apply(p) ==
          [] op = "<" -> IF Len(A) >= Len(B) THEN False ELSE Subset(A, B)
          [] op = ">" -> IF Len(A) <= Len(B) THEN False ELSE Subset(B, A)
          [] op = "==" -> IF Len(A) # Len(B) THEN False ELSE Subset(A, B)
-         [] op = "isdisjoint" -> Walk("disjoint", Smaller(A, B), 1, <<>>, Other(A, B), <<>>)
+         \* isdisjoint iterates an instance, else walks the smaller set.
+         [] op = "isdisjoint" -> IF p.kb = "subset" THEN Walk("disjoint", B, 1, <<>>, A, <<>>)
+                                 ELSE Walk("disjoint", Smaller(A, B), 1, <<>>, Other(A, B), <<>>)
 
 Compares == {"<=", "<", ">=", ">", "==", "issubset", "issuperset", "isdisjoint"}
 RECURSIVE Join(_)

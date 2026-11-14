@@ -49,7 +49,7 @@ Contents | - navigation
 7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.1 IsCallable ( *o* ) | Callables, BuiltinsObjects
 7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.2 SameObject ( *a*, *b* ) | Objects
 7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.3 ReflectedComparison ( *op* ) | BasicCustomization, Operators
-7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.4 RichCompare ( *v*, *w*, *op* ) | BasicCustomization, Operators, Comparisons
+7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.4 RichCompare ( *v*, *w*, *op* ) | BasicCustomization, Operators, Comparisons, SetWalks
 7 Abstract Operations > 7.2 Testing and comparison operations > 7.2.5 RichCompareBool ( *v*, *w*, *op* ) | Comparisons, Containers
 7 Abstract Operations > 7.3 Attribute and special method operations | = sections
 7 Abstract Operations > 7.3 Attribute and special method operations > 7.3.1 LookupInMRO ( *T*, *name* ) | MRO, Attributes

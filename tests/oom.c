@@ -347,6 +347,13 @@ static const char *const programs[] = {
     "    return [len(a), len(b), a.issubset([SD()]), b.issubset(x for x in b)]\n"
     "print(st())\n",
 
+    "class SS(set): pass\n"
+    "def ss():\n"
+    "    a = SS([SD(), SD()]); b = {SD()}\n"
+    "    c = a | b; a ^= b; d = b == SS([SD()])\n"
+    "    return [len(c), len(a), d, b.isdisjoint(a), [1] == type('L', (list,), {})([1])]\n"
+    "print(ss())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

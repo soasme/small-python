@@ -9,6 +9,13 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 log = []
 
 
+class S(set):
+    pass
+
+
+KINDS = {"set": set, "frozenset": frozenset, "subset": S}
+
+
 class E:
     def __init__(self, side, v): self.side, self.v = side, v
     def __hash__(self): return 1
@@ -33,15 +40,14 @@ def source(op, named):
 
 
 def named_method(p):
-    # frozenset has no in-place methods
-    return p["op"] in METHODS and hasattr(set if p["ka"] == "set" else frozenset, "__%s__" % METHODS[p["op"]])
+    # frozenset has no in-place methods; a method called by name is not reflected
+    return p["op"] in METHODS and hasattr(KINDS[p["ka"]], "__%s__" % METHODS[p["op"]]) and p["kb"] == "set"
 
 
 def run(p, machine, named=False):
     for _ in (): pass
-    kind = set if p["ka"] == "set" else frozenset
-    a = kind(E("a", v) for v in sorted(p["a"]))
-    b = {E("b", v) for v in sorted(p["b"])}
+    a = KINDS[p["ka"]](E("a", v) for v in sorted(p["a"]))
+    b = KINDS[p["kb"]](E("b", v) for v in sorted(p["b"]))
     body = source(p["op"], named).replace("\n", "\n    ")
     loop = "    for _ in (): pass\n" if machine else ""
     scope = {}

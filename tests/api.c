@@ -1626,6 +1626,12 @@ int main(int argc, char **argv) {
                "def unioned():\n    s = {Slow()}\n    return len(s.union([Slow(), Slow()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "unioned()", "unioned.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So do a set subclass's operators, in-place operators and comparisons. */
+    execute(c, "class Sub(set): pass\n"
+               "def subs():\n    s = Sub([Slow()])\n    t = {Slow()}\n    u = s | t\n    s &= t\n"
+               "    return len(u) + len(s) + (t == Sub([Slow()])) + t.isdisjoint(Sub([Slow()]))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "subs()", "subs.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So do a set's symmetric difference, its update and issubset of a list. */
     execute(c, "def toggled():\n    s = {Slow()}\n    t = s.symmetric_difference([Slow()])\n    s.symmetric_difference_update([Slow()])\n"
                "    return len(t) + len(s) + s.issubset([Slow()])\n");
