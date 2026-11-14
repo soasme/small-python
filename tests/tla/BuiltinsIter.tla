@@ -56,7 +56,7 @@ Zero(s) == [i \in DOMAIN s |-> s[i] - 1]
 Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 
-Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_dict", "next_default", "next_python", "adapt_python", "next_stop",
+Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_dict", "next_default", "next_python", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
@@ -103,6 +103,9 @@ Case(c) ==
       \* enumerate, zip and map take an instance's items from its Python __next__,
       \* a zip ending at the first StopIteration
       [] c = "adapt_python" -> "([(0, 1), (1, 0)], [('a', 2), ('b', 1)], [0], 'end')"
+      \* creating zip, map, enumerate and filter calls each instance's Python
+      \* __iter__ in order, an error stopping the iterables after it
+      [] c = "adapt_iter" -> "([(1, 2, 3)], [4], [(0, 5)], [6], [(1,), (), (1,), (3,), (4,), (5,), (0, 6)])"
       [] c = "next_stop" -> "StopIteration: "
       [] c = "next_non_iterator" -> "TypeError: 'list' object is not an iterator"
       [] c = "iter_sentinel_noncallable" -> "TypeError: iter(v, w): v must be callable"

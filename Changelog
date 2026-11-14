@@ -66,6 +66,8 @@ Unreleased (0.10.0):
   C stack, so it can pause, and runs a __next__ that calls nothing 2.2x faster
 - enumerate(), zip() and map() of an instance, and next() of them, call its Python __next__
   without nesting on the C stack, so they can pause
+- zip(), map(), enumerate() and filter() call an instance's Python __iter__ without nesting on
+  the C stack, so they can pause
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python
   __eq__ of a key of the same hash without nesting on the C stack, so they can pause
 - a tuple key of a dict or set calls its items' Python __hash__ without nesting on the C stack,

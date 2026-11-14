@@ -1553,6 +1553,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(list(enumerate(Steps(2)))) + sum(map(abs, Steps(1))) + next(zip(Steps(1), Steps(1)))[1]", "adapt.py"),
                                  SPY_STOP_STEPS, &pauses)) == 2 + 2999 + 2999 && pauses > 4);
+    /* So do zip(), map(), enumerate() and filter() calling a Python __iter__. */
+    execute(c, "class Walk:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([i])\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "list(zip(Walk(), [1]))[0][0] + list(map(abs, Walk()))[0] + list(enumerate(Walk()))[0][1] + "
+                                                 "list(filter(None, Walk()))[0]", "walk.py"), SPY_STOP_STEPS, &pauses)) == 4 * 2999 && pauses > 3);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

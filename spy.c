@@ -22819,6 +22819,25 @@ static NO_INLINE int delegating(Machine *m) {
 static int adapted_source(SPYContext *c, SPYValue *s) {
     return (s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) || next_function(c, s);
 }
+/* The zip, map, enumerate or filter of id over its collected iterables
+ * source, an enumerate's count counter; both are consumed. */
+static NO_INLINE SPYValue *adapter_new(SPYContext *c, int id, SPYValue *source, SPYValue *counter) {
+    SPYValue *v = value_new(c, SPY_ITERATOR);
+    if (!v) { spy_release(source); spy_release(counter); return NULL; }
+    v->as.iterator.source = source;
+    v->as.iterator.kind = id == B_MAP ? I_MAP : id == B_ZIP ? I_ZIP : id == B_ENUMERATE ? I_ENUMERATE : I_FILTER;
+    /* A zip's or map's removed count marks a generator among its
+     * iterables (zip_of_generator), and its second bit a map or an
+     * instance, as an enumerate's of one (adapts). */
+    if (id == B_ZIP || id == B_MAP)
+        for (size_t i = id == B_MAP; i < source->as.seq.len; i++) {
+            SPYValue *s = source->as.seq.items[i];
+            v->as.iterator.removed |= (s->type == SPY_GENERATOR) | adapted_source(c, s) << 1;
+        }
+    if (id == B_ENUMERATE && adapted_source(c, source)) v->as.iterator.removed = 2;
+    v->as.iterator.counter = counter;
+    return v;
+}
 /* Whether v is a zip or map, not strict, of a generator the machine
  * resumes (zip_fill), one made with a generator (its removed count's
  * first bit). */
@@ -22846,6 +22865,78 @@ static SPYValue *iter_function(SPYContext *c, SPYValue *v) {
     SPYValue *cls = v->type != SPY_INSTANCE || v->as.map.base || builtin_base(c, v, "__iter__", NULL) ? NULL : v->as.map.parent;
     SPYValue *function = cls ? class_lookup(cls, "__iter__") : NULL;
     return function && (machine_function(c, function) || generator_function(c, function)) ? function : NULL;
+}
+static SPYValue *adapter_iterated(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* zip(), map(), enumerate() or filter() on machine m, whose iterables'
+ * Python __iter__ methods are m's calls (callk), in order: state, which
+ * it takes, lists the builtin, its arguments, an enumerate's count, then
+ * map's or filter's function and the iterators so far. */
+static SPYValue *adapter_step(SPYContext *c, Machine *m, SPYValue *state) {
+    SPYValue *callee = state->as.seq.items[0], *args = state->as.seq.items[1], *result;
+    int id = callee->as.map.native - 1;
+    size_t last = id == B_ENUMERATE ? 1 : id == B_FILTER ? 2 : args->as.seq.len;
+    while (state->as.seq.len - 3 < last) {
+        SPYValue *method = NULL, *iterator = iterator_of(c, args->as.seq.items[state->as.seq.len - 3], &method);
+        if (method) {
+            result = callk(c, m, method, 0, NULL, adapter_iterated, state);
+            spy_release(method);
+            return result;
+        }
+        int status = iterator ? sequence_append(c, state, iterator) : -1;
+        spy_release(iterator);
+        if (status) { spy_release(state); return NULL; }
+    }
+    SPYValue *counter = id == B_ENUMERATE ? spy_retain(state->as.seq.items[2]) : NULL, *source;
+    if (id == B_ENUMERATE) source = spy_retain(state->as.seq.items[3]);
+    else if ((source = id == B_FILTER ? value_new(c, SPY_TUPLE) : spy_list(c)))
+        for (size_t i = 3; i < state->as.seq.len; i++)
+            if (sequence_append(c, source, state->as.seq.items[i])) { spy_release(source); source = NULL; break; }
+    spy_release(state);
+    if (!source) { spy_release(counter); return NULL; }
+    return adapter_new(c, id, source, counter);
+}
+/* What an iterable's Python __iter__ returned for adapter_step (callk). */
+static SPYValue *adapter_iterated(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *args = state->as.seq.items[1];
+    int status = result && (result = iterator_returned(c, args->as.seq.items[state->as.seq.len - 3], result, "__iter__")) ?
+                 sequence_append(c, state, result) : -1;
+    spy_release(result);
+    if (status) { spy_release(state); return NULL; }
+    return adapter_step(c, m, state);
+}
+/* Whether class callee is zip, map, enumerate or filter, called on the
+ * argc arguments argv, one of whose iterables has a Python __iter__ on
+ * the machine (iter_function). */
+static NO_INLINE int adapter_iterates(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    size_t i = 0, last = argc;
+    switch (callee->as.map.native - 1) {
+    case B_ZIP: break;
+    case B_MAP: if (argc < 2) return 0; i = 1; break;
+    case B_ENUMERATE: if (argc < 1 || argc > 2) return 0; last = 1; break;
+    case B_FILTER: if (argc != 2) return 0; i = 1; break;
+    default: return 0;
+    }
+    for (; i < last; i++) {
+        SPYValue *function = iter_function(c, argv[i]);
+        if (function && machine_function(c, function)) return 1;
+    }
+    return 0;
+}
+/* That call (adapter_iterates) on machine m, which takes callee and the
+ * arguments: the iterators are m's calls (adapter_step). */
+static NO_INLINE SPYValue *adapter_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    int id = callee->as.map.native - 1;
+    SPYValue *args = tuple_of(c, argc, argv);
+    release_all(argc, argv);
+    /* enumerate() converts its start before calling iter(). */
+    SPYValue *counter = !args ? NULL : id != B_ENUMERATE ? spy_none(c) :
+                        args->as.seq.len == 2 ? index_object(c, args->as.seq.items[1]) : spy_int(c, 0);
+    SPYValue *state = counter ? spy_list(c) : NULL;
+    int status = !state || sequence_append(c, state, callee) || sequence_append(c, state, args) || sequence_append(c, state, counter) ||
+                 ((id == B_MAP || id == B_FILTER) && sequence_append(c, state, args->as.seq.items[0]));
+    spy_release(counter); spy_release(args); spy_release(callee);
+    if (status) { spy_release(state); return NULL; }
+    return adapter_step(c, m, state);
 }
 /* The Python __getitem__ on the machine of plain instance v's class,
  * borrowed; else NULL. */
@@ -24059,6 +24150,9 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
+    /* zip(), map(), enumerate() and filter() call a Python __iter__ (adapter_call). */
+    if (method < 0 && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, argc, argv))
+        return adapter_call(c, m, callee, argc, argv);
     /* A dict or set method hashing an instance or tuple key, or hash() of
      * a tuple, enters its first Python __hash__ (hash_call_step). */
     SPYValue *key;
@@ -24447,6 +24541,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         result = iter_builtin(c, m, source);
         spy_release(source); spy_release(callee);
         return result;
+    }
+    if (calls && callee->type == SPY_CLASS && callee->as.map.native && adapter_iterates(c, callee, argc, argv)) {
+        /* So do zip(), map(), enumerate() and filter(), the callee and arguments leaving the stack. */
+        m->len -= argc + 1;
+        return adapter_call(c, m, callee, argc, argv);
     }
     /* So do min() and max() of a list's or tuple's items or of the
      * arguments, comparing them by a Python __lt__ or __gt__ (fold_call). */
@@ -33596,11 +33695,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         SPYValue *source = iterator ? value_new(c, SPY_TUPLE) : NULL;
         if (source && (sequence_append(c, source, a) || sequence_append(c, source, iterator))) { spy_release(source); source = NULL; }
         spy_release(iterator);
-        SPYValue *v = source ? value_new(c, SPY_ITERATOR) : NULL;
-        if (!v) { spy_release(source); return NULL; }
-        v->as.iterator.source = source;
-        v->as.iterator.kind = I_FILTER;
-        return v;
+        return source ? adapter_new(c, B_FILTER, source, NULL) : NULL;
     }
     case B_VARS: {
         if (argc > 1) goto arity;
@@ -33714,7 +33809,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             spy_release(step); spy_release(slice); spy_release(range); return iterator;
         }
         if (id == B_MAP && argc < 2) return spy_error(c, "TypeError", "map() must have at least two arguments.");
-        SPYValue *source, *counter = NULL;
+        SPYValue *source = NULL, *counter = NULL;
         if (id == B_ZIP || id == B_MAP) {
             source = spy_list(c);
             if (!source) return NULL;
@@ -33729,7 +33824,8 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             if (!(counter = argc == 2 ? index_object(c, argv[1]) : spy_int(c, 0))) return NULL;
             if (!(source = get_iterator(c, a))) { spy_release(counter); return NULL; }
         }
-        else if (special_dispatch(a)) {
+        if (id != B_REVERSED) return adapter_new(c, id, source, counter);
+        if (special_dispatch(a)) {
             /* reversed_new: __reversed__, else the sequence protocol. */
             SPYValue *cls = value_class(c, a), *method = class_lookup(cls, "__reversed__");
             if (method && method->type != SPY_NONE) return call_special(c, a, "__reversed__", 0, NULL);
@@ -33756,24 +33852,15 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
         }
         if (!source) return NULL;
         SPYValue *v = value_new(c, SPY_ITERATOR);
-        if (!v) { spy_release(source); spy_release(counter); return NULL; }
+        if (!v) { spy_release(source); return NULL; }
         v->as.iterator.source = source;
-        v->as.iterator.kind = id == B_MAP ? I_MAP : id == B_ZIP ? I_ZIP : id == B_ENUMERATE ? I_ENUMERATE : I_REVERSED;
-        /* A zip's or map's removed count marks a generator among its
-         * iterables (zip_of_generator), and its second bit a map or an
-         * instance, as an enumerate's of one (adapts). */
-        if (id == B_ZIP || id == B_MAP)
-            for (size_t i = id == B_MAP; i < source->as.seq.len; i++) {
-                SPYValue *s = source->as.seq.items[i];
-                v->as.iterator.removed |= (s->type == SPY_GENERATOR) | adapted_source(c, s) << 1;
-            }
-        if (id == B_ENUMERATE && adapted_source(c, source)) v->as.iterator.removed = 2;
-        v->as.iterator.counter = owner ? spy_retain(owner) : counter;
-        if (id == B_REVERSED && (is_dict(a) || is_view(a))) {
+        v->as.iterator.kind = I_REVERSED;
+        v->as.iterator.counter = spy_retain(owner);
+        if (is_dict(a) || is_view(a)) {
             SPYValue *map = is_dict(a) ? a : view_map(a);
             v->as.iterator.index = v->as.iterator.size = map->as.map.len;
             v->as.iterator.removed = map->as.map.removed;
-        } else if (id == B_REVERSED) v->as.iterator.index =
+        } else v->as.iterator.index =
             (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) ? string_length(a) : a->as.seq.len;
         return v;
     }

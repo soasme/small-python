@@ -299,7 +299,9 @@ These run as machines on the heap, in one native activation of
   generators that a `zip` or a `map` without `strict` takes items from
   beside list, tuple and range iterators, and the calls of the maps, and
   the Python `__next__` of the instances, that they and an `enumerate`
-  take items from, for a loop, a consumer below or `next`;
+  take items from, for a loop, a consumer below or `next`, and the
+  Python `__iter__` of the instances that creating a `zip`, `map`,
+  `enumerate` or `filter` calls;
 - the generator a `yield from` delegates to, and those it delegates to
   in turn, when a step above resumes the delegating generator;
 - generators, maps, and instances whose class has a Python `__iter__`,

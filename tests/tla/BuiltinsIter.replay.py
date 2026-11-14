@@ -62,6 +62,10 @@ SOURCES = {
     "adapt_python": "class C:\n    def __init__(s, n): s.n = n\n    def __iter__(s): return s\n    def __next__(s):\n        for _ in (): pass\n"
                     "        if not s.n: raise StopIteration\n        s.n -= 1\n        return s.n\n"
                     "result = (list(enumerate(C(2))), list(zip('ab', C(3))), list(map(abs, C(1))), next(zip(C(1), C(0)), 'end'))",
+    "adapt_iter": "log = []\nclass C:\n    def __init__(s, *v): s.v = v\n    def __iter__(s):\n        for _ in (): pass\n"
+                  "        log.append(s.v)\n        if not s.v: raise KeyError('k')\n        return iter(s.v)\n"
+                  "try: zip(C(1), C(), C(2))\nexcept KeyError: pass\n"
+                  "result = (list(zip(C(1), [2], C(3))), list(map(abs, C(4))), list(enumerate(C(5))), list(filter(None, C(0, 6))), log)",
     "next_stop": 'result = next(iter([]))',
     "next_non_iterator": 'result = next([1])',
     "iter_sentinel_noncallable": 'result = iter(1, 2)',
