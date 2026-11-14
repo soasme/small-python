@@ -1673,6 +1673,12 @@ int main(int argc, char **argv) {
     execute(c, "def held():\n    x = (Slow(),)\n    return int(x in [(Slow(),), [x], (Slow(), 1)]) + int([Slow()] not in [[Slow()], (1,)])\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "held()", "held.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* So do a starred builtin call's __bool__ and __str__ calls. */
+    execute(c, "class Truthy:\n    def __bool__(self):\n        for i in range(3000): pass\n        return True\n"
+               "    def __str__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
+               "def starred():\n    a = [Truthy()]\n    return int(any(*[a])) + int(all(*(a,))) + len(str(*a)) + len(format(*[Truthy(), '']))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "starred()", "starred.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 3);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

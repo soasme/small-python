@@ -25144,13 +25144,13 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
     release_all(argc, argv); spy_release(callee);
     return result;
 }
-/* BC_CALLF: plain call node n, whose operands need no steps of their own;
- * or NULL with no error when a consumer of a generator began on m. */
-static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
-    SPYValue *argv[9], *callee;
-    size_t argc;
-    int method;
-    if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1))) return NULL;
+/* Call node n of callee, or of its native method method, on argc
+ * arguments argv, at most 9, all taken: entered on the machine (its
+ * function with *env), stepped (operand_call_rest, builtin_call), or
+ * called here; NULL with no error when a consumer of a generator began
+ * on m. */
+static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
+                                                SPYValue **argv, SPYValue **env) {
     /* A call on the machine takes the arguments and the callee. */
     if (method < 0 && machine_function(c, callee)) {
         if ((*env = function_env(c, callee, argc, argv, NULL, 1))) return callee;
@@ -25190,6 +25190,15 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     release_all(argc, argv);
     spy_release(callee);
     return result;
+}
+/* BC_CALLF: plain call node n, whose operands need no steps of their own;
+ * or NULL with no error when a consumer of a generator began on m. */
+static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
+    SPYValue *argv[9], *callee;
+    size_t argc;
+    int method;
+    if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1))) return NULL;
+    return operand_dispatch(c, m, n, callee, method, argc, argv, env);
 }
 /* The attribute step of a method call (F_CALLEE_FIRST) on a builtin
  * receiver, which takes object: a builtin type's attributes are its own
@@ -25651,11 +25660,13 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
     spy_release(decorator);
     return NULL;
 }
-/* BC_CALL: the callee, argument list and keyword dict on the stack; a
- * generator's machine (calls 0) enters no call. A bound method's function
- * takes its self first, and a plain class's Python __init__ the new
- * instance, the call's value on the stack (CALL_INIT), as in stack_call. */
-static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
+/* BC_CALL of call node n: the callee, argument list and keyword dict on
+ * the stack; a generator's machine (calls 0) enters no call. A bound
+ * method's function takes its self first, and a plain class's Python
+ * __init__ the new instance, the call's value on the stack (CALL_INIT), as
+ * in stack_call; a builtin or a class given no keywords is called as a
+ * plain call of the arguments is (operand_dispatch). */
+static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int calls, SPYValue **env) {
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
     SPYValue *allocate = NULL;
     int plain = 0, init = 0, id;
@@ -25697,7 +25708,12 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         /* As a stack call's consumer, a starred call's (stack_call). */
         consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
                 args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);
-    else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
+    else if (calls && !keywords->as.map.len && args->as.seq.len <= 9 && (callee->type == SPY_NATIVE || callee->type == SPY_CLASS) &&
+             !c->error_type[0]) {
+        SPYValue *argv[9];
+        for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
+        result = operand_dispatch(c, m, n, spy_retain(callee), -1, args->as.seq.len, argv, env);
+    } else if (!c->error_type[0]) result = step_keywords(c, m, callee, args->as.seq.len, args->as.seq.items, keywords);
     if (self) {
         SPYValue *all = spy_list(c);
         int failed = !all || sequence_append(c, all, self);
@@ -29098,7 +29114,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (!value && !c->error_type[0]) goto consume_generator;
             machine_push(c, m, value); NEXT;
         CASE(BC_CALL)
-            callee_env = NULL; value = keyword_call(c, m, 1, &callee_env);
+            callee_env = NULL; value = keyword_call(c, m, n, 1, &callee_env);
             if (UNLIKELY(callee_env && value->type == SPY_CLASS)) goto enter_init;
             if (callee_env) goto enter_call;
             if (!value && !c->error_type[0]) goto consume_generator;

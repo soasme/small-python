@@ -395,6 +395,13 @@ static const char *const programs[] = {
     "    return [x in [(SD(), [SD()]), (1, 2), x], (SD(),) in [(SD(),)], {1: SD()} in [{1: SD()}]]\n"
     "print(ms())\n",
 
+    "class TB:\n"
+    "    def __bool__(self): return False\n"
+    "    def __str__(self): return 'tb'\n"
+    "    def __format__(self, f): return 'f' + f\n"
+    "a = [TB(), TB()]\n"
+    "print(any(*[a]), all(*(a,)), str(*a[:1]), repr(*[1]), format(*[TB(), 'x']))\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"
