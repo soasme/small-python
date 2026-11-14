@@ -43,6 +43,12 @@ SOURCES = {
     "if_without_else": "[x for x in a if x else 1]",
     "lambda_in_if": "result = [x for x in range(4) if (lambda: x % 2)()]",
     "iter_var_global": "def f():\n    global x\n    return [x for x in range(2)]\nx = 'g'\nresult = (f(), x)",
+    "iter_method": "class I:\n    def __iter__(self):\n        t('iter')\n        return iter([1, 2])\n"
+                   "result = [t(x) for x in I()]\nt('created')",
+    "gen_iter_method": "class I:\n    def __iter__(self):\n        t('iter')\n        return iter([1, 2])\n"
+                       "g = (t(x) for x in I())\nt('created')\nresult = list(g)",
+    "iter_method_bad": "class I:\n    def __iter__(self):\n        t('iter')\n        return 5\n"
+                       "result = {x for x in I()}",
 }
 
 

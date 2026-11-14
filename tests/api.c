@@ -1720,6 +1720,11 @@ int main(int argc, char **argv) {
                "    return t + sum(i for i, x in enumerate(iter(ticks(), 2)))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So does the Python __iter__ a comprehension's first iterable calls. */
+    execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
+               "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "comprehended()", "comprehended.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So does a method call whose attribute a Python getter or __getattr__ reads. */
     execute(c, "class Fetched:\n    @property\n    def f(self):\n        for i in range(3000): pass\n        return abs\n"
                "    def __getattr__(self, name):\n        for i in range(3000): pass\n        return len\n"

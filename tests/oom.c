@@ -463,6 +463,16 @@ static const char *const programs[] = {
     "h = tg(); next(h)\n"
     "print(g.throw(TE, (1, 2), None), h.throw(TE, TE(3), None))\n",
 
+    "class CI:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __iter__(self): return iter(range(self.n)) if self.n else 5\n"
+    "def ci2():\n"
+    "    r = [[x for x in CI(3)], {x: x for x in CI(2)}, list(x * y for x in CI(2) for y in CI(3))]\n"
+    "    try: [x for x in CI(0)]\n"
+    "    except TypeError as e: r.append(e)\n"
+    "    return r\n"
+    "print(ci2())\n",
+
     "def zc():\n"
     "    n = [0]\n"
     "    def f():\n"

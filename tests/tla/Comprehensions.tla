@@ -35,7 +35,8 @@ Cases == {"no_leak", "class_scope", "class_scope_inner", "class_first_iterable",
           "gen_not_sole", "gen_first_error", "gen_inner_error", "comp_error_type", "star_list", "dstar_dict",
           "star_gen", "dstar_list", "star_dict_key", "star_dict_bad", "dstar_bad", "star_target_in_comp",
           "nested_scope", "late_binding", "gen_close", "gen_send_none", "gen_name", "frame_name",
-          "unparenthesized_tuple", "if_else_elem", "if_without_else", "lambda_in_if", "iter_var_global"}
+          "unparenthesized_tuple", "if_else_elem", "if_without_else", "lambda_in_if", "iter_var_global",
+          "iter_method", "gen_iter_method", "iter_method_bad"}
 Programs == [kind : {"list", "set", "dict", "gen"}, clauses : Clauses, element : {"plain", "star"}]
             \cup [case : Cases]
 
@@ -109,6 +110,10 @@ Case(c) ==
       [] c = "if_without_else" -> Syntax("invalid syntax")
       [] c = "lambda_in_if" -> <<"ok", "[1, 3]", <<>>>>
       [] c = "iter_var_global" -> <<"ok", "([0, 1], 'g')", <<>>>>
+      \* An instance's __iter__ is called once, in the enclosing scope, first.
+      [] c = "iter_method" -> <<"ok", "[1, 2]", <<"'iter'", "1", "2", "'created'">>>>
+      [] c = "gen_iter_method" -> <<"ok", "[1, 2]", <<"'iter'", "'created'", "1", "2">>>>
+      [] c = "iter_method_bad" -> <<"TypeError: I.__iter__() must return an iterator, not int", <<>>, <<"'iter'">>>>
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Comprehension(p)
 

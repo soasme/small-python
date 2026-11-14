@@ -18738,10 +18738,9 @@ static SPYValue *comprehension_end(SPYContext *c, SPYValue *g, Result result) {
     spy_release(result.value);
     return c->error_type[0] ? NULL : spy_error(c, "RuntimeError", "synchronous comprehension suspended");
 }
-/* Comprehension n over source, its first iterable, as a generator whose
- * machine has not started. */
-static SPYValue *comprehension_new(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
-    SPYValue *iterator = n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source);
+/* Comprehension n over iterator, its first iterable's, which it takes,
+ * as a generator whose machine has not started. */
+static SPYValue *comprehension_of(SPYContext *c, Frame *f, Node *n, SPYValue *iterator) {
     if (!iterator) return NULL;
     int eager = eager_comprehension(n);
     SPYValue *env = eager ? kept_env(c, n->scope) : NULL;
@@ -18772,6 +18771,10 @@ static SPYValue *comprehension_new(SPYContext *c, Frame *f, Node *n, SPYValue *s
     spy_release(iterator); spy_release(env);
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result;
+}
+/* Comprehension n over source, its first iterable (comprehension_of). */
+static SPYValue *comprehension_new(SPYContext *c, Frame *f, Node *n, SPYValue *source) {
+    return comprehension_of(c, f, n, n->a->op ? async_iterator(c, source, 1) : get_iterator(c, source));
 }
 /* The value of comprehension n over source: an eager one's result, else a
  * generator. */
@@ -27679,8 +27682,15 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
 }
 /* An iter_call returned result into step ins, the iterable on m's stack:
  * the loop's block, when result is an iterator; or a yield from's or an
- * await's delegate, the step then running again (1). */
+ * await's delegate, or a comprehension's iterator, the step then running
+ * again (1). */
 static NO_INLINE int iter_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
+    if (ins->op == BC_COMPREHENSION) {
+        /* A comprehension's step runs again with the iterator under c->unbound. */
+        SPYValue *source = machine_pop(m), *iterator = iterator_returned(c, source, result, "__iter__");
+        spy_release(source);
+        return iterator && !machine_push(c, m, iterator) && !machine_push(c, m, spy_retain(c->unbound));
+    }
     if (ins->op == BC_DELEGATE)
         return !!(m->delegate = iterator_returned(c, m->stack[m->len - 1], result, ins->arg ? "__await__" : "__iter__"));
     SPYValue *source = machine_pop(m);
@@ -29423,11 +29433,27 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         CASE(BC_DEFAULT)
             a = machine_pop(m); function_default(c, m->stack[m->len - 1], n, a); break;
         CASE(BC_COMPREHENSION)
+            /* An instance's Python __iter__ is a call (iter_call). */
+            if (!n->a->op && m->stack[m->len - 1]->type == SPY_INSTANCE) {
+                callee_env = NULL;
+                if ((value = iter_call(c, m, ins, "__iter__", &callee_env))) {
+                    if (value == c->unbound) { pc--; break; }
+                    special = CALL_ITER; goto enter_special;
+                }
+                if (c->error_type[0]) break;
+            }
             a = machine_pop(m);
-            if (!eager_comprehension(n)) { machine_push(c, m, comprehension_from(c, &f, n, a)); break; }
+            if (a == c->unbound) { spy_release(a); a = NULL; b = machine_pop(m); }
+            if (!eager_comprehension(n)) {
+                machine_push(c, m, b ? comprehension_of(c, &f, n, b) : comprehension_from(c, &f, n, a));
+                b = NULL;
+                break;
+            }
             /* An eager comprehension runs on in this run_machine, returning
              * into this machine (generator_left). */
-            if (!(value = comprehension_new(c, &f, n, a))) break;
+            value = b ? comprehension_of(c, &f, n, b) : comprehension_new(c, &f, n, a);
+            b = NULL;
+            if (!value) break;
             spy_release(a);
             m->pc = pc;
             value->as.generator.machine->resumer = m;
