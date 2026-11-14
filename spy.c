@@ -14359,9 +14359,9 @@ enum { CLOSING = 1, THROWING };
  * the step that made a special call, a class call's __init__, a loop's
  * __next__, a sort's key function, a consumer's next item, a with
  * statement's __enter__, an operator's special method, a test's
- * __bool__, a loop's __iter__, a store's __setitem__ or a key's
- * __hash__ (hash_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+ * __bool__, a loop's __iter__, a store's __setitem__, a key's
+ * __hash__ (hash_call) or a list index's __index__ (index_call). */
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
@@ -26284,6 +26284,40 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     spy_release(x); spy_release(y);
     return m;
 }
+/* The Python __index__ of key as the index of list object's method name,
+ * object's own or its base's (builtin_base); else NULL. */
+static SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, const char *name) {
+    SPYValue *base = object->type == SPY_INSTANCE ? builtin_base(c, object, name, NULL) : object;
+    return base && base->type == SPY_LIST ? index_function(c, key) : NULL;
+}
+/* The Python __index__ of key, the index of a store to or a deletion
+ * from list operands[0], owned, with its env, to enter on m (CALL_INDEX)
+ * with the key over the count operands the store keeps (index_returned);
+ * else NULL, with an error if the call cannot bind. */
+static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, size_t count, SPYValue *const *operands, SPYValue **env) {
+    SPYValue *function = list_index(c, operands[0], key, count == 2 ? "__delitem__" : "__setitem__");
+    size_t len = m->len;
+    if (!function) return NULL;
+    for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) return NULL;
+    if (machine_push(c, m, spy_retain(key))) return NULL;
+    c->entering_kind = CALL_INDEX;
+    if ((*env = function_env(c, function, 1, &key, NULL, 0))) return spy_retain(function);
+    while (m->len > len) spy_release(machine_pop(m));
+    return NULL;
+}
+/* The __index__ index_call entered for store ins returned result: the
+ * store or deletion runs on the operands it kept under the key, at the
+ * index, which must fit a Py_ssize_t as the key's. */
+static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
+    int deletion = ins->op == BC_SET_TARGET && ins->arg;
+    SPYValue *key = machine_pop(m), *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m);
+    SPYValue *index = index_result(c, key, result);
+    relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
+    if (index && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
+    else if (index && deletion) delete_evaluated(c, ins->node, object, index);
+    else if (index && !set_index(c, object, index, value) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
+    release_all(5, (SPYValue *[]){index, object, item, value, key});
+}
 /* x[y], x an instance of a builtin's subclass: its class's Python
  * __getitem__, or for a dict's subclass, of a key y that is a builtin
  * scalar and absent, found without calling Python, its Python
@@ -26828,10 +26862,12 @@ static int store_collides(SPYContext *c, SPYValue *map, SPYValue *key) {
 }
 /* Whether a store of key into object is a call (store_call): a Python
  * __setitem__, or the key's Python __hash__ for a dict, or a comparison
- * of the key for an exact one (native_store). */
+ * of the key for an exact one (native_store), or its Python __index__ for
+ * a list (index_call). */
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key) {
     return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
-           (hashes_key(object, 0) && (hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key))));
+           (hashes_key(object, 0) && (hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key)))) ||
+           list_index(c, object, key, "__setitem__");
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
@@ -26905,9 +26941,10 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
         SPYValue *function = store_function(c, args[0], "__delitem__");
-        if (!function && hashes_key(args[0], 0) && ((function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
-                                                    (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], NULL, env))) ||
-                                                    c->error_type[0])) {
+        if (!function && (hashes_key(args[0], 0) ? (function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
+                                                   (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], NULL, env))) ||
+                                                   c->error_type[0]
+                                                 : (function = index_call(c, m, args[1], 2, args, env)) || c->error_type[0])) {
             release_all(2, args); return function;
         }
         relocate(c, n);
@@ -26930,7 +26967,8 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     if (!function) {
         /* A dict's key's Python __hash__ (store_hooked), else the store in C. */
         if ((function = hash_call(c, m, args[1], 3, args, env)) || c->error_type[0] ||
-            (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], args[2], env))) || c->error_type[0]) {
+            (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], args[2], env))) || c->error_type[0] ||
+            (function = index_call(c, m, args[1], 3, args, env)) || c->error_type[0]) {
             release_all(3, args); return function;
         }
         relocate(c, n);
@@ -28070,6 +28108,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_HASH) {
                         m = hash_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
+                    } else if (kind == CALL_INDEX) {
+                        index_returned(c, m, &code[pc - 1], result);
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;

@@ -268,6 +268,19 @@ static const char *const programs[] = {
     "def sx(): return [[1, 2, 3, 4][SX(1):SX(3)], 'abcd'[SX(0)::SX(2)], range(9)[SX(2):]]\n"
     "print(sx())\n",
 
+    "class LX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return self.v\n"
+    "def lx():\n"
+    "    s = [1, 2, 3]\n"
+    "    s[LX(0)] = 7\n"
+    "    del s[LX(1)]\n"
+    "    s[LX(1)] += 1\n"
+    "    return s\n"
+    "print(lx())\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"

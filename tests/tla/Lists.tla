@@ -13,6 +13,7 @@
 (* one of                                                                  *)
 (*                                                                         *)
 (*     s[i] = 7, del s[i]                    i in -4..3                    *)
+(*         i an int, or an instance whose Python __index__ returns it      *)
 (*     s[start:stop:step] = t, del s[...]    t: up to two of 7, 8          *)
 (*     s += t   s *= n   s.append(7)   s.clear()   s.copy()   s.extend(t)  *)
 (*     s.insert(i, 7)   s.pop()   s.pop(i)   s.remove(x)   s.reverse()     *)
@@ -27,7 +28,8 @@ Items == UNION {[1..n -> {1, 2}] : n \in 0..3}
 Values == UNION {[1..n -> {7, 8}] : n \in 0..2}
 None == 99   \* a missing start, stop, step, or index
 Bounds == {None, -1, 0, 2, 4}
-Op == {[op |-> o, i |-> i] : o \in {"set", "del", "insert"}, i \in -4..3}
+Op == {[op |-> o, i |-> i, by |-> b] : o \in {"set", "del"}, i \in -4..3, b \in {"int", "index"}}
+      \cup {[op |-> "insert", i |-> i] : i \in -4..3}
       \cup {[op |-> "pop", i |-> i] : i \in {None, -4, -1, 0, 2, 3}}
       \cup {[op |-> "setslice", start |-> a, stop |-> b, step |-> c, t |-> t] :
               a \in Bounds, b \in Bounds, c \in {None, 1, 2, -1}, t \in Values}
@@ -112,4 +114,7 @@ DelIsEmptyAssignment == Finished /\ program.op = "delslice" /\ program.step \in 
 AppendIsSlice == Finished /\ program.op = "append" =>
     outcome = Run([type |-> program.type, items |-> program.items, op |-> "setslice", start |-> Len(program.items),
                    stop |-> Len(program.items), step |-> None, t |-> <<7>>])
+
+\* An index's __index__ gives the int it returns.
+IndexIsInt == Finished /\ program.op \in {"set", "del"} => outcome = Run([program EXCEPT !.by = "int"])
 =============================================================================

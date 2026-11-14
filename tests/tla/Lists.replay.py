@@ -5,6 +5,20 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
+class Index:
+    def __init__(self, i):
+        self.i = i
+
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        return self.i
+
+
+def index(p):
+    return Index(p["i"]) if p["by"] == "index" else p["i"]
+
+
 def arg(v):
     return None if v == 99 else v
 
@@ -17,9 +31,9 @@ def outcome(p):
     r = None
     try:
         if op == "set":
-            s[p["i"]] = 7
+            s[index(p)] = 7
         elif op == "del":
-            del s[p["i"]]
+            del s[index(p)]
         elif op == "setslice":
             s[arg(p["start"]):arg(p["stop"]):arg(p["step"])] = t
         elif op == "delslice":

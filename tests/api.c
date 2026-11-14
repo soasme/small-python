@@ -1601,6 +1601,10 @@ int main(int argc, char **argv) {
     execute(c, "class Mark:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        for i in range(3000): pass\n        return self.v\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(list(range(10))[Mark(1):Mark(7):Mark(2)])", "marked.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So do a list store's and deletion's index's __index__. */
+    execute(c, "def marks():\n    s = [0, 1, 2]\n    s[Mark(1)] = 5\n    del s[Mark(0)]\n    return s[0]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "marks()", "stored.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"
