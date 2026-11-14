@@ -461,6 +461,10 @@ struct SPYContext {
      * when the Python __next__ it called raises StopIteration
      * (checked_returned). */
     SPYValue *stopping;
+    /* On a machine's stack, marks an augmented assignment whose in-place
+     * method declined, under the plain operator's operands: its error
+     * names the augmented operator (operator_returned). */
+    SPYValue *augmenting;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -26913,8 +26917,19 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
         spy_release(result);
         const Operator *o = kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : kind == OPERATE_BINARY ? operator_of(op) : NULL;
         if (phase == OPERATOR_FIRST && kind == OPERATE_INPLACE && class_lookup(value_class(c, x), o->inplace)) {
-            /* A declined in-place method leaves the plain operator. */
-            result = binary(c, o->token, x, y);
+            /* A declined in-place method leaves the plain operator, its
+             * Python method a call. */
+            Instruction plain = {.op = BC_BINARY, .arg = o->token};
+            SPYValue *env = NULL, *function = machine_push(c, m, spy_retain(c->augmenting)) ? NULL : operator_call(c, m, &plain, x, y, &env);
+            Call *call = function ? call_enter(c, function, env, m) : NULL;
+            if (call) {
+                spy_release(x); spy_release(y);
+                call->m.outermost = CALL_OPERATOR;
+                return &call->m;
+            }
+            if (function) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+            if (m->len && m->stack[m->len - 1] == c->augmenting) spy_release(machine_pop(m));
+            result = function || c->error_type[0] ? NULL : binary(c, o->token, x, y);
         } else {
             int negated = 0;
             SPYValue *self, *function = operator_declined(c, o, op, x, y, phase, &self, &result, &negated);
@@ -26932,6 +26947,10 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             } else if (function) result = NULL;
         }
         if (kind == OPERATE_INPLACE && !result) augmented_error(c, o->token, x, y);
+    }
+    if (called && m->len && m->stack[m->len - 1] == c->augmenting) {
+        spy_release(machine_pop(m));
+        if (!result) augmented_error(c, op, x, y);
     }
     m->pc = operator_finish(c, m, ins, y, result, pc);
     spy_release(x); spy_release(y);
@@ -37081,9 +37100,10 @@ SPYContext *spy_context_new(void) {
     c->pairing = value_new(c, V_UNBOUND);
     c->adapting = value_new(c, V_UNBOUND);
     c->stopping = value_new(c, V_UNBOUND);
+    c->augmenting = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

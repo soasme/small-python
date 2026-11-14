@@ -283,6 +283,25 @@ static const char *const programs[] = {
     "    return [s, (0,) * LX(2), LX(1) * 'ab', hex(LX(255)), oct(LX(8)), bin(LX(3)), chr(LX(65)), range(LX(1), LX(5), LX(2)), bytes(LX(2)), bytearray(LX(1))]\n"
     "print(lx())\n",
 
+    "class AX:\n"
+    "    def __iadd__(self, o): return NotImplemented\n"
+    "    def __add__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return NotImplemented\n"
+    "class RX:\n"
+    "    def __radd__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return [o]\n"
+    "def ax():\n"
+    "    x = AX()\n"
+    "    x += RX()\n"
+    "    try:\n"
+    "        y = AX()\n"
+    "        y += 1\n"
+    "    except TypeError as e: x.append(str(e))\n"
+    "    return len(x)\n"
+    "print(ax())\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"
