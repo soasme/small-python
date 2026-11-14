@@ -340,6 +340,13 @@ static const char *const programs[] = {
     "    return [len(a.__or__(b)), len(b.__rsub__(a)), a.__eq__(b), set.__ge__(a, b), a.__ixor__(b) is a, len(a)]\n"
     "print(sd())\n",
 
+    "def st():\n"
+    "    a = {SD(), SD()}\n"
+    "    b = a.symmetric_difference([SD()])\n"
+    "    a.symmetric_difference_update((SD(), SD()))\n"
+    "    return [len(a), len(b), a.issubset([SD()]), b.issubset(x for x in b)]\n"
+    "print(st())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

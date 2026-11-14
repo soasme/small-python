@@ -33,10 +33,13 @@
 (*     update(src) or |= src, of a set src of three objects of one hash    *)
 (*     whose Python __eq__ logs "e": merged into an empty set, the         *)
 (*     distinct elements are compared with none (Annex D); or              *)
-(*   - {K(1)}'s union, difference, intersection, isdisjoint or issuperset  *)
-(*     of a list or a generator of K(1) and K(2): each item is hashed and  *)
-(*     compared with the set's K(1) before the next is taken, and          *)
-(*     intersection and isdisjoint stop at the first, which decides.       *)
+(*   - {K(1)}'s union, difference, intersection, isdisjoint, issuperset,   *)
+(*     issubset, symmetric_difference or symmetric_difference_update of a  *)
+(*     list or a generator of K(1) and K(2): each item is hashed and       *)
+(*     compared with the set's K(1) before the next is taken; intersection,*)
+(*     isdisjoint and issubset stop at the first, which decides; the       *)
+(*     symmetric ones make a set of the items, comparing none, then toggle *)
+(*     K(1), comparing it once.                                            *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -57,7 +60,8 @@ Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : 
             \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update"}, source : {"list", "generator"},
                   fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
             \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|="}]
-            \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset"},
+            \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset", "issubset",
+                                              "symmetric_difference", "symmetric_difference_update"},
                   source : {"list", "generator"}]
 
 VARIABLES program, outcome
@@ -94,14 +98,20 @@ RunHashed(p) ==
         [] OTHER -> {1, 2}>>
 
 \* The items an iterable method takes, each hashed and compared with K(1)
-\* in turn: a generator gives each as it is taken.
+\* in turn: a generator gives each as it is taken. The symmetric methods
+\* hash both items into a set, then look K(1) up in it, or its K(1) up in
+\* the set, and drop it.
 RunIterable(p) ==
     LET y(v) == IF p.source = "generator" THEN "y" \o v \o " " ELSE ""
         first == y("1") \o "h1 e1"
-        log == IF p.method \in {"intersection", "isdisjoint"} THEN first ELSE first \o " " \o y("2") \o "h2"
+        both == y("1") \o "h1 " \o y("2") \o "h2"
+        log == CASE p.method \in {"intersection", "isdisjoint", "issubset"} -> first
+                 [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> both \o " e1"
+                 [] OTHER -> first \o " " \o y("2") \o "h2"
     IN  CASE p.method = "union" -> <<"set", log, {1, 2}>>
           [] p.method = "difference" -> <<"set", log, {}>>
           [] p.method = "intersection" -> <<"set", log, {1}>>
+          [] p.method \in {"symmetric_difference", "symmetric_difference_update"} -> <<"set", log, {2}>>
           [] OTHER -> <<"bool", log, {}>>
 
 Run(p) ==
@@ -139,8 +149,8 @@ Done == outcome # Pending
 Antisymmetric == Done /\ program.op = "<=" /\ outcome = Bool(TRUE) /\ Run([program EXCEPT !.op = ">="]) = Bool(TRUE)
                  => Run([program EXCEPT !.op = "=="]) = Bool(TRUE)
 
-\* intersection and isdisjoint take no item past the one that decides.
-Decided == Done /\ program.op = "iterable" /\ program.method \in {"intersection", "isdisjoint"} =>
+\* intersection, isdisjoint and issubset take no item past the one that decides.
+Decided == Done /\ program.op = "iterable" /\ program.method \in {"intersection", "isdisjoint", "issubset"} =>
            outcome[2] \in {"h1 e1", "y1 h1 e1"}
 
 \* Numbers equal as numbers are one element.

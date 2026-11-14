@@ -1626,6 +1626,11 @@ int main(int argc, char **argv) {
                "def unioned():\n    s = {Slow()}\n    return len(s.union([Slow(), Slow()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "unioned()", "unioned.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So do a set's symmetric difference, its update and issubset of a list. */
+    execute(c, "def toggled():\n    s = {Slow()}\n    t = s.symmetric_difference([Slow()])\n    s.symmetric_difference_update([Slow()])\n"
+               "    return len(t) + len(s) + s.issubset([Slow()])\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "toggled()", "toggled.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So do a set's operator, in-place and comparison methods called by name. */
     execute(c, "def dunders():\n    s = {Slow()}\n    t = {Slow()}\n    s.__ior__(t)\n"
                "    return len(s.__and__(t)) + len(t.__rsub__(s)) + s.__eq__({Slow(), Slow()}) + set.__le__(t, s)\n");

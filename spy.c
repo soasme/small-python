@@ -465,6 +465,9 @@ struct SPYContext {
      * method declined, under the plain operator's operands: its error
      * names the augmented operator (operator_returned). */
     SPYValue *augmenting;
+    /* The kind of call k_fn's entry with no continuation is, CALL_CHECKED
+     * when 0 (k_enter). */
+    int k_kind;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -553,7 +556,7 @@ enum { B_PRINT, B_LEN, B_RANGE, B_STR, B_REPR, B_INT, B_FLOAT, B_BOOL,
        B_EXTEND /* list.extend, dict.update or set.update consuming a generator into its object (consume) */,
        B_FROMKEYS /* dict.fromkeys consuming its keys (consume) */,
        /* A set's methods of another iterable (set_items). */
-       B_SET_UNION, B_SET_DISCARD, B_SET_KEEP, B_SET_DISJOINT, B_SET_SUPERSET };
+       B_SET_UNION, B_SET_DISCARD, B_SET_KEEP, B_SET_DISJOINT, B_SET_SUPERSET, B_SET_TOGGLE };
 static SPYValue *dictionary_value(SPYContext *c, SPYValue *value) {
     SPYValue *dict = builtin_value(c, value, SPY_DICT);
     return dict ? dict : builtin_value(c, value, SPY_FROZENDICT);
@@ -14363,7 +14366,7 @@ struct Sorter {
 typedef struct {
     int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
     SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched;
-    int updating;
+    int updating, subset;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
     size_t finalizing; /* A dead generator's close (finalizer): one more than the finalizers waiting after it. */
@@ -14385,7 +14388,7 @@ enum { UNPACK_ITEMS = -2, EXTEND_ITEMS = -3, CONTAINS_ITEMS = -4 };
  * found or missing one in searched, and an intersection once its result
  * is as large as the set, which ends the consumer (KEY_DONE).
  * An update's value is None (updating). */
-static ALWAYS_INLINE int set_items(int id) { return id >= B_SET_UNION && id <= B_SET_SUPERSET; }
+static ALWAYS_INLINE int set_items(int id) { return id >= B_SET_UNION && id <= B_SET_TOGGLE; }
 /* The set consumer s looks its next item up in. */
 static ALWAYS_INLINE SPYValue *consumer_map(Consumer *s) { return s->searched && !s->phase ? s->searched : s->result; }
 static int consumer_add(SPYContext *, Consumer *, SPYValue *);
@@ -17218,9 +17221,11 @@ static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t
 static NO_INLINE Machine *k_enter(SPYContext *c, Machine *m) {
     Call *call = call_enter(c, c->k_fn, c->k_env, m);
     c->k_fn = c->k_env = NULL;
+    int kind = c->k_kind;
+    c->k_kind = 0;
     if (call) {
         call->k = c->k; call->k_ctx = c->k_ctx; call->host = c->k_host;
-        call->m.outermost = c->k ? CALL_K : CALL_CHECKED;
+        call->m.outermost = c->k ? CALL_K : kind ? kind : CALL_CHECKED;
     } else spy_release(c->k_ctx);
     c->k_ctx = NULL;
     return call ? &call->m : m;
@@ -23292,9 +23297,9 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : NULL;
     int fromkeys = function && callee->as.method.self == c->types[SPY_DICT] && function->type == SPY_NATIVE &&
                    function->as.native.kwcall == dict_fromkeys;
-    /* So does a set's update of one source, and its other methods but
-     * the symmetric ones and issubset of one that is not a set (set_items). */
-    static const int set_ids[] = {B_SET_UNION, B_SET_KEEP, B_SET_DISCARD, -1, B_EXTEND, B_SET_KEEP, B_SET_DISCARD, -1, -1, B_SET_SUPERSET, B_SET_DISJOINT};
+    /* So do a set's methods of one source that is not a set (set_items). */
+    static const int set_ids[] = {B_SET_UNION, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE, B_EXTEND, B_SET_KEEP, B_SET_DISCARD, B_SET_TOGGLE,
+                                  B_SET_KEEP, B_SET_SUPERSET, B_SET_DISJOINT};
     int updates = function && is_set(callee->as.method.self) && function->type == SPY_NATIVE && function->as.native.kwcall == set_method &&
                   argc == 1 && !(argv[0]->type == SPY_INSTANCE && argv[0]->as.map.base && (is_set(argv[0]->as.map.base) || is_dict(argv[0]->as.map.base))) ?
                   set_ids[(intptr_t)function->as.native.data & 255] : -1;
@@ -23436,9 +23441,12 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     SPYValue *result = id == B_SUM ? start ? start : spy_int(c, 0) : id == B_NEXT ? start : id == B_EXTEND ? spy_retain(callee) : id == B_LIST || id == B_TUPLE || id == B_SET || id == B_FROZENSET || id == B_DICT || id == B_FROMKEYS || collects ?
                        value_new(c, id == B_TUPLE ? SPY_TUPLE : id == B_SET ? SPY_SET : id == B_FROZENSET ? SPY_FROZENSET :
                                  id == B_DICT || id == B_FROMKEYS ? SPY_DICT : SPY_LIST) : NULL;
-    SPYValue *searched = id == B_SET_KEEP || id == B_SET_DISJOINT || id == B_SET_SUPERSET ? spy_retain(callee) : NULL;
+    SPYValue *searched = id == B_SET_KEEP || id == B_SET_DISJOINT || id == B_SET_SUPERSET || id == B_SET_TOGGLE ? spy_retain(callee) : NULL;
+    /* A symmetric difference first makes a set of the source, a frozenset
+     * for a frozenset's (set_toggled). */
     if (which >= 0)
         result = id == B_SET_KEEP ? value_new(c, callee->type) : id == B_SET_DISJOINT || id == B_SET_SUPERSET ? spy_bool(c, 1) :
+                 id == B_SET_TOGGLE ? value_new(c, which == 3 ? callee->type : SPY_SET) :
                  which == 6 ? spy_retain(callee) : set_copy_type(c, callee, callee->type);
     /* dict.fromkeys's keys take its value, None by default. */
     SPYValue *value = id != B_FROMKEYS ? NULL : start ? start : spy_none(c);
@@ -23451,7 +23459,8 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     if (!block) { mem_free(consumer); release_all(6, (SPYValue *[]){result, generator, sent, source, value, searched}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
-                           .searched = searched, .updating = which == 5 || which == 6};
+                           .searched = searched, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
+                           .phase = id == B_SET_TOGGLE};
     block->value = generator; block->consumer = consumer;
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
     if (source && keyed == KEY_ITER) spy_release(source);
@@ -23582,6 +23591,25 @@ static NO_INLINE int finalize_closed(SPYContext *c, Machine *m, Frame *f, SPYVal
     return 0;
 }
 static int keys_merge(SPYContext *, Block *, SPYValue *);
+static SPYValue *set_walk(SPYContext *, Machine *, int, SPYValue *, SPYValue *, int, SPYValue **);
+static SPYValue *looked(SPYContext *);
+/* A symmetric difference's or its update's consumer atop m, made a set of
+ * its source, its result, ends: the set's entries are toggled in a copy
+ * of it, or its entries in the set, as ^ and ^= do (set_walk), the walk's
+ * first Python __eq__ left for m to enter (CALL_OPERATOR), 1; else the
+ * value pushed, 0. */
+static NO_INLINE int set_toggled(SPYContext *c, Machine *m, Frame *f) {
+    Consumer *s = m->blocks[m->block_len - 1].consumer;
+    SPYValue *made = s->result, *set = s->searched, *env = NULL, *function;
+    int updating = s->updating;
+    s->result = s->searched = NULL;
+    pop_block(c, m, f);
+    if ((function = set_walk(c, m, '^', set, made, updating ? 2 : 0, &env))) {
+        c->k_fn = function; c->k_env = env; c->k = NULL; c->k_ctx = NULL; c->k_kind = CALL_OPERATOR;
+    } else machine_push(c, m, c->error_type[0] ? NULL : looked(c));
+    spy_release(made); spy_release(set);
+    return function != NULL;
+}
 static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue *item) {
     Block *top = &m->blocks[m->block_len - 1];
     /* A generator closes on the GeneratorExit its close threw. */
@@ -23628,6 +23656,7 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         release_all(3, (SPYValue *[]){items, callee, keywords});
         return began > 0;
     }
+    if (status > 0 && top->consumer->id == B_SET_TOGGLE) return set_toggled(c, m, f);
     if (status > 0) {
         int id = top->consumer->id;
         SPYValue *result = consumer_end(c, top->consumer);
@@ -34455,8 +34484,14 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         return NULL;
     }
     if (s->id == EXTEND_ITEMS && s->count && !c->error_type[0]) seal_tuple(c, s->result);
-    /* intersection_update swaps its result into the set. */
+    /* intersection_update swaps its result into the set; issubset is
+     * whether the intersection has all the set's entries. */
     if (s->id == B_SET_KEEP && s->updating && !c->error_type[0]) swap_contents(s->searched, s->result);
+    if (s->subset && !c->error_type[0]) {
+        int all = s->result->as.map.len == s->searched->as.map.len;
+        spy_release(s->result);
+        s->result = spy_bool(c, all);
+    }
     /* list.extend, dict.update and a set's updates return None. */
     if (s->id == B_EXTEND || s->updating) {
         spy_release(s->result);

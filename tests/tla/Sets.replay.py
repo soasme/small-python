@@ -91,6 +91,8 @@ def iterable(p):
     source = generator() if p["source"] == "generator" else [K(1, log, "no"), K(2, log, "no")]
     del log[:]
     r = getattr(a, p["method"])(source)
+    if r is None:
+        r = a
     if type(r) is bool:
         return ("bool", " ".join(log), frozenset())
     return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
