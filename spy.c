@@ -10323,15 +10323,35 @@ static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     return binary_builtin(c, op, a, b);
 }
 static SPYValue *divmod_declined(SPYContext *, SPYValue *, SPYValue *);
+static int repeats(SPYValue *);
 /* Binary op on a and b once their special methods declined it. */
 static SPYValue *binary_declined(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     if (op == O_DIVMOD) return divmod_declined(c, a, b);
     if (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY)) return percent_format(c, a, b);
     if (op == '|' && dictionary_value(c, a) && dictionary_value(c, b)) return dict_union(c, a, b);
-    if ((a->type == SPY_INSTANCE && a->as.map.base) || (b->type == SPY_INSTANCE && b->as.map.base))
-        return binary(c, op, a->type == SPY_INSTANCE && a->as.map.base ? a->as.map.base : a,
-                      b->type == SPY_INSTANCE && b->as.map.base ? b->as.map.base : b);
-    return binary_builtin(c, op, a, b);
+    int left = a->type == SPY_INSTANCE && a->as.map.base, right = b->type == SPY_INSTANCE && b->as.map.base;
+    if (!left && !right) return binary_builtin(c, op, a, b);
+    SPYValue *x = left ? a->as.map.base : a, *y = right ? b->as.map.base : b;
+    const Operator *o = operator_of(op);
+    /* An operand whose class defines the operator's method keeps no
+     * builtin operation: a number's remains when the other operand is an
+     * exact number, and a sequence's concatenation or repetition by the
+     * left operand, or its repetition by the right, unless that operand's
+     * class defines the direct method. */
+    if ((left && (!builtin_base(c, a, o->direct, NULL) || !builtin_base(c, a, o->reflected, NULL))) ||
+        (right && (!builtin_base(c, b, o->direct, NULL) || !builtin_base(c, b, o->reflected, NULL)))) {
+        int kept = (is_number(x) || x->type == SPY_COMPLEX) && (is_number(y) || y->type == SPY_COMPLEX) && (!left || !right);
+        kept = kept || ((op == '+' || op == '*') && repeats(x) && (!left || builtin_base(c, a, o->direct, NULL))) ||
+               (op == '*' && repeats(y) && (!right || builtin_base(c, b, o->direct, NULL)));
+        if (!kept) return operand_error(c, binary_symbol(op), a, b, NULL);
+    }
+    SPYValue *result = binary(c, op, x, y);
+    /* An unsupported operation names the operands' own types. */
+    if (!result && !strcmp(c->error_type, "TypeError") && !strncmp(c->error_message, "unsupported operand type(s)", 27)) {
+        spy_clear_error(c);
+        return operand_error(c, binary_symbol(op), a, b, NULL);
+    }
+    return result;
 }
 /* Binary op on a and b, values of builtin types for it. */
 static SPYValue *binary_builtin(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -11247,13 +11267,28 @@ static SPYValue *rich_compare(SPYContext *c, int op, SPYValue *left, SPYValue *r
     if (!first && !result && !c->error_type[0]) result = rich_method(c, reflected[op], right, left);
     spy_release(left); spy_release(right); return result;
 }
+static int repeats(SPYValue *);
+static SPYValue *builtin_slot_before(SPYContext *, SPYValue *, const char *);
 /* Binary methods are optional (special_method_maybe); an in-place method's
  * lookup error propagates. */
 static SPYValue *try_operator(SPYContext *c, SPYValue *self, const char *name, SPYValue *other, SPYValue *modulus, int inplace) {
     SPYValue *method = inplace ? special_method(c, self, name) : special_method_maybe(c, self, name);
-    if (!method) return NULL;
-    SPYValue *args[] = {other, modulus};
-    SPYValue *result = call(c, method, modulus ? 2 : 1, args);
+    /* A builtin subclass's instance without the method has its builtin's
+     * in the method's place. A sequence's concatenation and repetition come
+     * after both operands' methods (binary_declined), unless the class
+     * defines the method's other side, giving it the number slot. */
+    SPYValue *slot = NULL;
+    if (!method && !inplace && !c->error_type[0] && self->type == SPY_INSTANCE && self->as.map.base) {
+        const char *side = name + 2 + (name[2] == 'r');
+        char other_side[16];
+        int sequence = repeats(self->as.map.base) && (!strcmp(side, "add__") || !strcmp(side, "mul__"));
+        snprintf(other_side, sizeof other_side, "__%s%s", name[2] == 'r' ? "" : "r", side);
+        if (!sequence || class_lookup(self->as.map.parent, other_side))
+            slot = builtin_slot_before(c, self->as.map.parent, name);
+    }
+    if (!method && !slot) return NULL;
+    SPYValue *args[] = {self, other, modulus};
+    SPYValue *result = slot ? call(c, slot, modulus ? 3 : 2, args) : call(c, method, modulus ? 2 : 1, args + 1);
     spy_release(method);
     if (result == c->not_implemented) { spy_release(result); return NULL; }
     return result;
@@ -36254,7 +36289,14 @@ static SPYValue *slot_call(SPYContext *c, size_t argc, SPYValue *const *argv, SP
         if (!count) return NULL;
         result = kind == SLOT_INPLACE ? inplace(c, op, value, count) : binary(c, '*', value, count);
         spy_release(count);
-        if (result && result == value && value != self) { spy_release(result); result = spy_retain(self); }
+        /* In place a subclass's instance is the result; a repetition once
+         * of it is a new copy of its builtin value. */
+        if (result && result == value && value != self) {
+            spy_release(result);
+            result = kind == SLOT_INPLACE ? spy_retain(self) : type == SPY_TUPLE ? tuple_of(c, value->as.seq.len, value->as.seq.items) :
+                     type == SPY_STRING ? spy_string(c, value->as.string.data, value->as.string.len) :
+                     spy_bytes(c, value->as.string.data, value->as.string.len);
+        }
         return result;
     }
     switch (kind) {
