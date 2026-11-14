@@ -10560,6 +10560,7 @@ static SPYValue *comparison_declined(SPYContext *c, int op, SPYValue *a, SPYValu
                   op == '<' ? "<" : op == T_LE ? "<=" : op == '>' ? ">" : ">=", type_name(a), type_name(b));
 }
 static size_t python_item(SPYContext *, SPYValue *, SPYValue *, size_t);
+static int pair_python(SPYContext *, SPYValue *, SPYValue *);
 /* A builtin scalar, or a class of no metaclass, whose == with another
  * calls no Python. */
 static int pure_operand(SPYValue *v) { return v->type <= SPY_STRING || (v->type == SPY_CLASS && !v->as.map.meta); }
@@ -10567,12 +10568,15 @@ static int pure_operand(SPYValue *v) { return v->type <= SPY_STRING || (v->type 
  * does: each item is held across a comparison that may change seq; -1 on
  * an error. For the machine, 2 instead at an item whose comparison with
  * x, a pure operand, calls a Python __eq__ (python_item) after items that
- * are pure too, which the machine compares again (contains_call). */
+ * are pure too, or with x, a list, tuple or dict, one of their items' or
+ * an instance item's (pair_python); the machine compares those before it
+ * again (contains_call). */
 static ALWAYS_INLINE int sequence_contains(SPYContext *c, SPYValue *x, SPYValue *seq, int machine) {
-    int scalars = machine && pure_operand(x);
+    int scalars = machine && pure_operand(x), pairs = machine && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_DICT);
     for (size_t i = 0; i < seq->as.seq.len; i++) {
         SPYValue *item = seq->as.seq.items[i];
         if (item == x) return 1;
+        if (pairs && (pair_python(c, x, item) || (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i))) return 2;
         if (scalars && item->type > SPY_STRING && !pure_operand(item)) {
             if (item->type == SPY_INSTANCE && python_item(c, x, seq, i) == i) return 2;
             scalars = 0;
@@ -25754,7 +25758,8 @@ static int step_operation(Instruction *ins, int *op) {
 static size_t python_item(SPYContext *c, SPYValue *x, SPYValue *seq, size_t at) {
     for (int instance = x->type == SPY_INSTANCE; at < seq->as.seq.len; at++) {
         SPYValue *item = seq->as.seq.items[at];
-        if (item == x || ((instance || item->type == SPY_INSTANCE) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))))
+        if (item == x || ((instance || item->type == SPY_INSTANCE) && (rich_function(c, item, x, R_EQ) || rich_function(c, x, item, R_EQ))) ||
+            pair_python(c, x, item))
             break;
     }
     return at;
@@ -25923,6 +25928,12 @@ static size_t python_pair(SPYContext *c, SPYValue *a, SPYValue *b, size_t at, si
     *end = at;
     return SIZE_MAX;
 }
+/* Whether a and b are a sequence_pair whose == calls a Python __eq__ of
+ * their items on the machine (python_pair). */
+static int pair_python(SPYContext *c, SPYValue *a, SPYValue *b) {
+    size_t end;
+    return sequence_pair(a, b) && python_pair(c, a, b, 0, &end) != SIZE_MAX;
+}
 /* Whether comparing a and b for == calls a Python __eq__ on the machine:
  * an instance, or a sequence_pair with a python_pair. */
 static int sequence_python(SPYContext *c, SPYValue *a, SPYValue *b) {
@@ -26059,6 +26070,18 @@ static NO_INLINE SPYValue *contains_call(SPYContext *c, Machine *m, SPYValue *x,
         if (same || c->error_type[0] || pass(c)) return NULL;
     }
     SPYValue *item = seq->as.seq.items[at], *iterator = y == seq ? get_iterator(c, seq) : spy_retain(y);
+    if (iterator && pair_python(c, x, item)) {
+        /* Two sequences compare their items' pairs, the item's first, as
+         * item == x (equal_call), returning
+         * into the search (pair_returned): x, the iterator and c->unbound
+         * under the pair. */
+        size_t end, len = m->len;
+        iterator->as.iterator.index = at + 1;
+        if (machine_push(c, m, spy_retain(x)) || machine_push(c, m, iterator) || machine_push(c, m, spy_retain(c->unbound)) ||
+            !(function = equal_call(c, m, item, x, python_pair(c, item, x, 0, &end), env)))
+            while (m->len > len) spy_release(machine_pop(m));
+        return function;
+    }
     SPYValue *left = (function = rich_function(c, item, x, R_EQ)) ? item : x, *right = left == x ? item : x;
     if (!function) function = rich_function(c, x, item, R_EQ);
     if (!iterator) return NULL;
@@ -27245,6 +27268,32 @@ static NO_INLINE SPYValue *operator_declined(SPYContext *c, const Operator *o, i
     if (!*result && !c->error_type[0]) *result = o ? binary_declined(c, o->token, x, y) : comparison_declined(c, op, x, y);
     return NULL;
 }
+/* An item's comparison for in, op, of step ins (contains_call) found it
+ * equal, or not: the test's truth; or the next item's comparison, or the
+ * native search of the rest, from the iterator, under which x is on m's
+ * stack. The machine to run on, at its pc. */
+static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instruction *ins, int op, int found, size_t pc) {
+    if (found || c->error_type[0]) {
+        SPYValue *iterator = machine_pop(m);
+        spy_release(machine_pop(m));
+        m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == found), pc);
+        spy_release(iterator);
+        return m;
+    }
+    SPYValue *iterator = machine_pop(m), *x = machine_pop(m), *env = NULL;
+    size_t len = m->len;
+    SPYValue *function = contains_call(c, m, x, iterator, &env);
+    Call *call = function ? call_enter(c, function, env, m) : NULL;
+    if (call) {
+        spy_release(x); spy_release(iterator);
+        call->m.outermost = CALL_OPERATOR;
+        return &call->m;
+    }
+    while (m->len > len) spy_release(machine_pop(m));
+    m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : operation(c, ins, x, iterator), pc);
+    spy_release(x); spy_release(iterator);
+    return m;
+}
 /* The __eq__ equal_call entered for step ins returned result: the pair
  * unequal, or the next pair's comparison, or the native comparison of the
  * rest; an ordering's then decides at the first unequal pair
@@ -27271,7 +27320,8 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
         }
         while (m->len > len) spy_release(machine_pop(m));
         int nested = m->len && m->stack[m->len - 1] == c->nesting, probing = !nested && m->len && m->stack[m->len - 1] == c->probing,
-            walking = m->len && m->stack[m->len - 1] == c->walking, ordered = !nested && !probing && !walking && op != T_EQ && op != T_NE;
+            walking = m->len && m->stack[m->len - 1] == c->walking, searching = (op == O_IN || op == O_NOTIN) && m->len && m->stack[m->len - 1] == c->unbound,
+            ordered = !nested && !probing && !walking && !searching && op != T_EQ && op != T_NE;
         /* An unequal pair the comparison left past an end compares the lengths. */
         int same = c->error_type[0] ? -1 : ordered ? 0 : found ? pair_equal_from(c, x, y, end) :
                    x->type != SPY_DICT && (at > x->as.seq.len || at > y->as.seq.len) ? x->as.seq.len == y->as.seq.len : 0;
@@ -27286,6 +27336,11 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
             spy_release(x); spy_release(y);
             if (!same) walk_unequal(c, m);
             return walk_resume(c, m, ins, NULL, NULL, pc);
+        }
+        /* An in's item is x when these are equal (contains_call). */
+        if (searching) {
+            spy_release(machine_pop(m)); spy_release(x); spy_release(y);
+            return contains_returned(c, m, ins, op, same > 0, pc);
         }
         /* A lookup's key is equal to its entry's when these are (lookup_call). */
         if (probing) {
@@ -27352,26 +27407,7 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             machine_push(c, m, value);
             return m;
         }
-        /* An item's comparison for in (contains_call): found, or the next
-         * item's, or the native search of the rest, from the iterator. */
-        if (found || c->error_type[0]) {
-            SPYValue *iterator = machine_pop(m);
-            spy_release(machine_pop(m));
-            m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : spy_bool(c, (op == O_IN) == found), pc);
-            spy_release(iterator);
-            return m;
-        }
-        SPYValue *iterator = machine_pop(m), *x = machine_pop(m), *env = NULL, *function = contains_call(c, m, x, iterator, &env);
-        Call *call = function ? call_enter(c, function, env, m) : NULL;
-        if (call) {
-            spy_release(x); spy_release(iterator);
-            call->m.outermost = CALL_OPERATOR;
-            return &call->m;
-        }
-        if (function) for (int i = 0; i < 5; i++) spy_release(machine_pop(m));
-        m->pc = operator_finish(c, m, ins, iterator, c->error_type[0] ? NULL : operation(c, ins, x, iterator), pc);
-        spy_release(x); spy_release(iterator);
-        return m;
+        return contains_returned(c, m, ins, op, found, pc);
     }
     SPYValue *marker = machine_pop(m), *y = machine_pop(m), *x = machine_pop(m);
     int op = 0, kind = step_operation(ins, &op), phase = (int)marker->as.integer_data.small, called = phase & ~3;

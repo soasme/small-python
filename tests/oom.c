@@ -390,6 +390,11 @@ static const char *const programs[] = {
     "    return r + [len(a)]\n"
     "print(kd())\n",
 
+    "def ms():\n"
+    "    x = (SD(), [SD()])\n"
+    "    return [x in [(SD(), [SD()]), (1, 2), x], (SD(),) in [(SD(),)], {1: SD()} in [{1: SD()}]]\n"
+    "print(ms())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

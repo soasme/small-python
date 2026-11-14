@@ -40,7 +40,7 @@ Cases == {"chain_once", "chain_short", "chain_mixed", "chain_value", "chain_valu
           "contains_iter", "contains_getitem", "contains_none", "contains_is_none", "contains_raises",
           "in_dict_unhashable", "in_set_unhashable", "in_set_of_set", "not_in_precedence", "eq_returns_value",
           "hash_none_eq", "list_identity_shortcut", "seq_length_eq", "seq_cleared", "lookup_reflected",
-          "store_keeps_key", "seq_nested", "seq_order_calls", "seq_order_chain", "builtin_declines",
+          "store_keeps_key", "seq_nested", "in_seq_calls", "seq_order_calls", "seq_order_chain", "builtin_declines",
           "ne_by_eq", "sub_object_reflected", "dict_key_eq"}
 Programs == [op : Ops, left : Kinds, right : Kinds, relation : {"unrelated", "sub"}] \cup [case : Cases]
 
@@ -141,6 +141,9 @@ Case(c) ==
       [] c = "store_keeps_key" -> <<"[('a', 3), 0, 1]", <<"'ab'", "'ac'", "'ae'", "'fg'">>>>
       \* nested lists and tuples compare their own items pair by pair, also in a chain
       [] c = "seq_nested" -> <<"(True, False, True)", <<"'ac'", "'bd'", "'gh'", "'hi'">>>>
+      \* in compares each item v of a list with a sequence x as v == x, v's
+      \* items' __eq__ first, until one is equal
+      [] c = "in_seq_calls" -> <<"(True, False)", <<"'ba'", "'aa'", "'dc'">>>>
       \* an ordering of sequences orders the first pair unequal by __eq__, by
       \* the item's method or its reflection, and returns that result as is
       [] c = "seq_order_calls" -> <<"('b<c', 'y<x')", <<"'aa'", "'bc'", "'b<c'", "'xy'", "'y<x'">>>>
