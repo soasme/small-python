@@ -361,6 +361,13 @@ static const char *const programs[] = {
     "    return r + [len(a)]\n"
     "print(ch())\n",
 
+    "class BS(set): pass\nclass BD(dict): pass\nclass BT(tuple): pass\n"
+    "def bs():\n"
+    "    g = lambda n: (SD() for i in range(n))\n"
+    "    d = {SD(): 1, SD(): 2}\n"
+    "    return [len(BS(g(3))), len(BD((k, 0) for k in g(2))), len(BT(g(2))), len(BD(d)), len(dict(d)), len({**d})]\n"
+    "print(bs())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

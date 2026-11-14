@@ -17,7 +17,11 @@ for name in ("union", "intersection", "difference", "symmetric_difference"):
     SOURCES[name] = "r = a.%s(b)" % name
     SOURCES[name + "_update" if name != "union" else "update"] = "assert a.%s(b) is None\nr = a" % (name + "_update" if name != "union" else "update")
 MERGES = {"set": "r = set(src)", "frozenset": "r = frozenset(src)", "star": "r = {*src}", "union": "r = set().union(src)",
-          "update": "r = set()\nr.update(src)", "|=": "r = set()\nr |= src"}
+          "update": "r = set()\nr.update(src)", "|=": "r = set()\nr |= src", "S": "r = S(src)", "F": "r = F(src)"}
+
+
+class S(set): pass
+class F(frozenset): pass
 
 
 class E:
@@ -56,7 +60,8 @@ def hashed(p):
             r = {0}
             r.update(source)
         else:
-            r = set(source) if p["form"] == "set" else frozenset(source) if p["form"] == "frozenset" else {*source}
+            build = {"set": set, "frozenset": frozenset, "S": S, "F": F}.get(p["form"], lambda source: {*source})
+            r = build(source)
     except TypeError as error:
         return ("TypeError: " + str(error), " ".join(log), frozenset())
     except ValueError:
@@ -74,7 +79,7 @@ class C:
 
 def merged(p):
     log = []
-    namespace = {"src": {C(v, log) for v in (0, 1, 2)}}
+    namespace = {"src": {C(v, log) for v in (0, 1, 2)}, "S": S, "F": F}
     del log[:]
     exec(MERGES[p["form"]], namespace)
     r = namespace["r"]

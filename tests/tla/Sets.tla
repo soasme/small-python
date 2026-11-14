@@ -22,7 +22,9 @@
 (*     where with eq each element is an object hashing as its value whose  *)
 (*     Python __eq__ compares values, which changes no outcome; or         *)
 (*   - set(<items>) of up to three of 1, 1.0, True, 2; or                  *)
-(*   - set(src), frozenset(src), {*src} or {0}.update(src) of a list or a  *)
+(*   - set(src), frozenset(src), {*src}, {0}.update(src), S(src) or F(src) *)
+(*     of S and F a set's and a frozenset's subclasses of no methods, of a  *)
+(*     list or a                                                           *)
 (*     generator of two objects whose Python __hash__ (which loops) logs   *)
 (*     "h" and its value, the second's returning, raising TypeError or     *)
 (*     raising ValueError, or both of value 1, the second found equal by   *)
@@ -30,7 +32,8 @@
 (*     a generator logs "y" and the value before each item; with tuple,    *)
 (*     each object is the first item of a pair (object, 0); or             *)
 (*   - set(src), frozenset(src), {*src}, set().union(src), an empty set's  *)
-(*     update(src) or |= src, of a set src of three objects of one hash    *)
+(*     update(src) or |= src, S(src) or F(src), of a set src of three      *)
+(*     objects of one hash                                                 *)
 (*     whose Python __eq__ logs "e": merged into an empty set, the         *)
 (*     distinct elements are compared with none (Annex D); or              *)
 (*   - {K(1)}'s union, difference, intersection, isdisjoint, issuperset,   *)
@@ -57,9 +60,9 @@ Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list
 Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
-            \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update"}, source : {"list", "generator"},
+            \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update", "S", "F"}, source : {"list", "generator"},
                   fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
-            \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|="}]
+            \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|=", "S", "F"}]
             \cup [op : {"iterable"}, method : {"union", "difference", "intersection", "isdisjoint", "issuperset", "issubset",
                                               "symmetric_difference", "symmetric_difference_update"},
                   source : {"list", "generator"}]
@@ -83,12 +86,15 @@ Keep(s, seen) ==
     ELSE LET v == IF Head(s) = "2" THEN 2 ELSE 1
          IN  (IF v \in seen THEN {} ELSE {Head(s)}) \cup Keep(Tail(s), seen \cup {v})
 
+\* The type a build makes: a subclass's when it calls one.
+Built(form) == IF form \in {"frozenset", "S", "F"} THEN form ELSE "set"
+
 \* A list's items exist before the set hashes them; a generator gives each
 \* as the set takes it.
 RunHashed(p) ==
     <<CASE p.fails = "TypeError" -> "TypeError: cannot use '" \o (IF p.tuple THEN "tuple" ELSE "K") \o "' as a set element (t)"
         [] p.fails = "ValueError" -> "ValueError"
-        [] OTHER -> IF p.form = "frozenset" THEN "frozenset" ELSE "set",
+        [] OTHER -> Built(p.form),
       CASE p.fails = "equal" -> IF p.source = "list" THEN "h1 h1 e1" ELSE "y1 h1 y1 h1 e1"
         [] p.source = "list" -> "h1 h2"
         [] OTHER -> "y1 h1 y2 h2",
@@ -118,7 +124,7 @@ Run(p) ==
     IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
     ELSE IF p.op = "iterable" THEN RunIterable(p)
     ELSE IF p.op = "hashed" THEN RunHashed(p)
-    ELSE IF p.op = "merge" THEN <<IF p.form = "frozenset" THEN "frozenset" ELSE "set", "", {0, 1, 2}>>
+    ELSE IF p.op = "merge" THEN <<Built(p.form), "", {0, 1, 2}>>
     ELSE LET a == p.a  b == p.b
          IN  CASE p.op \in {"|", "&", "-", "^"} \cup Methods -> <<p.ka, "", Combine(p.op, a, b)>>
                [] p.op \in {"<=", "issubset"} -> Bool(a \subseteq b)

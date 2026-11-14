@@ -1653,6 +1653,12 @@ int main(int argc, char **argv) {
                "def abstract():\n    a = Abstract(())\n    return int(issubclass(Abstract((Abstract(()), Abstract((a,)))), a))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "abstract()", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* So do a builtin subclass's builds of a generator. */
+    execute(c, "class SS(set): pass\nclass DD(dict): pass\nclass LL(list): pass\n"
+               "def slows(n):\n    for i in range(n): yield Slow()\n"
+               "def built():\n    return len(SS(slows(3))) + len(DD((k, 0) for k in slows(2))) + len(LL(slows(2)))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "built()", "built.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

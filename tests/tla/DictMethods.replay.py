@@ -88,6 +88,7 @@ SOURCES = {
     "update_too_many": 'result = {}.update({}, {})',
     "or_non_dict": 'result = {} | [1]',
     "ior_iterable": "d = {}\nd |= [('a', 1)]\nresult = d",
+    "merge_empty": "class E:\n    def __init__(s, n): s.n = n\n    def __hash__(s): return 1\n    def __eq__(s, o):\n        for _ in range(2): pass\n        log.append(s.n + o.n)\n        return s is o\nclass D(dict): pass\nlog = []\nd = {E('a'): 1, E('b'): 2, E('c'): 3}\ndel log[:]\nn = [len(dict(d)), len({**d}), len(D(d)), len(d.copy()), len(d | {})]\ne = {}\ne.update(d)\nf = {0: 0}\nf.update(d)\nresult = (n, len(e), len(f), log)",
     "copy_shallow": "a = {'k': []}\nb = a.copy()\nb['k'].append(1)\nb['n'] = 1\nresult = (a, b)",
     "clear": 'd = {1: 2}\ne = d\nd.clear()\nresult = e',
     "len_iter_reversed": "d = {'one': 1, 'two': 2, 'three': 3, 'four': 4}\nresult = (len(d), list(d), list(reversed(d)), list(reversed(d.values())))",

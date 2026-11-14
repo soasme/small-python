@@ -14380,7 +14380,7 @@ struct Sorter {
 };
 typedef struct {
     int id, compensating, method, keyed, descending, calls, phase, swapped, stage, fed, hints;
-    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched;
+    SPYValue *result, *callee, *name, *target, *best, *item, *sent, *made, *pending, *empty, *mapping, *listed, *searched, *wrap;
     int updating, subset;
     double total, compensation, imag, imag_compensation;
     size_t count, star;
@@ -14469,6 +14469,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
         if (b->error && b->error->value) visit(b->error->value, data);
         if (b->consumer && b->consumer->result) visit(b->consumer->result, data);
         if (b->consumer && b->consumer->callee) visit(b->consumer->callee, data);
+        if (b->consumer && b->consumer->wrap) visit(b->consumer->wrap, data);
         if (b->consumer && b->consumer->target) visit(b->consumer->target, data);
         if (b->consumer && b->consumer->best) visit(b->consumer->best, data);
         if (b->consumer && b->consumer->item) visit(b->consumer->item, data);
@@ -15277,6 +15278,16 @@ static int extend_container(SPYContext *c, SPYValue *result, SPYValue *source, S
             return c->error_type[0] ? -1 : 0;
         }
         if (source == result && !callable) return 0;
+        if (!callable && !result->as.map.len) {
+            /* An empty dict takes the entries as they are: their keys are
+             * distinct, so none is compared (dict_merge). */
+            if (spend(c, source->as.map.len)) return -1;
+            for (size_t i = 0; i < source->as.map.len; i++) {
+                Entry entry = map_items(source)[i];
+                if (map_append(c, result, entry.key, entry.value, entry.hash)) return -1;
+            }
+            return 0;
+        }
         size_t size = source->as.map.len;
         for (size_t i = 0; i < source->as.map.len; i++) {
             Entry entry = map_items(source)[i];
@@ -22715,7 +22726,7 @@ static void pop_block(SPYContext *c, Machine *m, Frame *f) {
     spy_release(b.value); spy_release(b.handled);
     if (b.error) { spy_release(b.error->value); mem_free(b.error); }
     if (b.consumer) {
-        spy_release(b.consumer->result); spy_release(b.consumer->callee);
+        spy_release(b.consumer->result); spy_release(b.consumer->callee); spy_release(b.consumer->wrap);
         spy_release(b.consumer->best); spy_release(b.consumer->item); spy_release(b.consumer->sent); spy_release(b.consumer->made);
         spy_release(b.consumer->pending); spy_release(b.consumer->empty);
         spy_release(b.consumer->mapping); spy_release(b.consumer->listed); spy_release(b.consumer->searched);
@@ -23285,7 +23296,25 @@ static int machine_source(SPYContext *c, SPYValue *v) {
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static int is_builtin(SPYValue *, int);
+/* The set, frozenset, list, tuple or dict that Python class cls, of no
+ * metaclass, derives from with no __new__, __init__ or __del__ of its
+ * own: calling cls is calling that builtin, then cls of its result
+ * (consume), the instance no earlier seen. */
+static SPYValue *built_type(SPYContext *c, SPYValue *cls) {
+    if (cls->type != SPY_CLASS || builtin_class(c, cls) || meta_class(cls) || !cls->as.map.mro) return NULL;
+    SPYValue *mro = cls->as.map.mro;
+    for (size_t i = 0; i < mro->as.seq.len; i++) {
+        SPYValue *base = mro->as.seq.items[i];
+        if (builtin_class(c, base))
+            return base == c->types[SPY_SET] || base == c->types[SPY_FROZENSET] || base == c->types[SPY_LIST] ||
+                   base == c->types[SPY_TUPLE] || base == c->types[SPY_DICT] ? base : NULL;
+        if (name_local(base, "__new__") || name_local(base, "__init__") || name_local(base, "__del__")) return NULL;
+    }
+    return NULL;
+}
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
+    SPYValue *built = method < 0 ? built_type(c, callee) : NULL;
+    if (built) callee = built;
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
     /* A coroutine wrapper's methods are its coroutine's, its __next__ and
      * next() of it the coroutine's send(None). */
@@ -23346,7 +23375,7 @@ static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method
     return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
-                       callee->type == SPY_METHOD)))) ||
+                       callee->type == SPY_METHOD || callee->type == SPY_CLASS)))) ||
            callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ?
            consumer_id(c, callee, method, argc, argv) : -1;
 }
@@ -23407,7 +23436,8 @@ static SPYValue *throw_inited(SPYContext *c, Machine *m, SPYValue *state, SPYVal
  * whose call runs a Python __init__ calls it first, on m (callk), and goes
  * on with the instance (throw_inited). */
 static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
-    SPYValue *init = NULL, *made = NULL;
+    SPYValue *init = NULL, *made = NULL, *built = method < 0 ? built_type(c, callee) : NULL, *wrap = built ? spy_retain(callee) : NULL;
+    if (built) callee = built;
     if (id == B_THROW && generator->type == SPY_CLASS) {
         /* The value is the instance, the tuple of arguments, none, or the
          * one argument (thrown_exception). */
@@ -23472,10 +23502,10 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
-    if (!block) { mem_free(consumer); release_all(6, (SPYValue *[]){result, generator, sent, source, value, searched}); return; }
+    if (!block) { mem_free(consumer); release_all(7, (SPYValue *[]){result, generator, sent, source, value, searched, wrap}); return; }
     *consumer = (Consumer){.id = id, .method = method, .result = result, .callee = collects ? spy_retain(callee) : NULL, .name = name, .best = value,
                            .sent = sent, .keyed = keyed, .calls = id == B_SUM || id == B_ANY || id == B_ALL, .hints = hints,
-                           .searched = searched, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
+                           .searched = searched, .wrap = wrap, .updating = which == 5 || which == 6 || which == 7, .subset = which == 8,
                            .phase = id == B_SET_TOGGLE};
     block->value = generator; block->consumer = consumer;
     /* An __iter__ the machine calls asks the hint as it returns (key_took). */
@@ -34654,6 +34684,12 @@ static SPYValue *consumer_end(SPYContext *c, Consumer *s) {
         result = s->method >= 0 ? call_native_method(c, s->callee, s->method, s->name, 1, &items) : call_keywords(c, s->callee, 1, &items, NULL);
         spy_release(items);
     }
+    if (s->wrap && !c->error_type[0]) {
+        /* A builtin's subclass made of the builtin's result (built_type). */
+        SPYValue *items = result;
+        result = call(c, s->wrap, 1, &items);
+        spy_release(items);
+    }
     if (c->error_type[0]) { spy_release(result); return NULL; }
     return result || (s->id != B_ALL && s->id != B_ANY) ? result : spy_bool(c, s->id == B_ALL);
 }
@@ -36649,10 +36685,8 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     }
     SPYValue *fresh = builtin_keywords(c, argc - 1, argv + 1, owner->as.map.native - 1, keywords, owner);
     if (!fresh) return NULL;
-    if (type == SPY_DICT) {
-        for (size_t i = 0; i < fresh->as.map.len; i++)
-            if (map_set_hash(c, self, map_items(fresh)[i].key, map_items(fresh)[i].value, map_items(fresh)[i].hash)) break;
-    } else swap_contents(self, fresh);
+    if (type == SPY_DICT) extend_display(c, self, fresh);
+    else swap_contents(self, fresh);
     spy_release(fresh);
     return c->error_type[0] ? NULL : spy_none(c);
 }

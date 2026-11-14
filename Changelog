@@ -93,6 +93,9 @@ Unreleased (0.10.0):
   an await closes, without nesting on the C stack, so they can pause
 - an unreachable generator or coroutine that ignores its close in an except block is still
   reclaimed, with its locals and the iterator it waits on
+- calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a
+  generator, or on items with a Python __hash__ or __eq__, does not nest on the C stack
+- dict(), **, update(), copy(), | and a dict subclass merge a dict into an empty one comparing no keys
 - a set's union(), intersection(), difference() and their updates of several sets, and a
   difference update by a much larger set, call a Python __eq__ without nesting on the C stack
 - a set subclass's instance takes its set's operators, in-place operators and comparisons without

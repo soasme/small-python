@@ -12,7 +12,8 @@
 (* ignores order and dicts are unordered and unhashable; get, setdefault,  *)
 (* pop (hashing its key once, but not in an empty dict), popitem (last in, *)
 (* first out), fromkeys (hashing and setting each key before taking the    *)
-(* next), copy (shallow), clear,                                           *)
+(* next), copy (shallow), clear, a merge into an empty dict comparing     *)
+(* no keys,                                                                *)
 (* reversed(), and __missing__ in subclasses behave as documented, a       *)
 (* missing key raising KeyError, a present key of the same hash compared   *)
 (* by its Python __eq__ (which loops) in get, setdefault, pop and a set's  *)
@@ -71,7 +72,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
           "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
-          "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "clear",
+          "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
           "view_live", "view_mapping", "view_contains", "view_set_ops_iterable", "view_set_ops_return_set",
           "values_no_set_ops", "values_equality", "items_unhashable_value", "items_set_op_unhashable",
@@ -141,6 +142,10 @@ Case(c) ==
       [] c = "or_non_dict" -> "TypeError: unsupported operand type(s) for |: 'dict' and 'list'"
       [] c = "ior_iterable" -> "{'a': 1}"
       [] c = "copy_shallow" -> "({'k': [1]}, {'k': [1], 'n': 1})"
+      \* A dict merged into an empty one, by dict(), **, a subclass, copy, |
+      \* or update, gives its distinct keys comparing none; into a full one,
+      \* each stored key of the hash compares itself with the new.
+      [] c = "merge_empty" -> "([3, 3, 3, 3, 3], 3, 4, ['ab', 'ac', 'bc'])"
       [] c = "clear" -> "{}"
       [] c = "len_iter_reversed" -> "(4, ['one', 'two', 'three', 'four'], ['four', 'three', 'two', 'one'], [4, 3, 2, 1])"
       [] c = "order_reinsert" -> "{'one': 42, 'two': None}"
