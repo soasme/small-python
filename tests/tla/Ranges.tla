@@ -2,7 +2,8 @@
 (***************************************************************************)
 (* Ranges, as the Built-in Types chapter specifies them                    *)
 (* (library/stdtypes.html#ranges): range(stop) and range(start, stop,      *)
-(* step) take integers or __index__ objects, step defaulting to 1 and      *)
+(* step) take integers or __index__ objects, each converted in turn up to  *)
+(* one refused, step defaulting to 1 and                                   *)
 (* start to 0, a zero step raising ValueError; r[i] = start + step * i for *)
 (* i >= 0 while r[i] is short of stop in the step's direction; negative    *)
 (* indices count from the end; slicing yields the range of the selected    *)
@@ -46,7 +47,7 @@ Describe(a, b, s) ==
         \o (IF found = {} THEN "False, 'missing'" ELSE "True, " \o R((CHOOSE i \in found : TRUE) - 1)) \o ")"
 
 
-Cases == {"one_arg", "index_args", "float_arg", "str_arg", "no_args", "four_args", "keyword", "step_zero", "huge_len",
+Cases == {"one_arg", "index_args", "index_order", "index_refused", "float_arg", "str_arg", "no_args", "four_args", "keyword", "step_zero", "huge_len",
           "huge_ok", "attrs_kept", "equal_sequences", "equal_list", "hash_equal", "ordering", "concat",
           "repeat", "contains_float", "contains_bool", "contains_other", "index_missing", "count",
           "doc_example", "slice_step", "index_bad_type", "index_too_big", "immutable", "attr_readonly",
@@ -65,6 +66,8 @@ Generated(p) == IF p.step = 0 THEN "ValueError: range() arg 3 must not be zero" 
 Case(c) ==
     CASE c = "one_arg" -> "(range(0, 3), 0, 3, 1)"
       [] c = "index_args" -> "[1, 4]"
+      [] c = "index_order" -> "([1, 4], [1, 7, 3])"
+      [] c = "index_refused" -> "(\"'str' object cannot be interpreted as an integer\", [1])"
       [] c = "float_arg" -> "TypeError: 'float' object cannot be interpreted as an integer"
       [] c = "str_arg" -> "TypeError: 'str' object cannot be interpreted as an integer"
       [] c = "no_args" -> "TypeError: range expected at least 1 argument, got 0"

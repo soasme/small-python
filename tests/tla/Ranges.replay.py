@@ -6,10 +6,19 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 class I:
     def __init__(self, v): self.v = v
     def __index__(self): return self.v
+class J:
+    def __init__(self, v, log): self.v, self.log = v, log
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        self.log.append(self.v)
+        return self.v
 
 SOURCES = {
     "one_arg": "result = (range(3), range(3).start, range(3).stop, range(3).step)",
     "index_args": "result = list(range(I(1), I(7), I(3)))",
+    "index_order": "log = []\nresult = (list(range(J(1, log), J(7, log), J(3, log))), log)",
+    "index_refused": "log = []\ntry:\n    range(J(1, log), '3', J(2, log))\nexcept TypeError as e:\n    result = (str(e), log)",
     "float_arg": "result = range(1.0)",
     "str_arg": "result = range(0, '3')",
     "no_args": "result = range()",

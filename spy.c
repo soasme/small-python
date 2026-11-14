@@ -24468,9 +24468,12 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
 }
 static SPYValue *set_walk_call(SPYValue *, size_t, SPYValue *const *, int *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
+static int range_indexes(SPYContext *, SPYValue *, size_t, SPYValue *const *);
+static SPYValue *range_call(SPYContext *, Machine *, size_t, SPYValue **);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && range_indexes(c, callee, argc, argv)) { spy_release(callee); return range_call(c, m, argc, argv); }
     if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_INSTANCE && is_builtin(callee, B_NEXT)) return next_builtin_call(c, m, n, callee, argc, argv, env);
     /* getattr() of an instance or class and a str, and a default, or
      * hasattr() of them, as a stack call's (getattr_call). */
@@ -24590,6 +24593,49 @@ static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue
         value = truth ? spy_bool(c, 1) : check_from(c, m, items[3] == c->booleans[1], items[0], items[1], (size_t)items[2]->as.integer_data.small);
     spy_release(state);
     return value;
+}
+static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* Whether callee, called with argc arguments argv, is range() of an
+ * instance, whose __index__ may run on the machine (range_from). */
+static int range_indexes(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv) {
+    if (callee != c->types[SPY_RANGE] || !argc || argc > 3) return 0;
+    for (size_t i = 0; i < argc; i++) if (argv[i]->type == SPY_INSTANCE) return 1;
+    return 0;
+}
+/* range() of the arguments in tuple args, from the i-th on: the next one's
+ * Python __index__ is m's call (callk), the call going on with its int
+ * (index_argued); else range() of them, refusing there an argument neither
+ * an int nor such an instance, as each is converted in turn. */
+static SPYValue *range_from(SPYContext *c, Machine *m, SPYValue *args, size_t i) {
+    for (; i < args->as.seq.len; i++) {
+        SPYValue *item = args->as.seq.items[i], *function = index_function(c, item);
+        if (function) {
+            SPYValue *parts[] = {args, int_value(c, (int64_t)i)}, *state = parts[1] ? spy_tuple(c, 2, parts) : NULL;
+            spy_release(parts[1]);
+            return state ? callk(c, m, function, 1, (SPYValue *[]){spy_retain(item)}, index_argued, state) : NULL;
+        }
+        if (!builtin_value(c, item, SPY_INT)) break;
+    }
+    return builtin(c, args->as.seq.len, args->as.seq.items, (void *)(intptr_t)B_RANGE);
+}
+/* An argument's __index__ that range_from called returned result. */
+static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *args = state->as.seq.items[0], *items[3], *value = NULL;
+    size_t i = (size_t)state->as.seq.items[1]->as.integer_data.small, n = args->as.seq.len;
+    memcpy(items, args->as.seq.items, n * sizeof(*items));
+    if ((items[i] = index_result(c, args->as.seq.items[i], result))) {
+        SPYValue *converted = spy_tuple(c, n, items);
+        value = converted ? range_from(c, m, converted, i + 1) : NULL;
+        spy_release(items[i]); spy_release(converted);
+    }
+    spy_release(state);
+    return value;
+}
+/* range() of argc arguments argv (range_indexes), which it takes, on m. */
+static SPYValue *range_call(SPYContext *c, Machine *m, size_t argc, SPYValue **argv) {
+    SPYValue *args = tuple_of(c, argc, argv), *result = args ? range_from(c, m, args, 0) : NULL;
+    spy_release(args); release_all(argc, argv);
+    return result;
 }
 /* Prepare unit, a module body with statements, to run in env on the
  * machine: its docstring stored and its body compiled; -1 on an error. */
@@ -24838,6 +24884,13 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         return NULL;
     }
     if (c->error_type[0]) return NULL;
+    if (calls && range_indexes(c, callee, argc, argv)) {
+        SPYValue *args[3];
+        memcpy(args, argv, argc * sizeof(*argv));
+        m->len -= argc + 1;
+        spy_release(callee);
+        return range_call(c, m, argc, args);
+    }
     SPYValue *allocate = !init && callee->type == SPY_CLASS ? new_method(c, callee) : NULL;
     if (allocate) {
         /* The class stays in its place, the arguments' tuple after it. */
@@ -25211,7 +25264,11 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         spy_release(all); spy_release(tuple);
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
-    else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
+    else if (calls && !keywords->as.map.len && range_indexes(c, callee, args->as.seq.len, args->as.seq.items)) {
+        SPYValue *argv[3];
+        for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
+        result = range_call(c, m, args->as.seq.len, argv);
+    } else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)
         /* As a stack call's consumer, a starred call's (stack_call). */
         consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
                 args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);

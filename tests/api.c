@@ -1611,6 +1611,9 @@ int main(int argc, char **argv) {
     /* So do hex()'s and chr()'s. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(hex(Mark(255)) + chr(Mark(65)))", "converted.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
+    /* So do range()'s. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(range(Mark(1), Mark(9), Mark(2)))", "ranged.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"
