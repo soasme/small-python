@@ -356,7 +356,8 @@ These run as machines on the heap, in one native activation of
   tuple, dict, frozendict, set or frozenset, also of one inside
   another, the property getter, `__get__`, `__getattribute__` or
   `__getattr__` that `getattr` of two arguments, or of three when an
-  `AttributeError` gives the default, calls, and the
+  `AttributeError` gives the default, calls, of an instance or of a
+  class, and the
   `__setattr__`, property setter or `__set__` that `setattr` calls;
 - a key's `__hash__` in dict and set displays, dict subscripts, stores
   and deletions, tests of a dict or set, and `dict.get`, `setdefault`
@@ -379,7 +380,11 @@ These run as machines on the heap, in one native activation of
   `__class_getitem__` that subscripting a class calls;
 - a descriptor's `__get__` and a class's own `__getattribute__`, and
   the class's `__getattr__` that an `AttributeError` from that
-  `__getattribute__` calls in an attribute reference; an
+  `__getattribute__` calls in an attribute reference; the `__get__` of
+  a class's descriptor, and the getter or `__get__` of its metaclass's
+  property or descriptor, that a reference to a class's attribute
+  calls when the metaclass has no `__getattr__` or own
+  `__getattribute__`; an
   attribute store's `__setattr__`, property setter or `__set__` in
   function code, and, in code compiled while pausing, an attribute
   deletion's `__delattr__`, property deleter or `__delete__`;

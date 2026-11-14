@@ -1558,6 +1558,11 @@ int main(int argc, char **argv) {
                "    def __getattr__(self, n):\n        for i in range(3000): pass\n        return i\nhooked = Hooked()\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "hooked.a + hooked.b", "hooked.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 3);
+    /* So does reading a class's descriptor and its metaclass's property. */
+    execute(c, "class Spun(type):\n    @property\n    def p(cls):\n        for i in range(3000): pass\n        return i\n"
+               "class Classy(metaclass=Spun):\n    d = Shadow()\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "Classy.d + Classy.p + getattr(Classy, 'd')", "classy.py"), SPY_STOP_STEPS, &pauses)) == 8997 && pauses > 2);
     /* So does next() in a Python __next__, also giving its default for a StopIteration. */
     execute(c, "class Stepper:\n    def __init__(self, n): self.n = n\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        if not self.n: raise StopIteration\n        self.n -= 1\n        return i\n"

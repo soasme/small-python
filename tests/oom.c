@@ -190,7 +190,17 @@ static const char *const programs[] = {
     "        for i in range(1): pass\n"
     "        return n\n"
     "def ga(o): return [o.x, o.__class__.__name__, o.x.upper()]\n"
-    "print(ga(GA()))\n",
+    "print(ga(GA()))\n"
+    "class CD:\n"
+    "    def __get__(self, o, t):\n"
+    "        for i in range(1): pass\n"
+    "        return [t]\n"
+    "class CM(type):\n"
+    "    p = property(lambda cls: [cls])\n"
+    "class CC(metaclass=CM):\n"
+    "    d = CD()\n"
+    "def cc(): return [CC.d, [CC.p, getattr(CC, 'd'), hasattr(CC, 'p')]]\n"
+    "print(cc())\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"

@@ -85,6 +85,8 @@ Unreleased (0.10.0):
   its items without nesting on the C stack, so it can pause
 - a dict display's ** item calls a mapping's Python keys() and __getitem__ without nesting on the
   C stack, so it can pause
+- reading a class's attribute, also by getattr() or hasattr(), calls a descriptor's Python __get__
+  or a metaclass property's getter without nesting on the C stack, so it can pause
 - an iterator over a sequence whose __getitem__ raises an error other than IndexError or
   StopIteration tries the same index again on its next step
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python

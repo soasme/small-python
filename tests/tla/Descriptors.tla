@@ -9,6 +9,8 @@
 (* dictionary lacks the name, and a descriptor without __get__ is returned *)
 (* itself. Instance binding calls __get__(a, type(a)), class binding       *)
 (* __get__(None, A), super binding __get__(a, A) for the class after A;    *)
+(* a class's metaclass binds its descriptor as __get__(A, M), a data       *)
+(* descriptor before the class's own attribute, a non-data one after;      *)
 (* assignment and deletion call __set__ and __delete__ (an AttributeError  *)
 (* when a data descriptor lacks the one needed) or change the instance     *)
 (* dictionary; assigning through the class replaces the descriptor.        *)
@@ -21,8 +23,10 @@
 (*                                                                         *)
 (* with base object or list, and does a.x, getattr(a, "x"), getattr(a,     *)
 (* "x", "dflt"), hasattr(a, "x"), A.x, super(A, a).x,                      *)
-(* B.__dict__["x"].__get__(a), a.x = 1, del a.x, or A.x = 1. The outcome   *)
-(* is the result (a descriptor call as                                     *)
+(* B.__dict__["x"].__get__(a), a.x = 1, del a.x, or A.x = 1; or, for       *)
+(* metaget, makes B and A of metaclass M(type) holding x = D() instead,    *)
+(* A holding x = "cls" when dict, and reads A.x. The outcome is the        *)
+(* result (a descriptor call as                                            *)
 (* get(instance, owner), set(instance, value), or delete(instance); the    *)
 (* descriptor itself as D) or the exception, then a's dictionary after an  *)
 (* assignment or deletion (A.__dict__["x"] after A.x = 1). When raises, a  *)
@@ -32,7 +36,7 @@
 EXTENDS Naturals, Sequences
 
 Names == {"get", "set", "delete"}
-Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "classset"}
+Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "classset", "metaget"}
 Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : BOOLEAN] :
                 p.raises => p.op \in {"get", "getattr", "getattrd", "hasattr"}}
 
@@ -59,6 +63,10 @@ Run(p) ==
       [] p.op = "hasattr" -> IF Read(p) = "AttributeError x" THEN "False" ELSE "True"
       [] p.op = "classget" -> IF Has(p, "get") THEN "get(None, A)" ELSE "D"
       [] p.op = "superget" -> IF Has(p, "get") THEN "get(a, A)" ELSE "D"
+      [] p.op = "metaget" -> CASE Data(p) /\ Has(p, "get") -> "get(A, M)"   \* the metaclass's data descriptor wins
+                               [] p.dict -> "'cls'"                          \* then the class's own attribute
+                               [] Has(p, "get") -> "get(A, M)"
+                               [] OTHER -> "D"
       [] p.op = "direct" -> IF Has(p, "get") THEN "get(a, None)" ELSE "AttributeError"
       [] p.op = "set" -> CASE Has(p, "set") -> "set(a, 1) " \o Dict(p)
                            [] Data(p) -> "AttributeError " \o Dict(p)       \* __delete__ only: no __set__

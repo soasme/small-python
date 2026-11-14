@@ -14,7 +14,7 @@ def read(op, a, A, B, label):
         return label(getattr(a, "x", "dflt"))
     if op == "hasattr":
         return repr(hasattr(a, "x"))
-    if op == "classget":
+    if op in ("classget", "metaget"):
         return label(A.x)
     if op == "superget":
         return label(super(A, a).x)
@@ -52,15 +52,16 @@ def outcome(p):
         body["__delete__"] = __delete__
     D = type("D", (), body)
     d = D()
-    B = type("B", (list,) if p["base"] == "list" else (), {"x": d})
-    A = type("A", (B,), {"x": 999} if p["op"] == "superget" else {})
+    meta = type("M", (type,), {"x": d}) if p["op"] == "metaget" else type
+    B = meta("B", (list,) if p["base"] == "list" else (), {} if meta is not type else {"x": d})
+    A = meta("A", (B,), {"x": 999} if p["op"] == "superget" else {"x": "cls"} if meta is not type and p["dict"] else {})
     a = A()
-    names.update({id(a): "a", id(A): "A", id(None): "None", id(d): "D"})
+    names.update({id(a): "a", id(A): "A", id(meta): "M", id(None): "None", id(d): "D"})
     if p["dict"]:
         a.__dict__["x"] = "inst"
     op = p["op"]
     try:
-        if op in ("get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct"):
+        if op in ("get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "metaget"):
             return read(op, a, A, B, label)
     except AttributeError as e:
         return "AttributeError x" if p["raises"] and e.name == "x" else "AttributeError"
