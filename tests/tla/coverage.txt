@@ -310,8 +310,8 @@ Contents | - navigation
 19 The Built-in Namespace > 19.3 Function properties > 19.3.18 hash ( *obj*, / ) | NumericHash, BuiltinsObjects
 19 The Built-in Namespace > 19.3 Function properties > 19.3.19 id ( *obj*, / ) | Objects
 19 The Built-in Namespace > 19.3 Function properties > 19.3.20 input ( *prompt*=`''`, / ) | - host hook HostInput (Annex B)
-19 The Built-in Namespace > 19.3 Function properties > 19.3.21 isinstance ( *obj*, *class_or_tuple*, / ) | BuiltinsObjects, InstanceChecks
-19 The Built-in Namespace > 19.3 Function properties > 19.3.22 issubclass ( *cls*, *class_or_tuple*, / ) | BuiltinsObjects, InstanceChecks
+19 The Built-in Namespace > 19.3 Function properties > 19.3.21 isinstance ( *obj*, *class_or_tuple*, / ) | BuiltinsObjects, InstanceChecks, AbstractChecks
+19 The Built-in Namespace > 19.3 Function properties > 19.3.22 issubclass ( *cls*, *class_or_tuple*, / ) | BuiltinsObjects, InstanceChecks, AbstractChecks
 19 The Built-in Namespace > 19.3 Function properties > 19.3.23 iter ( *object* [, *sentinel*] ) | BuiltinsIter, Iterators
 19 The Built-in Namespace > 19.3 Function properties > 19.3.24 len ( *obj*, / ) | BuiltinsIter
 19 The Built-in Namespace > 19.3 Function properties > 19.3.25 locals ( ) | DynamicScopes

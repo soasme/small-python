@@ -297,6 +297,23 @@ static const char *const programs[] = {
     "    return [len(s.union([SK(4)])), len(s.intersection([SK(2), SK(5)])), s.isdisjoint([SK(2)]), s.issuperset([SK(9)]), len(t)]\n"
     "print(sk())\n",
 
+    "class AB:\n"
+    "    def __init__(self, b): self.b = b\n"
+    "    @property\n"
+    "    def __bases__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return self.b\n"
+    "class AI:\n"
+    "    def __init__(self, k): self.k = k\n"
+    "    @property\n"
+    "    def __class__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return self.k\n"
+    "def ab():\n"
+    "    a = AB(()); d = AB((AB(()), AB((a,))))\n"
+    "    return [issubclass(d, a), issubclass(d, (AB(()), a)), isinstance(AI(d), a), isinstance(AI(d), int), issubclass(*(d, a))]\n"
+    "print(ab())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

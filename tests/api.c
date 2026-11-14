@@ -1626,6 +1626,14 @@ int main(int argc, char **argv) {
                "def unioned():\n    s = {Slow()}\n    return len(s.union([Slow(), Slow()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "unioned()", "unioned.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So do the __bases__ reads of an abstract issubclass. */
+    execute(c, "class Abstract:\n    def __init__(self, b): self.b = b\n"
+               "    @property\n    def __bases__(self):\n        for i in range(3000): pass\n        return self.b\n"
+               "def abstract():\n    a = Abstract(())\n    return int(issubclass(Abstract((Abstract(()), Abstract((a,)))), a))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "abstract()", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */
     execute(c, "class Declines:\n    def __iadd__(self, o): return NotImplemented\n"
                "    def __add__(self, o):\n        for i in range(3000): pass\n        return i + o\n"

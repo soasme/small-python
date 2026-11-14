@@ -524,6 +524,9 @@ static int hash_calls(SPYContext *, SPYValue *);
 static int tuple_push(SPYContext *, Machine *, SPYValue *, size_t, uint64_t);
 static SPYValue *tuple_next(SPYContext *, Machine *, SPYValue **, int64_t *);
 static SPYValue *callk(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, Continuation, SPYValue *);
+static int abstract_reaches(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *abstract_from(SPYContext *, Machine *, int, SPYValue *, SPYValue *, SPYValue *, size_t);
+static int checks_call(SPYContext *, Machine *, int, size_t, SPYValue *const *, SPYValue **);
 static int parse_arguments(SPYContext *, const char *, size_t, SPYValue *const *, SPYValue *, const char *const *, size_t, size_t, size_t, SPYValue **);
 static int unknown_keywords(SPYContext *, const char *, SPYValue *, const char *const *, size_t);
 static SPYValue *function_closure(SPYContext *, SPYValue *);
@@ -24581,6 +24584,10 @@ static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && checks_call(c, m, builtin_id(callee), argc, argv, &result)) {
+        release_all(argc, argv); spy_release(callee);
+        return result;
+    }
     if (index_arguments(c, callee, method, argc, argv)) {
         result = indexed_call(c, m, callee, method, method >= 0 ? n->a->b->global_key : NULL, argc, argv);
         spy_release(callee);
@@ -24691,10 +24698,23 @@ static SPYValue *check_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPY
             release_all(4, parts);
             return state ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(item), spy_retain(a)}, check_next, state) : NULL;
         }
+        /* One by the abstract protocol goes on with the next item when false. */
+        if (abstract_reaches(c, sub, a, item)) return abstract_from(c, m, sub, a, item, choices, i + 1);
         int result = instance_check(c, a, item, sub, 0);
         if (result) return result < 0 ? NULL : spy_bool(c, 1);
     }
     return spy_bool(c, 0);
+}
+/* isinstance() or issubclass(), as id, of argv, two, on m: a tuple tests
+ * its items in turn (check_from), an argument by the abstract protocol
+ * reads on m (abstract_from), *result their value; else 0. */
+static int checks_call(SPYContext *c, Machine *m, int id, size_t argc, SPYValue *const *argv, SPYValue **result) {
+    int sub = id == B_ISSUBCLASS;
+    if ((!sub && id != B_ISINSTANCE) || argc != 2) return 0;
+    if (argv[1]->type == SPY_TUPLE) *result = check_from(c, m, sub, argv[0], argv[1], 0);
+    else if (abstract_reaches(c, sub, argv[0], argv[1])) *result = abstract_from(c, m, sub, argv[0], argv[1], NULL, 0);
+    else return 0;
+    return 1;
 }
 /* An item's check that check_from called returned result. */
 static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
@@ -24705,6 +24725,163 @@ static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue
         value = truth ? spy_bool(c, 1) : check_from(c, m, items[3] == c->booleans[1], items[0], items[1], (size_t)items[2]->as.integer_data.small);
     spy_release(state);
     return value;
+}
+static SPYValue *getter_fallback(SPYValue *, SPYValue *);
+static SPYValue *getter_function(SPYContext *, SPYValue *, const char *, SPYValue *, SPYValue **, size_t *);
+/* Whether isinstance() of a, or issubclass() for sub, against target, not
+ * a tuple (a subclass's included), follows the abstract protocol
+ * (object_isinstance, recursive_issubclass), with no Python
+ * __instancecheck__ or __subclasscheck__ of its own, reading an attribute
+ * that may call Python:
+ * the __bases__ of a target, or of a, that is not a class, or a's
+ * __class__ that its class defines or reads by its own __getattribute__. */
+static int abstract_reaches(SPYContext *c, int sub, SPYValue *a, SPYValue *target) {
+    const char *hook = sub ? "__subclasscheck__" : "__instancecheck__";
+    SPYValue *owner = target->type == SPY_CLASS ? target->as.map.meta : target->type == SPY_INSTANCE ? target->as.map.parent : NULL;
+    if (builtin_value(c, target, SPY_TUPLE) || (owner && class_lookup(owner, hook) && class_lookup(owner, hook) != class_lookup(c->types[SPY_CLASS], hook)))
+        return 0;
+    if (target->type != SPY_CLASS || (sub && a->type != SPY_CLASS)) return 1;
+    return !sub && a->type == SPY_INSTANCE && !subclass(a->as.map.parent, target) &&
+           (class_lookup(a->as.map.parent, "__class__") || class_lookup(a->as.map.parent, "__getattribute__"));
+}
+/* The abstract protocol's stages: issubclass() reads its first argument's
+ * __bases__, then the target's; isinstance() reads the target's __bases__
+ * when it is not a class, then its first argument's __class__; both then
+ * search the __bases__ of what they reach for the target (ABSTRACT_WALK).
+ * The slots of its state, a list: sub, a, the target, the stage, the
+ * classes still to search, each followed by its depth of multiple bases,
+ * the depth of the one whose __bases__ is read, the object read and the
+ * __getattr__ its read falls back to, and a tuple's items and the index
+ * of the next to test when this one fails (check_from), or None. */
+enum { ABSTRACT_DERIVED, ABSTRACT_TARGET, ABSTRACT_CLASS, ABSTRACT_WALK };
+enum { AS_SUB, AS_A, AS_TARGET, AS_STAGE, AS_PENDING, AS_DEPTH, AS_READ, AS_FALLBACK, AS_CHOICES, AS_NEXT, AS_SLOTS };
+static void slot_put(SPYValue *state, int i, SPYValue *v) {
+    spy_release(state->as.seq.items[i]);
+    state->as.seq.items[i] = v;
+}
+static int abstract_stage(SPYValue *state) { return (int)state->as.seq.items[AS_STAGE]->as.integer_data.small; }
+static const char *abstract_name(SPYValue *state) { return abstract_stage(state) == ABSTRACT_CLASS ? "__class__" : "__bases__"; }
+static SPYValue *abstract_go(SPYContext *, Machine *, SPYValue *, SPYValue *, int);
+/* What a Python read of the attribute of state's stage returned: an
+ * AttributeError gives way to the __getattr__ the read falls back to, a
+ * call on m too (callk); else the protocol goes on (abstract_go). */
+static SPYValue *abstract_read(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue *fallback = state->as.seq.items[AS_FALLBACK];
+    if (result || fallback == c->none || !error_is(c, "AttributeError")) return abstract_go(c, m, state, result, 1);
+    spy_clear_error(c);
+    const char *name = abstract_name(state);
+    SPYValue *argv[] = {spy_retain(state->as.seq.items[AS_READ]), spy_string(c, name, strlen(name))};
+    if (!argv[1]) { spy_release(argv[0]); return abstract_go(c, m, state, NULL, 1); }
+    spy_retain(fallback);
+    slot_put(state, AS_FALLBACK, spy_none(c));
+    result = callk(c, m, fallback, 2, argv, abstract_read, state);
+    spy_release(fallback);
+    return result;
+}
+/* The read of state's attribute of v: 0 with its value in *value, owned,
+ * or NULL with an error; or 1 when a Python call reads it, on m (callk),
+ * taking state, *value what callk returned. */
+static int abstract_get(SPYContext *c, Machine *m, SPYValue *state, SPYValue *v, SPYValue **value) {
+    const char *name = abstract_name(state);
+    SPYValue *function, *get, *argv[3] = {NULL, NULL, NULL};
+    size_t argc;
+    if ((*value = attribute_step(c, v, name)) || c->error_type[0] || !(function = c->fallback)) return 0;
+    c->fallback = NULL;
+    SPYValue *fallback = getter_fallback(v, function);
+    slot_put(state, AS_READ, spy_retain(v));
+    slot_put(state, AS_FALLBACK, spy_retain(fallback ? fallback : c->none));
+    if (!(get = getter_function(c, v, name, function, argv, &argc))) return 0;
+    *value = callk(c, m, get, argc, argv, abstract_read, state);
+    spy_release(get);
+    return 1;
+}
+/* Push v, borrowed, and its depth onto state's classes to search. */
+static int abstract_push(SPYContext *c, SPYValue *state, SPYValue *v, size_t depth) {
+    SPYValue *pending = state->as.seq.items[AS_PENDING], *count = int_value(c, (int64_t)depth);
+    int failed = !count || sequence_append(c, pending, v) || sequence_append(c, pending, count);
+    spy_release(count);
+    return failed;
+}
+/* The abstract protocol of state, which it takes, on m, given what the
+ * read of its stage gave when have is set, read (owned, or NULL with an
+ * error or for none): as abstract_issubclass, a class followed through
+ * its one base, or searched through each of several in turn, each more
+ * than the recursion limit deep, with the frames running, a RecursionError.
+ * Its result: True or False, or a tuple's next items' test when false;
+ * NULL with an error, or with none while a read's Python call runs. */
+static SPYValue *abstract_go(SPYContext *c, Machine *m, SPYValue *state, SPYValue *read, int have) {
+    SPYValue **items = state->as.seq.items, *a = items[AS_A], *target = items[AS_TARGET], *pending = items[AS_PENDING];
+    int sub = items[AS_SUB] == c->booleans[1], result = 0;
+    for (;;) {
+        int stage = abstract_stage(state);
+        if (have) {
+            have = 0;
+            if (!read && c->error_type[0]) {
+                if (!error_is(c, "AttributeError")) { result = -1; break; }
+                spy_clear_error(c);
+            }
+            SPYValue *bases = read && read->type == SPY_TUPLE ? read : NULL;
+            size_t depth = (size_t)items[AS_DEPTH]->as.integer_data.small;
+            if ((stage == ABSTRACT_DERIVED || stage == ABSTRACT_TARGET) && !bases) {
+                spy_error(c, "TypeError", stage == ABSTRACT_DERIVED ? "issubclass() arg 1 must be a class" :
+                          sub ? "issubclass() arg 2 must be a class, a tuple of classes, or a union" :
+                          "isinstance() arg 2 must be a type, a tuple of types, or a union");
+                spy_release(read); result = -1; break;
+            }
+            if (stage == ABSTRACT_CLASS && !read) break;
+            if (stage == ABSTRACT_CLASS && target->type == SPY_CLASS) {
+                result = read != value_class(c, a) && read->type == SPY_CLASS ? subclass(read, target) : 0;
+                spy_release(read); break;
+            }
+            int failed = 0;
+            if (stage == ABSTRACT_CLASS || (stage == ABSTRACT_TARGET && sub)) failed = abstract_push(c, state, stage == ABSTRACT_CLASS ? read : a, 0);
+            else if (stage == ABSTRACT_WALK && bases && bases->as.seq.len == 1) failed = abstract_push(c, state, bases->as.seq.items[0], depth);
+            else if (stage == ABSTRACT_WALK && bases && bases->as.seq.len > 1) {
+                if (c->py_depth + depth + 1 >= c->recursion_limit) failed = !errorf(c, "RecursionError", "maximum recursion depth exceeded in __issubclass__") || 1;
+                for (size_t i = bases->as.seq.len; i-- && !failed;) failed = abstract_push(c, state, bases->as.seq.items[i], depth + 1);
+            }
+            spy_release(read);
+            if (failed) { result = -1; break; }
+            slot_put(state, AS_STAGE, int_value(c, stage == ABSTRACT_DERIVED ? ABSTRACT_TARGET : stage == ABSTRACT_TARGET && !sub ? ABSTRACT_CLASS : ABSTRACT_WALK));
+            continue;
+        }
+        if (spend(c, 1)) { result = -1; break; }
+        SPYValue *v = stage == ABSTRACT_TARGET ? target : a;
+        if (stage == ABSTRACT_WALK) {
+            if (!pending->as.seq.len) break;
+            SPYValue *depth = pending->as.seq.items[--pending->as.seq.len];
+            v = pending->as.seq.items[--pending->as.seq.len];
+            slot_put(state, AS_DEPTH, depth);
+            if (v == target) { spy_release(v); result = 1; break; }
+        } else spy_retain(v);
+        int called = abstract_get(c, m, state, v, &read);
+        spy_release(v);
+        if (called) return read;
+        have = 1;
+    }
+    SPYValue *choices = spy_retain(items[AS_CHOICES]), *value;
+    size_t next = (size_t)items[AS_NEXT]->as.integer_data.small;
+    spy_retain(a);
+    spy_release(state);
+    value = result < 0 ? NULL : result || choices == c->none ? spy_bool(c, result) : check_from(c, m, sub, a, choices, next);
+    spy_release(a); spy_release(choices);
+    return value;
+}
+/* isinstance() of a, or issubclass() for sub, against target by the
+ * abstract protocol (abstract_go) on m, then choices' items from next on
+ * when false, or none for NULL. */
+static SPYValue *abstract_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPYValue *target, SPYValue *choices, size_t next) {
+    if (!sub && target->type == SPY_CLASS && subclass(value_class(c, a), target)) return spy_bool(c, 1);
+    SPYValue *slots[AS_SLOTS] = {spy_bool(c, sub), spy_retain(a), spy_retain(target),
+                                 int_value(c, sub ? ABSTRACT_DERIVED : target->type == SPY_CLASS ? ABSTRACT_CLASS : ABSTRACT_TARGET),
+                                 spy_list(c), int_value(c, 0), spy_none(c), spy_none(c), spy_retain(choices ? choices : c->none),
+                                 int_value(c, (int64_t)next)};
+    SPYValue *state = spy_list(c);
+    int failed = !state;
+    for (int i = 0; i < AS_SLOTS; i++) failed = failed || !slots[i] || sequence_append(c, state, slots[i]);
+    release_all(AS_SLOTS, slots);
+    if (failed) { spy_release(state); return NULL; }
+    return abstract_go(c, m, state, NULL, 0);
 }
 static SPYValue *index_bytes(SPYContext *, SPYValue *, SPYValue *, const char *);
 static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
@@ -24859,9 +25036,7 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
         spy_release(callee);
         return consumer >= 0 ? NULL : result;
     }
-    /* isinstance() and issubclass() of a tuple test its items in turn. */
-    if ((id == B_ISINSTANCE || id == B_ISSUBCLASS) && argc == 2 && argv[1]->type == SPY_TUPLE) {
-        result = check_from(c, m, id == B_ISSUBCLASS, argv[0], argv[1], 0);
+    if (checks_call(c, m, id, argc, argv, &result)) {
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -25413,6 +25588,7 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         spy_release(all); spy_release(tuple);
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
+    else if (calls && !keywords->as.map.len && checks_call(c, m, builtin_id(callee), args->as.seq.len, args->as.seq.items, &result)) ;
     else if (calls && !keywords->as.map.len && index_arguments(c, callee, -1, args->as.seq.len, args->as.seq.items)) {
         SPYValue *argv[3];
         for (size_t i = 0; i < args->as.seq.len; i++) argv[i] = spy_retain(args->as.seq.items[i]);
