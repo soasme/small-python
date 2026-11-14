@@ -463,6 +463,18 @@ static const char *const programs[] = {
     "h = tg(); next(h)\n"
     "print(g.throw(TE, (1, 2), None), h.throw(TE, TE(3), None))\n",
 
+    "class PN:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self): return self.v\n"
+    "    def __float__(self): return 0.5\n"
+    "def pn():\n"
+    "    r = ['%d|%x|%5.1f|%s' % (PN(3), PN(30), PN(1), 's')]\n"
+    "    r.append('%(k)o' % {'k': PN(8)})\n"
+    "    try: '%x' % PN('no')\n"
+    "    except TypeError as e: r.append(e)\n"
+    "    return r\n"
+    "print(pn())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"

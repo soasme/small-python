@@ -1720,12 +1720,17 @@ int main(int argc, char **argv) {
                "    return t + sum(i for i, x in enumerate(iter(ticks(), 2)))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
+    /* So does str % of an instance's Python __index__, __int__ or __float__. */
+    execute(c, "def percented():\n    return len('%x %d %.1f' % (Listed(), Listed(), Listed()))\n");
+    pauses = 0;
     /* So do dir() of a Python __dir__ and int() of a Python __index__. */
     execute(c, "class Listed:\n    def __dir__(self):\n        for i in range(3000): pass\n        return ['b', 'a']\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return 3\n"
                "def listed():\n    return len(dir(Listed())) + int(Listed()) + int(float(Listed()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "listed()", "listed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "percented()", "percented.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");

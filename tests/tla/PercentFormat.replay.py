@@ -19,6 +19,13 @@ class L:
     def __init__(self, tag): self.tag = tag
     def __str__(self): spin(); L.log.append('s' + self.tag); return self.tag
     def __repr__(self): spin(); L.log.append('r' + self.tag); return self.tag.upper() + '\xe9'
+class Q:
+    log = []
+    def __int__(self): spin(); Q.log.append('int'); return 9
+    def __index__(self): spin(); Q.log.append('index'); return 31
+    def __float__(self): spin(); Q.log.append('float'); return 2.5
+class NotIndex:
+    def __index__(self): spin(); return 'x'
 class Bad:
     def __repr__(self): spin(); raise KeyError('k')
 class NotStr:
@@ -77,6 +84,8 @@ SOURCES = {
     "method_raises": "L.log.clear()\ntry: '%r %s' % (Bad(), L('c'))\nexcept KeyError: result = L.log",
     "method_not_str": "result = '%s' % NotStr()",
     "method_too_few": "L.log.clear()\ntry: '%s %s' % (L('a'),)\nexcept TypeError as e: result = (str(e), L.log)",
+    "method_numbers": "Q.log.clear(); result = ('%d-%x-%.2f|%X' % (Q(), Q(), Q(), Q()), Q.log)",
+    "method_number_bad": "result = '%x' % NotIndex()",
     "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)"
 }
 

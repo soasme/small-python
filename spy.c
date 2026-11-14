@@ -22034,14 +22034,22 @@ static int percent_mapping(SPYContext *c, SPYValue *v, int bytes) {
 static SPYValue *conversion_method(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *conversion_value(SPYContext *, SPYValue *, SPYValue *, SPYValue *);
 static SPYValue *percent_converted(SPYContext *, Machine *, SPYValue *, SPYValue *);
+static SPYValue *index_function(SPYContext *, SPYValue *);
 /* Of percent_build's spec ch at its arguments' value v, on m: 1 when
  * the job defers its conversion, as percent_build says, its state built
  * of the format and args in held, the text so far in out and the spec's
  * position and count of characters and the arguments' length and index
- * in at; 2, the text in *piece, when a repr job ended at once; else 0. */
+ * in at; 2, the text in *piece, when a repr job ended at once; else 0.
+ * A number's spec converts by int() or float(), or %o, %x and %X by the
+ * __index__ int() takes ("int"). */
 static NO_INLINE int percent_defer(SPYContext *c, Machine *m, unsigned ch, SPYValue *v, SPYValue *const *held, Buffer *out, const int64_t *at, SPYValue **piece) {
-    SPYValue *callee = ch == 's' ? c->types[SPY_STRING] : c->field_calls[0], *found[2], *function = NULL, *job = NULL, *env = NULL;
-    if (v->type == SPY_INSTANCE ? !(function = conversion_method(c, callee, 1, &v, found)) : !repr_job(c, callee, v)) return 0;
+    int index = ch == 'o' || ch == 'x' || ch == 'X', number = ch != 's' && ch != 'r' && ch != 'a';
+    SPYValue *callee = ch == 's' ? c->types[SPY_STRING] : !number ? c->field_calls[0] :
+                       c->types[ch == 'd' || ch == 'i' || ch == 'u' ? SPY_INT : SPY_FLOAT];
+    SPYValue *found[2], *function = NULL, *job = NULL, *env = NULL;
+    if (index) {
+        if (!(function = index_function(c, v)) || !(found[0] = spy_string(c, "int", 3))) return 0;
+    } else if (v->type == SPY_INSTANCE ? !(function = conversion_method(c, callee, 1, &v, found)) : number || !repr_job(c, callee, v)) return 0;
     SPYValue *parts[] = {spy_retain(held[0]), spy_retain(held[1]), spy_string(c, out->data ? out->data : "", out->len),
                          int_value(c, at[0]), int_value(c, at[1]), int_value(c, at[2]), int_value(c, at[3]),
                          spy_retain(v), function ? found[0] : spy_none(c)};
@@ -22196,9 +22204,22 @@ static SPYValue *percent_build(SPYContext *c, Machine *m, SPYValue *format, SPYV
             else piece = builtin(c, 1, &v, (void *)(intptr_t)(ch == 's' ? B_STR : bytes || ch == 'a' ? B_ASCII : B_REPR));
             break;
         case 'i': case 'd': case 'u': case 'o': case 'x': case 'X':
-            piece = percent_integer(c, &p, key, v, (int)ch, flags, prec); sign = 1; break;
-        case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
-            piece = percent_float(c, &p, key, v, (int)ch, flags, prec); sign = 1; break;
+        case 'e': case 'E': case 'f': case 'F': case 'g': case 'G': {
+            /* A number's conversion is deferred as a %s's is. */
+            int real = ch == 'e' || ch == 'E' || ch == 'f' || ch == 'F' || ch == 'g' || ch == 'G';
+            sign = 1;
+            if (converted == c->unbound)
+                piece = percent_type(c, &p, key, real || !(ch == 'o' || ch == 'x' || ch == 'X') ? "%%%c requires a real number" : "%%%c requires an integer", (int)ch, v);
+            else if (converted) v = converted;
+            else if (m && v->type == SPY_INSTANCE &&
+                     (defer = percent_defer(c, m, ch, v, (SPYValue *[]){format, args}, &out, (int64_t[]){(int64_t)start, (int64_t)startc, startlen, startidx}, &piece))) {
+                deferred = 1;
+                break;
+            }
+            if (converted != c->unbound) piece = (real ? percent_float : percent_integer)(c, &p, key, v, (int)ch, flags, prec);
+            spy_release(converted); converted = NULL;
+            break;
+        }
         case 'c':
             piece = percent_char(c, &p, key, v, bytes);
             if (bytes) prec = -1;
@@ -22240,10 +22261,16 @@ static SPYValue *percent_format(SPYContext *c, SPYValue *format, SPYValue *args)
     format->as.string.exports--;
     return result;
 }
-/* What the method of a % job's instance (percent_build) returned. */
+/* What the method of a % job's instance (percent_build) returned: a
+ * number's TypeError, c->unbound, is the spec's (percent_type). */
 static SPYValue *percent_converted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **saved = state->as.seq.items;
     SPYValue *text = !result ? NULL : saved[8] == c->none ? spy_retain(result) : conversion_value(c, saved[7], saved[8], result);
+    const char *name = saved[8] == c->none ? "" : saved[8]->as.string.data;
+    if (!text && error_is(c, "TypeError") && (!strcmp(name, "int") || !strcmp(name, "float") || !strcmp(name, "__int__") || !strcmp(name, "__float__"))) {
+        spy_clear_error(c);
+        text = spy_retain(c->unbound);
+    }
     SPYValue *value = text ? percent_build(c, m, saved[0], saved[1], state, text) : NULL;
     spy_release(result); spy_release(state);
     return value;
