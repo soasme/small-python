@@ -101,6 +101,7 @@ Unreleased (0.10.0):
 - a super object finds a base's __get__, __self__ or __thisclass__ before its own
 - an instance of a property subclass calls its Python getter without nesting on the C stack
 - iter(f, sentinel) calls a Python f without nesting on the C stack
+- print(*objects) calls their Python __str__ without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

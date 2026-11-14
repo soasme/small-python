@@ -435,6 +435,16 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class PS:\n"
+    "    def __str__(self): return 'ps'\n"
+    "class PF:\n"
+    "    def __init__(self): self.out = []\n"
+    "    def write(self, s): self.out.append(s)\n"
+    "f = PF()\n"
+    "print(*[PS(), 1, PS()], sep='|', file=f)\n"
+    "print(*(PS(),), end='', file=f)\n"
+    "print(*f.out)\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

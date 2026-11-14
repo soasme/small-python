@@ -53,6 +53,8 @@ SOURCES = {
     "format_object_empty": "result = format(object(), '')[:8]",
     "format_bad_return": 'result = format(BadFormat())',
     "format_spec_type": 'result = format(1, 2)',
+    "print_starred": "log = []\nclass S:\n    def __init__(s, v): s.v = v\n    def __str__(s):\n        for _ in (): pass\n        log.append('str %d' % s.v)\n        return 's%d' % s.v\n"
+                     "w = W()\nprint(*[S(1), 2, S(3)], sep='-', end='.', file=w)\nresult = (w.parts, log)",
     "print_sep_end": "w = W()\nprint(1, 'a', None, sep='|', end='!\\n', file=w)\nresult = w.parts",
     "print_none_sep": 'w = W()\nprint(1, 2, sep=None, end=None, file=w)\nresult = w.parts',
     "print_no_args": 'w = W()\nprint(file=w)\nresult = w.parts',

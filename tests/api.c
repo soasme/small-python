@@ -1697,6 +1697,12 @@ int main(int argc, char **argv) {
                "def ticked():\n    t = sum(iter(ticks(), 3))\n    for x in iter(ticks(), 2): t += x\n    return t + next(iter(ticks(), 0))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "ticked()", "ticked.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 4);
+    /* So does a starred print's __str__ calls. */
+    execute(c, "class Shown:\n    def __str__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
+               "class Sink:\n    n = 0\n    def write(self, s): Sink.n += len(s)\n"
+               "def shown():\n    a = [Shown(), Shown()]\n    print(*a, file=Sink())\n    print(*a, sep='', end='', file=Sink())\n    return Sink.n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 3);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */
