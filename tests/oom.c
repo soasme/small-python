@@ -463,6 +463,17 @@ static const char *const programs[] = {
     "h = tg(); next(h)\n"
     "print(g.throw(TE, (1, 2), None), h.throw(TE, TE(3), None))\n",
 
+    "def zc():\n"
+    "    n = [0]\n"
+    "    def f():\n"
+    "        n[0] += 1\n"
+    "        if n[0] == 7: raise StopIteration\n"
+    "        return n[0]\n"
+    "    r = list(zip('abc', iter(f, 3))) + list(enumerate(iter(f, 6)))\n"
+    "    n[0] = 4\n"
+    "    return r + [z for z in zip(iter(f, 0), [1, 2, 3], 'xy')]\n"
+    "print(zc())\n",
+
     "class MG:\n"
     "    @property\n"
     "    def f(self): return lambda *a: [a]\n"

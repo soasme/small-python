@@ -23126,8 +23126,10 @@ static NO_INLINE int delegating(Machine *m) {
     return 0;
 }
 /* Whether an adapter's iterable s may give its next item by a call
- * (adapts): a map, or an instance whose __next__ is on the machine now. */
+ * (adapts): a map, a callable iterator of a Python function, or an
+ * instance whose __next__ is on the machine now. */
 static int adapted_source(SPYContext *c, SPYValue *s) {
+    if (s->type == SPY_ITERATOR && s->as.iterator.kind == I_CALLABLE) return !s->as.iterator.done && machine_function(c, s->as.iterator.source);
     return (s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) || next_function(c, s);
 }
 /* The zip, map, enumerate or filter of id over its collected iterables
@@ -28905,8 +28907,10 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
             inner = NULL;
             for (size_t i = (v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0); !inner && i < source->as.seq.len; i++) {
                 SPYValue *s = source->as.seq.items[i];
-                if ((s->type == SPY_ITERATOR && s->as.iterator.kind == I_MAP) || next_function(c, s)) inner = s;
-                else if (!iterator_fast(c, s, &item)) return 0;
+                if (adapted_source(c, s)) inner = s;
+                else if (resumable(s)) return 0;
+                /* Another iterable's item is taken as zip_items takes it. */
+                else if (!iterator_fast(c, s, &item) && !(item = iterator_next(c, s))) break;
                 else if (!item) break;
                 else if (!adapted_item(c, v, item) && c->error_type[0]) break;
             }
@@ -28935,11 +28939,17 @@ static NO_INLINE int adapted_call(SPYContext *c, Machine *m, SPYValue *v, SPYVal
 }
 /* What the call of a map's next item that adapted_call made returned in
  * result, which it takes: the item of v, under c->adapting on m's stack,
- * made of it (adapted_item); or NULL, with *again set when v goes on to
- * take more, else its pending items dropped. */
+ * made of it (adapted_item), a callable iterator's once it is no
+ * sentinel (sentinel_returned); or NULL, with *again set when v goes on
+ * to take more, else its pending items dropped. */
 static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue *result, int *again) {
     spy_release(machine_pop(m));
-    SPYValue *v = machine_pop(m), *item = result ? adapted_item(c, v, result) : NULL;
+    SPYValue *v = machine_pop(m), *source = v->as.iterator.source, *inner = source;
+    /* The iterable called is the first a zip or map has no item of. */
+    if (v->as.iterator.kind != I_ENUMERATE)
+        inner = source->as.seq.items[(v->as.iterator.kind == I_MAP) + (v->as.iterator.counter ? v->as.iterator.counter->as.seq.len : 0)];
+    if (inner->type == SPY_ITERATOR && inner->as.iterator.kind == I_CALLABLE) result = sentinel_returned(c, inner, result);
+    SPYValue *item = result ? adapted_item(c, v, result) : NULL;
     if (!item && !c->error_type[0]) *again = 1;
     else if (!item && v->as.iterator.kind != I_ENUMERATE) { spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL; }
     spy_release(v);

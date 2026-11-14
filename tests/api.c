@@ -1715,6 +1715,11 @@ int main(int argc, char **argv) {
                "def thrown():\n    g = caught(); next(g)\n    return g.throw(Slowly, 4, None)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "thrown()", "thrown.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So do zip and enumerate of a callable iterator of a Python function. */
+    execute(c, "def zipped():\n    t = 0\n    for a, b in zip('xyz', iter(ticks(), 3)): t += b\n"
+               "    return t + sum(i for i, x in enumerate(iter(ticks(), 2)))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "zipped()", "zipped.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So does a method call whose attribute a Python getter or __getattr__ reads. */
     execute(c, "class Fetched:\n    @property\n    def f(self):\n        for i in range(3000): pass\n        return abs\n"
                "    def __getattr__(self, name):\n        for i in range(3000): pass\n        return len\n"

@@ -102,6 +102,7 @@ Unreleased (0.10.0):
 - an instance of a property subclass calls its Python getter without nesting on the C stack
 - iter(f, sentinel) calls a Python f without nesting on the C stack
 - a method call whose attribute a Python getter or __getattr__ reads calls both without nesting on the C stack
+- zip, map and enumerate of iter(f, sentinel) call a Python f without nesting on the C stack
 - print(*objects) calls their Python __str__ without nesting on the C stack
 - property.__get__() of an object calls a Python getter without nesting on the C stack
 - a generator's throw() of a class, a value and a None traceback calls its Python __init__ without nesting
