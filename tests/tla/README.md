@@ -42,6 +42,7 @@ agree on their distinct-state counts), in about half TLC's time.
 | `SeqOps.tla` | sequence indexing, slicing with steps, `in`, `count`, `index`, `+`, `*`, and hashing, over str, tuple, bytes, list, and bytearray | yes |
 | `Lists.tla` | item and slice assignment and deletion, `+=`, `*=`, and the mutable sequence methods, over list and bytearray | yes |
 | `Sets.tla` | set and frozenset operators, comparisons, mutation, hashing, and equal numbers as one element | yes |
+| `SetWalks.tla` | which entries the operations of two sets compare: the set walked and searched, the second lookup that adds, and the walks that discard | yes |
 | `FrozenDicts.tla` | `frozendict` construction, order, `|` and `|=`, equality with dict, hashing, and the absent mutating methods | yes |
 | `FunctionObjects.tla` | function special attributes: read-only ones, type-checked writes, new defaults and code taking effect, and closures | yes |
 | `Methods.tla` | method binding (instance, classmethod, staticmethod, instance attribute), method attributes, and built-in functions and methods | yes |

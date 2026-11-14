@@ -314,6 +314,22 @@ static const char *const programs[] = {
     "    return [issubclass(d, a), issubclass(d, (AB(()), a)), isinstance(AI(d), a), isinstance(AI(d), int), issubclass(*(d, a))]\n"
     "print(ab())\n",
 
+    "class SW:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __hash__(self): return 1\n"
+    "    def __eq__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return self.v == o.v\n"
+    "def sw(n):\n"
+    "    return {SW(v) for v in range(n)}\n"
+    "def walks():\n"
+    "    for i in range(1): pass\n"
+    "    a = sw(3); b = sw(4); c = sw(9)\n"
+    "    d = set(a); d -= b; e = set(a); e ^= b; f = set(a); f &= b\n"
+    "    return [len(a | b), len(a & b), len(a - b), len(a ^ b), len(c - a), a <= b, a.isdisjoint(b), len(d), len(e), len(f)]\n"
+    "def plain(a, b): return [len(a & b), len(a - b), len(a ^ b), len(a.symmetric_difference(b)), len(a.difference(b))]\n"
+    "print(walks(), plain(sw(3), sw(4)), plain(sw(9), sw(1)))\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

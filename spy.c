@@ -563,6 +563,8 @@ static const char *type_fqname(SPYValue *, char *, size_t);
 static SPYValue *set_copy_type(SPYContext *, SPYValue *, int);
 static SPYValue *set_key(SPYContext *, SPYValue *, SPYValue *, int64_t *);
 static SPYValue *set_binary(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *set_updated(SPYContext *, int, SPYValue *, SPYValue *);
+static SPYValue *set_intersection(SPYContext *, SPYValue *, SPYValue *);
 static int set_subset(SPYContext *, SPYValue *, SPYValue *);
 static SPYValue *bytearray_new(SPYContext *, const void *, size_t);
 static SPYValue *memory_construct(SPYContext *, size_t, SPYValue *const *, SPYValue *);
@@ -18840,7 +18842,7 @@ static SPYValue *inplace(SPYContext *c, int op, SPYValue *old, SPYValue *rhs) {
     if (old->type == SPY_SET && !other_set && (token == '|' || token == '&' || token == '-' || token == '^'))
         other_set = builtin_value(c, rhs, SPY_FROZENSET);
     if (other_set || (old->type == SPY_BYTEARRAY && (token == '+' || token == '*'))) {
-        SPYValue *fresh = other_set ? set_binary(c, token, old, other_set) : sequence_binary(c, token, old, rhs);
+        SPYValue *fresh = other_set ? set_updated(c, token, old, other_set) : sequence_binary(c, token, old, rhs);
         if (!fresh) return NULL;
         if (fresh->type != old->type) return fresh;
         /* A bytearray keeps its exports, which forbid resizing. */
@@ -26403,8 +26405,11 @@ static int dict_walks(SPYValue *x, SPYValue *y, size_t at) {
     return 0;
 }
 /* A set walk's op for an update method, which returns None, and for
- * isdisjoint (set_call). */
-enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17 };
+ * isdisjoint (set_call); a walk whose set searched is its result, which
+ * loses each entry found (SET_DISCARDS); a walked entry's second lookup,
+ * in the result, which gains it when absent (SET_ADDING). */
+enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17, SET_DISCARDS = 1 << 18, SET_ADDING = 1 << 19 };
+static int walk_op(SPYValue *op) { return (int)op->as.integer_data.small & ~(SET_UPDATING | SET_DISCARDS | SET_ADDING); }
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
  * instance with one, or a tuple holding one (eq_reaches), and their
@@ -26436,17 +26441,29 @@ static void walk_unequal(SPYContext *c, Machine *m);
  * NULL, the walk going on with the next entry. */
 static SPYValue *walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found, SPYValue **env) {
     SPYValue **state = &m->stack[m->len - 7], *result = state[0];
-    int op = (int)state[4]->as.integer_data.small & ~SET_UPDATING;
-    SPYValue *index = int_value(c, state[3]->as.integer_data.small + 1);
+    int flags = (int)state[4]->as.integer_data.small, op = walk_op(state[4]);
+    SPYValue *index = flags & SET_ADDING ? NULL : int_value(c, state[3]->as.integer_data.small + 1), *phase;
     if (index) { spy_release(state[3]); state[3] = index; }
     if (op == SET_DISJOINT) {
         if (found >= 0) walk_unequal(c, m);
         return NULL;
     }
     if (rich_kind(op) < 0) {
-        if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
-        else if (op == '^') set_remove_at(result, (size_t)found);
-        return NULL;
+        /* | adds an entry not found, as a second lookup does; a walk that
+         * discards removes one found; & looks one found up again, - one not
+         * found, and ^ one not found that it discards. */
+        int again = flags & SET_DISCARDS ? found < 0 && op == '^' : op != '|' && (found >= 0) == (op == '&');
+        if (flags & SET_ADDING || op == '|') {
+            if (found < 0) map_append(c, result, key, c->none, hash);
+            again = 0;
+        } else if (flags & SET_DISCARDS && found >= 0) set_remove_at(result, (size_t)found);
+        if (again != !!(flags & SET_ADDING)) {
+            if (!(phase = int_value(c, flags ^ SET_ADDING))) return NULL;
+            spy_release(state[4]); state[4] = phase;
+        }
+        if (!again) return NULL;
+        SPYValue *function = lookup_call(c, m, result, key, hash, map_cursor(result, hash), &found, env);
+        return function || c->error_type[0] ? function : walk_decide(c, m, key, hash, found, env);
     }
     if (found < 0) { walk_unequal(c, m); return NULL; }
     if (state[1]->type != SPY_DICT) return NULL;
@@ -26488,38 +26505,47 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     }
     spy_release(machine_pop(m));
     SPYValue *target = machine_pop(m);
-    int op = (int)m->stack[m->len - 1]->as.integer_data.small, compares = rich_kind(op) >= 0 || op == SET_DISJOINT;
+    int flags = (int)m->stack[m->len - 1]->as.integer_data.small, op = walk_op(m->stack[m->len - 1]), compares = rich_kind(op) >= 0 || op == SET_DISJOINT;
     for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
     if (!c->error_type[0] && !compares && target != c->none) {
         swap_contents(target, result);
         spy_release(result);
-        result = op & SET_UPDATING ? spy_none(c) : target;
-        if (op & SET_UPDATING) spy_release(target);
+        result = flags & SET_UPDATING ? spy_none(c) : target;
+        if (flags & SET_UPDATING) spy_release(target);
     } else spy_release(target);
     if (c->error_type[0]) spy_release(result);
     else c->looked = result;
     return NULL;
 }
 /* For set operator step op of x and y (set_walks), the result built on
- * m as set_combine does: x's copy, given y's entries for | and ^, or x's
- * entries kept for & and -, each looked up in the other, on the machine;
- * an augmented assignment to a set (inplace) then swaps it into x. A
+ * m as set_binary and set_combine build it, each entry walked looked up
+ * on the machine: | gives x's copy y's entries; & the smaller's entries,
+ * y's when as large, found in the other; - x's entries not in y, or, for a
+ * larger x and in place, discards y's from x's copy; ^ discards x's
+ * entries from y's copy or adds them, in place y's from x's copy. An
+ * augmented assignment to a set (inplace) then swaps it into x. A
  * comparison's is whether each entry of the subset side is in the other,
- * isdisjoint's whether no entry of the smaller is in the other.
+ * isdisjoint's whether no entry of the smaller, y when as large, is in the other.
  * An update method (inplace 2) swaps it into x too, its value None.
  * The walk's state, the result, the set walked, the set searched, the
  * next entry's index, op and x or None, goes on m's stack under
  * c->walking, and the walk begins (walk_next). */
 static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, int inplace, SPYValue **env) {
-    int adds = op == '|' || op == '^', rich = rich_kind(op);
-    SPYValue *result = rich >= 0 || op == SET_DISJOINT ? spy_bool(c, op != T_NE) : adds ? set_copy_type(c, x, x->type) : value_new(c, x->type);
-    /* isdisjoint walks the smaller set. */
-    SPYValue *walked = adds || rich == R_GT || rich == R_GE || (op == SET_DISJOINT && x->as.map.len > y->as.map.len) ? y : x;
-    SPYValue *searched = adds ? result : walked == x ? y : x;
+    int rich = rich_kind(op), updates = inplace && x->type == SPY_SET;
+    int discards = op == '^' || (op == '-' && (updates || x->as.map.len >> 2 > y->as.map.len));
+    SPYValue *result = rich >= 0 || op == SET_DISJOINT ? spy_bool(c, op != T_NE) : op == '|' || (discards && (op != '^' || updates)) ?
+                       set_copy_type(c, x, x->type) : op == '^' ? set_copy_type(c, y, x->type) : value_new(c, x->type);
+    SPYValue *walked = op == '^' && !updates ? x : op == '|' || discards || rich == R_GT || rich == R_GE ? y :
+                       (op == '&' || op == SET_DISJOINT) && y->as.map.len <= x->as.map.len ? y : x;
+    SPYValue *searched = op == '|' || discards ? result : walked == x ? y : x;
+    /* A difference update of a set more than eight times larger discards
+     * their intersection's entries. */
+    walked = op == '-' && updates && y->as.map.len >> 3 > x->as.map.len ? set_intersection(c, x, y) : spy_retain(walked);
     size_t len = m->len;
-    if (machine_push(c, m, result) || machine_push(c, m, spy_retain(walked)) || machine_push(c, m, spy_retain(searched)) ||
-        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op | (inplace == 2 ? SET_UPDATING : 0))) ||
+    if (!walked) { spy_release(result); return NULL; }
+    if (machine_push(c, m, result) || machine_push(c, m, walked) || machine_push(c, m, spy_retain(searched)) ||
+        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op | (inplace == 2 ? SET_UPDATING : 0) | (discards ? SET_DISCARDS : 0))) ||
         machine_push(c, m, spy_retain(inplace && x->type == SPY_SET ? x : c->none)) || machine_push(c, m, spy_retain(c->walking))) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
@@ -32794,54 +32820,95 @@ static SPYValue *set_copy_type(SPYContext *c, SPYValue *source, int type) {
     }
     return copy;
 }
-/* Combine into result in place. A set's distinct elements merged into an
- * empty set are copied, comparing none (Annex D). */
+/* Whether other's entry i, held while it is compared, is in set (1) or
+ * not (0), -1 on an error: added to set (adding), as CPython's
+ * set_add_entry; or removed from it when discarding, as set_discard_entry,
+ * and added after another lookup when absent (adding). Comparisons may
+ * change either set. */
+static int set_entry(SPYContext *c, SPYValue *set, SPYValue *other, size_t i, int discarding, int adding) {
+    Entry entry = map_items(other)[i];
+    spy_retain(entry.key);
+    ptrdiff_t found = adding && !discarding ? -1 : map_find_hash(set, entry.key, entry.hash);
+    int status = c->error_type[0] ? -1 : found >= 0;
+    if (status > 0 && discarding) set_remove_at(set, (size_t)found);
+    else if (!status && adding) status = set_add_hash(c, set, entry.key, entry.hash);
+    spy_release(entry.key);
+    return status;
+}
+/* A new set of so's type holding the entries of the smaller of so and
+ * other, other when they are as large, found in the larger, each added
+ * then (set_intersection). */
+static SPYValue *set_intersection(SPYContext *c, SPYValue *so, SPYValue *other) {
+    if (so == other) return set_copy_type(c, so, so->type);
+    SPYValue *result = value_new(c, so->type), *walked = other->as.map.len > so->as.map.len ? so : other, *searched = walked == so ? other : so;
+    for (size_t i = 0; result && i < walked->as.map.len; i++) {
+        int found = set_entry(c, searched, walked, i, 0, 0);
+        if (found > 0) found = set_entry(c, result, walked, i, 0, 1);
+        if (found < 0) { spy_release(result); return NULL; }
+    }
+    return result;
+}
+/* Combine set other into result in place, as CPython's set_update,
+ * set_intersection_update, set_difference_update and
+ * set_symmetric_difference_update do: each entry of other added, the
+ * intersection swapped in, each entry of other (of their intersection when
+ * other is more than eight times larger) discarded, or discarded and added
+ * when absent. A set's distinct elements merged into an empty set are
+ * copied, comparing none (Annex D). */
 static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other) {
     if (op == SET_UNION && !result->as.map.len && is_set(other)) {
         for (size_t i = 0; i < other->as.map.len; i++)
             if (map_append(c, result, map_items(other)[i].key, c->none, map_items(other)[i].hash)) return -1;
         return 0;
     }
-    if (op == SET_UNION || op == SET_SYMMETRIC) {
-        /* Comparisons may mutate other: each entry is held while compared. */
-        int status = 0;
-        for (size_t i = 0; i < other->as.map.len && !status; i++) {
-            Entry entry = map_items(other)[i];
-            spy_retain(entry.key);
-            ptrdiff_t found = map_find_hash(result, entry.key, entry.hash);
-            if (c->error_type[0]) status = -1;
-            else if (found < 0) status = map_append(c, result, entry.key, c->none, entry.hash);
-            else if (op == SET_SYMMETRIC) set_remove_at(result, (size_t)found);
-            spy_release(entry.key);
-        }
-        return status;
+    if (op == SET_INTERSECTION) {
+        SPYValue *common = set_intersection(c, result, other);
+        if (common) swap_contents(result, common);
+        spy_release(common);
+        return common ? 0 : -1;
     }
-    /* Decide every entry before removing any: a removal leaves a hole that
-     * the next positional read would compact. */
-    Entry *gone = NULL;
-    size_t count = 0, cap = 0;
-    int status = 0;
-    for (size_t i = 0; i < result->as.map.len && !status; i++) {
-        Entry entry = map_items(result)[i];
-        spy_retain(entry.key);
-        int found = set_contains(c, other, entry.key, entry.hash);
-        if (found == (op == SET_DIFFERENCE) && !grow(c, (void **)&gone, &cap, count + 1, sizeof(*gone))) gone[count++] = entry;
-        else spy_release(entry.key);
-        status = c->error_type[0] ? -1 : 0;
+    if (op != SET_UNION && result == other) {
+        while (result->as.map.len) set_remove_at(result, map_used(result) - 1);
+        return 0;
     }
-    for (size_t i = 0; i < count; i++) {
-        ptrdiff_t at = status ? -1 : map_find_hash(result, gone[i].key, gone[i].hash);
-        if (at >= 0) set_remove_at(result, (size_t)at);
-        status = c->error_type[0] ? -1 : status;
-        spy_release(gone[i].key);
-    }
-    mem_free(gone);
+    SPYValue *walked = op == SET_DIFFERENCE && other->as.map.len >> 3 > result->as.map.len ? set_intersection(c, result, other) : spy_retain(other);
+    int status = walked ? 0 : -1;
+    for (size_t i = 0; !status && i < walked->as.map.len; i++)
+        status = set_entry(c, result, walked, i, op != SET_UNION, op != SET_DIFFERENCE) < 0 ? -1 : 0;
+    spy_release(walked);
     return status;
 }
-static SPYValue *set_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
-    int which = op == '|' ? SET_UNION : op == '&' ? SET_INTERSECTION : op == '-' ? SET_DIFFERENCE : SET_SYMMETRIC;
+/* A new set of a's type of the entries of a not in b, each added then:
+ * a's copy, b's entries discarded, when a is more than four times larger. */
+static SPYValue *set_difference(SPYContext *c, SPYValue *a, SPYValue *b) {
+    SPYValue *result;
+    if (a->as.map.len >> 2 > b->as.map.len) {
+        if ((result = set_copy_type(c, a, a->type)) && set_combine(c, result, SET_DIFFERENCE, b)) { spy_release(result); return NULL; }
+        return result;
+    }
+    result = value_new(c, a->type);
+    for (size_t i = 0; result && i < a->as.map.len; i++) {
+        int found = set_entry(c, b, a, i, 0, 0);
+        if (!found) found = set_entry(c, result, a, i, 0, 1) < 0 ? -1 : 1;
+        if (found < 0) { spy_release(result); return NULL; }
+    }
+    return result;
+}
+/* A copy of a updated in place by operator op with b (set_combine). */
+static SPYValue *set_updated(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     SPYValue *result = set_copy_type(c, a, a->type);
+    int which = op == '|' ? SET_UNION : op == '&' ? SET_INTERSECTION : op == '-' ? SET_DIFFERENCE : SET_SYMMETRIC;
     if (result && set_combine(c, result, which, b)) { spy_release(result); return NULL; }
+    return result;
+}
+/* a's operator op with b, a new set of a's type: a's copy given b's
+ * entries, their intersection, a's difference, or b's copy whose
+ * entries a's discard or add. */
+static SPYValue *set_binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
+    if (op == '&') return set_intersection(c, a, b);
+    if (op == '-') return set_difference(c, a, b);
+    SPYValue *result = set_copy_type(c, op == '|' ? a : b, a->type);
+    if (result && set_combine(c, result, op == '|' ? SET_UNION : SET_SYMMETRIC, op == '|' ? b : a)) { spy_release(result); return NULL; }
     return result;
 }
 static SPYValue *view_list(SPYContext *c, SPYValue *view) {
@@ -32942,8 +33009,15 @@ static SPYValue *set_method(SPYContext *c, size_t argc, SPYValue *const *argv, S
         spy_release(other);
         return result < 0 || c->error_type[0] ? NULL : spy_bool(c, result);
     }
-    SPYValue *result = which < 4 ? set_copy_type(c, self, self->type) : spy_retain(self);
-    for (size_t i = 1; result && i < argc; i++) {
+    /* difference starts from set_difference of its first set, and
+     * symmetric_difference from its operand, which the set's entries
+     * discard or are added to (set_binary). */
+    SPYValue *first = argc > 1 && (which == SET_DIFFERENCE || which == SET_SYMMETRIC) ? set_operand(c, argv[1], which == SET_SYMMETRIC) : NULL;
+    if (!first && c->error_type[0]) return NULL;
+    SPYValue *result = first ? which == SET_DIFFERENCE ? set_difference(c, self, first) : set_binary(c, '^', self, first) :
+                       which < 4 ? set_copy_type(c, self, self->type) : spy_retain(self);
+    spy_release(first);
+    for (size_t i = first ? 2 : 1; result && i < argc; i++) {
         SPYValue *borrowed = (which & 3) == SET_INTERSECTION ? set_operand(c, argv[i], 0) : NULL;
         spy_release(borrowed);
         if ((which & 3) == SET_INTERSECTION && !borrowed) {
