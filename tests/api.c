@@ -1569,6 +1569,13 @@ int main(int argc, char **argv) {
                "def raised():\n    try: raise Slow from Cause\n    except Slow as e: return e.i + isinstance(e.__cause__, Cause)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "raised()", "raised.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
+    /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
+    execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
+               "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"
+               "class Measured(metaclass=Sized): pass\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "int(repr(Loud(1))) + len(Measured) + round(Loud(2), 1)", "owner.py"), SPY_STOP_STEPS, &pauses)) == 6000 &&
+           pauses > 1);
     /* So does a class call with ** arguments in a Python __new__ and __init__. */
     execute(c, "class Fresh:\n    def __new__(cls, **k):\n        for i in range(3000): pass\n        return super().__new__(cls)\n"
                "    def __init__(self, **k):\n        for i in range(3000): pass\n        self.i = i + k['x']\n");

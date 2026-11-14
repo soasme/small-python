@@ -75,7 +75,11 @@ SOURCES = {
     "ascii_bytes_unchanged": "result = ascii(b'\\xff')",
     "bin_format_spec": "result = (format(10, 'b'), format(10, '#x'), format(255, '_b'))",
     "repr_own_slot": "result = ([type(v).__repr__(v) == repr(v) for v in (len, [].append, str.join, str.__add__, (1).__add__)], "
-                     "b'a'.__str__())"
+                     "b'a'.__str__())",
+    "repr_subclass_own": "class I(int):\n    def __repr__(self): return 'I!'\nclass J(int):\n    def __str__(self): return 'J!'\n"
+                         "result = (repr(I(1)), str(I(1)), format(I(1)), format(I(1), 'd'), repr(J(2)), str(J(2)))",
+    "repr_metaclass": "class M(type):\n    def __repr__(cls): return 'M:' + cls.__name__\nclass C(metaclass=M): pass\n"
+                      "result = (repr(C), str(C), format(C), '%s' % (C,))",
 }
 
 

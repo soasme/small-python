@@ -220,6 +220,16 @@ static const char *const programs[] = {
     "def fn(): return [FN(*[1], **{'x': [2]}).v, FN(**{}).v]\n"
     "print(fn())\n",
 
+    "class OI(int):\n"
+    "    def __repr__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return 'o' * self\n"
+    "class OM(type):\n"
+    "    def __len__(cls): return 2\n"
+    "class OC(metaclass=OM): pass\n"
+    "def oi(): return [repr(OI(2)), len(OC), str(OI(1))]\n"
+    "print(oi())\n",
+
     "class G:\n"
     "    def __getattr__(self, k):\n"
     "        for i in range(1): pass\n"

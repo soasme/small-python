@@ -9,7 +9,8 @@
 (* characters as \x, \u, or \U escapes, and keeping printable ones;        *)
 (* ascii(), which also escapes every non-ASCII character; repr() and str() *)
 (* requiring a str from __repr__ and __str__, which built-in types hold    *)
-(* themselves (bytes' __str__ giving its repr); format() through           *)
+(* themselves (bytes' __str__ giving its repr), a builtin type's subclass  *)
+(* and a class taking their own class's or metaclass's; format() through   *)
 (* __format__, object.__format__ refusing a non-empty spec; and print()    *)
 (* writing str() of each argument with sep and end (None meaning the       *)
 (* default) to file's write(), flushing on request.                        *)
@@ -74,7 +75,7 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
           "print_str_calls", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
-          "repr_own_slot", "repr_nested_items", "repr_map_items"}
+          "repr_own_slot", "repr_nested_items", "repr_map_items", "repr_subclass_own", "repr_metaclass"}
 Programs == [op : {"ascii", "repr_len", "ord"}, s : Strings]
             \cup [case : Cases]
 
@@ -131,6 +132,10 @@ Case(c) ==
       [] c = "format_width_unicode" -> "'**\\u03b1**'"
       [] c = "ascii_bytes_unchanged" -> "\"b'\\\\xff'\""
       [] c = "bin_format_spec" -> "('1010', '0xa', '1111_1111')"
+      \* A builtin subclass's own method wins over its base's; int's str()
+      \* and empty format() are its repr(), and a class's are its metaclass's.
+      [] c = "repr_subclass_own" -> "('I!', 'I!', 'I!', '1', '2', 'J!')"
+      [] c = "repr_metaclass" -> "('M:C', 'M:C', 'M:C', 'M:C')"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

@@ -24159,7 +24159,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     if (argv[0]->type == SPY_ITERATOR)
         return argc <= 2 && callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_NEXT ?
                sequence_next(c, argv[0], found) : NULL;
-    if (argc > 2 || argv[0]->as.map.base) return NULL;
+    if (argc > 2 || (argv[0]->type == SPY_CLASS && !argv[0]->as.map.meta)) return NULL;
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
@@ -24167,9 +24167,14 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && callee != c->types[SPY_STRING])) return NULL;
-    SPYValue *cls = argv[0]->as.map.parent, *function;
+    /* A class's methods are its metaclass's. */
+    int class = argv[0]->type == SPY_CLASS;
+    SPYValue *cls = class ? argv[0]->as.map.meta : argv[0]->as.map.parent, *function, *base = class ? NULL : argv[0]->as.map.base;
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
+        /* A builtin subclass's instance formats as its base unless a
+         * Python class before it defines the method (builtin_base). */
+        if (base && builtin_base(c, argv[0], "__format__", NULL)) return NULL;
         function = class_lookup(cls, "__format__");
         if (function && machine_function(c, function)) {
             if (!(*spec = text ? spy_retain(text) : spy_string(c, "", 0)) || !(*name = spy_string(c, "__format__", 10))) { spy_release(*spec); *spec = NULL; return NULL; }
@@ -24181,6 +24186,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     }
     if (id == B_BOOL) {
         /* False names a __len__ bool() takes the truth of. */
+        if (base || class) return NULL;
         int length = 0;
         *spec = NULL;
         if (!(function = truth_function(c, argv[0], &length)) ||
@@ -24192,6 +24198,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
         id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
         id == B_REVERSED ? "__reversed__" : id == B_NEXT ? "__next__" : repr ? "__repr__" : "__str__";
+    if (base && builtin_base(c, argv[0], method, NULL)) return NULL;
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
     /* reversed() of a sequence without __reversed__ calls its __len__,
@@ -24315,6 +24322,8 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
 }
 static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
+/* Whether v is a class whose metaclass is not type, whose methods may convert it (conversion_method). */
+static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 /* Whether callee is builtin function id. */
 static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
     return callee->type == SPY_NATIVE && callee->as.native.data == (void *)(intptr_t)id && callee->as.native.call == builtin;
@@ -24326,7 +24335,8 @@ static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
  * enters none. */
 static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                          SPYValue **argv, SPYValue **env) {
-    SPYValue *found[2], *convert = method < 0 && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0])) ? conversion_method(c, callee, argc, argv, found) : NULL;
+    SPYValue *found[2], *convert = method < 0 && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0])) ?
+                                   conversion_method(c, callee, argc, argv, found) : NULL;
     if (!convert && method < 0 && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
         /* isinstance() or issubclass() enters its check (check_method)
          * (CALL_CHECKED), its name and the tested value on the stack. */
@@ -24448,6 +24458,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
     if (method < 0 && argc && argc <= 2 && is_set(argv[argc - 1]) && (result = set_call(c, m, callee, argc, argv, env)) != c->unbound)
         return result;
     if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
+                 metaclassed(argv[0]) ||
                  (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
@@ -24585,10 +24596,12 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                       callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
                       (argc && argv[0]->type == SPY_INSTANCE)) ||
         (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR)) ||
-        (callee->type == SPY_NATIVE && ((argc == 1 && (argv[0]->type == SPY_INSTANCE ||
+        (callee->type == SPY_NATIVE && ((argc == 1 && (argv[0]->type == SPY_INSTANCE || metaclassed(argv[0]) ||
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
                                                        (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
+                                                       /* round() with ndigits (conversion_method) */
+                                                       ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
                                                        /* a set method given its set (set_call) */
                                                        (is_set(argv[1]) && callee->as.native.kwcall == set_method) ||
                                                        (argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
@@ -24723,7 +24736,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (machine_push(c, m, args) || !*env) { *env = NULL; spy_release(callee); return NULL; }
         return spy_retain(callee);
     }
-    SPYValue *found[2], *convert = argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0])) ? conversion_method(c, callee, argc, argv, found) : NULL;
+    SPYValue *found[2], *convert = argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0])) ?
+                                   conversion_method(c, callee, argc, argv, found) : NULL;
     if (!convert && calls && print_instances(c, callee, argc, argv)) {
         /* print writes its arguments, an instance's Python __str__ a call
          * (CALL_CHECKED) among them (print_from). */

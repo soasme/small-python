@@ -345,7 +345,10 @@ These run as machines on the heap, in one native activation of
   `__float__`, `__bool__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
   `__round__`, `__reversed__` and `__next__` that `str`, `repr`, `format`, `len`,
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
-  `round`, `reversed` and `next`, also with a default, call, the `__len__` that `reversed`
+  `round`, `reversed` and `next`, also with a default, call, on an instance
+  (one of a builtin type's subclass when a Python class defines the method
+  before the builtin type) or, except `bool`'s, on a class from its
+  metaclass, the `__len__` that `reversed`
   calls on a sequence without `__reversed__`, and the same methods of the items that a
   `map` of one of those functions takes, a tuple item's items'
   `__hash__` too, the `__bool__` or `__len__`
