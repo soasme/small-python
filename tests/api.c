@@ -1662,6 +1662,22 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "minmax()", "minmax.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 9);
     /* A module whose import names are not augmented assignments. */
     assert(integer(c, spy_eval(c, "from __future__ import annotations\nclass A:\n    y: int\nlen(A.__annotations__)", "future.py")) == 1);
+    /* A budget spent entering any call of a dict walk stops the walk there. */
+    SPYContext *walk = spy_context_new();
+    execute(walk, "class W:\n    def __init__(self, v): self.v = v\n    def __hash__(self): return self.v % 3\n"
+                  "    def __eq__(self, o):\n        for _ in range(2): pass\n        return self.v == o.v\n"
+                  "a, b = {W(i): i for i in range(6)}, {W(i): i for i in range(6)}\n");
+    size_t stops = 0;
+    for (size_t budget = 1;; budget++) {
+        spy_set_limit(walk, SPY_LIMIT_STEPS, budget);
+        SPYValue *walked = spy_eval(walk, "{**a} == {**b}", "walked.py");
+        if (walked) { assert(integer(walk, walked) == 1); break; }
+        assert(!strcmp(spy_error_type(walk), "RuntimeError"));
+        spy_clear_error(walk);
+        stops++;
+    }
+    assert(stops > 6);
+    spy_context_free(walk);
     /* An interrupt pauses too; spy_exec returns -1 when it pauses. */
     spy_set_limit(c, SPY_LIMIT_STEPS, 0);
     spy_set_interrupt(c, always, NULL);
