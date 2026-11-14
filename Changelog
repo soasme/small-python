@@ -87,6 +87,8 @@ Unreleased (0.10.0):
   C stack, so it can pause
 - reading a class's attribute, also by getattr() or hasattr(), calls a descriptor's Python __get__
   or a metaclass property's getter without nesting on the C stack, so it can pause
+- an attribute read calls a Python __getattr__ after a descriptor's or __getattribute__'s
+  AttributeError, and a metaclass's __getattr__ or __getattribute__, without nesting on the C stack
 - an iterator over a sequence whose __getitem__ raises an error other than IndexError or
   StopIteration tries the same index again on its next step
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python

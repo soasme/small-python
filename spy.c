@@ -12170,8 +12170,14 @@ static int python_getter(SPYContext *c, SPYValue *descriptor) {
     SPYValue *get = descriptor->type == SPY_INSTANCE && descriptor->ctx == c ? class_lookup(descriptor->as.map.parent, "__get__") : NULL;
     return get && machine_function(c, get);
 }
+/* Whether class v's metaclass has a __getattr__ or its own
+ * __getattribute__, which attribute_lookup calls. */
+static int class_hooked(SPYValue *v) {
+    SPYValue *meta = v->as.map.meta, *hook = meta ? class_lookup(meta, "__getattribute__") : NULL;
+    return meta && (class_lookup(meta, "__getattr__") || (hook && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)));
+}
 /* The descriptor whose Python getter a read of class v's attribute name
- * calls (attribute_value) when no metaclass hook comes first: a property
+ * calls (attribute_value) after any metaclass hook: a property
  * or data descriptor of its metaclass, else a class attribute's __get__,
  * else a metaclass attribute's; else NULL. */
 static SPYValue *class_getter(SPYContext *c, SPYValue *v, const char *name) {
@@ -12179,10 +12185,11 @@ static SPYValue *class_getter(SPYContext *c, SPYValue *v, const char *name) {
     if (!data_descriptor_get(found) && (value = class_lookup(v, name)) == NULL) value = found;
     /* A class's own property is itself. */
     if (!value || !(value->type == SPY_INSTANCE || (value == found && value->type == SPY_PROPERTY))) return NULL;
-    SPYValue *hook = meta ? class_lookup(meta, "__getattribute__") : NULL;
-    /* Special names, and builtin bases, have their own answers. */
-    if (!strncmp(name, "__", 2) || !plain_mro(c, v) || (meta && class_lookup(meta, "__getattr__")) ||
-        (hook && !default_hook(hook, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE))) return NULL;
+    /* Special names have their own answers, and a builtin base's
+     * attribute comes before the class's, or the metaclass's non-data,
+     * descriptor (attribute_value). */
+    if (!strncmp(name, "__", 2) || (value != found ? builtin_slot_before(c, v, name) != NULL :
+                                    !data_descriptor_get(found) && builtin_descriptor_lookup(c, v, name))) return NULL;
     return python_getter(c, value) ? value : NULL;
 }
 /* The arguments after descriptor, args[0], that a read of v's attribute
@@ -12196,62 +12203,51 @@ static void getter_args(SPYContext *c, SPYValue *v, const char *name, SPYValue *
         args[1] = spy_retain(c->none); args[2] = spy_retain(v);
     } else { args[1] = spy_retain(v); args[2] = spy_retain(meta ? meta : v->as.map.parent); }
 }
+/* For a read of instance v's attribute name, a new reference to the
+ * class attribute of v's class owner whose Python getter the read calls:
+ * a property's, or a descriptor's __get__ unless v's own entry comes
+ * first, before a descriptor without __set__ or __delete__
+ * (PyObject_GenericGetAttr); else NULL, with *own that entry when the
+ * search, which may compare keys, found it. */
+static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, const char *name, SPYValue **own) {
+    SPYValue *descriptor = class_lookup(owner, name);
+    *own = NULL;
+    if (descriptor && descriptor->type == SPY_PROPERTY) return machine_function(c, descriptor->as.property.get) ? spy_retain(descriptor) : NULL;
+    SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
+    SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
+    int data = 0;
+    if (!get || !machine_function(c, get) || !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
+        return NULL;
+    /* The search may delete the descriptor. */
+    spy_retain(descriptor);
+    if (!data && ((*own = instance_dict_search(c, v, name)) || c->error_type[0])) { spy_release(descriptor); return NULL; }
+    return descriptor;
+}
 /* attribute, for an attribute step: NULL with no error when a call on the
- * machine, c->fallback, answers: v's class's __getattr__ after an
- * AttributeError, else its own __getattribute__, or a class attribute
- * whose type's __get__ is the attribute's (getter_call); or, for a step
- * that chains (node_attribute), a property's getter before __getattr__. */
-static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name, int chains) {
-    if (v->type == SPY_CLASS) {
+ * machine, c->fallback, answers: the owner's (v's class's, or a class's
+ * metaclass's) own Python __getattribute__, else a property's getter or a
+ * descriptor's __get__ (instance_getter, class_getter), else the
+ * attribute itself natively; the owner's __getattr__ is called after an
+ * AttributeError from any of them (getter_call, getattr_call). */
+static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char *name) {
+    if (v->type == SPY_CLASS && !class_hooked(v)) {
         SPYValue *descriptor = class_getter(c, v, name);
         if (!descriptor) return attribute(c, v, name);
         c->fallback = spy_retain(descriptor);
         return NULL;
     }
-    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : NULL, *definition;
-    SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
-    definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
-    int custom = definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE);
-    if (owner && !fallback) {
-        /* A Python __getattribute__ is called as a __getattr__ would be. */
-        if (custom) {
-            if (!machine_function(c, definition)) return attribute(c, v, name);
-            c->fallback = spy_retain(definition);
-            return NULL;
-        }
-        /* So is a property's Python getter, which comes first (attribute_value), */
-        SPYValue *descriptor = class_lookup(owner, name);
-        if (descriptor && descriptor->type == SPY_PROPERTY && machine_function(c, descriptor->as.property.get)) {
-            c->fallback = spy_retain(descriptor);
-            return NULL;
-        }
-        /* and a class attribute's Python __get__, unless the instance's own
-         * entry comes first, before a descriptor without __set__ or
-         * __delete__ (PyObject_GenericGetAttr). */
-        SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
-        SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
-        int data = 0;
-        if (get && machine_function(c, get) && ((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name))) {
-            /* The search may compare keys, which may delete the descriptor. */
-            spy_retain(descriptor);
-            SPYValue *own = data ? NULL : instance_dict_search(c, v, name);
-            if (own || c->error_type[0]) { spy_release(descriptor); return own; }
-            c->fallback = descriptor;
-            return NULL;
-        }
-    }
-    if (!fallback || !machine_function(c, fallback) || custom) {
-        /* A Python __getattribute__ comes before a Python __getattr__,
-         * which its AttributeError calls (getter_call). */
-        if (!custom || !chains || !fallback || !machine_function(c, definition) || !machine_function(c, fallback)) return attribute(c, v, name);
+    SPYValue *owner = v->type == SPY_INSTANCE ? v->as.map.parent : v->type == SPY_CLASS ? v->as.map.meta : NULL;
+    SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL, *own = NULL, *descriptor;
+    SPYValue *definition = owner ? class_lookup(owner, "__getattribute__") : NULL;
+    if (!owner || (fallback && !machine_function(c, fallback))) return attribute(c, v, name);
+    if (definition && !default_hook(definition, B_OBJECT_GETATTRIBUTE, B_TYPE_GETATTRIBUTE)) {
+        if (!machine_function(c, definition)) return attribute(c, v, name);
         c->fallback = spy_retain(definition);
         return NULL;
     }
-    SPYValue *descriptor = chains ? class_lookup(owner, name) : NULL;
-    if (descriptor && descriptor->type == SPY_PROPERTY && machine_function(c, descriptor->as.property.get)) {
-        c->fallback = spy_retain(descriptor);
-        return NULL;
-    }
+    descriptor = v->type == SPY_CLASS ? spy_retain(class_getter(c, v, name)) : instance_getter(c, v, owner, name, &own);
+    if (descriptor) { c->fallback = descriptor; return NULL; }
+    if (own || c->error_type[0] || !fallback) return own ? own : c->error_type[0] ? NULL : attribute(c, v, name);
     /* As attribute_lookup: __getattr__ is found before the lookup runs. */
     spy_retain(fallback);
     SPYValue *result = attribute_value(c, v, name);
@@ -12273,17 +12269,17 @@ static HOT SPYValue *node_attribute(SPYContext *c, SPYValue *v, Node *n, int cal
     }
     if (calls && kind == ATTR_PROPERTY && machine_function(c, n->attr_method->as.property.get)) return NULL;
     if (calls && v->type == SPY_CLASS) {
-        /* A class with no Python getter for the name is remembered until
-         * any class changes, under the epoch's complement, which no other
-         * answer kept on n uses. */
+        /* A class with no Python getter or hook for the name is remembered
+         * until any class changes, under the epoch's complement, which no
+         * other answer kept on n uses. */
         if (n->attr_class != v || n->attr_epoch != ~c->classes_changed) {
-            SPYValue *descriptor = class_getter(c, v, n->b->text);
-            if (descriptor) { c->fallback = spy_retain(descriptor); return NULL; }
+            if (class_getter(c, v, n->b->text) || class_hooked(v)) return attribute_step(c, v, n->b->text);
+            if (c->error_type[0]) return NULL;
             n->attr_class = v; n->attr_epoch = ~c->classes_changed;
         }
         return attribute(c, v, n->b->text);
     }
-    return calls ? attribute_step(c, v, n->b->text, 1) : attribute(c, v, n->b->text);
+    return calls ? attribute_step(c, v, n->b->text) : attribute(c, v, n->b->text);
 }
 /* Assign value to the attribute node n of v, as set_attribute. The key a
  * new entry takes is kept on the name node. */
@@ -24522,10 +24518,10 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
                                                        (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
-                                                       (argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE) ||
+                                                       (argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
-                                        (argc == 3 && argv[1]->type == SPY_STRING && argv[0]->type == SPY_INSTANCE) ||
+                                        (argc == 3 && argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
                                          (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
@@ -26712,40 +26708,51 @@ static SPYValue *constructed(SPYContext *c, Machine *m, SPYValue *cls, SPYValue 
     spy_release(init); spy_release(args); spy_release(keywords);
     return function;
 }
-/* Attribute step n's call on v, which it owns: its property's getter, or
- * the getter of the property c->fallback, with v and its class's
- * __getattr__ on m's stack when it has one (CALL_CHECKED); else, with v on m's stack
- * (CALL_CHECKED), the __get__ of the descriptor c->fallback, or the
- * __getattr__ or __getattribute__ c->fallback. The function to enter, its
- * kind c->entering_kind, else NULL. */
+/* The __getattr__ that an AttributeError from function, the call a read
+ * of v's attribute makes (attribute_step), calls, or NULL. */
+static SPYValue *getter_fallback(SPYValue *v, SPYValue *function) {
+    SPYValue *owner = v->type == SPY_CLASS ? v->as.map.meta : v->as.map.parent;
+    SPYValue *fallback = owner ? class_lookup(owner, "__getattr__") : NULL;
+    return fallback == function ? NULL : fallback;
+}
+/* The function to enter for function, which it takes, the call a read of
+ * v's attribute name makes (attribute_step): a property's getter on v, a
+ * descriptor's __get__ (getter_args), or a __getattribute__ or
+ * __getattr__ on v and the name, its arguments in argv and *argc, new
+ * references; NULL on an error. */
+static SPYValue *getter_function(SPYContext *c, SPYValue *v, const char *name, SPYValue *function, SPYValue **argv, size_t *argc) {
+    SPYValue *get = NULL;
+    *argc = 1;
+    if (function->type == SPY_PROPERTY) get = spy_retain(function->as.property.get);
+    else if (function->type == SPY_INSTANCE) {
+        argv[0] = function; *argc = 3;
+        getter_args(c, v, name, argv);
+        return spy_retain(class_lookup(function->as.map.parent, "__get__"));
+    } else if (!(argv[1] = spy_string(c, name, strlen(name)))) { spy_release(function); return NULL; }
+    else { *argc = 2; get = function; function = NULL; }
+    spy_release(function);
+    argv[0] = spy_retain(v);
+    return get;
+}
+/* Attribute step n's call on v, which it owns: its property's getter
+ * (CALL_MACHINE); else, with v and the __getattr__ that follows the call
+ * (getter_fallback) on m's stack (CALL_CHECKED), the call c->fallback
+ * gives (getter_function). The function to enter, its kind
+ * c->entering_kind, else NULL. */
 static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYValue *v, SPYValue **env) {
-    SPYValue *function = c->fallback, *argv[3] = {v, NULL, NULL};
+    SPYValue *function = c->fallback, *argv[3] = {v, NULL, NULL}, *fallback;
     size_t argc = 1;
     c->fallback = NULL;
     c->entering_kind = CALL_MACHINE;
-    if (!function || function->type == SPY_PROPERTY) {
-        SPYValue *property = function ? function : n->attr_method;
-        SPYValue *fallback = function && v->type == SPY_INSTANCE ? class_lookup(v->as.map.parent, "__getattr__") : NULL;
-        function = spy_retain(property->as.property.get);
-        if (property != n->attr_method) spy_release(property);
-        if (fallback) {
-            c->entering_kind = CALL_CHECKED;
-            if (machine_push(c, m, spy_retain(v)) || machine_push(c, m, spy_retain(fallback))) { spy_release(v); spy_release(function); return NULL; }
+    if (!function) function = spy_retain(n->attr_method->as.property.get);
+    else {
+        fallback = getter_fallback(v, function);
+        c->entering_kind = CALL_CHECKED;
+        if (machine_push(c, m, v) || (fallback && machine_push(c, m, spy_retain(fallback))) ||
+            !(function = getter_function(c, v, n->b->text, function, argv, &argc))) {
+            spy_release(function);
+            return NULL;
         }
-    } else if (c->entering_kind = CALL_CHECKED, machine_push(c, m, spy_retain(v)) ||
-               (function->type != SPY_INSTANCE && !(argv[1] = spy_string(c, n->b->text, strlen(n->b->text))))) {
-        spy_release(v); spy_release(function);
-        return NULL;
-    } else if (function->type == SPY_INSTANCE) {
-        argv[0] = function; argc = 3;
-        getter_args(c, v, n->b->text, argv);
-        spy_release(v);
-        function = spy_retain(class_lookup(argv[0]->as.map.parent, "__get__"));
-    } else {
-        /* A __getattribute__ has its class's __getattr__ above v (attribute_step). */
-        SPYValue *cls = v->as.map.parent, *fallback = class_lookup(cls, "__getattribute__") == function ? class_lookup(cls, "__getattr__") : NULL;
-        argc = 2;
-        if (fallback && machine_push(c, m, spy_retain(fallback))) { spy_release(v); spy_release(argv[1]); spy_release(function); return NULL; }
     }
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
@@ -26772,15 +26779,15 @@ static SPYValue *getattr_returned(SPYContext *c, SPYValue *fallback, SPYValue *r
 }
 static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted, SPYValue **env) {
     size_t n = 3 + (size_t)defaulted;
-    SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, name, NULL};
+    SPYValue **slots = &m->stack[m->len - n], *v = slots[1], *name = slots[2], *method = NULL, *function, *argv[3] = {v, NULL, NULL}, *fallback = NULL;
     size_t argc = 1;
     int kind = plain_instance(v) ? instance_access(c, v->as.map.parent, name->as.string.data, &method) & ATTR_READ : ATTR_SLOW;
     SPYValue *own = kind == ATTR_OWN ? name_local(v, name->as.string.data) : NULL;
-    if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) function = spy_retain(method->as.property.get);
+    if (kind == ATTR_PROPERTY && machine_function(c, method->as.property.get)) { function = spy_retain(method->as.property.get); spy_retain(v); }
     else {
         /* An own entry, or its miss with a default, is read without an
          * AttributeError (ATTR_OWN). */
-        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, name->as.string.data, 0);
+        SPYValue *result = own ? spy_retain(own) : defaulted && kind == ATTR_OWN ? NULL : attribute_step(c, v, name->as.string.data);
         if (result || c->error_type[0] || !c->fallback) {
             result = getattr_returned(c, defaulted ? slots[3] : NULL, result);
             if (!result) return NULL;
@@ -26790,22 +26797,15 @@ static NO_INLINE SPYValue *getattr_call(SPYContext *c, Machine *m, int defaulted
         }
         function = c->fallback;
         c->fallback = NULL;
-        if (function->type == SPY_PROPERTY) {
-            SPYValue *property = function;
-            function = spy_retain(property->as.property.get);
-            spy_release(property);
-        } else if (function->type == SPY_INSTANCE) {
-            /* A descriptor's __get__ (getter_args). */
-            argv[0] = function; argc = 3;
-            getter_args(c, v, name->as.string.data, argv);
-            function = spy_retain(class_lookup(argv[0]->as.map.parent, "__get__"));
-        } else argc = 2;
+        fallback = getter_fallback(v, function);
+        if (!(function = getter_function(c, v, name->as.string.data, function, argv, &argc))) return NULL;
     }
-    for (size_t i = 0; argc < 3 && i < argc; i++) spy_retain(argv[i]);
     spy_release(slots[0]);
     slots[0] = name;
     if (defaulted) { slots[2] = slots[3]; slots[3] = spy_retain(c->defaulting); }
     else slots[2] = spy_retain(c->unbound);
+    /* The __getattr__ that follows the call is above them (checked_returned). */
+    if (fallback && machine_push(c, m, spy_retain(fallback))) { release_all(argc, argv); spy_release(function); return NULL; }
     *env = function_env(c, function, argc, argv, NULL, 1);
     c->entering_init = function; c->entering_kind = CALL_CHECKED;
     spy_release(function);
@@ -27122,15 +27122,20 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         class_called(c, m->stack[m->len - 1], m->stack[m->len - 3], result);
         return m;
     }
-    if (ins->op == BC_ATTR && m->stack[m->len - 1]->type == SPY_FUNCTION) {
-        /* A property's getter returned before __getattr__ (getter_call),
-         * which its AttributeError calls. */
+    SPYValue *below = m->len > 1 ? m->stack[m->len - 2] : NULL;
+    int getattr = below == c->unbound || below == c->defaulting;
+    if ((ins->op == BC_ATTR || getattr) && m->stack[m->len - 1]->type == SPY_FUNCTION) {
+        /* A getter returned before __getattr__ (getter_call,
+         * getattr_call), which its AttributeError calls. */
         SPYValue *fallback = machine_pop(m), *args[2];
         if (result || !error_is(c, "AttributeError")) spy_release(fallback);
         else {
+            /* getattr()'s slots: the name, v, and c->unbound, or the default and c->defaulting. */
+            size_t at = m->len - (below == c->defaulting ? 3 : 2);
+            const char *name = getattr ? m->stack[at - 1]->as.string.data : ins->node->b->text;
             spy_clear_error(c);
-            args[0] = spy_retain(m->stack[m->len - 1]);
-            args[1] = spy_string(c, ins->node->b->text, strlen(ins->node->b->text));
+            args[0] = spy_retain(m->stack[getattr ? at : m->len - 1]);
+            args[1] = spy_string(c, name, strlen(name));
             SPYValue *env = args[1] ? function_env(c, fallback, 2, args, NULL, 1) : NULL;
             if (!args[1]) spy_release(args[0]);
             Call *call = env ? call_enter(c, fallback, env, m) : (spy_release(fallback), NULL);

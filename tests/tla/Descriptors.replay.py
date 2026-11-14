@@ -32,7 +32,7 @@ def outcome(p):
     def __get__(self, instance, owner=None):
         # A loop puts __get__ on the machine, as a pausing read runs it.
         for _ in (): pass
-        if p["raises"]:
+        if p["raises"] != "no":
             raise AttributeError("get")
         return "get(%s, %s)" % (label(instance), label(owner))
 
@@ -53,7 +53,14 @@ def outcome(p):
     D = type("D", (), body)
     d = D()
     meta = type("M", (type,), {"x": d}) if p["op"] == "metaget" else type
-    B = meta("B", (list,) if p["base"] == "list" else (), {} if meta is not type else {"x": d})
+    body = {} if meta is not type else {"x": d}
+    if p["raises"] == "fallback":
+        # A loop puts __getattr__ on the machine too.
+        def __getattr__(self, name):
+            for _ in (): pass
+            return "fallback"
+        body["__getattr__"] = __getattr__
+    B = meta("B", (list,) if p["base"] == "list" else (), body)
     A = meta("A", (B,), {"x": 999} if p["op"] == "superget" else {"x": "cls"} if meta is not type and p["dict"] else {})
     a = A()
     names.update({id(a): "a", id(A): "A", id(meta): "M", id(None): "None", id(d): "D"})
@@ -64,7 +71,7 @@ def outcome(p):
         if op in ("get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "metaget"):
             return read(op, a, A, B, label)
     except AttributeError as e:
-        return "AttributeError x" if p["raises"] and e.name == "x" else "AttributeError"
+        return "AttributeError x" if p["raises"] == "yes" and e.name == "x" else "AttributeError"
     try:
         if op == "classset":
             A.x = 1

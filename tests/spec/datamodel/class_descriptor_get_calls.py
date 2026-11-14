@@ -113,3 +113,48 @@ def changing():
     return out
 
 assert_eq(changing(), [1, "instance", ("later", None, "K"), "instance", ("meta", "K"), ("meta", "K")])
+
+# A metaclass __getattr__ follows an AttributeError from a descriptor, a
+# property or a metaclass __getattribute__, in a reference, getattr() and
+# hasattr(); a builtin base's attribute comes before a class's descriptor.
+class Hooks(type):
+    def __getattr__(cls, name):
+        spin(); log.append(("getattr", name))
+        if name == "absent": raise AttributeError(name)
+        return "fallback " + name
+    @property
+    def gone(cls):
+        spin(); raise AttributeError("gone")
+
+class Guarded(Hooks):
+    def __getattribute__(cls, name):
+        spin(); log.append(("getattribute", name))
+        if name.startswith("hidden"): raise AttributeError(name)
+        return type.__getattribute__(cls, name)
+
+class H(metaclass=Hooks):
+    nd = NonData()
+    missing = Missing()
+
+class G(metaclass=Guarded):
+    nd = NonData()
+
+class RealMeta(type):
+    real = NonData()
+
+class N(int, metaclass=RealMeta):
+    nd = NonData()
+
+def hooks():
+    log.clear()
+    out = [H.nd, H.missing, H.gone, H.other, getattr(H, "x"), getattr(H, "absent", "dflt"), hasattr(H, "absent"),
+           G.nd, G.hidden, getattr(G, "hidden2"), N.nd, type(N.real).__name__]
+    out.append(log[:]); log.clear()
+    return out
+
+assert_eq(hooks(), ["non-data", "fallback missing", "fallback gone", "fallback other", "fallback x", "dflt", False,
+                    "non-data", "fallback hidden", "fallback hidden2", "non-data", "getset_descriptor",
+                    [("get", None, "H"), ("getattr", "missing"), ("getattr", "gone"), ("getattr", "other"),
+                     ("getattr", "x"), ("getattr", "absent"), ("getattr", "absent"),
+                     ("getattribute", "nd"), ("getattribute", "__name__"), ("get", None, "G"), ("getattribute", "hidden"), ("getattr", "hidden"),
+                     ("getattribute", "hidden2"), ("getattr", "hidden2"), ("get", None, "N")]])

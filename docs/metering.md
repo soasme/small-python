@@ -383,8 +383,9 @@ These run as machines on the heap, in one native activation of
   `__getattribute__` calls in an attribute reference; the `__get__` of
   a class's descriptor, and the getter or `__get__` of its metaclass's
   property or descriptor, that a reference to a class's attribute
-  calls when the metaclass has no `__getattr__` or own
-  `__getattribute__`; an
+  calls, a metaclass's own `__getattribute__`, and the `__getattr__` of
+  a class or metaclass that an `AttributeError` from any of them calls,
+  also in `getattr` and `hasattr`; an
   attribute store's `__setattr__`, property setter or `__set__` in
   function code, and, in code compiled while pausing, an attribute
   deletion's `__delattr__`, property deleter or `__delete__`;

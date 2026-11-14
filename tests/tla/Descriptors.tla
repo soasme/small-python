@@ -31,14 +31,15 @@
 (* descriptor itself as D) or the exception, then a's dictionary after an  *)
 (* assignment or deletion (A.__dict__["x"] after A.x = 1). When raises, a  *)
 (* read's __get__ raises AttributeError, which the read names: x, and      *)
-(* getattr with a default returns the default and hasattr False.           *)
+(* getattr with a default returns the default and hasattr False; or, when  *)
+(* raises is "fallback", B's __getattr__ returning 'fallback' answers it.  *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Names == {"get", "set", "delete"}
 Ops == {"get", "getattr", "getattrd", "hasattr", "classget", "superget", "direct", "set", "del", "classset", "metaget"}
-Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : BOOLEAN] :
-                p.raises => p.op \in {"get", "getattr", "getattrd", "hasattr"}}
+Programs == {p \in [methods : SUBSET Names, dict : BOOLEAN, op : Ops, base : {"object", "list"}, raises : {"no", "yes", "fallback"}] :
+                p.raises # "no" => p.op \in {"get", "getattr", "getattrd", "hasattr"}}
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -54,8 +55,10 @@ Get(p) == CASE Data(p) /\ Has(p, "get") -> "get(a, A)"                 \* a data
             [] Has(p, "get") -> "get(a, A)"
             [] OTHER -> "D"                                            \* no __get__: the descriptor itself
 
-\* A read's __get__ that raises AttributeError: the read names the attribute.
-Read(p) == IF p.raises /\ Get(p) = "get(a, A)" THEN "AttributeError x" ELSE Get(p)
+\* A read's __get__ that raises AttributeError: the read names the attribute,
+\* unless the class's __getattr__ answers.
+Read(p) == IF p.raises # "no" /\ Get(p) = "get(a, A)" THEN (IF p.raises = "fallback" THEN "'fallback'" ELSE "AttributeError x")
+           ELSE Get(p)
 
 Run(p) ==
     CASE p.op \in {"get", "getattr"} -> Read(p)
@@ -85,7 +88,7 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # Pending
 
 \* A data descriptor with __get__ overrides the instance dictionary.
-DataOverrides == Done /\ program.op = "get" /\ ~program.raises /\ Data(program) /\ Has(program, "get") => outcome = "get(a, A)"
+DataOverrides == Done /\ program.op = "get" /\ program.raises = "no" /\ Data(program) /\ Has(program, "get") => outcome = "get(a, A)"
 
 \* The instance dictionary overrides a non-data descriptor.
 InstanceOverrides == Done /\ program.op = "get" /\ ~Data(program) /\ program.dict => outcome = "'inst'"
