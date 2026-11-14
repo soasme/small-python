@@ -20839,6 +20839,7 @@ enter:
     return spy_retain(function);
 }
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static SPYValue *property_entered(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* Whether callee of argc arguments argv makes a class class_make makes:
  * type() of a name, bases of no metaclass and a namespace, or
  * type.__new__. */
@@ -24722,6 +24723,12 @@ static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
+    if (method < 0 && (result = property_entered(c, callee, argc, argv, env))) {
+        /* property.__get__ enters its getter. */
+        release_all(argc, argv); spy_release(callee);
+        return result;
+    }
+    if (c->error_type[0]) { release_all(argc, argv); spy_release(callee); return NULL; }
     if (method < 0 && class_maker(c, callee, argc, argv)) {
         /* type() or type.__new__ runs its class's callbacks on m. */
         result = class_make(c, argc, argv, NULL);
@@ -25488,7 +25495,8 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
-    result = id >= 0 ? NULL : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
+    SPYValue *getter = id < 0 && calls ? property_entered(c, callee, argc, argv, env) : NULL;
+    result = id >= 0 || getter || c->error_type[0] ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
              init ? plain_construct(c, callee, init, argc, argv, NULL) : step_call(c, m, callee, -1, n, argc, argv);
     if (id >= 0) spy_retain(callee);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -25588,7 +25596,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         release_all(argc + 1, held); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    if (callee && id < 0)
+    if (callee && id < 0 && !(result = calls && method < 0 ? property_entered(c, callee, argc + !skip, argv + skip, env) : NULL) && !c->error_type[0])
         result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -36909,6 +36917,22 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     else swap_contents(self, fresh);
     spy_release(fresh);
     return c->error_type[0] ? NULL : spy_none(c);
+}
+/* A call of callee with argc arguments argv that is property.__get__ of
+ * an object, bound or not, whose property's getter is Python: that
+ * getter, owned, with *env, to enter as the call; else NULL. */
+static SPYValue *property_entered(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
+    SPYValue *self = NULL;
+    if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
+    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != descriptor_method ||
+        callee->as.native.data != (void *)((intptr_t)SPY_PROPERTY << 8 | DESCR_GET)) return NULL;
+    if (!self) {
+        if (!argc--) return NULL;
+        self = *argv++;
+    }
+    SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
+    if (!p || argc < 1 || argc > 2 || argv[0]->type == SPY_NONE || !machine_function(c, p->as.property.get)) return NULL;
+    return (*env = function_env(c, p->as.property.get, 1, argv, NULL, 0)) ? spy_retain(p->as.property.get) : NULL;
 }
 static SPYValue *type_method(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
     SPYValue *type = c->types[SPY_CLASS];

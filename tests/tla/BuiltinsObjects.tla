@@ -52,7 +52,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
              ELSE "AttributeError: 'int' object has no attribute '" \o n \o "' and no __dict__ for setting new attributes"
 
 
-Cases == {"getattr_nonstr", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
+Cases == {"getattr_nonstr", "property_get_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
           "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook",
           "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
@@ -81,6 +81,8 @@ Case(c) ==
       [] c = "setattr_nonstr" -> "TypeError: attribute name must be string, not 'int'"
       [] c = "hasattr_propagates" -> "ValueError: inner"
       [] c = "hasattr_attributeerror" -> "False"
+      \* property.__get__ of an object, bound or through super(), calls its getter
+      [] c = "property_get_calls" -> "(('q', 2), 2, 2, False, ['own', 'get', 'get', 'get', 'own'])"
       [] c = "slots_setattr" -> "AttributeError: 'P' object has no attribute 't' and no __dict__ for setting new attributes"
       [] c = "slots_vars" -> "TypeError: vars() argument must have __dict__ attribute"
       [] c = "vars_no_arg" -> "{'a': 1}"

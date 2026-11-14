@@ -1703,6 +1703,12 @@ int main(int argc, char **argv) {
                "def shown():\n    a = [Shown(), Shown()]\n    print(*a, file=Sink())\n    print(*a, sep='', end='', file=Sink())\n    return Sink.n\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 3);
+    /* So does property.__get__ called for an object. */
+    execute(c, "class Wrapped(property):\n    def __get__(self, obj, owner=None):\n        return super().__get__(obj, owner) + 1\n"
+               "class Has:\n    @Wrapped\n    def v(self):\n        for i in range(3000): pass\n        return 2\n"
+               "def wrapped():\n    h = Has()\n    return h.v + property.__get__(Has.__dict__['v'], h)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "wrapped()", "wrapped.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

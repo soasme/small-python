@@ -52,6 +52,10 @@ SOURCES = {
     "setattr_nonstr": 'result = setattr(P(), 1, 2)',
     "hasattr_propagates": "class E:\n    @property\n    def p(self): raise ValueError('inner')\nresult = hasattr(E(), 'p')",
     "hasattr_attributeerror": "class E:\n    @property\n    def p(self): raise AttributeError('x')\nresult = hasattr(E(), 'p')",
+    "property_get_calls": "log = []\nclass Q(property):\n    def __get__(self, obj, owner=None):\n        log.append('own')\n        return ('q', super().__get__(obj, owner))\n"
+                          "class K:\n    @Q\n    def q(self):\n        for _ in (): pass\n        log.append('get')\n        return 2\n"
+                          "k = K()\nd = K.__dict__['q']\n"
+                          "result = (k.q, property.__get__(d, k), super(Q, d).__get__(k, K), d.__get__(None, K) is d, log)",
     "slots_setattr": 'p = P()\np.t = 1',
     "slots_vars": 'result = vars(P())',
     "vars_no_arg": 'def f():\n    a = 1\n    return vars()\nresult = f()',

@@ -445,6 +445,13 @@ static const char *const programs[] = {
     "print(*(PS(),), end='', file=f)\n"
     "print(*f.out)\n",
 
+    "class PG(property):\n"
+    "    def __get__(self, obj, owner=None): return [super().__get__(obj, owner)]\n"
+    "class PH:\n"
+    "    @PG\n"
+    "    def v(self): return 'v'\n"
+    "print(PH().v, property.__get__(PH.__dict__['v'], PH(), PH), PH.__dict__['v'].__get__(None, PH) is PH.__dict__['v'])\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"
