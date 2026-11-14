@@ -1568,6 +1568,17 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "list(zip(Walk(), [1]))[0][0] + list(map(abs, Walk()))[0] + list(enumerate(Walk()))[0][1] + "
                                                  "list(filter(None, Walk()))[0]", "walk.py"), SPY_STOP_STEPS, &pauses)) == 4 * 2999 && pauses > 3);
+    /* So does reversed() calling a sequence's Python __len__. */
+    execute(c, "class Backward:\n    def __len__(self):\n        for i in range(3000): pass\n        return 2\n"
+               "    def __getitem__(self, i): return i\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "next(reversed(Backward())) + next(reversed(Backward()))", "backward.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 2 && pauses > 1);
+    /* So do list() and sorted() asking an iterator over one for its length hint. */
+    execute(c, "class Hinted(Backward):\n    def __getitem__(self, i):\n        if i > 1: raise IndexError\n        return i\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(sorted(iter(Hinted()))) + len(list(iter(Hinted())))", "hinted.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

@@ -66,7 +66,7 @@ Cases == {"iter_returns_non_iterator", "for_returns_non_iterator", "no_next", "i
           "list_iterator_mutation", "dict_changed_size", "set_changed_size", "dict_keys_replaced_ok",
           "iterator_type_names", "length_hint", "next_dunder_direct", "zip_strict", "map_multi",
           "enumerate_start", "reversed_not_sequence", "reversed_dunder", "exhausted_releases_source",
-          "adapters_ask_again", "hint_after_iter", "hint_fallback", "hint_none", "hint_error",
+          "adapters_ask_again", "hint_after_iter", "hint_sequence", "hint_fallback", "hint_none", "hint_error",
           "hint_not_int", "hint_negative", "len_error", "no_hint_consumers",
           "join_lists_iterator", "join_bare_iterator", "pair_iterates_once"}
 Programs == [kind : Kinds, n : 0..2]
@@ -116,6 +116,9 @@ Case(c) ==
       [] c = "exhausted_releases_source" -> "['made', 'freed', 'exhausted', 'made', 'freed', 'exhausted']"
       [] c = "adapters_ask_again" -> "[([1], 3), ([1], 3), ([(0, 1)], (1, 3)), ([(1,)], (3,))]"
       [] c = "hint_after_iter" -> "['iter', 'len', 'iter', 'len', 'iter', 'len', 'iter', 'len', 'iter', 'len', 'iter', 'len']"
+      \* an iterator or reversed object over a sequence hints by its __len__,
+      \* the iterator none without one
+      [] c = "hint_sequence" -> "([1, 0], [0, 1], [0, 1], ['len', 'len', 'len'])"
       [] c = "hint_fallback" -> "([1, 2], ['iter', 'len', 'hint'])"
       [] c = "hint_none" -> "[[1, 2], [1, 2]]"
       [] c = "hint_error" -> "ValueError: v"

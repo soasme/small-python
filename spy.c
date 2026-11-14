@@ -8998,7 +8998,27 @@ static SPYValue *length_measured(SPYContext *c, Machine *m, SPYValue *o, SPYValu
     spy_clear_error(c);
     return length_hint_method(c, m, o);
 }
+/* Whether v is a getitem or reversed iterator going over an instance,
+ * whose length hint is that instance's __len__ (iter_len, reversed_len). */
+static int sequence_iterator(SPYValue *v) {
+    return v->type == SPY_ITERATOR && (v->as.iterator.kind == I_GETITEM || v->as.iterator.kind == I_REVERSED) &&
+           !v->as.iterator.done && v->as.iterator.source->type == SPY_INSTANCE;
+}
+/* What sequence iterator o's instance's __len__ returned, length. */
+static SPYValue *sequence_measured(SPYContext *c, Machine *m, SPYValue *o, SPYValue *length) {
+    int64_t n;
+    if (length) length_result(c, length, &n);
+    spy_release(length);
+    return length_hinted(c, m, o, NULL);
+}
 static SPYValue *length_hint(SPYContext *c, Machine *m, SPYValue *o) {
+    if (sequence_iterator(o)) {
+        SPYValue *method = special_method(c, o->as.iterator.source, "__len__");
+        if (!method) return length_hinted(c, m, o, NULL);
+        SPYValue *result = callk(c, m, method, 0, NULL, sequence_measured, o);
+        spy_release(method);
+        return result;
+    }
     SPYValue *method = special_method(c, o, "__len__");
     if (!method) {
         if (c->error_type[0]) { spy_release(o); return NULL; }
@@ -9012,7 +9032,7 @@ static SPYValue *length_hint(SPYContext *c, Machine *m, SPYValue *o) {
  * asked for a list or bytes of its items (ListExtend, 7.7.6); NULL on an
  * error. */
 static SPYValue *hinted(SPYContext *c, SPYValue *iterator, SPYValue *iterable) {
-    if (iterator && iterable->type == SPY_INSTANCE && (length_hint(c, NULL, spy_retain(iterable)), c->error_type[0])) {
+    if (iterator && (iterable->type == SPY_INSTANCE || sequence_iterator(iterable)) && (length_hint(c, NULL, spy_retain(iterable)), c->error_type[0])) {
         spy_release(iterator);
         return NULL;
     }
@@ -23136,7 +23156,7 @@ static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int met
     /* dict() and dict.update() of an instance merge it as a mapping (consumer_id). */
     int merging = (id == B_DICT || (id == B_EXTEND && callee->type == SPY_DICT)) && generator && generator->type == SPY_INSTANCE;
     int hints = id == B_LIST || id == B_SORTED || (id == B_EXTEND && callee->type == SPY_LIST);
-    SPYValue *source = hints && generator && generator->type == SPY_INSTANCE ? spy_retain(generator) : NULL;
+    SPYValue *source = hints && generator && (generator->type == SPY_INSTANCE || sequence_iterator(generator)) ? spy_retain(generator) : NULL;
     int keyed = merging ? KEY_KEYS : generator ? consumer_source(c, &generator) : 0;
     Block *block = consumer && !c->error_type[0] ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(consumer); release_all(5, (SPYValue *[]){result, generator, sent, source, value}); return; }
@@ -24001,6 +24021,10 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
         id == B_REVERSED ? "__reversed__" : id == B_NEXT ? "__next__" : repr ? "__repr__" : "__str__";
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
+    /* reversed() of a sequence without __reversed__ calls its __len__,
+     * named "reversed". */
+    if (!function && id == B_REVERSED && class_lookup(cls, "__getitem__") && !subclass(cls, c->types[SPY_DICT]))
+        function = class_lookup(cls, "__len__"), method = "reversed";
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
     /* round() passes ndigits but None; next() keeps its default. */
     *spec = argc == 2 && id == B_ROUND && argv[1]->type != SPY_NONE ? spy_retain(argv[1]) : NULL;
@@ -26928,11 +26952,21 @@ static void short_or_false(Machine *m, Instruction *ins, int truth, size_t *pc, 
     else if ((ins->arg == O_OR) == truth) { *pc = ins->target; *known = truth + 1; }
     else spy_release(machine_pop(m));
 }
+/* reversed() of sequence v of length n. */
+static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
+    SPYValue *iterator = value_new(c, SPY_ITERATOR);
+    if (!iterator) return NULL;
+    iterator->as.iterator.source = spy_retain(v);
+    iterator->as.iterator.kind = I_REVERSED;
+    iterator->as.iterator.index = (size_t)n;
+    return iterator;
+}
 /* What v's method name (conversion_method, check_method) returned in
  * result makes the call's value, owned, or NULL with an error: len(),
  * hash(), int(), float(), complex() and bytes() check their results as
  * natively, bool() takes a truth (False names its __len__), abs(), round()
- * and reversed() return theirs, isinstance() and issubclass() take the
+ * and reversed() return theirs, or reversed() a sequence's ("reversed" its
+ * __len__), isinstance() and issubclass() take the
  * result's truth, and the others' text is a str. */
 static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue *name, SPYValue *result) {
     SPYValue *whole = NULL;
@@ -26940,6 +26974,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     int64_t length;
     const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
     if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
+    if (!strcmp(method, "reversed")) return length_result(c, result, &length) ? NULL : reversed_iterator(c, v, length);
     if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
@@ -33902,13 +33937,7 @@ static SPYValue *builtin(SPYContext *c, size_t argc, SPYValue *const *argv, void
             int64_t n;
             int status = length ? spy_as_int(c, length, &n) : -1;
             spy_release(length);
-            if (status) return NULL;
-            SPYValue *v = value_new(c, SPY_ITERATOR);
-            if (!v) return NULL;
-            v->as.iterator.source = spy_retain(a);
-            v->as.iterator.kind = I_REVERSED;
-            v->as.iterator.index = (size_t)n;
-            return v;
+            return status ? NULL : reversed_iterator(c, a, n);
         } else {
             if (a->type != SPY_LIST && a->type != SPY_TUPLE && a->type != SPY_STRING && a->type != SPY_BYTES && a->type != SPY_BYTEARRAY &&
                 a->type != SPY_RANGE && !is_dict(a) && !is_view(a))

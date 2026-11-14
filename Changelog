@@ -70,8 +70,11 @@ Unreleased (0.10.0):
   the C stack, so they can pause
 - == and != of two dicts call their keys' Python __eq__ without nesting on the C stack, so they
   can pause
-- An attribute reference calls a Python __getattribute__ and then the __getattr__ its
+- an attribute reference calls a Python __getattribute__ and then the __getattr__ its
   AttributeError reaches without nesting on the C stack, so it can pause
+- reversed() of a sequence calls its Python __len__ without nesting on the C stack, so it can pause
+- list(), sorted(), list.extend(), +=, starred displays and bytes() of an iterator or reversed
+  iterator over a sequence ask its length hint, calling the sequence's __len__
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python
   __eq__ of a key of the same hash without nesting on the C stack, so they can pause
 - a tuple key of a dict or set calls its items' Python __hash__ without nesting on the C stack,

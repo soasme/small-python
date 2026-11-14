@@ -142,6 +142,9 @@ SOURCES = {
     "hint_after_iter": "result = []\nclass S:\n    def __iter__(self): result.append('iter'); return iter((1, 2))\n"
                        "    def __len__(self): result.append('len'); return 2\n"
                        "l = list(S()); l.extend(S()); l += S(); [*S()]; sorted(S()); bytes(S())",
+    "hint_sequence": "log = []\nclass U:\n    def __getitem__(s, i):\n        if i > 1: raise IndexError\n        return i\n"
+                     "class S(U):\n    def __len__(s): log.append('len'); return 2\n"
+                     "result = (list(reversed(S())), list(iter(S())), [*iter(U())], log)",
     "hint_fallback": "log = []\nclass S:\n    def __iter__(self): log.append('iter'); return iter((1, 2))\n"
                      "    def __len__(self): log.append('len'); raise TypeError\n"
                      "    def __length_hint__(self): log.append('hint'); return 5\nresult = (list(S()), log)",

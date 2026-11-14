@@ -56,7 +56,7 @@ Zero(s) == [i \in DOMAIN s |-> s[i] - 1]
 Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 
-Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_bad", "reversed_dict", "next_default", "next_python", "adapt_python", "adapt_iter", "next_stop",
+Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
@@ -95,6 +95,9 @@ Generated(p) ==
 Case(c) ==
     CASE c = "iter_sequence_protocol" -> "([0, 10, 20], [20, 10, 0], True)"
       [] c = "reversed_hook" -> "['r', 'e', 'v']"
+      \* reversed() of a sequence calls its Python __len__, which must give a
+      \* length and must exist
+      [] c = "reversed_len" -> "([2, 1, 0], [-1, 'neg', 'nolen', 3])"
       [] c = "reversed_bad" -> "TypeError: 'set' object is not reversible"
       [] c = "reversed_dict" -> "[3, 1]"
       [] c = "next_default" -> "(1, 'end', None)"

@@ -53,6 +53,12 @@ def iterate(op, l):
 SOURCES = {
     "iter_sequence_protocol": 'result = (list(iter(Seq())), list(reversed(Seq())), 20 in Seq())',
     "reversed_hook": 'result = list(reversed(Rev()))',
+    "reversed_len": "log = []\nclass S:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n"
+                    "        log.append(s.n)\n        return s.n\n    def __getitem__(s, i): return i\n"
+                    "class N:\n    def __getitem__(s, i): return i\n"
+                    "try: reversed(S(-1))\nexcept ValueError: log.append('neg')\n"
+                    "try: reversed(N())\nexcept TypeError: log.append('nolen')\n"
+                    "result = ([x for x in reversed(S(3))], log)",
     "reversed_bad": 'result = reversed({1, 2})',
     "reversed_dict": 'result = list(reversed({1: 2, 3: 4}))',
     "next_default": "it = iter([1])\nresult = (next(it), next(it, 'end'), next(it, None))",

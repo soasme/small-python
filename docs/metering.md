@@ -309,7 +309,9 @@ These run as machines on the heap, in one native activation of
   `__length_hint__`, and `reversed` iterators over an instance,
   consumed by `sum`, `any`, `all`, `min`, `max`, `list`, `tuple`,
   `set`, `frozenset`, `sorted`, `str.join`, `list.extend`, or `dict`
-  and `dict.update` (but an instance), and an instance's Python `keys`
+  and `dict.update` (but an instance), the Python `__len__` of the
+  instance that `list`, `sorted` and `list.extend` ask for the length
+  hint of an iterator or `reversed` iterator over it, and an instance's Python `keys`
   and `__getitem__`, and the generator its `keys` returns, that `dict`
   and `dict.update` merge it by as a mapping, and, in
   code compiled while pausing, the generators and such instances a target
@@ -333,7 +335,8 @@ These run as machines on the heap, in one native activation of
   `__float__`, `__bool__`, `__complex__`, `__bytes__`, `__hash__`, `__abs__`,
   `__round__`, `__reversed__` and `__next__` that `str`, `repr`, `format`, `len`,
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
-  `round`, `reversed` and `next`, also with a default, call, and the same methods of the items that a
+  `round`, `reversed` and `next`, also with a default, call, the `__len__` that `reversed`
+  calls on a sequence without `__reversed__`, and the same methods of the items that a
   `map` of one of those functions takes, a tuple item's items'
   `__hash__` too, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items
