@@ -77,6 +77,8 @@ Unreleased (0.10.0):
   iterator over a sequence ask its length hint, calling the sequence's __len__
 - next() of an iterator over a sequence, a map or a filter calls its Python __getitem__ or function
   without nesting on the C stack, so it can pause
+- an await of an async generator's asend() or __anext__(), and an async for over one, resume its
+  body without nesting on the C stack, so it can pause
 - an iterator over a sequence whose __getitem__ raises an error other than IndexError or
   StopIteration tries the same index again on its next step
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python

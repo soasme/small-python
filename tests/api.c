@@ -1584,6 +1584,13 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "next(iter(Paged())) + next(map(slower, [1])) + next(filter(slower, [0]))", "paged.py"),
                                  SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So does an await of an async generator's asend() or __anext__(), and an async for over one. */
+    execute(c, "async def ticks(n):\n    for i in range(n): yield slower(i)\n"
+               "async def total():\n    s = 0\n    async for i in ticks(2): s += i\n"
+               "    g = ticks(2)\n    return s + await g.asend(None) + await anext(g)\n"
+               "def finish(co):\n    try: co.send(None)\n    except StopIteration as e: return e.value\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "finish(total())", "ticks.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 3);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

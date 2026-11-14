@@ -1,6 +1,7 @@
 # Replays AsyncGenerators.tla: each case starts an async generator running
 # the spec's body and performs the spec's steps on it, running each
-# awaitable to completion and comparing its result with the model's.
+# awaitable to completion, an asend() through an await, and comparing its
+# result with the model's.
 FIELDS = ("variant", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -26,9 +27,14 @@ def make(variant):
     return body()
 
 
+async def awaiting(awaitable):
+    return await awaitable
+
+
 def perform(target, op):
     if op[0] == "asend":
-        awaitable = target.asend(None if op[1] == "None" else op[1])
+        # Awaited, as an async for or await runs it, resuming the body there.
+        awaitable = awaiting(target.asend(None if op[1] == "None" else op[1]))
     elif op[0] == "athrow":
         awaitable = target.athrow({"ValueError": ValueError, "KeyError": KeyError}[op[1]])
     else:

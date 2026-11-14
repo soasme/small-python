@@ -14294,6 +14294,9 @@ struct Machine {
     SPYValue *generator, *outer_handled, *outer_inherited, *outer_env;
     Machine *resumer;
     int throwing; /* A close (CLOSING) or throw (THROWING) entered its yield from's delegate first (delegate_left). */
+    /* An await's async generator asend or __anext__ whose generator, the
+     * delegate, the machine resumes in its place (operation_entered). */
+    SPYValue *operation;
 };
 enum { CLOSING = 1, THROWING };
 /* What a call on the machine returns into: its caller's machine; C; or
@@ -14310,7 +14313,7 @@ struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_e
                SPYContinuation host; /* A spy_callk's continuation. */ };
 static SPYValue *suspended_delegate(SPYContext *c, SPYValue *value) {
     Machine *m = value->as.generator.machine;
-    return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->delegate) : spy_none(c);
+    return !value->as.generator.running && m && m->awaiting >= AWAIT_DELEGATE && m->delegate ? spy_retain(m->operation ? m->operation : m->delegate) : spy_none(c);
 }
 static void free_program(Program *code) {
     if (code) { mem_free(code->items); mem_free(code); }
@@ -14319,6 +14322,7 @@ static void machine_edges(Machine *m, Visit visit, void *data) {
     for (size_t i = 0; i < m->len; i++) visit(m->stack[i], data);
     if (m->handled) visit(m->handled, data);
     if (m->delegate) visit(m->delegate, data);
+    if (m->operation) visit(m->operation, data);
     for (size_t i = 0; i < m->block_len; i++) {
         Block *b = &m->blocks[i];
         if (b->value) visit(b->value, data);
@@ -22747,10 +22751,29 @@ static void finish_delegate(SPYContext *c, Machine *m) {
     if (m->delegate && error_is(c, "StopIteration") &&
         (m->awaiting != AWAIT_COMPREHENSION || m->delegate->as.generator.returned))
         machine_push(c, m, stop_value(c));
-    else if (m->awaiting == AWAIT_NEXT && error_is(c, "StopAsyncIteration")) {
+    else if ((m->awaiting == AWAIT_NEXT || (m->operation && m->await_target)) && error_is(c, "StopAsyncIteration")) {
         spy_clear_error(c); m->pc = m->await_target;
     }
+    if (UNLIKELY(m->operation)) {
+        m->operation->as.async_operation.state = 2; m->delegate->as.generator.async_running = 0;
+        spy_release(m->operation); m->operation = NULL;
+    }
     spy_release(m->delegate); m->delegate = NULL; m->awaiting = AWAIT_NONE; m->throwing = 0;
+}
+/* Whether the await of op on machine m resumes its async generator there:
+ * op an asend or __anext__ not yet awaited, of a generator at a yield, or
+ * not started and sent None. The generator becomes m's delegate, op its
+ * operation, which delegate_left ends at its next yield or its end. */
+static NO_INLINE int operation_entered(Machine *m) {
+    SPYValue *op = m->delegate, *g = op->as.async_operation.generator;
+    if (op->type != SPY_ASYNC_GENERATOR_ASEND || op->as.async_operation.state || g->as.generator.async_running ||
+        g->as.generator.running || g->as.generator.done || !g->as.generator.machine ||
+        (g->as.generator.machine->awaiting != AWAIT_YIELD && (g->as.generator.started ||
+         (op->as.async_operation.method == M_ASEND && op->as.async_operation.args->as.seq.items[0]->type != SPY_NONE))))
+        return 0;
+    op->as.async_operation.state = 1; g->as.generator.async_running = 1;
+    m->operation = op; m->delegate = spy_retain(g); m->await_target = 0;
+    return 1;
 }
 /* The call of finalizer's __del__, which m's next step waits for
  * (CALL_FINALIZE), with *env its environment: the instance and the number
@@ -22797,9 +22820,9 @@ static ALWAYS_INLINE int resumable(SPYValue *v) { return v->type == SPY_GENERATO
 /* Whether a yield from or await of v resumes it on the machine. */
 static NO_INLINE int delegable(SPYValue *v) { return (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE) && suspended(v); }
 /* The machine a yield from or await of machine m's waits on at last, or m:
- * the one waiting on an iterator not a generator. */
+ * the one waiting on an iterator not a generator, or on an operation. */
 static Machine *innermost(Machine *m) {
-    while (m->awaiting == AWAIT_DELEGATE && m->delegate->type != SPY_INSTANCE) m = m->delegate->as.generator.machine;
+    while (m->awaiting == AWAIT_DELEGATE && m->delegate->type != SPY_INSTANCE && !m->operation) m = m->delegate->as.generator.machine;
     return m;
 }
 /* Whether a close of, or a throw of exception into, a generator or
@@ -22814,7 +22837,8 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* A yield from passes on a throw of what is no exception, which
      * raises there (generator_throw). */
     if (g->as.generator.machine->awaiting == AWAIT_DELEGATE && !(k && subclass(k, c->exceptions[X_BASE_EXCEPTION]))) return 0;
-    if (m->awaiting != AWAIT_DELEGATE) return m->awaiting == AWAIT_YIELD;
+    /* An operation takes a close or throw in C (awaitable_method). */
+    if (m->awaiting != AWAIT_DELEGATE || m->operation) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of an instance with a Python close, or throw of
      * an exception instance, which it takes as thrown (delegate_next); a
      * throw of a class reaches it in C as given. */
@@ -22834,10 +22858,11 @@ static NO_INLINE int next_method(SPYContext *c, SPYValue *v) { return next_funct
  * chain of them, that a step may resume in its place (resume_generator),
  * or on an iterator whose __next__ the machine calls. */
 static NO_INLINE int delegating(Machine *m) {
-    while (m->awaiting == AWAIT_DELEGATE && (m->generator->type == SPY_GENERATOR || m->generator->type == SPY_COROUTINE)) {
+    if (m->generator->type == SPY_ASYNC_GENERATOR) return 0;
+    while (m->awaiting == AWAIT_DELEGATE) {
         SPYValue *d = m->delegate;
         /* An iterator's Python __next__ is a call (delegate_next). */
-        if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE) || d->as.generator.running || d->as.generator.done ||
+        if ((d->type != SPY_GENERATOR && d->type != SPY_COROUTINE && !m->operation) || d->as.generator.running || d->as.generator.done ||
             !d->as.generator.machine) return d->type == SPY_INSTANCE ? next_method(m->generator->ctx, d) : 0;
         if ((m = d->as.generator.machine)->awaiting < AWAIT_DELEGATE) return 1;
     }
@@ -27205,6 +27230,10 @@ static ALWAYS_INLINE Consumer *resuming(Machine *resumer) {
     return top->kind == BLOCK_CONSUME ? top->consumer : NULL;
 }
 static NO_INLINE SPYValue *resumed_with(SPYContext *c, Machine *resumer) {
+    /* An async generator an operation resumes at its yield takes what asend sends. */
+    SPYValue *op = resumer->operation;
+    if (UNLIKELY(op) && resumer->delegate->as.generator.machine->awaiting == AWAIT_YIELD)
+        return spy_retain(op->as.async_operation.method == M_ASEND ? op->as.async_operation.args->as.seq.items[0] : c->none);
     Consumer *s = resuming(resumer);
     SPYValue *sent = s ? s->sent : NULL;
     if (!sent) return spy_none(c);
@@ -27586,7 +27615,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
     Result flow = {FLOW_NORMAL, NULL};
     if (m->awaiting >= AWAIT_DELEGATE) {
         int halt = 0;
-        SPYValue *item = iterator_send(c, m->delegate, sent, thrown, argc, argv, &halt);
+        SPYValue *item = iterator_send(c, m->operation ? m->operation : m->delegate, sent, thrown, argc, argv, &halt);
         if (item) return (Result){FLOW_YIELD, item};
         if (halt) return (Result){FLOW_HALT, NULL};
         if (thrown && c->handled) delegate_raised(c);
@@ -28037,7 +28066,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 m->awaiting = ins->arg == DELEGATE_COMPREHENSION ? AWAIT_COMPREHENSION : AWAIT_DELEGATE;
                 /* A generator this yield from may resume yields or ends
                  * into this machine (generator_left). */
-                if (ins->arg <= DELEGATE_AWAITABLE && delegable(m->delegate)) {
+                if ((ins->arg <= DELEGATE_AWAITABLE && delegable(m->delegate)) ||
+                    (ins->arg == DELEGATE_AWAITABLE && m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(m))) {
                     spy_release(a); a = NULL; m->drop = 0; value = m->delegate; goto resume_generator;
                 }
                 spy_release(a); a = NULL; value = NULL;
@@ -28091,6 +28121,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 a = call_special(c, m->blocks[m->block_len - 1].value, "__anext__", 0, NULL);
                 m->awaiting = AWAIT_NEXT; m->await_target = ins->target;
                 if (a) m->delegate = await_iterator(c, a, "__anext__");
+                if (m->delegate && m->delegate->type == SPY_ASYNC_GENERATOR_ASEND && operation_entered(m)) {
+                    m->awaiting = AWAIT_DELEGATE; m->await_target = ins->target;
+                    spy_release(a); a = NULL; value = m->delegate; goto resume_generator;
+                }
                 if (m->delegate) {
                     value = iterator_send(c, m->delegate, NULL, NULL, 0, NULL, NULL);
                     if (value) { spy_release(a); m->pc = pc; YIELD(value); }
@@ -28322,9 +28356,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             if (value->type != SPY_INSTANCE) goto resume_generator;
             goto delegate_step;
         }
-        m->awaiting = AWAIT_NONE;
         /* The value it takes, or a close's GeneratorExit raised there. */
-        machine_push(c, m, resumed_with(c, m->resumer));
+        value = resumed_with(c, m->resumer);
+        m->awaiting = AWAIT_NONE;
+        machine_push(c, m, value);
         if (c->error_type[0]) { f = m->frame; code = m->code->items; pc = m->pc; continue; }
         goto switch_call;
     generator_left: {
@@ -28608,6 +28643,15 @@ static NO_INLINE Machine *delegate_left(SPYContext *c, Machine *m, SPYValue **g,
         if (UNLIKELY(throwing)) {
             m->throwing = 0;
             if (throwing == CLOSING) { delegate_closed(c, m, *flow); *flow = (Result){FLOW_NORMAL, NULL}; return m; }
+        }
+        /* An operation's generator yields the await's value, or ends it
+         * raising StopAsyncIteration, which ends an async for. */
+        if (UNLIKELY(m->operation) && (flow->flow != FLOW_YIELD || m->delegate->as.generator.machine->awaiting == AWAIT_YIELD)) {
+            if (flow->flow == FLOW_YIELD) machine_push(c, m, flow->value);
+            else generator_end(c, m->delegate, *flow);
+            finish_delegate(c, m);
+            *flow = (Result){FLOW_NORMAL, NULL};
+            return m;
         }
         if (flow->flow != FLOW_YIELD) {
             SPYValue *d = m->delegate;
