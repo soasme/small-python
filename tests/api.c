@@ -1546,6 +1546,11 @@ int main(int argc, char **argv) {
                "class Shadowed:\n    d = Shadow()\nshadowed = Shadowed()\nshadowed.__dict__['d'] = 0\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shadowed.d + getattr(shadowed, 'd')", "shadow.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 1);
+    /* So does a __getattribute__ before a __getattr__ its AttributeError calls. */
+    execute(c, "class Hooked:\n    def __getattribute__(self, n):\n        for i in range(3000): pass\n        raise AttributeError(n)\n"
+               "    def __getattr__(self, n):\n        for i in range(3000): pass\n        return i\nhooked = Hooked()\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "hooked.a + hooked.b", "hooked.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 3);
     /* So does next() in a Python __next__, also giving its default for a StopIteration. */
     execute(c, "class Stepper:\n    def __init__(self, n): self.n = n\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        if not self.n: raise StopIteration\n        self.n -= 1\n        return i\n"

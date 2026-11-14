@@ -15,7 +15,9 @@
 (*     raising    a property with only a getter, raising AttributeError    *)
 (*     slot       __slots__ = ('a',)                                       *)
 (*                                                                         *)
-(* with or without a __getattr__ returning 'ga'. The steps are o.a,        *)
+(* with or without a __getattr__ returning 'ga', and with no Python       *)
+(* __getattribute__ (hook none), one passing the name to object's (pass), *)
+(* or one raising AttributeError (refuse). The steps are o.a,             *)
 (* o.a = v (v is 'v1' or 'v2'), and del o.a; `stored` is what o's          *)
 (* __dict__ or slot holds for a.                                           *)
 (***************************************************************************)
@@ -25,13 +27,16 @@ Kinds == {"none", "value", "nondata", "data", "property", "raising", "slot"}
 Values == {"v1", "v2"}
 Missing == "missing"
 
-VARIABLES kind, getattr, stored, op, result
-vars == <<kind, getattr, stored, op, result>>
+Hooks == {"none", "pass", "refuse"}
+
+VARIABLES kind, getattr, hook, stored, op, result
+vars == <<kind, getattr, hook, stored, op, result>>
 
 DataDescriptor == kind \in {"data", "property", "raising", "slot"}
 
 \* o.a: a data descriptor wins over the instance, which wins over the rest
-\* of the class; failing that, or on a getter's AttributeError, __getattr__.
+\* of the class; failing that, on a getter's AttributeError, or when the
+\* class's __getattribute__ refuses, __getattr__.
 Lookup ==
     CASE kind = "data" -> "dget"
       [] kind = "property" -> "pget"
@@ -41,15 +46,15 @@ Lookup ==
       [] kind = "value" -> "cls"
       [] OTHER -> Missing
 Get == /\ op' = "get"
-       /\ result' = IF Lookup # Missing THEN Lookup ELSE IF getattr THEN "ga" ELSE "AttributeError"
-       /\ UNCHANGED <<kind, getattr, stored>>
+       /\ result' = IF hook # "refuse" /\ Lookup # Missing THEN Lookup ELSE IF getattr THEN "ga" ELSE "AttributeError"
+       /\ UNCHANGED <<kind, getattr, hook, stored>>
 
 \* o.a = v: a data descriptor's __set__, otherwise the instance's __dict__.
 Set(v) == /\ op' = "set " \o v
           /\ IF kind \in {"property", "raising"}
              THEN result' = "AttributeError" /\ UNCHANGED stored
              ELSE result' = "ok" /\ stored' = v
-          /\ UNCHANGED <<kind, getattr>>
+          /\ UNCHANGED <<kind, getattr, hook>>
 
 \* del o.a: a data descriptor's __delete__, otherwise the instance's own.
 Del == /\ op' = "del"
@@ -57,20 +62,21 @@ Del == /\ op' = "del"
             [] kind = "data" -> result' = "ok" /\ stored' = Missing
             [] stored # Missing -> result' = "ok" /\ stored' = Missing
             [] OTHER -> result' = "AttributeError" /\ UNCHANGED stored
-       /\ UNCHANGED <<kind, getattr>>
+       /\ UNCHANGED <<kind, getattr, hook>>
 
-Init == kind \in Kinds /\ getattr \in BOOLEAN /\ stored = Missing /\ op = "new" /\ result = "ok"
+Init == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ stored = Missing /\ op = "new" /\ result = "ok"
 Next == Get \/ Del \/ \E v \in Values : Set(v)
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
-TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ stored \in Values \cup {Missing}
+TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ stored \in Values \cup {Missing}
 
-\* A data descriptor's __get__ answers whatever the instance holds.
-DescriptorWins == op = "get" /\ kind \in {"data", "property"} => result \in {"dget", "pget"}
+\* A data descriptor's __get__ answers whatever the instance holds, unless
+\* __getattribute__ refuses before it.
+DescriptorWins == op = "get" /\ kind \in {"data", "property"} /\ hook # "refuse" => result \in {"dget", "pget"}
 
 \* What is set is what is got, unless a data descriptor intervenes.
-SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data", "property", "raising"}) /\ op' = "get"
+SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data", "property", "raising"}) /\ hook # "refuse" /\ op' = "get"
                  => result' = stored]_vars
 
 \* __getattr__ is only consulted when lookup fails, so o.a never fails with it.

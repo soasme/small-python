@@ -170,7 +170,17 @@ static const char *const programs[] = {
     "        for i in range(1): pass\n"
     "        return self.v == o.v\n"
     "def q(): return [{Q(1): Q(2), Q(3): 4} == {Q(3): 4, Q(1): Q(2)}, {Q(1): (Q(2),)} != {Q(1): (Q(3),)}]\n"
-    "print(q())\n",
+    "print(q())\n"
+    "class GA:\n"
+    "    def __getattribute__(self, n):\n"
+    "        for i in range(1): pass\n"
+    "        if n == 'x': raise AttributeError(n)\n"
+    "        return object.__getattribute__(self, n)\n"
+    "    def __getattr__(self, n):\n"
+    "        for i in range(1): pass\n"
+    "        return n\n"
+    "def ga(o): return [o.x, o.__class__.__name__, o.x.upper()]\n"
+    "print(ga(GA()))\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"

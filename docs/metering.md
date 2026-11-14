@@ -368,7 +368,9 @@ These run as machines on the heap, in one native activation of
   `range`; a metaclass's `__instancecheck__` and `__subclasscheck__` in
   `isinstance` and `issubclass`; the metaclass `__getitem__` or
   `__class_getitem__` that subscripting a class calls;
-- a descriptor's `__get__` and a class's own `__getattribute__`; an
+- a descriptor's `__get__` and a class's own `__getattribute__`, and
+  the class's `__getattr__` that an `AttributeError` from that
+  `__getattribute__` calls in an attribute reference; an
   attribute store's `__setattr__`, property setter or `__set__` in
   function code, and, in code compiled while pausing, an attribute
   deletion's `__delattr__`, property deleter or `__delete__`;

@@ -12179,8 +12179,13 @@ static NO_INLINE SPYValue *attribute_step(SPYContext *c, SPYValue *v, const char
             return NULL;
         }
     }
-    if (!fallback || !machine_function(c, fallback) || custom)
-        return attribute(c, v, name);
+    if (!fallback || !machine_function(c, fallback) || custom) {
+        /* A Python __getattribute__ comes before a Python __getattr__,
+         * which its AttributeError calls (getter_call). */
+        if (!custom || !chains || !fallback || !machine_function(c, definition) || !machine_function(c, fallback)) return attribute(c, v, name);
+        c->fallback = spy_retain(definition);
+        return NULL;
+    }
     SPYValue *descriptor = chains ? class_lookup(owner, name) : NULL;
     if (descriptor && descriptor->type == SPY_PROPERTY && machine_function(c, descriptor->as.property.get)) {
         c->fallback = spy_retain(descriptor);
@@ -26596,7 +26601,12 @@ static NO_INLINE SPYValue *getter_call(SPYContext *c, Machine *m, Node *n, SPYVa
     } else if (function->type == SPY_INSTANCE) {
         argv[0] = function; argv[1] = v; argv[2] = spy_retain(v->as.map.parent); argc = 3;
         function = spy_retain(class_lookup(argv[0]->as.map.parent, "__get__"));
-    } else argc = 2;
+    } else {
+        /* A __getattribute__ has its class's __getattr__ above v (attribute_step). */
+        SPYValue *cls = v->as.map.parent, *fallback = class_lookup(cls, "__getattribute__") == function ? class_lookup(cls, "__getattr__") : NULL;
+        argc = 2;
+        if (fallback && machine_push(c, m, spy_retain(fallback))) { spy_release(v); spy_release(argv[1]); spy_release(function); return NULL; }
+    }
     if ((*env = function_env(c, function, argc, argv, NULL, 1))) return function;
     spy_release(function);
     return NULL;
