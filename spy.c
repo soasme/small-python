@@ -14453,8 +14453,10 @@ static int expands(Node *n, int calls) {
     if (!n) return 0;
     if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
-    /* An import runs a module of source as a call (import_step). */
+    /* An import runs a module of source as a call (import_step), and a
+     * raise may call the exception's class (raise_step). */
     if (n->kind == N_YIELD || n->kind == N_AWAIT || (calls && (n->kind == N_CALL || n->kind == N_IMPORT || n->kind == N_FROM)) ||
+        (calls && n->kind == N_RAISE && n->a) ||
         (calls >= BODY && (n->kind == N_IF || n->kind == N_RETURN || n->kind == N_FOR || n->kind == N_WHILE ||
                            n->kind == N_TRY || n->kind == N_WITH || n->kind == N_MATCH || n->kind == N_UNARY ||
                            n->kind == N_BINARY || n->kind == N_COMPARE || n->kind == N_INDEX || n->kind == N_ATTR ||
@@ -20028,6 +20030,45 @@ static SPYValue *raise_with_cause(SPYContext *c, SPYValue *value, SPYValue *caus
     return NULL;
 }
 static SPYValue *raise_value(SPYContext *c, SPYValue *value) { return raise_with_cause(c, value, NULL); }
+static SPYValue *class_init(SPYContext *, SPYValue *, int *);
+static SPYValue *init_instance(SPYContext *, SPYValue *, int, size_t, SPYValue *const *, SPYValue *);
+/* The instance a raise of exception class cls makes when its call runs a
+ * Python __init__ on the machine (class_init), *init that; else NULL. */
+static SPYValue *raised_instance(SPYContext *c, SPYValue *cls, SPYValue **init) {
+    int plain;
+    if (cls->type != SPY_CLASS || !subclass(cls, c->exceptions[X_BASE_EXCEPTION])) return NULL;
+    *init = class_init(c, cls, &plain);
+    return *init && machine_function(c, *init) ? init_instance(c, cls, plain, 0, NULL, NULL) : NULL;
+}
+static SPYValue *raise_inited(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* raise of value, an exception class or instance, from cause, or NULL
+ * without from, on m: the call of the exception's class, and then of
+ * the cause's, that runs a Python __init__ is m's (callk), the raise
+ * going on with the instance when it returns (raise_inited); else the
+ * raise (raise_with_cause). */
+static void raise_step(SPYContext *c, Machine *m, SPYValue *value, SPYValue *cause) {
+    SPYValue *init = NULL, *made = raised_instance(c, value, &init), *exception = NULL;
+    /* The exception is made before the cause. */
+    if (!made && !c->error_type[0] && cause && (exception = normalize_exception(c, value, 0))) made = raised_instance(c, cause, &init);
+    if (!made) {
+        if (!c->error_type[0]) raise_with_cause(c, exception ? exception : value, cause);
+        spy_release(exception);
+        return;
+    }
+    SPYValue *parts[] = {exception ? exception : spy_retain(made), spy_retain(exception ? made : cause ? cause : c->unbound)};
+    SPYValue *state = spy_tuple(c, 2, parts);
+    release_all(2, parts);
+    if (state) callk(c, m, init, 1, (SPYValue *[]){made}, raise_inited, state);
+    else spy_release(made);
+}
+/* The __init__ a raise called (raise_step) returned result: None goes on
+ * with the raise of state's exception and cause, c->unbound for none. */
+static SPYValue *raise_inited(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+    else if (result) raise_step(c, m, state->as.seq.items[0], state->as.seq.items[1] == c->unbound ? NULL : state->as.seq.items[1]);
+    spy_release(result); spy_release(state);
+    return NULL;
+}
 /* Raise exception thrown into a generator, NULL: chained, as CPython's
  * throw, to own, the exception the generator handles, never to its
  * caller's. */
@@ -28093,7 +28134,10 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             break;
         CASE(BC_RAISE)
             b = machine_pop(m); a = machine_pop(m);
-            raise_with_cause(c, a, ins->arg ? b : NULL); break;
+            raise_step(c, m, a, ins->arg ? b : NULL);
+            if (!c->k_fn) break;
+            spy_release(a); spy_release(b); a = b = NULL;
+            goto enter_k;
         CASE(BC_SET_TARGET)
             if (ins->arg || (n->kind == N_INDEX && store_hooked(c, m->stack[m->len - 2], m->stack[m->len - 1]))) goto store_step;
             if (n->kind == N_INDEX) b = machine_pop(m);

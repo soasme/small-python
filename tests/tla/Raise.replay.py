@@ -8,8 +8,27 @@ class NotAnException:
     pass
 
 
-WHATS = {"class": "ValueError", "instance": "ValueError()", "int": "5", "other": "NotAnException"}
-CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5"}
+log = []
+
+
+class PyError(ValueError):
+    def __init__(self):
+        log.append("e")
+
+
+class PyCause(TypeError):
+    def __init__(self):
+        log.append("c")
+
+
+class Returns(ValueError):
+    def __init__(self):
+        return 1
+
+
+WHATS = {"class": "ValueError", "instance": "ValueError()", "int": "5", "other": "NotAnException", "python": "PyError",
+         "returns": "Returns"}
+CAUSES = {"class": "TypeError", "instance": "TypeError()", "None": "None", "int": "5", "python": "PyCause"}
 
 
 def statement(p):
@@ -31,11 +50,18 @@ def outcome(p):
     body = statement(p)
     if p["handling"]:
         body = "try:\n    raise KeyError\nexcept KeyError:\n    " + body
-    try:
-        exec(body, {"NotAnException": NotAnException})
-    except BaseException as error:
-        return "%s cause=%s context=%s suppress=%s" % (
-            type(error).__name__, name(error.__cause__), name(error.__context__), error.__suppress_context__)
+    # The statement runs in a function, as compiled code, and at module level.
+    results = []
+    for code in ("def f():\n" + "".join("    " + line + "\n" for line in body.split("\n")) + "f()", body):
+        del log[:]
+        try:
+            exec(code, {"NotAnException": NotAnException, "PyError": PyError, "PyCause": PyCause, "Returns": Returns})
+        except BaseException as error:
+            results.append("%s cause=%s context=%s suppress=%s log=%s" % (
+                type(error).__name__, name(error.__cause__), name(error.__context__), error.__suppress_context__, "".join(log)))
+        else:
+            results.append("no exception")
+    return results[0] if results[0] == results[1] else " / ".join(results)
     return "no exception"
 
 

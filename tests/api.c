@@ -1563,6 +1563,12 @@ int main(int argc, char **argv) {
                "class Classy(metaclass=Spun):\n    d = Shadow()\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "Classy.d + Classy.p + getattr(Classy, 'd')", "classy.py"), SPY_STOP_STEPS, &pauses)) == 8997 && pauses > 2);
+    /* So does raising an exception class, and its cause's, with a Python __init__. */
+    execute(c, "class Slow(Exception):\n    def __init__(self):\n        for i in range(3000): pass\n        self.i = i\n"
+               "class Cause(Exception):\n    def __init__(self):\n        for i in range(3000): pass\n"
+               "def raised():\n    try: raise Slow from Cause\n    except Slow as e: return e.i + isinstance(e.__cause__, Cause)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "raised()", "raised.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
     /* So does next() in a Python __next__, also giving its default for a StopIteration. */
     execute(c, "class Stepper:\n    def __init__(self, n): self.n = n\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        if not self.n: raise StopIteration\n        self.n -= 1\n        return i\n"

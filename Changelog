@@ -96,6 +96,8 @@ Unreleased (0.10.0):
 - a set's union(), intersection(), difference(), symmetric_difference(), their updates, issubset(),
   issuperset() and isdisjoint() of another set call a Python __eq__ without nesting on the C stack
 - set(s), frozenset(s), {*s} and the like of a set s into an empty set no longer call __eq__
+- raise of an exception class, or from a cause class, calls its Python __init__ without nesting
+  on the C stack, so it can pause
 - an iterator over a sequence whose __getitem__ raises an error other than IndexError or
   StopIteration tries the same index again on its next step
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python

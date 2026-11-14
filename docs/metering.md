@@ -302,6 +302,8 @@ These run as machines on the heap, in one native activation of
   take items from, for a loop, a consumer below or `next`, and the
   Python `__iter__` of the instances that creating a `zip`, `map`,
   `enumerate` or `filter` calls;
+- the Python `__init__` of the exception class, and then of the cause's
+  class, that a `raise` statement's call of the class runs;
 - the generator a `yield from` delegates to, or the coroutine an `await`
   awaits, and those it delegates to in turn, when a step above resumes
   the delegating generator, and the async generator whose `asend` or

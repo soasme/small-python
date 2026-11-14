@@ -202,6 +202,17 @@ static const char *const programs[] = {
     "def cc(): return [CC.d, [CC.p, getattr(CC, 'd'), hasattr(CC, 'p')]]\n"
     "print(cc())\n",
 
+    "class RE(Exception):\n"
+    "    def __init__(self):\n"
+    "        for i in range(1): pass\n"
+    "        self.x = [i]\n"
+    "class RC(Exception):\n"
+    "    def __init__(self): self.y = [1]\n"
+    "def re():\n"
+    "    try: raise RE from RC\n"
+    "    except RE as e: return [e.x, e.__cause__.y]\n"
+    "print(re())\n",
+
     "class G:\n"
     "    def __getattr__(self, k):\n"
     "        for i in range(1): pass\n"
