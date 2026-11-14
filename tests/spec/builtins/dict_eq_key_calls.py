@@ -53,7 +53,7 @@ def main():
     check(lambda: {(K(1), 2): 1} == {(K(1), 2): 1}, True, [("k", 1, 1)])
     check(lambda: {K(1, 5): 1, K(2, 5): 2} == {K(2, 5): 2, K(1, 5): 1}, True,
           [("k", 1, 2), ("k", 2, 1), ("k", 2, 1), ("k", 1, 1), ("k", 2, 2)])
-    check(lambda: {K("ni"): 1} == {K("ni"): 1}, False, [("k", "ni", "ni"), ("k", "ni", "ni")])
+    check(lambda: {K("ni", 1): 1} == {K("ni", 1): 1}, False, [("k", "ni", "ni"), ("k", "ni", "ni")])
     k = K(1)
     check(lambda: {k: V(1)} == {k: V(1)}, True, [("v", 1, 1)])
     check(lambda: error(lambda: {K("err"): 1} == {K("err"): 1}), ("KeyError", "'k'"), [("k", "err", "err")])
