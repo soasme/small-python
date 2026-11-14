@@ -869,6 +869,13 @@ int main(int argc, char **argv) {
     assert(integer(c, spy_call(c, closure, 0, NULL)) == 42);
     spy_release(closure); spy_collect(c);
     assert(spy_live_values(c) == baseline);
+    /* A close the host calls runs in C: a generator yielding there ignored GeneratorExit. */
+    execute(c, "def stubborn():\n    try: yield 1\n    finally: yield 2\ns = stubborn()\nnext(s)\nclose = s.close\n");
+    SPYValue *close = spy_get_global(c, "close");
+    assert(!spy_call(c, close, 0, NULL) && !strcmp(spy_error_message(c), "generator ignored GeneratorExit"));
+    spy_clear_error(c);
+    spy_release(close);
+    execute(c, "del s, close, stubborn\n"); spy_collect(c);
 
     int calls = 0;
     /* A suspended function owns operands, iterators, pending exceptions and
@@ -1591,6 +1598,11 @@ int main(int argc, char **argv) {
                "def finish(co):\n    try: co.send(None)\n    except StopIteration as e: return e.value\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "finish(total())", "ticks.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 3);
+    /* So does the close of an unreachable async generator suspended at a yield. */
+    execute(c, "async def held(log):\n    try: yield 1\n    finally: log.append(slower(slower(1)))\n"
+               "def dropped():\n    log = []\n    g = held(log)\n    finish(g.__anext__())\n    del g\n    log.append(0)\n    return sum(log)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "dropped()", "held.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

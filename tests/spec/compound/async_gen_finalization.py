@@ -85,6 +85,45 @@ del g, awaiting
 host.collect()
 assert_eq(log, ["closed"])
 log.clear()
+# Cleanup may call functions; a body that yields again while closing is not
+# resumed after that yield; an async for left by break closes its
+# generator once nothing else holds it; inside functions as at module level.
+def note(x):
+    log.append(x)
+    return x
+async def calling():
+    try:
+        for i in range(3): yield i
+    finally:
+        note([note(j) for j in range(2)])
+async def stubborn():
+    try:
+        yield 1
+    finally:
+        log.append("first")
+        yield 2
+        log.append("never")
+def collect_both():
+    g = calling()
+    assert_eq(step(g.__anext__()), 0)
+    del g
+    host.collect()
+    g = stubborn()
+    assert_eq(step(g.__anext__()), 1)
+    del g
+    host.collect()
+collect_both()
+assert_eq(log, [0, 1, [0, 1], "first"])
+log.clear()
+async def breaking():
+    async for x in calling():
+        break
+    log.append("after")
+    return x
+assert_eq(step(breaking()), 0)
+host.collect()
+assert_eq(log, [0, 1, [0, 1], "after"])
+log.clear()
 # A generator never started, or already finished, has nothing to close.
 g = agen("unstarted")
 del g

@@ -22782,7 +22782,7 @@ static NO_INLINE int operation_entered(Machine *m) {
 static void finalize_close(SPYContext *, Machine *);
 static NO_INLINE SPYValue *finalizer_call(SPYContext *c, Machine *m, SPYValue **env) {
     SPYValue *self = c->finalize_first, *method = finalizer(c);
-    if (self->type == SPY_GENERATOR) {
+    if (self->type != SPY_INSTANCE) {
         finalize_close(c, m);
         return c->error_type[0] ? NULL : c->unbound;
     }
@@ -23284,8 +23284,9 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
     SPYValue *self = c->finalize_first;
     if (finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->py_depth >= c->recursion_limit)
         return NULL;
-    if (self->type == SPY_GENERATOR)
-        return resumable(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
+    /* A generator, or an async generator without a finalizer hook, closes at its yield. */
+    if (self->type == SPY_GENERATOR || (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin))
+        return suspended(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
                !close_quietly(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
     return method && machine_function(c, method) ? method : NULL;
@@ -23307,7 +23308,7 @@ static NO_INLINE int finalize_closed(SPYContext *c, Machine *m, Frame *f, SPYVal
     Block *top = &m->blocks[m->block_len - 1];
     SPYValue *g = spy_retain(top->value);
     size_t waiting = top->consumer->finalizing - 1;
-    if (item) { spy_release(item); spy_error(c, "RuntimeError", "generator ignored GeneratorExit"); }
+    if (item) { spy_release(item); spy_error(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" : "generator ignored GeneratorExit"); }
     if (c->error_type[0]) report_unraisable(c, "Exception ignored while closing generator ", g, NULL);
     if (c->error_type[0]) spy_clear_error(c);
     pop_block(c, m, f);
@@ -28321,7 +28322,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         /* A call consuming a generator (consume) resumes it for each item;
          * one delegating in C gives its item there, as to a loop step. */
         value = m->blocks[m->block_len - 1].value;
-        if (key_working(m->blocks[m->block_len - 1].consumer) || (!resumable(value) && (value->type != SPY_COROUTINE || !suspended(value)))) {
+        if (key_working(m->blocks[m->block_len - 1].consumer) || (!resumable(value) && ((value->type != SPY_COROUTINE && value->type != SPY_ASYNC_GENERATOR) || !suspended(value)))) {
             m->pc = pc;
             callee_env = NULL;
             if (key_working(m->blocks[m->block_len - 1].consumer)) {

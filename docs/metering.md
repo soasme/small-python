@@ -380,7 +380,8 @@ These run as machines on the heap, in one native activation of
   attribute store's `__setattr__`, property setter or `__set__` in
   function code, and, in code compiled while pausing, an attribute
   deletion's `__delattr__`, property deleter or `__delete__`;
-- a dead instance's `__del__`;
+- a dead instance's `__del__`, and the close of a dead generator, or of
+  an async generator without a finalizer hook, suspended at a `yield`;
 - property getters, also of a builtin's or an exception's subclass, and
   `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and binary
   operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
