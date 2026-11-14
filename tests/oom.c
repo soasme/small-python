@@ -212,6 +212,13 @@ static const char *const programs[] = {
     "    try: raise RE from RC\n"
     "    except RE as e: return [e.x, e.__cause__.y]\n"
     "print(re())\n",
+    "class FN:\n"
+    "    def __new__(cls, *a, **k):\n"
+    "        for i in range(1): pass\n"
+    "        return super().__new__(cls)\n"
+    "    def __init__(self, *a, **k): self.v = [a, k]\n"
+    "def fn(): return [FN(*[1], **{'x': [2]}).v, FN(**{}).v]\n"
+    "print(fn())\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"

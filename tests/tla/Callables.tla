@@ -18,8 +18,9 @@
 (*                | instance (c.__call__ = a function, after creation)     *)
 (*                | meta (a metaclass's def __call__(cls, *a): return a)   *)
 (*                                                                         *)
-(* where __new__ and __init__ take *args, then evaluates C(), C(1), or     *)
-(* C()(2). The outcome is the result (its type, and args if recorded or an *)
+(* where __new__ and __init__ take *args and **kw (recording args and the  *)
+(* keyword items), then evaluates C(), C(1), C(k=1), or C()(2). The        *)
+(* outcome is the result (its type, and args if recorded or an             *)
 (* exception's), or the exception. A builtin base's __new__ makes the      *)
 (* instance: list's then initializes from an iterable, and                 *)
 (* BaseException's keeps the arguments as args.                            *)
@@ -28,7 +29,7 @@ EXTENDS Naturals, Sequences
 
 Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other"},
              init : {"none", "records", "returns"}, call : {"none", "class", "instance", "meta"},
-             op : {"C()", "C(1)", "C()(2)"}]
+             op : {"C()", "C(1)", "C(k=1)", "C()(2)"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -39,15 +40,18 @@ Pending == "pending"
 Create(p, args) ==
     CASE p.new = "other" -> "int 5"                                              \* __init__ is not called
       [] p.init = "returns" -> "TypeError"                                       \* __init__ should return None
+      \* BaseException's __init__ takes no keywords, nor list's unless __new__ is overridden.
+      [] args = "(('k', 1),)" /\ p.init = "none" /\ (p.new = "none" \/ p.base = "Exception") -> "TypeError"
       [] p.init = "records" \/ p.base = "Exception" -> "C args=" \o args
       [] args = "(1,)" /\ (p.new = "none" \/ p.base = "list") -> "TypeError"    \* C() takes no arguments; list(1)
       [] OTHER -> "C"
 
 Run(p) ==
     CASE p.call = "meta" -> CASE p.op = "C()" -> "tuple ()" [] p.op = "C(1)" -> "tuple (1,)"
-                                 [] OTHER -> "TypeError"                         \* a tuple is not callable
+                                 [] OTHER -> "TypeError"                         \* no keywords; a tuple is not callable
       [] p.op = "C()" -> Create(p, "()")
       [] p.op = "C(1)" -> Create(p, "(1,)")
+      [] p.op = "C(k=1)" -> Create(p, "(('k', 1),)")
       [] Create(p, "()") \in {"TypeError", "int 5"} -> "TypeError"               \* an int is not callable
       [] p.call = "class" -> "(2,)"
       [] OTHER -> "TypeError"                                                    \* 'C' object is not callable

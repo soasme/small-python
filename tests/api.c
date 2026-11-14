@@ -1569,6 +1569,11 @@ int main(int argc, char **argv) {
                "def raised():\n    try: raise Slow from Cause\n    except Slow as e: return e.i + isinstance(e.__cause__, Cause)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "raised()", "raised.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
+    /* So does a class call with ** arguments in a Python __new__ and __init__. */
+    execute(c, "class Fresh:\n    def __new__(cls, **k):\n        for i in range(3000): pass\n        return super().__new__(cls)\n"
+               "    def __init__(self, **k):\n        for i in range(3000): pass\n        self.i = i + k['x']\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "Fresh(**{'x': 1}).i", "fresh.py"), SPY_STOP_STEPS, &pauses)) == 3000 && pauses > 1);
     /* So does next() in a Python __next__, also giving its default for a StopIteration. */
     execute(c, "class Stepper:\n    def __init__(self, n): self.n = n\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        if not self.n: raise StopIteration\n        self.n -= 1\n        return i\n"

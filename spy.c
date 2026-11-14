@@ -25051,6 +25051,7 @@ static NO_INLINE SPYValue *decorate(SPYContext *c, Machine *m, SPYValue **env) {
  * instance, the call's value on the stack (CALL_INIT), as in stack_call. */
 static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SPYValue **env) {
     SPYValue *keywords = machine_pop(m), *args = machine_pop(m), *callee = machine_pop(m), *result = NULL, *function = NULL, *self = NULL;
+    SPYValue *allocate = NULL;
     int plain = 0, init = 0, id;
     if (calls && machine_function(c, callee) && string_keys(c, keywords))
         result = (*env = function_env(c, callee, args->as.seq.len, args->as.seq.items, keywords, 0)) ? spy_retain(callee) : NULL;
@@ -25061,6 +25062,24 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, int calls, SP
         self = init_instance(c, callee, plain, args->as.seq.len, args->as.seq.items, keywords);
         if (self && machine_push(c, m, spy_retain(self))) { spy_release(self); self = NULL; }
         c->entering_init = function; c->entering_kind = CALL_INIT; init = 1;
+    } else if (calls && callee->type == SPY_CLASS && !function && !c->error_type[0] && (allocate = new_method(c, callee)) &&
+               string_keys(c, keywords)) {
+        /* A class call enters its Python __new__ (CALL_CHECKED) with the
+         * class first; the class, the arguments' tuple and the keywords'
+         * dict stay on the stack for its __init__ (constructed). */
+        SPYValue *all = spy_list(c), *tuple = tuple_of(c, args->as.seq.len, args->as.seq.items);
+        int failed = !all || !tuple || sequence_append(c, all, callee);
+        for (size_t i = 0; !failed && i < args->as.seq.len; i++) failed = sequence_append(c, all, args->as.seq.items[i]);
+        if (!failed && (*env = function_env(c, allocate, all->as.seq.len, all->as.seq.items, keywords, 0))) {
+            if (machine_push(c, m, spy_retain(callee))) spy_release(tuple);
+            else if (!machine_push(c, m, tuple) && !machine_push(c, m, spy_retain(keywords))) {
+                c->entering_init = allocate;
+                result = spy_retain(callee);
+            }
+            if (!result) { release_locals(*env); *env = NULL; }
+            tuple = NULL;
+        }
+        spy_release(all); spy_release(tuple);
     } else if (calls && (callee->type == SPY_NATIVE || callee->type == SPY_BOUND_METHOD) && string_keys(c, keywords) &&
                key_consumer(c, m, callee, args->as.seq.len, args->as.seq.items, map_items(keywords), keywords->as.map.len)) ;
     else if (calls && !keywords->as.map.len && (id = consumer_of(c, callee, -1, args->as.seq.len, args->as.seq.items)) >= 0)

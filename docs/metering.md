@@ -282,7 +282,8 @@ These run as machines on the heap, in one native activation of
 `run_machine`:
 
 - calls of functions, bound methods and plain classes; classes with a
-  Python `__new__`, also called with keywords; the Python `__init__` of a
+  Python `__new__`, also called with keywords or `*` and `**` arguments;
+  the Python `__init__` of a
   subclass of a builtin type or of an exception, after its builtin
   `__new__`; instances with a Python `__call__`; Python
   decorators; a class statement's bases' `__mro_entries__`, its

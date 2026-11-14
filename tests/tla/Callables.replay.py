@@ -4,10 +4,10 @@
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
-NEW = {"none": "", "self": "    def __new__(cls, *args):\n        return super().__new__(cls)\n",
-       "other": "    def __new__(cls, *args):\n        return 5\n"}
-INIT = {"none": "", "records": "    def __init__(self, *args):\n        self.args = args\n",
-        "returns": "    def __init__(self, *args):\n        return 1\n"}
+NEW = {"none": "", "self": "    def __new__(cls, *args, **kw):\n        return super().__new__(cls)\n",
+       "other": "    def __new__(cls, *args, **kw):\n        return 5\n"}
+INIT = {"none": "", "records": "    def __init__(self, *args, **kw):\n        self.args = args + tuple(kw.items())\n",
+        "returns": "    def __init__(self, *args, **kw):\n        return 1\n"}
 CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": ""}
 META = "class M(type):\n    def __call__(cls, *a):\n        return a\n"
 
@@ -29,6 +29,8 @@ def outcome(p):
             return describe(C())
         if p["op"] == "C(1)":
             return describe(C(1))
+        if p["op"] == "C(k=1)":
+            return describe(C(k=1))
         c = C()
         if p["call"] == "instance" and type(c) is C:
             c.__call__ = lambda *a: a
