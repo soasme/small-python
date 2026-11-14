@@ -16,8 +16,9 @@
 (* A program takes a set or frozenset a and a set b of at most two of the  *)
 (* values 1, 2, 3, each element an object of one hash whose Python __eq__  *)
 (* logs its side and value, and applies an operator, an augmented          *)
-(* assignment, or a method. The outcome is the result's values, a's after  *)
-(* an update, or the bool, then the log.                                   *)
+(* assignment, or a method; an operator's special method called by name    *)
+(* gives the operator's outcome. The outcome is the result's values, a's   *)
+(* after an update, or the bool, then the log.                             *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 

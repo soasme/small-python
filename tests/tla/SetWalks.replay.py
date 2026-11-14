@@ -1,8 +1,8 @@
 # Replays SetWalks.tla: each case builds a and b of objects of one hash
 # whose Python __eq__ (which loops) logs its side and value, applies the
 # operation in a function that runs on the machine and in one that runs
-# in C, and compares the result's values, or the bool, and the log with
-# the model's outcome.
+# in C, an operator also by its method's name, and compares the result's
+# values, or the bool, and the log with the model's outcome.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -19,9 +19,12 @@ class E:
 
 
 SOURCES = {"|=": "a |= b\nr = a", "&=": "a &= b\nr = a", "-=": "a -= b\nr = a", "^=": "a ^= b\nr = a"}
+METHODS = {"|": "or", "&": "and", "-": "sub", "^": "xor", "|=": "ior", "&=": "iand", "-=": "isub", "^=": "ixor",
+           "==": "eq", "!=": "ne", "<": "lt", "<=": "le", ">": "gt", ">=": "ge"}
 
 
-def source(op):
+def source(op, named):
+    if named: return "r = a.__%s__(b)" % METHODS[op]
     if op in SOURCES: return SOURCES[op]
     if op.endswith("update"): return "a.%s(b)\nr = a" % op
     if op in ("union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"):
@@ -29,12 +32,17 @@ def source(op):
     return "r = a %s b" % op
 
 
-def run(p, machine):
+def named_method(p):
+    # frozenset has no in-place methods
+    return p["op"] in METHODS and hasattr(set if p["ka"] == "set" else frozenset, "__%s__" % METHODS[p["op"]])
+
+
+def run(p, machine, named=False):
     for _ in (): pass
     kind = set if p["ka"] == "set" else frozenset
     a = kind(E("a", v) for v in sorted(p["a"]))
     b = {E("b", v) for v in sorted(p["b"])}
-    body = source(p["op"]).replace("\n", "\n    ")
+    body = source(p["op"], named).replace("\n", "\n    ")
     loop = "    for _ in (): pass\n" if machine else ""
     scope = {}
     exec("def f(a, b):\n" + loop + "    " + body + "\n    return r\n", scope)
@@ -46,8 +54,8 @@ def run(p, machine):
 
 def outcome(p):
     machine = run(p, True)
-    walker = run(p, False)
-    return machine if machine == walker else "machine " + machine + " | C " + walker
+    runs = [run(p, False)] + [run(p, machine, True) for machine in (True, False) if named_method(p)]
+    return machine if all(r == machine for r in runs) else "machine " + machine + " | " + " | ".join(runs)
 
 
 check_programs(outcome)

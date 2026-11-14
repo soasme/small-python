@@ -330,6 +330,16 @@ static const char *const programs[] = {
     "def plain(a, b): return [len(a & b), len(a - b), len(a ^ b), len(a.symmetric_difference(b)), len(a.difference(b))]\n"
     "print(walks(), plain(sw(3), sw(4)), plain(sw(9), sw(1)))\n",
 
+    "class SD:\n"
+    "    def __hash__(self): return 1\n"
+    "    def __eq__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return False\n"
+    "def sd():\n"
+    "    a = {SD(), SD()}; b = {SD()}\n"
+    "    return [len(a.__or__(b)), len(b.__rsub__(a)), a.__eq__(b), set.__ge__(a, b), a.__ixor__(b) is a, len(a)]\n"
+    "print(sd())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

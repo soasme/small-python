@@ -24415,6 +24415,7 @@ static NO_INLINE SPYValue *check_method(SPYContext *c, SPYValue *callee, SPYValu
 static SPYValue *format_job(SPYContext *, Machine *, SPYValue *, int, size_t, SPYValue **, SPYValue *, SPYValue **);
 static SPYValue *format_function(SPYContext *, SPYValue *);
 static SPYValue *slot_call(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int set_slot(SPYValue *, int *, int *);
 static SPYValue *str_format_map(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 /* Whether a call of callee, method number method of it or -1, with argc
  * arguments argv, at most 8, is str.format (1) or str.format_map (2) of
@@ -24579,7 +24580,7 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
     spy_release(callee);
     return result;
 }
-static SPYValue *set_walk_call(SPYValue *, size_t, SPYValue *const *, int *);
+static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, int *, int *, SPYValue **);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
 static unsigned index_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
@@ -25079,7 +25080,7 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                                                        /* round() with ndigits (conversion_method) */
                                                        ((argv[0]->type == SPY_INSTANCE || metaclassed(argv[0])) && is_builtin(callee, B_ROUND)) ||
                                                        /* a set method given its set (set_call) */
-                                                       (is_set(argv[1]) && callee->as.native.kwcall == set_method) ||
+                                                       (is_set(argv[1]) && (callee->as.native.kwcall == set_method || callee->as.native.kwcall == slot_call)) ||
                                                        (argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
@@ -25297,8 +25298,9 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         m->len -= argc + 1;
         return builtin_call(c, m, n, callee, argc, args, env);
     }
-    int op;
-    if (calls && argc && argc <= 2 && is_set(argv[argc - 1]) && set_walk_call(callee, argc, argv, &op)) {
+    int op, inplace;
+    SPYValue *y;
+    if (calls && argc && argc <= 2 && is_set(argv[argc - 1]) && set_walk_call(c, callee, argc, argv, &op, &inplace, &y)) {
         /* A set method walking another set (set_call) takes them from the stack. */
         SPYValue *held[2];
         memcpy(held, argv, argc * sizeof(*argv));
@@ -25373,8 +25375,9 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         spy_release(callee);
         return NULL;
     }
-    int id;
-    if (callee && calls && method < 0 && argc + !skip <= 2 && is_set(m->stack[m->len - 1]) && set_walk_call(callee, argc + !skip, argv + skip, &id)) {
+    int id, inplace;
+    SPYValue *y;
+    if (callee && calls && method < 0 && argc + !skip <= 2 && is_set(m->stack[m->len - 1]) && set_walk_call(c, callee, argc + !skip, argv + skip, &id, &inplace, &y)) {
         /* A set method walking another set (set_call) takes them from the stack. */
         SPYValue *held[3];
         memcpy(held, argv, (argc + 1) * sizeof(*argv));
@@ -26554,17 +26557,31 @@ static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue 
 }
 /* Whether a call of callee on argc arguments argv is a set's union,
  * intersection, difference or symmetric_difference, one of their updates,
- * issubset, issuperset or isdisjoint of one other set, bound or given the set first,
- * whose lookups may call a Python __eq__ as its operator's do
- * (set_walks): the set, borrowed, its operator in *op; else NULL. */
-static SPYValue *set_walk_call(SPYValue *callee, size_t argc, SPYValue *const *argv, int *op) {
+ * issubset, issuperset or isdisjoint of one other set, or a set's operator,
+ * reflected operator, in-place operator or comparison method of one,
+ * bound or given the set first, whose lookups may call a Python __eq__ as
+ * its operator's do (set_walks): the walk's first operand, borrowed, the
+ * second in *y, its operator in *op, its inplace (set_walk) in *inplace;
+ * else NULL. */
+static SPYValue *set_walk_call(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, int *op, int *inplace, SPYValue **y) {
     static const int tokens[] = {'|', '&', '-', '^', '|', '&', '-', '^', T_LE, T_GE, SET_DISJOINT};
     SPYValue *function = callee, *self = argc == 2 ? argv[0] : NULL;
     if (callee->type == SPY_METHOD) { function = callee->as.method.function; self = argc == 1 ? callee->as.method.self : NULL; }
-    if (!self || function->type != SPY_NATIVE || function->as.native.kwcall != set_method) return NULL;
-    intptr_t data = (intptr_t)function->as.native.data;
-    *op = tokens[data & 255];
-    return *op && self->type == (int)(data >> 8) && set_walks(*op, self, argv[argc - 1]) ? self : NULL;
+    if (!self || function->type != SPY_NATIVE) return NULL;
+    SPYValue *x = self;
+    *y = argv[argc - 1];
+    if (function->as.native.kwcall == set_method) {
+        intptr_t data = (intptr_t)function->as.native.data;
+        *op = tokens[data & 255];
+        *inplace = (data & 255) >= 4 && (data & 255) < 8 ? 2 : 0;
+        if (self->type != (int)(data >> 8)) return NULL;
+    } else {
+        int reflected;
+        if (function->as.native.kwcall != slot_call || !is_set(self) || function->as.native.owner != c->types[self->type] ||
+            !(*op = set_slot(function, inplace, &reflected))) return NULL;
+        if (reflected) { x = *y; *y = self; }
+    }
+    return set_walks(*op, x, *y) ? x : NULL;
 }
 /* A call of callee on argc arguments argv that walks two sets
  * (set_walk_call), taking callee and the arguments: its first Python
@@ -26572,11 +26589,10 @@ static SPYValue *set_walk_call(SPYValue *callee, size_t argc, SPYValue *const *a
  * walk under it, a placeholder for its value; else the call's value;
  * c->unbound, taking nothing, when it is no such call. */
 static NO_INLINE SPYValue *set_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
-    int op;
-    SPYValue *self = set_walk_call(callee, argc, argv, &op);
-    if (!self) return c->unbound;
-    int which = (int)((intptr_t)(callee->type == SPY_METHOD ? callee->as.method.function : callee)->as.native.data & 255);
-    SPYValue *function = set_walk(c, m, op, self, argv[argc - 1], which >= 4 && which < 8 ? 2 : 0, env);
+    int op, inplace;
+    SPYValue *y, *x = set_walk_call(c, callee, argc, argv, &op, &inplace, &y);
+    if (!x) return c->unbound;
+    SPYValue *function = set_walk(c, m, op, x, y, inplace, env);
     release_all(argc, argv); spy_release(callee);
     if (!function) return c->error_type[0] ? NULL : looked(c);
     c->entering_init = function; c->entering_kind = CALL_OPERATOR;
@@ -36555,6 +36571,17 @@ static int builtin_type_id(SPYContext *c, SPYValue *cls) {
 static int slot_index(const char *name) {
     for (size_t i = 0; i < sizeof(slots) / sizeof(*slots); i++) if (!strcmp(slots[i].name, name)) return (int)i;
     return -1;
+}
+/* The set walk's operator (set_walk_call) of builtin method function
+ * when it is an operator, reflected operator (*reflected), in-place
+ * operator (*inplace) or comparison method: its token; else 0. */
+static int set_slot(SPYValue *function, int *inplace, int *reflected) {
+    static const int rich[] = {'<', T_LE, T_EQ, T_NE, '>', T_GE};
+    int index = slot_index(function->as.native.name->as.string.data), kind = index < 0 ? -1 : slots[index].kind;
+    *inplace = kind == SLOT_INPLACE;
+    *reflected = kind == SLOT_RBINARY;
+    return kind == SLOT_COMPARE ? rich[slots[index].op] : *inplace ? operators[slots[index].op - T_ADDEQ].token :
+           kind == SLOT_BINARY || *reflected ? slots[index].op : 0;
 }
 /* Whether a builtin operation of the owner type handles this operand. */
 /* str, bytes and bytearray __mod__ format with self as the template, and

@@ -1626,6 +1626,11 @@ int main(int argc, char **argv) {
                "def unioned():\n    s = {Slow()}\n    return len(s.union([Slow(), Slow()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "unioned()", "unioned.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So do a set's operator, in-place and comparison methods called by name. */
+    execute(c, "def dunders():\n    s = {Slow()}\n    t = {Slow()}\n    s.__ior__(t)\n"
+               "    return len(s.__and__(t)) + len(t.__rsub__(s)) + s.__eq__({Slow(), Slow()}) + set.__le__(t, s)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "dunders()", "dunders.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 3);
     /* So do the __bases__ reads of an abstract issubclass. */
     execute(c, "class Abstract:\n    def __init__(self, b): self.b = b\n"
                "    @property\n    def __bases__(self):\n        for i in range(3000): pass\n        return self.b\n"
