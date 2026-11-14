@@ -1731,6 +1731,12 @@ int main(int argc, char **argv) {
     assert(integer(c, run_paused(c, spy_eval(c, "listed()", "listed.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 2);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "percented()", "percented.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So does str.format of a conversion's Python __repr__ or __str__. */
+    execute(c, "class Shown:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
+               "    __str__ = __repr__\n"
+               "def shown():\n    return len('{!r}{!s:>3}{!a}'.format(Shown(), Shown(), Shown()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");

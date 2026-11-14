@@ -475,6 +475,16 @@ static const char *const programs[] = {
     "    return r\n"
     "print(pn())\n",
 
+    "class FC:\n"
+    "    def __repr__(self): return '\\xe9'\n"
+    "    def __str__(self): return 3\n"
+    "def fc():\n"
+    "    r = ['{0!r}|{0!a:>4}|{x!r:.1}'.format(FC(), x=FC())]\n"
+    "    try: '{!s}'.format(FC())\n"
+    "    except TypeError as e: r.append(e)\n"
+    "    return r\n"
+    "print(fc())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"

@@ -136,7 +136,8 @@ Cases == {"str_align", "str_precision", "str_equal_align", "str_sign", "str_type
           "str_format_negative_index", "str_format_conversion_then_spec", "str_format_example_align",
           "str_format_example_bases", "str_format_example_prefix", "str_format_example_percent",
           "str_format_example_comma", "str_format_example_nesting", "str_format_example_items",
-          "str_format_extra_args", "format_map_missing", "fstring_format_spec", "format_builtin_default"}
+          "str_format_extra_args", "format_map_missing", "fstring_format_spec", "format_builtin_default",
+          "str_format_conversion_spec", "str_format_conversion_str_raises", "str_format_conversion_bad_repr"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 1234567}, align : {"", "<", ">", "^", "=", "*^"}, sign : Signs,
              alt : {"", "#"}, zero : {"", "0"}, width : {0, 9}, group : Groups, type : {"", "d", "b", "x", "X", "o"}]
             \cup [kind : {"float"}, num : {0, 20, -1, 9875, 4}, align : {"", "<", "^", "="}, sign : Signs,
@@ -223,6 +224,9 @@ Case(c) ==
       [] c = "format_map_missing" -> "KeyError: 'a'"
       [] c = "fstring_format_spec" -> "\"  3.14| 'x' \""
       [] c = "format_builtin_default" -> "('5', 'a', 'None')"
+      [] c = "str_format_conversion_spec" -> "'  P()|*p*|\\\\xe9|\\xe9u'"
+      [] c = "str_format_conversion_str_raises" -> "LookupError: u"
+      [] c = "str_format_conversion_bad_repr" -> "TypeError: BadRepr.__repr__() must return a str, not int"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

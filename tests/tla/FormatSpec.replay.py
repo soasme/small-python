@@ -11,6 +11,11 @@ class P:
     def __str__(self): return 'p'
 class BadFormat:
     def __format__(self, spec): return 5
+class U:
+    def __repr__(self): return '\xe9u'
+    def __str__(self): raise LookupError('u')
+class BadRepr:
+    def __repr__(self): return 3
 
 SOURCES = {
     "str_align": "result = (format('ab', '<5'), format('ab', '>5'), format('ab', '^5'), format('ab', '*^6'), format('ab', '5'))",
@@ -83,7 +88,10 @@ SOURCES = {
     "str_format_extra_args": "result = '{0}'.format(1, 2, x=3)",
     "format_map_missing": "result = '{a}'.format_map({})",
     "fstring_format_spec": 'w = 6\nresult = f\'{3.14159:{w}.2f}|{"x"!r:^5}\'',
-    "format_builtin_default": "result = (format(5), format('a'), format(None))"
+    "format_builtin_default": "result = (format(5), format('a'), format(None))",
+    "str_format_conversion_spec": "result = '{0!r:>5}|{0!s:*^3}|{1!a:.4}|{1!r}'.format(P(), U())",
+    "str_format_conversion_str_raises": "result = '{!s}'.format(U())",
+    "str_format_conversion_bad_repr": "result = '{k!r}'.format_map({'k': BadRepr()})"
 }
 
 
