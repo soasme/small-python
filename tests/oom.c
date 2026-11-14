@@ -412,6 +412,15 @@ static const char *const programs[] = {
     "B = TM('B', (TH,), {'y': TN()}, j=2)\n"
     "print(A.n, A.kw, B.n, B.kw, type.__new__(TM, 'C', (), {'z': TN()}).n)\n",
 
+    "class SP(property): pass\n"
+    "class SG:\n"
+    "    @SP\n"
+    "    def v(self): return 'v'\n"
+    "    @SP\n"
+    "    def w(self): raise AttributeError('w')\n"
+    "    def __getattr__(self, name): return name * 2\n"
+    "print(SG().v, SG().w, getattr(SG(), 'v'), super(SP, SG.__dict__['v']).__get__(SG()))\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

@@ -13,6 +13,7 @@
 (*                removes it from there                                    *)
 (*     property   a property with only a getter, returning 'pget'          *)
 (*     raising    a property with only a getter, raising AttributeError    *)
+(*     subproperty, subraising   the same of a subclass of property       *)
 (*     slot       __slots__ = ('a',)                                       *)
 (*                                                                         *)
 (* with or without a __getattr__ returning 'ga', and with no Python       *)
@@ -23,7 +24,9 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Kinds == {"none", "value", "nondata", "data", "property", "raising", "slot"}
+Kinds == {"none", "value", "nondata", "data", "property", "raising", "subproperty", "subraising", "slot"}
+\* A property, or an instance of a subclass, with only a getter.
+Getters == {"property", "raising", "subproperty", "subraising"}
 Values == {"v1", "v2"}
 Missing == "missing"
 
@@ -32,15 +35,15 @@ Hooks == {"none", "pass", "refuse"}
 VARIABLES kind, getattr, hook, stored, op, result
 vars == <<kind, getattr, hook, stored, op, result>>
 
-DataDescriptor == kind \in {"data", "property", "raising", "slot"}
+DataDescriptor == kind \in {"data", "slot"} \cup Getters
 
 \* o.a: a data descriptor wins over the instance, which wins over the rest
 \* of the class; failing that, on a getter's AttributeError, or when the
 \* class's __getattribute__ refuses, __getattr__.
 Lookup ==
     CASE kind = "data" -> "dget"
-      [] kind = "property" -> "pget"
-      [] kind = "raising" -> Missing
+      [] kind \in {"property", "subproperty"} -> "pget"
+      [] kind \in {"raising", "subraising"} -> Missing
       [] stored # Missing -> stored
       [] kind = "nondata" -> "nget"
       [] kind = "value" -> "cls"
@@ -51,14 +54,14 @@ Get == /\ op' = "get"
 
 \* o.a = v: a data descriptor's __set__, otherwise the instance's __dict__.
 Set(v) == /\ op' = "set " \o v
-          /\ IF kind \in {"property", "raising"}
+          /\ IF kind \in Getters
              THEN result' = "AttributeError" /\ UNCHANGED stored
              ELSE result' = "ok" /\ stored' = v
           /\ UNCHANGED <<kind, getattr, hook>>
 
 \* del o.a: a data descriptor's __delete__, otherwise the instance's own.
 Del == /\ op' = "del"
-       /\ CASE kind \in {"property", "raising"} -> result' = "AttributeError" /\ UNCHANGED stored
+       /\ CASE kind \in Getters -> result' = "AttributeError" /\ UNCHANGED stored
             [] kind = "data" -> result' = "ok" /\ stored' = Missing
             [] stored # Missing -> result' = "ok" /\ stored' = Missing
             [] OTHER -> result' = "AttributeError" /\ UNCHANGED stored
@@ -73,15 +76,15 @@ TypeOK == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ stored \in 
 
 \* A data descriptor's __get__ answers whatever the instance holds, unless
 \* __getattribute__ refuses before it.
-DescriptorWins == op = "get" /\ kind \in {"data", "property"} /\ hook # "refuse" => result \in {"dget", "pget"}
+DescriptorWins == op = "get" /\ kind \in {"data", "property", "subproperty"} /\ hook # "refuse" => result \in {"dget", "pget"}
 
 \* What is set is what is got, unless a data descriptor intervenes.
-SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data", "property", "raising"}) /\ hook # "refuse" /\ op' = "get"
+SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in {"data"} \cup Getters) /\ hook # "refuse" /\ op' = "get"
                  => result' = stored]_vars
 
 \* __getattr__ is only consulted when lookup fails, so o.a never fails with it.
 GetattrFallback == op = "get" /\ getattr => result # "AttributeError"
 
 \* A read-only property cannot change.
-ReadOnly == kind \in {"property", "raising"} => stored = Missing
+ReadOnly == kind \in Getters => stored = Missing
 =============================================================================

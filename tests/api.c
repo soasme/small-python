@@ -1686,6 +1686,12 @@ int main(int argc, char **argv) {
                "def made():\n    A = type('A', (Hooked,), {'a': Named(), 'b': Named()}, k=1)\n    B = Made('B', (Hooked,), {'a': Named()})\n    return A.seen + B.seen\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "made()", "made.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 4);
+    /* So does the getter of a property subclass's instance. */
+    execute(c, "class Sub(property): pass\n"
+               "class Got:\n    @Sub\n    def v(self):\n        for i in range(3000): pass\n        return 3\n"
+               "def got():\n    g = Got()\n    return g.v + getattr(g, 'v')\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "got()", "got.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 1);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

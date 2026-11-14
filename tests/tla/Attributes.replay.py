@@ -21,6 +21,10 @@ class Data:
         object.__getattribute__(obj, "__dict__").pop("a", None)
 
 
+class SubProperty(property):
+    pass
+
+
 def refuse(self):
     raise AttributeError("refused")
 
@@ -45,6 +49,10 @@ def make(kind, getattr, hook):
         namespace["a"] = property(lambda self: "pget")
     elif kind == "raising":
         namespace["a"] = property(refuse)
+    elif kind == "subproperty":
+        namespace["a"] = SubProperty(lambda self: "pget")
+    elif kind == "subraising":
+        namespace["a"] = SubProperty(refuse)
     elif kind == "slot":
         namespace["__slots__"] = ("a",)
     if getattr:

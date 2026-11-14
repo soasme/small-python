@@ -12304,6 +12304,11 @@ static SPYValue *instance_getter(SPYContext *c, SPYValue *v, SPYValue *owner, co
     SPYValue *kind = descriptor && descriptor->type == SPY_INSTANCE && descriptor->ctx == c && plain_mro(c, owner) ? descriptor->as.map.parent : NULL;
     SPYValue *get = kind ? class_lookup(kind, "__get__") : NULL;
     int data = 0;
+    /* A property subclass's inherited __get__ calls its property's getter. */
+    if (get && get == name_local(c->types[SPY_PROPERTY], "__get__")) {
+        descriptor = builtin_value(c, descriptor, SPY_PROPERTY);
+        return machine_function(c, descriptor->as.property.get) ? spy_retain(descriptor) : NULL;
+    }
     if (!get || !machine_function(c, get) || !((data = class_lookup(kind, "__set__") || class_lookup(kind, "__delete__")) || !name_local(v, name)))
         return NULL;
     /* The search may delete the descriptor. */
