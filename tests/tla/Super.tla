@@ -18,6 +18,9 @@
 (*                                                                         *)
 (* and the program calls X().m() for one of the classes X. The outcome is  *)
 (* the log, and AttributeError if a lookup found no m (object has none).   *)
+(* The method may instead be named __get__, called with None, each super   *)
+(* call passing self: a super object finds a class's __get__ before its    *)
+(* own, which answers when no class after the start has one.               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -25,7 +28,7 @@ Classes == {"A", "B", "C", "D"}
 Kinds == {"none", "stop", "super"}
 MRO(x) == CASE x = "A" -> <<"A">> [] x = "B" -> <<"B", "A">> [] x = "C" -> <<"C", "A">>
              [] x = "D" -> <<"D", "B", "C", "A">>
-Programs == [kind : [Classes -> Kinds], call : Classes]
+Programs == [kind : [Classes -> Kinds], call : Classes, name : {"m", "__get__"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -36,12 +39,12 @@ Call(p) ==
     LET mro == MRO(p.call)
         \* m as found from position i of the MRO on (the receiver's class
         \* is position 1; super() in mro[j] starts at j + 1).
-        RECURSIVE From(_)
-        From(i) == IF i > Len(mro) THEN <<<<>>, "AttributeError">>
-                   ELSE IF p.kind[mro[i]] = "none" THEN From(i + 1)
+        RECURSIVE From(_, _)
+        From(i, viaSuper) == IF i > Len(mro) THEN <<<<>>, IF viaSuper /\ p.name = "__get__" THEN "ok" ELSE "AttributeError">>
+                   ELSE IF p.kind[mro[i]] = "none" THEN From(i + 1, viaSuper)
                    ELSE IF p.kind[mro[i]] = "stop" THEN <<<<mro[i]>>, "ok">>
-                   ELSE LET rest == From(i + 1) IN <<<<mro[i]>> \o rest[1], rest[2]>>
-    IN  From(1)
+                   ELSE LET rest == From(i + 1, TRUE) IN <<<<mro[i]>> \o rest[1], rest[2]>>
+    IN  From(1, FALSE)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Call(program) /\ UNCHANGED program
@@ -60,7 +63,7 @@ InMROOrder == Done => \A i, j \in DOMAIN Log : i < j => Index(MRO(program.call),
 AtMostOnce == Done => \A i, j \in DOMAIN Log : i # j => Log[i] # Log[j]
 
 \* When every class cooperates, every class's method runs, then lookup
-\* fails at object.
+\* fails at object, or the super object's own __get__ answers.
 AllCooperate == Done /\ (\A c \in Classes : program.kind[c] = "super") =>
-    Log = MRO(program.call) /\ outcome[2] = "AttributeError"
+    Log = MRO(program.call) /\ outcome[2] = IF program.name = "m" THEN "AttributeError" ELSE "ok"
 =============================================================================

@@ -1,5 +1,5 @@
-# Replays Super.tla: each case defines the spec's diamond, calls m on an
-# instance, and compares the log with the model's.
+# Replays Super.tla: each case defines the spec's diamond, calls m or
+# __get__ on an instance, and compares the log with the model's.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -14,11 +14,11 @@ def outcome(p):
         if kind == "none":
             lines.append("    pass")
         else:
-            lines.append("    def m(self):")
+            lines.append("    def %s(self, *args):" % p["name"])
             lines.append("        log.append(%r)" % c)
             if kind == "super":
-                lines.append("        super().m()")
-    lines.append("%s().m()" % p["call"])
+                lines.append("        super().%s(%s)" % (p["name"], "self" if p["name"] == "__get__" else ""))
+    lines.append("%s().%s(%s)" % (p["call"], p["name"], "None" if p["name"] == "__get__" else ""))
     log = []
     try:
         exec("\n".join(lines) + "\n", {"log": log})

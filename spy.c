@@ -11660,10 +11660,7 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         if (!strcmp(name, "format_spec")) return spy_retain(v->as.interpolation.format_spec);
     }
     if (v->type == SPY_SUPER) {
-        if (!strcmp(name, "__get__")) return bound_method(c, v, M_SUPER_GET, name);
-        if (!strcmp(name, "__thisclass__")) return spy_retain(v->as.super.type);
-        if (!strcmp(name, "__self__")) return spy_retain(v->as.super.self ? v->as.super.self : c->none);
-        if (!strcmp(name, "__self_class__")) return spy_retain(v->as.super.owner ? v->as.super.owner : c->none);
+        /* The classes after the type come before super's own attributes. */
         SPYValue *mro = v->as.super.owner ? v->as.super.owner->as.map.mro : NULL;
         SPYValue *definition = NULL;
         size_t i = 0;
@@ -11686,6 +11683,10 @@ static SPYValue *attribute_value(SPYContext *c, SPYValue *v, const char *name) {
         }
         if (definition) return descriptor_get(c, definition,
             v->as.super.self == v->as.super.owner ? NULL : v->as.super.self, v->as.super.owner);
+        if (!strcmp(name, "__get__")) return bound_method(c, v, M_SUPER_GET, name);
+        if (!strcmp(name, "__thisclass__")) return spy_retain(v->as.super.type);
+        if (!strcmp(name, "__self__")) return spy_retain(v->as.super.self ? v->as.super.self : c->none);
+        if (!strcmp(name, "__self_class__")) return spy_retain(v->as.super.owner ? v->as.super.owner : c->none);
         return errorf(c, "AttributeError", "'super' object has no attribute '%s'", name);
     }
     if (v->type != SPY_INSTANCE && v->type != SPY_CLASS && (!strcmp(name, "__hash__") || !strcmp(name, "__round__"))) {
