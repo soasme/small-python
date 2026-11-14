@@ -14,7 +14,11 @@
 (*     frozenset, and one of  a | b, a & b, a - b, a ^ b, a <= b, a < b,   *)
 (*     a >= b, a > b, a == b, a.isdisjoint(b), a <= b <= a, a |= b,        *)
 (*     a &= b, a -= b, a ^= b, a.add(2), a.discard(2), a.remove(2),        *)
-(*     hash(a), a.add([]),                                                 *)
+(*     hash(a), a.add([]), the methods union, intersection, difference,    *)
+(*     symmetric_difference, issubset and issuperset of b, and update,     *)
+(*     intersection_update, difference_update and                          *)
+(*     symmetric_difference_update of b, which change a set in place and   *)
+(*     return None,                                                        *)
 (*     where with eq each element is an object hashing as its value whose  *)
 (*     Python __eq__ compares values, which changes no outcome; or         *)
 (*   - set(<items>) of up to three of 1, 1.0, True, 2; or                  *)
@@ -24,7 +28,11 @@
 (*     raising ValueError, or both of value 1, the second found equal by   *)
 (*     the first's Python __eq__ (which loops), logging "e" and its value; *)
 (*     a generator logs "y" and the value before each item; with tuple,    *)
-(*     each object is the first item of a pair (object, 0).                *)
+(*     each object is the first item of a pair (object, 0); or             *)
+(*   - set(src), frozenset(src), {*src}, set().union(src), an empty set's  *)
+(*     update(src) or |= src, of a set src of three objects of one hash    *)
+(*     whose Python __eq__ logs "e": merged into an empty set, the         *)
+(*     distinct elements are compared with none (Annex D).                 *)
 (*                                                                         *)
 (* The outcome is a's type and elements afterwards (or the result's, for   *)
 (* an operator), the bool, or the exception; for the hashed builds, the    *)
@@ -35,13 +43,16 @@ EXTENDS Integers, Sequences, FiniteSets
 
 Kinds == {"set", "frozenset"}
 Elements == SUBSET {0, 1, 2}
-Binary == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "isdisjoint", "<= <="}
-Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list"}
+Methods == {"union", "intersection", "difference", "symmetric_difference"}
+Updates == {"update", "intersection_update", "difference_update", "symmetric_difference_update"}
+Binary == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "isdisjoint", "<= <=", "issubset", "issuperset"} \cup Methods
+Mutate == {"|=", "&=", "-=", "^=", "add", "discard", "remove", "hash", "add list"} \cup Updates
 Numbers == {"1", "1.0", "True", "2"}
 Programs == [ka : Kinds, a : Elements, op : Binary \cup Mutate, kb : Kinds, b : Elements, eq : BOOLEAN]
             \cup [op : {"build"}, items : UNION {[1..n -> Numbers] : n \in 0..3}]
             \cup [op : {"hashed"}, form : {"set", "frozenset", "star", "update"}, source : {"list", "generator"},
                   fails : {"no", "TypeError", "ValueError", "equal"}, tuple : BOOLEAN]
+            \cup [op : {"merge"}, form : {"set", "frozenset", "star", "union", "update", "|="}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -50,8 +61,10 @@ Pending == <<"pending", "", {}>>
 Error(name) == <<name, "", {}>>
 Bool(b) == <<"bool", IF b THEN "True" ELSE "False", {}>>
 
-Combine(op, a, b) == CASE op \in {"|", "|="} -> a \cup b [] op \in {"&", "&="} -> a \cap b
-                       [] op \in {"-", "-="} -> a \ b [] op \in {"^", "^="} -> (a \ b) \cup (b \ a)
+Combine(op, a, b) == CASE op \in {"|", "|=", "union", "update"} -> a \cup b
+                       [] op \in {"&", "&=", "intersection", "intersection_update"} -> a \cap b
+                       [] op \in {"-", "-=", "difference", "difference_update"} -> a \ b
+                       [] op \in {"^", "^=", "symmetric_difference", "symmetric_difference_update"} -> (a \ b) \cup (b \ a)
 
 \* The numbers that set() keeps: the first of each equal value, as spelled.
 RECURSIVE Keep(_, _)
@@ -77,18 +90,20 @@ RunHashed(p) ==
 Run(p) ==
     IF p.op = "build" THEN <<"set", "", Keep(p.items, {})>>
     ELSE IF p.op = "hashed" THEN RunHashed(p)
+    ELSE IF p.op = "merge" THEN <<IF p.form = "frozenset" THEN "frozenset" ELSE "set", "", {0, 1, 2}>>
     ELSE LET a == p.a  b == p.b
-         IN  CASE p.op \in {"|", "&", "-", "^"} -> <<p.ka, "", Combine(p.op, a, b)>>
-               [] p.op = "<=" -> Bool(a \subseteq b)
+         IN  CASE p.op \in {"|", "&", "-", "^"} \cup Methods -> <<p.ka, "", Combine(p.op, a, b)>>
+               [] p.op \in {"<=", "issubset"} -> Bool(a \subseteq b)
                [] p.op = "<" -> Bool(a \subseteq b /\ a # b)
-               [] p.op = ">=" -> Bool(b \subseteq a)
+               [] p.op \in {">=", "issuperset"} -> Bool(b \subseteq a)
                [] p.op = ">" -> Bool(b \subseteq a /\ a # b)
                [] p.op = "==" -> Bool(a = b)
                [] p.op = "isdisjoint" -> Bool(a \cap b = {})
                [] p.op = "<= <=" -> Bool(a = b)                         \* a chain's links
                \* A set is changed in place; a frozenset name is rebound to a new one.
                [] p.op \in {"|=", "&=", "-=", "^="} -> <<p.ka, "", Combine(p.op, a, b)>>
-               [] p.ka = "frozenset" /\ p.op \in {"add", "discard", "remove", "add list"} -> Error("AttributeError")
+               [] p.ka = "frozenset" /\ p.op \in {"add", "discard", "remove", "add list"} \cup Updates -> Error("AttributeError")
+               [] p.op \in Updates -> <<"set", "", Combine(p.op, a, b)>>
                [] p.op = "add" -> <<"set", "", a \cup {2}>>
                [] p.op = "discard" -> <<"set", "", a \ {2}>>
                [] p.op = "remove" -> IF 2 \in a THEN <<"set", "", a \ {2}>> ELSE Error("KeyError")

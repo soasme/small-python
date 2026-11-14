@@ -24342,6 +24342,8 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
     spy_release(callee);
     return result;
 }
+static SPYValue *set_walk_call(SPYValue *, size_t, SPYValue *const *, int *);
+static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
@@ -24401,6 +24403,9 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(argv[0]); spy_release(callee);
         return result;
     }
+    /* A set method walking another set (set_call). */
+    if (method < 0 && argc && argc <= 2 && is_set(argv[argc - 1]) && (result = set_call(c, m, callee, argc, argv, env)) != c->unbound)
+        return result;
     if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
                  (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
@@ -24543,6 +24548,8 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
                                                        (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||
                                         (argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta) ||
+                                                       /* a set method given its set (set_call) */
+                                                       (is_set(argv[1]) && callee->as.native.kwcall == set_method) ||
                                                        (argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
@@ -24751,6 +24758,14 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         m->len -= argc + 1;
         return builtin_call(c, m, n, callee, argc, args, env);
     }
+    int op;
+    if (calls && argc && argc <= 2 && is_set(argv[argc - 1]) && set_walk_call(callee, argc, argv, &op)) {
+        /* A set method walking another set (set_call) takes them from the stack. */
+        SPYValue *held[2];
+        memcpy(held, argv, argc * sizeof(*argv));
+        m->len -= argc + 1;
+        return set_call(c, m, callee, argc, held, env);
+    }
     SPYValue *key;
     if (calls && may_hash(callee, -1, argc, argv) && hashing_call(c, callee, -1, argc, argv, &key)) {
         /* The callee and arguments leave the stack for the key's __hash__ (hash_call_step). */
@@ -24820,6 +24835,14 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         return NULL;
     }
     int id;
+    if (callee && calls && method < 0 && argc + !skip <= 2 && is_set(m->stack[m->len - 1]) && set_walk_call(callee, argc + !skip, argv + skip, &id)) {
+        /* A set method walking another set (set_call) takes them from the stack. */
+        SPYValue *held[3];
+        memcpy(held, argv, (argc + 1) * sizeof(*argv));
+        m->len -= argc + 1;
+        if (skip) spy_release(held[0]);
+        return set_call(c, m, callee, argc + !skip, held + skip, env);
+    }
     SPYValue *seq = callee && calls ? searched(callee, method, argc, &id) : NULL;
     if (seq) {
         /* index, count or remove of a list or tuple (search_call). */
@@ -25806,6 +25829,9 @@ static int dict_walks(SPYValue *x, SPYValue *y, size_t at) {
     for (size_t i = at; i < x->as.map.len; i++) if (eq_reaches(map_items(x)[i].key)) return 1;
     return 0;
 }
+/* A set walk's op for an update method, which returns None, and for
+ * isdisjoint (set_call). */
+enum { SET_UPDATING = 1 << 16, SET_DISJOINT = 1 << 17 };
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
  * instance with one, or a tuple holding one (eq_reaches), and their
@@ -25814,8 +25840,10 @@ static int dict_walks(SPYValue *x, SPYValue *y, size_t at) {
 static int set_walks(int op, SPYValue *x, SPYValue *y) {
     int rich = rich_kind(op);
     if (x->type == SPY_DICT) return (rich == R_EQ || rich == R_NE) && dict_walks(x, y, 0);
-    if ((rich < 0 && op != '|' && op != '&' && op != '-' && op != '^') || !is_set(x) || !is_set(y)) return 0;
+    if ((rich < 0 && op != '|' && op != '&' && op != '-' && op != '^' && op != SET_DISJOINT) || !is_set(x) || !is_set(y)) return 0;
     size_t a = x->as.map.len, b = y->as.map.len;
+    /* A union with an empty set copies the other (set_combine). */
+    if (op == '|' && !a) return 0;
     if (rich == R_EQ || rich == R_NE ? a != b : rich == R_LT ? a >= b : rich == R_LE ? a > b : rich == R_GT ? b >= a : rich == R_GE && b > a)
         return 0;
     for (size_t i = 0; i < x->as.map.len + y->as.map.len; i++) {
@@ -25835,9 +25863,13 @@ static void walk_unequal(SPYContext *c, Machine *m);
  * NULL, the walk going on with the next entry. */
 static SPYValue *walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found, SPYValue **env) {
     SPYValue **state = &m->stack[m->len - 7], *result = state[0];
-    int op = (int)state[4]->as.integer_data.small;
+    int op = (int)state[4]->as.integer_data.small & ~SET_UPDATING;
     SPYValue *index = int_value(c, state[3]->as.integer_data.small + 1);
     if (index) { spy_release(state[3]); state[3] = index; }
+    if (op == SET_DISJOINT) {
+        if (found >= 0) walk_unequal(c, m);
+        return NULL;
+    }
     if (rich_kind(op) < 0) {
         if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
         else if (op == '^') set_remove_at(result, (size_t)found);
@@ -25856,8 +25888,8 @@ static SPYValue *walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t h
     spy_release(right);
     return function;
 }
-/* The comparison atop m (set_walk) found an entry missing or unequal:
- * its result is the inequality, and the walk ends. */
+/* The comparison atop m (set_walk) found an entry missing or unequal, or
+ * isdisjoint one common: its result is the inequality, and the walk ends. */
 static void walk_unequal(SPYContext *c, Machine *m) {
     SPYValue **state = &m->stack[m->len - 7], *index = int_value(c, (int64_t)state[1]->as.map.len);
     spy_release(state[0]); state[0] = spy_bool(c, state[4]->as.integer_data.small == T_NE);
@@ -25883,13 +25915,14 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     }
     spy_release(machine_pop(m));
     SPYValue *target = machine_pop(m);
-    int compares = rich_kind((int)m->stack[m->len - 1]->as.integer_data.small) >= 0;
+    int op = (int)m->stack[m->len - 1]->as.integer_data.small, compares = rich_kind(op) >= 0 || op == SET_DISJOINT;
     for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
     if (!c->error_type[0] && !compares && target != c->none) {
         swap_contents(target, result);
         spy_release(result);
-        result = target;
+        result = op & SET_UPDATING ? spy_none(c) : target;
+        if (op & SET_UPDATING) spy_release(target);
     } else spy_release(target);
     if (c->error_type[0]) spy_release(result);
     else c->looked = result;
@@ -25899,22 +25932,57 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
  * m as set_combine does: x's copy, given y's entries for | and ^, or x's
  * entries kept for & and -, each looked up in the other, on the machine;
  * an augmented assignment to a set (inplace) then swaps it into x. A
- * comparison's is whether each entry of the subset side is in the other.
+ * comparison's is whether each entry of the subset side is in the other,
+ * isdisjoint's whether no entry of the smaller is in the other.
+ * An update method (inplace 2) swaps it into x too, its value None.
  * The walk's state, the result, the set walked, the set searched, the
  * next entry's index, op and x or None, goes on m's stack under
  * c->walking, and the walk begins (walk_next). */
 static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue *x, SPYValue *y, int inplace, SPYValue **env) {
     int adds = op == '|' || op == '^', rich = rich_kind(op);
-    SPYValue *result = rich >= 0 ? spy_bool(c, op != T_NE) : adds ? set_copy_type(c, x, x->type) : value_new(c, x->type);
-    SPYValue *walked = adds || rich == R_GT || rich == R_GE ? y : x, *searched = adds ? result : walked == x ? y : x;
+    SPYValue *result = rich >= 0 || op == SET_DISJOINT ? spy_bool(c, op != T_NE) : adds ? set_copy_type(c, x, x->type) : value_new(c, x->type);
+    /* isdisjoint walks the smaller set. */
+    SPYValue *walked = adds || rich == R_GT || rich == R_GE || (op == SET_DISJOINT && x->as.map.len > y->as.map.len) ? y : x;
+    SPYValue *searched = adds ? result : walked == x ? y : x;
     size_t len = m->len;
     if (machine_push(c, m, result) || machine_push(c, m, spy_retain(walked)) || machine_push(c, m, spy_retain(searched)) ||
-        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op)) ||
+        machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op | (inplace == 2 ? SET_UPDATING : 0))) ||
         machine_push(c, m, spy_retain(inplace && x->type == SPY_SET ? x : c->none)) || machine_push(c, m, spy_retain(c->walking))) {
         while (m->len > len) spy_release(machine_pop(m));
         return NULL;
     }
     return walk_next(c, m, env);
+}
+/* Whether a call of callee on argc arguments argv is a set's union,
+ * intersection, difference or symmetric_difference, one of their updates,
+ * issubset, issuperset or isdisjoint of one other set, bound or given the set first,
+ * whose lookups may call a Python __eq__ as its operator's do
+ * (set_walks): the set, borrowed, its operator in *op; else NULL. */
+static SPYValue *set_walk_call(SPYValue *callee, size_t argc, SPYValue *const *argv, int *op) {
+    static const int tokens[] = {'|', '&', '-', '^', '|', '&', '-', '^', T_LE, T_GE, SET_DISJOINT};
+    SPYValue *function = callee, *self = argc == 2 ? argv[0] : NULL;
+    if (callee->type == SPY_METHOD) { function = callee->as.method.function; self = argc == 1 ? callee->as.method.self : NULL; }
+    if (!self || function->type != SPY_NATIVE || function->as.native.kwcall != set_method) return NULL;
+    intptr_t data = (intptr_t)function->as.native.data;
+    *op = tokens[data & 255];
+    return *op && self->type == (int)(data >> 8) && set_walks(*op, self, argv[argc - 1]) ? self : NULL;
+}
+/* A call of callee on argc arguments argv that walks two sets
+ * (set_walk_call), taking callee and the arguments: its first Python
+ * __eq__ entered as c->entering_init (CALL_OPERATOR) with *env, the
+ * walk under it, a placeholder for its value; else the call's value;
+ * c->unbound, taking nothing, when it is no such call. */
+static NO_INLINE SPYValue *set_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
+    int op;
+    SPYValue *self = set_walk_call(callee, argc, argv, &op);
+    if (!self) return c->unbound;
+    int which = (int)((intptr_t)(callee->type == SPY_METHOD ? callee->as.method.function : callee)->as.native.data & 255);
+    SPYValue *function = set_walk(c, m, op, self, argv[argc - 1], which >= 4 && which < 8 ? 2 : 0, env);
+    release_all(argc, argv); spy_release(callee);
+    if (!function) return c->error_type[0] ? NULL : looked(c);
+    c->entering_init = function; c->entering_kind = CALL_OPERATOR;
+    spy_release(function);
+    return spy_retain(c->types[SPY_STRING]);
 }
 /* The walk atop m goes on (walk_next), entering function, owned, with
  * env, or its next Python __eq__, as an operator's call, the call's
@@ -32001,8 +32069,14 @@ static SPYValue *set_copy_type(SPYContext *c, SPYValue *source, int type) {
     }
     return copy;
 }
-/* Combine into result in place. */
+/* Combine into result in place. A set's distinct elements merged into an
+ * empty set are copied, comparing none (Annex D). */
 static int set_combine(SPYContext *c, SPYValue *result, int op, SPYValue *other) {
+    if (op == SET_UNION && !result->as.map.len && is_set(other)) {
+        for (size_t i = 0; i < other->as.map.len; i++)
+            if (map_append(c, result, map_items(other)[i].key, c->none, map_items(other)[i].hash)) return -1;
+        return 0;
+    }
     if (op == SET_UNION || op == SET_SYMMETRIC) {
         /* Comparisons may mutate other: each entry is held while compared. */
         int status = 0;

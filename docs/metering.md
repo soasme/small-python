@@ -436,7 +436,10 @@ These run as machines on the heap, in one native activation of
   a nested tuple's first, the
   same `__eq__` that `|`, `&`, `-` or `^` of two sets or frozensets,
   their augmented assignment, or their comparison, also in a comparison
-  chain, calls when one of their elements is such an instance, and
+  chain, or a set's `union`, `intersection`, `difference`,
+  `symmetric_difference`, their updates, `issubset`, `issuperset` or
+  `isdisjoint` of another set, calls when one of their elements is such
+  an instance, and
   the `__format__` that `str.format`, also called on `str` itself, and
   `str.format_map` of a dict call on each field's object, a nested
   spec's fields first;

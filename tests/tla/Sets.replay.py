@@ -11,7 +11,13 @@ SOURCES = {"|": "r = a | b", "&": "r = a & b", "-": "r = a - b", "^": "r = a ^ b
            ">=": "r = a >= b", ">": "r = a > b", "==": "r = a == b", "isdisjoint": "r = a.isdisjoint(b)", "<= <=": "r = a <= b <= a",
            "|=": "a |= b\nr = a", "&=": "a &= b\nr = a", "-=": "a -= b\nr = a", "^=": "a ^= b\nr = a",
            "add": "a.add(2)\nr = a", "discard": "a.discard(2)\nr = a", "remove": "a.remove(2)\nr = a",
-           "hash": "hash(a)\nr = 'hashable'", "add list": "a.add([])\nr = a"}
+           "hash": "hash(a)\nr = 'hashable'", "add list": "a.add([])\nr = a",
+           "issubset": "r = a.issubset(b)", "issuperset": "r = a.issuperset(b)"}
+for name in ("union", "intersection", "difference", "symmetric_difference"):
+    SOURCES[name] = "r = a.%s(b)" % name
+    SOURCES[name + "_update" if name != "union" else "update"] = "assert a.%s(b) is None\nr = a" % (name + "_update" if name != "union" else "update")
+MERGES = {"set": "r = set(src)", "frozenset": "r = frozenset(src)", "star": "r = {*src}", "union": "r = set().union(src)",
+          "update": "r = set()\nr.update(src)", "|=": "r = set()\nr |= src"}
 
 
 class E:
@@ -58,9 +64,28 @@ def hashed(p):
     return (type(r).__name__, " ".join(log), frozenset(getattr(v[0] if type(v) is tuple else v, "v", v) for v in r))
 
 
+class C:
+    def __init__(self, v, log): self.v, self.log = v, log
+    def __hash__(self): return 0
+    def __eq__(self, other):
+        self.log.append("e")
+        return self is other
+
+
+def merged(p):
+    log = []
+    namespace = {"src": {C(v, log) for v in (0, 1, 2)}}
+    del log[:]
+    exec(MERGES[p["form"]], namespace)
+    r = namespace["r"]
+    return (type(r).__name__, " ".join(log), frozenset(v.v for v in r))
+
+
 def outcome(p):
     if p["op"] == "hashed":
         return hashed(p)
+    if p["op"] == "merge":
+        return merged(p)
     if p["op"] == "build":
         r = set(eval(s) for s in p["items"])
         return ("set", "", frozenset(repr(v) for v in r))
@@ -77,7 +102,7 @@ def outcome(p):
         return ("hashable", "", frozenset())
     if type(r) is bool:
         return ("bool", repr(r), frozenset())
-    if p["op"] in ("|=", "&=", "-=", "^=") and p["ka"] == "set" and r is not a:
+    if (p["op"] in ("|=", "&=", "-=", "^=") or p["op"].endswith("update")) and p["ka"] == "set" and r is not a:
         return ("not in place", "", frozenset())
     return (type(r).__name__, "", frozenset(getattr(v, "v", v) for v in r))
 
