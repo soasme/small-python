@@ -2151,7 +2151,10 @@ static int truthy(SPYValue *v) {
         SPYContext *c = v->ctx;
         SPYValue *base = builtin_base(c, v, "__bool__", "__len__");
         if (base) return truthy(base);
-        SPYValue *method = special_method_maybe(c, v, "__bool__");
+        SPYValue *method = special_method_maybe(c, v, "__bool__"), *number = v->type == SPY_INSTANCE ? v->as.map.base : NULL;
+        /* A builtin number's own truth comes before a Python __len__. */
+        if (!method && number && (number->type == SPY_INT || number->type == SPY_BOOL || number->type == SPY_FLOAT || number->type == SPY_COMPLEX))
+            return c->error_type[0] ? 0 : truthy(number);
         int boolean = method != NULL;
         /* __len__ is optional only behind a defined __bool__ (slot_nb_bool). */
         if (!method && !c->error_type[0])
@@ -15742,7 +15745,10 @@ static NO_INLINE SPYValue *make_function(SPYContext *c, Frame *f, Node *n) {
     return fn;
 }
 static SPYValue *unary(SPYContext *c, int op, SPYValue *a) {
-    if (op == O_NOT) return spy_bool(c, !truthy(a));
+    if (op == O_NOT) {
+        int truth = truthy(a);
+        return c->error_type[0] ? NULL : spy_bool(c, !truth);
+    }
     const char *special = op == '+' ? "__pos__" : op == '-' ? "__neg__" : "__invert__";
     SPYValue *base = builtin_base(c, a, special, NULL);
     if (base) return unary(c, op, base);
@@ -24180,13 +24186,15 @@ static NO_INLINE SPYValue *new_method(SPYContext *c, SPYValue *callee) {
     c->entering_kind = CALL_CHECKED;
     return allocator->as.wrapper.function;
 }
-/* The Python __bool__ of instance v's class, borrowed, or with none its
- * __len__, *length set, whose result is v's truth (truth_result); else
- * NULL. */
+/* The Python __bool__ of the class of v, an instance or a class with a
+ * metaclass, borrowed, or with none its __len__, *length set, whose result
+ * is v's truth (truth_result); else NULL. A builtin number's own truth
+ * comes before a Python __len__. */
 static SPYValue *truth_function(SPYContext *c, SPYValue *v, int *length) {
-    if (v->as.map.base || builtin_base(c, v, "__bool__", "__len__")) return NULL;
-    SPYValue *function = class_lookup(v->as.map.parent, "__bool__");
-    if (!function && (function = class_lookup(v->as.map.parent, "__len__"))) *length = 1;
+    if (builtin_base(c, v, "__bool__", "__len__")) return NULL;
+    SPYValue *cls = value_class(c, v), *function = class_lookup(cls, "__bool__"), *base = v->type == SPY_INSTANCE ? v->as.map.base : NULL;
+    int number = base && (base->type == SPY_INT || base->type == SPY_BOOL || base->type == SPY_FLOAT || base->type == SPY_COMPLEX);
+    if (!function && !number && (function = class_lookup(cls, "__len__"))) *length = 1;
     return function && machine_function(c, function) ? function : NULL;
 }
 /* The Python __getitem__ that next() calls on __getitem__ or reversed
@@ -24240,7 +24248,6 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     }
     if (id == B_BOOL) {
         /* False names a __len__ bool() takes the truth of. */
-        if (base || class) return NULL;
         int length = 0;
         *spec = NULL;
         if (!(function = truth_function(c, argv[0], &length)) ||
@@ -27600,7 +27607,7 @@ static NO_INLINE int filter_truth(SPYContext *c, Machine *m, SPYValue *v, SPYVal
     SPYValue *item;
     while ((item = iterator_next(c, v->as.iterator.source->as.seq.items[1]))) {
         int length = 0;
-        SPYValue *function = item->type == SPY_INSTANCE ? truth_function(c, item, &length) : NULL, *name;
+        SPYValue *function = item->type == SPY_INSTANCE || metaclassed(item) ? truth_function(c, item, &length) : NULL, *name;
         if (function) {
             v->as.iterator.counter = item;
             name = length ? spy_retain(c->booleans[0]) : spy_string(c, "__bool__", 8);
@@ -28120,7 +28127,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, slice_new(c, value, a, b)); spy_release(value); break;
         CASE(BC_UNARY)
             a = machine_pop(m);
-            if (a->type == SPY_INSTANCE) { x = y = a; goto operator_step; }
+            if (a->type == SPY_INSTANCE || (ins->arg == O_NOT && metaclassed(a))) { x = y = a; goto operator_step; }
             machine_push(c, m, unary(c, ins->arg, a)); break;
         CASE(BC_BINARY)
             b = machine_pop(m); a = machine_pop(m);
@@ -28323,11 +28330,13 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_FALSE)
             a = machine_pop(m);
-            if (a->type == SPY_INSTANCE && !truth_known) goto bool_step;
+            if ((a->type == SPY_INSTANCE || metaclassed(a)) && !truth_known) goto bool_step;
             if (!(truth_known ? truth_known - 1 : a->type == SPY_BOOL ? (int)a->as.integer_data.small : truthy(a))) pc = ins->target;
             NEXT_RELEASE;
         CASE(BC_SHORT) {
-            if (m->stack[m->len - 1]->type == SPY_INSTANCE && !truth_known) { a = spy_retain(m->stack[m->len - 1]); goto bool_step; }
+            if ((m->stack[m->len - 1]->type == SPY_INSTANCE || metaclassed(m->stack[m->len - 1])) && !truth_known) {
+                a = spy_retain(m->stack[m->len - 1]); goto bool_step;
+            }
             int truth = truth_known ? truth_known - 1 : !!truthy(m->stack[m->len - 1]);
             if ((ins->arg == O_OR) == truth) { pc = ins->target; known = truth + 1; }
             else spy_release(machine_pop(m));
@@ -33712,7 +33721,7 @@ static int consumer_add(SPYContext *c, Consumer *s, SPYValue *item) {
     consumer_settle(c, s);
     if (s->id == B_ALL || s->id == B_ANY) {
         int length = 0;
-        SPYValue *function = s->calls && item->type == SPY_INSTANCE ? truth_function(c, item, &length) : NULL;
+        SPYValue *function = s->calls && (item->type == SPY_INSTANCE || metaclassed(item)) ? truth_function(c, item, &length) : NULL;
         if (function) { s->best = spy_retain(function); s->item = item; s->keyed = KEY_BOOL; s->phase = length; return 0; }
         int truth = truthy(item);
         spy_release(item);

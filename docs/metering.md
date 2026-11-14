@@ -348,8 +348,8 @@ These run as machines on the heap, in one native activation of
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
   `round`, `reversed` and `next`, also with a default, call, on an instance
   (one of a builtin type's subclass when a Python class defines the method
-  before the builtin type) or, except `bool`'s, on a class from its
-  metaclass, the `__len__` that `reversed`
+  before the builtin type) or on a class from its metaclass, the
+  `__len__` that `reversed`
   calls on a sequence without `__reversed__`, and the same methods of the items that a
   `map` of one of those functions takes, a tuple item's items'
   `__hash__` too, the `__bool__` or `__len__`
@@ -357,7 +357,8 @@ These run as machines on the heap, in one native activation of
   by, the `__str__` and `__repr__` that `str` `%` calls on the arguments
   of `%s`, `%r` and `%a`, and the items' `__repr__` of a list, tuple,
   dict or set argument and of those inside it, each after the conversions before it, the
-  `__bool__` that `not` calls, and, in code compiled while pausing, the
+  `__bool__` or `__len__` that `not`, `if`, `and` and `or` test, also of a
+  builtin subclass's instance and of a class by its metaclass, and, in code compiled while pausing, the
   `__str__` of the instances that a call of `print` writes, each after
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list,

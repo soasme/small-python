@@ -220,6 +220,16 @@ static const char *const programs[] = {
     "h = tg(); next(h)\n"
     "print(g.throw(RE), h.throw(RE, None))\n",
 
+    "class TL(list):\n"
+    "    def __bool__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return False\n"
+    "class TM(type):\n"
+    "    def __len__(cls): return 0\n"
+    "class TC(metaclass=TM): pass\n"
+    "def tt(): return [not TL([1]), bool(TC), TL() or [TC and 1]]\n"
+    "print(tt())\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"

@@ -1572,6 +1572,12 @@ int main(int argc, char **argv) {
     execute(c, "def caught():\n    try: yield 0\n    except Slow as e: yield e.i\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "(g := caught(), next(g), g.throw(Slow))[2]", "thrown.py"), SPY_STOP_STEPS, &pauses)) == 2999 && pauses > 0);
+    /* So does testing the truth of a builtin subclass's instance, or of a class by its metaclass. */
+    execute(c, "class Doubt(list):\n    def __bool__(self):\n        for i in range(3000): pass\n        return False\n"
+               "class Veil(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return 0\n"
+               "class Hidden(metaclass=Veil): pass\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "(not Doubt([1])) + (not Hidden) + bool(Doubt() or Hidden)", "truth.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"

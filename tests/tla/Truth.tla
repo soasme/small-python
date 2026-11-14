@@ -24,7 +24,9 @@
 (* as __bool__, a __len__ returning 0, 3, -1, "3", 2**64, or an object     *)
 (* with __index__ returning 2, or __bool__ returning False with __len__    *)
 (* returning 3. The outcome is the result ("left" or "right" for and and   *)
-(* or) or the exception, and the log.                                      *)
+(* or) or the exception, and the log. Each class is of a HOLDER: an        *)
+(* instance's class, a list subclass whose instance holds one item, or a  *)
+(* metaclass whose class is tested; the outcome is the same for each.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -33,8 +35,10 @@ Kinds == {"plain", "bool_true", "bool_false", "bool_int", "bool_none", "len_zero
 Values == {"0", "0.0", "-0.0", "0j", "''", "b''", "[]", "()", "{}", "set()", "frozenset()", "range(0)", "range(1, 1)",
            "None", "...", "NotImplemented", "float('nan')", "' '", "[0]", "frozendict()", "bytearray()",
            "memoryview(b'')", "type", "object()", "1e-300 * 1e-300"}
-Programs == [op : {"bool", "not"}, left : Kinds, right : {"plain"}]
-            \cup [op : {"and", "or", "if_and", "if_or", "any", "all", "any_gen", "all_gen"}, left : Kinds, right : Kinds]
+Holders == {"instance", "list", "class"}
+Programs == [op : {"bool", "not"}, left : Kinds, right : {"plain"}, holder : Holders]
+            \cup [op : {"and", "or", "if_and", "if_or", "any", "all", "any_gen", "all_gen"}, left : Kinds, right : Kinds,
+                  holder : Holders]
             \cup [value : Values]
 
 VARIABLES program, outcome

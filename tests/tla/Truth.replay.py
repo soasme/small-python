@@ -1,4 +1,5 @@
-# Replays Truth.tla: each case builds the spec's classes, applies the
+# Replays Truth.tla: each case builds the spec's classes, as plain classes,
+# list subclasses or metaclasses by the holder, applies the
 # spec's operation to their instances (an if over and or or among them,
 # any() or all() of a list or a generator of them, or bool() to a built-in
 # value), and compares the result and the logged
@@ -17,7 +18,7 @@ RETURNS = {"bool_true": ("__bool__", True), "bool_false": ("__bool__", False), "
            "len_str": ("__len__", "3"), "len_big": ("__len__", 2 ** 64), "len_index": ("__len__", Index())}
 
 
-def instance(kind, side, log):
+def instance(kind, side, log, holder):
     def method(name, value):
         def call(self):
             for _ in ():  # a loop: the method runs on the machine
@@ -35,6 +36,10 @@ def instance(kind, side, log):
     elif kind in RETURNS:
         name, value = RETURNS[kind]
         namespace[name] = method(name, value)
+    if holder == "list":
+        return type(kind, (list,), namespace)([0])
+    if holder == "class":
+        return type(kind, (type,), namespace)("C", (), {})
     return type(kind, (), namespace)()
 
 
@@ -55,7 +60,7 @@ def outcome(p):
     try:
         if "value" in p:
             return (str(bool(eval(p["value"]))), ())
-        left, right = instance(p["left"], "L", log), instance(p["right"], "R", log)
+        left, right = instance(p["left"], "L", log, p["holder"]), instance(p["right"], "R", log, p["holder"])
         op = p["op"]
         if op == "bool":
             result = str(bool(left))
