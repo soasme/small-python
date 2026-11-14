@@ -24525,7 +24525,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
         callee == c->types[SPY_COMPLEX] ? B_COMPLEX : callee == c->types[SPY_BYTES] ? B_BYTES :
-        callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR;
+        callee == c->iterator_types[IT_REVERSED] ? B_REVERSED : -1, repr = id == B_REPR || id == B_ASCII;
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && id != B_HEX && id != B_OCT && id != B_BIN &&
@@ -24579,6 +24579,8 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
      * named "reversed". */
     if (!function && id == B_REVERSED && class_lookup(cls, "__getitem__") && !subclass(cls, c->types[SPY_DICT]))
         function = class_lookup(cls, "__len__"), method = "reversed";
+    /* ascii() escapes the __repr__'s text, named "ascii". */
+    if (id == B_ASCII) method = "ascii";
     if (!function || !machine_function(c, function) || !(*name = spy_string(c, method, strlen(method)))) return NULL;
     /* round() passes ndigits but None; next() keeps its default. */
     *spec = argc == 2 && id == B_ROUND && argv[1]->type != SPY_NONE ? spy_retain(argv[1]) : NULL;
@@ -24698,6 +24700,13 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
 static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 /* Whether v is a class whose metaclass is not type, whose methods may convert it (conversion_method). */
+/* A list of round()'s number x and ndigits, whose __index__ it calls
+ * (conversion_value), or NULL. */
+static SPYValue *round_pair(SPYContext *c, SPYValue *x, SPYValue *digits) {
+    SPYValue *pair = spy_list(c);
+    if (pair && (sequence_append(c, pair, x) || sequence_append(c, pair, digits))) { spy_release(pair); return NULL; }
+    return pair;
+}
 /* Whether callee is builtin function id. */
 static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
     return callee->type == SPY_NATIVE && callee->as.native.data == (void *)(intptr_t)id && callee->as.native.call == builtin;
@@ -24719,6 +24728,17 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         if (machine_push(c, m, argv[0])) { spy_release(argv[1]); return NULL; }
         found[0] = argv[1]; found[1] = spy_retain(argv[0]);
         if (!(*env = function_env(c, convert, 2, found, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
+    }
+    if (!convert && method < 0 && argc == 2 && is_builtin(callee, B_ROUND) && is_number(argv[0]) && (convert = index_function(c, argv[1]))) {
+        c->entering_kind = CALL_CHECKED;
+        /* round() of a number enters its ndigits' __index__ (CALL_CHECKED),
+         * "round" and the pair on the stack (conversion_value). */
+        SPYValue *pair = round_pair(c, argv[0], argv[1]);
+        spy_release(callee); spy_release(argv[0]);
+        if (machine_push(c, m, spy_string(c, "round", 5)) || machine_push(c, m, pair)) { spy_release(argv[1]); return NULL; }
+        if (!(*env = function_env(c, convert, 1, argv + 1, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
@@ -25577,6 +25597,17 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         argv[-1] = found[0];
         found[0] = machine_pop(m); found[1] = spy_retain(argv[0]);
         if (!(*env = function_env(c, convert, 2, found, NULL, 1))) return NULL;
+        c->entering_init = convert;
+        return spy_retain(c->types[SPY_STRING]);
+    }
+    if (!convert && calls && argc == 2 && is_builtin(callee, B_ROUND) && is_number(argv[0]) && (convert = index_function(c, argv[1]))) {
+        c->entering_kind = CALL_CHECKED;
+        /* So does round() of a number by its ndigits' __index__, "round"
+         * and the pair taking the stack's places (conversion_value). */
+        SPYValue *digits = machine_pop(m), *x = machine_pop(m), *pair = round_pair(c, x, digits);
+        spy_release(machine_pop(m)); spy_release(x);
+        if (machine_push(c, m, spy_string(c, "round", 5)) || machine_push(c, m, pair)) { spy_release(digits); return NULL; }
+        if (!(*env = function_env(c, convert, 1, &digits, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
     }
@@ -28414,7 +28445,9 @@ static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
  * __len__), hex(), oct(), bin() and chr() ("hex" and so on their
  * __index__) the int's, as int() and float() ("int", "float") do,
  * dir() lists and sorts it, isinstance() and issubclass() take the
- * result's truth, and the others' text is a str. */
+ * result's truth, ascii() ("ascii" its __repr__) escapes the text,
+ * round() ("round" an ndigits' __index__, v the number and ndigits)
+ * rounds by the int, and the others' text is a str. */
 static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue *name, SPYValue *result) {
     SPYValue *whole = NULL;
     Buffer b = { .ctx = c, .whole = &whole };
@@ -28433,6 +28466,15 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
         SPYValue *index = index_result(c, v, spy_retain(result)), *value = index;
         double real;
         if (index && *method == 'f') { value = spy_as_float(c, index, &real) ? NULL : spy_float(c, real); spy_release(index); }
+        return value;
+    }
+    if (!strcmp(method, "ascii")) {
+        SPYValue *text = whole_text(&b, append_conversion(&b, v, result, "__repr__"));
+        return text ? ascii_text(c, text, builtin_value(c, text, SPY_STRING)) : NULL;
+    }
+    if (!strcmp(method, "round")) {
+        SPYValue *index = index_result(c, v->as.seq.items[1], spy_retain(result)), *value = index ? round_value(c, v->as.seq.items[0], index) : NULL;
+        spy_release(index);
         return value;
     }
     if (!strcmp(method, "__dir__")) {

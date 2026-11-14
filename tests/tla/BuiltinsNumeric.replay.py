@@ -84,6 +84,9 @@ SOURCES = {
     "int_index_calls": 'class K:\n    calls = 0\n    def __index__(self):\n        for _ in (): pass\n        K.calls += 1\n        return 65\n'
                        'result = (int(K()), float(K()), K.calls)',
     "index_calls": 'result = (bin(J()), oct(J()), hex(J()), chr(J()), J.calls)',
+    "round_index_calls": 'class D:\n    def __init__(self, n): self.n = n\n    def __index__(self):\n        for _ in (): pass\n        return self.n\n'
+                         'result = (round(2.25, D(1)), round(1250, D(-2)), round(5, D(True)), round(0.5, D(0)))',
+    "round_index_bad": 'class D:\n    def __init__(self, n): self.n = n\n    def __index__(self):\n        for _ in (): pass\n        return self.n\nresult = round(1.5, D("x"))',
     "bin_float": 'result = bin(3.0)',
     "hex_float_method": 'result = (1.5).hex()',
     "complex_forms": "result = (complex(), complex(1), complex(1, 2), complex('1+2j'), complex(' 3j '), complex(1j, 1j))",

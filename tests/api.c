@@ -1737,6 +1737,12 @@ int main(int argc, char **argv) {
                "def shown():\n    return len('{!r}{!s:>3}{!a}'.format(Shown(), Shown(), Shown()))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
+    execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
+               "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"
+               "def rounded():\n    return len(ascii(Rounded())) + round(1234, Rounded()) + int(round(2.5, Rounded()))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "rounded()", "rounded.py"), SPY_STOP_STEPS, &pauses)) == 1232 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");

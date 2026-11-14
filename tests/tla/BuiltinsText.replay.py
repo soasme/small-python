@@ -39,6 +39,7 @@ SOURCES = {
     "ord_int": 'result = ord(1)',
     "ascii_object": "result = (ascii(U()), repr(U()) == '\\u03b1', ascii([U()]))",
     "repr_bad": 'result = repr(BadRepr())',
+    "ascii_bad": 'result = ascii(BadRepr())',
     "str_bad": 'result = str(BadStr())',
     "repr_recursive": 'a = [1]\na.append(a)\nresult = repr(a)',
     "repr_bytes_quotes": 'result = (repr(b"\'"), repr(b\'"\'), repr(b\'\\\'"\'))',

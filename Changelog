@@ -107,6 +107,7 @@ Unreleased (0.10.0):
 - dir() calls a Python __dir__, and int() and float() a Python __index__, without nesting on the C stack
 - str % calls an instance's Python __int__, __index__ and __float__ without nesting on the C stack
 - str.format's !r, !s and !a call an instance's Python __repr__ and __str__ without nesting on the C stack
+- ascii() calls a Python __repr__, and round() an ndigits' Python __index__, without nesting on the C stack
 - print(*objects) calls their Python __str__ without nesting on the C stack
 - property.__get__() of an object calls a Python getter without nesting on the C stack
 - a generator's throw() of a class, a value and a None traceback calls its Python __init__ without nesting

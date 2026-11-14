@@ -69,7 +69,7 @@ Sum(s) == IF s = <<>> THEN 0 ELSE Head(s) + Sum(Tail(s))
 
 
 Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "ord_long", "ord_empty", "ord_bytes",
-          "ord_int", "ascii_object", "repr_bad", "str_bad", "repr_recursive", "repr_bytes_quotes",
+          "ord_int", "ascii_object", "repr_bad", "ascii_bad", "str_bad", "repr_recursive", "repr_bytes_quotes",
           "format_hook", "format_fields", "format_map_fields", "format_object_spec", "format_object_empty", "format_bad_return",
           "format_spec_type", "print_sep_end", "print_starred", "print_none_sep", "print_no_args", "print_flush",
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
@@ -100,6 +100,7 @@ Case(c) ==
       [] c = "ord_int" -> "TypeError: ord() expected string of length 1, but int found"
       [] c = "ascii_object" -> "('\\\\u03b1', True, '[\\\\u03b1]')"
       [] c = "repr_bad" -> "TypeError: BadRepr.__repr__() must return a str, not int"
+      [] c = "ascii_bad" -> "TypeError: BadRepr.__repr__() must return a str, not int"
       [] c = "str_bad" -> "TypeError: BadStr.__str__() must return a str, not bytes"
       [] c = "repr_recursive" -> "'[1, [...]]'"
       [] c = "repr_nested_items" -> "('[a, [b, (c,)]]', '([d],)', ['a', 'b', 'c', 'd'])"

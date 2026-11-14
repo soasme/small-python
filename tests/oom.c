@@ -485,6 +485,20 @@ static const char *const programs[] = {
     "    return r\n"
     "print(fc())\n",
 
+    "class AR:\n"
+    "    def __repr__(self): return '\\xe9'\n"
+    "    def __index__(self): return 1\n"
+    "class AB:\n"
+    "    def __repr__(self): return 1\n"
+    "    def __index__(self): return 'i'\n"
+    "def ar():\n"
+    "    r = [ascii(AR()), round(2.25, AR()), round(15, AR())]\n"
+    "    for f in (lambda: ascii(AB()), lambda: round(1.5, AB())):\n"
+    "        try: f()\n"
+    "        except TypeError as e: r.append(e)\n"
+    "    return r\n"
+    "print(ar())\n",
+
     "class DX:\n"
     "    def __dir__(self): return iter(('q', 'p'))\n"
     "    def __index__(self): return True\n"
