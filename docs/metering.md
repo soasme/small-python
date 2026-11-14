@@ -363,7 +363,8 @@ These run as machines on the heap, in one native activation of
   the objects before it, and the items' `__repr__` in `repr`, `str`,
   `format` without a spec, `print` and f-string fields of a list,
   tuple, dict, frozendict, set or frozenset, also of one inside
-  another, the property getter, `__get__`, `__getattribute__` or
+  another, items of a builtin's subclass defining it before the builtin
+  and classes by their metaclass too, the property getter, `__get__`, `__getattribute__` or
   `__getattr__` that `getattr` of two arguments, or of three when an
   `AttributeError` gives the default, calls, of an instance or of a
   class, and the

@@ -242,6 +242,15 @@ static const char *const programs[] = {
     "def ow(): return [OW(1) + 2, 3 + OW(1), OT < OT, OT > OT, 4 in OT, OT | None, -OW(2)]\n"
     "print(ow())\n",
 
+    "class RS(str):\n"
+    "    def __repr__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return 'RS' + str(i)\n"
+    "class RM(type):\n"
+    "    def __repr__(cls): return 'RM'\n"
+    "class RT(metaclass=RM): pass\n"
+    "print([repr([RS('a'), RT]), str({RS('b'): (RT,)})])\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"

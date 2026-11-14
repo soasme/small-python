@@ -80,6 +80,9 @@ SOURCES = {
                          "result = (repr(I(1)), str(I(1)), format(I(1)), format(I(1), 'd'), repr(J(2)), str(J(2)))",
     "repr_metaclass": "class M(type):\n    def __repr__(cls): return 'M:' + cls.__name__\nclass C(metaclass=M): pass\n"
                       "result = (repr(C), str(C), format(C), '%s' % (C,))",
+    "repr_items_own": "class I(int):\n    def __repr__(self): return 'I!'\n"
+                      "class M(type):\n    def __repr__(cls): return 'M:' + cls.__name__\nclass C(metaclass=M): pass\n"
+                      "result = (repr([I(1), C]), str({I(2): (C,)}), f'{[C]}')",
 }
 
 

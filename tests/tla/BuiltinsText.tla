@@ -75,7 +75,8 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
           "print_str_calls", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
-          "repr_own_slot", "repr_nested_items", "repr_map_items", "repr_subclass_own", "repr_metaclass"}
+          "repr_own_slot", "repr_nested_items", "repr_map_items", "repr_subclass_own", "repr_metaclass",
+          "repr_items_own"}
 Programs == [op : {"ascii", "repr_len", "ord"}, s : Strings]
             \cup [case : Cases]
 
@@ -136,6 +137,8 @@ Case(c) ==
       \* and empty format() are its repr(), and a class's are its metaclass's.
       [] c = "repr_subclass_own" -> "('I!', 'I!', 'I!', '1', '2', 'J!')"
       [] c = "repr_metaclass" -> "('M:C', 'M:C', 'M:C', 'M:C')"
+      \* So are their reprs as items of a container's.
+      [] c = "repr_items_own" -> "('[I!, M:C]', '{I!: (M:C,)}', '[M:C]')"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)
 

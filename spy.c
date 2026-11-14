@@ -34739,10 +34739,7 @@ static NO_INLINE Machine *print_returned(SPYContext *c, Machine *m, size_t argc,
  * container stays in the repr stack (repr_enter) until the job ends. */
 /* The Python __repr__ of item a repr job calls on the machine, borrowed;
  * else NULL. */
-static SPYValue *repr_method(SPYContext *c, SPYValue *item) {
-    SPYValue *function = item->type == SPY_INSTANCE && !item->as.map.base ? class_lookup(item->as.map.parent, "__repr__") : NULL;
-    return function && machine_function(c, function) ? function : NULL;
-}
+static SPYValue *repr_method(SPYContext *c, SPYValue *item) { return item_function(c, item, "__repr__"); }
 static int repr_reaches(SPYContext *, SPYValue *, int *);
 /* Whether item has such a method or is a container that reaches one. */
 static int repr_item_reaches(SPYContext *c, SPYValue *item, int *budget) {

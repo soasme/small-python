@@ -1586,6 +1586,12 @@ int main(int argc, char **argv) {
                "class Weights(metaclass=Scale): pass\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "(Weighed(1) + 1) + (Weighed(2) < 3) + -Weights + (5 in Weights)", "weighed.py"), SPY_STOP_STEPS, &pauses)) == 3002 && pauses > 3);
+    /* So does the repr of a container of such items. */
+    execute(c, "class Shown(str):\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'S'\n"
+               "class Lens(type):\n    def __repr__(cls):\n        for i in range(3000): pass\n        return 'L'\n"
+               "class Seen(metaclass=Lens): pass\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(repr([Shown('x'), Seen]))", "shown.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 1);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"
