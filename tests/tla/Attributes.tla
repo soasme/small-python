@@ -19,7 +19,8 @@
 (* with or without a __getattr__ returning 'ga', and with no Python       *)
 (* __getattribute__ (hook none), one passing the name to object's (pass), *)
 (* or one raising AttributeError (refuse). The steps are o.a,             *)
-(* o.a = v (v is 'v1' or 'v2'), and del o.a; `stored` is what o's          *)
+(* o.a() (each value is callable, returning itself), o.a = v (v is 'v1'   *)
+(* or 'v2'), and del o.a; `stored` is what o's                             *)
 (* __dict__ or slot holds for a.                                           *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
@@ -48,9 +49,15 @@ Lookup ==
       [] kind = "nondata" -> "nget"
       [] kind = "value" -> "cls"
       [] OTHER -> Missing
+Read == IF hook # "refuse" /\ Lookup # Missing THEN Lookup ELSE IF getattr THEN "ga" ELSE "AttributeError"
 Get == /\ op' = "get"
-       /\ result' = IF hook # "refuse" /\ Lookup # Missing THEN Lookup ELSE IF getattr THEN "ga" ELSE "AttributeError"
+       /\ result' = Read
        /\ UNCHANGED <<kind, getattr, hook, stored>>
+
+\* o.a(): the method call reads o.a as Get does, then calls what it read.
+Call == /\ op' = "call"
+        /\ result' = Read
+        /\ UNCHANGED <<kind, getattr, hook, stored>>
 
 \* o.a = v: a data descriptor's __set__, otherwise the instance's __dict__.
 Set(v) == /\ op' = "set " \o v
@@ -68,7 +75,7 @@ Del == /\ op' = "del"
        /\ UNCHANGED <<kind, getattr, hook>>
 
 Init == kind \in Kinds /\ getattr \in BOOLEAN /\ hook \in Hooks /\ stored = Missing /\ op = "new" /\ result = "ok"
-Next == Get \/ Del \/ \E v \in Values : Set(v)
+Next == Get \/ Call \/ Del \/ \E v \in Values : Set(v)
 Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
@@ -83,7 +90,7 @@ SetThenGet == [][(op = "set v1" \/ op = "set v2") /\ result = "ok" /\ ~(kind \in
                  => result' = stored]_vars
 
 \* __getattr__ is only consulted when lookup fails, so o.a never fails with it.
-GetattrFallback == op = "get" /\ getattr => result # "AttributeError"
+GetattrFallback == op \in {"get", "call"} /\ getattr => result # "AttributeError"
 
 \* A read-only property cannot change.
 ReadOnly == kind \in Getters => stored = Missing

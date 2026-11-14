@@ -463,6 +463,23 @@ static const char *const programs[] = {
     "h = tg(); next(h)\n"
     "print(g.throw(TE, (1, 2), None), h.throw(TE, TE(3), None))\n",
 
+    "class MG:\n"
+    "    @property\n"
+    "    def f(self): return lambda *a: [a]\n"
+    "    def __getattr__(self, name): return MI if name == 'i' else lambda *a: (name, a)\n"
+    "class MI(list):\n"
+    "    def __init__(self, *a): super().__init__(a)\n"
+    "class MH:\n"
+    "    def __getattribute__(self, name):\n"
+    "        if name == 'no': raise AttributeError(name)\n"
+    "        return lambda *a: [name, a]\n"
+    "def mg():\n"
+    "    g = MG(); k = 'k'\n"
+    "    try: MH().no(1)\n"
+    "    except AttributeError as e: k = e.args\n"
+    "    return g.f(1, k), g.h(k, [2]), MH().x(k), g.f(*[3]), g.i(k, 4)\n"
+    "print(mg())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

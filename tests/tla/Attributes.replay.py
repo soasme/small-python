@@ -4,14 +4,20 @@ FIELDS = ("kind", "getattr", "hook", "op", "result")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
+# Every value is callable, a call returning it (Call).
+class Value(str):
+    def __call__(self):
+        return str(self)
+
+
 class NonData:
     def __get__(self, obj, owner=None):
-        return "nget"
+        return Value("nget")
 
 
 class Data:
     def __get__(self, obj, owner=None):
-        return "dget"
+        return Value("dget")
 
     # The instance's __dict__ past any __getattribute__ of its class.
     def __set__(self, obj, value):
@@ -40,23 +46,23 @@ def refusing(self, name):
 def make(kind, getattr, hook):
     namespace = {}
     if kind == "value":
-        namespace["a"] = "cls"
+        namespace["a"] = Value("cls")
     elif kind == "nondata":
         namespace["a"] = NonData()
     elif kind == "data":
         namespace["a"] = Data()
     elif kind == "property":
-        namespace["a"] = property(lambda self: "pget")
+        namespace["a"] = property(lambda self: Value("pget"))
     elif kind == "raising":
         namespace["a"] = property(refuse)
     elif kind == "subproperty":
-        namespace["a"] = SubProperty(lambda self: "pget")
+        namespace["a"] = SubProperty(lambda self: Value("pget"))
     elif kind == "subraising":
         namespace["a"] = SubProperty(refuse)
     elif kind == "slot":
         namespace["__slots__"] = ("a",)
     if getattr:
-        namespace["__getattr__"] = lambda self, name: str("ga")
+        namespace["__getattr__"] = lambda self, name: Value("ga")
     if hook != "none":
         namespace["__getattribute__"] = passing if hook == "pass" else refusing
     return type("C", (), namespace)()
@@ -66,10 +72,12 @@ def perform(o, op):
     try:
         if op == "get":
             return o.a
+        if op == "call":
+            return o.a()
         if op == "del":
             del o.a
         else:
-            o.a = op.split()[1]
+            o.a = Value(op.split()[1])
         return "ok"
     except AttributeError:
         return "AttributeError"

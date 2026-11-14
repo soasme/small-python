@@ -15917,16 +15917,18 @@ static ALWAYS_INLINE void relocate(SPYContext *c, Node *n) {
  * goes to call_method without the bound method the attribute would make. */
 static SPYValue *call_native_method(SPYContext *, SPYValue *, int, SPYValue *, size_t, SPYValue *const *);
 static SPYValue *call_function(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
-static SPYValue *method_of(SPYContext *, Node *, SPYValue *, SPYValue **, int *);
-static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self, int *method) {
+static SPYValue *method_of(SPYContext *, Node *, SPYValue *, SPYValue **, int *, int);
+static SPYValue *method_callee(SPYContext *c, Frame *f, Node *n, SPYValue **self, int *method, int calls) {
     SPYValue *object = eval(c, f, n->a);
     *self = NULL; *method = -1;
-    return object ? method_of(c, n, object, self, method) : NULL;
+    return object ? method_of(c, n, object, self, method, calls) : NULL;
 }
 /* The callee of method call n.b() on object, which it takes: a function
  * with *self the object to pass first, the object itself with *method its
- * native method, or else the attribute. */
-static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **self, int *method) {
+ * native method, or else the attribute; or, when calls is set, NULL with
+ * no error and *self the object for a Python getter of the attribute that
+ * the machine calls (node_attribute, method_getter). */
+static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **self, int *method, int calls) {
     relocate(c, n);
     if (plain_instance(object) && (node_access(c, object, n) & ATTR_READ) == ATTR_METHOD && !env_find(object, node_name(n->b))) {
         *self = object;
@@ -15941,7 +15943,8 @@ static SPYValue *method_of(SPYContext *c, Node *n, SPYValue *object, SPYValue **
         *method = -1 - n->attr_kind;
         return object;
     }
-    SPYValue *callee = node_attribute(c, object, n, 0);
+    SPYValue *callee = node_attribute(c, object, n, calls);
+    if (!callee && calls && !c->error_type[0]) { *self = object; return NULL; }
     int dunder = n->b->text[0] == '_' && n->b->text[1] == '_';
     if (type && callee && callee->type == SPY_METHOD && callee->as.method.self == object &&
         !dunder && callee->as.method.function == class_lookup(type, n->b->text)) {
@@ -15971,13 +15974,15 @@ static SPYValue *operator_fast(SPYContext *, Node *, SPYValue *, SPYValue *);
  * argv released. A literal or name among them, while tick has only the
  * line to record, is taken as it is, and with operators, so is an
  * operator on such operands that operator_fast computes. With *method
- * set, the callee is the object whose native method n names. */
+ * set, the callee is the object whose native method n names. With
+ * operators, NULL with no error and argv[0] the object is a Python getter
+ * of a method call's attribute for the machine to call (method_of). */
 static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SPYValue **argv, size_t *argc, int *method, int operators) {
     SPYValue *a;
     size_t done = 0;
     *method = -1;
     if (n->a->kind == N_ATTR) {
-        a = method_callee(c, f, n->a, argv, method);
+        a = method_callee(c, f, n->a, argv, method, operators);
         done = argv[0] != NULL;
     } else a = callee_of(c, f, n);
     if (!a) return NULL;
@@ -15992,6 +15997,7 @@ static ALWAYS_INLINE SPYValue *plain_callee(SPYContext *c, Frame *f, Node *n, SP
         }
         if (!(argv[done] = value ? value : c->error_type[0] ? NULL : eval(c, f, arg))) {
             while (done) spy_release(argv[--done]);
+            argv[0] = NULL;
             spy_release(a);
             return NULL;
         }
@@ -17242,9 +17248,9 @@ static ALWAYS_INLINE int machine_function(SPYContext *c, SPYValue *fn) {
  * the C stack. Otherwise fn runs here and callk returns what k does. */
 static NO_INLINE SPYValue *callk(SPYContext *c, Machine *m, SPYValue *fn, size_t argc, SPYValue **argv, Continuation k, SPYValue *ctx) {
     SPYValue *function = fn->type == SPY_METHOD ? fn->as.method.function : fn;
-    if (m && machine_function(c, function) && argc < 8) {
+    size_t n = fn != function;
+    if (m && machine_function(c, function) && n + argc <= 9) {
         SPYValue *args[9];
-        size_t n = fn != function;
         if (n) args[0] = spy_retain(fn->as.method.self);
         if (argc) memcpy(args + n, argv, argc * sizeof(*argv));
         if (!(c->k_env = function_env(c, function, n + argc, args, NULL, 1))) return k(c, m, ctx, NULL);
@@ -25252,13 +25258,101 @@ static ALWAYS_INLINE SPYValue *operand_dispatch(SPYContext *c, Machine *m, Node 
     spy_release(callee);
     return result;
 }
+static SPYValue *getter_fallback(SPYValue *, SPYValue *);
+/* Pop the object and argc arguments of a method call from m's stack. */
+static void method_drop(Machine *m, int argc) {
+    for (int i = 0; i <= argc; i++) spy_release(machine_pop(m));
+}
+/* The value method call method_got called, callee released. */
+static SPYValue *method_called(SPYContext *c, Machine *m, SPYValue *callee, SPYValue *result) {
+    (void)c; (void)m;
+    spy_release(callee);
+    return result;
+}
+/* Instance self, which it takes, once the __init__ method_got called
+ * returned result. */
+static SPYValue *method_inited(SPYContext *c, Machine *m, SPYValue *self, SPYValue *result) {
+    (void)m;
+    if (result && result->type != SPY_NONE) errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
+    if (!result || c->error_type[0]) { spy_release(self); self = NULL; }
+    spy_release(result);
+    return self;
+}
+/* What a method call's getter (method_getter), of state's object, its
+ * __getattr__ or None, the attribute's name and the stacked argument
+ * count, returned in result: after an AttributeError, the __getattr__'s
+ * call; else the call of the attribute with the arguments, those above
+ * the object on m's stack, or for -1 the evaluated argument nodes of
+ * m's call step (BC_CALLF), a class's Python __init__ entered as a
+ * class call enters it (class_init). State taken. */
+static SPYValue *method_got(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *args[9];
+    int stacked = (int)items[3]->as.integer_data.small;
+    size_t argc = 0;
+    if (!result && items[1] != c->none && error_is(c, "AttributeError")) {
+        SPYValue *fallback = items[1];
+        spy_clear_error(c);
+        items[1] = spy_retain(c->none);
+        args[0] = spy_retain(items[0]); args[1] = spy_retain(items[2]);
+        result = callk(c, m, fallback, 2, args, method_got, state);
+        spy_release(fallback);
+        return result;
+    }
+    if (!result) { method_drop(m, stacked); spy_release(state); return NULL; }
+    spy_release(state);
+    if (stacked >= 0) {
+        argc = (size_t)stacked;
+        memcpy(args, &m->stack[m->len - argc], argc * sizeof(*args));
+        m->len -= argc;
+        spy_release(machine_pop(m));
+    } else for (Node *arg = m->code->items[m->pc - 1].node->args; arg; arg = arg->next, argc++)
+        if (!(args[argc] = eval(c, &m->frame, arg))) { release_all(argc, args); spy_release(result); return NULL; }
+    int plain;
+    SPYValue *init = result->type == SPY_CLASS ? class_init(c, result, &plain) : NULL;
+    if (init && machine_function(c, init)) {
+        SPYValue *self = init_instance(c, result, plain, argc, args, NULL);
+        spy_release(result);
+        if (!self) { release_all(argc, args); return NULL; }
+        memmove(args + 1, args, argc * sizeof(*args));
+        args[0] = spy_retain(self);
+        return callk(c, m, init, argc + 1, args, method_inited, self);
+    }
+    if (c->error_type[0]) { release_all(argc, args); spy_release(result); return NULL; }
+    return callk(c, m, result, argc, args, method_called, result);
+}
+/* Method call attr() on object, which it takes, whose lookup calls the
+ * Python getter node_attribute left (attribute_step), the step's call
+ * (callk): a property's getter, a descriptor's __get__ or a
+ * __getattribute__, then the __getattr__ after its AttributeError, then
+ * the attribute (method_got), with the stacked arguments above the object
+ * on m's stack, or, for -1, those of the call node. */
+static NO_INLINE SPYValue *method_getter(SPYContext *c, Machine *m, Node *attr, SPYValue *object, int stacked) {
+    SPYValue *function = c->fallback ? c->fallback : spy_retain(attr->attr_method), *argv[3] = {object, NULL, NULL};
+    SPYValue *fallback = getter_fallback(object, function);
+    size_t argc = 1;
+    c->fallback = NULL;
+    SPYValue *items[4] = {object, fallback ? fallback : c->none, spy_string(c, attr->b->text, strlen(attr->b->text)), int_value(c, stacked)};
+    SPYValue *state = items[2] && items[3] ? spy_tuple(c, 4, items) : NULL;
+    spy_release(items[2]); spy_release(items[3]); spy_release(object);
+    if (!state || !(function = getter_function(c, object, attr->b->text, function, argv, &argc))) {
+        if (!state) spy_release(function);
+        spy_release(state);
+        method_drop(m, stacked);
+        return NULL;
+    }
+    SPYValue *result = callk(c, m, function, argc, argv, method_got, state);
+    spy_release(function);
+    return result;
+}
 /* BC_CALLF: plain call node n, whose operands need no steps of their own;
  * or NULL with no error when a consumer of a generator began on m. */
 static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Node *n, SPYValue **env) {
     SPYValue *argv[9], *callee;
     size_t argc;
     int method;
-    if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1))) return NULL;
+    argv[0] = NULL;
+    if (!(callee = plain_callee(c, f, n, argv, &argc, &method, 1)))
+        return argv[0] && !c->error_type[0] ? method_getter(c, m, n->a, argv[0], -1) : NULL;
     return operand_dispatch(c, m, n, callee, method, argc, argv, env);
 }
 /* The attribute step of a method call (F_CALLEE_FIRST) on a builtin
@@ -25269,7 +25363,7 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
 static NO_INLINE void method_load(SPYContext *c, Machine *m, Node *n, SPYValue *object) {
     SPYValue *self = NULL;
     int method = -1;
-    SPYValue *callee = method_of(c, n, spy_retain(object), &self, &method);
+    SPYValue *callee = method_of(c, n, spy_retain(object), &self, &method, 0);
     if (callee && (self || method >= 0)) {
         spy_release(callee); spy_release(self);
         if (!machine_push(c, m, object)) machine_push(c, m, spy_retain(c->unbound));
@@ -25522,8 +25616,9 @@ static ALWAYS_INLINE SPYValue *searched(SPYValue *callee, int method, size_t arg
 static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n, size_t argc, int calls, SPYValue **env) {
     SPYValue **argv = &m->stack[m->len - argc - 1], *object = argv[0], *self = NULL, *result = NULL;
     int method = -1;
-    SPYValue *callee = method_of(c, n->a, spy_retain(object), &self, &method);
+    SPYValue *callee = method_of(c, n->a, spy_retain(object), &self, &method, calls);
     relocate(c, n);
+    if (!callee && self) return method_getter(c, m, n->a, self, (int)argc);
     if (self) spy_release(object); /* The stack holds it; a native method's callee is the reference passed. */
     /* A method takes the object first; another callee, the arguments after it. */
     size_t skip = !self;

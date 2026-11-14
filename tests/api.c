@@ -1715,6 +1715,12 @@ int main(int argc, char **argv) {
                "def thrown():\n    g = caught(); next(g)\n    return g.throw(Slowly, 4, None)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "thrown()", "thrown.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does a method call whose attribute a Python getter or __getattr__ reads. */
+    execute(c, "class Fetched:\n    @property\n    def f(self):\n        for i in range(3000): pass\n        return abs\n"
+               "    def __getattr__(self, name):\n        for i in range(3000): pass\n        return len\n"
+               "def fetched():\n    g = Fetched(); k = -2\n    return g.f(k) + g.h('ab') + g.f(-1)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "fetched()", "fetched.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */
