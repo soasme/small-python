@@ -107,6 +107,9 @@ SOURCES = {
                       "it = iter([O(9), O(4), O(2)])\nnext(it)\nv = lambda l: [o.v for o in l]\n"
                       "result = (v(sorted({O(3), O(1), O(2)})), v(sorted({O(1): 0, O(3): 0}.keys(), reverse=True)), v(sorted(it)), log != [])",
     "map_hash_tuple": "log = []\nclass H:\n    def __init__(s, v): s.v = v\n    def __hash__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v\nresult = (list(map(hash, [(H(1),), (2, (H(3), H(4)))])) == [hash((1,)), hash((2, (3, 4)))], log)",
+    "map_class": "log = []\nclass P:\n    def __init__(s, *a):\n        for _ in (): pass\n        log.append(a[0])\n        s.a = a\n"
+                 "out = []\nfor p in map(P, [1, 2], 'ab'):\n    out.append(p.a)\n    log.append(('t', p.a[0]))\nresult = (out, log)",
+    "map_class_bad": "class B:\n    def __init__(s, v):\n        for _ in (): pass\n        return v\nresult = list(map(B, [None, 1]))",
     "map_convert_bad": "class W:\n    def __str__(s):\n        for _ in (): pass\n        return 1\nresult = list(map(str, [W()]))",
     "sort_key_callables": "class R:\n    def __init__(s, v): s.v = -v\n    def __lt__(s, o): return s.v < o.v\n"
                           "class W:\n    def m(s, v): return v % 2\n    def __call__(s, v): return -v\n"

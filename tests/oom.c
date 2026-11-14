@@ -368,6 +368,21 @@ static const char *const programs[] = {
     "    return [len(BS(g(3))), len(BD((k, 0) for k in g(2))), len(BT(g(2))), len(BD(d)), len(dict(d)), len({**d})]\n"
     "print(bs())\n",
 
+    "class MI:\n"
+    "    def __init__(self, *v):\n"
+    "        for i in range(1): pass\n"
+    "        self.v = v\n"
+    "class MB:\n"
+    "    def __init__(self, v):\n"
+    "        for i in range(1): pass\n"
+    "        return v\n"
+    "def mc():\n"
+    "    r = [p.v for p in map(MI, [1, 2], 'ab')] + [len(list(map(MI, (3,))))]\n"
+    "    try: list(map(MB, [None, 1]))\n"
+    "    except TypeError as e: r.append(str(e))\n"
+    "    return r\n"
+    "print(mc())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

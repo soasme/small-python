@@ -7,7 +7,8 @@
 (* sequence protocol; enumerate() from start; zip() stopping at the        *)
 (* shortest input, consuming inputs left to right, and with strict=True    *)
 (* naming the first input of a different length; map() over several        *)
-(* iterables, also strict; filter() with a function or None; all() and     *)
+(* iterables, also strict, or of a class, each instance made, then its     *)
+(* __init__ called; filter() with a function or None; all() and            *)
 (* any() stopping at the first deciding item; len() requiring a non-       *)
 (* negative index-sized __len__; and sorted() and list.sort(), stable with *)
 (* key and reverse (equal items keeping their order even reversed), a key  *)
@@ -59,7 +60,7 @@ Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
-          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
+          "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_class", "map_class_bad", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
           "filter_truth_bad", "enumerate_kw", "enumerate_bad_start", "all_any_empty",
           "all_returns_bool", "sorted_key_none", "sorted_positional_key", "sorted_mixed",
           "sorted_returns_new", "list_sort_none", "sort_stability_doc", "sort_reverse_stable",
@@ -134,6 +135,10 @@ Case(c) ==
       \* map() of str, repr or format calls each item's method as it takes it
       [] c = "map_convert" -> "(['k1', 'k2'], ['K1', '7'], 'k1,k2', ['F'], ['s1', 's2', 'r1', 's1', 's2', 'f'])"
       [] c = "map_convert_bad" -> "TypeError: W.__str__() must return a str, not int"
+      \* map() of a class makes each instance, then calls its Python __init__
+      \* with the items, as it takes them; __init__ returns None.
+      [] c = "map_class" -> "([(1, 'a'), (2, 'b')], [1, ('t', 1), 2, ('t', 2)])"
+      [] c = "map_class_bad" -> "TypeError: __init__() should return None, not 'int'"
       \* map() of hash hashes a tuple's items in order, nested tuples first
       [] c = "map_hash_tuple" -> "(True, [1, 3, 4])"
       [] c = "map_adapted" -> "([('a', '1'), ('b', '2')], [(0, '3')], [1, 2, 3])"

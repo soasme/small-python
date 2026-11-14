@@ -28515,12 +28515,15 @@ static int convert_call(SPYContext *c, Machine *m, SPYValue *function, SPYValue 
     *fn = spy_retain(function);
     return 1;
 }
-/* What a next call that convert_call made returned in result, which it
- * takes: the item's conversion, owned (conversion_value), or NULL with an
- * error; the item and name leave m's stack. */
+/* What a next call that convert_call or init_convert made returned in
+ * result, which it takes: the item's conversion, owned (conversion_value),
+ * or the new instance item when name is its class, whose __init__
+ * returned None; else NULL with an error. The item and name leave m's
+ * stack. */
 static NO_INLINE SPYValue *item_converted(SPYContext *c, Machine *m, SPYValue *result) {
     spy_release(machine_pop(m));
-    SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = result ? conversion_value(c, item, name, result) : NULL;
+    SPYValue *name = machine_pop(m), *item = machine_pop(m), *value = !result ? NULL : name->type != SPY_CLASS ? conversion_value(c, item, name, result) :
+                    result->type == SPY_NONE ? spy_retain(item) : errorf(c, "TypeError", "__init__() should return None, not '%s'", type_name(result));
     spy_release(result); spy_release(name); spy_release(item);
     return value;
 }
@@ -28550,10 +28553,35 @@ static NO_INLINE int item_convert(SPYContext *c, Machine *m, SPYValue *callee, S
  * its iterables' next items (zip_items); for one item that callee may
  * convert by Python (item_convert), that conversion; else the function
  * called here, the item in *fn, 3. -1 when the iterables ended or raised. */
+/* Class cls's call of items, a map's next ones, whose __init__ is on the
+ * machine (class_init): the new instance and cls on m's stack under
+ * c->converting, as the call's item (item_converted), its __init__, owned,
+ * in *fn with *env, 1; 0 for another class; or -1 on an error. */
+static NO_INLINE int init_convert(SPYContext *c, Machine *m, SPYValue *cls, SPYValue *items, SPYValue **fn, SPYValue **env) {
+    int plain = 0;
+    SPYValue *init = class_init(c, cls, &plain), *self;
+    if (!init || !machine_function(c, init)) return c->error_type[0] ? -1 : 0;
+    size_t argc = items->as.seq.len;
+    if (argc > 7 || !(self = init_instance(c, cls, plain, argc, items->as.seq.items, NULL))) return argc > 7 ? 0 : -1;
+    SPYValue *args[8] = {self};
+    memcpy(args + 1, items->as.seq.items, argc * sizeof(*args));
+    size_t depth = m->len;
+    if (machine_push(c, m, self) || machine_push(c, m, spy_retain(cls)) || machine_push(c, m, spy_retain(c->converting)) ||
+        !(*env = function_env(c, init, argc + 1, args, NULL, 0))) {
+        while (m->len > depth) spy_release(machine_pop(m));
+        return -1;
+    }
+    *fn = spy_retain(init);
+    return 1;
+}
 static NO_INLINE int map_convert(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *callee = v->as.iterator.source->as.seq.items[0], *items = zip_items(c, v), *item;
     if (!items) return -1;
     int status;
+    if (callee->type == SPY_CLASS && (status = init_convert(c, m, callee, items, fn, env))) {
+        spy_release(items);
+        return status;
+    }
     if (items->as.seq.len == 1 && ((item = items->as.seq.items[0])->type == SPY_INSTANCE || (item->type == SPY_TUPLE && item->listed && !item->as.seq.hashed && is_builtin(callee, B_HASH))) &&
         (status = item_convert(c, m, callee, item, fn, env))) {
         spy_release(items);

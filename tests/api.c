@@ -1659,6 +1659,11 @@ int main(int argc, char **argv) {
                "def built():\n    return len(SS(slows(3))) + len(DD((k, 0) for k in slows(2))) + len(LL(slows(2)))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "built()", "built.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* So do the __init__ calls of a map of a class. */
+    execute(c, "class Init:\n    def __init__(self, v):\n        for i in range(3000): pass\n        self.v = v\n"
+               "def mapped():\n    return sum(p.v for p in map(Init, [1, 2])) + len(list(map(Init, 'ab')))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "mapped()", "mapped.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */
