@@ -318,8 +318,9 @@ These run as machines on the heap, in one native activation of
   and `__getitem__`, and the generator its `keys` returns, that `dict`
   and `dict.update` merge it by as a mapping, and, in
   code compiled while pausing, the generators and such instances a target
-  list unpacks or a list, tuple or set display stars, and the generators
-  and such instances a call's starred argument takes, and those, without
+  list unpacks, the generators, such instances and iterators over them,
+  and the maps, filters, zips and enumerates above, that a list, tuple
+  or set display stars or a call's starred argument takes, and those, without
   a `__contains__`, that an `in` or `not in` outside a comparison chain
   searches, after calling their `__iter__`, comparing the items natively;
   generators resumed by

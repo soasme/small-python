@@ -81,6 +81,8 @@ Unreleased (0.10.0):
   body without nesting on the C stack, so it can pause
 - an unreachable async generator suspended at a yield closes without nesting on the C stack, so
   its cleanup can pause
+- a starred iterator over a sequence, map, filter, zip or enumerate in a display or a call takes
+  its items without nesting on the C stack, so it can pause
 - an iterator over a sequence whose __getitem__ raises an error other than IndexError or
   StopIteration tries the same index again on its next step
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python

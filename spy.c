@@ -23237,18 +23237,20 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
 /* BC_EXTEND's or a call's BC_ARG's starred item a, which it takes, into
  * display, a display or the call's arguments on m's stack, sealing a
  * tuple at the last (arg), a list or tuple display asking a's length hint
- * (hints): 1 when a, a generator the machine can resume or an instance
- * with a Python __iter__, gives its items on the machine (BLOCK_CONSUME,
- * EXTEND_ITEMS); else 0, a extended into the display and released. */
+ * (hints): 1 when a, a source whose items the machine takes
+ * (machine_source), but a map or filter of a native function, gives them
+ * on the machine (BLOCK_CONSUME, EXTEND_ITEMS); else 0, a extended into
+ * the display and released. */
 static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
-    if ((!resumable(a) && !iter_function(c, a) && !(is_set(display) && hashed_items(c, a))) || is_dict(display)) {
+    if ((!(machine_source(c, a) && (!called_iterator(a) || sequence_iterator(a) || next_calls(c, a))) &&
+         !(is_set(display) && hashed_items(c, a))) || is_dict(display)) {
         (hints ? extend_list : extend_display)(c, display, a);
         if (arg) seal_tuple(c, display);
         spy_release(a);
         return 0;
     }
     Consumer *s = allocate(c, sizeof(*s));
-    SPYValue *source = s && hints && a->type == SPY_INSTANCE ? spy_retain(a) : NULL;
+    SPYValue *source = s && hints && (a->type == SPY_INSTANCE || sequence_iterator(a)) ? spy_retain(a) : NULL;
     int keyed = s ? consumer_source(c, &a) : 0;
     Block *block = s && a ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(s); spy_release(a); spy_release(source); return 0; }

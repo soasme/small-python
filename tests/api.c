@@ -1603,6 +1603,10 @@ int main(int argc, char **argv) {
                "def dropped():\n    log = []\n    g = held(log)\n    finish(g.__anext__())\n    del g\n    log.append(0)\n    return sum(log)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "dropped()", "held.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So does a starred iterator over one, or a map, in a display or call. */
+    execute(c, "def starred():\n    return len([*map(slower, [1, 2])]) + len((*iter(Hinted()),)) + max(*map(slower, [1, 4]))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "starred()", "starred.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

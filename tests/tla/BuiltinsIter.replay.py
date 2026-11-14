@@ -68,6 +68,10 @@ SOURCES = {
     "next_called": "class S:\n    def __getitem__(s, i):\n        for _ in (): pass\n        if i > 0: raise IndexError\n        return i\n"
                    "def f(x):\n    for _ in (): pass\n    if x == 's': raise StopIteration\n    return x * 2\n"
                    "it = iter(S())\nresult = (next(it), next(it, 'end'), next(map(f, [2])), next(map(f, 's'), 'stop'), next(filter(f, [0, 3])))",
+    "star_called": "log = []\nclass S:\n    def __getitem__(s, i):\n        for _ in (): pass\n        if i > 1: raise IndexError\n        return i\n"
+                   "    def __len__(s):\n        for _ in (): pass\n        log.append('len')\n        return 2\n"
+                   "def g(x):\n    for _ in (): pass\n    return x + 1\n"
+                   "def f(): return [*iter(S())], (*map(g, [1]),), (*reversed(S()),), len(log)\nresult = f()",
     "next_retry": "class S:\n    f = 1\n    def __getitem__(s, i):\n        for _ in (): pass\n"
                   "        if S.f:\n            S.f = 0\n            raise KeyError(i)\n        if i > 1: raise IndexError\n        return i\n"
                   "it = iter(S())\ntry: next(it)\nexcept KeyError: pass\nresult = list(it)",

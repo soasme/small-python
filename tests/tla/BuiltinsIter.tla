@@ -56,7 +56,7 @@ Zero(s) == [i \in DOMAIN s |-> s[i] - 1]
 Rest(l, hits) == IF hits = <<>> THEN 0 ELSE Len(l) - hits[1]
 
 
-Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "adapt_python", "adapt_iter", "next_stop",
+Cases == {"iter_sequence_protocol", "reversed_hook", "reversed_len", "reversed_bad", "reversed_dict", "next_default", "next_python", "next_called", "next_retry", "star_called", "adapt_python", "adapt_iter", "next_stop",
           "next_non_iterator", "iter_sentinel_noncallable", "iter_two_args_kw", "zip_strict_first_shorter",
           "zip_strict_third", "zip_shortest", "zip_consumes", "zip_consumes_order", "map_strict",
           "map_shortest", "map_none", "map_bound", "map_convert", "map_convert_bad", "map_hash_tuple", "map_adapted", "sorted_sources", "filter_none", "filter_truth",
@@ -108,6 +108,9 @@ Case(c) ==
       [] c = "next_called" -> "(0, 'end', 4, 'stop', 3)"
       \* a sequence iterator tries an index again after its __getitem__ raised
       [] c = "next_retry" -> "[0, 1]"
+      \* a starred iterator over a sequence, reversed one or map in a display
+      \* calls __getitem__, __len__ for each length hint, or the function
+      [] c = "star_called" -> "([0, 1], (2,), (1, 0), 3)"
       \* enumerate, zip and map take an instance's items from its Python __next__,
       \* a zip ending at the first StopIteration
       [] c = "adapt_python" -> "([(0, 1), (1, 0)], [('a', 2), ('b', 1)], [0], 'end')"

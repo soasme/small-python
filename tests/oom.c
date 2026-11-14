@@ -170,7 +170,7 @@ static const char *const programs[] = {
     "    def __getitem__(self, i):\n"
     "        if i > 1: raise IndexError\n"
     "        return [i]\n"
-    "def rv(): return [list(reversed(RV())), [next(reversed(RV())), sorted(iter(RV())), [next(iter(RV())), next(map(len, [RV()]))]]]\n"
+    "def rv(): return [list(reversed(RV())), [next(reversed(RV())), sorted(iter(RV())), [next(iter(RV())), next(map(len, [RV()]))], [*iter(RV()), *map(len, [RV()])]]]\n"
     "print(rv())\n"
     "class Q:\n"
     "    def __init__(self, v): self.v = v\n"
