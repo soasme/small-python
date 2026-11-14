@@ -15,13 +15,14 @@
 (* return 0, or raise ValueError, or with the hooks defined on C itself,   *)
 (* or with none, and class D(C); then calls isinstance(x, CLS) for x a C,  *)
 (* a D, or 1, or issubclass(X, CLS) for X C, D, or int, where CLS is C,    *)
-(* (str, C), 5, or C(). The outcome is the result or the exception.        *)
+(* (str, C), (C, int), 5, or C(). The outcome is the result or the        *)
+(* exception; a tuple's items are checked in order until one is true.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Hooks == {"true", "false", "raise", "onclass", "none"}
 Subjects == {"C", "D", "int"}
-Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "five", "instance"}]
+Programs == [check : {"isinstance", "issubclass"}, hook : Hooks, subject : Subjects, cls : {"C", "tuple", "pair", "five", "instance"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -37,9 +38,13 @@ Check(p) ==
       [] p.hook = "raise" -> "ValueError"
       [] OTHER -> Default(p)
 
+\* (C, int): int decides once C's check is false.
+Pair(p) == IF Check(p) = "False" /\ p.subject = "int" THEN "True" ELSE Check(p)
+
 \* An instance's class's hooks check against it; a metaclass's are not its class's.
 Run(p) == CASE p.cls = "five" -> "TypeError"
             [] p.cls = "instance" -> IF p.hook = "onclass" THEN "True" ELSE "TypeError"
+            [] p.cls = "pair" -> Pair(p)
             [] OTHER -> Check(p)
 
 Init == program \in Programs /\ outcome = Pending

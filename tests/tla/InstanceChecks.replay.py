@@ -6,6 +6,8 @@ CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 def hooks(kind):
     def check(cls, other):
+        for _ in ():  # a loop: the hook runs on the machine
+            pass
         if kind == "raise":
             raise ValueError
         return 1 if kind == "true" else 0
@@ -19,7 +21,7 @@ def outcome(p):
     else:
         C = type("C", (), hooks("true") if hook == "onclass" else {})
     D = type("D", (C,), {})
-    cls = {"C": C, "tuple": (str, C), "five": 5}[p["cls"]] if p["cls"] != "instance" else C()
+    cls = {"C": C, "tuple": (str, C), "pair": (C, int), "five": 5}[p["cls"]] if p["cls"] != "instance" else C()
     try:
         if p["check"] == "isinstance":
             result = isinstance({"C": C, "D": D, "int": int}[p["subject"]]() if p["subject"] != "int" else 1, cls)

@@ -251,6 +251,15 @@ static const char *const programs[] = {
     "class RT(metaclass=RM): pass\n"
     "print([repr([RS('a'), RT]), str({RS('b'): (RT,)})])\n",
 
+    "class IJ(type):\n"
+    "    def __instancecheck__(cls, x):\n"
+    "        for i in range(1): pass\n"
+    "        return [cls.__name__ == 'IB']\n"
+    "class IA(metaclass=IJ): pass\n"
+    "class IB(metaclass=IJ): pass\n"
+    "def ij(): return [isinstance(1, (IA, IB)), isinstance(1, (IA, str)), issubclass(int, (IA, int))]\n"
+    "print(ij())\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"

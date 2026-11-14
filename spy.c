@@ -24535,14 +24535,50 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 static SPYValue *source_unit(SPYContext *, int, size_t, SPYValue *const *, SPYValue **);
 static SPYValue *run_source(SPYContext *, int, SPYValue *, SPYValue *);
-/* Whether callee is exec(), eval(), divmod(), pow(), sum(), any() or
- * all(), whose call may run on the machine (builtin_call). */
+/* Whether callee is exec(), eval(), divmod(), pow(), sum(), any(), all(),
+ * isinstance() or issubclass(), whose call may run on the machine
+ * (builtin_call). */
 static ALWAYS_INLINE int machine_builtin(SPYValue *callee) {
-    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64, "builtin mask");
+    _Static_assert(B_EXEC < 64 && B_EVAL < 64 && B_DIVMOD < 64 && B_POW < 64 && B_SUM < 64 && B_ANY < 64 && B_ALL < 64 &&
+                   B_ISINSTANCE < 64 && B_ISSUBCLASS < 64, "builtin mask");
     uintptr_t id = (uintptr_t)callee->as.native.data;
     return callee->type == SPY_NATIVE && callee->as.native.call == builtin && id < 64 &&
            (UINT64_C(1) << id & (UINT64_C(1) << B_EXEC | UINT64_C(1) << B_EVAL | UINT64_C(1) << B_DIVMOD | UINT64_C(1) << B_POW |
-                                 UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL));
+                                 UINT64_C(1) << B_SUM | UINT64_C(1) << B_ANY | UINT64_C(1) << B_ALL |
+                                 UINT64_C(1) << B_ISINSTANCE | UINT64_C(1) << B_ISSUBCLASS));
+}
+static int instance_check(SPYContext *, SPYValue *, SPYValue *, int, size_t);
+static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
+static SPYValue *check_next(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* isinstance() of a, or issubclass() for sub, against the items of tuple
+ * choices from i on, on m: an item's Python __instancecheck__ or
+ * __subclasscheck__ is m's call (callk), the test going on with the next
+ * item when its result is false (check_next); else the result, as
+ * instance_check's. */
+static SPYValue *check_from(SPYContext *c, Machine *m, int sub, SPYValue *a, SPYValue *choices, size_t i) {
+    for (; i < choices->as.seq.len; i++) {
+        SPYValue *item = choices->as.seq.items[i], *function;
+        if ((i & 15) == 15 && spend(c, 1)) return NULL;
+        if ((sub || value_class(c, a) != item) && (function = item_function(c, item, sub ? "__subclasscheck__" : "__instancecheck__"))) {
+            SPYValue *parts[] = {spy_retain(a), spy_retain(choices), int_value(c, (int64_t)i + 1), spy_bool(c, sub)};
+            SPYValue *state = spy_tuple(c, 4, parts);
+            release_all(4, parts);
+            return state ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(item), spy_retain(a)}, check_next, state) : NULL;
+        }
+        int result = instance_check(c, a, item, sub, 0);
+        if (result) return result < 0 ? NULL : spy_bool(c, 1);
+    }
+    return spy_bool(c, 0);
+}
+/* An item's check that check_from called returned result. */
+static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *value = NULL;
+    int truth = result ? truthy(result) : 0;
+    spy_release(result);
+    if (!c->error_type[0])
+        value = truth ? spy_bool(c, 1) : check_from(c, m, items[3] == c->booleans[1], items[0], items[1], (size_t)items[2]->as.integer_data.small);
+    spy_release(state);
+    return value;
 }
 /* Prepare unit, a module body with statements, to run in env on the
  * machine: its docstring stored and its body compiled; -1 on an error. */
@@ -24628,7 +24664,13 @@ static NO_INLINE SPYValue *builtin_call(SPYContext *c, Machine *m, Node *n, SPYV
         spy_release(callee);
         return consumer >= 0 ? NULL : result;
     }
-    if (argc == 2 + (size_t)(id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
+    /* isinstance() and issubclass() of a tuple test its items in turn. */
+    if ((id == B_ISINSTANCE || id == B_ISSUBCLASS) && argc == 2 && argv[1]->type == SPY_TUPLE) {
+        result = check_from(c, m, id == B_ISSUBCLASS, argv[0], argv[1], 0);
+        release_all(argc, argv); spy_release(callee);
+        return result;
+    }
+    if ((id == B_DIVMOD || id == B_POW) && argc == 2 + (size_t)(id == B_POW && argc == 3 && argv[2]->type == SPY_NONE) &&
         (argv[0]->type == SPY_INSTANCE || argv[1]->type == SPY_INSTANCE)) {
         Instruction called = {.op = BC_BINARY, .arg = id == B_POW ? T_POW : O_DIVMOD};
         function = operator_call(c, m, &called, argv[0], argv[1], env);

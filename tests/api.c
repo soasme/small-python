@@ -1592,6 +1592,11 @@ int main(int argc, char **argv) {
                "class Seen(metaclass=Lens): pass\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(repr([Shown('x'), Seen]))", "shown.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 1);
+    /* So does isinstance() of a tuple of classes with such a metaclass. */
+    execute(c, "class Judge(type):\n    def __instancecheck__(cls, x):\n        for i in range(3000): pass\n        return cls.__name__ == 'B'\n"
+               "class A(metaclass=Judge): pass\nclass B(metaclass=Judge): pass\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "isinstance(1, (A, B)) + isinstance(1, (A, str))", "judged.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"
