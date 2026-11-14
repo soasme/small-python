@@ -12,7 +12,9 @@
 (* value or one returning NotImplemented; a method R does not define it    *)
 (* inherits from L when R is L's subclass. A method returning a value      *)
 (* returns "<class>.<name>:<self>", like "L.add:x". The outcome is the     *)
-(* result, as a string, or the exception.                                  *)
+(* result, as a string, or the exception. L and R are classes of x and y,  *)
+(* or metaclasses of the classes x and y (holder "class"), whose type     *)
+(* defines none of the methods; the outcome is the same for both.         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -29,9 +31,10 @@ UsesR(op) == CASE op \in {"+", "+="} -> {"radd"} [] op = "==" -> {"eq"}
                [] op = "!=" -> {"eq", "ne"} [] op = "<" -> {"gt"}
 
 Fill(f, all) == [m \in all |-> IF m \in DOMAIN f THEN f[m] ELSE "none"]
+Holders == {"instance", "class"}
 Programs == UNION {
-    {[op |-> op, rel |-> rel, L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
-        l \in [UsesL(op) -> Kinds], r \in [IF rel = "same" THEN {} ELSE UsesR(op) -> Kinds]}
+    {[op |-> op, rel |-> rel, holder |-> h, L |-> Fill(l, LMethods), R |-> Fill(r, RMethods)] :
+        l \in [UsesL(op) -> Kinds], r \in [IF rel = "same" THEN {} ELSE UsesR(op) -> Kinds], h \in Holders}
     : op \in Ops, rel \in Rels}
 
 VARIABLES program, outcome

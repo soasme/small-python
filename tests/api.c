@@ -1578,6 +1578,14 @@ int main(int argc, char **argv) {
                "class Hidden(metaclass=Veil): pass\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "(not Doubt([1])) + (not Hidden) + bool(Doubt() or Hidden)", "truth.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 2);
+    /* So do their operators, comparisons and in. */
+    execute(c, "class Weighed(int):\n    def __add__(self, other):\n        for i in range(3000): pass\n        return i\n"
+               "    def __lt__(self, other):\n        for i in range(3000): pass\n        return 1\n"
+               "class Scale(type):\n    def __neg__(cls):\n        for i in range(3000): pass\n        return 1\n"
+               "    def __contains__(cls, x):\n        for i in range(3000): pass\n        return True\n"
+               "class Weights(metaclass=Scale): pass\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "(Weighed(1) + 1) + (Weighed(2) < 3) + -Weights + (5 in Weights)", "weighed.py"), SPY_STOP_STEPS, &pauses)) == 3002 && pauses > 3);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"

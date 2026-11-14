@@ -485,6 +485,7 @@ static void materialize_error(SPYContext *);
 static int subclass(SPYValue *, SPYValue *);
 static SPYValue *class_lookup(SPYValue *, const char *);
 static SPYValue *value_class(SPYContext *, SPYValue *);
+static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 static SPYValue *builtin_base(SPYContext *, SPYValue *, const char *, const char *);
 static int special_dispatch(SPYValue *);
 /* A class with a metaclass, whose special methods the metaclass supplies. */
@@ -10242,7 +10243,7 @@ static NO_INLINE SPYValue *set_compared(SPYContext *c, int op, SPYValue *a, SPYV
     return set_walks(op, a, b) ? NULL : comparison(c, op, a, b);
 }
 static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
-    if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE) return NULL;
+    if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b)) return NULL;
     if ((a->type == SPY_LIST || a->type == SPY_TUPLE) && b->type == a->type) {
         if (op != T_EQ && op != T_NE) {
             if (order_python(c, op, a, b)) return NULL;
@@ -10290,11 +10291,12 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
      * or a list or tuple with an item it compares by a Python __eq__
      * before any identical one. */
     if (op == O_IN || op == O_NOTIN)
-        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || b->type == SPY_GENERATOR ||
+        return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(b) || b->type == SPY_GENERATOR ||
                (a->type == SPY_TUPLE && hashes_key(b, 1) && key_reaches(c, a)) ? NULL :
                b->type == SPY_LIST || b->type == SPY_TUPLE ? sequence_operand(c, op, a, b) : comparison(c, op, a, b);
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
-    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || (is_set(a) && set_walks(op, a, b)) || class_union(op, a, b) ||
+    return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
+           class_union(op, a, b) ||
            (op == '%' && a->type == SPY_STRING && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -24384,7 +24386,6 @@ static NO_INLINE SPYValue *hash_call_step(SPYContext *c, Machine *m, SPYValue *c
 static SPYValue *getattr_call(SPYContext *, Machine *, int, SPYValue **);
 static SPYValue *builtin(SPYContext *, size_t, SPYValue *const *, void *);
 /* Whether v is a class whose metaclass is not type, whose methods may convert it (conversion_method). */
-static ALWAYS_INLINE int metaclassed(SPYValue *v) { return v->type == SPY_CLASS && v->as.map.meta; }
 /* Whether callee is builtin function id. */
 static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
     return callee->type == SPY_NATIVE && callee->as.native.data == (void *)(intptr_t)id && callee->as.native.call == builtin;
@@ -25567,12 +25568,13 @@ static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, in
 }
 static SPYValue *bool_call(SPYContext *, Machine *, SPYValue *, SPYValue **);
 /* Whether x's rich comparison rich declines any plain instance: x is
- * None, a str, bytes, tuple, list or dict, or a plain instance whose class
- * compares as object does, whose != calls its __eq__. */
+ * None, a str, bytes, tuple, list or dict, or a plain instance, or a class
+ * by its metaclass, whose class compares as object does, whose != calls
+ * its __eq__. */
 static int rich_declines(SPYContext *c, SPYValue *x, int rich) {
     if (x->type == SPY_NONE || x->type == SPY_STRING || x->type == SPY_BYTES || x->type == SPY_TUPLE || x->type == SPY_LIST ||
         x->type == SPY_DICT) return 1;
-    return plain_instance(x) && class_lookup(x->as.map.parent, rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
+    return (plain_instance(x) || metaclassed(x)) && class_lookup(value_class(c, x), rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
            (rich != R_NE || rich_declines(c, x, R_EQ));
 }
 /* The Python special method that operator step ins calls first on x and
@@ -26288,11 +26290,17 @@ static NO_INLINE SPYValue *class_item(SPYContext *c, Machine *m, SPYValue *x, SP
     }
     return function && machine_function(c, function) ? last_call(c, m, function, x, y, x, y, env) : NULL;
 }
-/* Whether x | y is type.__or__ of classes of no metaclass or None, one a
- * class, the intrinsic _union's call (union_call). */
+/* Whether x | y is type.__or__ of classes or None, one a class, whose
+ * metaclasses take __or__ and __ror__ from type (unionable), the intrinsic
+ * _union's call (union_call). */
+/* Whether v is None or a class whose metaclass takes its method name,
+ * __or__ or __ror__, from type. */
+static int unionable(SPYValue *v, const char *name) {
+    return v->type == SPY_NONE || (v->type == SPY_CLASS && (!v->as.map.meta ||
+           class_lookup(v->as.map.meta, name) == class_lookup(v->ctx->types[SPY_CLASS], name)));
+}
 static int class_union(int op, SPYValue *x, SPYValue *y) {
-    return op == '|' && (x->type == SPY_CLASS || y->type == SPY_CLASS) &&
-           (x->type == SPY_NONE || (x->type == SPY_CLASS && !x->as.map.meta)) && (y->type == SPY_NONE || (y->type == SPY_CLASS && !y->as.map.meta));
+    return op == '|' && (x->type == SPY_CLASS || y->type == SPY_CLASS) && unionable(x, "__or__") && unionable(y, "__ror__");
 }
 static NO_INLINE SPYValue *union_call(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *function = intrinsic(c, "_union");
@@ -26347,8 +26355,9 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (machine_lookup(contains ? y : x, contains ? x : y, contains)) return native_lookup(c, m, ins, contains ? y : x, contains ? x : y, env);
     }
     /* A builtin sequence's item: an instance key's Python __index__ first,
-     * the item then of its int (operator_returned). */
-    if (kind == OPERATE_INDEX && y->type == SPY_INSTANCE && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
+     * the item then of its int (operator_returned); an int's subclass is
+     * its int. */
+    if (kind == OPERATE_INDEX && y->type == SPY_INSTANCE && !builtin_value(c, y, SPY_INT) && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
         x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE) &&
         (function = item_function(c, y, "__index__")) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
         *env = function_env(c, function, 1, &y, NULL, 0);
@@ -26361,9 +26370,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if ((y->type == SPY_LIST || y->type == SPY_TUPLE || y->type == SPY_ITERATOR) && (ins->op != BC_COMPARE || !ins->arg) &&
             (function = contains_call(c, m, x, y, env))) return function;
         /* in takes the container's __contains__, given the item. */
-        if (y->type == SPY_INSTANCE && !y->as.map.base && !builtin_base(c, y, "__contains__", NULL) &&
-            (function = class_lookup(y->as.map.parent, "__contains__")) && machine_function(c, function) &&
-            (function = last_call(c, m, function, x, y, y, x, env))) return function;
+        if ((function = item_function(c, y, "__contains__")) && (function = last_call(c, m, function, x, y, y, x, env))) return function;
         return last && !c->error_type[0] && contains_step(c, m, op, x, y) ? c->unbound : NULL;
     }
     /* not calls a Python __bool__ (CALL_CHECKED), inverting its truth
@@ -26379,7 +26386,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
     int phase = OPERATOR_FIRST, negated = 0;
-    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT || (rich >= 0 && y->type == SPY_INSTANCE && rich_declines(c, x, rich))) {
+    if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT ||
+        (rich >= 0 && (y->type == SPY_INSTANCE || metaclassed(y)) && rich_declines(c, x, rich))) {
         /* A number declines an operator or comparison with a plain
          * instance, whose reflected method is the last call. */
         if (!reflected || !(function = o ? item_function(c, y, reflected) : rich_entry(c, y, rich_reflected[rich], &negated))) return NULL;
@@ -26400,8 +26408,20 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             spy_release(value);
             return entered;
         }
-        if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
-        SPYValue *cls = x->as.map.parent, *right = value_class(c, y);
+        if (x->type != SPY_INSTANCE && !metaclassed(x)) {
+            /* A builtin's operator comes after the reflected method that
+             * y's subclass of its type overrides, but a set's or dict's
+             * in-place one, a number method, before. */
+            SPYValue *left = value_class(c, x), *right = value_class(c, y);
+            int token = o ? o->token : 0;
+            if (!o || right == left || !subclass(right, left) || class_lookup(right, reflected) == class_lookup(left, reflected) ||
+                (kind == OPERATE_INPLACE && ((x->type == SPY_SET && (token == '|' || token == '&' || token == '-' || token == '^')) ||
+                                             (x->type == SPY_DICT && token == '|'))) ||
+                !(function = item_function(c, y, reflected))) return NULL;
+            self = y; other = x; phase = OPERATOR_REFLECTED;
+            goto found;
+        }
+        SPYValue *cls = value_class(c, x), *right = value_class(c, y);
         /* y's reflected method comes first when y's class is a subclass
          * of x's that overrides it; a comparison's whenever it is one. */
         int first = reflected && right != cls && subclass(right, cls) && (!o || class_lookup(right, reflected) != class_lookup(cls, reflected));
@@ -26419,6 +26439,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
             else phase = OPERATOR_LAST;
         } else function = o ? class_lookup(cls, o->direct) : rich < 0 ? NULL : rich_entry(c, x, rich, &negated);
     }
+found:
     /* A builtin's operator (builtin_operator) goes with the phase. */
     if (!function || !machine_function(c, function) || operator_push(c, m, x, y, ins->node ? phase : phase | op << 2) ||
         (negated && machine_push(c, m, spy_retain(c->negating)))) return NULL;
@@ -26682,11 +26703,12 @@ static NO_INLINE SPYValue *iter_call(SPYContext *c, Machine *m, Instruction *ins
     if (result) iter_returned(c, m, ins, result);
     return c->error_type[0] ? NULL : c->unbound;
 }
-/* The Python method name, __setitem__ or __delitem__, of plain instance
- * object's class, borrowed, or NULL. */
+/* The Python method name of instance object's class, also of a builtin's
+ * subclass overriding it, or of class object's metaclass, borrowed, or
+ * NULL. */
 static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name) {
-    SPYValue *function = object->type != SPY_INSTANCE || object->as.map.base || builtin_base(c, object, name, NULL) ?
-                         NULL : class_lookup(object->as.map.parent, name);
+    SPYValue *function = (object->type != SPY_INSTANCE && !metaclassed(object)) || builtin_base(c, object, name, NULL) ?
+                         NULL : class_lookup(value_class(c, object), name);
     return function && machine_function(c, function) ? function : NULL;
 }
 /* The Python __setitem__ or __delitem__, as name, of instance object's
@@ -26696,21 +26718,22 @@ static SPYValue *store_function(SPYContext *c, SPYValue *object, const char *nam
     return function && machine_function(c, function) ? function : NULL;
 }
 static SPYValue *setitem_function(SPYContext *c, SPYValue *object) { return store_function(c, object, "__setitem__"); }
-/* The comparison method rich of plain instance self to call on the machine,
- * borrowed: its Python one, or for != by object's __ne__, which no class
- * entry overrides, its Python __eq__, *negated set, whose truth the
- * comparison inverts. */
+/* The comparison method rich of instance or class self (item_function) to
+ * call on the machine, borrowed: its Python one, or for != by object's
+ * __ne__, which no class entry overrides, its Python __eq__, *negated set,
+ * whose truth the comparison inverts. */
 static SPYValue *rich_entry(SPYContext *c, SPYValue *self, int rich, int *negated) {
-    SPYValue *cls = self->type == SPY_INSTANCE && !self->as.map.base ? self->as.map.parent : NULL;
+    SPYValue *cls = (self->type == SPY_INSTANCE || metaclassed(self)) && !builtin_base(c, self, rich_names[rich], NULL) ?
+                    value_class(c, self) : NULL;
     SPYValue *function = cls ? class_lookup(cls, rich_names[rich]) : NULL;
     if ((*negated = cls && rich == R_NE && !function)) function = class_lookup(cls, "__eq__");
     return function && machine_function(c, function) ? function : NULL;
 }
-/* Whether plain instance self's comparison method rich is object's, which
- * declines a comparison with another object: no class overrides it, nor
- * __eq__ for !=. */
+/* Whether instance or class self's comparison method rich is object's,
+ * which declines a comparison with another object: no class overrides it,
+ * nor __eq__ for !=. */
 static int rich_default(SPYContext *c, SPYValue *self, int rich) {
-    SPYValue *cls = self->as.map.parent;
+    SPYValue *cls = value_class(c, self);
     return class_lookup(cls, rich_names[rich]) == class_lookup(c->object, rich_names[rich]) &&
            (rich != R_NE || class_lookup(cls, "__eq__") == class_lookup(c->object, "__eq__"));
 }
@@ -28127,7 +28150,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, slice_new(c, value, a, b)); spy_release(value); break;
         CASE(BC_UNARY)
             a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || (ins->arg == O_NOT && metaclassed(a))) { x = y = a; goto operator_step; }
+            if (a->type == SPY_INSTANCE || metaclassed(a)) { x = y = a; goto operator_step; }
             machine_push(c, m, unary(c, ins->arg, a)); break;
         CASE(BC_BINARY)
             b = machine_pop(m); a = machine_pop(m);
@@ -28258,7 +28281,9 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             spy_release(value); break;
         CASE(BC_INPLACE)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || a->type == SPY_SET) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || a->type == SPY_SET) {
+                x = a; y = b; goto operator_step;
+            }
             machine_push(c, m, augmented(c, ins->arg, a, b)); break;
         CASE(BC_CONVERT)
             a = machine_pop(m); machine_push(c, m, convert_step(c, m, a, ins->arg)); break;
@@ -33585,8 +33610,8 @@ static const char *attribute_slot_name(SPYContext *c, const char *owner, const c
 static SPYValue *add_function(SPYContext *c, SPYValue *x, SPYValue *y, int *phase) {
     *phase = OPERATOR_LAST;
     if (x->type == SPY_INT || x->type == SPY_BOOL || x->type == SPY_FLOAT) return item_function(c, y, "__radd__");
-    if (x->type != SPY_INSTANCE || x->as.map.base || (y->type == SPY_INSTANCE && y->as.map.base)) return NULL;
-    SPYValue *cls = x->as.map.parent, *right = value_class(c, y), *function;
+    if (x->type != SPY_INSTANCE && !metaclassed(x)) return NULL;
+    SPYValue *cls = value_class(c, x), *right = value_class(c, y), *function;
     if (right != cls && subclass(right, cls) && class_lookup(right, "__radd__") != class_lookup(cls, "__radd__")) {
         *phase = OPERATOR_REFLECTED;
         return item_function(c, y, "__radd__");

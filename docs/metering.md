@@ -404,8 +404,10 @@ These run as machines on the heap, in one native activation of
 - property getters, also of a builtin's or an exception's subclass, and
   `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and binary
   operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`
-  and `__contains__` methods of instances, where a step of their own
-  reaches them, a builtin subclass's `__getitem__` and a dictionary
+  and `__contains__` methods of instances, also of a builtin's subclass
+  defining them before the builtin, and of classes from their metaclass,
+  where a step of their own reaches them, a builtin subclass's
+  `__getitem__` and a dictionary
   subclass's `__missing__` for an absent `None`, `bool`, `int`, `float`
   or `str` key, and the `__eq__` that `in` a list or tuple, or an
   iterator over one, calls on its items, of an instance or of a `None`,
@@ -429,7 +431,9 @@ These run as machines on the heap, in one native activation of
   calls on them, in such calls, and the reflected
   operator or comparison method of an
   instance on the right, called once the left operand, an `int`, `bool`,
-  `float` or instance, declines, or, for a comparison, the left operand
+  `float` or instance, declines, or first when the left operand is
+  another builtin value of whose type the right operand's class is a
+  subclass overriding the method, or, for a comparison, the left operand
   is `None`, a `str`, `bytes`, `tuple`, `list` or `dict`, or first when the right operand's class
   is a subclass of the left's, then, when that class has object's
   reflected comparison method, the left operand's method, and the same methods of `divmod` and of

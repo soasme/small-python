@@ -230,6 +230,18 @@ static const char *const programs[] = {
     "def tt(): return [not TL([1]), bool(TC), TL() or [TC and 1]]\n"
     "print(tt())\n",
 
+    "class OW(int):\n"
+    "    def __add__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return [o]\n"
+    "    def __radd__(self, o): return NotImplemented\n"
+    "class OS(type):\n"
+    "    def __lt__(cls, o): return [cls]\n"
+    "    def __contains__(cls, x): return x\n"
+    "class OT(metaclass=OS): pass\n"
+    "def ow(): return [OW(1) + 2, 3 + OW(1), OT < OT, OT > OT, 4 in OT, OT | None, -OW(2)]\n"
+    "print(ow())\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"

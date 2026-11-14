@@ -1,5 +1,6 @@
-# Replays Operators.tla: each case defines the spec's classes, applies the
-# operator, and compares which method answered with the model's.
+# Replays Operators.tla: each case defines the spec's classes, or
+# metaclasses for holder "class", applies the operator to their instances,
+# and compares which method answered with the model's.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
@@ -15,12 +16,14 @@ def body(cls, methods):
 
 
 def outcome(p):
-    source = "class L:\n" + body("L", p["L"]) + "\n"
+    meta = p["holder"] == "class"
+    source = ("class L(type):\n" if meta else "class L:\n") + body("L", p["L"]) + "\n"
     if p["rel"] == "same":
         source += "R = L\n"
     else:
-        source += ("class R(L):\n" if p["rel"] == "sub" else "class R:\n") + body("R", p["R"]) + "\n"
-    source += "x = L(); x.name = 'x'\ny = R(); y.name = 'y'\n"
+        source += ("class R(L):\n" if p["rel"] == "sub" else "class R(type):\n" if meta else "class R:\n") + body("R", p["R"]) + "\n"
+    made = "('X', (), {})" if meta else "()"
+    source += f"x = L{made}; x.name = 'x'\ny = R{made}; y.name = 'y'\n"
     source += "x += y\nresult = x\n" if p["op"] == "+=" else f"result = x {p['op']} y\n"
     namespace = {}
     try:

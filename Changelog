@@ -104,6 +104,8 @@ Unreleased (0.10.0):
   __bool__ or __len__ without nesting on the C stack
 - the truth of an int, float or complex subclass with a Python __len__ but no __bool__ is the number's
 - not of a value whose __bool__ or __len__ fails no longer passes True to a call around it
+- operators, comparisons and in of a builtin subclass's instance, or of a class by its metaclass,
+  call its Python methods without nesting on the C stack
 - a class with a Python __new__ called with * or ** arguments runs __new__ and __init__ without
   nesting on the C stack, so it can pause
 - str(), repr(), format(), len(), hash(), int(), round() and the like call the Python method of a
