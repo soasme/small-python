@@ -56,9 +56,9 @@ def outcome(p):
         elif op == "reverse":
             s.reverse()
         elif op == "insert":
-            s.insert(p["i"], 7)
+            s.insert(index(p), 7)
         elif op == "pop":
-            return ("item", s.pop() if p["i"] == 99 else s.pop(p["i"]), tuple(s))
+            return ("item", s.pop() if p["i"] == 99 else s.pop(index(p)), tuple(s))
         else:
             s.remove(p["x"])
     except (IndexError, ValueError) as error:
