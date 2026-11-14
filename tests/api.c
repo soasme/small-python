@@ -1709,6 +1709,12 @@ int main(int argc, char **argv) {
                "def wrapped():\n    h = Has()\n    return h.v + property.__get__(Has.__dict__['v'], h)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "wrapped()", "wrapped.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
+    /* So does a throw of a class, its value and a None traceback. */
+    execute(c, "class Slowly(Exception):\n    def __init__(self, *a):\n        for i in range(3000): pass\n        super().__init__(*a)\n"
+               "def caught():\n    try:\n        yield 0\n    except Slowly as e:\n        yield e.args[0]\n"
+               "def thrown():\n    g = caught(); next(g)\n    return g.throw(Slowly, 4, None)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "thrown()", "thrown.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

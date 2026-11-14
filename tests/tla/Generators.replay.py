@@ -99,6 +99,10 @@ def text(value):
     return "None" if value is None else value
 
 
+def thrown(op):
+    return (THROWN[op[1]],) if op[3] == "one" else (THROWN[op[1]], None, None)
+
+
 def perform(kind, target, op):
     try:
         if op[0] == "send":
@@ -110,9 +114,9 @@ def perform(kind, target, op):
             try:
                 raise IndexError
             except IndexError:
-                value = target.throw(THROWN[op[1]])
+                value = target.throw(*thrown(op))
         elif op[0] == "throw":
-            value = target.throw(THROWN[op[1]])
+            value = target.throw(*thrown(op))
         else:
             return ("return", text(target.close()))
         return ("yield", value[0], text(value[1]))

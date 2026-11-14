@@ -452,6 +452,17 @@ static const char *const programs[] = {
     "    def v(self): return 'v'\n"
     "print(PH().v, property.__get__(PH.__dict__['v'], PH(), PH), PH.__dict__['v'].__get__(None, PH) is PH.__dict__['v'])\n",
 
+    "class TE(Exception):\n"
+    "    def __init__(self, *a): super().__init__(*a)\n"
+    "def tg():\n"
+    "    try:\n"
+    "        yield 0\n"
+    "    except TE as e:\n"
+    "        yield e.args\n"
+    "g = tg(); next(g)\n"
+    "h = tg(); next(h)\n"
+    "print(g.throw(TE, (1, 2), None), h.throw(TE, TE(3), None))\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"

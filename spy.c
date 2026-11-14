@@ -23385,8 +23385,8 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
-        /* A throw of a class and its value into a yield, too. */
-        return (argc == (method == M_THROW) || (argc == 2 && method == M_THROW && argv[0]->type == SPY_CLASS)) &&
+        /* A throw of a class and its value, and a None traceback, into a yield, too. */
+        return (argc == (method == M_THROW) || (argc >= 2 && method == M_THROW && argv[0]->type == SPY_CLASS && (argc == 2 || argv[2]->type == SPY_NONE))) &&
                throws_in(c, callee, argc ? argv[0] : NULL) && (argc < 2 || callee->as.generator.machine->awaiting == AWAIT_YIELD) ?
                method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))

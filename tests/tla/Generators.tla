@@ -31,6 +31,8 @@
 (*                                                                         *)
 (* A throw is of ValueError or KeyError, or of PyValueError, a ValueError  *)
 (* subclass whose Python __init__ throw() calls to make the exception.     *)
+(* A throw passes the class alone or, in its three-argument form, with a  *)
+(* None value and traceback, which changes nothing.                       *)
 (* A throw is made while its caller handles `handled` (an IndexError) or   *)
 (* nothing. With variant 'bare' the loop's yield stands outside the try,   *)
 (* so a throw there propagates and close() ends the object without a      *)
@@ -46,7 +48,8 @@ Variants == {"plain", "stubborn", "bare"}
 Sent == {"None", "go", "stop", "reenter"}       \* "None" is next() itself
 Thrown == {"ValueError", "KeyError", "PyValueError"}
 Handled == {"None", "IndexError"}               \* what the caller of a throw handles
-Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h>> : e \in Thrown, h \in Handled} \cup {<<"close">>, <<"drop">>}
+Forms == {"one", "three"}                        \* throw(e) or throw(e, None, None)
+Ops == {<<"send", v>> : v \in Sent} \cup {<<"throw", e, h, f>> : e \in Thrown, h \in Handled, f \in Forms} \cup {<<"close">>, <<"drop">>}
 
 \* Where the body is suspended: before its first line, at the loop's yield,
 \* at the yield inside the GeneratorExit handler, or finished; or the object
@@ -96,8 +99,8 @@ Send(v) ==
 
 (* The exception thrown is chained to none the caller handles, so h never *)
 (* shows: the body's handler sees no context.                             *)
-Throw(e, h) ==
-    /\ op' = <<"throw", e, h>>
+Throw(e, h, f) ==
+    /\ op' = <<"throw", e, h, f>>
     /\ CASE pc = "loop" /\ e \in {"ValueError", "PyValueError"} /\ variant # "bare" -> Continue("caught")
          [] pc = "done" /\ kind = "coroutine" -> Stay(<<"raise", "RuntimeError">>)  \* cannot reuse already awaited coroutine
          [] OTHER -> Finish(<<"raise", e>>)  \* a just-started body never runs; elsewhere nothing catches e
@@ -119,7 +122,7 @@ Next ==
     /\ UNCHANGED <<kind, variant>>
     /\ pc # "gone"
     /\ \/ \E v \in Sent : Send(v)
-       \/ \E e \in Thrown, h \in Handled : Throw(e, h)
+       \/ \E e \in Thrown, h \in Handled, f \in Forms : Throw(e, h, f)
        \/ Close
        \/ Drop
 
