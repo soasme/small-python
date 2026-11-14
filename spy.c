@@ -468,6 +468,8 @@ struct SPYContext {
     /* The kind of call k_fn's entry with no continuation is, CALL_CHECKED
      * when 0 (k_enter). */
     int k_kind;
+    /* On a machine's stack, marks a chain of set walks under way (chain_begin). */
+    SPYValue *chaining;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -24624,6 +24626,7 @@ static NO_INLINE SPYValue *next_builtin_call(SPYContext *c, Machine *m, Node *n,
     return result;
 }
 static SPYValue *set_walk_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, int *, int *, SPYValue **);
+static SPYValue *set_chain_call(SPYValue *, size_t, SPYValue *const *, int *, size_t *);
 static SPYValue *set_call(SPYContext *, Machine *, SPYValue *, size_t, SPYValue **, SPYValue **);
 static unsigned index_arguments(SPYContext *, SPYValue *, int, size_t, SPYValue *const *);
 static SPYValue *indexed_call(SPYContext *, Machine *, SPYValue *, int, SPYValue *, size_t, SPYValue **);
@@ -24696,7 +24699,7 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         return result;
     }
     /* A set method walking another set (set_call). */
-    if (method < 0 && argc && argc <= 2 && set_like(argv[argc - 1]) && (result = set_call(c, m, callee, argc, argv, env)) != c->unbound)
+    if (method < 0 && argc && argc <= 9 && set_like(argv[argc - 1]) && (result = set_call(c, m, callee, argc, argv, env)) != c->unbound)
         return result;
     if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
                  metaclassed(argv[0]) ||
@@ -25128,6 +25131,8 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
                                                        /* next() with a default (next_builtin_call) */
                                                        (callee->as.native.data == (void *)(intptr_t)B_NEXT && argv[0]->type == SPY_INSTANCE))) ||
                                         (argc == 3 && argv[1]->type == SPY_STRING && (argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_CLASS)) ||
+                                        /* a set method given its set and others (set_chain_call) */
+                                        (argc > 2 && set_like(argv[argc - 1]) && callee->as.native.kwcall == set_method) ||
                                         (argc > 1 && argv[0]->type == SPY_STRING &&
                                          (callee->as.native.kwcall == slot_call || callee->as.native.kwcall == str_format_map)))))
         return operand_call_rest(c, m, n, callee, method, argc, argv, env);
@@ -25343,9 +25348,11 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     int op, inplace;
     SPYValue *y;
-    if (calls && argc && argc <= 2 && set_like(argv[argc - 1]) && set_walk_call(c, callee, argc, argv, &op, &inplace, &y)) {
+    size_t sets;
+    if (calls && argc && argc <= 9 && set_like(argv[argc - 1]) &&
+        (set_walk_call(c, callee, argc, argv, &op, &inplace, &y) || set_chain_call(callee, argc, argv, &op, &sets))) {
         /* A set method walking another set (set_call) takes them from the stack. */
-        SPYValue *held[2];
+        SPYValue *held[9];
         memcpy(held, argv, argc * sizeof(*argv));
         m->len -= argc + 1;
         return set_call(c, m, callee, argc, held, env);
@@ -25420,9 +25427,11 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
     }
     int id, inplace;
     SPYValue *y;
-    if (callee && calls && method < 0 && argc + !skip <= 2 && set_like(m->stack[m->len - 1]) && set_walk_call(c, callee, argc + !skip, argv + skip, &id, &inplace, &y)) {
+    size_t sets;
+    if (callee && calls && method < 0 && argc + !skip <= 9 && set_like(m->stack[m->len - 1]) &&
+        (set_walk_call(c, callee, argc + !skip, argv + skip, &id, &inplace, &y) || set_chain_call(callee, argc + !skip, argv + skip, &id, &sets))) {
         /* A set method walking another set (set_call) takes them from the stack. */
-        SPYValue *held[3];
+        SPYValue *held[10];
         memcpy(held, argv, (argc + 1) * sizeof(*argv));
         m->len -= argc + 1;
         if (skip) spy_release(held[0]);
@@ -26536,6 +26545,65 @@ static void walk_unequal(SPYContext *c, Machine *m) {
  * Python __eq__ entered, its lookup pushed above the walk (lookup_call).
  * At the end, or on an error, the walk popped, its result in c->looked,
  * swapped into the set an augmented assignment updates; then NULL. */
+static SPYValue *set_walk(SPYContext *, Machine *, int, SPYValue *, SPYValue *, int, SPYValue **);
+/* A chain of set walks (chain_begin): set method which of the set self
+ * and each of the sets args in turn, or (CHAIN_DISCARD plus the walk's
+ * inplace) a difference update of self by a set more than eight times
+ * larger, args alone, which discards their intersection. Its state, self,
+ * args, the next one's index, which and the result so far, goes on m's
+ * stack under c->chaining, each walk above it. */
+enum { CHAIN_DISCARD = 16 };
+/* Walk i of a chain (chain_begin) whose result so far is r, which it
+ * takes: its first Python __eq__ to enter with *env, the walk under it;
+ * else NULL, the chain's value in c->looked, or an error. */
+static SPYValue *chain_step(SPYContext *c, Machine *m, SPYValue *self, SPYValue *args, size_t i, int which, SPYValue *r, SPYValue **env) {
+    static const int ops[] = {'|', '&', '-', 0, '|', '&', '-'};
+    size_t len = m->len;
+    int op = which >= CHAIN_DISCARD ? (i ? '-' : '&') : ops[which];
+    /* union and difference build their result from self's, which updates
+     * then change in place, as the update methods change self. */
+    int inplace = which >= CHAIN_DISCARD ? (i ? which - CHAIN_DISCARD : 0) : which == 4 || which == 6 ? 2 :
+                  (which == 0 || which == 2) && i ? 3 : 0;
+    SPYValue *x = which == 4 || which == 6 || which >= CHAIN_DISCARD || !i ? self : r;
+    SPYValue *y = which >= CHAIN_DISCARD && i ? r : args->as.seq.items[which >= CHAIN_DISCARD ? 0 : i];
+    if (machine_push(c, m, spy_retain(self)) || machine_push(c, m, spy_retain(args)) || machine_push(c, m, int_value(c, (int64_t)i)) ||
+        machine_push(c, m, int_value(c, which)) || machine_push(c, m, r) || machine_push(c, m, spy_retain(c->chaining))) {
+        while (m->len > len) spy_release(machine_pop(m));
+        return NULL;
+    }
+    SPYValue *function = set_walk(c, m, op, x, y, inplace, env);
+    /* A walk that could not begin leaves the chain. */
+    if (!function && c->error_type[0]) while (m->len > len) spy_release(machine_pop(m));
+    return function;
+}
+/* The chain atop m goes on once its walk ended with value, owned, or
+ * NULL on an error: its next walk (chain_step), or its end, its value in
+ * c->looked: an update's None, intersection_update's swapped into self. */
+static NO_INLINE SPYValue *chain_next(SPYContext *c, Machine *m, SPYValue *value, SPYValue **env) {
+    spy_release(machine_pop(m));
+    SPYValue *r = machine_pop(m), *which_value = machine_pop(m), *index = machine_pop(m), *args = machine_pop(m), *self = machine_pop(m);
+    int which = (int)which_value->as.integer_data.small;
+    size_t i = (size_t)index->as.integer_data.small + 1, n = which >= CHAIN_DISCARD ? 2 : args->as.seq.len;
+    SPYValue *function = NULL;
+    spy_release(which_value); spy_release(index);
+    if (value && (value->type != SPY_NONE || which >= CHAIN_DISCARD)) { spy_release(r); r = value; }
+    else spy_release(value);
+    if (c->error_type[0]) spy_release(r);
+    else if (i < n) function = chain_step(c, m, self, args, i, which, r, env);
+    else {
+        if (which == 5) swap_contents(set_storage(self), r);
+        if (which >= 4 && which <= 6) { spy_release(r); r = spy_none(c); }
+        c->looked = r;
+    }
+    spy_release(args); spy_release(self);
+    return function;
+}
+/* Set method which of self and args, a tuple of sets, as a chain of
+ * walks (chain_step), or self's difference update by args[0], a larger
+ * set (CHAIN_DISCARD). */
+static NO_INLINE SPYValue *chain_begin(SPYContext *c, Machine *m, int which, SPYValue *self, SPYValue *args, SPYValue **env) {
+    return chain_step(c, m, self, args, 0, which, spy_retain(self), env);
+}
 static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
     for (;;) {
         SPYValue **state = &m->stack[m->len - 7], *walked = state[1], *map = state[2], *function;
@@ -26560,8 +26628,9 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
         result = flags & SET_UPDATING ? spy_none(c) : target;
         if (flags & SET_UPDATING) spy_release(target);
     } else spy_release(target);
-    if (c->error_type[0]) spy_release(result);
-    else c->looked = result;
+    if (c->error_type[0]) { spy_release(result); result = NULL; }
+    if (m->len && m->stack[m->len - 1] == c->chaining) return chain_next(c, m, result, env);
+    c->looked = result;
     return NULL;
 }
 /* For set operator step op of x and y (set_walks), the result built on
@@ -26579,18 +26648,24 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
  * c->walking, and the walk begins (walk_next). */
 static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue *operand, SPYValue *other, int inplace, SPYValue **env) {
     SPYValue *x = set_storage(operand), *y = set_storage(other);
-    int rich = rich_kind(op), updates = inplace && x->type == SPY_SET;
+    int rich = rich_kind(op), updates = (inplace && x->type == SPY_SET) || inplace == 3;
+    /* A difference update of a set more than eight times larger discards
+     * their intersection's entries (CHAIN_DISCARD). */
+    if (op == '-' && updates && y->as.map.len >> 3 > x->as.map.len) {
+        SPYValue *args = tuple_of(c, 1, &other), *function = args ? chain_begin(c, m, CHAIN_DISCARD + inplace, operand, args, env) : NULL;
+        spy_release(args);
+        return function;
+    }
     int discards = op == '^' || (op == '-' && (updates || x->as.map.len >> 2 > y->as.map.len));
-    SPYValue *result = rich >= 0 || op == SET_DISJOINT ? spy_bool(c, op != T_NE) : op == '|' || (discards && (op != '^' || updates)) ?
-                       set_copy_type(c, x, x->type) : op == '^' ? set_copy_type(c, y, x->type) : value_new(c, x->type);
-    SPYValue *walked = op == '^' && !updates ? x : op == '|' || discards || rich == R_GT || rich == R_GE ? y :
+    /* A union into an empty set copies the other, comparing none. */
+    int copies = op == '|' && !x->as.map.len;
+    SPYValue *result = rich >= 0 || op == SET_DISJOINT ? spy_bool(c, op != T_NE) : op == '^' || copies ? set_copy_type(c, copies || !updates ? y : x, x->type) :
+                       op == '|' || discards ? set_copy_type(c, x, x->type) : value_new(c, x->type);
+    SPYValue *walked = (op == '^' && !updates) || copies ? x : op == '|' || discards || rich == R_GT || rich == R_GE ? y :
                        (op == '&' || op == SET_DISJOINT) && y->as.map.len <= x->as.map.len ? y : x;
     SPYValue *searched = op == '|' || discards ? result : walked == x ? y : x;
-    /* A difference update of a set more than eight times larger discards
-     * their intersection's entries. */
-    walked = op == '-' && updates && y->as.map.len >> 3 > x->as.map.len ? set_intersection(c, x, y) : spy_retain(walked);
+    spy_retain(walked);
     size_t len = m->len;
-    if (!walked) { spy_release(result); return NULL; }
     if (machine_push(c, m, result) || machine_push(c, m, walked) || machine_push(c, m, spy_retain(searched)) ||
         machine_push(c, m, int_value(c, 0)) || machine_push(c, m, int_value(c, op | (inplace == 2 ? SET_UPDATING : 0) | (discards ? SET_DISCARDS : 0))) ||
         machine_push(c, m, spy_retain(updates ? operand : c->none)) || machine_push(c, m, spy_retain(c->walking))) {
@@ -26628,16 +26703,41 @@ static SPYValue *set_walk_call(SPYContext *c, SPYValue *callee, size_t argc, SPY
     /* isdisjoint iterates any other but an exact set (set_method). */
     return (*op != SET_DISJOINT || is_set(*y)) && set_walks(*op, set_storage(x), set_storage(*y)) ? x : NULL;
 }
+/* Whether a call of callee on argc arguments argv, at most 8, is a set's
+ * union, intersection, difference or one of their updates of several
+ * sets, none of them the set, bound or given the set first, whose lookups
+ * may call a Python __eq__ (set_walks): the set, borrowed, the method in
+ * *which, the other sets' count in *n; else NULL. */
+static SPYValue *set_chain_call(SPYValue *callee, size_t argc, SPYValue *const *argv, int *which, size_t *n) {
+    SPYValue *function = callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    SPYValue *self = callee->type == SPY_METHOD ? callee->as.method.self : argv[0];
+    *n = argc - (callee == function);
+    if (*n < 2 || *n > 8 || function->type != SPY_NATIVE || function->as.native.kwcall != set_method) return NULL;
+    intptr_t data = (intptr_t)function->as.native.data;
+    *which = (int)(data & 255);
+    if ((*which & 3) == SET_SYMMETRIC || *which >= 8 || set_storage(self)->type != (int)(data >> 8)) return NULL;
+    int walks = 0;
+    for (size_t i = argc - *n; i < argc; i++) {
+        if (!set_like(argv[i]) || set_storage(argv[i]) == set_storage(self)) return NULL;
+        walks = walks || set_walks('^', set_storage(self), set_storage(argv[i]));
+    }
+    return walks ? self : NULL;
+}
 /* A call of callee on argc arguments argv that walks two sets
- * (set_walk_call), taking callee and the arguments: its first Python
+ * (set_walk_call), or a chain of them (set_chain_call), taking callee and the arguments: its first Python
  * __eq__ entered as c->entering_init (CALL_OPERATOR) with *env, the
  * walk under it, a placeholder for its value; else the call's value;
  * c->unbound, taking nothing, when it is no such call. */
 static NO_INLINE SPYValue *set_call(SPYContext *c, Machine *m, SPYValue *callee, size_t argc, SPYValue **argv, SPYValue **env) {
     int op, inplace;
-    SPYValue *y, *x = set_walk_call(c, callee, argc, argv, &op, &inplace, &y);
-    if (!x) return c->unbound;
-    SPYValue *function = set_walk(c, m, op, x, y, inplace, env);
+    size_t n;
+    SPYValue *y, *x = set_walk_call(c, callee, argc, argv, &op, &inplace, &y), *function, *args;
+    if (x) function = set_walk(c, m, op, x, y, inplace, env);
+    else if (!(x = set_chain_call(callee, argc, argv, &op, &n))) return c->unbound;
+    else {
+        function = (args = tuple_of(c, n, argv + argc - n)) ? chain_begin(c, m, op, x, args, env) : NULL;
+        spy_release(args);
+    }
     release_all(argc, argv); spy_release(callee);
     if (!function) return c->error_type[0] ? NULL : looked(c);
     c->entering_init = function; c->entering_kind = CALL_OPERATOR;
@@ -37536,9 +37636,10 @@ SPYContext *spy_context_new(void) {
     c->adapting = value_new(c, V_UNBOUND);
     c->stopping = value_new(c, V_UNBOUND);
     c->augmenting = value_new(c, V_UNBOUND);
+    c->chaining = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;

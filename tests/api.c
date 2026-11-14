@@ -1626,6 +1626,11 @@ int main(int argc, char **argv) {
                "def unioned():\n    s = {Slow()}\n    return len(s.union([Slow(), Slow()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "unioned()", "unioned.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 1);
+    /* So do a set method's several sets and a difference update by a much larger one. */
+    execute(c, "def chained():\n    s = {Slow()}\n    t = s.union({Slow()}, {Slow()})\n    s.difference_update({Slow()}, {Slow()})\n"
+               "    u = {Slow()}\n    u -= {Slow() for i in range(9)} | {1}\n    return len(t) + len(s) + len(u)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "chained()", "chained.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
     /* So do a set subclass's operators, in-place operators and comparisons. */
     execute(c, "class Sub(set): pass\n"
                "def subs():\n    s = Sub([Slow()])\n    t = {Slow()}\n    u = s | t\n    s &= t\n"

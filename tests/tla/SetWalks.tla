@@ -21,7 +21,8 @@
 (* gives the operator's outcome. The outcome is the result's values, a's   *)
 (* after an update, or the bool, then the log. An instance is operated on  *)
 (* as its set, but a set's comparison with one is the instance's reflected *)
-(* comparison (RichCompare, 7.2.4).                                        *)
+(* comparison (RichCompare, 7.2.4). A set's union, intersection,          *)
+(* difference or update of two sets b and c is that of b, then of c.       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -30,8 +31,10 @@ Small == {s \in SUBSET {1, 2, 3} : Cardinality(s) <= 2}
 Operators == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "|=", "&=", "-=", "^="}
 Methods == {"union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"}
 Updates == {"update", "intersection_update", "difference_update", "symmetric_difference_update"}
+Chains == {"union", "intersection", "difference", "update", "intersection_update", "difference_update"}
 Programs == [ka : {"set", "frozenset", "subset"}, a : Small, op : Operators \cup Methods, kb : {"set", "subset"}, b : Small]
             \cup [ka : {"set", "subset"}, a : Small, op : Updates, kb : {"set", "subset"}, b : Small]
+            \cup [ka : {"set"}, a : Small, chain : Chains, kb : {"set"}, b : Small, c : Small]
 
 \* A set built in the order of the values: its elements <<side, value>>.
 Build(side, s) == LET RECURSIVE From(_) From(i) == IF i > 3 THEN <<>>
@@ -82,6 +85,16 @@ False == [r |-> <<>>, log |-> <<>>, bool |-> "False"]
 
 Reflected == [o \in {"<=", "<", ">=", ">", "=="} |-> CASE o = "<=" -> ">=" [] o = "<" -> ">" [] o = ">=" -> "<="
                                                        [] o = ">" -> "<" [] o = "==" -> "=="]
+\* A walk's result w walked again by step S, its log after w's.
+Then(w, S(_)) == LET v == S(w.r) IN [v EXCEPT !.log = w.log \o v.log]
+\* A method of two sets: of the first, then of the second.
+Chain(p) ==
+    LET A == Build("a", p.a)  B == Build("b", p.b)  C == Build("c", p.c)
+        Plus(R) == Union(R, C)  Keep(R) == Inter(R, C)  Less(R) == Discard(R, C)
+    IN CASE p.chain \in {"union", "update"} -> Then(Union(A, B), Plus)
+         [] p.chain \in {"intersection", "intersection_update"} -> Then(Inter(A, B), Keep)
+         [] p.chain = "difference" -> Then(Diff(A, B), Less)
+         [] p.chain = "difference_update" -> Then(Discard(A, B), Less)
 \* What a program gives; a frozenset's augmented assignment is its operator.
 \* A set's comparison with a subclass's instance is the instance's reflected one.
 Apply(p) ==
@@ -110,7 +123,8 @@ Join(s) == IF s = <<>> THEN "" ELSE " " \o Head(s) \o Join(Tail(s))
 Shown(S) == LET RECURSIVE From(_) From(i) == IF i > 3 THEN ""
                                              ELSE (IF \E j \in 1..Len(S) : S[j][2] = Values[i] THEN Values[i] ELSE "") \o From(i + 1)
             IN "{" \o From(1) \o "}"
-Show(p) == LET w == Apply(p) IN (IF p.op \in Compares THEN w.bool ELSE Shown(w.r)) \o Join(w.log)
+Show(p) == IF "chain" \in DOMAIN p THEN LET w == Chain(p) IN Shown(w.r) \o Join(w.log)
+           ELSE LET w == Apply(p) IN (IF p.op \in Compares THEN w.bool ELSE Shown(w.r)) \o Join(w.log)
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -123,8 +137,16 @@ Spec == Init /\ [][Execute]_vars
 Done == outcome # "pending"
 
 \* An entry is compared at most twice per walked entry: a union compares each of the result's once.
-Bounded == Done => Len(Apply(program).log) <= 2 * (Cardinality(program.a) + 1) * (Cardinality(program.b) + 1)
+Bounded == Done /\ "op" \in DOMAIN program => Len(Apply(program).log) <= 2 * (Cardinality(program.a) + 1) * (Cardinality(program.b) + 1)
 
 \* Disjoint sets intersect in nothing.
-Disjoint == Done /\ program.op = "&" /\ program.a \cap program.b = {} => Apply(program).r = <<>>
+Disjoint == Done /\ "op" \in DOMAIN program /\ program.op = "&" /\ program.a \cap program.b = {} => Apply(program).r = <<>>
+
+\* A chain's result holds the elements the methods' definitions give.
+Chained == Done /\ "chain" \in DOMAIN program =>
+    LET r == {e[2] : e \in {Chain(program).r[i] : i \in 1..Len(Chain(program).r)}}
+        a == {Values[v] : v \in program.a}  b == {Values[v] : v \in program.b}  c == {Values[v] : v \in program.c}
+    IN r = CASE program.chain \in {"union", "update"} -> a \cup b \cup c
+              [] program.chain \in {"intersection", "intersection_update"} -> a \cap b \cap c
+              [] OTHER -> a \ (b \cup c)
 =============================================================================

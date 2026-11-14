@@ -58,7 +58,21 @@ def run(p, machine, named=False):
     return " ".join([shown] + log)
 
 
+def chained(p, machine):
+    a = set(E("a", v) for v in sorted(p["a"]))
+    b, c = ({E(side, v) for v in sorted(p[side])} for side in ("b", "c"))
+    loop = "    for _ in (): pass\n" if machine else ""
+    scope = {}
+    exec("def f(a, b, c):\n" + loop + "    r = a.%s(b, c)\n    return a if r is None else r\n" % p["chain"], scope)
+    log.clear()
+    r = scope["f"](a, b, c)
+    return " ".join(["{" + "".join(str(v) for v in sorted(e.v for e in r)) + "}"] + log)
+
+
 def outcome(p):
+    if "chain" in p:
+        machine, walker = chained(p, True), chained(p, False)
+        return machine if machine == walker else "machine " + machine + " | C " + walker
     machine = run(p, True)
     runs = [run(p, False)] + [run(p, machine, True) for machine in (True, False) if named_method(p)]
     return machine if all(r == machine for r in runs) else "machine " + machine + " | " + " | ".join(runs)

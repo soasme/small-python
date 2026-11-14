@@ -93,6 +93,8 @@ Unreleased (0.10.0):
   an await closes, without nesting on the C stack, so they can pause
 - an unreachable generator or coroutine that ignores its close in an except block is still
   reclaimed, with its locals and the iterator it waits on
+- a set's union(), intersection(), difference() and their updates of several sets, and a
+  difference update by a much larger set, call a Python __eq__ without nesting on the C stack
 - a set subclass's instance takes its set's operators, in-place operators and comparisons without
   nesting on the C stack; a comparison with a builtin subclass's instance tries its reflected one first
 - a set's symmetric_difference(), symmetric_difference_update() and issubset() of an iterable

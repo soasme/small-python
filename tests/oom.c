@@ -354,6 +354,13 @@ static const char *const programs[] = {
     "    return [len(c), len(a), d, b.isdisjoint(a), [1] == type('L', (list,), {})([1])]\n"
     "print(ss())\n",
 
+    "def ch():\n"
+    "    a = {SD(), SD()}; b = {SD()}; d = {SD() for i in range(20)}\n"
+    "    r = [len(a.union(b, {SD()})), len(a.intersection(b, a | b)), len(frozenset(a).difference(b, {SD()}))]\n"
+    "    a.update(b, {SD()}); a.intersection_update(a | b, {*a}); a.difference_update(b, {SD()}); a -= d\n"
+    "    return r + [len(a)]\n"
+    "print(ch())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"
