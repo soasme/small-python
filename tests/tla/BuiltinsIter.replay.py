@@ -109,6 +109,9 @@ SOURCES = {
     "starred_calls": "log = []\nclass B:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return bool(s.v)\n"
                      "class W:\n    def __str__(s):\n        for _ in (): pass\n        log.append('str')\n        return 's'\n    def __format__(s, f):\n        for _ in (): pass\n        log.append('format')\n        return 'f'\n"
                      "result = (any(*[[B(0), B(1), B(2)]]), str(*[W()]), format(*(W(), '')), log)",
+    "callable_calls": "log = []\nn = [0]\ndef f():\n    for _ in (): pass\n    n[0] += 1\n    log.append(n[0])\n    return n[0] % 3\n"
+                      "a = [x for x in iter(f, 0)]\nn[0] = 0\nb = sum(iter(f, 0))\nn[0] = 0\nc = list(iter(f, 0))\nn[0] = 0\n"
+                      "result = (a, b, c, next(iter(f, 0)), log)",
     "map_hash_tuple": "log = []\nclass H:\n    def __init__(s, v): s.v = v\n    def __hash__(s):\n        for _ in (): pass\n        log.append(s.v)\n        return s.v\nresult = (list(map(hash, [(H(1),), (2, (H(3), H(4)))])) == [hash((1,)), hash((2, (3, 4)))], log)",
     "map_class": "log = []\nclass P:\n    def __init__(s, *a):\n        for _ in (): pass\n        log.append(a[0])\n        s.a = a\n"
                  "out = []\nfor p in map(P, [1, 2], 'ab'):\n    out.append(p.a)\n    log.append(('t', p.a[0]))\nresult = (out, log)",

@@ -1692,6 +1692,11 @@ int main(int argc, char **argv) {
                "def got():\n    g = Got()\n    return g.v + getattr(g, 'v')\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "got()", "got.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 1);
+    /* So do the calls of a callable iterator's Python function. */
+    execute(c, "def ticks():\n    n = [0]\n    def f():\n        for i in range(3000): pass\n        n[0] += 1\n        return n[0]\n    return f\n"
+               "def ticked():\n    t = sum(iter(ticks(), 3))\n    for x in iter(ticks(), 2): t += x\n    return t + next(iter(ticks(), 0))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "ticked()", "ticked.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 4);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

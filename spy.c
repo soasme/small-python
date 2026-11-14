@@ -23272,7 +23272,7 @@ static int called_iterator(SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
     return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE) ||
-           adapts(v);
+           (kind == I_CALLABLE && v->as.iterator.source->type == SPY_FUNCTION) || adapts(v);
 }
 /* Whether next() of v takes its item on the machine (consume): one that
  * adapts a map's, or a map or filter whose function is Python. */
@@ -23281,6 +23281,7 @@ static int next_calls(SPYContext *c, SPYValue *v) {
     if (v->type != SPY_ITERATOR) return 0;
     int kind = v->as.iterator.kind;
     if (adapts(v)) return 1;
+    if (kind == I_CALLABLE) return !v->as.iterator.done && machine_function(c, v->as.iterator.source);
     SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
     return function && (machine_function(c, function) || (kind == I_MAP && bound_function(c, function)));
 }
@@ -28581,10 +28582,39 @@ static NO_INLINE int filter_call(SPYContext *c, Machine *m, SPYValue *v, SPYValu
     *fn = spy_retain(function);
     return 1;
 }
+/* What callable iterator v's call (sentinel_call) returned in result,
+ * taking it: the item, unless it equals the sentinel, which ends v as an
+ * exhausting call does, a StopIteration then pending for next_ended
+ * (iterator_next). */
+static NO_INLINE SPYValue *sentinel_returned(SPYContext *c, SPYValue *v, SPYValue *result) {
+    v->as.iterator.index--;
+    if (!result) {
+        if (error_is(c, "StopIteration")) v->as.iterator.done = 1;
+        return NULL;
+    }
+    SPYValue *sentinel = v->as.iterator.done ? NULL : spy_retain(v->as.iterator.counter);
+    int stop = !sentinel || sentinel == result || equal(sentinel, result);
+    spy_release(sentinel);
+    if (c->error_type[0] || stop) {
+        spy_release(result);
+        if (stop && !c->error_type[0]) {
+            if (!v->as.iterator.done) {
+                v->as.iterator.done = 1;
+                spy_release(v->as.iterator.source); v->as.iterator.source = spy_none(c);
+                spy_release(v->as.iterator.counter); v->as.iterator.counter = NULL;
+            }
+            spy_error(c, "StopIteration", "");
+        }
+        return NULL;
+    }
+    return result;
+}
 /* What the function of filter v, given the item waiting in v's counter
  * (filter_call), returned in test, taking it: the item when test is true;
- * else NULL, with *again set unless an error is pending. */
+ * else NULL, with *again set unless an error is pending; a callable
+ * iterator's call, sentinel_returned. */
 static NO_INLINE SPYValue *filter_returned(SPYContext *c, SPYValue *v, SPYValue *test, int *again) {
+    if (v->as.iterator.kind == I_CALLABLE) return sentinel_returned(c, v, test);
     SPYValue *item = v->as.iterator.counter;
     v->as.iterator.counter = NULL;
     int keep = test && truthy(test);
@@ -28595,7 +28625,20 @@ static NO_INLINE SPYValue *filter_returned(SPYContext *c, SPYValue *v, SPYValue 
     return NULL;
 }
 static ALWAYS_INLINE int filtering(SPYValue *v) {
-    return v->type == SPY_ITERATOR && v->as.iterator.kind == I_FILTER && v->as.iterator.counter;
+    return v->type == SPY_ITERATOR && ((v->as.iterator.kind == I_FILTER && v->as.iterator.counter) ||
+                                       (v->as.iterator.kind == I_CALLABLE && v->as.iterator.index));
+}
+/* next_call_of for a callable iterator v, iter(f, sentinel), of a Python
+ * f: its call, v's index counting those pending for filter_returned,
+ * which a call of f may itself make; 1, or
+ * 0 for iterator_next when v ended or f is no Python function. */
+static NO_INLINE int sentinel_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPYValue **env) {
+    SPYValue *function = v->as.iterator.source;
+    if (v->as.iterator.done || !machine_function(c, function)) return 0;
+    if (!(*env = function_env(c, function, 0, NULL, NULL, 0))) return -1;
+    *fn = spy_retain(function);
+    v->as.iterator.index++;
+    return 1;
 }
 /* The call a step enters on the machine for iterator v's next item, owned,
  * with its env: a Python __next__ of v's class, or a map's function, or
@@ -28797,6 +28840,7 @@ static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYVal
         if (status) return status < 0 ? -1 : 2;
         if ((v->as.iterator.removed & 2) && (status = adapted_call(c, m, v, fn, env))) return status;
         if (v->as.iterator.kind == I_FILTER) return filter_call(c, m, v, fn, env);
+        if (v->as.iterator.kind == I_CALLABLE) return sentinel_call(c, v, fn, env);
         if (v->as.iterator.kind == I_GETITEM || v->as.iterator.kind == I_REVERSED) return getitem_call(c, v, fn, env);
         SPYValue *callee = v->as.iterator.kind == I_MAP && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
         if (!callee) return 0;

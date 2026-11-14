@@ -421,6 +421,20 @@ static const char *const programs[] = {
     "    def __getattr__(self, name): return name * 2\n"
     "print(SG().v, SG().w, getattr(SG(), 'v'), super(SP, SG.__dict__['v']).__get__(SG()))\n",
 
+    "def ci():\n"
+    "    n = [0]\n"
+    "    def f():\n"
+    "        n[0] += 1\n"
+    "        if n[0] == 9: raise StopIteration\n"
+    "        return n[0]\n"
+    "    it = iter(f, 4)\n"
+    "    r = [x for x in it] + list(it)\n"
+    "    n[0] = 0\n"
+    "    for x in iter(f, 3): r.append(x)\n"
+    "    n[0] = 4\n"
+    "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
+    "print(ci())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"
