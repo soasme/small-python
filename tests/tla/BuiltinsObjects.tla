@@ -53,7 +53,7 @@ NoDict(n) == IF n = "real" THEN "AttributeError: attribute 'real' of 'int' objec
 
 
 Cases == {"getattr_nonstr", "property_get_calls", "getattr_missing", "setattr_nonstr", "hasattr_propagates", "hasattr_attributeerror",
-          "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook",
+          "slots_setattr", "slots_vars", "vars_no_arg", "vars_module", "dir_sorted", "dir_hook", "dir_hook_calls",
           "dir_hook_bad", "callable_forms", "id_identity", "hash_big", "hash_bad", "hash_eq_only",
           "hash_tuple", "hash_tuple_fails", "hash_numeric", "type_one_arg", "type_three_args", "type_two_args", "type_bad_bases",
           "type_bad_dict", "type_bad_name", "type_qualname_kw", "isinstance_hook", "isinstance_bad",
@@ -88,6 +88,8 @@ Case(c) ==
       [] c = "vars_no_arg" -> "{'a': 1}"
       [] c = "vars_module" -> "'mappingproxy'"
       [] c = "dir_sorted" -> "['a', 'b']"
+      \* a Python __dir__, which may loop, is called once and its iterable sorted
+      [] c = "dir_hook_calls" -> "(['a', 'y', 'z'], 1)"
       [] c = "dir_hook" -> "['a', 'z']"
       [] c = "dir_hook_bad" -> "TypeError: 'int' object is not iterable"
       [] c = "callable_forms" -> "(True, True, False, True, False)"

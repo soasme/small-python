@@ -24472,11 +24472,11 @@ static NO_INLINE SPYValue *sequence_next(SPYContext *c, SPYValue *v, SPYValue **
     return function;
 }
 /* The Python __str__, __repr__, __format__, __len__, __int__, __float__,
- * __complex__, __bytes__, __hash__, __abs__, __round__, __reversed__ or
- * __next__ that callee, str, repr, format, len, int, float, complex,
- * bytes, hash, abs, round, reversed or next, calls on its first
- * argument, an instance, found[0] its name and found[1] the spec format or
- * the ndigits round passes it, or NULL; else NULL. */
+ * __complex__, __bytes__, __hash__, __abs__, __round__, __reversed__,
+ * __next__ or __dir__ that callee, str, repr, format, len, int, float,
+ * complex, bytes, hash, abs, round, reversed, next or dir, calls on its
+ * first argument, an instance, found[0] its name and found[1] the spec
+ * format or the ndigits round passes it, or NULL; else NULL. */
 static SPYValue *index_function(SPYContext *, SPYValue *);
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
@@ -24491,7 +24491,7 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     if (argc != 1 + (size_t)((id == B_FORMAT || id == B_ROUND || id == B_NEXT) && argc == 2) ||
         (!repr && id != B_FORMAT && id != B_LEN && id != B_INT && id != B_FLOAT && id != B_BOOL && id != B_COMPLEX && id != B_BYTES &&
          id != B_HASH && id != B_ABS && id != B_ROUND && id != B_REVERSED && id != B_NEXT && id != B_HEX && id != B_OCT && id != B_BIN &&
-         id != B_CHR && callee != c->types[SPY_STRING])) return NULL;
+         id != B_CHR && id != B_DIR && callee != c->types[SPY_STRING])) return NULL;
     /* A class's methods are its metaclass's. */
     int class = argv[0]->type == SPY_CLASS;
     SPYValue *cls = class ? argv[0]->as.map.meta : argv[0]->as.map.parent, *function, *base = class ? NULL : argv[0]->as.map.base;
@@ -24530,10 +24530,13 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     /* With no __str__ above object's, str() calls the instance's __repr__. */
     const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
         id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
-        id == B_REVERSED ? "__reversed__" : id == B_NEXT ? "__next__" : repr ? "__repr__" : "__str__";
+        id == B_REVERSED ? "__reversed__" : id == B_NEXT ? "__next__" : id == B_DIR ? "__dir__" : repr ? "__repr__" : "__str__";
     if (base && builtin_base(c, argv[0], method, NULL)) return NULL;
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
+    /* int() and float() with no __int__ or __float__ convert the int the
+     * instance's __index__ returns, named by the builtin. */
+    if (!function && (id == B_INT || id == B_FLOAT) && (function = class_lookup(cls, "__index__"))) method = id == B_INT ? "int" : "float";
     /* reversed() of a sequence without __reversed__ calls its __len__,
      * named "reversed". */
     if (!function && id == B_REVERSED && class_lookup(cls, "__getitem__") && !subclass(cls, c->types[SPY_DICT]))
@@ -28371,7 +28374,8 @@ static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
  * natively, bool() takes a truth (False names its __len__), abs(), round()
  * and reversed() return theirs, or reversed() a sequence's ("reversed" its
  * __len__), hex(), oct(), bin() and chr() ("hex" and so on their
- * __index__) the int's, isinstance() and issubclass() take the
+ * __index__) the int's, as int() and float() ("int", "float") do,
+ * dir() lists and sorts it, isinstance() and issubclass() take the
  * result's truth, and the others' text is a str. */
 static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue *name, SPYValue *result) {
     SPYValue *whole = NULL;
@@ -28386,6 +28390,17 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
         SPYValue *index = index_result(c, v, spy_retain(result)), *value = index ? builtin(c, 1, &index, (void *)(intptr_t)number) : NULL;
         spy_release(index);
         return value;
+    }
+    if (!strcmp(method, "int") || !strcmp(method, "float")) {
+        SPYValue *index = index_result(c, v, spy_retain(result)), *value = index;
+        double real;
+        if (index && *method == 'f') { value = spy_as_float(c, index, &real) ? NULL : spy_float(c, real); spy_release(index); }
+        return value;
+    }
+    if (!strcmp(method, "__dir__")) {
+        SPYValue *listed = builtin(c, 1, &result, (void *)(intptr_t)B_LIST);
+        if (listed && sort_list(c, listed, NULL, 0, NULL)) { spy_release(listed); return NULL; }
+        return listed;
     }
     if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));

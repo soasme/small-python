@@ -57,7 +57,7 @@ Cases == {"round_half_even", "round_float_digits", "round_none", "round_hook", "
           "divmod_complex", "divmod_zero_float", "pow_float", "pow_mod_float", "pow_keywords",
           "pow_zero_zero", "sum_floats", "sum_compensated", "sum_stages", "sum_add", "sum_strings", "sum_bytes", "sum_start_kw", "sum_empty",
           "min_key_default", "min_empty", "max_empty", "min_default_with_many", "min_no_args",
-          "min_first_of_equal", "max_mixed", "bin_index", "index_calls", "bin_float", "hex_float_method", "complex_forms",
+          "min_first_of_equal", "max_mixed", "bin_index", "index_calls", "int_index_calls", "bin_float", "hex_float_method", "complex_forms",
           "complex_bad_string", "complex_string_second", "float_forms", "float_bad", "int_forms",
           "int_bad_base", "int_leading_zero", "int_float_inf", "int_float_nan", "bool_forms", "bool_kw"}
 Programs == [op : Ops, a : {-25, -15, -7, -1, 0, 3, 8, 25, 35}, b : {-3, -1, 0, 2, 5}]
@@ -120,6 +120,8 @@ Case(c) ==
       [] c = "min_first_of_equal" -> "((1, 'a'), (1, 'a'))"
       [] c = "max_mixed" -> "TypeError: '>' not supported between instances of 'str' and 'int'"
       [] c = "bin_index" -> "('0b1010', '0o12', '0xa', '-0xff')"
+      \* int() and float() of an instance with only __index__ call it, once each
+      [] c = "int_index_calls" -> "(65, 65.0, 2)"
       [] c = "index_calls" -> "('0b1000001', '0o101', '0x41', 'A', 4)"
       [] c = "bin_float" -> "TypeError: 'float' object cannot be interpreted as an integer"
       [] c = "hex_float_method" -> "'0x1.8000000000000p+0'"

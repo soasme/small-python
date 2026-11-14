@@ -61,6 +61,7 @@ SOURCES = {
     "vars_no_arg": 'def f():\n    a = 1\n    return vars()\nresult = f()',
     "vars_module": 'result = type(vars(type(P))).__name__',
     "dir_sorted": "class D:\n    b = 1\n    a = 2\nresult = [n for n in dir(D) if not n.startswith('_')]",
+    "dir_hook_calls": "n = []\nclass D:\n    def __dir__(self):\n        for _ in (): pass\n        n.append(1)\n        return ('z', 'a', 'y')\nresult = (dir(D()), len(n))",
     "dir_hook": "class D:\n    def __dir__(self): return ['z', 'a']\nresult = dir(D())",
     "dir_hook_bad": 'class D:\n    def __dir__(self): return 1\nresult = dir(D())',
     "callable_forms": 'class K:\n    def __call__(self): pass\nresult = (callable(K), callable(K()), callable(P()), callable(len), callable(1))',

@@ -463,6 +463,20 @@ static const char *const programs[] = {
     "h = tg(); next(h)\n"
     "print(g.throw(TE, (1, 2), None), h.throw(TE, TE(3), None))\n",
 
+    "class DX:\n"
+    "    def __dir__(self): return iter(('q', 'p'))\n"
+    "    def __index__(self): return True\n"
+    "class DY:\n"
+    "    def __dir__(self): return 3\n"
+    "    def __index__(self): return 'i'\n"
+    "def dx():\n"
+    "    r = [dir(DX()), int(DX()), float(DX())]\n"
+    "    for f in (dir, int, float):\n"
+    "        try: f(DY())\n"
+    "        except TypeError as e: r.append(e)\n"
+    "    return r\n"
+    "print(dx())\n",
+
     "class CI:\n"
     "    def __init__(self, n): self.n = n\n"
     "    def __iter__(self): return iter(range(self.n)) if self.n else 5\n"

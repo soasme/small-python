@@ -81,6 +81,8 @@ SOURCES = {
     "min_first_of_equal": "result = (min([(1, 'a'), (1, 'b')], key=lambda t: t[0]), max([(1, 'a'), (1, 'b')], key=lambda t: t[0]))",
     "max_mixed": "result = max(1, 'a')",
     "bin_index": 'result = (bin(I()), oct(I()), hex(I()), hex(-255))',
+    "int_index_calls": 'class K:\n    calls = 0\n    def __index__(self):\n        for _ in (): pass\n        K.calls += 1\n        return 65\n'
+                       'result = (int(K()), float(K()), K.calls)',
     "index_calls": 'result = (bin(J()), oct(J()), hex(J()), chr(J()), J.calls)',
     "bin_float": 'result = bin(3.0)',
     "hex_float_method": 'result = (1.5).hex()',
