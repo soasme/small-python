@@ -94,6 +94,8 @@ Unreleased (0.10.0):
 - an unreachable generator or coroutine that ignores its close in an except block is still
   reclaimed, with its locals and the iterator it waits on
 - map() of a class calls its Python __init__ without nesting on the C stack
+- a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
+  keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a
   generator, or on items with a Python __hash__ or __eq__, does not nest on the C stack
 - dict(), **, update(), copy(), | and a dict subclass merge a dict into an empty one comparing no keys

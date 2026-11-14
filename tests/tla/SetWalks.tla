@@ -22,7 +22,10 @@
 (* after an update, or the bool, then the log. An instance is operated on  *)
 (* as its set, but a set's comparison with one is the instance's reflected *)
 (* comparison (RichCompare, 7.2.4). A set's union, intersection,          *)
-(* difference or update of two sets b and c is that of b, then of c.       *)
+(* difference or update of two sets b and c is that of b, then of c. A     *)
+(* set's union, update, difference or symmetric_difference_update of a    *)
+(* dict or frozendict b walks b's keys as a set's, but a union into an     *)
+(* empty set compares them too.                                            *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -32,9 +35,12 @@ Operators == {"|", "&", "-", "^", "<=", "<", ">=", ">", "==", "|=", "&=", "-=", 
 Methods == {"union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"}
 Updates == {"update", "intersection_update", "difference_update", "symmetric_difference_update"}
 Chains == {"union", "intersection", "difference", "update", "intersection_update", "difference_update"}
+Dicts == {"dict", "frozendict"}
+Keyed == {"union", "update", "difference", "symmetric_difference_update"}
 Programs == [ka : {"set", "frozenset", "subset"}, a : Small, op : Operators \cup Methods, kb : {"set", "subset"}, b : Small]
             \cup [ka : {"set", "subset"}, a : Small, op : Updates, kb : {"set", "subset"}, b : Small]
             \cup [ka : {"set"}, a : Small, chain : Chains, kb : {"set"}, b : Small, c : Small]
+            \cup [ka : {"set"}, a : Small, op : Keyed, kb : Dicts, b : Small]
 
 \* A set built in the order of the values: its elements <<side, value>>.
 Build(side, s) == LET RECURSIVE From(_) From(i) == IF i > 3 THEN <<>>
@@ -102,7 +108,7 @@ Apply(p) ==
         A == IF swap THEN Build("b", p.b) ELSE Build("a", p.a)
         B == IF swap THEN Build("a", p.a) ELSE Build("b", p.b)
         op == IF swap THEN Reflected[p.op] ELSE IF p.ka = "frozenset" /\ p.op \in {"|=", "&=", "-=", "^="} THEN SubSeq(p.op, 1, 1) ELSE p.op
-    IN CASE op \in {"|", "|=", "union", "update"} -> Union(A, B)
+    IN CASE op \in {"|", "|=", "union", "update"} -> IF p.kb \in Dicts THEN Walk("add", B, 1, A, <<>>, <<>>) ELSE Union(A, B)
          [] op \in {"&", "&=", "intersection", "intersection_update"} -> Inter(A, B)
          [] op \in {"-", "difference"} -> Diff(A, B)
          [] op \in {"-=", "difference_update"} -> Discard(A, B)

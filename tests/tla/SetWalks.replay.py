@@ -13,7 +13,8 @@ class S(set):
     pass
 
 
-KINDS = {"set": set, "frozenset": frozenset, "subset": S}
+KINDS = {"set": set, "frozenset": frozenset, "subset": S,
+         "dict": lambda keys: dict.fromkeys(keys, 0), "frozendict": lambda keys: frozendict(dict.fromkeys(keys, 0))}
 
 
 class E:

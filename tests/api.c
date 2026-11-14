@@ -1664,6 +1664,11 @@ int main(int argc, char **argv) {
                "def mapped():\n    return sum(p.v for p in map(Init, [1, 2])) + len(list(map(Init, 'ab')))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "mapped()", "mapped.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 3);
+    /* So do a set method's lookups of a dict's keys. */
+    execute(c, "def keyed():\n    s = {Slow()}\n    d = {Slow(): 0, Slow(): 1}\n    s.update(d)\n    t = {Slow()}\n"
+               "    return len(s) + len(t.difference(d)) + len(t.intersection(d))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "keyed()", "keyed.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 3);
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "int(issubclass(*(Abstract((Abstract(()),)), Abstract(()))))", "abstract.py"), SPY_STOP_STEPS, &pauses)) == 0 && pauses > 1);
     /* So does the __add__ after an __iadd__ that declines. */

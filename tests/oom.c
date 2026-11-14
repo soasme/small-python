@@ -383,6 +383,13 @@ static const char *const programs[] = {
     "    return r\n"
     "print(mc())\n",
 
+    "def kd():\n"
+    "    a = {SD(), SD()}; d = {SD(): 0, SD(): 1}; f = frozendict(d)\n"
+    "    r = [len(a.union(d)), len(a.difference(f)), len(a.intersection(d)), a.isdisjoint(d)]\n"
+    "    a.update(f); a.symmetric_difference_update(d); a.difference_update(d)\n"
+    "    return r + [len(a)]\n"
+    "print(kd())\n",
+
     "class AX:\n"
     "    def __iadd__(self, o): return NotImplemented\n"
     "    def __add__(self, o):\n"
