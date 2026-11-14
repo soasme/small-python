@@ -1607,6 +1607,11 @@ int main(int argc, char **argv) {
     execute(c, "def starred():\n    return len([*map(slower, [1, 2])]) + len((*iter(Hinted()),)) + max(*map(slower, [1, 4]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "starred()", "starred.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So does a dict display merging an instance by its keys() and __getitem__. */
+    execute(c, "class Slowmap:\n    def keys(self): return [slower(0), slower(1)]\n    def __getitem__(self, k): return slower(k)\n"
+               "def merged():\n    return sum([{**Slowmap()}][0].values())\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "merged()", "merged.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 2);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

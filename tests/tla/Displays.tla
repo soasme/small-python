@@ -24,7 +24,7 @@ EXTENDS Naturals, Sequences, TLC
 SeqItems == {"plain", "true", "star", "empty", "bad"}
 DictItems == {"pair", "true_pair", "merge", "bad"}
 Cases == {"paren_same", "paren_yield", "empty", "tuple_needs_comma", "trailing_comma", "nested", "dict_unhashable",
-          "set_unhashable", "dict_late_unhashable", "dstar_keys_protocol", "dstar_keys_listed", "dstar_bad_keys", "star_generator_error",
+          "set_unhashable", "dict_late_unhashable", "dstar_keys_protocol", "dstar_keys_listed", "dstar_nested", "dstar_bad_keys", "star_generator_error",
           "star_bare", "dstar_in_list", "dstar_in_set", "list_identity"}
 Programs == [kind : {"list", "tuple", "set"}, items : UNION {[1..n -> SeqItems] : n \in 0..3}]
             \cup [kind : {"dict"}, items : UNION {[1..n -> DictItems] : n \in 0..3}]
@@ -96,6 +96,8 @@ Case(c) ==
       [] c = "dstar_keys_protocol" -> <<"ok", "{'k': 'K'}", <<>>>>         \* keys() and __getitem__
       \* keys() is iterated to its end before the first __getitem__ (DictMerge).
       [] c = "dstar_keys_listed" -> <<"ok", "{'a': 'A', 'b': 'B'}", <<"'a'", "'b'", "'A'", "'B'">>>>
+      \* a merge inside a list and a tuple leaves each display in its place
+      [] c = "dstar_nested" -> <<"ok", "[{'a': 'A'}, ({'a': 'A'}, 1)]", <<"'a'", "'A'", "'a'", "'A'", "1">>>>
       [] c = "dstar_bad_keys" -> <<"TypeError: M.keys() must return an iterable, not int", <<>>, <<>>>>
       [] c = "star_generator_error" -> <<"ValueError: mid", <<>>, <<"1">>>>
       [] c = "star_bare" -> <<"SyntaxError: can't use starred expression here", <<>>, <<>>>>

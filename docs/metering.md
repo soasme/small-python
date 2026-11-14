@@ -320,7 +320,9 @@ These run as machines on the heap, in one native activation of
   code compiled while pausing, the generators and such instances a target
   list unpacks, the generators, such instances and iterators over them,
   and the maps, filters, zips and enumerates above, that a list, tuple
-  or set display stars or a call's starred argument takes, and those, without
+  or set display stars or a call's starred argument takes, the instances
+  with a Python `keys` that a dict display merges by it and their
+  `__getitem__`, and those, without
   a `__contains__`, that an `in` or `not in` outside a comparison chain
   searches, after calling their `__iter__`, comparing the items natively;
   generators resumed by

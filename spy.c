@@ -23238,20 +23238,23 @@ static NO_INLINE SPYValue *unpack_step(SPYContext *c, Machine *m, Frame *f, Node
  * display, a display or the call's arguments on m's stack, sealing a
  * tuple at the last (arg), a list or tuple display asking a's length hint
  * (hints): 1 when a, a source whose items the machine takes
- * (machine_source), but a map or filter of a native function, gives them
- * on the machine (BLOCK_CONSUME, EXTEND_ITEMS); else 0, a extended into
- * the display and released. */
+ * (machine_source), but a map or filter of a native function, or a dict
+ * display's instance with a Python keys(), merged as dict() merges it
+ * (KEY_KEYS) when keys() or __getitem__ is on the machine, gives them on the machine (BLOCK_CONSUME, EXTEND_ITEMS);
+ * else 0, a extended into the display and released. */
 static NO_INLINE int extend_step(SPYContext *c, Machine *m, SPYValue *display, SPYValue *a, int arg, int hints) {
-    if ((!(machine_source(c, a) && (!called_iterator(a) || sequence_iterator(a) || next_calls(c, a))) &&
-         !(is_set(display) && hashed_items(c, a))) || is_dict(display)) {
+    SPYValue *keys = a->type == SPY_INSTANCE && display->type == SPY_DICT ? method_function(c, a, "keys") : NULL;
+    int merging = keys && (machine_function(c, keys) || getitem_function(c, a));
+    if (!merging && ((!(machine_source(c, a) && (!called_iterator(a) || sequence_iterator(a) || next_calls(c, a))) &&
+                      !(is_set(display) && hashed_items(c, a))) || is_dict(display))) {
         (hints ? extend_list : extend_display)(c, display, a);
         if (arg) seal_tuple(c, display);
         spy_release(a);
         return 0;
     }
     Consumer *s = allocate(c, sizeof(*s));
-    SPYValue *source = s && hints && (a->type == SPY_INSTANCE || sequence_iterator(a)) ? spy_retain(a) : NULL;
-    int keyed = s ? consumer_source(c, &a) : 0;
+    SPYValue *source = s && hints && !merging && (a->type == SPY_INSTANCE || sequence_iterator(a)) ? spy_retain(a) : NULL;
+    int keyed = merging ? KEY_KEYS : s ? consumer_source(c, &a) : 0;
     Block *block = s && a ? push_block(c, m, BLOCK_CONSUME, &(Instruction){0}) : NULL;
     if (!block) { mem_free(s); spy_release(a); spy_release(source); return 0; }
     *s = (Consumer){.id = EXTEND_ITEMS, .result = spy_retain(display), .count = (size_t)arg, .keyed = keyed, .hints = hints};
@@ -23346,9 +23349,12 @@ static NO_INLINE int consumer_took(SPYContext *c, Machine *m, Frame *f, SPYValue
         /* A fed min or max takes its item's key next (key_call), as a
          * merged mapping its key's value, or ends. */
         if (item) { top->consumer->item = item; return 1; }
+        int id = top->consumer->id;
         SPYValue *result = c->error_type[0] ? NULL : top->consumer->keyed == KEY_ITEMS ? consumer_end(c, top->consumer) : key_best(c, top->consumer);
         pop_block(c, m, f);
-        if (result) machine_push(c, m, result);
+        /* A display's merge leaves the display, already on the stack. */
+        if (id == EXTEND_ITEMS) spy_release(result);
+        else if (result) machine_push(c, m, result);
         return 0;
     }
     int status = item ? consumer_add(c, top->consumer, item) : c->error_type[0] ? -1 : 1;

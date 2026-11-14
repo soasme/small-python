@@ -24,6 +24,8 @@ SOURCES = {
                            "result = {**M()}",
     "dstar_keys_listed": "class M:\n    def keys(self):\n        yield t('a')\n        yield t('b')\n"
                          "    def __getitem__(self, k): return t(k.upper())\nresult = {**M()}",
+    "dstar_nested": "class M:\n    def keys(self): return [t('a')]\n    def __getitem__(self, k): return t(k.upper())\n"
+                    "result = [{**M()}, ({**M()}, t(1))]",
     "dstar_bad_keys": "class M:\n    def keys(self): return 5\n    def __getitem__(self, k): return k\n{**M()}",
     "star_generator_error": "def g():\n    yield t(1)\n    raise ValueError('mid')\n[*g()]",
     "star_bare": "*a",
