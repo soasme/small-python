@@ -1579,6 +1579,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(sorted(iter(Hinted()))) + len(list(iter(Hinted())))", "hinted.py"),
                                  SPY_STOP_STEPS, &pauses)) == 4 && pauses > 1);
+    /* So does next() of an iterator over one, a map or a filter. */
+    execute(c, "class Paged:\n    def __getitem__(self, i):\n        for j in range(3000): pass\n        return i + 5\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "next(iter(Paged())) + next(map(slower, [1])) + next(filter(slower, [0]))", "paged.py"),
+                                 SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
     /* So does setattr() in a __setattr__, a property's setter and a
      * descriptor's __set__; a plain store and a setter's error are native. */
     execute(c, "class Hook:\n    def __setattr__(self, name, value): object.__setattr__(self, name, slow(value))\n"

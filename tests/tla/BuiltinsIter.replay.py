@@ -65,6 +65,12 @@ SOURCES = {
     "next_python": "class C:\n    def __init__(s, n): s.n = n\n    def __next__(s):\n        for _ in (): pass\n"
                    "        if not s.n: raise StopIteration\n        s.n -= 1\n        return s.n\n"
                    "c = C(1)\nresult = (next(c), next(c, 'end'), next(C(0), None))",
+    "next_called": "class S:\n    def __getitem__(s, i):\n        for _ in (): pass\n        if i > 0: raise IndexError\n        return i\n"
+                   "def f(x):\n    for _ in (): pass\n    if x == 's': raise StopIteration\n    return x * 2\n"
+                   "it = iter(S())\nresult = (next(it), next(it, 'end'), next(map(f, [2])), next(map(f, 's'), 'stop'), next(filter(f, [0, 3])))",
+    "next_retry": "class S:\n    f = 1\n    def __getitem__(s, i):\n        for _ in (): pass\n"
+                  "        if S.f:\n            S.f = 0\n            raise KeyError(i)\n        if i > 1: raise IndexError\n        return i\n"
+                  "it = iter(S())\ntry: next(it)\nexcept KeyError: pass\nresult = list(it)",
     "adapt_python": "class C:\n    def __init__(s, n): s.n = n\n    def __iter__(s): return s\n    def __next__(s):\n        for _ in (): pass\n"
                     "        if not s.n: raise StopIteration\n        s.n -= 1\n        return s.n\n"
                     "result = (list(enumerate(C(2))), list(zip('ab', C(3))), list(map(abs, C(1))), next(zip(C(1), C(0)), 'end'))",

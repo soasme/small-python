@@ -8889,6 +8889,8 @@ static SPYValue *iterator_next(SPYContext *c, SPYValue *v) {
         if (index) result = call_special(c, source, "__getitem__", 1, &index);
         spy_release(index);
         if (!result && (error_is(c, "IndexError") || error_is(c, "StopIteration"))) spy_clear_error(c);
+        /* Another error leaves the index for the next call (iter_iternext). */
+        else if (!result) v->as.iterator.index--;
         break;
     }
     }
@@ -22997,6 +22999,16 @@ static int called_iterator(SPYValue *v) {
     return kind == I_MAP || kind == I_FILTER || ((kind == I_GETITEM || kind == I_REVERSED) && v->as.iterator.source->type == SPY_INSTANCE) ||
            adapts(v);
 }
+/* Whether next() of v takes its item on the machine (consume): one that
+ * adapts a map's, or a map or filter whose function is Python. */
+static SPYValue *bound_function(SPYContext *, SPYValue *);
+static int next_calls(SPYContext *c, SPYValue *v) {
+    if (v->type != SPY_ITERATOR) return 0;
+    int kind = v->as.iterator.kind;
+    if (adapts(v)) return 1;
+    SPYValue *function = (kind == I_MAP || kind == I_FILTER) && v->as.iterator.source->as.seq.len ? v->as.iterator.source->as.seq.items[0] : NULL;
+    return function && (machine_function(c, function) || (kind == I_MAP && bound_function(c, function)));
+}
 /* Whether a set takes item on the machine (KEY_HASH): its __hash__ is
  * Python, or it is a tuple whose items' __hash__ or __eq__ may be
  * (key_reaches). */
@@ -23087,7 +23099,7 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
              callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data : -1;
     if (id != B_LIST && id != B_TUPLE && id != B_SUM && id != B_ANY && id != B_ALL && id != B_SET && id != B_MIN &&
         id != B_MAX && id != B_FROZENSET && id != B_DICT && id != B_SORTED && id != B_JOIN && id != B_EXTEND && id != B_FROMKEYS &&
-        (id != B_NEXT || !(resumable(argv[0]) || (argv[0]->type == SPY_ITERATOR && adapts(argv[0]))))) return -1;
+        (id != B_NEXT || !(resumable(argv[0]) || next_calls(c, argv[0])))) return -1;
     if (argc > (id == B_SUM || id == B_NEXT || id == B_FROMKEYS ? 2u : 1u)) return -1;
     /* sum() refuses a str, bytes or bytearray start before it iterates. */
     if (id == B_SUM && argc == 2 && (builtin_value(c, argv[1], SPY_STRING) || builtin_value(c, argv[1], SPY_BYTES) ||
@@ -23978,6 +23990,19 @@ static SPYValue *truth_function(SPYContext *c, SPYValue *v, int *length) {
     if (!function && (function = class_lookup(v->as.map.parent, "__len__"))) *length = 1;
     return function && machine_function(c, function) ? function : NULL;
 }
+/* The Python __getitem__ that next() calls on __getitem__ or reversed
+ * iterator v's instance, found[0] its name "next" and found[1] the index,
+ * v moved past it as getitem_call does; else NULL. */
+static NO_INLINE SPYValue *sequence_next(SPYContext *c, SPYValue *v, SPYValue **found) {
+    int reversed = v->as.iterator.kind == I_REVERSED;
+    SPYValue *function = sequence_iterator(v) && (reversed ? v->as.iterator.index : v->as.iterator.index <= INT64_MAX) ?
+                         getitem_function(c, v->as.iterator.source) : NULL;
+    if (!function || !(found[1] = spy_int(c, (int64_t)(v->as.iterator.index - reversed)))) return NULL;
+    if (!(found[0] = spy_string(c, "next", 4))) { spy_release(found[1]); return NULL; }
+    v->as.iterator.index += reversed ? -1 : 1;
+    c->entering_kind = CALL_CHECKED;
+    return function;
+}
 /* The Python __str__, __repr__, __format__, __len__, __int__, __float__,
  * __complex__, __bytes__, __hash__, __abs__, __round__, __reversed__ or
  * __next__ that callee, str, repr, format, len, int, float, complex,
@@ -23986,6 +24011,9 @@ static SPYValue *truth_function(SPYContext *c, SPYValue *v, int *length) {
  * the ndigits round passes it, or NULL; else NULL. */
 static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **found) {
     SPYValue **name = &found[0], **spec = &found[1];
+    if (argv[0]->type == SPY_ITERATOR)
+        return argc <= 2 && callee->type == SPY_NATIVE && callee->as.native.call == builtin && callee->as.native.data == (void *)(intptr_t)B_NEXT ?
+               sequence_next(c, argv[0], found) : NULL;
     if (argc > 2 || argv[0]->as.map.base) return NULL;
     int id = callee->type == SPY_NATIVE && callee->as.native.call == builtin ? (int)(intptr_t)callee->as.native.data :
         callee == c->types[SPY_INT] ? B_INT : callee == c->types[SPY_FLOAT] ? B_FLOAT : callee == c->types[SPY_BOOL] ? B_BOOL :
@@ -24153,7 +24181,7 @@ static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
  * enters none. */
 static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method, size_t argc,
                                          SPYValue **argv, SPYValue **env) {
-    SPYValue *found[2], *convert = method < 0 && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
+    SPYValue *found[2], *convert = method < 0 && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0])) ? conversion_method(c, callee, argc, argv, found) : NULL;
     if (!convert && method < 0 && argc == 2 && (argv[1]->type == SPY_INSTANCE || (argv[1]->type == SPY_CLASS && argv[1]->as.map.meta)) && (convert = check_method(c, callee, argv, found))) {
         /* isinstance() or issubclass() enters its check (check_method)
          * (CALL_CHECKED), its name and the tested value on the stack. */
@@ -24176,7 +24204,7 @@ static NO_INLINE SPYValue *instance_call(SPYContext *c, Machine *m, Node *n, SPY
         if (machine_push(c, m, argv[0])) { if (defaults) spy_release(argv[1]); spy_release(found[1]); return NULL; }
         /* next()'s default, marked, waits for a StopIteration. */
         if (defaults && (machine_push(c, m, argv[1]) || machine_push(c, m, spy_retain(c->stopping)))) return NULL;
-        found[0] = spy_retain(argv[0]);
+        found[0] = spy_retain(argv[0]->type == SPY_ITERATOR ? argv[0]->as.iterator.source : argv[0]);
         if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
@@ -24268,7 +24296,8 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         spy_release(argv[0]); spy_release(callee);
         return result;
     }
-    if (argc && (argv[0]->type == SPY_INSTANCE || (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
+    if (argc && (argv[0]->type == SPY_INSTANCE || (sequence_iterator(argv[0]) && method < 0 && is_builtin(callee, B_NEXT)) ||
+                 (argc == 1 && argv[0]->type == SPY_TUPLE && argv[0]->listed) ||
                  (argc == 2 && (argv[1]->type == SPY_INSTANCE || argv[1]->type == SPY_CLASS))) &&
         (result = instance_call(c, m, n, callee, method, argc, argv, env)) != c->unbound) return result;
     int id = consumer_of(c, callee, method, argc, argv);
@@ -24540,7 +24569,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (machine_push(c, m, args) || !*env) { *env = NULL; spy_release(callee); return NULL; }
         return spy_retain(callee);
     }
-    SPYValue *found[2], *convert = argc && argv[0]->type == SPY_INSTANCE ? conversion_method(c, callee, argc, argv, found) : NULL;
+    SPYValue *found[2], *convert = argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0])) ? conversion_method(c, callee, argc, argv, found) : NULL;
     if (!convert && calls && print_instances(c, callee, argc, argv)) {
         /* print writes its arguments, an instance's Python __str__ a call
          * (CALL_CHECKED) among them (print_from). */
@@ -24605,7 +24634,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         argv[-1] = found[0];
         if (argc == 2 && !defaults) spy_release(machine_pop(m));
         if (defaults && machine_push(c, m, spy_retain(c->stopping))) return NULL;
-        found[0] = spy_retain(argv[0]);
+        found[0] = spy_retain(argv[0]->type == SPY_ITERATOR ? argv[0]->as.iterator.source : argv[0]);
         if (!(*env = function_env(c, convert, 1 + !!found[1], found, NULL, 1))) return NULL;
         c->entering_init = convert;
         return spy_retain(c->types[SPY_STRING]);
@@ -26975,6 +27004,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
     if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "reversed")) return length_result(c, result, &length) ? NULL : reversed_iterator(c, v, length);
+    if (!strcmp(method, "next")) return spy_retain(result);
     if (!strcmp(method, "__hash__")) return hash_result(c, spy_retain(result), &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "__int__") || !strcmp(method, "__float__")) return number_result(c, v, method[2] == 'f', spy_retain(result));
     if (!strcmp(method, "__complex__") || !strcmp(method, "__bytes__")) return converted_result(c, v, method, result);
@@ -26988,6 +27018,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     }
     return whole_text(&b, append_conversion(&b, v, result, name->as.string.data));
 }
+static int next_ended(SPYContext *, SPYValue *);
 static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result, size_t pc) {
     m->pc = pc;
     if (ins->op == BC_CLASS && (ins->arg == 3 || ins->arg == 4)) {
@@ -27020,6 +27051,11 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
             return &call->m;
         }
     }
+    /* next() of a sequence iterator (sequence_next): its __getitem__'s
+     * error ends it as a StopIteration (next_ended). */
+    size_t at = m->len - (m->len && m->stack[m->len - 1] == c->stopping ? 3 : 1);
+    if (!result && at && at < m->len && m->stack[at]->type == SPY_ITERATOR && m->stack[at - 1]->type == SPY_STRING &&
+        !strcmp(m->stack[at - 1]->as.string.data, "next") && next_ended(c, m->stack[at])) spy_error(c, "StopIteration", "");
     if (m->len && m->stack[m->len - 1] == c->stopping) {
         /* next()'s default replaces a StopIteration. */
         spy_release(machine_pop(m));
@@ -27318,11 +27354,16 @@ static NO_INLINE int getitem_call(SPYContext *c, SPYValue *v, SPYValue **fn, SPY
 }
 /* Whether a call for iterator v's next item that failed ended its items:
  * a StopIteration, or a __getitem__ iterator's IndexError, which ends it
- * for good; the error is cleared. A reversed iterator ends at any error. */
+ * for good; the error is cleared. A reversed iterator ends at any error;
+ * a __getitem__ one's other errors leave its index. */
 static NO_INLINE int next_ended(SPYContext *c, SPYValue *v) {
     int kind = v->type == SPY_ITERATOR ? v->as.iterator.kind : -1;
     if (kind == I_REVERSED) v->as.iterator.index = 0;
-    if (!error_is(c, "StopIteration") && !((kind == I_GETITEM || kind == I_REVERSED) && error_is(c, "IndexError"))) return 0;
+    if (!error_is(c, "StopIteration") && !((kind == I_GETITEM || kind == I_REVERSED) && error_is(c, "IndexError"))) {
+        /* A __getitem__ iterator tries the index again (iter_iternext). */
+        if (kind == I_GETITEM) v->as.iterator.index--;
+        return 0;
+    }
     spy_clear_error(c);
     if (kind == I_GETITEM) v->as.iterator.done = 1;
     return 1;
