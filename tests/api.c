@@ -1617,6 +1617,9 @@ int main(int argc, char **argv) {
     /* So do a list's pop()'s and insert()'s. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "[[0, 1, 2].pop(Mark(1)), [3].insert(Mark(0), 4)][0]", "popped.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 1);
+    /* So do bytes()'s and bytearray()'s. */
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(bytes(Mark(3)) + bytearray(Mark(2)))", "sized.py"), SPY_STOP_STEPS, &pauses)) == 5 && pauses > 1);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"

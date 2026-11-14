@@ -115,11 +115,13 @@ Unreleased (0.10.0):
 - a list item store or deletion by an index with a Python __index__ runs it without nesting on the
   C stack
 - a sequence repeated by an instance with a Python __index__ runs it without nesting on the C stack
-- an item's index or a repetition's count that cannot fit an index names the instance's type
+- an item's index, a repetition's count or a bytes() size that cannot fit an index names the
+  instance's type
 - hex(), oct(), bin() and chr() of an instance call its Python __index__ without nesting on the
   C stack
 - range() of instances calls their Python __index__ in turn without nesting on the C stack
 - a list's pop() and insert() of an instance call its Python __index__ without nesting on the C stack
+- bytes() and bytearray() of an instance call its Python __index__ without nesting on the C stack
 - a class with a Python __new__ called with * or ** arguments runs __new__ and __init__ without
   nesting on the C stack, so it can pause
 - str(), repr(), format(), len(), hash(), int(), round() and the like call the Python method of a

@@ -7,6 +7,13 @@ class B:
     def __bytes__(self): return b'dunder'
 class I:
     def __index__(self): return 3
+class J:
+    def __init__(self, v, log): self.v, self.log = v, log
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        self.log.append(self.v)
+        return self.v
 
 SEARCH = ["find", "rfind", "count", "startswith", "endswith", "partition", "rpartition", "split", "rsplit1",
           "replace", "replace1", "removeprefix", "removesuffix", "strip", "lstrip", "rstrip", "index"]
@@ -39,6 +46,8 @@ SOURCES = {
     "literal_non_ascii": 'compile("b\'\\u00e9\'", \'s\', \'eval\')',
     "ctor_forms": "result = (bytes(), bytes(3), bytes(range(3)), bytes(b'ab'), bytes(bytearray(b'c')), bytes(memoryview(b'm')), bytes(B()), bytes(I()))",
     "ctor_str_encoding": "result = (bytes('\xe9', 'utf-8'), bytes('\xe9', encoding='latin-1'), bytes('a', 'ascii', 'strict'))",
+    "ctor_index_calls": "log = []\nresult = (bytes(J(2, log)), bytearray(J(1, log)), log)",
+    "ctor_index_big": "result = bytes(J(1 << 70, []))",
     "ctor_negative": 'result = bytes(-1)',
     "ctor_range_error": 'result = bytes([256])',
     "ctor_float": 'result = bytes(1.5)',

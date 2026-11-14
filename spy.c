@@ -9131,8 +9131,14 @@ static int index_in(SPYContext *c, SPYValue *value, int64_t *result, int64_t lim
 static int index_value(SPYContext *c, SPYValue *value, int64_t *result) {
     return index_in(c, value, result, INT64_MAX, "Python int too large to convert to C ssize_t");
 }
+/* A size that fits a Py_ssize_t, else OverflowError naming value's type. */
 static int index_size(SPYContext *c, SPYValue *value, int64_t *result) {
-    return index_in(c, value, result, INT64_MAX, "cannot fit 'int' into an index-sized integer");
+    SPYValue *index = index_object(c, value);
+    if (!index) return -1;
+    int big = index->as.integer_data.big != NULL;
+    if (big) errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(value));
+    else *result = index->as.integer_data.small;
+    spy_release(index); return -big;
 }
 static int index_int(SPYContext *c, SPYValue *value, int64_t *result) {
     return index_in(c, value, result, INT_MAX, "Python int too large to convert to C int");
@@ -24598,16 +24604,20 @@ static SPYValue *check_next(SPYContext *c, Machine *m, SPYValue *state, SPYValue
     spy_release(state);
     return value;
 }
+static SPYValue *index_bytes(SPYContext *, SPYValue *, SPYValue *, const char *);
 static SPYValue *index_argued(SPYContext *, Machine *, SPYValue *, SPYValue *);
 /* The arguments that a call of callee, method number method of it or -1,
  * or of a bound method's, with argc arguments argv, converts first by
  * __index__, in turn, as a
  * mask, when one of them is an instance (indexed_call): all of range()'s,
- * and a list's pop() and insert() index; else 0. */
+ * a list's pop() and insert() index, and the size of bytes() of a plain
+ * instance without __bytes__ or of bytearray(); else 0. */
 static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (method < 0 && callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; callee = callee->as.bound.self; }
-    unsigned mask = method < 0 ? (callee == c->types[SPY_RANGE] && argc && argc <= 3 ? (1u << argc) - 1 : 0) :
-                    callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) ? 1 : 0;
+    unsigned mask = method >= 0 ? callee->type == SPY_LIST && ((method == M_POP && argc == 1) || (method == M_INSERT && argc == 2)) :
+                    callee == c->types[SPY_RANGE] ? argc && argc <= 3 ? (1u << argc) - 1 : 0 :
+                    argc == 1 && argv[0]->type == SPY_INSTANCE && !argv[0]->as.map.base &&
+                    (callee == c->types[SPY_BYTEARRAY] || (callee == c->types[SPY_BYTES] && !class_lookup(argv[0]->as.map.parent, "__bytes__")));
     for (size_t i = 0; i < argc; i++) if (mask >> i & 1 && argv[i]->type == SPY_INSTANCE) return mask;
     return 0;
 }
@@ -24615,7 +24625,8 @@ static unsigned index_arguments(SPYContext *c, SPYValue *callee, int method, siz
  * (or -1 and None) on the arguments of its tuple, from the i-th on: the
  * next masked one's Python __index__ is m's call (callk), the call going
  * on with its int (index_argued); else the call of them, refusing there
- * an argument neither an int nor such an instance, before the later ones. */
+ * an argument neither an int nor such an instance, before the later ones;
+ * bytes() and bytearray() make their bytes of the size (index_bytes). */
 static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int method, SPYValue *name, SPYValue *args, size_t i, unsigned mask) {
     for (; i < args->as.seq.len; i++) {
         SPYValue *item = args->as.seq.items[i], *function = mask >> i & 1 ? index_function(c, item) : NULL;
@@ -24628,14 +24639,20 @@ static SPYValue *index_from(SPYContext *c, Machine *m, SPYValue *callee, int met
         if (mask >> i & 1 && !builtin_value(c, item, SPY_INT)) break;
     }
     return method >= 0 ? call_native_method(c, callee, method, name, args->as.seq.len, args->as.seq.items) :
-           builtin(c, args->as.seq.len, args->as.seq.items, (void *)(intptr_t)B_RANGE);
+           call(c, callee, args->as.seq.len, args->as.seq.items);
 }
 /* An argument's __index__ that index_from called returned result. */
 static SPYValue *index_argued(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
     SPYValue **parts = state->as.seq.items, *args = parts[3], *items[8], *value = NULL;
     size_t i = (size_t)parts[4]->as.integer_data.small, n = args->as.seq.len;
     memcpy(items, args->as.seq.items, n * sizeof(*items));
-    if ((items[i] = index_result(c, args->as.seq.items[i], result))) {
+    if (parts[0] == c->types[SPY_BYTES] || parts[0] == c->types[SPY_BYTEARRAY]) {
+        /* A size's TypeError leaves the iterable form. */
+        int array = parts[0] == c->types[SPY_BYTEARRAY];
+        SPYValue *bytes = index_bytes(c, items[0], index_result(c, items[0], result), array ? "bytearray" : "bytes");
+        value = bytes && array ? builtin(c, 1, &bytes, (void *)(intptr_t)B_BYTEARRAY) : spy_retain(bytes);
+        spy_release(bytes);
+    } else if ((items[i] = index_result(c, args->as.seq.items[i], result))) {
         SPYValue *converted = spy_tuple(c, n, items);
         value = converted ? index_from(c, m, parts[0], (int)parts[1]->as.integer_data.small, parts[2], converted, i + 1,
                                        (unsigned)parts[5]->as.integer_data.small) : NULL;
@@ -32174,23 +32191,29 @@ static SPYValue *bytes_from_object(SPYContext *c, SPYValue *a, const char *targe
     SPYValue *result = c->error_type[0] ? NULL : spy_bytes(c, out.data ? out.data : "", out.len);
     mem_free(out.data); spy_release(iterator); return result;
 }
-/* bytes(n) and bytearray(n) make n zero bytes; when n's __index__ raises
- * TypeError the source goes on to the buffer and iterable forms. */
-static SPYValue *sized_bytes(SPYContext *c, SPYValue *a, const char *target) {
-    if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) {
-        int64_t len;
-        if (!index_size(c, a, &len)) {
-            if (len < 0) return spy_error(c, "ValueError", "negative count");
-            if ((uint64_t)len >= SIZE_MAX) return spy_error(c, "OverflowError", "byte string too large");
-            SPYValue *result = value_new(c, SPY_BYTES);
-            if (!result) return NULL;
-            result->as.string.data = allocate(c, (size_t)len + 1); result->as.string.len = (size_t)len;
-            if (!result->as.string.data) { spy_release(result); return NULL; }
-            return result;
-        }
-        if (!error_is(c, "TypeError")) return NULL;
-        spy_clear_error(c);
+/* bytes(n) and bytearray(n) of a, whose __index__ gave index, which it
+ * takes, make n zero bytes; when it raised TypeError (index NULL) the
+ * source goes on to the buffer and iterable forms. */
+static SPYValue *index_bytes(SPYContext *c, SPYValue *a, SPYValue *index, const char *target) {
+    if (index) {
+        int64_t len = index->as.integer_data.small;
+        int big = index->as.integer_data.big != NULL;
+        spy_release(index);
+        if (big) return errorf(c, "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(a));
+        if (len < 0) return spy_error(c, "ValueError", "negative count");
+        if ((uint64_t)len >= SIZE_MAX) return spy_error(c, "OverflowError", "byte string too large");
+        SPYValue *result = value_new(c, SPY_BYTES);
+        if (!result) return NULL;
+        result->as.string.data = allocate(c, (size_t)len + 1); result->as.string.len = (size_t)len;
+        if (!result->as.string.data) { spy_release(result); return NULL; }
+        return result;
     }
+    if (!error_is(c, "TypeError")) return NULL;
+    spy_clear_error(c);
+    return bytes_from_object(c, a, target);
+}
+static SPYValue *sized_bytes(SPYContext *c, SPYValue *a, const char *target) {
+    if (is_int(a) || (a->type == SPY_INSTANCE && class_lookup(a->as.map.parent, "__index__"))) return index_bytes(c, a, index_object(c, a), target);
     return bytes_from_object(c, a, target);
 }
 static SPYValue *int_from_bytes(SPYContext *c, size_t argc, SPYValue *const *argv, SPYValue *keywords, void *data) {
