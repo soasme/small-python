@@ -9157,20 +9157,20 @@ static int slice_part_bad(SPYContext *c, SPYValue *v) {
 }
 static SPYValue *normalize_slice(SPYContext *c, SPYValue *slice, SPYValue *length) {
     if (integer_sign(length) < 0) return spy_error(c, "ValueError", "length should not be negative");
-    /* The step, then the bounds (slice.indices's message). */
+    /* The step, then the start and the stop, each checked as it is taken
+     * (slice.indices's message). */
     const char *message = "slice indices must be integers or None or have an __index__ method";
     if (slice_part_bad(c, slice->as.slice.step)) return spy_error(c, "TypeError", message);
     SPYValue *step = slice->as.slice.step->type == SPY_NONE ? spy_int(c, 1) : index_object(c, slice->as.slice.step);
     if (!step) return NULL;
     int sign = integer_sign(step);
     if (!sign) { spy_release(step); return spy_error(c, "ValueError", "slice step cannot be zero"); }
-    if (slice_part_bad(c, slice->as.slice.start) || slice_part_bad(c, slice->as.slice.stop)) {
-        spy_release(step); return spy_error(c, "TypeError", message);
-    }
     SPYValue *lower = spy_int(c, sign < 0 ? -1 : 0);
     SPYValue *upper = lower ? integer_add(c, length, lower, 0) : NULL;
-    SPYValue *start = upper ? slice_bound(c, slice->as.slice.start, length, lower, upper, sign < 0 ? upper : lower) : NULL;
-    SPYValue *stop = start ? slice_bound(c, slice->as.slice.stop, length, lower, upper, sign < 0 ? lower : upper) : NULL;
+    SPYValue *start = !upper ? NULL : slice_part_bad(c, slice->as.slice.start) ? spy_error(c, "TypeError", message) :
+                      slice_bound(c, slice->as.slice.start, length, lower, upper, sign < 0 ? upper : lower);
+    SPYValue *stop = !start ? NULL : slice_part_bad(c, slice->as.slice.stop) ? spy_error(c, "TypeError", message) :
+                     slice_bound(c, slice->as.slice.stop, length, lower, upper, sign < 0 ? lower : upper);
     SPYValue *result = stop ? slice_new(c, start, stop, step) : NULL;
     spy_release(step); spy_release(lower); spy_release(upper); spy_release(start); spy_release(stop);
     return result;
@@ -9442,15 +9442,15 @@ typedef struct { int64_t start, stop, step; int has_start, has_stop; } SliceBoun
 static int slice_bounds(SPYContext *c, SPYValue *slice, SliceBounds *out) {
     *out = (SliceBounds){.step = 1, .has_start = slice->as.slice.start->type != SPY_NONE,
                         .has_stop = slice->as.slice.stop->type != SPY_NONE};
-    /* The step, then the bounds, as _PyEval_SliceIndex checks them for a subscript. */
+    /* The step, then the start and the stop, each checked as it is taken,
+     * as PySlice_Unpack takes them for a subscript. */
     const char *message = "slice indices must be integers or have an __index__ method";
     if (slice_part_bad(c, slice->as.slice.step)) { spy_error(c, "TypeError", message); return -1; }
     if (slice->as.slice.step->type != SPY_NONE && slice_index(c, slice->as.slice.step, &out->step)) return -1;
     if (!out->step) { spy_error(c, "ValueError", "slice step cannot be zero"); return -1; }
-    if (slice_part_bad(c, slice->as.slice.start) || slice_part_bad(c, slice->as.slice.stop)) {
-        spy_error(c, "TypeError", message); return -1;
-    }
+    if (slice_part_bad(c, slice->as.slice.start)) { spy_error(c, "TypeError", message); return -1; }
     if (out->has_start && slice_index(c, slice->as.slice.start, &out->start)) return -1;
+    if (slice_part_bad(c, slice->as.slice.stop)) { spy_error(c, "TypeError", message); return -1; }
     if (out->has_stop && slice_index(c, slice->as.slice.stop, &out->stop)) return -1;
     return 0;
 }
@@ -25604,6 +25604,8 @@ static NO_INLINE int contains_step(SPYContext *c, Machine *m, int op, SPYValue *
     return 1;
 }
 static SPYValue *item_function(SPYContext *, SPYValue *, const char *);
+static SPYValue *index_function(SPYContext *, SPYValue *);
+static SPYValue *slice_part(SPYContext *, SPYValue *);
 /* An operator's call pushes its operands x and y and its phase. */
 static int operator_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, int phase) {
     return machine_push(c, m, spy_retain(x)) || machine_push(c, m, spy_retain(y)) || machine_push(c, m, int_value(c, phase));
@@ -26397,12 +26399,13 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (machine_lookup(contains ? y : x, contains ? x : y, contains)) return native_lookup(c, m, ins, contains ? y : x, contains ? x : y, env);
     }
     /* A builtin sequence's item: an instance key's Python __index__ first,
-     * the item then of its int (operator_returned); an int's subclass is
-     * its int. */
-    if (kind == OPERATE_INDEX && y->type == SPY_INSTANCE && !builtin_value(c, y, SPY_INT) && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
+     * or a slice's part's (slice_part), the item then of its int
+     * (operator_returned). */
+    SPYValue *part;
+    if (kind == OPERATE_INDEX && (x->type == SPY_LIST || x->type == SPY_TUPLE || x->type == SPY_STRING ||
         x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE) &&
-        (function = item_function(c, y, "__index__")) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
-        *env = function_env(c, function, 1, &y, NULL, 0);
+        (function = index_function(c, part = y->type == SPY_SLICE ? slice_part(c, y) : y)) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
+        *env = function_env(c, function, 1, &part, NULL, 0);
         return *env ? spy_retain(function) : NULL;
     }
     if (contains) {
@@ -26680,9 +26683,26 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
     /* divmod() and pow() keep their operator with the phase (operator_call). */
     if (called) { op = phase >> 2; kind = OPERATE_BINARY; phase &= 3; }
     if (phase == OPERATOR_INDEX) {
-        SPYValue *index = index_result(c, y, result);
-        result = index ? operation(c, ins, x, index) : NULL;
-        spy_release(index);
+        /* A slice's part takes its int, and the next part's __index__ is
+         * the next call (slice_part). */
+        SPYValue *part = y->type == SPY_SLICE ? slice_part(c, y) : y, *index = index_result(c, part, result), *key = index;
+        if (index && y->type == SPY_SLICE)
+            key = slice_new(c, part == y->as.slice.start ? index : y->as.slice.start, part == y->as.slice.stop ? index : y->as.slice.stop,
+                            part == y->as.slice.step ? index : y->as.slice.step);
+        if (key != index) spy_release(index);
+        SPYValue *function = key && y->type == SPY_SLICE ? index_function(c, slice_part(c, key)) : NULL, *next = function ? slice_part(c, key) : NULL;
+        if (function && !operator_push(c, m, x, key, OPERATOR_INDEX)) {
+            SPYValue *env = function_env(c, function, 1, &next, NULL, 0);
+            Call *call = env ? call_enter(c, spy_retain(function), env, m) : NULL;
+            if (call) {
+                spy_release(key); spy_release(x); spy_release(y);
+                call->m.outermost = CALL_OPERATOR;
+                return &call->m;
+            }
+            for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+            result = NULL;
+        } else result = key && !c->error_type[0] ? operation(c, ins, x, key) : NULL;
+        spy_release(key);
     } else if (op == O_IN || op == O_NOTIN) {
         int truth = truthy(result);
         spy_release(result);
@@ -26752,6 +26772,24 @@ static SPYValue *item_function(SPYContext *c, SPYValue *object, const char *name
     SPYValue *function = (object->type != SPY_INSTANCE && !metaclassed(object)) || builtin_base(c, object, name, NULL) ?
                          NULL : class_lookup(value_class(c, object), name);
     return function && machine_function(c, function) ? function : NULL;
+}
+/* The Python __index__ of instance v, borrowed; else NULL. An int's
+ * subclass is its int (PyNumber_Index). */
+static SPYValue *index_function(SPYContext *c, SPYValue *v) {
+    return v && v->type == SPY_INSTANCE && !builtin_value(c, v, SPY_INT) ? item_function(c, v, "__index__") : NULL;
+}
+/* The part of slice s whose Python __index__ a subscript calls first, as
+ * slice_bounds takes them: the step, the start, then the stop, unless one
+ * before it is no None or int, which slice_bounds takes in C, or the step
+ * is zero; else NULL. */
+static SPYValue *slice_part(SPYContext *c, SPYValue *s) {
+    SPYValue *parts[] = {s->as.slice.step, s->as.slice.start, s->as.slice.stop};
+    for (int i = 0; i < 3; i++) {
+        if (index_function(c, parts[i])) return parts[i];
+        if ((parts[i]->type != SPY_NONE && parts[i]->type != SPY_INT && parts[i]->type != SPY_BOOL) ||
+            (!i && parts[0]->type != SPY_NONE && !integer_sign(parts[0]))) return NULL;
+    }
+    return NULL;
 }
 /* The Python __setitem__ or __delitem__, as name, of instance object's
  * class, also of a builtin's subclass overriding it, borrowed, or NULL. */
@@ -28201,7 +28239,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE || (b->type == SPY_TUPLE && key_reaches(c, b))) { x = a; y = b; goto operator_step; }
+            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE || (b->type == SPY_TUPLE && key_reaches(c, b)) ||
+                (b->type == SPY_SLICE && index_function(c, slice_part(c, b)))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)
             a = machine_pop(m);

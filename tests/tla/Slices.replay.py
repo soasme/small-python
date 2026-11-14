@@ -4,14 +4,33 @@ FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
 
-def value(v):
-    return None if v == 99 else "x" if v == 98 else v
+class Indexed:
+    def __init__(self, name, log):
+        self.name, self.log = name, log
+
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        self.log.append(self.name)
+        return 3
+
+    def __repr__(self):
+        return "I3"
+
+
+def value(v, name, log):
+    return None if v == 99 else "x" if v == 98 else Indexed(name, log) if v == 97 else v
 
 
 def outcome(p):
     if p["op"] == "generic":
         return repr(slice[float])
-    s = slice(value(p["start"]), value(p["stop"]), value(p["step"]))
+    log = []
+    s = slice(value(p["start"], "start", log), value(p["stop"], "stop", log), value(p["step"], "step", log))
+    return "".join([result(p, s)] + [" " + name for name in log])
+
+
+def result(p, s):
     op = p["op"]
     try:
         if op == "indices":

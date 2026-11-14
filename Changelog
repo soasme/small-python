@@ -109,6 +109,9 @@ Unreleased (0.10.0):
 - the repr of a container calls its such items' Python __repr__ without nesting on the C stack
 - isinstance() and issubclass() of a tuple call its classes' Python __instancecheck__ or
   __subclasscheck__ without nesting on the C stack
+- a slice's Python __index__ parts in a subscript run without nesting on the C stack
+- a subscript by a slice and slice.indices() check each part as they reach it, after the
+  __index__ of the parts before it
 - a class with a Python __new__ called with * or ** arguments runs __new__ and __init__ without
   nesting on the C stack, so it can pause
 - str(), repr(), format(), len(), hash(), int(), round() and the like call the Python method of a

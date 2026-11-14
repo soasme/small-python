@@ -1597,6 +1597,10 @@ int main(int argc, char **argv) {
                "class A(metaclass=Judge): pass\nclass B(metaclass=Judge): pass\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "isinstance(1, (A, B)) + isinstance(1, (A, str))", "judged.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
+    /* So do a slice's parts' __index__. */
+    execute(c, "class Mark:\n    def __init__(self, v): self.v = v\n    def __index__(self):\n        for i in range(3000): pass\n        return self.v\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "len(list(range(10))[Mark(1):Mark(7):Mark(2)])", "marked.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* So do repr() and len() in a builtin subclass's and a metaclass's methods. */
     execute(c, "class Loud(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return str(i)\n"
                "class Sized(type):\n    def __len__(cls):\n        for i in range(3000): pass\n        return i\n"

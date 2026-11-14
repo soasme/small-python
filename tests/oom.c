@@ -260,6 +260,14 @@ static const char *const programs[] = {
     "def ij(): return [isinstance(1, (IA, IB)), isinstance(1, (IA, str)), issubclass(int, (IA, int))]\n"
     "print(ij())\n",
 
+    "class SX:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        for i in range(1): pass\n"
+    "        return self.v\n"
+    "def sx(): return [[1, 2, 3, 4][SX(1):SX(3)], 'abcd'[SX(0)::SX(2)], range(9)[SX(2):]]\n"
+    "print(sx())\n",
+
     "class FN:\n"
     "    def __new__(cls, *a, **k):\n"
     "        for i in range(1): pass\n"
