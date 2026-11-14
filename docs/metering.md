@@ -389,7 +389,10 @@ These run as machines on the heap, in one native activation of
   and inside such pairs, the `__eq__` that `==` or `!=` of two dicts
   calls on the values of their keys that are neither instances nor
   tuples, also of such dicts inside such lists, tuples or dicts and of
-  such lists or tuples inside them, the `__eq__` and then the ordering method, or
+  such lists or tuples inside them, the `__eq__` that `==` or `!=` of two
+  dicts, not inside such a list, tuple or dict, calls on keys of the same
+  hash when a key is an instance with a Python `__eq__` or a tuple holding
+  one, finding each in the other, and on those keys' values, the `__eq__` and then the ordering method, or
   its reflection, that `<`, `<=`, `>` or `>=` of two lists or two tuples,
   also in a comparison chain, calls on such items, the `__eq__` that `index`, `count` or `remove` of
   one item in a list or tuple, called as its method with that item alone,

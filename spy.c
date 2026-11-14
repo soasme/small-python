@@ -10205,6 +10205,7 @@ static int pair_equal_from(SPYContext *, SPYValue *, SPYValue *, size_t);
  * a Python method (order_python), gives NULL without an error. */
 static int order_python(SPYContext *, int, SPYValue *, SPYValue *);
 static int set_walks(int, SPYValue *, SPYValue *);
+static int dict_walks(SPYValue *, SPYValue *, size_t);
 /* Comparison op of a, a set, and b: NULL without an error when it walks
  * the elements on the machine (set_walks). */
 static NO_INLINE SPYValue *set_compared(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
@@ -10221,10 +10222,11 @@ static NO_INLINE SPYValue *compare_operand(SPYContext *c, int op, SPYValue *a, S
         }
     }
     /* Two dicts of one length compare their values, on the machine from
-     * a pair whose comparison calls Python (python_pair). */
+     * a pair whose comparison calls Python (python_pair), or looking their
+     * keys up there too (dict_walks). */
     if (a->type == SPY_DICT && b->type == SPY_DICT && (op == T_EQ || op == T_NE) && a->as.map.len == b->as.map.len) {
         size_t end;
-        if (python_pair(c, a, b, 0, &end) != SIZE_MAX) return NULL;
+        if (python_pair(c, a, b, 0, &end) != SIZE_MAX || (end < a->as.map.len && dict_walks(a, b, end))) return NULL;
         int equal = pair_equal_from(c, a, b, end);
         return equal < 0 ? NULL : spy_bool(c, equal == (op == T_EQ));
     }
@@ -25632,12 +25634,22 @@ static Machine *lookup_step(SPYContext *c, Machine *m, Instruction *ins, SPYValu
     SPYValue *function = lookup_call(c, m, map, key, hash, cursor, &found, &env);
     return lookup_enter(c, m, ins, map, key, hash, function, env, found, pc);
 }
+/* Whether x == y or x != y, x and y dicts of one length, looks up x's
+ * keys in y on the machine (set_walk): one from entry at on is an instance
+ * with a Python __eq__, or a tuple holding one (eq_reaches). */
+static int dict_walks(SPYValue *x, SPYValue *y, size_t at) {
+    if (y->type != SPY_DICT || x->as.map.len != y->as.map.len) return 0;
+    for (size_t i = at; i < x->as.map.len; i++) if (eq_reaches(map_items(x)[i].key)) return 1;
+    return 0;
+}
 /* Whether set operator or comparison op of x and y, exact sets or
  * frozensets, may call a Python __eq__ (set_walk): one of them holds an
  * instance with one, or a tuple holding one (eq_reaches), and their
- * lengths do not decide the comparison. */
+ * lengths do not decide the comparison; or a dict comparison does
+ * (dict_walks). */
 static int set_walks(int op, SPYValue *x, SPYValue *y) {
     int rich = rich_kind(op);
+    if (x->type == SPY_DICT) return (rich == R_EQ || rich == R_NE) && dict_walks(x, y, 0);
     if ((rich < 0 && op != '|' && op != '&' && op != '-' && op != '^') || !is_set(x) || !is_set(y)) return 0;
     size_t a = x->as.map.len, b = y->as.map.len;
     if (rich == R_EQ || rich == R_NE ? a != b : rich == R_LT ? a >= b : rich == R_LE ? a > b : rich == R_GT ? b >= a : rich == R_GE && b > a)
@@ -25648,20 +25660,43 @@ static int set_walks(int op, SPYValue *x, SPYValue *y) {
     }
     return 0;
 }
+static void walk_unequal(SPYContext *c, Machine *m);
 /* The walk atop m (set_walk) decides an entry, key of hash, found at
  * index found of the set searched, or -1: | and ^ add one not found to
  * the result, ^ removes one found from it, & keeps one found and - one
- * not found, and one not found decides a comparison; the walk goes on
- * with the next entry. */
-static void walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found) {
+ * not found, and one not found decides a comparison; a dict's found entry
+ * then compares its value with the walked one's: the Python __eq__ that
+ * calls first, owned, with *env, its pair the values' one-item tuples
+ * above the walk (equal_call), whose end pair_returned decides; else
+ * NULL, the walk going on with the next entry. */
+static SPYValue *walk_decide(SPYContext *c, Machine *m, SPYValue *key, int64_t hash, ptrdiff_t found, SPYValue **env) {
     SPYValue **state = &m->stack[m->len - 7], *result = state[0];
     int op = (int)state[4]->as.integer_data.small;
-    int64_t next = state[3]->as.integer_data.small + 1;
-    if (rich_kind(op) >= 0) {
-        if (found < 0) { spy_release(result); state[0] = spy_bool(c, op == T_NE); next = (int64_t)state[1]->as.map.len; }
-    } else if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
-    else if (op == '^') set_remove_at(result, (size_t)found);
-    SPYValue *index = int_value(c, next);
+    SPYValue *index = int_value(c, state[3]->as.integer_data.small + 1);
+    if (index) { spy_release(state[3]); state[3] = index; }
+    if (rich_kind(op) < 0) {
+        if (found >= 0 ? op == '&' : op != '&') map_append(c, result, key, c->none, hash);
+        else if (op == '^') set_remove_at(result, (size_t)found);
+        return NULL;
+    }
+    if (found < 0) { walk_unequal(c, m); return NULL; }
+    if (state[1]->type != SPY_DICT) return NULL;
+    SPYValue *left = state[5], *right = spy_retain(state[2]->as.map.items[found].value), *function = NULL;
+    if (left != right && (left->type == SPY_INSTANCE || right->type == SPY_INSTANCE || sequence_pair(left, right))) {
+        SPYValue *x = tuple_of(c, 1, &left), *y = x ? tuple_of(c, 1, &right) : NULL;
+        size_t end, at = y ? python_pair(c, x, y, 0, &end) : SIZE_MAX;
+        if (at != SIZE_MAX) function = equal_call(c, m, x, y, at, env);
+        else if (y && !c->error_type[0] && !pair_equal_from(c, x, y, end) && !c->error_type[0]) walk_unequal(c, m);
+        spy_release(x); spy_release(y);
+    } else if (left != right && !equal(left, right) && !c->error_type[0]) walk_unequal(c, m);
+    spy_release(right);
+    return function;
+}
+/* The comparison atop m (set_walk) found an entry missing or unequal:
+ * its result is the inequality, and the walk ends. */
+static void walk_unequal(SPYContext *c, Machine *m) {
+    SPYValue **state = &m->stack[m->len - 7], *index = int_value(c, (int64_t)state[1]->as.map.len);
+    spy_release(state[0]); state[0] = spy_bool(c, state[4]->as.integer_data.small == T_NE);
     if (index) { spy_release(state[3]); state[3] = index; }
 }
 /* The walk atop m from its next entry on: each entry's lookup in the set
@@ -25676,15 +25711,18 @@ static SPYValue *walk_next(SPYContext *c, Machine *m, SPYValue **env) {
         if (c->error_type[0] || i >= walked->as.map.len) break;
         Entry entry = map_items(walked)[i];
         ptrdiff_t found;
-        if ((function = lookup_call(c, m, map, entry.key, entry.hash, map_cursor(map, entry.hash), &found, env)) || c->error_type[0])
+        /* A dict's walk holds the entry's value while its key is looked up. */
+        if (walked->type == SPY_DICT) { spy_release(state[5]); state[5] = spy_retain(entry.value); }
+        if ((function = lookup_call(c, m, map, entry.key, entry.hash, map_cursor(map, entry.hash), &found, env)) || c->error_type[0] ||
+            (function = walk_decide(c, m, entry.key, entry.hash, found, env)))
             return function;
-        walk_decide(c, m, entry.key, entry.hash, found);
     }
     spy_release(machine_pop(m));
     SPYValue *target = machine_pop(m);
+    int compares = rich_kind((int)m->stack[m->len - 1]->as.integer_data.small) >= 0;
     for (int i = 0; i < 4; i++) spy_release(machine_pop(m));
     SPYValue *result = machine_pop(m);
-    if (!c->error_type[0] && target != c->none) {
+    if (!c->error_type[0] && !compares && target != c->none) {
         swap_contents(target, result);
         spy_release(result);
         result = target;
@@ -25714,16 +25752,29 @@ static NO_INLINE SPYValue *set_walk(SPYContext *c, Machine *m, int op, SPYValue 
     }
     return walk_next(c, m, env);
 }
-/* A set walk's lookup (walk_next) ended with entry found, or -1: decided,
- * the walk goes on, entering its next Python __eq__ (lookup_enter, which
- * returns here if the call fails); at its end, or on an error, operator
- * step ins ends with its result. */
-static Machine *walk_found(SPYContext *c, Machine *m, Instruction *ins, SPYValue *key, int64_t hash, ptrdiff_t found, size_t pc) {
-    SPYValue *env = NULL, *function;
-    if (!c->error_type[0]) walk_decide(c, m, key, hash, found);
-    if ((function = walk_next(c, m, &env))) return lookup_enter(c, m, ins, NULL, key, hash, function, env, -1, pc);
+/* The walk atop m goes on (walk_next), entering function, owned, with
+ * env, or its next Python __eq__, as an operator's call, the call's
+ * machine; at its end, or on an error, operator step ins ends with its
+ * result. A call that cannot be entered ends the walk with the error,
+ * what the call pushed above the walk popped. */
+static Machine *walk_resume(SPYContext *c, Machine *m, Instruction *ins, SPYValue *function, SPYValue *env, size_t pc) {
+    if (function || (function = walk_next(c, m, &env))) {
+        Call *call = call_enter(c, function, env, m);
+        if (call) {
+            call->m.outermost = CALL_OPERATOR;
+            return &call->m;
+        }
+        while (m->stack[m->len - 1] != c->walking) spy_release(machine_pop(m));
+        walk_next(c, m, &env);
+    }
     m->pc = operator_finish(c, m, ins, c->none, c->error_type[0] ? NULL : looked(c), pc);
     return m;
+}
+/* A set walk's lookup (walk_next) ended with entry found, or -1: decided,
+ * the walk goes on (walk_resume). */
+static Machine *walk_found(SPYContext *c, Machine *m, Instruction *ins, SPYValue *key, int64_t hash, ptrdiff_t found, size_t pc) {
+    SPYValue *env = NULL, *function = c->error_type[0] ? NULL : walk_decide(c, m, key, hash, found, &env);
+    return walk_resume(c, m, ins, function, env, pc);
 }
 /* The __eq__ of a key's lookup (lookup_push) returned result: on
  * NotImplemented from the first call, the reflected Python __eq__ entered
@@ -25911,7 +25962,7 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     c->entering_kind = CALL_OPERATOR;
     /* A set operation, augmented assignment or comparison, whose lookups
      * may call a Python __eq__. */
-    if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) && is_set(x)) {
+    if ((kind == OPERATE_BINARY || kind == OPERATE_INPLACE || kind == OPERATE_COMPARE) && (is_set(x) || (kind == OPERATE_COMPARE && x->type == SPY_DICT))) {
         int token = kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : op;
         if (set_walks(token, x, y)) {
             operator_keep(c, m, ins, y);
@@ -26091,7 +26142,7 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
         }
         while (m->len > len) spy_release(machine_pop(m));
         int nested = m->len && m->stack[m->len - 1] == c->nesting, probing = !nested && m->len && m->stack[m->len - 1] == c->probing,
-            ordered = !nested && !probing && op != T_EQ && op != T_NE;
+            walking = m->len && m->stack[m->len - 1] == c->walking, ordered = !nested && !probing && !walking && op != T_EQ && op != T_NE;
         /* An unequal pair the comparison left past an end compares the lengths. */
         int same = c->error_type[0] ? -1 : ordered ? 0 : found ? pair_equal_from(c, x, y, end) :
                    x->type != SPY_DICT && (at > x->as.seq.len || at > y->as.seq.len) ? x->as.seq.len == y->as.seq.len : 0;
@@ -26100,6 +26151,12 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
             spy_release(machine_pop(m)); spy_release(x); spy_release(y);
             found = same > 0;
             continue;
+        }
+        /* A dict walk's value is equal to the searched one's when these are (walk_decide). */
+        if (walking) {
+            spy_release(x); spy_release(y);
+            if (!same) walk_unequal(c, m);
+            return walk_resume(c, m, ins, NULL, NULL, pc);
         }
         /* A lookup's key is equal to its entry's when these are (lookup_call). */
         if (probing) {

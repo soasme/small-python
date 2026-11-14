@@ -84,6 +84,9 @@ SOURCES = {
                             "    def __ge__(s, o): t(s.n + '>=' + o.n); return NotImplemented\n"
                             "class F(E): pass\n"
                             "result = (E('a') < F('b'), F('c') < E('d'), E('e') >= F('f'))",
+    "dict_key_eq": "class E:\n    def __init__(s, n, v=''): s.n, s.v = n, v\n    def __hash__(s): return 1\n"
+                   "    def __eq__(s, o): t(s.n + '==' + o.n); return s.v == o.v\n"
+                   "result = ({E('a'): 1, E('b', 'x'): 2} == {E('c'): 1, E('d', 'x'): 2}, {E('e'): 1} != {E('f', 'y'): 1})",
 }
 
 

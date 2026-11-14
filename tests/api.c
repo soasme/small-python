@@ -1474,6 +1474,11 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "({i: Tied(i) for i in range(60)} == {i: Tied(i) for i in range(60)}) + "
                                              "({1: Tied(1)} != {1: Tied(2)}) * 2", "dicteq.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So does == of two dicts whose keys compare by them. */
+    execute(c, "class Keyed(Tied):\n    def __hash__(self): return self.v % 7\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "({Keyed(i): i for i in range(60)} == {Keyed(i): i for i in range(60)}) + "
+                                             "({Keyed(1): 1} != {Keyed(8): 1}) * 2", "dictkeys.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
     /* And such dicts inside lists, or lists inside dicts. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "([{i: Tied(i)} for i in range(30)] == [{i: Tied(i)} for i in range(30)]) + "

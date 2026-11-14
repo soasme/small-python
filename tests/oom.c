@@ -162,7 +162,15 @@ static const char *const programs[] = {
     "        for i in range(1): pass\n"
     "        return iter([1, 2])\n"
     "def w(): return [list(zip(W(), [3], W())), [list(map(abs, W())), [list(enumerate(W(), 1)), list(filter(None, W()))]]]\n"
-    "print(w())\n",
+    "print(w())\n"
+    "class Q:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __hash__(self): return 1\n"
+    "    def __eq__(self, o):\n"
+    "        for i in range(1): pass\n"
+    "        return self.v == o.v\n"
+    "def q(): return [{Q(1): Q(2), Q(3): 4} == {Q(3): 4, Q(1): Q(2)}, {Q(1): (Q(2),)} != {Q(1): (Q(3),)}]\n"
+    "print(q())\n",
 
     "class G:\n"
     "    def __getattr__(self, k):\n"
