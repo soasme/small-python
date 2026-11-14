@@ -1440,6 +1440,7 @@ static SPYValue *finalize_pop(SPYContext *c) {
     c->finalize_calls_len--;
     return v;
 }
+static void generator_close(SPYValue *);
 /* Keep a dying instance alive for its __del__, a suspended generator or
  * coroutine for its close(), or an exporter's memoryview for its
  * __release_buffer__, once per object: 1. 2 for a generator past that whose
@@ -1449,8 +1450,12 @@ static int finalize_later(SPYValue *v) {
         UINT64_C(1) << SPY_ASYNC_GENERATOR | UINT64_C(1) << SPY_MEMORYVIEW | UINT64_C(1) << SPY_INSTANCE))) return 0;
     if (v->type == SPY_GENERATOR || v->type == SPY_COROUTINE || v->type == SPY_ASYNC_GENERATOR) {
         int hooked = v->type == SPY_ASYNC_GENERATOR && v->as.generator.origin && !v->as.generator.async_closed;
-        if (v->finalized || !(v->as.generator.started || hooked) || v->as.generator.running || v->as.generator.done)
+        if (v->finalized || !(v->as.generator.started || hooked) || v->as.generator.running || v->as.generator.done) {
+            /* Its execution state goes first, as in gen_dealloc: the
+             * tracebacks of the exceptions it handles may hold the frame. */
+            if (v->as.generator.frame && v->as.generator.frame->refs > 1 && !v->as.generator.running) generator_close(v);
             return v->as.generator.frame && v->as.generator.frame->refs > 1 ? 2 : 0;
+        }
     } else if (v->finalized) return 0;
     else if (v->type == SPY_MEMORYVIEW) {
         if (!v->as.memory.view || v->as.memory.released) return 0;
@@ -23134,15 +23139,22 @@ static int machine_source(SPYContext *c, SPYValue *v) {
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
+static int is_builtin(SPYValue *, int);
 static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
     if (callee->type == SPY_BOUND_METHOD && !callee->as.bound.module) { method = callee->as.bound.method; callee = callee->as.bound.self; }
+    /* A coroutine wrapper's methods are its coroutine's, its __next__ and
+     * next() of it the coroutine's send(None). */
+    int wrapped = callee->type == SPY_COROUTINE_ITERATOR && method >= 0;
+    if (wrapped) callee = callee->as.iterator.source;
+    if (method < 0 && argc && argc <= 2 && argv[0]->type == SPY_COROUTINE_ITERATOR && is_builtin(callee, B_NEXT))
+        return suspended(argv[0]->as.iterator.source) ? B_NEXT : -1;
     /* A generator's close at a yield (B_CLOSE), its __next__ and send,
      * and a coroutine's send. */
     if (method == M_CLOSE || method == M_THROW)
         return argc == (method == M_THROW) && throws_in(c, callee, argc ? argv[0] : NULL) ? method == M_THROW ? B_THROW : B_CLOSE : -1;
     if (method >= 0 && (callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE))
         return suspended(callee) && argc == (method == M_SEND) &&
-               (method == M_SEND || (method == M_NEXT && callee->type == SPY_GENERATOR)) &&
+               (method == M_SEND || (method == M_NEXT && (callee->type == SPY_GENERATOR || wrapped))) &&
                (method == M_NEXT || callee->as.generator.started || argv[0]->type == SPY_NONE) ? B_NEXT : -1;
     /* dict() and dict.update() merge an instance as a mapping, on the
      * machine when its keys() is Python (method_function). */
@@ -23178,11 +23190,12 @@ static NO_INLINE int consumer_id(SPYContext *c, SPYValue *callee, int method, si
     return id;
 }
 static ALWAYS_INLINE int consumer_of(SPYContext *c, SPYValue *callee, int method, size_t argc, SPYValue *const *argv) {
-    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE ||
+    return (argc && (resumable(argv[0]) || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_INSTANCE || argv[0]->type == SPY_COROUTINE_ITERATOR ||
                      ((argv[0]->type == SPY_LIST || argv[0]->type == SPY_TUPLE) &&
                       (callee == c->types[SPY_SET] || callee == c->types[SPY_FROZENSET] || callee == c->types[SPY_DICT] ||
                        callee->type == SPY_METHOD)))) ||
-           callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_BOUND_METHOD ? consumer_id(c, callee, method, argc, argv) : -1;
+           callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR || callee->type == SPY_BOUND_METHOD ?
+           consumer_id(c, callee, method, argc, argv) : -1;
 }
 /* A consumer's source *v, owned (iter_function): an instance whose
  * __iter__ is on the machine stays, its call the consumer's first
@@ -23222,6 +23235,12 @@ static SPYValue *join_listed(SPYContext *c, Machine *m, SPYValue *it) {
  * owned. */
 static void consume(SPYContext *c, Machine *m, int id, SPYValue *callee, int method, SPYValue *name, SPYValue *generator, SPYValue *start) {
     if (callee->type == SPY_BOUND_METHOD) { method = callee->as.bound.method; name = callee->as.bound.name; callee = callee->as.bound.self; }
+    /* A coroutine wrapper's coroutine is resumed (consumer_id). */
+    if (callee->type == SPY_COROUTINE_ITERATOR && method >= 0) callee = callee->as.iterator.source;
+    if (method < 0 && generator && generator->type == SPY_COROUTINE_ITERATOR) {
+        SPYValue *source = spy_retain(generator->as.iterator.source);
+        spy_release(generator); generator = source;
+    }
     /* A set's update extends its set. */
     if (id == B_EXTEND && callee->type == SPY_METHOD) callee = callee->as.method.self;
     /* A generator's send takes its argument first, and __next__ none. */
@@ -23335,8 +23354,9 @@ static NO_INLINE SPYValue *finalizer(SPYContext *c) {
     SPYValue *self = c->finalize_first;
     if (finalizers_wait(c) || c->error_type[0] || c->settings[SET_TRACE] || c->settings[SET_PROFILE] || c->py_depth >= c->recursion_limit)
         return NULL;
-    /* A generator, or an async generator without a finalizer hook, closes at its yield. */
-    if (self->type == SPY_GENERATOR || (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin))
+    /* A generator or coroutine, or an async generator without a finalizer
+     * hook, closes at its yield, or its delegate's. */
+    if (self->type == SPY_GENERATOR || self->type == SPY_COROUTINE || (self->type == SPY_ASYNC_GENERATOR && !self->as.generator.origin))
         return suspended(self) && self->as.generator.started && innermost(self->as.generator.machine)->awaiting == AWAIT_YIELD &&
                !close_quietly(c, self) ? self : NULL;
     SPYValue *method = self->type != SPY_INSTANCE ? NULL : class_lookup(self->as.map.parent, "__del__");
@@ -23359,7 +23379,11 @@ static NO_INLINE int finalize_closed(SPYContext *c, Machine *m, Frame *f, SPYVal
     Block *top = &m->blocks[m->block_len - 1];
     SPYValue *g = spy_retain(top->value);
     size_t waiting = top->consumer->finalizing - 1;
-    if (item) { spy_release(item); spy_error(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" : "generator ignored GeneratorExit"); }
+    if (item) {
+        spy_release(item);
+        spy_error(c, "RuntimeError", g->type == SPY_ASYNC_GENERATOR ? "async generator ignored GeneratorExit" :
+                                     g->type == SPY_COROUTINE ? "coroutine ignored GeneratorExit" : "generator ignored GeneratorExit");
+    }
     if (c->error_type[0]) report_unraisable(c, "Exception ignored while closing generator ", g, NULL);
     if (c->error_type[0]) spy_clear_error(c);
     pop_block(c, m, f);
@@ -24512,8 +24536,9 @@ static NO_INLINE SPYValue *operand_call(SPYContext *c, Machine *m, Frame *f, Nod
     }
     if ((method < 0 ? UINT64_C(1) << callee->type & (UINT64_C(1) << SPY_METHOD | UINT64_C(1) << SPY_CLASS |
                       UINT64_C(1) << SPY_INSTANCE | UINT64_C(1) << SPY_BOUND_METHOD) :
-                      callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || (argc && argv[0]->type == SPY_INSTANCE)) ||
-        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR)) ||
+                      callee->type == SPY_GENERATOR || callee->type == SPY_COROUTINE || callee->type == SPY_COROUTINE_ITERATOR ||
+                      (argc && argv[0]->type == SPY_INSTANCE)) ||
+        (argc && (argv[0]->type == SPY_GENERATOR || argv[0]->type == SPY_ITERATOR || argv[0]->type == SPY_COROUTINE_ITERATOR)) ||
         (callee->type == SPY_NATIVE && ((argc == 1 && (argv[0]->type == SPY_INSTANCE ||
                                                        /* hash() of a tuple that may hold an instance (hashing_call) */
                                                        (argv[0]->type == SPY_TUPLE && argv[0]->listed && is_builtin(callee, B_HASH)))) ||

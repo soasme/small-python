@@ -23,13 +23,18 @@
 (* fresh coroutine, calls iter(), sends 1, closes it and sends None, or    *)
 (* throws ValueError and then sends None; or, suspended in await Gen()     *)
 (* catching GeneratorExit, closes it as it returns 3 or awaits Gen()       *)
-(* again. The outcome is the values the                                    *)
-(* driver received and the result, or the exception.                       *)
+(* again. A wrapper program drives the chain coroutine through its         *)
+(* __await__() wrapper with next() and send(None), throws ValueError       *)
+(* through the wrapper into a coroutine returning 4 on it, or drops a      *)
+(* coroutine suspended in await Gen() whose finally records "closed". The  *)
+(* outcome is the values the driver received and the result, or the        *)
+(* exception.                                                              *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
 Programs == [part : {"await"}, x : {"coroutine", "iter", "gen", "chain", "bad", "int", "generator", "reused"}]
             \cup [part : {"object"}, op : {"iter", "send1", "close", "throw", "closed", "ignored"}]
+            \cup [part : {"wrapper"}, op : {"drive", "throw", "dropped"}]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -48,7 +53,10 @@ Object(p) == CASE p.op \in {"iter", "send1"} -> "TypeError"
                [] p.op = "closed" -> "3"
                [] p.op = "throw" -> "ValueError RuntimeError"
 
-Run(p) == IF p.part = "await" THEN Await(p) ELSE Object(p)
+\* A wrapper's methods are its coroutine's; a dropped suspended coroutine closes.
+Wrapper(p) == CASE p.op = "drive" -> "[1] 6" [] p.op = "throw" -> "4" [] p.op = "dropped" -> "closed"
+
+Run(p) == CASE p.part = "await" -> Await(p) [] p.part = "object" -> Object(p) [] OTHER -> Wrapper(p)
 
 Init == program \in Programs /\ outcome = Pending
 Execute == outcome = Pending /\ outcome' = Run(program) /\ UNCHANGED program

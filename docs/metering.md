@@ -328,7 +328,8 @@ These run as machines on the heap, in one native activation of
   generators resumed by
   `next` or by their `__next__` and `send` methods, or thrown into or
   closed at a `yield` by `throw` (with one argument) or `close`, and
-  coroutines resumed by `send`;
+  coroutines resumed by `send`, also through their `__await__` wrapper,
+  whose `__next__` and `next` of it send `None`;
 - the key functions of `sorted`, `list.sort`, `min` and `max`, also
   bound methods, callable instances' `__call__` and classes' `__init__`,
   and the items those with keywords take from generators and the other
@@ -389,8 +390,9 @@ These run as machines on the heap, in one native activation of
   attribute store's `__setattr__`, property setter or `__set__` in
   function code, and, in code compiled while pausing, an attribute
   deletion's `__delattr__`, property deleter or `__delete__`;
-- a dead instance's `__del__`, and the close of a dead generator, or of
-  an async generator without a finalizer hook, suspended at a `yield`;
+- a dead instance's `__del__`, and the close of a dead generator or
+  coroutine, or of an async generator without a finalizer hook,
+  suspended at a `yield` or in a `yield from` or `await` of one;
 - property getters, also of a builtin's or an exception's subclass, and
   `__getattr__`, `__enter__`, `__exit__`, `__bool__`, unary and binary
   operator, comparison, `__getitem__`, `__setitem__`, `__delitem__`

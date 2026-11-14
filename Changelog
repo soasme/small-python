@@ -89,6 +89,10 @@ Unreleased (0.10.0):
   or a metaclass property's getter without nesting on the C stack, so it can pause
 - an attribute read calls a Python __getattr__ after a descriptor's or __getattribute__'s
   AttributeError, and a metaclass's __getattr__ or __getattribute__, without nesting on the C stack
+- a coroutine's __await__ wrapper resumes the coroutine, and an unreachable coroutine suspended in
+  an await closes, without nesting on the C stack, so they can pause
+- an unreachable generator or coroutine that ignores its close in an except block is still
+  reclaimed, with its locals and the iterator it waits on
 - an iterator over a sequence whose __getitem__ raises an error other than IndexError or
   StopIteration tries the same index again on its next step
 - dict.get(), setdefault() and pop() and set.add(), discard() and remove() call the Python

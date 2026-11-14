@@ -107,7 +107,38 @@ def object_program(op):
         c.close()
 
 
+async def catching():
+    try:
+        await Gen()
+    except ValueError:
+        return 4
+
+
+def wrapper_program(op):
+    if op == "dropped":
+        log = []
+
+        async def held():
+            try:
+                await Gen()
+            finally:
+                log.append("closed")
+        c = held()
+        c.send(None)
+        del c
+        return " ".join(log)
+    w = (chain() if op == "drive" else catching()).__await__()
+    out = [next(w)]
+    try:
+        out.append(w.send(None) if op == "drive" else w.throw(ValueError))
+    except StopIteration as stop:
+        return repr(stop.value) if op == "throw" else "%r %r" % (out, stop.value)
+    return "no StopIteration"
+
+
 def outcome(p):
+    if p["part"] == "wrapper":
+        return wrapper_program(p["op"])
     return await_program(p["x"]) if p["part"] == "await" else object_program(p["op"])
 
 

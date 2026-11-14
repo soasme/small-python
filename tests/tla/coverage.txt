@@ -121,7 +121,7 @@ Contents | - navigation
 9 Executable Code and Execution Contexts > 9.4 Suspension and resumption | Generators, Awaitables
 9 Executable Code and Execution Contexts > 9.5 The handled exception | Exceptions, Raise
 9 Executable Code and Execution Contexts > 9.6 Recursion limit | Exceptions, BuiltinsText, SpyCalls
-9 Executable Code and Execution Contexts > 9.7 Object lifetime and finalization | GC, GCGenerators, SpyGC, SpyGCGenerators
+9 Executable Code and Execution Contexts > 9.7 Object lifetime and finalization | GC, GCGenerators, SpyGC, SpyGCGenerators, StubbornReclaim
 9 Executable Code and Execution Contexts > 9.8 Program execution | CompileModes
 10 Object Behaviours | = sections
 10 Object Behaviours > 10.1 Instances | = sections
