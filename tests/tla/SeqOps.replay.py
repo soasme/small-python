@@ -21,6 +21,20 @@ def ids(seq):
     return tuple(ord(c) - 96 if type(c) is str else c for c in seq)
 
 
+class Index:
+    def __init__(self, i):
+        self.i = i
+
+    def __index__(self):
+        for _ in ():  # a loop: __index__ runs on the machine
+            pass
+        return self.i
+
+
+def by(p, v):
+    return Index(v) if p["by"] == "index" else v
+
+
 def bound(v):
     return None if v == 99 else v
 
@@ -32,7 +46,7 @@ def outcome(p):
     x = ("_ab"[p["x"]] if p["x"] < 3 else "c") if kind == "str" and "x" in p else p.get("x")
     try:
         if op == "index":
-            r = s[p["i"]]
+            r = s[by(p, p["i"])]
             return ("item", type(r).__name__, ids([r]))
         if op == "slice":
             r = s[bound(p["start"]):bound(p["stop"]):bound(p["step"])]
@@ -47,7 +61,7 @@ def outcome(p):
         elif op == "concat list":
             r = s + [2]
         elif op == "repeat":
-            r = s * p["n"]
+            r = s * by(p, p["n"])
         else:
             hash(s)
             return ("hashable", "", ())

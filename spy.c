@@ -26409,6 +26409,10 @@ static NO_INLINE SPYValue *native_lookup(SPYContext *c, Machine *m, Instruction 
     if (!function && !c->error_type[0]) hash_kept(c, spy_retain(key), 1, hash);
     return function;
 }
+/* Whether v is a builtin sequence that * repeats. */
+static int repeats(SPYValue *v) {
+    return v->type == SPY_LIST || v->type == SPY_TUPLE || v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY;
+}
 static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction *ins, SPYValue *x, SPYValue *y, SPYValue **env) {
     int op = 0, kind = step_operation(ins, &op), rich = rich_kind(op), contains = op == O_IN || op == O_NOTIN;
     SPYValue *function = NULL;
@@ -26440,6 +26444,17 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         x->type == SPY_BYTES || x->type == SPY_BYTEARRAY || x->type == SPY_RANGE) &&
         (function = index_function(c, part = y->type == SPY_SLICE ? slice_part(c, y) : y)) && !operator_push(c, m, x, y, OPERATOR_INDEX)) {
         *env = function_env(c, function, 1, &part, NULL, 0);
+        return *env ? spy_retain(function) : NULL;
+    }
+    /* A builtin sequence repeated by an instance whose class multiplies
+     * neither way: its Python __index__ first, then the repetition by its
+     * int (operator_returned); in place, only of the sequence x. */
+    SPYValue *count = kind == OPERATE_BINARY && op == '*' ? (repeats(x) ? y : repeats(y) ? x : NULL) :
+                      kind == OPERATE_INPLACE && op == T_MULEQ && repeats(x) ? y : NULL;
+    if (count && count->type == SPY_INSTANCE && !class_lookup(value_class(c, count), "__mul__") &&
+        !class_lookup(value_class(c, count), "__rmul__") && (function = index_function(c, count)) &&
+        !operator_push(c, m, count == y ? x : y, count, OPERATOR_INDEX)) {
+        *env = function_env(c, function, 1, &count, NULL, 0);
         return *env ? spy_retain(function) : NULL;
     }
     if (contains) {
@@ -26735,6 +26750,10 @@ static NO_INLINE Machine *operator_returned(SPYContext *c, Machine *m, Instructi
             }
             for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
             result = NULL;
+        } else if (key && key->type == SPY_INT && key->as.integer_data.big && x->type != SPY_RANGE) {
+            /* An item's index, or a repetition's count, fits a Py_ssize_t
+             * as the operand's. */
+            result = errorf(c, kind == OPERATE_INDEX ? "IndexError" : "OverflowError", "cannot fit '%s' into an index-sized integer", type_name(y));
         } else result = key && !c->error_type[0] ? operation(c, ins, x, key) : NULL;
         spy_release(key);
     } else if (op == O_IN || op == O_NOTIN) {

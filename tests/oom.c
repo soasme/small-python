@@ -278,7 +278,8 @@ static const char *const programs[] = {
     "    s[LX(0)] = 7\n"
     "    del s[LX(1)]\n"
     "    s[LX(1)] += 1\n"
-    "    return s\n"
+    "    s *= LX(2)\n"
+    "    return [s, (0,) * LX(2), LX(1) * 'ab']\n"
     "print(lx())\n",
 
     "class FN:\n"

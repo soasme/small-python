@@ -18,6 +18,9 @@
 (*     s + <2> (same type)  s + [2] (a list)   s * n  for n in -1..2       *)
 (*     hash(s)                                                             *)
 (*                                                                         *)
+(* where i and n are ints, or instances whose Python __index__ returns     *)
+(* them.                                                                   *)
+(*                                                                         *)
 (* The outcome is the result as <<kind, type, items>>, or the exception.   *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, TLC
@@ -26,11 +29,11 @@ Types == {"str", "tuple", "bytes", "list", "bytearray"}
 Items == UNION {[1..n -> {1, 2}] : n \in 0..3}
 None == 99   \* a missing start, stop, or step
 Steps == {None, 1, 2, -1, -2, 0}
-Op == {[op |-> "index", i |-> i] : i \in -4..3}
+Op == {[op |-> "index", i |-> i, by |-> b] : i \in -4..3, b \in {"int", "index"}}
       \cup {[op |-> "slice", start |-> a, stop |-> b, step |-> c] : a \in {None, -4, -1, 0, 2, 4}, b \in {None, -4, -1, 0, 2, 4}, c \in Steps}
       \cup {[op |-> o, x |-> x] : o \in {"in", "count", "find"}, x \in {1, 3}}
       \cup {[op |-> o] : o \in {"concat", "concat list", "hash"}}
-      \cup {[op |-> "repeat", n |-> n] : n \in -1..2}
+      \cup {[op |-> "repeat", n |-> n, by |-> b] : n \in -1..2, b \in {"int", "index"}}
 Programs == {[type |-> t, items |-> s] @@ o : t \in Types, s \in Items, o \in Op}
 
 VARIABLES program, outcome
@@ -95,4 +98,7 @@ FullSlice == Done /\ program.op = "slice" /\ program.start = None /\ program.sto
 \* A negative step reverses: s[::-1] is s backwards.
 Reverse == Done /\ program.op = "slice" /\ program.start = None /\ program.stop = None /\ program.step = -1 =>
     outcome[3] = [k \in DOMAIN program.items |-> program.items[Len(program.items) - k + 1]]
+
+\* An index's or a count's __index__ gives the int it returns.
+IndexIsInt == Done /\ program.op \in {"index", "repeat"} => outcome = Run([program EXCEPT !.by = "int"])
 =============================================================================
