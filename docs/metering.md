@@ -285,7 +285,9 @@ These run as machines on the heap, in one native activation of
   Python `__new__`, also called with keywords or `*` and `**` arguments;
   the Python `__init__` of a
   subclass of a builtin type or of an exception, after its builtin
-  `__new__`; instances with a Python `__call__`; Python
+  `__new__`; those calls also as `type.__call__` bound to the class, the
+  `super().__call__` of a metaclass's `__call__`; instances with a
+  Python `__call__`; Python
   decorators; a class statement's bases' `__mro_entries__`, its
   metaclass `__prepare__` and `__new__`, the Python `__setitem__` and
   `__getitem__` of the namespace `__prepare__` returned for the names

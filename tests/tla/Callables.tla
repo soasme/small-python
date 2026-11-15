@@ -8,7 +8,8 @@
 (* arguments are an error unless __new__ or __init__ is overridden; an     *)
 (* instance is callable when its class defines __call__ (looked up on the  *)
 (* type, so one set on the instance does not count); a metaclass's         *)
-(* __call__ replaces all of creation.                                      *)
+(* __call__ replaces all of creation, and its super().__call__ is the      *)
+(* creation itself.                                                        *)
 (*                                                                         *)
 (* A program defines class C, of base object, list or Exception, with      *)
 (*                                                                         *)
@@ -17,6 +18,8 @@
 (*     call  none | class (def __call__(self, *a): return a)               *)
 (*                | instance (c.__call__ = a function, after creation)     *)
 (*                | meta (a metaclass's def __call__(cls, *a): return a)   *)
+(*                | super (a metaclass's __call__ returning                *)
+(*                         super().__call__ of its arguments)              *)
 (*                                                                         *)
 (* where __new__ and __init__ take *args and **kw (recording args and the  *)
 (* keyword items), then evaluates C(), C(1), C(k=1), or C()(2). The        *)
@@ -28,7 +31,7 @@
 EXTENDS Naturals, Sequences
 
 Programs == [base : {"object", "list", "Exception"}, new : {"none", "self", "other"},
-             init : {"none", "records", "returns"}, call : {"none", "class", "instance", "meta"},
+             init : {"none", "records", "returns"}, call : {"none", "class", "instance", "meta", "super"},
              op : {"C()", "C(1)", "C(k=1)", "C()(2)"}]
 
 VARIABLES program, outcome
@@ -65,4 +68,6 @@ Done == outcome # Pending
 
 \* A __call__ on the instance never makes it callable.
 TypeLookup == Done /\ program.op = "C()(2)" /\ program.call = "instance" => outcome = "TypeError"
+\* A metaclass's super().__call__ creates the instance as a plain call does.
+SuperCreates == Done /\ program.call = "super" => outcome = Run([program EXCEPT !.call = "none"])
 =============================================================================

@@ -528,6 +528,20 @@ static const char *const programs[] = {
     "    return out\n"
     "print(rx())\n",
 
+    "class TC(type):\n"
+    "    def __call__(cls, *a, **k):\n"
+    "        if len(a) == 1: return super().__call__(a[0])\n"
+    "        return super().__call__(*a, **k)\n"
+    "class TN(metaclass=TC):\n"
+    "    def __new__(cls, *a, **k): return super().__new__(cls)\n"
+    "    def __init__(self, *a, **k): self.a = a, k\n"
+    "class TL(list, metaclass=TC):\n"
+    "    def __init__(self, *a): super().__init__(*a)\n"
+    "def tc():\n"
+    "    for _ in (): pass\n"
+    "    return TN(1).a, TN(2, k=3).a, TL([4]), TL()\n"
+    "print(tc())\n",
+
     "class BN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "    def __delitem__(self, k):\n"

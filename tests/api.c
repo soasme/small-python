@@ -1773,6 +1773,12 @@ int main(int argc, char **argv) {
                "    except Metaraised as e: return 7 if type(e.__cause__) is Metaraised else 0\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "metaraised()", "metaraised.py"), SPY_STOP_STEPS, &pauses)) == 7 && pauses > 2);
+    /* And super().__call__ in a metaclass's __call__, of a Python __new__ and __init__. */
+    execute(c, "class Supered(metaclass=Called):\n    def __new__(cls, *a):\n        for i in range(3000): pass\n        return super().__new__(cls)\n"
+               "    def __init__(self, a, b):\n        for i in range(3000): pass\n        self.v = a + b\n"
+               "def supered():\n    return Supered(3, 4).v + Supered(*(1, 1)).v\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "supered()", "supered.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 3);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

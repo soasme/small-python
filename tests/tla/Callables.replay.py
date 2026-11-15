@@ -4,12 +4,15 @@
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
-NEW = {"none": "", "self": "    def __new__(cls, *args, **kw):\n        return super().__new__(cls)\n",
-       "other": "    def __new__(cls, *args, **kw):\n        return 5\n"}
-INIT = {"none": "", "records": "    def __init__(self, *args, **kw):\n        self.args = args + tuple(kw.items())\n",
-        "returns": "    def __init__(self, *args, **kw):\n        return 1\n"}
-CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": ""}
-META = "class M(type):\n    def __call__(cls, *a):\n        return a\n"
+# Each method loops, so that it runs on the machine.
+LOOP = "        for _ in (): pass\n"
+NEW = {"none": "", "self": "    def __new__(cls, *args, **kw):\n" + LOOP + "        return super().__new__(cls)\n",
+       "other": "    def __new__(cls, *args, **kw):\n" + LOOP + "        return 5\n"}
+INIT = {"none": "", "records": "    def __init__(self, *args, **kw):\n" + LOOP + "        self.args = args + tuple(kw.items())\n",
+        "returns": "    def __init__(self, *args, **kw):\n" + LOOP + "        return 1\n"}
+CALL = {"none": "", "class": "    def __call__(self, *a):\n        return a\n", "instance": "", "meta": "", "super": ""}
+META = {"meta": "class M(type):\n    def __call__(cls, *a):\n        return a\n",
+        "super": "class M(type):\n    def __call__(cls, *a, **k):\n" + LOOP + "        return super().__call__(*a, **k)\n"}
 
 
 def describe(r):
@@ -20,8 +23,8 @@ def describe(r):
 
 def outcome(p):
     namespace = {}
-    meta = p["call"] == "meta"
-    header = (META if meta else "") + "class C(%s%s):\n    pass\n" % (p["base"], ", metaclass=M" if meta else "")
+    meta = p["call"] in META
+    header = META.get(p["call"], "") + "class C(%s%s):\n    pass\n" % (p["base"], ", metaclass=M" if meta else "")
     exec(header + NEW[p["new"]] + INIT[p["init"]] + CALL[p["call"]], namespace)
     C = namespace["C"]
     try:
