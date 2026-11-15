@@ -27,8 +27,10 @@
 (* a view of bytearray(b"ab") that is plain, released, read-only, of no    *)
 (* dimension, or of shape (1, 2): a released view, one of no dimension, a  *)
 (* store into a read-only or two-dimensional view fail before the index;   *)
-(* a two-dimensional item fails after it. The outcome is the log and the   *)
-(* result or the exception.                                                *)
+(* a two-dimensional item fails after it. A grid program reads or stores  *)
+(* m[a, b] of a (2, 2) view of bytearray(b"abcd"), a's and b's __index__   *)
+(* logging their names, b returning 1 and a 0, or 5, out of bounds. The    *)
+(* outcome is the log and the result or the exception.                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -37,6 +39,7 @@ Programs == [part : {"export"}, ret : {"view", "bytes"}, release : BOOLEAN, how 
             \cup [part : {"plain"}]
             \cup [part : {"reenter"}, during : {"index", "store", "hash", "hex"}]
             \cup [part : {"index"}, view : {"plain", "released", "readonly", "zero", "grid"}, store : BOOLEAN]
+            \cup [part : {"grid"}, first : {"in", "out"}, store : BOOLEAN]
 
 VARIABLES program, outcome
 vars == <<program, outcome>>
@@ -59,8 +62,12 @@ Index(p) ==
                         [] p.store -> "b'aB'"
                         [] OTHER -> "98")
 
+\* A grid's key converts its items in order, each checked for its dimension before the next.
+Grid(p) == IF p.first = "out" THEN "a IndexError" ELSE "a b " \o (IF p.store THEN "b'aBcd'" ELSE "98")
+
 Run(p) == CASE p.part = "export" -> Export(p)
             [] p.part = "index" -> Index(p)
+            [] p.part = "grid" -> Grid(p)
             [] p.part = "resize" -> IF p.released THEN "3" ELSE "BufferError"
             [] p.part = "plain" -> "TypeError"
             [] p.part = "reenter" -> IF p.during \in {"index", "store"} THEN "ValueError" ELSE "BufferError"
@@ -81,4 +88,7 @@ ReleasedUntouched == Done /\ program.part = "reenter" => outcome \in {"ValueErro
 
 \* A view checks what it can before an index's __index__ runs.
 ChecksFirst == Done /\ program.part = "index" /\ program.view \in {"released", "zero"} => outcome \in {"ValueError", "TypeError"}
+
+\* A dimension out of bounds stops the key before its next item's __index__.
+DimensionsInOrder == Done /\ program.part = "grid" /\ program.first = "out" => outcome = "a IndexError"
 =============================================================================

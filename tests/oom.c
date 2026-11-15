@@ -435,6 +435,21 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class MI:\n"
+    "    def __init__(self, v): self.v = v\n"
+    "    def __index__(self):\n"
+    "        for _ in (): pass\n"
+    "        return self.v\n"
+    "def mi():\n"
+    "    for _ in (): pass\n"
+    "    m = memoryview(bytearray(range(6))).cast('B', (2, 3))\n"
+    "    m[MI(1), MI(2)] = 9\n"
+    "    m[0, MI(1)] += 5\n"
+    "    try: m[MI(4), MI(0)]\n"
+    "    except IndexError as e: r = str(e)\n"
+    "    return m[MI(1), 2], m.tolist(), r\n"
+    "print(mi())\n",
+
     "class FK:\n"
     "    def __hash__(self): return 1\n"
     "    def __repr__(self):\n"

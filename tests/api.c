@@ -1746,6 +1746,12 @@ int main(int argc, char **argv) {
     execute(c, "def nested():\n    return len('{!r:{}}{!s:>{}}'.format(Shown(), 4, Shown(), 5))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "nested()", "nested.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So do the Python __index__ of a multi-dimensional memoryview's tuple key. */
+    execute(c, "class Cell:\n    def __index__(self):\n        for i in range(3000): pass\n        return 1\n"
+               "def gridded():\n    m = memoryview(bytearray(6)).cast('B', (2, 3))\n    m[Cell(), Cell()] = 4\n"
+               "    return m[Cell(), 1] + m[1, Cell()]\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "gridded()", "gridded.py"), SPY_STOP_STEPS, &pauses)) == 8 && pauses > 3);
     /* And a container field's items' Python __repr__. */
     execute(c, "def contained():\n    return len('{}{!r:>5}{k}'.format([Shown()], (Shown(),), k={Shown()}))\n");
     pauses = 0;

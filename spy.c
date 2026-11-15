@@ -27583,30 +27583,115 @@ static SPYValue *list_index(SPYContext *c, SPYValue *object, SPYValue *key, cons
         return name[2] == 's' && !base->as.memory.released && !base->as.memory.readonly && base->as.memory.ndim == 1 ? index_function(c, key) : NULL;
     return base && (base->type == SPY_LIST || base->type == SPY_BYTEARRAY) ? index_function(c, key) : NULL;
 }
+static int memory_index(SPYContext *, SPYValue *, SPYValue *, int, ptrdiff_t *);
+/* Whether tuple key of view, unreleased, of as many items as dimensions,
+ * for a store writable, indexes it by an instance's Python __index__
+ * (memory_key_next), its other items ints. */
+static int memory_key_calls(SPYContext *c, SPYValue *view, SPYValue *key, int store) {
+    if (view->type != SPY_MEMORYVIEW || key->type != SPY_TUPLE || view->as.memory.released || (store && view->as.memory.readonly) ||
+        (size_t)view->as.memory.ndim != key->as.seq.len)
+        return 0;
+    int calls = 0;
+    for (size_t i = 0; i < key->as.seq.len; i++) {
+        SPYValue *item = key->as.seq.items[i];
+        if (index_function(c, item)) calls = 1;
+        else if (!is_int(item)) return 0;
+    }
+    return calls;
+}
+/* The dimensions of tuple key of view from *d on, checked in order, up
+ * to the first whose item is an instance, *d then its dimension (1);
+ * else 0 once all are, or -1 on an index error. */
+static int memory_key_next(SPYContext *c, SPYValue *view, SPYValue *key, size_t *d) {
+    ptrdiff_t at = 0;
+    for (; *d < key->as.seq.len; ++*d) {
+        if (key->as.seq.items[*d]->type == SPY_INSTANCE) return 1;
+        if (memory_index(c, view, key->as.seq.items[*d], (int)*d, &at)) return -1;
+    }
+    return 0;
+}
+/* Tuple key of view with item d, an instance, replaced by the int its
+ * __index__ returned in result, which it takes, checked for dimension d;
+ * else NULL. */
+static SPYValue *memory_key_converted(SPYContext *c, SPYValue *view, SPYValue *key, size_t d, SPYValue *result) {
+    SPYValue *item = key->as.seq.items[d], *index = index_result(c, item, result), *next = NULL;
+    ptrdiff_t at = 0;
+    if (index && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(item));
+    else if (index && !memory_index(c, view, index, (int)d, &at) && (next = spy_tuple(c, key->as.seq.len, key->as.seq.items))) {
+        spy_release(next->as.seq.items[d]); next->as.seq.items[d] = spy_retain(index);
+    }
+    spy_release(index);
+    return next;
+}
+static SPYValue *memory_key_returned(SPYContext *, Machine *, SPYValue *, SPYValue *);
+/* view[key] on m, key a tuple of memory_key_calls: the first item's
+ * Python __index__, the next ones' on its return (memory_key_returned),
+ * c->unbound; else NULL with an error. */
+static NO_INLINE SPYValue *memory_key_call(SPYContext *c, Machine *m, SPYValue *view, SPYValue *key, size_t d) {
+    if (memory_key_next(c, view, key, &d) < 0) return NULL;
+    SPYValue *count = int_value(c, (int64_t)d), *state = count ? spy_tuple(c, 3, (SPYValue *[]){view, key, count}) : NULL;
+    spy_release(count);
+    if (!state) return NULL;
+    callk(c, m, index_function(c, key->as.seq.items[d]), 1, (SPYValue *[]){spy_retain(key->as.seq.items[d])}, memory_key_returned, state);
+    return c->k_fn ? c->unbound : NULL;
+}
+/* What a view[key]'s __index__ (memory_key_call) returned in result:
+ * the next item's call, else the item at the ints. */
+static SPYValue *memory_key_returned(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    SPYValue **items = state->as.seq.items, *view = items[0];
+    size_t d = (size_t)items[2]->as.integer_data.small, next = d + 1;
+    SPYValue *key = result ? memory_key_converted(c, view, items[1], d, result) : NULL, *value = NULL;
+    int status = key ? memory_key_next(c, view, key, &next) : -1;
+    if (status > 0) memory_key_call(c, m, view, key, next);
+    else if (!status) value = get_index(c, view, key);
+    spy_release(key); spy_release(state);
+    return value;
+}
 /* The Python __index__ of key, the index of a store to or a deletion
  * from list operands[0], owned, with its env, to enter on m (CALL_INDEX)
  * with the key over the count operands the store keeps (index_returned);
  * else NULL, with an error if the call cannot bind. */
 static NO_INLINE SPYValue *index_call(SPYContext *c, Machine *m, SPYValue *key, size_t count, SPYValue *const *operands, SPYValue **env) {
     SPYValue *function = list_index(c, operands[0], key, count == 2 ? "__delitem__" : "__setitem__");
-    size_t len = m->len;
+    size_t len = m->len, d = 0;
+    /* A view's tuple key, from its first instance (memory_key_next). */
+    if (!function && count == 3 && memory_key_calls(c, operands[0], key, 1)) {
+        if (memory_key_next(c, operands[0], key, &d) < 0) return NULL;
+        function = index_function(c, key->as.seq.items[d]);
+    }
     if (!function) return NULL;
     for (size_t i = 0; i < count; i++) if (machine_push(c, m, spy_retain(operands[i]))) return NULL;
     if (machine_push(c, m, spy_retain(key))) return NULL;
     c->entering_kind = CALL_INDEX;
-    if ((*env = function_env(c, function, 1, &key, NULL, 0))) return spy_retain(function);
+    SPYValue *argument = key->type == SPY_TUPLE ? key->as.seq.items[d] : key;
+    if ((*env = function_env(c, function, 1, &argument, NULL, 0))) return spy_retain(function);
     while (m->len > len) spy_release(machine_pop(m));
     return NULL;
 }
 /* The __index__ index_call entered for store ins returned result: the
  * store or deletion runs on the operands it kept under the key, at the
- * index, which must fit a Py_ssize_t as the key's. */
+ * index, which must fit a Py_ssize_t as the key's; a view's tuple key
+ * takes the int for its first instance, the next one's call then left
+ * in c->k_fn (CALL_INDEX). */
 static NO_INLINE void index_returned(SPYContext *c, Machine *m, Instruction *ins, SPYValue *result) {
     int deletion = ins->op == BC_SET_TARGET && ins->arg;
-    SPYValue *key = machine_pop(m), *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m);
-    SPYValue *index = index_result(c, key, result);
+    SPYValue *key = machine_pop(m), *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m), *index;
+    if (key->type == SPY_TUPLE) {
+        size_t d = 0;
+        memory_key_next(c, object, key, &d);
+        index = memory_key_converted(c, object, key, d, result);
+        int status = index ? memory_key_next(c, object, index, &d) : -1;
+        if (status > 0) {
+            SPYValue *operands[] = {object, item, value}, *env = NULL;
+            SPYValue *function = index_call(c, m, index, 3, operands, &env);
+            if (function) { c->k_fn = function; c->k_env = env; c->k = NULL; c->k_kind = CALL_INDEX; }
+            release_all(5, (SPYValue *[]){index, object, item, value, key});
+            return;
+        }
+        if (status < 0) { spy_release(index); index = NULL; }
+    } else index = index_result(c, key, result);
     relocate(c, ins->op == BC_EXEC ? ins->node->a : ins->node);
-    if (index && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
+    if (index && index->type == SPY_INT && index->as.integer_data.big) errorf(c, "IndexError", "cannot fit '%s' into an index-sized integer", type_name(key));
     else if (index && deletion) delete_evaluated(c, ins->node, object, index);
     else if (index && !set_index(c, object, index, value) && (ins->op == BC_EXEC || (ins->op == BC_STORE && ins->arg))) spy_release(machine_pop(m));
     release_all(5, (SPYValue *[]){index, object, item, value, key});
@@ -27746,6 +27831,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         /* A key hashed in C whose Python __eq__ the lookup may call. */
         if (machine_lookup(contains ? y : x, contains ? x : y, contains)) return native_lookup(c, m, ins, contains ? y : x, contains ? x : y, env);
     }
+    /* A view's item at a tuple of an instance's Python __index__ (memory_key_call). */
+    if (kind == OPERATE_INDEX && memory_key_calls(c, x, y, 0)) return memory_key_call(c, m, x, y, 0);
     /* A builtin sequence's item: an instance key's Python __index__ first,
      * or a slice's part's (slice_part), the item then of its int
      * (operator_returned); a memoryview's, released or of no dimension,
@@ -28233,11 +28320,11 @@ static int store_collides(SPYContext *c, SPYValue *map, SPYValue *key) {
 /* Whether a store of key into object is a call (store_call): a Python
  * __setitem__, or the key's Python __hash__ for a dict, or a comparison
  * of the key for an exact one (native_store), or its Python __index__ for
- * a list (index_call). */
+ * a list, or an item's of a view's tuple key (index_call). */
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key) {
     return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
            (hashes_key(object, 0) && (hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key)))) ||
-           list_index(c, object, key, "__setitem__");
+           list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1);
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
  * named or literal instance whose class has a Python __setitem__
@@ -29687,6 +29774,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         f = m->frame; code = m->code->items; pc = m->pc;
                     } else if (kind == CALL_INDEX) {
                         index_returned(c, m, &code[pc - 1], result);
+                        if (c->k_fn) goto enter_k;
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;
@@ -29856,7 +29944,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
             machine_push(c, m, value); NEXT_RELEASE;
         CASE(BC_INDEX)
             b = machine_pop(m); a = machine_pop(m);
-            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE || (b->type == SPY_TUPLE && key_reaches(c, b)) ||
+            if (a->type == SPY_INSTANCE || a->type == SPY_CLASS || b->type == SPY_INSTANCE ||
+                (b->type == SPY_TUPLE && (key_reaches(c, b) || a->type == SPY_MEMORYVIEW)) ||
                 (b->type == SPY_SLICE && index_function(c, slice_part(c, b)))) { x = a; y = b; goto operator_step; }
             machine_push(c, m, get_index(c, a, b)); break;
         CASE(BC_ATTR)

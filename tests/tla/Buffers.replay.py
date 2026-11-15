@@ -93,6 +93,23 @@ def index(p, log):
     return repr(bytes(m.obj))
 
 
+class Logged:
+    def __init__(self, log, name, value): self.log, self.name, self.value = log, name, value
+    def __index__(self):
+        for _ in (): pass
+        self.log.append(self.name)
+        return self.value
+
+
+def grid(p, log):
+    m = memoryview(bytearray(b"abcd")).cast("B", (2, 2))
+    key = (Logged(log, "a", 0 if p["first"] == "in" else 5), Logged(log, "b", 1))
+    if not p["store"]:
+        return repr(m[key])
+    m[key] = 66
+    return repr(bytes(m.obj))
+
+
 def outcome(p):
     log = []
     try:
@@ -104,9 +121,11 @@ def outcome(p):
             result = reenter(p)
         elif p["part"] == "index":
             result = index(p, log)
+        elif p["part"] == "grid":
+            result = grid(p, log)
         else:
             result = repr(memoryview(object()))
-    except (TypeError, BufferError, ValueError, NotImplementedError) as error:
+    except (TypeError, BufferError, ValueError, NotImplementedError, IndexError) as error:
         result = type(error).__name__
     return " ".join(log + [result])
 
