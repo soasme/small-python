@@ -14,6 +14,8 @@ def iterator(kind, called):
             return 1
         called.append("next")
         raise StopIteration(8)
+    if kind == "builtin":
+        return iter([1])
     if kind == "map":
         def function(x):
             for _ in ():

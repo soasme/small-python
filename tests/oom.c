@@ -863,6 +863,24 @@ static const char *const programs[] = {
     "    return out\n"
     "print(yo())\n",
 
+    "def yt(source):\n"
+    "    try:\n"
+    "        yield from source\n"
+    "    except KeyError as e:\n"
+    "        yield [e.args]\n"
+    "    finally:\n"
+    "        yield 'f'\n"
+    "def yu():\n"
+    "    out = []\n"
+    "    for source in ([1, 2], map(str, [3])):\n"
+    "        g = yt(source); next(g)\n"
+    "        out += [g.throw(KeyError('k')), next(g)]\n"
+    "    g = yt(iter((4, 5))); next(g)\n"
+    "    try: g.close()\n"
+    "    except RuntimeError as e: out.append(str(e))\n"
+    "    return out\n"
+    "print(yu())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

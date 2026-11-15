@@ -23633,10 +23633,12 @@ static int throws_in(SPYContext *c, SPYValue *g, SPYValue *exception) {
     /* An operation takes a close or throw in C (awaitable_method). */
     if (m->awaiting != AWAIT_DELEGATE || m->operation) return m->awaiting == AWAIT_YIELD;
     /* Or at a yield from of an instance with a Python close, or throw of
-     * an exception instance, which it takes as thrown (delegate_next); a
-     * throw of a class reaches it in C as given. */
-    SPYValue *function = exception && exception->type != SPY_INSTANCE ? NULL :
-        method_function(c, m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
+     * an exception instance, which it takes as thrown (delegate_next), or
+     * of a builtin iterator, which has neither; a throw of a class
+     * reaches it in C as given. */
+    if (exception && exception->type != SPY_INSTANCE) return 0;
+    if (m->delegate->type == SPY_ITERATOR) return 1;
+    SPYValue *function = method_function(c, m->delegate, subclass(k, c->exceptions[X_GENERATOR_EXIT]) ? "close" : "throw");
     return function && machine_function(c, function);
 }
 /* The Python __next__ on the machine of instance v's class, borrowed;

@@ -28,13 +28,14 @@
 (* close returns None), raises ValueError when called, is missing, or is   *)
 (* broken: looking it up raises ZeroDivisionError. Or it is a map whose    *)
 (* Python function acts as that __next__, and has none of the three        *)
-(* methods. The outcome is the                                             *)
+(* methods, or a builtin list iterator of the one item 1, which ends with  *)
+(* StopIteration(None) and has no methods. The outcome is the              *)
 (* step's result or exception, the methods it called, and whether g        *)
 (* finished.                                                               *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
-Kinds == {"defined", "raises", "missing", "broken", "map"}
+Kinds == {"defined", "raises", "missing", "broken", "map", "builtin"}
 Programs == [kind : Kinds, step : {"close", "throw", "send", "next", "loop", "nested", "consume"}, first : BOOLEAN]
 
 VARIABLES program, outcome
@@ -46,8 +47,10 @@ Method(step) == CASE step = "close" -> "close" [] step \in {"throw", "nested"} -
 
 Run(p) ==
     LET m == Method(p.step)
-        called == IF p.kind \in {"defined", "raises"} \/ m = "next" THEN m ELSE ""
-    IN CASE p.step = "next" -> [result |-> "StopIteration 8", called |-> called, finished |-> TRUE]
+        called == IF p.kind = "builtin" THEN "" ELSE IF p.kind \in {"defined", "raises"} \/ m = "next" THEN m ELSE ""
+    IN CASE p.kind = "builtin" /\ p.step = "next" -> [result |-> "StopIteration None", called |-> called, finished |-> TRUE]
+         [] p.kind = "builtin" /\ p.step = "loop" -> [result |-> "[('ret', None)]", called |-> called, finished |-> TRUE]
+         [] p.step = "next" -> [result |-> "StopIteration 8", called |-> called, finished |-> TRUE]
          [] p.step = "loop" -> [result |-> "[('ret', 8)]", called |-> called, finished |-> TRUE]
          [] p.step = "consume" -> [result |-> "[]", called |-> called, finished |-> TRUE]
          [] p.kind = "defined" /\ p.step = "close" -> [result |-> "None", called |-> called, finished |-> TRUE]

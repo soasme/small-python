@@ -171,6 +171,8 @@ Unreleased (0.10.0):
 - a loop or consumer resumes a generator in a yield from of a builtin iterator, or of a map of a Python
   function, without nesting on the C stack; one in a yield from of an instance after a yield statement
   no longer crashes
+- throw() of an exception, and close(), raise in a generator in a yield from of a builtin iterator
+  without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a
