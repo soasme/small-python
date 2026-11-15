@@ -354,7 +354,8 @@ These run as machines on the heap, in one native activation of
 - the key functions of `sorted`, `list.sort`, `min` and `max`, also
   bound methods, callable instances' `__call__` and classes' `__init__`,
   the Python method by which a builtin key such as `len` or `repr`
-  converts an instance among a list's or tuple's items, and the items those with keywords take from generators and the other
+  converts an instance among a list's or tuple's items, or those a
+  list or tuple iterator, a set, a frozenset, a dict or its keys view gives, and the items those with keywords take from generators and the other
   sources above,
   the Python `__lt__` comparisons of `sorted` and `list.sort`, `sorted`'s
   of a set, a dict, its keys or a list iterator too, also the

@@ -716,6 +716,21 @@ static const char *const programs[] = {
     "    return r, next(it).n, [x.n for x in filter(str, [FB(0), FB(3)])]\n"
     "print(fb())\n",
 
+    "class IK:\n"
+    "    def __init__(self, n): self.n = n\n"
+    "    def __len__(self):\n"
+    "        if self.n < 0: raise KeyError('i')\n"
+    "        return self.n\n"
+    "    def __hash__(self): return self.n\n"
+    "def ik():\n"
+    "    xs = [IK(2), IK(0), IK(1)]\n"
+    "    it = iter(xs)\n"
+    "    next(it)\n"
+    "    try: max(iter([IK(1), IK(-1)]), key=len)\n"
+    "    except KeyError: pass\n"
+    "    return [x.n for x in sorted(iter(xs), key=len)], [x.n for x in sorted(it, key=len)], min({IK(4): 0, IK(3): 1}, key=len).n\n"
+    "print(ik())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

@@ -160,6 +160,7 @@ Unreleased (0.10.0):
 - sorted(), list.sort(), min() and max() by a builtin key such as len call an item's Python method without nesting
   on the C stack
 - filter() of a builtin function such as len calls an item's Python method without nesting on the C stack
+- so do sorted(), min() and max() by a builtin key over a list or tuple iterator, a set or a dict
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a

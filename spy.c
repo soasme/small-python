@@ -24493,12 +24493,23 @@ static SPYValue *key_comparison(SPYContext *c, Consumer *s, SPYValue *key) {
     return function && machine_function(c, function) ? function : NULL;
 }
 /* Whether key, a builtin function or class, converts one of the n values
- * items, or of the items of a list or tuple there alone, an instance, by a
- * Python method (key_enter). */
+ * items, or of the items there alone gives as keys_sort reads them, an
+ * instance, by a Python method (key_enter). */
 static int key_converts(SPYContext *c, SPYValue *key, size_t n, SPYValue *const *items) {
     if (!((key->type == SPY_NATIVE && key->as.native.call == builtin) || (key->type == SPY_CLASS && builtin_class(c, key)))) return 0;
-    if (n == 1 && (items[0]->type == SPY_LIST || items[0]->type == SPY_TUPLE)) { n = items[0]->as.seq.len; items = items[0]->as.seq.items; }
-    for (size_t i = 0; i < n; i++) if (items[i]->type == SPY_INSTANCE) return 1;
+    SPYValue *source = items[0];
+    size_t at = 0;
+    if (n == 1 && source->type == SPY_ITERATOR && source->as.iterator.kind == I_SEQUENCE && !source->as.iterator.done) {
+        at = source->as.iterator.index; source = source->as.iterator.source;
+    }
+    if (n == 1 && source->type == SPY_DICT_KEYS) source = source->as.bound.self;
+    if (n == 1 && (source->type == SPY_LIST || source->type == SPY_TUPLE)) { n = source->as.seq.len; items = source->as.seq.items; }
+    else if (n == 1 && (source->type == SPY_SET || source->type == SPY_FROZENSET || source->type == SPY_DICT || source->type == SPY_FROZENDICT)) {
+        Entry *keys = map_items(source);
+        for (size_t i = at; i < source->as.map.len; i++) if (keys[i].key->type == SPY_INSTANCE) return 1;
+        return 0;
+    } else at = 0;
+    for (size_t i = at; i < n; i++) if (items[i]->type == SPY_INSTANCE) return 1;
     return 0;
 }
 /* The function on the machine a call of key, a key function, runs: its

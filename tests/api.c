@@ -1858,6 +1858,10 @@ int main(int argc, char **argv) {
     execute(c, "def filtered():\n    return len(list(filter(len, [Sized(), '', Sized()]))) + sum(1 for x in filter(len, [Sized()]))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "filtered()", "filtered.py"), SPY_STOP_STEPS, &pauses)) == 3 && pauses > 2);
+    /* So do sorted() and max() by a builtin key over an iterator. */
+    execute(c, "def iterated():\n    return len(sorted(iter([Sized(), [1]]), key=len)) + len(max(iter((Sized(),)), key=len))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "iterated()", "iterated.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

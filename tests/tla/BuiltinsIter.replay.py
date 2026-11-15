@@ -134,6 +134,11 @@ SOURCES = {
                          "        log.append(s.n)\n        return s.n\n    def __repr__(s):\n        for _ in (): pass\n"
                          "        return 'k%d' % s.n\nlog = []\nks = [K(3), K(1), K(2)]\nks.sort(key=len)\n"
                          "result = (sorted([K(2), 'a', K(0)], key=len), max(ks, key=repr), min(K(4), K(5), key=len), ks, log)",
+    "builtin_key_iterators": "class K:\n    def __init__(s, n): s.n = n\n    def __len__(s):\n        for _ in (): pass\n"
+                             "        log.append(s.n)\n        return s.n\n    def __repr__(s): return 'k%d' % s.n\n"
+                             "    def __hash__(s): return s.n\nlog = []\nks = [K(3), K(1), K(2)]\nit = iter(ks)\n"
+                             "result = (sorted(iter(ks), key=len), max(iter(tuple(ks)), key=len), (next(it), sorted(it, key=len))[1], "
+                             "sorted({K(5): 0, K(4): 1}, key=len), log)",
     "key_sources": "def g(n):\n    for i in range(n):\n        log.append(i)\n        yield i\nlog = []\n"
                    "def k(v):\n    log.append('k%d' % v)\n    return -v\n"
                    "result = (sorted(g(2), key=k), max(g(2), key=k), min(g(0), key=k, default='d'), log)",
