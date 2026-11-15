@@ -10,17 +10,21 @@
 (* is evaluated only after its pattern succeeds; a value pattern looks up  *)
 (* its dotted name each time it is tried and compares the subject with ==; *)
 (* a parenthesized pattern is the pattern itself; and an irrefutable case  *)
-(* block (a capture or wildcard without a guard) may only be the last.     *)
+(* block (a capture or wildcard without a guard) may only be the last. A   *)
+(* value's Python __eq__ runs once each time its pattern is tried, in      *)
+(* order, and an exception it raises leaves the match statement at once.  *)
 (*                                                                         *)
 (* A program matches a subject t(x), x being 1, 2, or 3, against up to two *)
 (* case blocks, each with the pattern 1, the capture n, the value pattern  *)
-(* C.two (2, logged when looked up), or the group (1 | 2), and no guard or *)
+(* C.two (2, logged when looked up), the group (1 | 2), Q.eq (a value     *)
+(* whose __eq__ logs "eq" and is true for 3) or Q.bad (whose __eq__ logs   *)
+(* "bad" and raises KeyError), and no guard or                             *)
 (* a guard that is logged and true or false. A case's suite logs it. The   *)
 (* outcome is n (None unless bound) or the exception, and the log.         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, TLC
 
-Patterns == {"one", "capture", "value", "group"}
+Patterns == {"one", "capture", "value", "group", "eq", "bad"}
 Guards == {"none", "yes", "no"}
 Blocks == [pattern : Patterns, guard : Guards]
 Programs == [subject : 1..3, cases : UNION {[1..n -> Blocks] : n \in 1..2}]
@@ -36,16 +40,21 @@ Matches(pattern, x) == CASE pattern = "one" -> x = 1
                           [] pattern = "capture" -> TRUE
                           [] pattern = "value" -> x = 2
                           [] pattern = "group" -> x \in {1, 2}
+                          [] pattern = "eq" -> x = 3
+                          [] pattern = "bad" -> FALSE
 
 \* Case blocks k.. with n bound so far: the final n and the log.
 RECURSIVE Try(_, _, _)
 Try(p, k, n) ==
     IF k > Len(p.cases) THEN <<n, <<>>>>
     ELSE LET b == p.cases[k]  x == p.subject
-             lookup == IF b.pattern = "value" THEN <<"C.two">> ELSE <<>>
+             lookup == CASE b.pattern = "value" -> <<"C.two">>
+                         [] b.pattern \in {"eq", "bad"} -> <<b.pattern>>
+                         [] OTHER -> <<>>
              bound == IF b.pattern = "capture" THEN R(x) ELSE n
              guard == IF b.guard = "none" THEN <<>> ELSE <<"guard " \o R(k)>>
-         IN  IF ~Matches(b.pattern, x) THEN LET rest == Try(p, k + 1, n) IN <<rest[1], lookup \o rest[2]>>
+         IN  IF b.pattern = "bad" THEN <<"KeyError", lookup>>
+             ELSE IF ~Matches(b.pattern, x) THEN LET rest == Try(p, k + 1, n) IN <<rest[1], lookup \o rest[2]>>
              ELSE IF b.guard = "no" THEN LET rest == Try(p, k + 1, bound) IN <<rest[1], lookup \o guard \o rest[2]>>
              ELSE <<bound, lookup \o guard \o <<"case " \o R(k)>>>>
 
@@ -67,4 +76,6 @@ Ran == Done /\ Len(outcome[2]) > 0
 \* The subject is evaluated once, first, and at most one suite runs.
 SubjectOnce == Ran => outcome[2][1] = "subject" /\ \A i \in 2..Len(outcome[2]) : outcome[2][i] # "subject"
 OneSuite == Ran => Len(SelectSeq(outcome[2], LAMBDA e : e \in {"case 1", "case 2"})) <= 1
+\* An __eq__ that raises is the last thing the statement does.
+RaiseEnds == Done /\ outcome[1] = "KeyError" => outcome[2][Len(outcome[2])] = "bad"
 =============================================================================

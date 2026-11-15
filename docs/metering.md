@@ -499,6 +499,10 @@ These run as machines on the heap, in one native activation of
   `!s`, `!r` or `!a` conversion, before its spec, nested or not, and its
   items' `__repr__` for a list, tuple, dict, set or frozenset field,
   also before a nested spec;
+- the Python methods a `match` statement's patterns call, such as a
+  value's `__eq__`, a sequence's `__len__`, a mapping's `get`, a class's
+  `__instancecheck__` and an attribute's getter: the patterns are tried
+  again after each call, each earlier call giving its logged result;
 - list, set and dictionary comprehensions;
 - class bodies that hold a call or a loop, also of a generic class, when
   the builtin `__build_class__` makes the class.

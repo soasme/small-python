@@ -1924,6 +1924,13 @@ int main(int argc, char **argv) {
                "def classthrown():\n    g = catching()\n    next(g)\n    return g.throw(KeyError)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "classthrown()", "classthrown.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 2);
+    /* So do the Python __eq__ and __len__ a match statement's patterns call. */
+    execute(c, "class Equal:\n    def __eq__(self, o):\n        for i in range(3000): pass\n        return o == 1\n"
+               "class Sized(list):\n    def __len__(self):\n        for i in range(3000): pass\n        return 2\n"
+               "class Values:\n    one = Equal()\n"
+               "def matched():\n    match Sized([4, 6]):\n        case Values.one: return 0\n        case [a, b]: return a + b\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "matched()", "matched.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

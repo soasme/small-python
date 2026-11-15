@@ -1,10 +1,10 @@
 # Replays MatchGuards.tla: each case matches t(x) against the spec's case
 # blocks, logging the subject, value pattern lookups, guards, and suites, and
-# compares n and the log with the model's.
+# compares n (or the exception) and the log with the model's.
 FIELDS = ("program", "outcome")
 CASES = ""  # filled in by tests/tla_check.py, with walks() and states()
 
-PATTERNS = {"one": "1", "capture": "n", "value": "C.two", "group": "(1 | 2)"}
+PATTERNS = {"one": "1", "capture": "n", "value": "C.two", "group": "(1 | 2)", "eq": "Q.eq", "bad": "Q.bad"}
 PRE = """log = []
 def t(v):
     log.append('subject')
@@ -18,6 +18,19 @@ class Values:
         log.append('C.two')
         return 2
 C = Values()
+class Equal:
+    def __eq__(self, o):
+        for _ in (): pass
+        log.append('eq')
+        return o == 3
+class Bad:
+    def __eq__(self, o):
+        for _ in (): pass
+        log.append('bad')
+        raise KeyError(o)
+class Q:
+    eq = Equal()
+    bad = Bad()
 n = None
 """
 
@@ -32,6 +45,8 @@ def outcome(p):
         exec(compile(PRE + "\n".join(lines), "<match>", "exec"), namespace)
     except SyntaxError as error:
         return ("SyntaxError: %s" % error.msg, ())
+    except KeyError:
+        return ("KeyError", tuple(namespace["log"]))
     return (repr(namespace["n"]) if namespace["n"] is None else str(namespace["n"]), tuple(namespace["log"]))
 
 

@@ -476,6 +476,8 @@ struct SPYContext {
     SPYValue *sorter;
     /* Whether a call's return began a consumer that the machine goes on with (dir_listing). */
     int consuming;
+    /* The replay of the pattern a step matches, while it runs (pattern_step). */
+    struct Replay *replay;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -14512,7 +14514,7 @@ enum { CLOSING = 1, THROWING };
  * statement's __enter__, an operator's special method, a test's
  * __bool__, a loop's __iter__, a store's __setitem__, a key's
  * __hash__ (hash_call) or a list index's __index__ (index_call). */
-enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
+enum { CALL_MACHINE, CALL_OUTERMOST, CALL_INIT, CALL_NEXT, CALL_KEY, CALL_ITEM, CALL_ENTER, CALL_OPERATOR, CALL_CHECKED, CALL_ITER, CALL_STORE, CALL_HASH, CALL_INDEX, CALL_FINALIZE, CALL_PATTERN, CALL_DELEGATE, CALL_THROWN, CALL_CLOSED, CALL_K, CALL_EXEC, CALL_EVAL, CALL_IMPORT };
 /* A function running on the machine without recursing in C: its stacks,
  * its frame, and the function, which it retains. */
 struct Call { Machine m; Machine *caller; SPYValue *fn, *caller_env; /* caller_env: the eval_env to restore. */
@@ -17477,7 +17479,9 @@ static ALWAYS_INLINE SPYValue *run_function(SPYContext *c, SPYValue *fn, SPYValu
     release_locals(env);
     return result;
 }
+static SPYValue *replayed_call(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
 static HOT SPYValue *call_function(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    if (UNLIKELY(c->replay != NULL)) return replayed_call(c, fn, argc, argv, keywords);
     SPYValue *env = function_env(c, fn, argc, argv, keywords, 0);
     return env ? run_function(c, fn, env) : NULL;
 }
@@ -22797,6 +22801,8 @@ static Machine *percent_returned(SPYContext *c, Machine *m, SPYValue *text) {
     if (value) machine_push(c, m, value);
     return c->k_fn ? k_enter(c, m) : m;
 }
+/* The replay of a pattern's Python calls (pattern_step). */
+typedef struct Replay { SPYValue *log, *missing, *fn, *args; size_t at; } Replay;
 /* Pattern matching runtime. Bindings collect in a dictionary and are stored
  * only after the whole pattern succeeds, before any guard runs. */
 static void bindings_truncate(SPYValue *bindings, size_t len) {
@@ -22911,7 +22917,7 @@ done:
 }
 static int match_mapping(SPYContext *c, Frame *f, Node *n, SPYValue *subject, SPYValue *bindings) {
     if (!match_mapping_subject(c, subject)) return 0;
-    SPYValue *keys = value_new(c, SPY_LIST), *missing = value_new(c, SPY_LIST), *get = NULL;
+    SPYValue *keys = value_new(c, SPY_LIST), *missing = c->replay ? spy_retain(c->replay->missing) : value_new(c, SPY_LIST), *get = NULL;
     int result = -1;
     if (!keys || !missing) goto done;
     if (n->args) {
@@ -23058,10 +23064,106 @@ static int match_case(SPYContext *c, Frame *f, Node *item, SPYValue *subject) {
     SPYValue *bindings = value_new(c, SPY_DICT);
     if (!bindings) return -1;
     int result = match_pattern(c, f, item->a, subject, bindings);
-    for (size_t i = 0; result > 0 && i < bindings->as.map.len; i++)
+    for (size_t i = 0; result > 0 && (!c->replay || !c->replay->fn) && i < bindings->as.map.len; i++)
         if (name_set(c, f->env, map_items(bindings)[i].key->as.string.data, map_items(bindings)[i].value)) result = -1;
     spy_release(bindings);
     return result;
+}
+/* A pattern's Python calls run on the machine by replay: a pass matches
+ * it in C until a call to a Python function (replayed_call), which the
+ * machine makes; its result or exception goes in the log, and the pass
+ * runs again, each call it reaches taking the logged result in turn,
+ * until one completes. A pass is deterministic but for those calls; one
+ * reaching a call not logged with the same function and arguments, or
+ * running a machine in C, goes on in C. The log holds the missing
+ * sentinel of mapping patterns first, then [function, arguments, result,
+ * exception, error state] for each call. */
+static NO_INLINE int replay_log(SPYContext *c, Replay *r, SPYValue *fn, SPYValue *args, SPYValue *result);
+static NO_INLINE SPYValue *replayed_call(SPYContext *c, SPYValue *fn, size_t argc, SPYValue *const *argv, SPYValue *keywords) {
+    Replay *r = c->replay;
+    /* A pass that left a call goes no further. */
+    if (r->fn) return spy_error(c, "RuntimeError", "pattern call pending");
+    if (!keywords || !keywords->as.map.len) {
+        if (r->at < r->log->as.seq.len) {
+            SPYValue **e = r->log->as.seq.items[r->at++]->as.seq.items;
+            int same = e[0] == fn && e[1]->as.seq.len == argc;
+            for (size_t i = 0; same && i < argc; i++) same = e[1]->as.seq.items[i] == argv[i];
+            if (same && e[3]->type == SPY_NONE) return spy_retain(e[2]);
+            if (same) {
+                ErrorState state;
+                memcpy(&state, e[4]->as.string.data, sizeof(state));
+                state.value = spy_retain(e[3]);
+                restore_error(c, &state);
+                return NULL;
+            }
+        } else if (!machine_function(c, fn)) {
+            /* A function whose body is not on the machine runs here, logged. */
+            SPYValue *args = spy_tuple(c, argc, argv);
+            if (!args) return NULL;
+            c->replay = NULL;
+            SPYValue *result = call_function(c, fn, argc, argv, keywords);
+            c->replay = r;
+            if (replay_log(c, r, fn, args, result)) { spy_release(result); result = NULL; }
+            spy_release(args);
+            return result;
+        } else if ((r->args = spy_tuple(c, argc, argv))) {
+            r->fn = spy_retain(fn);
+            return spy_error(c, "RuntimeError", "pattern call pending");
+        } else return NULL;
+    }
+    c->replay = NULL;
+    return call_function(c, fn, argc, argv, keywords);
+}
+/* Log a call of fn with args that gave result, or NULL with the pending
+ * exception, which stays pending; nonzero when logging fails, an error
+ * pending. */
+static NO_INLINE int replay_log(SPYContext *c, Replay *r, SPYValue *fn, SPYValue *args, SPYValue *result) {
+    SPYValue *parts[] = {fn, args, result ? result : c->none, c->none, c->none}, *entry = spy_tuple(c, 5, parts);
+    int failed = !entry || sequence_append(c, r->log, entry);
+    spy_release(entry);
+    if (failed || result) return failed;
+    ErrorState state = take_error(c);
+    SPYValue **e = r->log->as.seq.items[r->log->as.seq.len - 1]->as.seq.items, *exception = state.value ? state.value : c->none;
+    e[3] = spy_retain(exception); spy_release(c->none);
+    state.value = NULL;
+    if (!(e[4] = spy_bytes(c, &state, sizeof(state)))) e[4] = spy_retain(c->none);
+    state.value = exception == c->none ? NULL : spy_retain(exception);
+    restore_error(c, &state);
+    return 0;
+}
+/* A pass of the case pattern n of BC_PATTERN, its subject on m's stack
+ * under the log when replaying: 1 or 0 whether it matched, its captures
+ * stored, or -1 on an error, the log popped; or 2, a call left for the
+ * machine (callk, CALL_PATTERN), the log atop m's stack. */
+static NO_INLINE int pattern_step(SPYContext *c, Machine *m, Frame *f, Node *n, int replaying) {
+    SPYValue *log = replaying ? m->stack[m->len - 1] : value_new(c, SPY_LIST), *subject = m->stack[m->len - 1 - replaying];
+    if (!log || (!replaying && (sequence_append(c, log, c->none) || machine_push(c, m, log)))) { if (!replaying) spy_release(log); return -1; }
+    Replay r = {.log = log, .missing = log->as.seq.items[0], .at = 1}, *outer = c->replay;
+    c->replay = &r;
+    int matched = match_case(c, f, n, subject);
+    c->replay = outer;
+    if (r.fn) {
+        spy_clear_error(c);
+        SPYValue *env = !replay_log(c, &r, r.fn, r.args, c->none) ? function_env(c, r.fn, r.args->as.seq.len, r.args->as.seq.items, NULL, 0) : NULL;
+        if (env) { c->k_fn = spy_retain(r.fn); c->k_env = env; c->k = NULL; c->k_kind = CALL_PATTERN; matched = 2; }
+        else matched = -1;
+    }
+    if (matched != 2) spy_release(machine_pop(m));
+    spy_release(r.fn); spy_release(r.args);
+    return matched;
+}
+/* The call pattern_step left for the machine returned result, or NULL
+ * with its exception: logged for the next pass. */
+static NO_INLINE void pattern_returned(SPYContext *c, Machine *m, SPYValue *result) {
+    SPYValue *log = m->stack[m->len - 1], **e = log->as.seq.items[log->as.seq.len - 1]->as.seq.items;
+    if (result) { spy_release(e[2]); e[2] = result; return; }
+    ErrorState state = take_error(c);
+    SPYValue *exception = state.value ? state.value : spy_retain(c->none);
+    state.value = NULL;
+    SPYValue *saved = spy_bytes(c, &state, sizeof(state));
+    if (!saved) { spy_release(exception); return; }
+    spy_release(e[3]); e[3] = exception;
+    spy_release(e[4]); e[4] = saved;
 }
 static NO_INLINE Result execute_match(SPYContext *c, Frame *f, Node *n) {
     SPYValue *subject = eval(c, f, n->a);
@@ -30589,6 +30691,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                     } else if (kind == CALL_FINALIZE) {
                         finalized(c, m, result);
                         pc--;
+                    } else if (kind == CALL_PATTERN) {
+                        /* The pattern's next pass. */
+                        pattern_returned(c, m, result);
+                        int matched = pattern_step(c, m, &f, code[pc - 1].node, 1);
+                        if (matched == 2) goto enter_k;
+                        if (!matched) pc = code[pc - 1].target;
                     } else if (kind >= CALL_DELEGATE && kind <= CALL_CLOSED) {
                         /* An iterator's method gives a yield from's item. */
                         if ((result = delegate_returned(c, m, kind, result))) YIELD(result);
@@ -30973,9 +31081,12 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (c->settings[SET_TRACE] && c->py_depth) c->frames[c->py_depth - 1].traced = 0;
             }
             pc = ins->target; NEXT;
-        CASE(BC_PATTERN)
-            if (!match_case(c, &f, n, m->stack[m->len - 1])) pc = ins->target;
+        CASE(BC_PATTERN) {
+            int matched = pattern_step(c, m, &f, n, 0);
+            if (matched == 2) goto enter_k;
+            if (!matched) pc = ins->target;
             break;
+        }
         CASE(BC_TEST) {
             /* BC_OPERATE then BC_FALSE, a comparison of numbers making no bool. */
             x = (n->flags & F_OPERATOR) && quiet(c, &f) ? operand(c, &f, n->a) : NULL;
@@ -31496,6 +31607,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
  * outermost one, a pausable call's, may pause. */
 static ALWAYS_INLINE Result run_machine(SPYContext *c, Machine *m, SPYValue *sent, SPYValue *thrown,
                                         size_t argc, SPYValue *const *argv) {
+    /* A pattern that runs a machine in C goes on in C (replayed_call). */
+    if (UNLIKELY(c->replay != NULL)) c->replay = NULL;
     c->machines++;
     Result r = run_steps(c, m, sent, thrown, argc, argv);
     c->machines--;
