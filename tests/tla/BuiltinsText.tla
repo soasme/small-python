@@ -73,7 +73,7 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "format_hook", "format_fields", "format_map_fields", "format_object_spec", "format_object_empty", "format_bad_return",
           "format_spec_type", "print_sep_end", "print_starred", "print_none_sep", "print_no_args", "print_flush",
           "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_unknown_kw",
-          "print_str_calls", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
+          "print_str_calls", "print_write_each", "print_str_sep", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
           "repr_own_slot", "repr_nested_items", "repr_map_items", "repr_subclass_own", "repr_metaclass",
           "repr_items_own"}
@@ -128,6 +128,10 @@ Case(c) ==
       [] c = "print_file_nowrite" -> "AttributeError: 'int' object has no attribute 'write'"
       [] c = "print_unknown_kw" -> "TypeError: print() got an unexpected keyword argument 'x'"
       [] c = "print_str_calls" -> "['S!', '\\n']"
+      \* Each write looks up the file's write before converting its value.
+      [] c = "print_write_each" -> "['get', 'str', 'get', 'get', 'get', 'get', 'str', 'get']"
+      \* A str subclass sep or end is written as its str().
+      [] c = "print_str_sep" -> "['1', '+', '2', '+']"
       [] c = "str_bytes_warns_not" -> "\"b'ab'\""
       [] c = "repr_str_quotes" -> "('\"it\\'s\"', '\\'say \"hi\"\\'', '\\'both \\\\\\' \"\\'')"
       [] c = "repr_nonprintable" -> "(\"'\\\\x00\\\\x1f\\\\x7f\\\\x80\\\\xa0\\\\xad'\", \"'\\\\u2028'\", \"'\\\\ud800'\")"

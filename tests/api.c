@@ -1767,6 +1767,13 @@ int main(int argc, char **argv) {
                "def paired():\n    d = dict(Paired()); d.update(Paired())\n    return sum(d) + len(d)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "paired()", "paired.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
+    /* So do print()'s calls of a file's Python write and flush. */
+    execute(c, "class Written:\n    def __init__(self): self.n = 0\n"
+               "    def write(self, text):\n        for i in range(3000): pass\n        self.n += len(text)\n"
+               "    def flush(self):\n        for i in range(3000): pass\n        self.n += 1\n"
+               "def written():\n    w = Written(); print('ab', 'c', file=w, flush=True)\n    return w.n\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "written()", "written.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
     /* So does the Python __iter__ a comprehension's first iterable calls. */
     execute(c, "class Iterated:\n    def __iter__(self):\n        for i in range(3000): pass\n        return iter([1, 2])\n"
                "def comprehended():\n    return sum([x for x in Iterated()]) + sum({x for x in Iterated()}) + sum(x for x in Iterated())\n");

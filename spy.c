@@ -3940,11 +3940,13 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
     case SPY_CLASS: {
         if (v->as.map.meta) {
             const char *name = repr ? "__repr__" : "__str__";
+            int pending = b->ctx->error_type[0] != 0;
             SPYValue *method = special_method(b->ctx, v, name);
             if (!method && !repr && !b->ctx->error_type[0]) method = special_method(b->ctx, v, name = "__repr__");
             if (!method && !strcmp(name, "__repr__") && error_is(b->ctx, "AttributeError")) {
                 spy_clear_error(b->ctx); return bare_repr(b, v);
             }
+            if (!method && !pending && b->ctx->error_type[0]) return -1;
             if (method) {
                 SPYValue *text = spy_call(b->ctx, method, 0, NULL);
                 spy_release(method);
@@ -3986,11 +3988,14 @@ static int format_object(Buffer *b, SPYValue *v, int repr) {
         if (base) return format_value(b, base, repr);
         if (deeper(b->ctx, repr ? " while getting the repr of an object" : " while getting the str of an object")) return -1;
         const char *name = repr ? "__repr__" : "__str__";
+        int pending = b->ctx->error_type[0] != 0;
         SPYValue *method = special_method(b->ctx, v, name);
         if (!method && !repr && !b->ctx->error_type[0]) method = special_method(b->ctx, v, name = "__repr__");
         if (!method && !strcmp(name, "__repr__") && error_is(b->ctx, "AttributeError")) {
             spy_clear_error(b->ctx); b->ctx->depth--; return bare_repr(b, v);
         }
+        /* A lookup's own error (a pending one aside) fails the text. */
+        if (!method && !pending && b->ctx->error_type[0]) { b->ctx->depth--; return -1; }
         if (method) {
             SPYValue *text = spy_call(b->ctx, method, 0, NULL);
             spy_release(method);
@@ -17128,7 +17133,8 @@ static NO_INLINE SPYValue *keyword_env(SPYContext *c, SPYValue *fn, size_t argc,
      * values open_locals sets, serve. A
      * replace()d code's parameters bind under its names and then take the
      * body's: the body's locals are declared after them. */
-    int direct = plain && !scope_order(c, scope);
+    if (plain && scope_order(c, scope)) { if (take) release_all(argc, argv); return NULL; }
+    int direct = plain;
     size_t fit = argc <= scope->positionals ? argc : scope->positionals;
     direct = direct && (argc == fit || (scope->stars & 1));
     SPYValue *env = direct ? kept_env(c, scope) : NULL;
@@ -21657,7 +21663,8 @@ static NO_INLINE Result execute_try(SPYContext *c, Frame *f, Node *n) {
     return r;
 }
 static int print_text(SPYContext *, SPYValue *, SPYValue *);
-static int print_instances(SPYContext *, SPYValue *, size_t, SPYValue *const *);
+static int print_instances(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue *);
+static SPYValue *entries_file(const Entry *, size_t);
 static int print_call_step(SPYContext *, Machine *, size_t, size_t, SPYValue *, SPYValue **, SPYValue **);
 static ALWAYS_INLINE int repr_job(SPYContext *c, SPYValue *callee, SPYValue *v) {
     return repr_container(v) && repr_items(c, callee, v);
@@ -25637,7 +25644,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     }
     SPYValue *found[2], *convert = argc && (argv[0]->type == SPY_INSTANCE || sequence_iterator(argv[0]) || metaclassed(argv[0])) ?
                                    conversion_method(c, callee, argc, argv, found) : NULL;
-    if (!convert && calls && print_instances(c, callee, argc, argv)) {
+    if (!convert && calls && print_instances(c, callee, argc, argv, NULL)) {
         /* print writes its arguments, an instance's Python __str__ a call
          * (CALL_CHECKED) among them (print_from). */
         int status = print_call_step(c, m, argc, argc, NULL, &convert, env);
@@ -25928,7 +25935,7 @@ static NO_INLINE SPYValue *stack_keyword_call(SPYContext *c, Machine *m, Node *n
         *env = callee_env;
         return callee;
     }
-    if (calls && print_instances(c, callee, positional, argv)) {
+    if (calls && print_instances(c, callee, positional, argv, entries_file(kw, kwc))) {
         /* As a plain call's step (stack_call), with its keywords. */
         SPYValue *keywords = entries_dict(c, kw, kwc);
         int status = keywords ? print_call_step(c, m, argc, positional, keywords, &function, env) : -1;
@@ -26039,7 +26046,8 @@ static NO_INLINE SPYValue *keyword_call(SPYContext *c, Machine *m, Node *n, int 
         /* As a stack call's consumer, a starred call's (stack_call). */
         consume(c, m, id, callee, -1, NULL, args->as.seq.len ? spy_retain(args->as.seq.items[0]) : NULL,
                 args->as.seq.len > 1 ? spy_retain(args->as.seq.items[1]) : NULL);
-    else if (calls && print_instances(c, callee, args->as.seq.len, args->as.seq.items) && string_keys(c, keywords)) {
+    else if (calls && print_instances(c, callee, args->as.seq.len, args->as.seq.items, entries_file(map_items(keywords), keywords->as.map.len)) &&
+             string_keys(c, keywords)) {
         /* print takes its objects atop m's stack, as a plain call's (stack_call). */
         size_t argc = args->as.seq.len;
         SPYValue *printing;
@@ -28546,7 +28554,8 @@ static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
  * and reversed() return theirs, or reversed() a sequence's ("reversed" its
  * __len__), hex(), oct(), bin() and chr() ("hex" and so on their
  * __index__) the int's, as int() and float() ("int", "float") do,
- * dir() lists and sorts it, isinstance() and issubclass() take the
+ * dir() lists and sorts it, print's write and flush return theirs,
+ * isinstance() and issubclass() take the
  * result's truth, ascii() ("ascii" its __repr__) escapes the text,
  * round() ("round" an ndigits' __index__, v the number and ndigits)
  * rounds by the int, and the others' text is a str. */
@@ -28557,7 +28566,7 @@ static NO_INLINE SPYValue *conversion_value(SPYContext *c, SPYValue *v, SPYValue
     const char *method = name == c->booleans[0] ? "__bool__" : name->as.string.data;
     if (!strcmp(method, "__len__")) return length_result(c, result, &length) ? NULL : spy_int(c, length);
     if (!strcmp(method, "reversed")) return length_result(c, result, &length) ? NULL : reversed_iterator(c, v, length);
-    if (!strcmp(method, "next")) return spy_retain(result);
+    if (!strcmp(method, "next") || !strcmp(method, "write") || !strcmp(method, "flush")) return spy_retain(result);
     int number = !strcmp(method, "hex") ? B_HEX : !strcmp(method, "oct") ? B_OCT : !strcmp(method, "bin") ? B_BIN : !strcmp(method, "chr") ? B_CHR : -1;
     if (number >= 0) {
         SPYValue *index = index_result(c, v, spy_retain(result)), *value = index ? builtin(c, 1, &index, (void *)(intptr_t)number) : NULL;
@@ -36066,16 +36075,16 @@ static int print_state(SPYContext *c, size_t argc, size_t positional, SPYValue *
         options[at] = entry->value;
     }
     SPYValue *sep = options[0], *end = options[1], *file = options[2], *flush = options[3];
-    if (sep && sep->type != SPY_STRING && sep->type != SPY_NONE) { errorf(c, "TypeError", "sep must be None or a string, not %s", type_name(sep)); return -1; }
-    if (end && end->type != SPY_STRING && end->type != SPY_NONE) { errorf(c, "TypeError", "end must be None or a string, not %s", type_name(end)); return -1; }
+    if (sep && sep->type != SPY_NONE && !builtin_value(c, sep, SPY_STRING)) { errorf(c, "TypeError", "sep must be None or a string, not %s", type_name(sep)); return -1; }
+    if (end && end->type != SPY_NONE && !builtin_value(c, end, SPY_STRING)) { errorf(c, "TypeError", "end must be None or a string, not %s", type_name(end)); return -1; }
     int flushing = flush && truthy(flush);
     if (c->error_type[0]) return -1;
     if (file && file->type == SPY_NONE) file = NULL;
     SPYValue *sys = file ? NULL : sys_module(c);
     if (!file && sys && !(file = name_local(sys, "stdout"))) { spy_error(c, "RuntimeError", "lost sys.stdout"); return -1; }
     if (file && file->type == SPY_NONE) return 1;
-    SPYValue *items[] = {file ? file : c->none, sep && sep->type == SPY_STRING ? spy_retain(sep) : spy_string(c, " ", 1),
-                         end && end->type == SPY_STRING ? spy_retain(end) : spy_string(c, "\n", 1), c->booleans[flushing],
+    SPYValue *items[] = {file ? file : c->none, sep && sep->type != SPY_NONE ? spy_retain(sep) : spy_string(c, " ", 1),
+                         end && end->type != SPY_NONE ? spy_retain(end) : spy_string(c, "\n", 1), c->booleans[flushing],
                          int_value(c, (int64_t)positional), int_value(c, (int64_t)argc)};
     *state = items[1] && items[2] && items[4] && items[5] ? spy_tuple(c, 6, items) : NULL;
     spy_release(items[1]); spy_release(items[2]); spy_release(items[4]); spy_release(items[5]);
@@ -36087,60 +36096,123 @@ static SPYValue *print_target(SPYValue *state) {
     SPYValue *file = state->as.seq.items[0];
     return file->type == SPY_NONE ? NULL : file;
 }
-/* print writes its end, as its state says, and flushes: 0, or -1 on an
- * error. */
-static int print_end(SPYContext *c, SPYValue *state) {
-    SPYValue *file = print_target(state);
-    if (print_text(c, file, state->as.seq.items[2])) return -1;
-    if (!state->as.seq.items[3]->as.integer_data.small) return 0;
+/* print's write of value to file (the host's output when NULL): its
+ * write looked up, then str(value), then the write's call, as each write
+ * makes them; 0, or -1 on an error. */
+static int print_value(SPYContext *c, SPYValue *file, SPYValue *value) {
+    SPYValue *writer = file ? attribute(c, file, "write") : NULL, *text = writer || !file ? stringify(c, value, 0) : NULL;
+    SPYValue *result = writer && text ? call(c, writer, 1, &text) : NULL;
+    if (text && !file) output_write(c, 0, text->as.string.data, text->as.string.len);
+    spy_release(writer); spy_release(text); spy_release(result);
+    return c->error_type[0] ? -1 : 0;
+}
+/* print's flush of file, the host's output when NULL: 0, or -1 on an error. */
+static int print_flush(SPYContext *c, SPYValue *file) {
     if (!file) { output_flush(c, 0); return c->error_type[0] ? -1 : 0; }
-    SPYValue *method = attribute(c, file, "flush");
-    SPYValue *result = method ? call(c, method, 0, NULL) : NULL;
+    SPYValue *method = attribute(c, file, "flush"), *result = method ? call(c, method, 0, NULL) : NULL;
     spy_release(method); spy_release(result);
     return c->error_type[0] ? -1 : 0;
 }
-/* Whether some of print's positional arguments argv, print being callee,
- * is an instance or a container of a repr job (repr_job). */
-static int print_instances(SPYContext *c, SPYValue *callee, size_t positional, SPYValue *const *argv) {
+/* The value of the file keyword among kwc keywords kw, borrowed, or NULL. */
+static SPYValue *entries_file(const Entry *kw, size_t kwc) {
+    for (size_t i = 0; i < kwc; i++)
+        if (kw[i].key->type == SPY_STRING && !strcmp(kw[i].key->as.string.data, "file")) return kw[i].value;
+    return NULL;
+}
+/* The Python write or flush of print's file on the machine, borrowed
+ * (method_function); else NULL. */
+static SPYValue *print_method(SPYContext *c, SPYValue *file, const char *name) {
+    SPYValue *method = file ? method_function(c, file, name) : NULL;
+    return method && machine_function(c, method) ? method : NULL;
+}
+/* Whether print, being callee, writes on the machine: some of its
+ * positional arguments argv is an instance or a container of a repr job
+ * (repr_job), or the file it writes to, file or else sys.stdout, has a
+ * Python write or flush (print_method). */
+static int print_instances(SPYContext *c, SPYValue *callee, size_t positional, SPYValue *const *argv, SPYValue *file) {
     if (callee->type != SPY_NATIVE || callee->as.native.call != builtin || (intptr_t)callee->as.native.data != B_PRINT) return 0;
     for (size_t i = 0; i < positional; i++) if (argv[i]->type == SPY_INSTANCE || repr_job(c, c->types[SPY_STRING], argv[i])) return 1;
-    return 0;
+    SPYValue *sys = file ? NULL : sys_module(c);
+    if (sys) file = name_local(sys, "stdout");
+    return print_method(c, file, "write") || print_method(c, file, "flush");
 }
-/* print's call, its arguments atop m's stack (print_state), the objects first,
- * writing as its state says (print_state) from object i, after its
- * separator, on: 0 once it wrote them and its end; 1 at an instance whose
- * class's Python __str__ (conversion_method) is the call *function with
- * *env to enter (CALL_CHECKED), the state, i, c->replacing, the method's
- * name and the instance above the arguments, its result written on its
- * return (print_returned); -1 on an error. */
-static int print_from(SPYContext *c, Machine *m, size_t i, SPYValue *state, SPYValue **function, SPYValue **env) {
-    SPYValue *found[2], *file = print_target(state);
-    size_t argc = (size_t)state->as.seq.items[5]->as.integer_data.small;
-    for (size_t positional = (size_t)state->as.seq.items[4]->as.integer_data.small; i < positional; i++) {
-        SPYValue *arg = m->stack[m->len - argc + i], *text;
-        if (i && print_text(c, file, state->as.seq.items[1])) return -1;
-        if (arg->type == SPY_INSTANCE && (*function = conversion_method(c, c->types[SPY_STRING], 1, &arg, found))) {
-            SPYValue *self = spy_retain(arg);
-            return machine_push(c, m, spy_retain(state)) || machine_push(c, m, int_value(c, (int64_t)i)) ||
-                   machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, found[0]) || machine_push(c, m, spy_retain(self)) ||
-                   !(*env = function_env(c, *function, 1, &self, NULL, 1)) ? -1 : 1;
-        }
-        if (c->error_type[0]) return -1;
-        if (repr_job(c, c->types[SPY_STRING], arg)) {
-            /* A container's repr job (repr_call) above the state, i and
-             * c->replacing. */
-            SPYValue *call_env = NULL;
-            if (machine_push(c, m, spy_retain(state)) || machine_push(c, m, int_value(c, (int64_t)i)) ||
-                machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_retain(c->types[SPY_STRING])) ||
-                machine_push(c, m, spy_retain(arg)) || !(text = repr_call(c, m, &call_env))) return -1;
-            if (call_env) { spy_release(text); *function = c->entering_init; *env = call_env; return 1; }
-            for (int k = 0; k < 3; k++) spy_release(machine_pop(m));
-        } else text = stringify(c, arg, 0);
-        int status = print_text(c, file, text);
-        spy_release(text);
-        if (status) return -1;
+/* print's call of callee, its file's write with text or flush without it
+ * (the host's output when NULL), both taken, going on at position at
+ * (print_from): 0 once it returned; 1 at a Python function or method, the
+ * call *function with *env to enter (CALL_CHECKED), the state, at,
+ * c->replacing, the name and callee above the arguments; -1 on an error. */
+static int print_call(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPYValue *callee, SPYValue *text, SPYValue **function,
+                      SPYValue **env) {
+    SPYValue *fn = !callee ? NULL : callee->type == SPY_METHOD ? callee->as.method.function : callee;
+    if (!fn || !machine_function(c, fn)) {
+        SPYValue *result = callee ? call(c, callee, !!text, &text) : NULL;
+        if (!callee && text) output_write(c, 0, text->as.string.data, text->as.string.len);
+        else if (!callee) output_flush(c, 0);
+        spy_release(callee); spy_release(text); spy_release(result);
+        return c->error_type[0] ? -1 : 0;
     }
-    return print_end(c, state);
+    size_t argc = callee != fn;
+    SPYValue *args[] = {argc ? spy_retain(callee->as.method.self) : text, text};
+    *function = fn;
+    return machine_push(c, m, spy_retain(state)) || machine_push(c, m, int_value(c, (int64_t)at)) ||
+           machine_push(c, m, spy_retain(c->replacing)) || machine_push(c, m, spy_string(c, text ? "write" : "flush", 5)) ||
+           machine_push(c, m, callee) || !(*env = function_env(c, fn, argc + !!text, args, NULL, 1)) ? -1 : 1;
+}
+/* print's write of value, as its state says, from position at: the
+ * file's write looked up, then str(value), then the call (print_call),
+ * going on at at + 2: 0 once it returned; 1 at a call to enter
+ * (CALL_CHECKED): an instance's Python __str__ (conversion_method) or a
+ * container's repr job, the write below the state, at + 1, c->replacing,
+ * the method's name and the instance (print_returned), or the write's;
+ * -1 on an error. */
+static int print_unit(SPYContext *c, Machine *m, SPYValue *state, size_t at, SPYValue *value, SPYValue **function, SPYValue **env) {
+    SPYValue *file = print_target(state), *writer = file ? attribute(c, file, "write") : NULL, *found[2], *text;
+    if (file && !writer) return -1;
+    if (value->type == SPY_INSTANCE && (*function = conversion_method(c, c->types[SPY_STRING], 1, &value, found))) {
+        SPYValue *self = spy_retain(value);
+        return machine_push(c, m, writer ? writer : spy_none(c)) || machine_push(c, m, spy_retain(state)) ||
+               machine_push(c, m, int_value(c, (int64_t)at + 1)) || machine_push(c, m, spy_retain(c->replacing)) ||
+               machine_push(c, m, found[0]) || machine_push(c, m, self) || !(*env = function_env(c, *function, 1, &self, NULL, 0)) ? -1 : 1;
+    }
+    if (c->error_type[0]) { spy_release(writer); return -1; }
+    if (repr_job(c, c->types[SPY_STRING], value)) {
+        /* A container's repr job (repr_call) above the write, the state,
+         * the position and c->replacing. */
+        SPYValue *call_env = NULL;
+        if (machine_push(c, m, writer ? writer : spy_none(c)) || machine_push(c, m, spy_retain(state)) ||
+            machine_push(c, m, int_value(c, (int64_t)at + 1)) || machine_push(c, m, spy_retain(c->replacing)) ||
+            machine_push(c, m, spy_retain(c->types[SPY_STRING])) || machine_push(c, m, spy_retain(value)) || !(text = repr_call(c, m, &call_env)))
+            return -1;
+        if (call_env) { spy_release(text); *function = c->entering_init; *env = call_env; return 1; }
+        for (int k = 0; k < 3; k++) spy_release(machine_pop(m));
+        if ((writer = machine_pop(m)) == c->none) { spy_release(writer); writer = NULL; }
+    } else text = stringify(c, value, 0);
+    if (!text) { spy_release(writer); return -1; }
+    return print_call(c, m, state, at + 2, writer, text, function, env);
+}
+/* print's call, its arguments atop m's stack (print_state), writing as
+ * its state says from position at on: object i's separator at 4 * i, the
+ * object at 4 * i + 2, the end after the objects, then the flush, each
+ * a write (print_unit) whose text a call returns to at + 1 and which goes
+ * on at at + 2: 0 once it wrote and flushed; 1 at a call to enter
+ * (CALL_CHECKED), print going on on its return (print_returned); -1 on
+ * an error. */
+static int print_from(SPYContext *c, Machine *m, size_t at, SPYValue *state, SPYValue **function, SPYValue **env) {
+    SPYValue **items = state->as.seq.items, *file = print_target(state);
+    size_t argc = (size_t)items[5]->as.integer_data.small, end = 4 * (size_t)items[4]->as.integer_data.small;
+    for (int status = 0; !status; at += 2) {
+        if (at == end + 4) return 0;
+        if (at == end + 2) {
+            /* The flush goes on at the end's position + 4. */
+            SPYValue *flush = file && items[3]->as.integer_data.small ? attribute(c, file, "flush") : NULL;
+            if (file && items[3]->as.integer_data.small && !flush) return -1;
+            if (items[3]->as.integer_data.small) status = print_call(c, m, state, at + 2, flush, NULL, function, env);
+            continue;
+        }
+        if (at == 0 && end) continue;
+        status = print_unit(c, m, state, at, at == end ? items[2] : at % 4 ? m->stack[m->len - argc + at / 4] : items[1], function, env);
+    }
+    return c->error_type[0] ? -1 : 1;
 }
 /* The step of print's call of positional objects and keywords, a call
  * step's argc arguments atop m's stack, some of them instances
@@ -36156,15 +36228,20 @@ static NO_INLINE int print_call_step(SPYContext *c, Machine *m, size_t argc, siz
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
     return status;
 }
-/* The text that print's call of arguments atop m's stack, which
- * print_from left for object i, returned: written, print goes on; once it
- * ends, its None replaces its callee and arguments. The machine to run
- * on. */
+/* What print's call of arguments atop m's stack returned to the position
+ * print_from left: at an odd one, a write's text, its write below the
+ * state (print_unit), called; else a write's or flush's value, ignored;
+ * print goes on; once it ends, its None replaces its callee and
+ * arguments. The machine to run on. */
 static NO_INLINE Machine *print_returned(SPYContext *c, Machine *m, SPYValue *text) {
     spy_release(machine_pop(m));
     SPYValue *index = machine_pop(m), *state = machine_pop(m), *function, *env;
-    int status = print_text(c, print_target(state), text) ? -1 :
-                 print_from(c, m, (size_t)index->as.integer_data.small + 1, state, &function, &env);
+    size_t at = (size_t)index->as.integer_data.small;
+    SPYValue *writer = at % 2 ? machine_pop(m) : NULL;
+    if (writer == c->none) { spy_release(writer); writer = NULL; }
+    int status = !text ? -1 : at % 2 ? print_call(c, m, state, at + 1, writer, spy_retain(text), &function, &env) : 0;
+    if (!text) spy_release(writer);
+    if (!status) status = print_from(c, m, at + at % 2, state, &function, &env);
     size_t argc = (size_t)state->as.seq.items[5]->as.integer_data.small;
     spy_release(index); spy_release(state); spy_release(text);
     if (status > 0) {
@@ -36478,12 +36555,8 @@ static SPYValue *print_values(SPYContext *c, size_t argc, SPYValue *const *argv,
     int status = print_state(c, argc, argc, keywords, &state);
     if (status) return status < 0 ? NULL : spy_none(c);
     SPYValue *file = print_target(state);
-    for (size_t i = 0; i < argc && !c->error_type[0]; i++) {
-        if (i && print_text(c, file, state->as.seq.items[1])) break;
-        SPYValue *text = stringify(c, argv[i], 0);
-        print_text(c, file, text); spy_release(text);
-    }
-    if (!c->error_type[0]) print_end(c, state);
+    for (size_t i = 0; i < argc && !(i && print_value(c, file, state->as.seq.items[1])) && !print_value(c, file, argv[i]); i++) {}
+    if (!c->error_type[0] && !print_value(c, file, state->as.seq.items[2]) && state->as.seq.items[3]->as.integer_data.small) print_flush(c, file);
     spy_release(state);
     return c->error_type[0] ? NULL : spy_none(c);
 }

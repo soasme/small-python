@@ -539,6 +539,21 @@ static const char *const programs[] = {
     "    return r\n"
     "print(nz())\n",
 
+    "class PW:\n"
+    "    def __init__(self): self.parts = []\n"
+    "    def write(self, t): self.parts.append(t)\n"
+    "    def flush(self): self.parts.append(0)\n"
+    "class PS(str):\n"
+    "    def __str__(self): return '+'\n"
+    "class PB:\n"
+    "    def write(self, t): raise KeyError(t)\n"
+    "def pw():\n"
+    "    w = PW(); print(1, [2], sep=PS('-'), end='', file=w, flush=True)\n"
+    "    try: print('x', file=PB())\n"
+    "    except KeyError as e: w.parts.append(e)\n"
+    "    return w.parts\n"
+    "print(pw())\n",
+
     "class DP:\n"
     "    def __init__(self, items): self.items = items\n"
     "    def __iter__(self): return iter(self.items)\n"
