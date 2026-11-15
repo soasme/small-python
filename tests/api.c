@@ -1270,6 +1270,10 @@ int main(int argc, char **argv) {
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len('%s' % [Shown()]) + len('%s %r' % ((Shown(), 1), [1, Shown()]))", "printl.py"),
                                  SPY_STOP_STEPS, &pauses)) == 3 + 13 && pauses > 1);
+    /* And those of a %= target's. */
+    execute(c, "def augmented():\n    t = '%s|%r'\n    t %= ([Shown()], {1: Shown()})\n    return len(t)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "augmented()", "augmented.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 1);
     /* And those of a list or tuple item. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(str([1, [Shown()] * 4])) + len(repr(([Shown()] * 4,)))", "nested.py"),

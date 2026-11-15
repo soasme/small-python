@@ -89,7 +89,7 @@ Cases == {"s_r_a", "s_object", "percent_literal", "mapping", "mapping_missing", 
           "bytes_basic", "bytes_b_alias", "bytes_dunder", "bytes_str_rejected", "bytes_r_is_a", "bytes_c",
           "bytes_c_bad", "bytes_mapping", "bytes_percent", "bytearray_result", "bytes_not_all",
           "bytes_unsupported", "bytes_float", "method_order", "method_mapping", "method_raises", "method_not_str",
-          "method_too_few", "method_items", "method_numbers", "method_number_bad", "bytes_methods", "bytes_own",
+          "method_too_few", "method_items", "method_items_augmented", "method_numbers", "method_number_bad", "bytes_methods", "bytes_own",
           "c_index_type", "bytes_c_index_type", "bytearray_methods", "bytearray_exported"}
 Programs == [kind : {"int"}, n : {0, 5, -42, 255}, flags : Flags, width : {0, 7}, prec : {-1, 0, 3},
              type : {"d", "i", "o", "x", "X", "u"}, target : {"str", "bytes"}]
@@ -171,6 +171,7 @@ Case(c) ==
       \* A str's %c takes __index__'s TypeError as its own; a bytes's raises it.
       [] c = "c_index_type" -> "TypeError: format argument: %c requires an integer or a unicode character, not NotIndex"
       [] c = "bytes_c_index_type" -> "TypeError: NotIndex.__index__() must return an int, not str"
+      [] c = "method_items_augmented" -> "('[A\\xe9]|[B\\\\xe9]', ['ra', 'rb'])" \* %= converts as % does
       [] c = "method_items" -> "('[A\\xe9, 1]|(B\\xe9,)|[C\\\\xe9]', ['ra', 'rb', 'rc'])"
 
 Run(p) == IF "case" \in DOMAIN p THEN Case(p.case) ELSE Generated(p)

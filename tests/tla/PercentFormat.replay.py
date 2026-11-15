@@ -104,6 +104,7 @@ SOURCES = {
     "bytes_c_index_type": "result = b'%c' % NotIndex()",
     "bytearray_methods": "Q.log.clear(); result = (bytearray(b'%d-%x-%c|%s') % (Q(), Q(), Q(), Y()), Q.log)",
     "bytearray_exported": "Grow.log.clear(); b = bytearray(b'%c'); t = b % Grow(b); b.append(1); result = (t, b, Grow.log)",
+    "method_items_augmented": "L.log.clear()\nt = '%s|%a'\nt %= ([L('a')], [L('b')])\nresult = (t, L.log)",
     "method_items": "L.log.clear(); result = ('%s|%r|%a' % ([L('a'), 1], (L('b'),), [L('c')]), L.log)"
 }
 

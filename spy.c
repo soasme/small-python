@@ -10399,6 +10399,11 @@ static int percent_reaches(SPYContext *c, SPYValue *y) {
     } else if (y->type == SPY_LIST) return percent_items(c, y);
     return 0;
 }
+/* Whether str or bytes a % b, or a %= b, may convert an argument by a
+ * Python method (percent_reaches), on the machine (percent_call). */
+static NO_INLINE int percent_converts(SPYContext *c, SPYValue *a, SPYValue *b) {
+    return (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && percent_reaches(c, b);
+}
 static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* A lone in, whose container may be a generator the machine searches,
      * or a list or tuple with an item it compares by a Python __eq__
@@ -10411,7 +10416,7 @@ static NO_INLINE SPYValue *binary_operand(SPYContext *c, int op, SPYValue *a, SP
     if (op == T_EQ || op == T_NE) return compare_operand(c, op, a, b);
     return a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || (is_set(a) && set_walks(op, a, b)) ||
            class_union(op, a, b) ||
-           (op == '%' && (a->type == SPY_STRING || a->type == SPY_BYTES || a->type == SPY_BYTEARRAY) && percent_reaches(c, b)) ? NULL : binary(c, op, a, b);
+           (op == '%' && percent_converts(c, a, b)) ? NULL : binary(c, op, a, b);
 }
 static SPYValue *binary(SPYContext *c, int op, SPYValue *a, SPYValue *b) {
     /* Exact floats, small ints and strs with the common operators come first. */
@@ -28939,9 +28944,8 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         return bool_call(c, m, x, env);
     }
     if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
-    if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' &&
-        (x->type == SPY_STRING || x->type == SPY_BYTES || x->type == SPY_BYTEARRAY) &&
-        percent_reaches(c, y)) return percent_call(c, m, x, y);
+    if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' && percent_converts(c, x, y))
+        return percent_call(c, m, x, y);
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;
@@ -31648,7 +31652,8 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                 if (began > 0) goto consume_generator;
                 if (began) break;
             }
-            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || a->type == SPY_SET) {
+            if (a->type == SPY_INSTANCE || b->type == SPY_INSTANCE || metaclassed(a) || metaclassed(b) || a->type == SPY_SET ||
+                (UNLIKELY(ins->arg == T_MODEQ) && percent_converts(c, a, b))) {
                 x = a; y = b; goto operator_step;
             }
             machine_push(c, m, augmented(c, ins->arg, a, b)); break;

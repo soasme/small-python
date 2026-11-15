@@ -1331,6 +1331,18 @@ static const char *const programs[] = {
     "    return round(2.25, ndigits=RK(1)), round(ndigits=RK(-1), number=15), round(number=1.5, ndigits=RK(0)), m\n"
     "print(rk())\n",
 
+    "class PK:\n"
+    "    def __repr__(s): return 'pk'\n"
+    "def pa():\n"
+    "    t = '%s|%a'\n"
+    "    t %= ([PK()], {1: PK()})\n"
+    "    b = bytearray(b'%r')\n"
+    "    b %= [PK()]\n"
+    "    u = ['<%s>']\n"
+    "    u[0] %= [PK()]\n"
+    "    return t, b, u\n"
+    "print(pa())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

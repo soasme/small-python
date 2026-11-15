@@ -210,6 +210,7 @@ Unreleased (0.10.0):
 - object.__format__ of an empty spec calls a Python __str__ without nesting on the C stack
 - ascii() of a container calls its items' Python __repr__ without nesting on the C stack
 - round() given ndigits by keyword calls its Python __index__ without nesting on the C stack
+- %= of a str or bytes target by a container calls its items' Python __repr__ without nesting on the C stack
 - min() and max(), with or without a key, call the best's reflected Python method, after an item's declined or
   when it has only object's, and the Python __bool__ of a result without nesting on the C stack
 - sorted() and list.sort() call the Python __bool__ or __len__ of a comparison's result without nesting on the C stack
