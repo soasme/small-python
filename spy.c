@@ -29181,6 +29181,10 @@ static NO_INLINE SPYValue *native_lookup(SPYContext *c, Machine *m, Instruction 
 static int repeats(SPYValue *v) {
     return v->type == SPY_LIST || v->type == SPY_TUPLE || v->type == SPY_STRING || v->type == SPY_BYTES || v->type == SPY_BYTEARRAY;
 }
+/* The list or tuple an instance v of a subclass of list or tuple holds, or v. */
+static SPYValue *sequence_base(SPYValue *v) {
+    return v->type == SPY_INSTANCE && v->as.map.base && (v->as.map.base->type == SPY_LIST || v->as.map.base->type == SPY_TUPLE) ? v->as.map.base : v;
+}
 /* Whether operand v of operator o, or of comparison rich when o is NULL,
  * is no set subclass's instance whose class has a Python method of it,
  * reflected or in place: an operation on its set (set_walk). */
@@ -29276,6 +29280,25 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
     if (kind == OPERATE_BINARY && class_union(op, x, y)) return union_call(c, m, x, y, env);
     if ((kind == OPERATE_BINARY ? op : kind == OPERATE_INPLACE ? operators[op - T_ADDEQ].token : 0) == '%' && percent_converts(c, x, y))
         return percent_call(c, m, x, y);
+    /* A list's or tuple's subclass instance whose class has no Python
+     * comparison compares as its list or tuple, its own items first
+     * when it is the right operand of its base's object (reflected,
+     * comparison_declined): by its items' Python __eq__ (equal_call),
+     * or, unreflected, their ordering. */
+    SPYValue *a = sequence_base(x), *b = sequence_base(y);
+    if (rich >= 0 && (a != x || b != y) && sequence_pair(a, b) && set_plain(NULL, rich, x) && set_plain(NULL, rich, y)) {
+        SPYValue *left = value_class(c, x), *right = value_class(c, y);
+        int swapped = b != y && right != left && subclass(right, left);
+        size_t end, at = python_pair(c, swapped ? b : a, swapped ? a : b, 0, &end);
+        if ((rich == R_EQ || rich == R_NE) && at != SIZE_MAX) return equal_call(c, m, swapped ? b : a, swapped ? a : b, at, env);
+        if (!swapped && order_python(c, op, a, b)) {
+            operator_keep(c, m, ins, y);
+            if (at != SIZE_MAX) return equal_call(c, m, a, b, at, env);
+            SPYValue *value, *entered = order_decide(c, m, ins, a, b, end, 1, env, &value);
+            spy_release(value);
+            return entered;
+        }
+    }
     const Operator *o = kind == OPERATE_BINARY ? operator_of(op) : kind == OPERATE_INPLACE ? &operators[op - T_ADDEQ] : NULL;
     const char *reflected = o ? o->reflected : rich < 0 ? NULL : rich_names[rich_reflected[rich]];
     SPYValue *self = x, *other = y;

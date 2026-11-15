@@ -76,6 +76,9 @@ SOURCES = {
                               "it = iter([0, E(1), E(2), E(3)])\nfound = 2 in it\nresult = (found, [e.n for e in it])",
     "in_mixed_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o\n"
                       "class P: pass\nresult = (2 in [1, (1,), P(), E(2)], 3 in [P(), [3], E(4), 3])",
+    "seq_subclass_calls": "class E:\n    def __init__(s, n): s.n = n\n    def __eq__(s, o):\n        for _ in (): pass\n        t(s.n)\n        return s.n == o.n\n"
+                          "    def __lt__(s, o): return s.n < o.n\nclass L(list): pass\nclass T(tuple): pass\n"
+                          "result = ([E(1), E(2)] == L([E(1), E(3)]), T((E(4),)) < (E(4), E(5)), L([E(6)]) != [E(6)])",
     "seq_truth_calls": "class T:\n    def __init__(s, v): s.v = v\n    def __bool__(s):\n        for _ in (): pass\n        t(s.v)\n        return s.v\n"
                        "class L:\n    def __len__(s):\n        for _ in (): pass\n        t(0)\n        return 0\n"
                        "class O:\n    def __init__(s, r): s.r = r\n    def __eq__(s, o): return s.r\n"

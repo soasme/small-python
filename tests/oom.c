@@ -1664,6 +1664,18 @@ static const char *const programs[] = {
     "    return [sorted(k.v for k in a), sorted(k.v for k in t)]\n"
     "print(si())\n",
 
+    "class SCK:\n"
+    "    def __init__(s, v): s.v = v\n"
+    "    def __eq__(s, o): return s.v == o.v\n"
+    "    def __lt__(s, o): return s.v < o.v\n"
+    "class SCL(list): pass\n"
+    "class SCT(tuple): pass\n"
+    "def sc():\n"
+    "    a, b = [SCK(1), SCK(2)], SCL([SCK(1), SCK(3)])\n"
+    "    p, q = (SCK(1),), SCT((SCK(1), SCK(0)))\n"
+    "    return [a == b, b != a, p < q, q == p, SCL(a) < [SCK(1), SCK(5)]]\n"
+    "print(sc())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

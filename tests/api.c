@@ -2298,6 +2298,12 @@ int main(int argc, char **argv) {
                "    return len(s) + len(t)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "resets()", "resets.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
+    /* So does a list or tuple compared with a list or tuple subclass's instance. */
+    execute(c, "class Seq(list): pass\nclass Row(tuple): pass\n"
+               "def compared():\n    a, r = [Same()], (Same(),)\n"
+               "    return (a != Seq([Same()])) + (Seq([Same()]) != a) + (Row(r) != (Same(),)) + ((Same(),) != Row(r))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "compared()", "compared.py"), SPY_STOP_STEPS, &pauses)) == 4 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
