@@ -365,7 +365,9 @@ These run as machines on the heap, in one native activation of
   (one of a builtin type's subclass when a Python class defines the method
   before the builtin type) or on a class from its metaclass, the
   `__len__` that `reversed`
-  calls on a sequence without `__reversed__`, and the same methods of the items that a
+  calls on a sequence without `__reversed__`, the `__dir__` that `dir`
+  calls and the generator it makes or returns, or such another iterator
+  the machine takes, which `dir` lists and sorts, and the same methods of the items that a
   `map` of one of those functions takes, a tuple item's items'
   `__hash__` too, the `__bool__` or `__len__`
   that `filter` of `None` or `bool`, `any` and `all` test their items

@@ -604,6 +604,22 @@ static const char *const programs[] = {
     "    return r\n"
     "print(tx())\n",
 
+    "class DL:\n"
+    "    def __dir__(self):\n"
+    "        yield 'b'; yield 'a'\n"
+    "class DI:\n"
+    "    def __iter__(self): return iter(['y', 'x'])\n"
+    "class DR:\n"
+    "    def __dir__(self): return DI()\n"
+    "class DE:\n"
+    "    def __dir__(self):\n"
+    "        yield 'a'; raise KeyError('e')\n"
+    "def dl():\n"
+    "    try: dir(DE())\n"
+    "    except KeyError: pass\n"
+    "    return dir(DL()), dir(DR())\n"
+    "print(dl())\n",
+
     "class GN(dict):\n"
     "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
     "class GM(type):\n"

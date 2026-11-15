@@ -63,6 +63,10 @@ SOURCES = {
     "dir_sorted": "class D:\n    b = 1\n    a = 2\nresult = [n for n in dir(D) if not n.startswith('_')]",
     "dir_hook_calls": "n = []\nclass D:\n    def __dir__(self):\n        for _ in (): pass\n        n.append(1)\n        return ('z', 'a', 'y')\nresult = (dir(D()), len(n))",
     "dir_hook": "class D:\n    def __dir__(self): return ['z', 'a']\nresult = dir(D())",
+    "dir_hook_generator": "class D:\n    def __dir__(self):\n        for _ in range(2): pass\n        yield 'b'; yield 'a'\nresult = dir(D())",
+    "dir_hook_iterable": "class I:\n    def __iter__(self):\n        for _ in range(2): pass\n        return iter(['y', 'x'])\n"
+                         "class D:\n    def __dir__(self): return I()\nresult = dir(D())",
+    "dir_hook_raises": "class D:\n    def __dir__(self):\n        yield 'a'; raise KeyError('e')\nresult = dir(D())",
     "dir_hook_bad": 'class D:\n    def __dir__(self): return 1\nresult = dir(D())',
     "callable_forms": 'class K:\n    def __call__(self): pass\nresult = (callable(K), callable(K()), callable(P()), callable(len), callable(1))',
     "id_identity": 'a = []\nresult = (id(a) == id(a), id([]) == id([]) or True, type(id(a)).__name__)',

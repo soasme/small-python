@@ -472,6 +472,10 @@ struct SPYContext {
     int k_kind;
     /* On a machine's stack, marks a chain of set walks under way (chain_begin). */
     SPYValue *chaining;
+    /* The builtin sorted, as dir() sorts a listing on the machine (dir_listing). */
+    SPYValue *sorter;
+    /* Whether a call's return began a consumer that the machine goes on with (dir_listing). */
+    int consuming;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -25294,6 +25298,21 @@ static SPYValue *round_pair(SPYContext *c, SPYValue *x, SPYValue *digits) {
     if (pair && (sequence_append(c, pair, x) || sequence_append(c, pair, digits))) { spy_release(pair); return NULL; }
     return pair;
 }
+/* The generator function that is the Python __dir__ of instance v's class, or NULL. */
+static SPYValue *dir_generator(SPYContext *c, SPYValue *v) {
+    SPYValue *cls = v->type != SPY_INSTANCE || v->as.map.base ? NULL : v->as.map.parent, *fn = cls ? class_lookup(cls, "__dir__") : NULL;
+    return fn && generator_function(c, fn) ? fn : NULL;
+}
+static int dir_list(SPYContext *, Machine *, SPYValue *);
+/* dir() of instance v, which it takes, whose __dir__ is a generator
+ * function (dir_generator): its generator, which no code runs for, listed
+ * and sorted on m (dir_list); NULL, the machine going on with it. */
+static NO_INLINE SPYValue *dir_generated(SPYContext *c, Machine *m, SPYValue *v) {
+    SPYValue *made = call(c, dir_generator(c, v), 1, &v);
+    spy_release(v);
+    if (made) dir_list(c, m, made);
+    return NULL;
+}
 /* Whether callee is builtin function id. */
 static ALWAYS_INLINE int is_builtin(SPYValue *callee, int id) {
     return callee->type == SPY_NATIVE && callee->as.native.data == (void *)(intptr_t)id && callee->as.native.call == builtin;
@@ -25461,6 +25480,11 @@ static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n,
         if ((*env = function_env(c, allocate, argc + 1, argv, NULL, 1))) return callee;
         spy_release(callee);
         return NULL;
+    }
+    if (method < 0 && argc == 1 && is_builtin(callee, B_DIR) && dir_generator(c, argv[0])) {
+        /* So does dir() of a generator function __dir__ (dir_generated). */
+        spy_release(callee);
+        return dir_generated(c, m, argv[0]);
     }
     if (method < 0 && argc == 1 && is_builtin(callee, B_ITER) && argv[0]->type == SPY_INSTANCE) {
         /* iter() calls a Python __iter__ on m (callk). */
@@ -26176,6 +26200,15 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
         if (callee->as.native.data == (void *)(intptr_t)B_GETATTR) return getattr_call(c, m, argc == 3, env);
         if (argc == 2 && callee->as.native.data == (void *)(intptr_t)B_HASATTR)
             return machine_push(c, m, spy_retain(c->defaulting)) ? NULL : getattr_call(c, m, 1, env);
+    }
+    if (calls && argc == 1 && is_builtin(callee, B_DIR) && dir_generator(c, argv[0])) {
+        /* dir() of an instance whose __dir__ is a generator function makes
+         * its generator, which no code runs for, listed and sorted on m
+         * (dir_generated). */
+        SPYValue *object = argv[0];
+        m->len -= 2;
+        spy_release(callee);
+        return dir_generated(c, m, object);
     }
     if (calls && argc == 1 && is_builtin(callee, B_ITER) && argv[0]->type == SPY_INSTANCE) {
         /* iter() calls a Python __iter__ on m (callk). */
@@ -29310,6 +29343,29 @@ static SPYValue *reversed_iterator(SPYContext *c, SPYValue *v, int64_t n) {
     iterator->as.iterator.index = (size_t)n;
     return iterator;
 }
+/* dir() of result, which it takes, its items listed and sorted on m as
+ * sorted() does (the consumer key_consumer goes on from): whether the
+ * consumer began, else an error is pending. */
+static void consume(SPYContext *, Machine *, int, SPYValue *, int, SPYValue *, SPYValue *, SPYValue *);
+static int machine_source(SPYContext *, SPYValue *);
+static NO_INLINE int dir_list(SPYContext *c, Machine *m, SPYValue *result) {
+    size_t blocks = m->block_len;
+    SPYValue *keywords = value_new(c, SPY_DICT);
+    if (keywords) consume(c, m, B_LIST, c->types[SPY_LIST], -1, NULL, result, NULL);
+    else spy_release(result);
+    if (m->block_len == blocks) { spy_release(keywords); return 0; }
+    Consumer *s = m->blocks[blocks].consumer;
+    s->callee = spy_retain(c->sorter); s->pending = keywords;
+    return 1;
+}
+/* What a Python __dir__, name, returned in result: a generator or another
+ * the machine iterates (machine_source), listed and sorted on m
+ * (dir_list), the machine going on with it, 1; else 0, result kept. */
+static NO_INLINE int dir_listing(SPYContext *c, Machine *m, SPYValue *name, SPYValue *result) {
+    if (name->type != SPY_STRING || strcmp(name->as.string.data, "__dir__") || !machine_source(c, result)) return 0;
+    c->consuming = dir_list(c, m, result);
+    return 1;
+}
 /* What v's method name (conversion_method, check_method) returned in
  * result makes the call's value, owned, or NULL with an error: len(),
  * hash(), int(), float(), complex() and bytes() check their results as
@@ -29454,7 +29510,9 @@ static NO_INLINE Machine *checked_returned(SPYContext *c, Machine *m, Instructio
         return &call->m;
     }
     if (ins->op != BC_FALSE && ins->op != BC_SHORT && ins->op != BC_UNARY) {
-        SPYValue *name = machine_pop(m), *string = conversion_value(c, v, name, result);
+        SPYValue *name = machine_pop(m);
+        if (dir_listing(c, m, name, result)) { spy_release(v); spy_release(name); return m; }
+        SPYValue *string = conversion_value(c, v, name, result);
         spy_release(result); spy_release(v); spy_release(name);
         if (m->len && m->stack[m->len - 1] == c->replacing && (string || m->stack[m->len - 2]->type == SPY_LIST))
             return text_returned(c, m, string);
@@ -30147,6 +30205,7 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
                         m = checked_returned(c, m, &code[pc - 1], result, pc);
                         f = m->frame; code = m->code->items; pc = m->pc;
                         known = c->short_truth; c->short_truth = 0;
+                        if (UNLIKELY(c->consuming)) { c->consuming = 0; goto consume_generator; }
                     } else if (kind == CALL_OPERATOR) {
                         if (result) {
                             m = operator_returned(c, m, &code[pc - 1], result, pc);
@@ -39256,6 +39315,7 @@ SPYContext *spy_context_new(void) {
         if (!v) goto fail;
         v->as.native.call = builtin; v->as.native.data = (void *)(intptr_t)i;
         if (i == B_REPR || i == B_FORMAT) c->field_calls[i == B_FORMAT] = spy_retain(v);
+        if (i == B_SORTED) c->sorter = spy_retain(v);
         int status = name_set(c, c->builtins, names[i], v);
         spy_release(v);
         if (status) goto fail;

@@ -1819,6 +1819,12 @@ int main(int argc, char **argv) {
                "    return len(K.A.__type_params__) + len(repr(K.A))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "generics()", "generics.py"), SPY_STOP_STEPS, &pauses)) == 24 && pauses > 2);
+    /* So does dir() of a generator __dir__, listed and sorted. */
+    execute(c, "class Listed:\n    def __dir__(self):\n        for n in 'cab':\n            for i in range(3000): pass\n"
+               "            yield n\n"
+               "def listed():\n    return len(''.join(dir(Listed())) + ''.join(dir(Listed())))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "listed()", "listed.py"), SPY_STOP_STEPS, &pauses)) == 6 && pauses > 2);
     /* So do ascii() of a Python __repr__ and round() by a Python __index__. */
     execute(c, "class Rounded:\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'ab'\n"
                "    def __index__(self):\n        for i in range(3000): pass\n        return -1\n"

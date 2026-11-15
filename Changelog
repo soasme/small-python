@@ -151,6 +151,7 @@ Unreleased (0.10.0):
 - generator.throw(type, value, traceback) resumes the generator without nesting on the C stack
 - a type statement and a generic def or class make their type parameters, generic base and alias without nesting
   on the C stack; a type alias's repr is its __qualname__
+- dir() lists and sorts the generator a Python __dir__ makes or returns without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its
   keys' stored hashes, as CPython does, and with intersection() and the rest do not nest on the C stack
 - calling a set, frozenset, list, tuple or dict subclass of no __new__ or __init__ on a
