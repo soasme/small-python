@@ -1566,6 +1566,24 @@ static const char *const programs[] = {
     "    return out\n"
     "print(kn())\n",
 
+    "class MK:\n"
+    "    def __init__(s, n): s.n = n\n"
+    "    def __hash__(s): return 1\n"
+    "    def __eq__(s, o):\n"
+    "        if o.n < 0: raise KeyError(o.n)\n"
+    "        return s.n == o.n\n"
+    "class MD(dict):\n"
+    "    def __missing__(s, k): return -k.n\n"
+    "def mk():\n"
+    "    d = MD({MK(1): 'a'})\n"
+    "    out = [d[MK(1)], d[MK(2)]]\n"
+    "    d[MK(1)] = 'b'; d[MK(3)] = 'c'; del d[MK(3)]\n"
+    "    for f in (lambda: d[MK(-1)], lambda: d.__setitem__(MK(-2), 0)):\n"
+    "        try: f()\n"
+    "        except KeyError as x: out.append(x.args[0])\n"
+    "    return out + [len(d), d[MK(1)]]\n"
+    "print(mk())\n",
+
     "class MS(dict):\n"
     "    def __missing__(s, k):\n"
     "        if k == 'bad': raise LookupError(k)\n"

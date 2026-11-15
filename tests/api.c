@@ -2258,6 +2258,12 @@ int main(int argc, char **argv) {
                "    return out\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "awaits_resumed()", "awaits_resumed.py"), SPY_STOP_STEPS, &pauses)) == 5998 && pauses > 2);
+    /* So do a dict subclass's subscript with a Python __missing__, store and deletion, comparing keys by a Python __eq__. */
+    execute(c, "class Absent(dict):\n    def __missing__(self, key): return 1\n"
+               "def missing_compares():\n    k = Same()\n    d = Absent({Same(): 1})\n    n = d[k]\n    d[k] = 2\n    d[k] += 1\n"
+               "    del d[k]\n    return n + len(d)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "missing_compares()", "missing_compares.py"), SPY_STOP_STEPS, &pauses)) == 2 && pauses > 4);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),

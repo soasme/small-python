@@ -480,6 +480,10 @@ struct SPYContext {
     struct Replay *replay;
     /* Whether a read of __annotations__ calls its Python __annotate__ (annotate_pending). */
     int annotating;
+    /* On a machine's stack, marks the dict subclass's instance, under it,
+     * whose subscript's lookup calls its Python __missing__ for an absent
+     * key (lookup_finish). */
+    SPYValue *missing;
 };
 /* The settings: the lazy-import mode ('all' makes eligible imports lazy) and
  * filter (17.5), the asynchronous generator hooks (B.5.1), the frames each
@@ -28201,11 +28205,23 @@ static int machine_lookup(SPYValue *map, SPYValue *key, int contains) {
 }
 /* The map a subscript, or an in when contains, of object looks a key up
  * in: object, or the dict of a dict subclass's instance whose class's
- * __contains__, or __getitem__ with no __missing__, is dict's. */
+ * __contains__, or __getitem__ with no __missing__ or a Python one
+ * (missing_push), is dict's. */
 static SPYValue *lookup_storage(SPYContext *c, SPYValue *object, int contains) {
     if (object->type != SPY_INSTANCE || !object->as.map.base) return object;
-    SPYValue *base = builtin_base(c, object, contains ? "__contains__" : "__getitem__", NULL);
-    return base && is_dict(base) && (contains || !class_lookup(object->as.map.parent, "__missing__")) ? base : object;
+    SPYValue *base = builtin_base(c, object, contains ? "__contains__" : "__getitem__", NULL), *missing;
+    return base && is_dict(base) && (contains || !(missing = class_lookup(object->as.map.parent, "__missing__")) ||
+                                     machine_function(c, missing)) ? base : object;
+}
+/* Before a subscript of x looks up in map, its storage (lookup_storage),
+ * x and c->missing on m's stack when x's class has a __missing__ the
+ * lookup's end calls for an absent key (lookup_finish); whether pushed,
+ * or -1 on an error. */
+static int missing_push(SPYContext *c, Machine *m, SPYValue *x, SPYValue *map) {
+    if (map == x || !class_lookup(x->as.map.parent, "__missing__")) return 0;
+    if (machine_push(c, m, spy_retain(x))) return -1;
+    if (machine_push(c, m, spy_retain(c->missing))) { spy_release(machine_pop(m)); return -1; }
+    return 1;
 }
 /* Whether step ins's lookup of key, of hash, in map compares key with a
  * stored key; else, when key itself is the first entry of hash or, for
@@ -28289,6 +28305,13 @@ static int lookup_stores(Instruction *ins) {
 static ALWAYS_INLINE int store_lookup(SPYValue *map, SPYValue *key, int display) {
     return (map->type == SPY_DICT || (display && map->type == SPY_SET)) && (lookup_key(key) || eq_keyed(map));
 }
+/* The map a store or deletion, by object's method name, looks its key up
+ * in: object, or the dict of a dict subclass's instance whose class's
+ * method is dict's. */
+static SPYValue *store_storage(SPYContext *c, SPYValue *object, const char *name) {
+    SPYValue *base = object->type == SPY_INSTANCE && object->as.map.base ? builtin_base(c, object, name, NULL) : NULL;
+    return base && base->type == SPY_DICT ? base : object;
+}
 /* For a call whose key, hashed in C, may be compared by a Python __eq__
  * in map (store_lookup): the lookup's first Python __eq__ (lookup_call),
  * owned, with *env, the count operands for the call (call_hashed) under
@@ -28363,6 +28386,22 @@ static Machine *lookup_finish(SPYContext *c, Machine *m, Instruction *ins, SPYVa
         return m;
     }
     int op = 0, index = step_operation(ins, &op) == OPERATE_INDEX;
+    if (index && m->len && m->stack[m->len - 1] == c->missing) {
+        /* A dict subclass's absent key: its Python __missing__ is the
+         * operator's call (missing_push). */
+        spy_release(machine_pop(m));
+        SPYValue *x = machine_pop(m), *function = class_lookup(x->as.map.parent, "__missing__"), *env;
+        Call *call = NULL;
+        m->pc = pc;
+        if (!c->error_type[0] && found < 0 && !operator_push(c, m, x, key, OPERATOR_FIRST)) {
+            if ((env = function_env(c, function, 2, (SPYValue *[]){spy_retain(x), spy_retain(key)}, NULL, 1)) &&
+                (call = call_enter(c, spy_retain(function), env, m))) call->m.outermost = CALL_OPERATOR;
+            if (!call) for (int i = 0; i < 3; i++) spy_release(machine_pop(m));
+        }
+        spy_release(x);
+        if (call) return &call->m;
+        if (c->error_type[0] || found < 0) return m;
+    }
     SPYValue *value = c->error_type[0] ? NULL : !index ? spy_bool(c, (op == O_IN) == (found >= 0)) :
                       found < 0 ? missing_key(c, key) : spy_retain(namespace_map(map)->as.map.items[found].value);
     m->pc = operator_finish(c, m, ins, index ? key : map, value, pc);
@@ -28788,9 +28827,10 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
         int deletion = ins->op == BC_SET_TARGET && ins->arg;
         SPYValue *value = deletion ? NULL : machine_pop(m), *item = machine_pop(m), *object = machine_pop(m);
         if (!hashed) hash_failed(c, object, key);
-        if (hashed && store_lookup(object, key, 0) && map_collides(object, key, hash)) {
+        SPYValue *map = hashed ? store_storage(c, object, deletion ? "__delitem__" : "__setitem__") : object;
+        if (hashed && store_lookup(map, key, 0) && map_collides(map, key, hash)) {
             /* The value goes under the lookup's state (lookup_finish). */
-            if (!value || !machine_push(c, m, value)) m = lookup_step(c, m, ins, object, key, hash, map_cursor(object, hash), pc);
+            if (!value || !machine_push(c, m, value)) m = lookup_step(c, m, ins, map, key, hash, map_cursor(map, hash), pc);
             spy_release(key); spy_release(object); spy_release(item);
             return m;
         }
@@ -28808,7 +28848,8 @@ static NO_INLINE Machine *hash_returned(SPYContext *c, Machine *m, Instruction *
     if (!hashed) hash_failed(c, contains ? y : x, key);
     SPYValue *map = hashed ? lookup_storage(c, contains ? y : x, contains) : NULL;
     if (hashed && machine_lookup(map, key, contains) && lookup_found(c, ins, map, key, hash)) {
-        m = lookup_step(c, m, ins, map, key, hash, map_cursor(namespace_map(map), hash), pc);
+        if (!contains && missing_push(c, m, x, map) < 0) m->pc = operator_finish(c, m, ins, y, NULL, pc);
+        else m = lookup_step(c, m, ins, map, key, hash, map_cursor(namespace_map(map), hash), pc);
         spy_release(key);
     } else {
         hash_kept(c, key, hashed && !c->looked, hash);
@@ -29121,8 +29162,16 @@ static NO_INLINE SPYValue *operator_call(SPYContext *c, Machine *m, Instruction 
         if (((contains ? x : y)->type == SPY_INSTANCE || (contains ? x : y)->type == SPY_TUPLE) &&
             ((function = hash_call(c, m, contains ? x : y, 2, operands, env)) || c->error_type[0])) return function;
         c->entering_kind = CALL_OPERATOR;
-        /* A key hashed in C whose Python __eq__ the lookup may call. */
-        if (machine_lookup(map, contains ? x : y, contains)) return native_lookup(c, m, ins, map, contains ? x : y, env);
+        /* A key hashed in C whose Python __eq__ the lookup may call; a
+         * subclass's absent key found without one calls its __missing__
+         * (based_item). */
+        int missing = 0;
+        if (machine_lookup(map, contains ? x : y, contains) && (contains || (missing = missing_push(c, m, x, map)) >= 0)) {
+            if ((function = native_lookup(c, m, ins, map, contains ? x : y, env)) || !missing) return function;
+            spy_release(machine_pop(m)); spy_release(machine_pop(m));
+            if (c->error_type[0] || c->looked) return NULL;
+            c->entering_kind = CALL_OPERATOR;
+        }
     }
     /* A view's item at a tuple of an instance's Python __index__ (memory_key_call). */
     if (kind == OPERATE_INDEX && memory_key_calls(c, x, y, 0)) return memory_key_call(c, m, x, y, 0);
@@ -29740,8 +29789,10 @@ static int store_collides(SPYContext *c, SPYValue *map, SPYValue *key) {
  * of the key for an exact one (native_store), or its Python __index__ for
  * a list, or an item's of a view's tuple key (index_call). */
 static NO_INLINE int store_hooked(SPYContext *c, SPYValue *object, SPYValue *key) {
+    SPYValue *map;
     return (object->type == SPY_INSTANCE && setitem_function(c, object)) ||
-           (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(object, key, 0) && store_collides(c, object, key)))) ||
+           (hashes_first(c, object, "__setitem__") && (hash_calls(c, key) || (store_lookup(map = store_storage(c, object, "__setitem__"), key, 0) &&
+                                                                        store_collides(c, map, key)))) ||
            list_index(c, object, key, "__setitem__") || memory_key_calls(c, object, key, 1);
 }
 /* BC_STORE, or BC_EXEC's assignment (assign_step), to a subscript of a
@@ -29859,9 +29910,10 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
     }
     if (ins->op == BC_SET_TARGET && ins->arg) {
         args[1] = machine_pop(m); args[0] = machine_pop(m);
-        SPYValue *function = store_function(c, args[0], "__delitem__");
+        SPYValue *map, *function = store_function(c, args[0], "__delitem__");
         if (!function && (hashes_first(c, args[0], "__delitem__") ? (function = hash_call(c, m, args[1], 2, args, env)) || c->error_type[0] ||
-                                                   (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], NULL, env))) ||
+                                                   (store_lookup(map = store_storage(c, args[0], "__delitem__"), args[1], 0) &&
+                                                    (function = native_store(c, m, map, args[1], NULL, env))) ||
                                                    c->error_type[0]
                                                  : (function = index_call(c, m, args[1], 2, args, env)) || c->error_type[0])) {
             release_all(2, args); return function;
@@ -29883,11 +29935,12 @@ static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instr
         args[0] = spy_retain(leaf_operand(f, n->a)); args[1] = spy_retain(leaf_operand(f, n->b));
         args[2] = spy_retain(m->stack[m->len - 1]);
     }
-    SPYValue *function = setitem_function(c, args[0]);
+    SPYValue *map, *function = setitem_function(c, args[0]);
     if (!function) {
         /* A dict's key's Python __hash__ (store_hooked), else the store in C. */
         if ((function = hash_call(c, m, args[1], 3, args, env)) || c->error_type[0] ||
-            (store_lookup(args[0], args[1], 0) && (function = native_store(c, m, args[0], args[1], args[2], env))) || c->error_type[0] ||
+            (store_lookup(map = store_storage(c, args[0], "__setitem__"), args[1], 0) && (function = native_store(c, m, map, args[1], args[2], env))) ||
+            c->error_type[0] ||
             (function = index_call(c, m, args[1], 3, args, env)) || c->error_type[0]) {
             release_all(3, args); return function;
         }
@@ -40891,9 +40944,10 @@ SPYContext *spy_context_new(void) {
     c->stopping = value_new(c, V_UNBOUND);
     c->augmenting = value_new(c, V_UNBOUND);
     c->chaining = value_new(c, V_UNBOUND);
+    c->missing = value_new(c, V_UNBOUND);
     c->booleans[0] = value_new(c, SPY_BOOL);
     c->booleans[1] = value_new(c, SPY_BOOL);
-    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->booleans[0] || !c->booleans[1]) goto fail;
+    if (!c->none || !c->not_implemented || !c->ellipsis || !c->unbound || !c->replacing || !c->probing || !c->nesting || !c->walking || !c->keeping || !c->defaulting || !c->negating || !c->converting || !c->tupling || !c->pairing || !c->adapting || !c->stopping || !c->augmenting || !c->chaining || !c->missing || !c->booleans[0] || !c->booleans[1]) goto fail;
     c->booleans[1]->as.integer_data.small = 1;
     for (int64_t i = -5; i <= 256; i++)
         if (!(c->small_ints[i + 5] = spy_int(c, i))) goto fail;
