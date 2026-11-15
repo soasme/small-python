@@ -14,7 +14,9 @@
 (* first out), fromkeys (hashing and setting each key before taking the    *)
 (* next), copy (shallow), clear, a merge into an empty dict comparing     *)
 (* no keys,                                                                *)
-(* reversed(), and __missing__ in subclasses behave as documented, a       *)
+(* reversed(), and __missing__ in subclasses, which dict.__getitem__       *)
+(* called on an instance also calls, its methods bound to it, behave as    *)
+(* documented, a                                                           *)
 (* missing key raising KeyError, a present key of the same hash compared   *)
 (* by its Python __eq__ (which loops) in get, setdefault, pop and a set's  *)
 (* add, discard and remove, a tuple key hashing its items in order, depth  *)
@@ -70,7 +72,7 @@ Reverse(s) == [i \in DOMAIN s |-> s[Len(s) + 1 - i]]
 
 
 Cases == {"ctor_forms", "ctor_keys_attribute", "ctor_own_keys_calls", "ctor_iter_pairs", "ctor_iter_bad_pair", "ctor_iter_keywords", "ctor_iter_keywords_fails", "ctor_keys_listed", "ctor_equal", "ctor_bad_item", "ctor_bad_element", "ctor_two_positional", "fromkeys",
-          "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
+          "fromkeys_shared", "fromkeys_hashed", "pairs_hashed", "values_equal", "values_nested_equal", "fromkeys_hash_fails", "missing_hook", "missing_slot", "missing_tuple", "keyerror", "keyerror_tuple", "unhashable_key", "get_default",
           "pop_default", "pop_missing", "hashed_key_methods", "equal_key_methods", "subclass_key_methods", "stored_key_methods", "tuple_key_hashed", "tuple_key_hash_fails", "tuple_key_equal", "popitem_lifo", "popitem_empty", "setdefault", "update_forms",
           "update_bad", "update_too_many", "or_non_dict", "ior_iterable", "copy_shallow", "merge_empty", "clear",
           "len_iter_reversed", "order_reinsert", "equality_ignores_order", "no_ordering", "unhashable_dict",
@@ -119,6 +121,7 @@ Case(c) ==
       [] c = "values_nested_equal" -> "(True, False, ['ab', 'cd'])"
       [] c = "fromkeys_hash_fails" -> "(\"cannot use 'Unhashed' as a dict key (no)\", [1])"
       [] c = "missing_hook" -> "(1, 'zzzz', False, None)"
+      [] c = "missing_slot" -> "(1, 'bb', 'cc', True)"
       [] c = "missing_tuple" -> "('s', (3, 3), ((1,), (1,)), True)"
       [] c = "keyerror" -> "KeyError: 'k'"
       [] c = "keyerror_tuple" -> "KeyError: (1,)"

@@ -2134,11 +2134,12 @@ static int is_view(SPYValue *v) { return v->type == SPY_DICT_KEYS || v->type == 
 static SPYValue *storage(SPYValue *v) { return v->type == SPY_INSTANCE ? v->as.map.base : v; }
 /* A view holds the mapping it was made from; it reads that mapping's storage. */
 static SPYValue *view_map(SPYValue *v) { return storage(v->as.bound.self); }
-/* A builtin method found on a subclass instance's storage binds the instance. */
+/* A builtin method found on a subclass instance's storage binds the
+ * instance: a bound method, or a method-wrapper made for the lookup. */
 static SPYValue *bind_instance(SPYValue *method, SPYValue *instance) {
-    if (method && method->type == SPY_BOUND_METHOD && instance->type == SPY_INSTANCE && method->as.bound.self == instance->as.map.base) {
-        spy_release(method->as.bound.self); method->as.bound.self = spy_retain(instance);
-    }
+    SPYValue **self = !method || instance->type != SPY_INSTANCE ? NULL : method->type == SPY_BOUND_METHOD ? &method->as.bound.self :
+                      method->type == SPY_METHOD && method->refs == 1 ? &method->as.method.self : NULL;
+    if (self && *self == instance->as.map.base) { spy_release(*self); *self = spy_retain(instance); }
     return method;
 }
 /* Keys and items views are set-like; values views are not. */
@@ -21514,7 +21515,7 @@ enter:
     return spy_retain(function);
 }
 static SPYValue *type_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
-static SPYValue *property_entered(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
+static SPYValue *native_entered(SPYContext *, SPYValue *, size_t, SPYValue *const *, SPYValue **);
 /* Whether callee of argc arguments argv makes a class class_make makes:
  * type() of a name, bases of no metaclass and a namespace, or
  * type.__new__. */
@@ -26096,8 +26097,8 @@ static SPYValue *class_stack_call(SPYContext *, Machine *, SPYValue *, size_t, i
 static NO_INLINE SPYValue *operand_call_rest(SPYContext *c, Machine *m, Node *n, SPYValue *callee, int method,
                                              size_t argc, SPYValue **argv, SPYValue **env) {
     SPYValue *result, *self;
-    if (method < 0 && (result = property_entered(c, callee, argc, argv, env))) {
-        /* property.__get__ enters its getter. */
+    if (method < 0 && (result = native_entered(c, callee, argc, argv, env))) {
+        /* property.__get__ enters its getter, dict.__getitem__ a __missing__ (native_entered). */
         release_all(argc, argv); spy_release(callee);
         return result;
     }
@@ -27085,7 +27086,7 @@ static NO_INLINE SPYValue *stack_call(SPYContext *c, Machine *m, Node *n, size_t
     id = consumer_of(c, callee, -1, argc, argv);
     SPYValue *generator = id >= 0 ? spy_retain(argv[0]) : NULL, *start = id >= 0 && argc > 1 ? spy_retain(argv[1]) : NULL;
     SPYValue *traceback = id >= 0 && argc > 2 ? spy_retain(argv[2]) : NULL;
-    SPYValue *getter = id < 0 && calls ? property_entered(c, callee, argc, argv, env) : NULL;
+    SPYValue *getter = id < 0 && calls ? native_entered(c, callee, argc, argv, env) : NULL;
     int plain = 0;
     SPYValue *init = callee->type == SPY_CLASS && !getter ? class_init(c, callee, &plain) : NULL;
     result = id >= 0 || getter || c->error_type[0] ? getter : calls && class_maker(c, callee, argc, argv) ? class_make(c, argc, argv, NULL) :
@@ -27203,7 +27204,7 @@ static NO_INLINE SPYValue *stack_method_call(SPYContext *c, Machine *m, Node *n,
         release_all(argc + 1, held); spy_release(callee);
         return function ? spy_retain(c->types[SPY_STRING]) : result;
     }
-    if (callee && id < 0 && !(result = calls && method < 0 ? property_entered(c, callee, argc + !skip, argv + skip, env) : NULL) && !c->error_type[0])
+    if (callee && id < 0 && !(result = calls && method < 0 ? native_entered(c, callee, argc + !skip, argv + skip, env) : NULL) && !c->error_type[0])
         result = calls && method < 0 && class_maker(c, callee, argc + !skip, argv + skip) ? class_make(c, argc + !skip, argv + skip, NULL) :
                  step_call(c, m, callee, method, n, argc + !skip, argv + skip);
     for (size_t i = 0; i <= argc; i++) spy_release(machine_pop(m));
@@ -28859,6 +28860,19 @@ static int native_key(SPYContext *c, SPYValue *key) {
     return key->type <= SPY_STRING ||
            (key->type == SPY_TUPLE && (!key->listed || key->as.seq.plain || (!hash_reaches(c, key, 1) && key->as.seq.plain)));
 }
+/* Whether native key (native_key) is absent from dict, found without
+ * calling Python. */
+static int native_absent(SPYContext *c, SPYValue *dict, SPYValue *key) {
+    int64_t hash;
+    if (!native_key(c, key) || hash_value(c, key, &hash)) return 0;
+    SPYValue *map = namespace_map(dict);
+    MapCursor cursor = map_cursor(map, hash);
+    for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
+        SPYValue *stored = map->as.map.items[i].key;
+        if (stored == key || !native_key(c, stored) || equal(stored, key)) return 0;
+    }
+    return 1;
+}
 /* x[y], x an instance of a builtin's subclass: its class's Python
  * __getitem__, or for a dict's subclass, of a key y that is native
  * (native_key) and absent, found without calling Python, its Python
@@ -28866,17 +28880,8 @@ static int native_key(SPYContext *c, SPYValue *key) {
  * phase pushed on m's stack; else NULL. */
 static NO_INLINE SPYValue *based_item(SPYContext *c, Machine *m, SPYValue *x, SPYValue *y, SPYValue **env) {
     SPYValue *base = builtin_base(c, x, "__getitem__", NULL), *function = NULL;
-    int64_t hash;
     if (!base) function = class_lookup(x->as.map.parent, "__getitem__");
-    else if (is_dict(base) && native_key(c, y) && !hash_value(c, y, &hash)) {
-        SPYValue *map = namespace_map(base);
-        MapCursor cursor = map_cursor(map, hash);
-        for (ptrdiff_t i; (i = map_next(map, hash, &cursor)) >= 0;) {
-            SPYValue *key = map->as.map.items[i].key;
-            if (key == y || !native_key(c, key) || equal(key, y)) return NULL;
-        }
-        function = class_lookup(x->as.map.parent, "__missing__");
-    }
+    else if (is_dict(base) && native_absent(c, base, y)) function = class_lookup(x->as.map.parent, "__missing__");
     if (!function || !machine_function(c, function) || operator_push(c, m, x, y, OPERATOR_FIRST)) return NULL;
     SPYValue *args[] = {spy_retain(x), spy_retain(y)};
     if ((*env = function_env(c, function, 2, args, NULL, 1))) return spy_retain(function);
@@ -39680,18 +39685,25 @@ static SPYValue *type_init(SPYContext *c, size_t argc, SPYValue *const *argv, SP
     spy_release(fresh);
     return c->error_type[0] ? NULL : spy_none(c);
 }
-/* A call of callee with argc arguments argv that is property.__get__ of
- * an object, bound or not, whose property's getter is Python: that
- * getter, owned, with *env, to enter as the call; else NULL. */
-static SPYValue *property_entered(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
-    SPYValue *self = NULL;
+static int native_absent(SPYContext *, SPYValue *, SPYValue *);
+/* A call of callee with argc arguments argv, bound or not, that is
+ * property.__get__ of an object whose property's getter is Python, or
+ * dict.__getitem__ of a dict subclass's instance whose class has a Python
+ * __missing__, with a native key it lacks (native_absent): that getter or
+ * __missing__, owned, with *env, to enter as the call; else NULL. */
+static SPYValue *native_entered(SPYContext *c, SPYValue *callee, size_t argc, SPYValue *const *argv, SPYValue **env) {
+    SPYValue *self = NULL, *function;
     if (callee->type == SPY_METHOD && !callee->as.method.plain) { self = callee->as.method.self; callee = callee->as.method.function; }
-    if (callee->type != SPY_NATIVE || callee->as.native.kwcall != descriptor_method ||
-        callee->as.native.data != (void *)((intptr_t)SPY_PROPERTY << 8 | DESCR_GET)) return NULL;
-    if (!self) {
-        if (!argc--) return NULL;
-        self = *argv++;
+    if (callee->type != SPY_NATIVE || (!self && !argc--)) return NULL;
+    if (!self) self = *argv++;
+    if (callee->as.native.kwcall == slot_call) {
+        SPYValue *base = self->type == SPY_INSTANCE && argc == 1 && callee->as.native.owner == c->types[SPY_DICT] &&
+                         !strcmp(callee->as.native.name->as.string.data, "__getitem__") ? builtin_value(c, self, SPY_DICT) : NULL;
+        if (!base || !(function = class_lookup(self->as.map.parent, "__missing__")) || !machine_function(c, function) ||
+            !native_absent(c, base, argv[0])) return NULL;
+        return (*env = function_env(c, function, 2, (SPYValue *[]){self, argv[0]}, NULL, 0)) ? spy_retain(function) : NULL;
     }
+    if (callee->as.native.kwcall != descriptor_method || callee->as.native.data != (void *)((intptr_t)SPY_PROPERTY << 8 | DESCR_GET)) return NULL;
     SPYValue *p = builtin_value(c, self, SPY_PROPERTY);
     if (!p || argc < 1 || argc > 2 || argv[0]->type == SPY_NONE || !machine_function(c, p->as.property.get)) return NULL;
     return (*env = function_env(c, p->as.property.get, 1, argv, NULL, 0)) ? spy_retain(p->as.property.get) : NULL;

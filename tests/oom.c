@@ -1395,6 +1395,20 @@ static const char *const programs[] = {
     "    return sorted(ns)\n"
     "print(hn())\n",
 
+    "class MS(dict):\n"
+    "    def __missing__(s, k):\n"
+    "        if k == 'bad': raise LookupError(k)\n"
+    "        return [k]\n"
+    "class MO(MS):\n"
+    "    def __getitem__(s, k): return super().__getitem__(k) + [1]\n"
+    "def ms():\n"
+    "    d = MO(a=[0])\n"
+    "    out = [d['a'], d['b'], dict.__getitem__(d, 'c'), d.__getitem__('e'), d.__len__.__self__ is d]\n"
+    "    try: dict.__getitem__(d, 'bad')\n"
+    "    except LookupError as e: out.append(e.args)\n"
+    "    return out\n"
+    "print(ms())\n",
+
     "class HR(dict):\n"
     "    def __setitem__(s, k, v): dict.__setitem__(s, k, (k, v is None))\n"
     "    def __delitem__(s, k):\n"

@@ -2186,6 +2186,12 @@ int main(int argc, char **argv) {
                "            except ZeroDivisionError as e: raise KeyError\n    except KeyError: return deleted\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "len(raised())", "raised.py"), SPY_STOP_STEPS, &pauses)) == 1 && pauses > 2);
+    /* So does dict.__getitem__ of a dict subclass's absent key, unbound or through super(), calling its Python __missing__. */
+    execute(c, "class Absent(dict):\n    def __missing__(self, k):\n        for i in range(3000): pass\n        return i\n"
+               "class Over(Absent):\n    def __getitem__(self, k): return super().__getitem__(k) + 1\n"
+               "def missed():\n    d = Over()\n    return d['a'] + dict.__getitem__(d, 'b') + d.__getitem__('c')\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "missed()", "missed.py"), SPY_STOP_STEPS, &pauses)) == 8999 && pauses > 2);
     /* So does round() given ndigits by keyword. */
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "round(1234, ndigits=Rounded()) + round(ndigits=Rounded(), number=25)", "rounded_by.py"),
