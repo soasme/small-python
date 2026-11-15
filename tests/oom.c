@@ -1119,6 +1119,14 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ok())\n",
 
+    "class OR(int):\n"
+    "    def __repr__(self): return 'r%d' % int(self)\n"
+    "class OS(float):\n"
+    "    def __str__(self): return 's'\n"
+    "def orr():\n"
+    "    return str(OR(1)), f'{OR(2)}|{OS(1.5)}', format(OR(3), ''), format(OS(2.5), ''), format(OR(4), 'x'), '%s%r' % (OR(5), OR(6))\n"
+    "print(orr())\n",
+
     "def of(n):\n"
     "    for i in range(n): yield i\n"
     "def ofk(x):\n"

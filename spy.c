@@ -25499,8 +25499,13 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     if (id == B_FORMAT) {
         SPYValue *text = argc == 2 ? argv[1] : NULL;
         /* A builtin subclass's instance formats as its base unless a
-         * Python class before it defines the method (builtin_base). */
-        if (base && builtin_base(c, argv[0], "__format__", NULL)) return NULL;
+         * Python class before it defines the method (builtin_base), which
+         * for an empty spec is str(). */
+        int empty = !text || (text->type == SPY_STRING && !text->as.string.len);
+        if (base && builtin_base(c, argv[0], "__format__", NULL)) {
+            if (!empty) return NULL;
+            goto converted;
+        }
         function = class_lookup(cls, "__format__");
         if (function && machine_function(c, function)) {
             if (!(*spec = text ? spy_retain(text) : spy_string(c, "", 0)) || !(*name = spy_string(c, "__format__", 10))) { spy_release(*spec); *spec = NULL; return NULL; }
@@ -25508,8 +25513,9 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
             return function;
         }
         /* With none above object's, an empty spec formats as str(). */
-        if (function || (text && (text->type != SPY_STRING || text->as.string.len))) return NULL;
+        if (function || !empty) return NULL;
     }
+converted:
     if (id == B_BOOL) {
         /* False names a __len__ bool() takes the truth of. */
         int length = 0;
@@ -25523,7 +25529,11 @@ static NO_INLINE SPYValue *conversion_method(SPYContext *c, SPYValue *callee, si
     const char *method = id == B_LEN ? "__len__" : id == B_INT ? "__int__" : id == B_FLOAT ? "__float__" :
         id == B_COMPLEX ? "__complex__" : id == B_BYTES ? "__bytes__" : id == B_HASH ? "__hash__" : id == B_ABS ? "__abs__" : id == B_ROUND ? "__round__" :
         id == B_REVERSED ? "__reversed__" : id == B_NEXT ? "__next__" : id == B_DIR ? "__dir__" : repr ? "__repr__" : "__str__";
-    if (base && builtin_base(c, argv[0], method, NULL)) return NULL;
+    SPYValue *first = base ? builtin_base(c, argv[0], method, NULL) : NULL;
+    /* str and bytes define __str__; other builtin bases only __repr__ (format_value). */
+    if (first && (id < 0 || id == B_FORMAT) && first->type != SPY_STRING && first->type != SPY_BYTES && first->type != SPY_BYTEARRAY)
+        first = builtin_base(c, argv[0], "__repr__", NULL);
+    if (first) return NULL;
     function = class_lookup(cls, method);
     if (!function && (id < 0 || id == B_FORMAT)) function = class_lookup(cls, "__repr__");
     /* int() and float() with no __int__ or __float__ convert the int the

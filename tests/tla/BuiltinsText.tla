@@ -72,7 +72,7 @@ Cases == {"chr_bounds", "chr_over", "chr_negative", "chr_float", "chr_huge", "or
           "ord_int", "ascii_object", "repr_bad", "ascii_bad", "str_bad", "repr_recursive", "repr_bytes_quotes",
           "format_hook", "format_fields", "format_map_fields", "format_object_spec", "format_object_empty", "format_bad_return",
           "format_spec_type", "print_sep_end", "print_starred", "print_none_sep", "print_no_args", "print_flush",
-          "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_file_getattr", "print_unknown_kw",
+          "print_bad_sep", "print_bad_end", "print_file_none_ok", "print_file_nowrite", "print_file_getattr", "str_base_repr", "print_unknown_kw",
           "print_str_calls", "print_write_each", "print_str_sep", "str_bytes_warns_not", "repr_str_quotes", "repr_nonprintable",
           "isprintable_rule", "format_width_unicode", "ascii_bytes_unchanged", "bin_format_spec",
           "repr_own_slot", "repr_nested_items", "repr_map_items", "repr_subclass_own", "repr_metaclass",
@@ -126,6 +126,8 @@ Case(c) ==
       [] c = "print_bad_end" -> "TypeError: end must be None or a string, not bytes"
       [] c = "print_file_none_ok" -> "True"
       [] c = "print_file_nowrite" -> "AttributeError: 'int' object has no attribute 'write'"
+      \* str() of an int subclass is its Python __repr__, as format() with an empty spec is
+      [] c = "str_base_repr" -> "('R!', 'R!', 'R!', '3', 'S!')"
       [] c = "print_file_getattr" -> "['write', 'a', 'write', '-', 'write', '1', 'write', '\\n', 'flush', 'get', 'b', 'get', '\\n']"
       [] c = "print_unknown_kw" -> "TypeError: print() got an unexpected keyword argument 'x'"
       [] c = "print_str_calls" -> "['S!', '\\n']"

@@ -378,7 +378,9 @@ These run as machines on the heap, in one native activation of
   `int`, `float`, `bool`, `complex` and `bytes` of one argument, `hash`, `abs`,
   `round`, `reversed` and `next`, also with a default, call, on an instance
   (one of a builtin type's subclass when a Python class defines the method
-  before the builtin type) or on a class from its metaclass, the
+  before the builtin type, or `__repr__` for `str` and an empty `format`
+  spec when the builtin type defines no `__str__`) or on a class from its
+  metaclass, the
   `__len__` that `reversed`
   calls on a sequence without `__reversed__`, the `__dir__` that `dir`
   calls and the generator it makes or returns, or such another iterator

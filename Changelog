@@ -194,6 +194,7 @@ Unreleased (0.10.0):
 - a call's ** reports a repeated keyword before reading its value, and a non-str key after every ** merges
 - a stored dict or set key's Python __eq__ runs without nesting on the C stack when a builtin key is looked up, stored or deleted
 - filter() of a Python function resumes its generator without nesting on the C stack
+- str() and an empty-spec format() of a builtin subclass call its Python __repr__ or __str__ without nesting on the C stack
 - a dropped generator in a yield from of a builtin iterator, or of an instance with a Python close,
   closes without nesting on the C stack
 - a set's union(), update(), difference() and symmetric_difference_update() of a dict take its

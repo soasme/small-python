@@ -1988,6 +1988,11 @@ int main(int argc, char **argv) {
                "def odd_items():\n    return sum(filter(odd, slow_items_of(6)))\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "odd_items()", "odd_items.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 4);
+    /* So does str() of an int subclass's Python __repr__, and format()'s with an empty spec. */
+    execute(c, "class Shown(int):\n    def __repr__(self):\n        for i in range(3000): pass\n        return 'shown'\n"
+               "def shown():\n    return len(str(Shown(1)) + f'{Shown(2)}' + format(Shown(3), '') + '%s' % Shown(4))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "shown()", "shown.py"), SPY_STOP_STEPS, &pauses)) == 20 && pauses > 3);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
