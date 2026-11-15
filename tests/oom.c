@@ -1231,6 +1231,16 @@ static const char *const programs[] = {
     "    return b'k' in it, len(list(it)), b'q' in iter((BE(),))\n"
     "print(bt())\n",
 
+    "class RD:\n"
+    "    def __eq__(self, o): return NotImplemented\n"
+    "class RE:\n"
+    "    def __eq__(self, o):\n"
+    "        for _ in (): pass\n"
+    "        return True\n"
+    "def rf():\n"
+    "    return [RD()] == [RE()], (RD(), 1) == (RD(), 1), {1: RD()} == {1: RE()}\n"
+    "print(rf())\n",
+
     "class SE(str):\n"
     "    __hash__ = str.__hash__\n"
     "    def __eq__(self, o):\n"

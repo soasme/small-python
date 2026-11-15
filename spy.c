@@ -29020,6 +29020,25 @@ static NO_INLINE Machine *contains_returned(SPYContext *c, Machine *m, Instructi
     spy_release(x); spy_release(iterator);
     return m;
 }
+/* A pair's __eq__ (equal_call) declined with NotImplemented: right's
+ * Python __eq__ entered with left, the operands, c->unbound and c->pairing
+ * pushed again for pair_returned; else NULL, maybe an error pending. */
+static NO_INLINE Call *pair_reflect(SPYContext *c, Machine *m, SPYValue *left, SPYValue *right) {
+    int negated;
+    SPYValue *function = rich_entry(c, right, R_EQ, &negated), *env;
+    if (!function) return NULL;
+    size_t len = m->len;
+    SPYValue *args[] = {spy_retain(right), spy_retain(left)};
+    if (machine_push(c, m, spy_retain(left)) || machine_push(c, m, spy_retain(right)) || machine_push(c, m, spy_retain(c->unbound)) ||
+        machine_push(c, m, spy_retain(c->pairing)))
+        release_all(2, args);
+    else if ((env = function_env(c, function, 2, args, NULL, 1))) {
+        Call *call = call_enter(c, spy_retain(function), env, m);
+        if (call) { call->m.outermost = CALL_OPERATOR; return call; }
+    }
+    while (m->len > len) spy_release(machine_pop(m));
+    return NULL;
+}
 /* The __eq__ equal_call entered for step ins returned result: the pair
  * unequal, or the next pair's comparison, or the native comparison of the
  * rest; an ordering's then decides at the first unequal pair
@@ -29029,7 +29048,21 @@ static NO_INLINE Machine *pair_returned(SPYContext *c, Machine *m, Instruction *
     int op = 0;
     step_operation(ins, &op);
     spy_release(machine_pop(m));
-    SPYValue *right = machine_pop(m), *left = machine_pop(m), *test = compared(c, T_EQ, left, right, result);
+    int reflected = m->stack[m->len - 1] == c->unbound;
+    if (reflected) spy_release(machine_pop(m));
+    SPYValue *right = machine_pop(m), *left = machine_pop(m), *test;
+    Call *call;
+    if (reflected && result == c->not_implemented) {
+        spy_release(result);
+        test = comparison_declined(c, T_EQ, left, right);
+    } else if (reflected) test = result;
+    else if (result == c->not_implemented && (call = pair_reflect(c, m, left, right))) {
+        spy_release(result); spy_release(left); spy_release(right);
+        return &call->m;
+    } else if (result == c->not_implemented && c->error_type[0]) {
+        spy_release(result);
+        test = NULL;
+    } else test = compared(c, T_EQ, left, right, result);
     int found = test ? truthy(test) : 0;
     spy_release(test); spy_release(left); spy_release(right);
     for (;;) {

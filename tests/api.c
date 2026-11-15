@@ -2042,6 +2042,12 @@ int main(int argc, char **argv) {
     execute(c, "def iterated():\n    it = iter([1, Wants(), Wants()])\n    return (b'k' in it) + len(list(it)) + 8\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "iterated()", "iterated.py"), SPY_STOP_STEPS, &pauses)) == 10 && pauses > 0);
+    /* So does a sequence item's reflected __eq__, after the other's declined. */
+    execute(c, "class Declines:\n    def __eq__(self, o): return NotImplemented\n"
+               "class Reflects:\n    def __eq__(self, o):\n        for i in range(3000): pass\n        return True\n"
+               "def reflected():\n    return ([Declines()] == [Reflects()]) + ({1: Declines()} == {1: Reflects()}) + 9\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "reflected()", "reflected.py"), SPY_STOP_STEPS, &pauses)) == 11 && pauses > 0);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"
