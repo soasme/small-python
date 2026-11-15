@@ -309,8 +309,8 @@ These run as machines on the heap, in one native activation of
   `map` or `filter`, or of `iter(f, sentinel)` with the sentinel's
   `__eq__` and its reflected one, also through a `zip`, `map` or
   `enumerate`, it takes items from, these also for `next`, a `map`'s bound method or callable
-  instance's `__call__` too, the generator that an `enumerate`, or a
-  `filter` whose function is `None` or native, takes items from, and the
+  instance's `__call__` too, the generator that an `enumerate` or a
+  `filter` takes items from, and the
   generators that a `zip` or a `map` without `strict` takes items from
   beside iterators over ranges and builtin values such as a `str`, `bytes` or
   `dict`, and the calls of the maps, and
@@ -536,8 +536,7 @@ A call that native code makes runs in an activation of its own: another
 special method (outside code compiled while pausing, an augmented
 subscript assignment's or a target list's `__setitem__` and a deletion's
 `__delitem__`; an unpacking's
-`__iter__`, a property of a class with `__getattr__`), the items a
-`filter` by a Python function takes from a generator, and a strict
+`__iter__`, a property of a class with `__getattr__`), and a strict
 `zip` or `map` or one taking from another iterator beside it, the
 comparisons of the items an `in` searches, a host function's `spy_call`
 (its `spy_callk` call runs on the machine and pauses),

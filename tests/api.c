@@ -1982,6 +1982,12 @@ int main(int argc, char **argv) {
                "def stored():\n    d = {Stored(4): 5}\n    d[4] = 6\n    return d[4] + (4 in d) + (4 in {Stored(4)}) + len({Stored(4), 4})\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "stored()", "stored.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 4);
+    /* So does filter()'s Python function over a generator. */
+    execute(c, "def odd(x): return x % 2\n"
+               "def slow_items_of(n):\n    for i in range(n):\n        for j in range(3000): pass\n        yield i\n"
+               "def odd_items():\n    return sum(filter(odd, slow_items_of(6)))\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "odd_items()", "odd_items.py"), SPY_STOP_STEPS, &pauses)) == 9 && pauses > 4);
     /* So does filter()'s iterator's Python __next__. */
     execute(c, "class Slow:\n    def __init__(self): self.n = 0\n    def __iter__(self): return self\n"
                "    def __next__(self):\n        for i in range(3000): pass\n        self.n += 1\n"

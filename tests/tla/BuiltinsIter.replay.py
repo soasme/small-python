@@ -178,6 +178,8 @@ SOURCES = {
     "sort_tuple_ties": 'class T:\n    def __init__(self, v): self.v = v\n    def __eq__(self, o): log.append(1); return self.v == o.v\n'
                        '    def __lt__(self, o): return self.v < o.v\nlog = []\n'
                        'result = ([t[1].v for t in sorted([(0, T(2)), (0, T(1)), (0, T(0))])], bool(log))',
+    "filter_generator": "log = []\ndef g(n):\n    for i in range(n):\n        log.append(i)\n        yield i\n"
+                        "def odd(x):\n    log.append(-x)\n    return x % 2\nresult = (list(filter(odd, g(4))), log)",
     "zip_native_generator": "log = []\ndef g(n):\n    for i in range(n):\n        log.append(i)\n        yield i\n"
                             "it = iter('abc')\nz = list(zip('ab', g(5))), dict(zip(b'x', g(2)))\nlist(zip(it, g(1)))\nresult = z + (next(it), log)",
     "sort_lt_declined": "class D:\n    def __init__(self, v): self.v = v\n    def __lt__(self, o): return NotImplemented\n"

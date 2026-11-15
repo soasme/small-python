@@ -23948,7 +23948,7 @@ static int zip_of_generator(SPYValue *v) {
  * can resume (consumer_of): sum, any, all, min, max, list, tuple, set,
  * frozenset, dict, sorted or str.join (B_JOIN); next() of it, or a generator's __next__
  * or send (B_NEXT); else -1. */
-static SPYValue *adapted_generator(SPYContext *, SPYValue *);
+static SPYValue *adapted_generator(SPYValue *);
 /* Whether fn is a generator function, whose call runs none of its body. */
 static int generator_function(SPYContext *c, SPYValue *fn) {
     Node *def = fn->type == SPY_FUNCTION && fn->ctx == c ? fn->as.function.def : NULL;
@@ -24161,7 +24161,7 @@ static int compared_items(SPYContext *c, SPYValue *set, SPYValue *v, int which) 
     return 0;
 }
 static int machine_source(SPYContext *c, SPYValue *v) {
-    return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(c, v) || iter_function(c, v) || getitem_iterated(c, v);
+    return resumable(v) || called_iterator(v) || zip_of_generator(v) || adapted_generator(v) || iter_function(c, v) || getitem_iterated(c, v);
 }
 static SPYValue *dict_fromkeys(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
 static SPYValue *set_method(SPYContext *, size_t, SPYValue *const *, SPYValue *, void *);
@@ -30261,22 +30261,28 @@ static ALWAYS_INLINE void loop_item(SPYContext *c, Machine *m, Frame *f, Instruc
     else machine_push(c, m, item);
 }
 /* The generator the machine resumes for iterator v's next item, borrowed:
- * the source of an enumerate, or of a filter whose function is None or
- * native, which adapted_item makes the item of; else NULL. */
-static SPYValue *adapted_generator(SPYContext *c, SPYValue *v) {
+ * the source of an enumerate, or of a filter with no item waiting in its
+ * counter, which adapted_item, or for a Python function adapted_flow,
+ * makes the item of; else NULL. */
+static SPYValue *adapted_generator(SPYValue *v) {
     if (v->type != SPY_ITERATOR || v->as.iterator.done) return NULL;
     SPYValue *source = v->as.iterator.source;
     if (v->as.iterator.kind == I_FILTER) {
-        if (machine_function(c, source->as.seq.items[0])) return NULL;
+        if (v->as.iterator.counter) return NULL;
         source = source->as.seq.items[1];
     } else if (v->as.iterator.kind != I_ENUMERATE) return NULL;
     return resumable(source) ? source : NULL;
 }
 /* Adapter v (adapted_generator) takes the item its generator yielded in
- * flow: a yield of its item; of none when it drops it; else its end, a
- * StopIteration from a filter's function, as in iterator_next, or an
- * error. */
+ * flow: a yield of its item; of none when it drops it, or when a filter's
+ * Python function is to test it, the item waiting in v's counter
+ * (filter_next); else its end, a StopIteration from a filter's function,
+ * as in iterator_next, or an error. */
 static NO_INLINE Result adapted_flow(SPYContext *c, SPYValue *v, Result flow) {
+    if (v->as.iterator.kind == I_FILTER && machine_function(c, v->as.iterator.source->as.seq.items[0])) {
+        v->as.iterator.counter = flow.value; v->as.iterator.index = 1;
+        return (Result){FLOW_YIELD, NULL};
+    }
     if ((flow.value = adapted_item(c, v, flow.value)) || !c->error_type[0]) return flow;
     if (error_is(c, "StopIteration")) spy_clear_error(c);
     return (Result){FLOW_NORMAL, NULL};
@@ -30791,7 +30797,7 @@ static NO_INLINE SPYValue *adapted_returned(SPYContext *c, Machine *m, SPYValue 
 }
 static NO_INLINE int next_call_of(SPYContext *c, Machine *m, SPYValue *v, SPYValue **fn, SPYValue **env) {
     SPYValue *function, *args;
-    if ((*fn = adapted_generator(c, v))) return 2;
+    if ((*fn = adapted_generator(v))) return 2;
     if (v->type == SPY_ITERATOR) {
         int status = (v->as.iterator.removed & 1) && zip_of_generator(v) ? zip_fill(c, v, fn) : 0;
         if (status) return status < 0 ? -1 : 2;

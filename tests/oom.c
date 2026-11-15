@@ -1119,6 +1119,18 @@ static const char *const programs[] = {
     "    return out\n"
     "print(ok())\n",
 
+    "def of(n):\n"
+    "    for i in range(n): yield i\n"
+    "def ofk(x):\n"
+    "    if x == 4: raise StopIteration\n"
+    "    return x % 2\n"
+    "def ofo():\n"
+    "    f = filter(ofk, of(3))\n"
+    "    out = [list(filter(ofk, of(5))), next(f), [y for y in f], sum(filter(ofk, of(4)))]\n"
+    "    for y in filter(ofk, of(2)): out.append(y)\n"
+    "    return out\n"
+    "print(ofo())\n",
+
     "class OE(int):\n"
     "    __hash__ = int.__hash__\n"
     "    def __eq__(self, o): return int(self) == o\n"
