@@ -23,7 +23,9 @@
 (* fill, with no __mro_entries__, __prepare__ or type parameter. A        *)
 (* __prepare__ may return a dict subclass whose Python __setitem__ logs    *)
 (* the body's implicit stores of __module__ ("module"), before its         *)
-(* statements, and __static_attributes__ ("static"), after them.          *)
+(* statements, and __static_attributes__ ("static"), after them; the body *)
+(* then ends with def m, logging "def", and del m, logging "del" by its    *)
+(* Python __delitem__.                                                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
@@ -46,7 +48,7 @@ Create(p) ==
                    \o (IF p.subclass_hook THEN <<IF p.flag THEN "init_subclass flag" ELSE "init_subclass">> ELSE <<>>)
         logged == p.logged /\ p.meta = "prepare" /\ ~p.call
         before == (IF p.entries /\ ~p.call THEN <<"mro_entries">> ELSE <<>>) \o (IF p.meta = "prepare" /\ ~p.call THEN <<"prepare">> ELSE <<>>)
-                  \o (IF logged THEN <<"module">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>) \o (IF logged THEN <<"static">> ELSE <<>>)
+                  \o (IF logged THEN <<"module">> ELSE <<>>) \o (IF p.calls THEN <<"body">> ELSE <<>>) \o (IF logged THEN <<"def", "del", "static">> ELSE <<>>)
                   \o (IF p.meta \in {"meta", "prepare"} THEN <<"new">> ELSE <<>>) \o typeNew
     IN  IF fails THEN <<before, "TypeError">>
         ELSE <<before \o (IF custom THEN <<"init">> ELSE <<>>) \o (IF p.deco THEN <<"decorate">> ELSE <<>>), "ok">>
@@ -68,6 +70,9 @@ BodyBetween == Done /\ Logged("body") => (Logged("prepare") => Index("prepare") 
 
 \* The implicit names surround the body's statements.
 ImplicitAroundBody == Done /\ Logged("module") /\ Logged("body") => Index("module") < Index("body") /\ Index("body") < Index("static")
+
+\* The body's statements bind and delete through the namespace in order, between the implicit names.
+BindsInBody == Done /\ Logged("def") => Index("module") < Index("def") /\ Index("def") < Index("del") /\ Index("del") < Index("static")
 
 \* The bases are resolved before anything else runs.
 EntriesFirst == Done /\ Logged("mro_entries") => Index("mro_entries") = 1

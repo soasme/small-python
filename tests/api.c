@@ -1785,6 +1785,14 @@ int main(int argc, char **argv) {
                "def namespaced():\n    class K(metaclass=Slowmeta): pass\n    return len(K.__qualname__)\n");
     pauses = 0;
     assert(integer(c, run_paused(c, spy_eval(c, "namespaced()", "namespaced.py"), SPY_STOP_STEPS, &pauses)) == 21 && pauses > 3);
+    /* So do its def's and del's, through __setitem__ and __delitem__. */
+    execute(c, "class Slowdel(Slowns):\n    def __delitem__(self, k):\n        for i in range(3000): pass\n"
+               "        super().__delitem__(k)\n"
+               "class Delmeta(type):\n    @classmethod\n    def __prepare__(m, n, b): return Slowdel()\n"
+               "def bound():\n    class K(metaclass=Delmeta):\n        def f(self): return 7\n        g: int = 1\n        del g\n"
+               "    return K().f() + len(K.__dict__) - ('g' in K.__dict__)\n");
+    pauses = 0;
+    assert(integer(c, run_paused(c, spy_eval(c, "bound()", "bound.py"), SPY_STOP_STEPS, &pauses)) > 7 && pauses > 6);
     /* So does the Python __new__ a generator's throw() of a class calls. */
     execute(c, "class Fresh(Exception):\n    def __new__(cls, *a):\n        for i in range(3000): pass\n"
                "        e = super().__new__(cls, *a); e.i = i; return e\n"

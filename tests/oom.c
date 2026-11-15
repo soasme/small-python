@@ -435,6 +435,24 @@ static const char *const programs[] = {
     "    return r + [sum(iter(f, 0)), next(iter(f, 0), 'd')]\n"
     "print(ci())\n",
 
+    "class BN(dict):\n"
+    "    def __setitem__(self, k, v): super().__setitem__(k, v)\n"
+    "    def __delitem__(self, k):\n"
+    "        if k == 'q': raise KeyError(k)\n"
+    "        super().__delitem__(k)\n"
+    "class BM(type):\n"
+    "    @classmethod\n"
+    "    def __prepare__(m, n, b): return BN()\n"
+    "class BK(metaclass=BM):\n"
+    "    def f(self): return 1\n"
+    "    class I: pass\n"
+    "    a: int = 2\n"
+    "    del a\n"
+    "    try:\n"
+    "        del q\n"
+    "    except NameError as e: r = str(e)\n"
+    "print(BK().f(), BK.I.__name__, BK.r, 'a' in BK.__dict__)\n",
+
     "class RO(Exception): pass\n"
     "class RA(Exception):\n"
     "    def __new__(cls, *a): return super().__new__(cls, *a) if a else RO('o')\n"

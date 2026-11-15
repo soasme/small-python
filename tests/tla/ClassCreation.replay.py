@@ -26,7 +26,13 @@ class Logged(dict):
         for _ in (): pass
         if key in ("__module__", "__static_attributes__"):
             log.append("module" if key == "__module__" else "static")
+        if key == "m":
+            log.append("def")
         super().__setitem__(key, value)
+    def __delitem__(self, key):
+        for _ in (): pass
+        log.append("del")
+        super().__delitem__(key)
 
 class Prepare(Meta):
     @classmethod
@@ -74,6 +80,8 @@ def source(p):
         lines.append("    x: int = 0")
     lines.append("    log.append('body')" if p["calls"] else "    n = 1")
     lines += ["    %s = D()" % name for name in "ab"[:p["set_names"]]]
+    if p["logged"]:
+        lines += ["    def m(self): pass", "    del m"]
     return "\n".join(lines) + "\n"
 
 

@@ -131,7 +131,8 @@ enum { F_ANNOTATE = 1, F_SIMPLE = 2, F_CONDITIONAL = 4, F_PARENTHESIZED = 8, F_S
        F_NAMED_CALLEE = 8192 /* A call of a name, until the fast path misses it. */,
        F_DIRECT_OPERAND = 16384 /* A binary operator with an operand eval_operand takes directly. */,
        F_PAIRED = 32768 /* An assignment of a tuple display to a target tuple of as many items, at most 8, none starred. */,
-       F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */ };
+       F_CALLEE_FIRST = 65536 /* A method call whose callee the machine evaluates before its arguments, or an f-string field it calls. */,
+       F_NAMESPACE = 131072 /* A class body's def, class, annotated assignment or del of a name: a binding through its namespace. */ };
 struct Node {
     int kind, op, asynchronous, flags;
     size_t line;
@@ -14580,6 +14581,8 @@ static int arithmetic(Node *n) {
 }
 static int expands(Node *n, int calls) {
     if (!n) return 0;
+    /* A class body binds through its namespace, whose Python methods are calls (store_call, name_delete). */
+    if (calls >= BODY && (n->flags & F_NAMESPACE)) return 1;
     if (calls == BODY && (n->kind == N_BINARY || n->kind == N_UNARY || n->kind == N_COMPARE || n->kind == N_INDEX) &&
         (operator_right(n) || arithmetic(n))) return 0;
     /* An import runs a module of source as a call (import_step), and a
@@ -14887,6 +14890,8 @@ static void compile_with(SPYContext *c, Program *p, Node *item, Node *body, int 
 /* A del target that suspends evaluates its object (and key) on the stack;
  * BC_DELETE with argument 0 deletes a target that does not suspend. */
 static void compile_delete(SPYContext *c, Program *p, Node *n) {
+    /* A class body's deletes a name through its namespace (name_delete), its None popped. */
+    if (n->kind == N_NAME && p->namespace) { emit(c, p, BC_DELETE, n, 3); emit(c, p, BC_POP, n, 0); return; }
     if (!expands(n, p->calls)) { emit(c, p, BC_DELETE, n, 0); return; }
     if (n->kind == N_LIST || n->kind == N_TUPLE) {
         for (Node *item = n->args; item && !c->error_type[0]; item = item->next) compile_delete(c, p, item);
@@ -15139,6 +15144,16 @@ static int loops(Node *body) {
     }
     return 0;
 }
+/* Flag the statements of class body n that bind names through its
+ * namespace (F_NAMESPACE), outside the definitions among them. */
+static void namespace_bindings(Node *n) {
+    for (; n; n = n->next) {
+        if (n->kind == N_DEF || n->kind == N_CLASS || (n->kind == N_ANNASSIGN && n->c && n->a->kind == N_NAME) || n->kind == N_DELETE)
+            n->flags |= F_NAMESPACE;
+        if (n->kind == N_DEF || n->kind == N_CLASS || n->kind == N_LAMBDA) continue;
+        namespace_bindings(n->a); namespace_bindings(n->b); namespace_bindings(n->c); namespace_bindings(n->args);
+    }
+}
 /* A generator's body, or a function or class body that holds a call or a loop, on
  * the machine: a body of neither always ends, so it may run on the walker. */
 static int compile_generator(SPYContext *c, Node *n) {
@@ -15156,7 +15171,7 @@ static int compile_generator(SPYContext *c, Node *n) {
     c->code_work++;
     /* A class body first binds its implicit names, then the set of its
      * executed conditional annotations (class_part). */
-    if (n->kind == N_CLASS) { emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
+    if (n->kind == N_CLASS) { namespace_bindings(n->b); emit(c, p, BC_CLASS, n, 9); emit(c, p, BC_POP, n, 0); }
     if (UNLIKELY(n->kind == N_CLASS && (n->flags & F_CONDITIONAL))) { emit(c, p, BC_CLASS, n, 8); emit(c, p, BC_POP, n, 0); }
     compile_body(c, p, n->b);
     c->code_work--;
@@ -28230,6 +28245,26 @@ static NO_INLINE SPYValue *native_store(SPYContext *c, Machine *m, SPYValue *map
     if (!c->error_type[0]) hash_kept(c, spy_retain(key), 1, hash);
     return NULL;
 }
+/* What the __delitem__ of a class body's del of name state returned in
+ * result: None, else a NameError in place of its error. */
+static SPYValue *name_deleted(SPYContext *c, Machine *m, SPYValue *state, SPYValue *result) {
+    (void)m;
+    if (!result && !c->stopped) { spy_clear_error(c); name_error(c, state->as.string.data, 0); }
+    spy_release(state);
+    if (!result) return NULL;
+    spy_release(result);
+    return spy_none(c);
+}
+/* BC_DELETE 3: del of name n in a class body, whose namespace's Python
+ * __delitem__ is m's call (callk, name_deleted); else delete_target's.
+ * None, or NULL. */
+static NO_INLINE SPYValue *name_delete(SPYContext *c, Machine *m, Frame *f, Node *n) {
+    SPYValue *owner = binding_env(c, f->env, name_of(n->text)), *namespace = owner->as.map.namespace;
+    SPYValue *function = namespace && namespace->type != SPY_DICT && owner->as.map.flags != 3 ? store_function(c, namespace, "__delitem__") : NULL;
+    if (!function) return delete_target(c, f, n) ? NULL : spy_none(c);
+    SPYValue *name = spy_string(c, n->text, strlen(n->text));
+    return name ? callk(c, m, function, 2, (SPYValue *[]){spy_retain(namespace), spy_retain(name)}, name_deleted, name) : NULL;
+}
 static NO_INLINE SPYValue *import_step(SPYContext *, Machine *, Frame *, Node *, SPYValue **);
 static NO_INLINE SPYValue *store_call(SPYContext *c, Machine *m, Frame *f, Instruction *ins, SPYValue **env) {
     Node *n = ins->op == BC_EXEC ? ins->node->a : ins->node;
@@ -30211,6 +30246,11 @@ static HOT Result run_steps(SPYContext *c, Machine *m, SPYValue *sent, SPYValue 
         }
         CASE(BC_DELETE)
             if (!ins->arg) { delete_target(c, &f, n); break; }
+            if (ins->arg == 3) {
+                value = name_delete(c, m, &f, n);
+                if (c->k_fn) goto enter_k;
+                machine_push(c, m, value); break;
+            }
             b = ins->arg == 2 ? machine_pop(m) : NULL; a = machine_pop(m);
             delete_evaluated(c, n, a, b); break;
         CASE(BC_STAR_RERAISE) {
